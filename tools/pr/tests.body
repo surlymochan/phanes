@@ -1,0 +1,35 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#66 (M10 E2E coverage gaps, audit `docs/audits/openbot-tests.md`). Test gaps 1-10 and 12-14 and 15 are in this PR; gap 11 (`openbot login`) follows when its script passes.
+
+## Type of change
+
+- [ ] Bug fix
+- [x] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- `agent-profile-tools-e2e`, `local-skill-library-e2e`, `plugin-install-e2e` (link forms and the install), `provider-runtime-install-e2e` (against a local fixture server), `data-export-e2e` (secrets stay redacted).
+- `media-attachment-e2e` (MP3 and MOV, the per-file, per-message and file-count limits), `webhook-routine-e2e` (signed request starts the routine; bad signature and replay are refused), `telegram-messaging-e2e` (local fake Bot API).
+- `channel-service-e2e` (Stop, Resume, Reassign, Archive, Restore), `agent-import-e2e` (Grok Bot export), `host-publish-e2e` (local fake account service), `web-client-flow-e2e` (sign in, send, reply, stop, sign out), `update-service-e2e` (check, download, ready to relaunch, failed download), `connector-e2e` (1Password and GitHub against local fakes).
+- Each script writes a JSON report under `.openbot-build/` and uses local fakes: no internet, no real account, no real secret.
+
+Surfaces: E2E scripts only, plus one helper for the host publish fake account service (`apps/auth-api/scripts/host-publish-server.ts`). No product code change.
+
+## Verification
+
+- [x] Each script passed on its executor host with `bun scripts/<name>.ts` (openswarm runs below, verify rc 0), and `bun run typecheck:node` passed.
+- [x] The CI workflow wiring of these scripts is not in this PR: the token that pushed it has no `workflow` scope. The patch is kept for a separate change.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+None for users: test scripts only. Each script starts local processes and binds loopback ports.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-122437-012415 20261028-120115-4114e4 20261028-123200-6d7887 20261028-114847-39230c 20261028-120827-c9aced 20261028-122514-ccbc10 20261028-120309-3bba55 20261028-123611-460fbf 20261028-124246-652fc7 20261028-155111-ba18da 20261028-155241-56d991

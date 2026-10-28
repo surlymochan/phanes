@@ -1,0 +1,31 @@
+## Linked issue
+
+Replaces nibiru-labs/openbot#37 and nibiru-labs/openbot#39 (written against the old main). Tracking: nibiru-labs/openbot-roadmap#4.
+
+## Type of change
+
+- [x] Small improvement or alignment, with no change to how a feature works
+
+## What changed
+
+- `scripts/dispatch-e2e.ts`: matches compact approval JSON and either reply order.
+- `scripts/dispatch-approval-e2e.ts`: new cases for decline, timeout, grant and revoke, with the M3 fields in the JSON report.
+- `docs/architecture/agents.md`: one paragraph for the M3 cases.
+
+Both changes were re-applied on `fd5719fc7f` (main after the upstream sync); the script and the note were checked against the current code.
+
+Surfaces: scripts and one architecture document. No product code.
+
+## Verification
+
+- [x] `bun run typecheck:node` and the two scripts pass on gocc (openswarm runs `20261028-155015-2a55b8`).
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+None. Test scripts and documentation only.
+
+Model and harness: Cursor composer-2.5 through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-155015-2a55b8

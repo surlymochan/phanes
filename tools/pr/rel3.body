@@ -1,0 +1,35 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#64 (M10 backend reliability, finding 3 of `docs/audits/openbot-reliability.md`). The other findings are in nibiru-labs/openbot#46.
+
+## Type of change
+
+- [x] Bug fix
+- [ ] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- The watcher polls with exponential backoff (2 s to 5 min) and stops after 4 hours.
+- A run that is still not finished then is marked `unknown`; an unknown run is not watched again after a restart.
+- An abort starts the watch again so the final result still arrives.
+- An E2E case covers an unknown run, a stop, a restart and a delivery.
+
+Surfaces: `src/backend/dispatch` and one E2E script. No migration, no IPC or Team API change.
+
+## Verification
+
+- [x] The E2E case and `bun run typecheck:node` passed on the executor host (openswarm run `20261028-160140-fe3aea`, verify rc 0).
+- [x] Broad checks run in CI.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+Changes how long a dispatch run is watched. The 4 hour limit is a named constant; a run that finishes later is shown as unknown, not lost.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-160140-fe3aea

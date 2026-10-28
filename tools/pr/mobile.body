@@ -1,0 +1,37 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#65 (M10 mobile parity, audit `docs/audits/openbot-mobile.md`). Findings 1, 7, 14 and 15 and three smaller gaps are here. Findings 4, 6, 9 and 10 were already fixed upstream. Findings 2, 3 and 12 need a new Team API capability and follow in their own PR.
+
+## Type of change
+
+- [ ] Bug fix
+- [x] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- Agent prompts with an interactive block (confirm, quick replies, choice, form) render as cards and are answered through `respondToPrompt`; the question fallback stays when there is no block (1).
+- The chat header opens in-chat search over the loaded messages with next and previous, scroll to the match and highlight (14).
+- Day separators and an unread divider at the read boundary for agent and channel chats (15).
+- Dropped system markers are projected, with a marketplace suggestion card (7).
+- `Stop and send`: stops the running turn through the existing interrupt route, then sends; a failed stop sends nothing.
+- Messages are grouped like the desktop rule (one time and one sender name per run); a created or changed routine shows as a card that opens the routine screen.
+
+Surfaces: `apps/mobile` and `@openbot/i18n`. No file under `packages/contracts`, `packages/team-client`, `src/main` or `src/backend` changed; no migration; no new dependency.
+
+## Verification
+
+- [x] Mobile parity E2E scripts under `scripts/` cover each item; `bun run --cwd apps/mobile typecheck` passed for every run on the executor hosts (rc 0).
+- [x] No physical-device acceptance yet: signing, push and lifecycle checks on a phone remain open on #65.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+Phone UI only; it uses existing Team API routes (the interrupt route for Stop and send).
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-120938-bf276c 20261028-120447-23ee55 20261028-120731-680e69 20261028-124249-d310fe

@@ -1,0 +1,25 @@
+## Linked issue
+
+Roadmap issue 8 (nibiru-labs/openbot-roadmap#8).
+
+## Type of change
+
+- [x] Small improvement or alignment, with no change to how a feature works
+
+## What changed
+
+- Add `scripts/response-process-renderer-e2e.ts`, an E2E that drives the real renderer.
+- Fix the fake Codex block-summary delivery used by it.
+
+Surfaces: scripts only. No product code, IPC, or migration change.
+
+## Verification
+
+- [x] The script passed on the executor host.
+- [x] The pre-commit hook passed.
+
+## Risk and security impact
+
+None: test script only.
+
+Model and harness: Cursor composer-2.5 through openswarm; planner Claude Code.

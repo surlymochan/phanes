@@ -1,0 +1,29 @@
+## Linked issue
+
+Replaces nibiru-labs/openbot#33 and nibiru-labs/openbot#36 (written against the old main). Closes nibiru-labs/openbot-roadmap#19.
+
+## Type of change
+
+- [x] Translation or documentation
+
+## What changed
+
+- `docs/ios-self-build.md`: how to build the iOS app with your own Apple ID. One stale step of the old PR was corrected against the current `apps/mobile` scripts.
+- `PRIVACY.md`: the "Agent and host usage" section says what a coding dispatch sends and where. Release note `changelog.d/docs-privacy-dispatch.md`.
+
+Surfaces: documentation. `PRIVACY.md` changes because outbound data is described (AGENTS.md).
+
+## Verification
+
+- [x] `git diff --check`; every command in the guide exists in `apps/mobile/package.json`.
+- [x] The pre-commit hook passed.
+- [x] Not run on a device: the guide is not yet tested with a real Apple ID (stays open on #19).
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+None. Documentation only. The PRIVACY note must match the code: it says that a dispatched card, its files and the executor result go to the executor host and its model provider.
+
+Model and harness: pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-155841-97e0b8

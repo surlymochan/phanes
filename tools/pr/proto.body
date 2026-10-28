@@ -1,0 +1,34 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#65 (M10 mobile parity, findings 2, 3 and 12). A Codex protocol review (openswarm run `20261028-202427-18bfcd`) found authorization and codec problems in the first versions; this PR has the fixes.
+
+## Type of change
+
+- [ ] Bug fix
+- [ ] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [x] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- `POST /v1/agents/:id/pause/continue`, capability `agent-pause-continue-v1`: optional frozen codec and side route, **chat** authorization (a view-only member is refused with no change), strict client response decoding, HTTP and signed WebRTC E2E.
+- `context-usage-v1`: frozen wire categories (no dependency on the live IPC list), a fail-closed client decoder, an explicit field projection at the send boundary, Team API E2E for chat success, view refusal, hidden and unknown agents, capability absence, malformed payloads and no extra fields.
+- Phone: a paused-agent marker with a Continue action, readable turn process notes, and a context usage meter. Older hosts without the capability keep the local-only behavior.
+
+Surfaces: `packages/contracts` (two frozen optional capabilities), `packages/team-client`, `src/main/team-api`, `src/main/ipc`, `apps/mobile`, `@openbot/i18n`, E2E scripts. No migration. Released adapters and existing routes are unchanged.
+
+## Verification
+
+- [x] `scripts/team-api-routes-e2e.ts` covers both routes (HTTP and signed WebRTC) and `scripts/team-api-legacy-clients-e2e.ts` still passes unchanged; `bun run typecheck:node` and the mobile typecheck passed on the executor hosts (rc 0).
+- [x] The approved-issue rule for new behavior: the capability design was reviewed in the Codex protocol review named above.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+**Released wire contract:** a shipped capability is permanent. Both are additive and gated by a capability that older hosts do not advertise. **Authorization:** pause/continue needs chat access (the review found view access reached it in the first version). Context usage needs chat access; it returns counts, category labels and compaction metadata, no provider text. This PR touches `src/main/team-api` and `packages/contracts`, so it should get the security review of CONTRIBUTING.md.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-115937-5af2d3 20261028-203141-2bc457 20261028-203604-07770a 20261028-120417-2ba5cf 20261028-123145-2ab61b

@@ -1,0 +1,29 @@
+## Linked issue
+
+Replaces nibiru-labs/openbot#40 (written against the old main). Closes nibiru-labs/openbot-roadmap#12.
+
+## Type of change
+
+- [x] Small improvement or alignment, with no change to how a feature works
+
+## What changed
+
+- `scripts/auth-claim-e2e.ts` (`bun run test:auth-claim`): starts a throwaway local account service with its own migrated database in a temporary state directory and a development admin token, signs a server claim through the admin route, redeems it, and stops the instance. It never touches the running local service. The instance runs in its own process group and cleanup stops the whole group, then waits until the port is free (a case with an exited parent and a listening grandchild proves it).
+- `apps/auth-api/vite.config.ts`, `apps/auth-api/src/server/runtime-env.ts`: optional `OPENBOT_API_STATE_DIR`, so a second local instance keeps its own state.
+- `apps/auth-api/README.md`, `package.json`: the note and the script.
+
+Re-applied on `fd5719fc7f` (main after the upstream sync). Surfaces: `apps/auth-api` (development only) and one script.
+
+## Verification
+
+- [x] `bun run test:auth-claim` passes on gocc with every case, including the full claim flow and the new cleanup cases (openswarm run `20261028-235008-936266`).
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+Development tooling only. The instance uses a development admin token created for the run and a temporary directory. It binds loopback ports and stops its own process group; it kills nothing by name.
+
+Model and harness: Codex gpt-6.1-terra through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-235008-936266

@@ -1,0 +1,39 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#63 (M10 error handling, audit `docs/audits/openbot-errors.md`). Findings 1-9 and 11-15 are in this PR. Finding 10 is not fixed by decision: the released Team API codec rejects error codes outside its fixed list, so a code field needs a new versioned protocol.
+
+## Type of change
+
+- [x] Bug fix
+- [ ] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- `runCauseEffect` keeps the typed error tag, so the error reference and code reach the UI; agent error events carry a reference (1, 2).
+- Team API routes forward only catalog text; other failures answer 500 without the raw message (3).
+- An attachment import failure and a `shell.openPath` failure show catalog sentences; the operating system text stays in the cause (4, 8).
+- Two provider status messages and the hourly provider update check use catalog keys and log failures with a code (5, 7).
+- The hosted-site marker retry is capped with a backoff and reports once (6). The hosted server start retry stops after five attempts and shows the last failure in the host status (12).
+- The tool router reports the cause of a failed tool call (9). A failed usage read is reported, not read as zero (13). A dead browser session shows when a CDP release fails (14).
+- The remote-server classifier keeps refusals that are not 401 as `request_failed` (11); the preload decoder accepts that code (see risk).
+- A failed queued message stores a catalog sentence in `error`, the redacted provider text in `errorDetail`, and an optional `reference`. Old rows keep their raw `error` and are localized when shown (15). No migration.
+
+Surfaces: Backend, main (IPC handlers, remote server status), preload (one decoder value), renderer, `@openbot/i18n` (all locales), E2E scripts. No Team API wire change.
+
+## Verification
+
+- [x] Each fix has an E2E case or a changed E2E script (`failure-reporting-e2e`, `queue-delivery-failure-e2e`, `team-api-routes-e2e`, `backend-reliability-bounds-e2e`). Executor evidence: every run ended `done` with host verify rc 0 (`typecheck:node`, `i18n:check`).
+- [x] Broad checks run in CI.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+**Trust boundary:** `src/preload/team-decoding.ts` gains one value, `request_failed`, in the list of server issue codes. Main already sends it; without it the preload decoder would reject the status. Sender validation and the other decoders are unchanged. **Data:** new queue failures add two optional fields (`errorDetail`, `reference`) to the stored delivery JSON; old rows are read unchanged and a downgrade still reads `error`. Secrets stay redacted before they are stored.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-115917-801034 20261028-114456-884204 20261028-114925-58beba 20261028-113650-f2f582 20261028-120115-4114e4 20261028-121011-330a13 20261028-114020-c133f8

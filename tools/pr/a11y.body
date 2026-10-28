@@ -1,0 +1,37 @@
+## Linked issue
+
+Closes nibiru-labs/openbot-roadmap#62 (M10 accessibility, audit `docs/audits/openbot-a11y.md`, all 15 findings).
+
+## Type of change
+
+- [x] Bug fix
+- [ ] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- Shared keyboard helper (Shift+F10 / ContextMenu key) on every context menu trigger; the free-area menu and Mark all read have a keyboard path (1, 15).
+- Chats in a sidebar section move with Alt+ArrowUp/Down (2). Sidebar rows put chat state and unread count into the accessible name (3).
+- The selection toolbar takes focus on open and returns it on dismiss (4). Tab triggers without panels became radio groups (5).
+- The planner shows routine status as text (6). Five toolbars use a shared roving tabindex with arrow keys (7). Onboarding focus order matches the visual order (8).
+- Pinned tile reorder publishes `aria-keyshortcuts` (9). Nine toggles carry `aria-controls` (10). Four dialog triggers report `aria-expanded` (11).
+- The tab close hint uses `aria-describedby` (12). Diagram and preview canvases use `role=group` instead of `application` (13). The switch field reads label first (14).
+
+Surfaces: Desktop renderer and `packages/ui` shared controls. Mouse behavior and visuals are unchanged. No IPC, contract or migration change; new text comes from `@openbot/i18n`.
+
+## Verification
+
+- [x] `bun run typecheck:renderer` and `bun run check:ui` passed for every run on the executor hosts (rc 0).
+- [x] Keyboard behavior is covered by the checks in the PR; broad checks run in CI.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+UI only. The shared keyboard helper sits on every context menu trigger, so it is the part to review for focus handling.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-123638-eec71d 20261028-114016-24b527 20261028-114316-7f7bbf 20261028-114741-554bd6 20261028-115013-46e2af 20261028-115606-4d2135

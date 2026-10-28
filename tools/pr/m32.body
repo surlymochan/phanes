@@ -1,0 +1,27 @@
+## Linked issue
+
+Replaces nibiru-labs/openbot#32 (written against the old main). Closes nibiru-labs/openbot-roadmap#52.
+
+## Type of change
+
+- [x] Translation or documentation
+
+## What changed
+
+Architecture notes under `docs/architecture/` re-applied on `fd5719fc7f` (main after the upstream sync). Every claim of the old PR was checked against the current code; stale claims were corrected or dropped (see the openswarm report of run `20261028-155019-6a8c59`).
+
+Surfaces: documentation only.
+
+## Verification
+
+- [x] `git diff --check`; every command named in the notes exists in `package.json`.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+None. Documentation only.
+
+Model and harness: Cursor composer-2.5 through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-155019-6a8c59

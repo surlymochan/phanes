@@ -1,0 +1,39 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#61 (M10 renderer performance, audit `docs/audits/openbot-perf.md`). Findings 1, 3, 4, 6-15 are in this PR. Finding 2 was tried and reverted because it was not reliably faster; finding 5 follows as a re-runnable codemod.
+
+## Type of change
+
+- [ ] Bug fix
+- [x] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- The conversation snapshot compares messages by identity and field instead of ten `JSON.stringify` calls, and skips re-projection when nothing changed (1).
+- The timeline reuses its rows and keeps a stable index when the structure is the same: 1.64x median speedup while streaming (3).
+- Smooth height resize checks `enabled` before layout reads and attaches its `ResizeObserver` only while it animates (4).
+- Chats above 20 messages are virtualized (6). Sidebar section lists (10) and file lists over 100 rows (11) use the shared list virtualizer: a 5,000-file list draws a median of 18 rows.
+- The keyed records of the conversation controller and the turns provider no longer spread the whole map on each write (8, 9).
+- `WorkspaceConversation` derived props are memoized, the composer compares attachment, skill and MCP arrays by reference, and rows look up agents through a map (13, 14, 15).
+- Findings 7 and 12 are covered in the same measurement script (content block cache and the markdown text block scans).
+
+Surfaces: Desktop renderer and `packages/ui`. Output and behavior are unchanged. No IPC, contract or migration change.
+
+## Verification
+
+- [x] `scripts/renderer-conversation-perf-e2e.ts` measures each change over at least 5 runs and writes a JSON report under `.openbot-build/`; a change that was not clearly faster was reverted (finding 2). `bun run typecheck:renderer` passed for each run on the executor hosts (rc 0).
+- [x] Broad checks run in CI.
+- [x] Not measured yet: `scripts/sidebar-virtual-perf-e2e.ts` does not complete on the executor host (a Storybook dependency allow-list problem), so finding 10 (sidebar) has no median in this PR; its virtualizer is the shared one that the file list uses.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+UI performance only. Virtualization changes which rows exist in the DOM: review scrolling, keyboard focus and find-in-chat on long chats.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-193635-0604db 20261028-194826-08f05a 20261028-195845-7bdf37 20261028-200459-d22e8d 20261028-201150-4885ea 20261028-120417-2ba5cf 20261028-121702-d42898 20261028-121705-0f2bbe

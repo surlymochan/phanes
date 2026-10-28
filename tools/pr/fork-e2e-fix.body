@@ -1,0 +1,26 @@
+## Linked issue
+
+Follow-up to the upstream sync (#42). Fixes the failing check "Team API and reverse actions E2E".
+
+## Type of change
+
+- [x] Bug fix
+
+## What changed
+
+- Message batching no longer adds queued messages to a run-now turn (`src/backend/mailbox-store.ts`).
+- A usage limit with no reported scope holds only the refused model, not the whole provider account (`usage-limit-gate.ts`, `turn-lifecycle.ts`, `claude-client.ts`, `agent-service.ts`).
+
+Surfaces: backend agent runtime. No IPC, Team API wire, or migration change.
+
+## Verification
+
+- [ ] `test:backup-model-failover` and the steer/interrupt/pause step: the executor sandbox cannot start the fake provider CLIs, so CI is the first run.
+- [x] `typecheck:node`, `test:team-legacy-clients`, Biome on changed files passed.
+- [x] The pre-commit hook passed.
+
+## Risk and security impact
+
+Scope of a usage-limit hold is narrower. An explicit account-wide or family limit still holds as before.
+
+Model and harness: Codex gpt-6.1-terra through openswarm; planner Claude Code.

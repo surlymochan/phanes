@@ -1,0 +1,38 @@
+## Linked issue
+
+Refs nibiru-labs/openbot-roadmap#64 (M10 backend reliability, audit `docs/audits/openbot-reliability.md`). Findings 1 and 4-15 are in this PR; finding 2 was already fixed upstream; finding 3 follows in its own PR.
+
+## Type of change
+
+- [x] Bug fix
+- [ ] Small improvement or alignment, with no change to how a feature works
+- [ ] New provider, MCP app, or connector
+- [ ] Translation or documentation
+- [ ] New feature or change to existing behavior (needs an approved issue)
+
+## What changed
+
+- Provider account reads use the start timeout budget, and a timeout no longer counts as a start failure (1).
+- The shared database queue has a 64-request limit and queued requests expire at the queue wait deadline (4). The scheduler owns the settle fiber and closes its scope when the agent service shuts down (5).
+- Slow-provider starts persist and get the long budget during multi-provider startup (6); slow providers are cleared after a successful initialize (12).
+- The latest 100 delivered terminal dispatch records are kept, and every record that still needs delivery (7).
+- Script origins are bounded in last-seen order (8); configuration warnings and the MCP command lookup cache are bounded with oldest-entry eviction (13, 14).
+- Provider shutdown waits for the temporary folder removal (9). The local MCP bridge aborts active calls on close, also calls whose session closed (10). Interrupted Codex turns are bounded and cleared on completion or thread release (11).
+- The browser tab sweep cannot run twice at the same time; an Electron E2E case proves it (15).
+
+Surfaces: `src/backend` (provider runtime, agent service, dispatch, browser host, MCP bridge) and E2E scripts. No migration, no IPC or Team API contract change.
+
+## Verification
+
+- [x] Each fix has an E2E case or a changed E2E script (`provider-account-reload-e2e`, `dispatch-history-e2e`, `acp-mcp-shared-token-e2e`, `backend-reliability-bounds-e2e`, the browser sweep case). Executor evidence from gocc and instabox: every run ended `done` with its host verify at rc 0.
+- [x] Narrow checks on the final head are in the PR checks; broad checks run in CI.
+- [x] The pre-commit hook passed.
+- [x] No credentials, private data, generated output, or real user files are included.
+
+## Risk and security impact
+
+Changes lifetimes and limits of long-running backend resources. Existing deadlines and retries are preserved; the new limits are named constants. Nothing is stored in a new table.
+
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+
+openswarm-run: 20261028-193632-661c67 20261028-194013-d25076 20261028-194312-5283e0 20261028-194536-cd12c2 20261028-195518-0f2b65 20261028-195717-72e667 20261028-200954-372ba2 20261028-201236-d7fac0 20261028-115917-801034
