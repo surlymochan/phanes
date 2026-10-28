@@ -7,12 +7,14 @@
 
 ## 0. 一页结论
 
+> **最终状态（用户指示"不继续了，直接交接"，2026-10-29 约 01:05）**：所有 lane 已停止派发，本轮不再推进。#54 的 CI 已实测：**19 项通过、2 项跳过，仅 NorbiAI `review`（无 runner，永久 pending，非必需）未结束；Team API E2E 全步骤通过**（steer/interrupt、backup failover、token-budget 都绿）。#54 **尚未拿到 Codex 评审回执，未合并**；其中 token-budget 夹具改动（`b5146b9fbb`）的语义风险仍待评审（§4.3）。其余 PR 的红灯都因同一回归，#54 合并后重跑即可。
+
 | 项 | 状态 |
 |---|---|
 | 上游同步（429 个 upstream commit） | **已合并**：PR #42，main = `fd5719fc7f`；旧 #41 已关闭 |
 | Hub 升级（gocc 自建 Hub） | **已完成并验证**：0.44.3 → 0.52.0，DB schema_migrations 最大版本 49，`openbot-cli run Hub` 收到并回复 `HUB-NEW-OK`（2026-10-29 00:27） |
 | M10 审计修复（6 份审计 #61–#66） | 已按领域整合成 **12 个开放 PR**（#43–#55），**全部未合并**；每个单提交 + 修复提交，gocc 正式 pre-commit hook 通过 |
-| **CI 阻塞** | 所有新 PR 的 `Team API and reverse actions E2E` 红：fork 功能在上游同步后回归。修复已集中到 **#54**；#54 上 steer/interrupt 与 backup failover 两步已转绿，但引入 `token-budget` E2E 回归，C1 已给出夹具修复（提交 `b5146b9fbb`，待 CI，存在语义风险，见 §4.3） |
+| **CI 阻塞** | 所有新 PR 的 `Team API and reverse actions E2E` 红：fork 功能在上游同步后回归。修复已集中到 **#54**；#54 上 steer/interrupt 与 backup failover 两步已转绿，但引入 `token-budget` E2E 回归，C1 的夹具修复（`b5146b9fbb`）已让 #54 CI 全绿，但存在语义风险，见 §4.3 |
 | 并发 | 8 路 = MiniMax 4 + Cursor 3 + Codex 1；**不用本机跑 agent**；gocc 只放 1 个 Codex |
 | 组网 | "先整合后组网"：M10 整合完成前不动网络；之后做 Tailscale/Headscale + 单点 mihomo（见 §8） |
 | 未做 | 协议 PR 合并（pause/continue + context-usage）、#38 重做、B1a 登录 E2E、perf5 codemod、Signal+TURN（#13）、agent-knowledge #10 rebase、CI workflow 补丁推送 |
@@ -80,7 +82,7 @@ openswarm 版本：全部主机 = `b2a70d4`（之后 main 无新提交，origin 
 | #51 | `test/e2e-coverage-gaps` | 14 个新 E2E；已加 B4a 的 ratchet 修复 `3d82719f81` | #66 | 红：Team API E2E；**ci.yml 改动被剥离成补丁**（§7） |
 | #52 | `perf/renderer-long-chats-and-lists` | 渲染性能（第 5 条另做 codemod，第 2 条已回退；侧栏基准脚本未跑通，PR 正文已如实写） | #61 | 红：Check（knip）、Tests (desktop 2/2)、Team API E2E |
 | #53 | `feat/mobile-chat-parity-client` | 移动端纯客户端（1、7、14、15 + 三个小缺口） | #65 | 红：Check、Team API E2E |
-| #54 | `fix/fork-e2e-regressions` | **CI 阻塞修复**（§4），含发布说明 | — | 红：token-budget E2E；夹具修复 `b5146b9fbb` 已推，待 CI |
+| #54 | `fix/fork-e2e-regressions` | **CI 阻塞修复**（§4），含发布说明 | — | **CI 全绿**（含 Team API E2E）；待 Codex 评审 + 夹具语义评审 |
 | #55 | `test/response-process-renderer-e2e` | #8 真实 renderer E2E（K2；已加 `no-changelog` 标签） | #8 | 待 CI |
 | #38 | `docs/dispatch-architecture` | 旧 dispatch 架构文档 PR | #52 | 只剩 NorbiAI review；**需在 #43 合并后重做**（见 §11） |
 
@@ -109,11 +111,13 @@ openswarm 版本：全部主机 = `b2a70d4`（之后 main 无新提交，origin 
 
 ### 4.3 token-budget 回归（C1 已给出修复，待 CI 验证）
 #54 修完后 `token-budget` E2E 红：`Timed out waiting for the refused turn to end`（`scripts/token-budget-e2e.ts:211`）。它在 #46 等其他 PR 上是绿的，所以由 #54 的后端改动引起。
-C1 run `20261029-004441-5f72ef` 的结论：失败的是 PLAN-1 场景，发的是 provider 用量限制（不是 token 预算拒绝）；`turn-lifecycle.ts:981` 里"省略 family"现在被当成"只限被拒模型"，turn 变成 failed 而不是 interrupted。C1 **只改了测试夹具**：让该用例发 `family: null`（表示整套餐限额）。已作为提交 `b5146b9fbb` 加进 #54，CI 重跑中。
+C1 run `20261029-004441-5f72ef` 的结论：失败的是 PLAN-1 场景，发的是 provider 用量限制（不是 token 预算拒绝）；`turn-lifecycle.ts:981` 里"省略 family"现在被当成"只限被拒模型"，turn 变成 failed 而不是 interrupted。C1 **只改了测试夹具**：让该用例发 `family: null`（表示整套餐限额）。已作为提交 `b5146b9fbb` 加进 #54，**CI 重跑后全绿**（Team API E2E 全部步骤通过）。但 CI 绿只说明夹具与现行代码一致，不证明语义正确。
 
 **这是语义风险，需要评审**：它把"省略 family"与"`family: null`"区分成两种含义。若真实 provider（`src/backend/claude-client.ts`）发出的套餐限额也是"省略 family"，那产品行为就是变了：整账号套餐限额只会拦被拒模型。接手后必须：（a）读 `claude-client.ts` 里构造用量限制事件的地方，确认真实套餐限额是否显式带 `family: null`；（b）若不是，应改产品代码让"省略"= 整账号、让"部分/家族"必须显式给出，而不是改夹具；（c）这点要写进 #54 的评审请求里。
 
-### 4.4 接手动作
+### 4.4 接手动作（#54 CI 已绿时的第一步）
+先请 Codex 评审 #54（评论里点名 §4.3 的语义问题），核对 `claude-client.ts`，再合并。若不再需要改代码，下面第 1–2 步可跳过。
+
 1. 读 C1 结果：`ssh gocc` 后读 `~/.claude/openswarm/runs/20261029-004441-5f72ef/result.json`。
 2. 若 `commit` 非空：到 gocc `~/work/openbot` 里 `git fetch ~/.claude/openswarm/lanes/C1/wt openswarm/<run-id>:refs/pub/c1-5`，在 `~/work/pub-fix-fork-e2e-regressions` worktree 里 `git cherry-pick -n <sha>`，用正式 hook 提交，`git push origin HEAD`，再在 Mac 上跑 `pushbr.sh fix/fork-e2e-regressions` 推到 GitHub（见 §6）。
 3. #54 的 CI 全绿且有 Codex 评审回执后**先合并 #54**。之后其他 PR 的 CI 重跑即可吃到修复（PR 的 CI 在 merge ref 上跑），不需要往每个 PR 单独加提交。
@@ -214,9 +218,12 @@ GitHub 令牌没有 `workflow` scope，任何改 `.github/workflows/*` 的提交
 
 ## 11. 待办清单（按优先级）
 
+**当前所有 lane 空闲，没有在跑的 run**（最后一个 C1 run `20261029-004441-5f72ef` 已 partial 收取）。监视器均已结束，接手无需清理后台任务。
+
+
 | # | 事项 | 怎么做 |
 |---|---|---|
-| 1 | **#54：确认 CI 转绿 + 评审 token-budget 夹具改动的语义** | §4.3 / §4.4 |
+| 1 | **#54：CI 已绿；请 Codex 评审并核对 token-budget 夹具语义，然后合并** | §4.3 / §4.4 |
 | 2 | 合并 #54，再让其余 PR 重跑 CI | `gh pr merge 54 --squash`（需评审回执）；其余用 `gh run rerun --failed` 或推空提交 |
 | 3 | 协议 PR：pause/continue + context-usage | 两条链在共享文件冲突；任务卡 `cards/c1-proto-merge.md`。pause/continue 在 gocc `6769e66`→`98f259bdad`→`364e2b6844`；context-usage 在 b2 `cb6db55`→`c0eeecfab0`。合并后需 Codex 评审并确认 Team API 已发布适配器语义不变 |
 | 4 | #38 重做 | 等 #43 合并（`agents.md` 冲突）；B2a 的 re-apply 提交 `db53a1b3fd` |
@@ -315,7 +322,7 @@ GitHub 令牌没有 `workflow` scope，任何改 `.github/workflows/*` 的提交
 
 ## 16. 未核实项（别当事实用）
 
-- #54 的 token-budget 夹具改动（`b5146b9fbb`）是否正确：**未验证**，CI 未出结果；语义风险见 §4.3。
+- #54 的 token-budget 夹具改动（`b5146b9fbb`）语义是否正确：**CI 已绿但语义未验证**，风险见 §4.3。
 - steer/interrupt 修复的真实原因是否为"自动 steer 覆盖 busy 模式"：CI 已转绿支持这个判断，但没有逐行复现。
 - 各 PR 的 NorbiAI `review`（无 runner）永久 pending，已知非必需。
 - Codex 对 #43–#55 的评审回执：**没有逐个核对**。
