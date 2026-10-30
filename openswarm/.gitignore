@@ -1,0 +1,13 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+# local overrides / runtime data never belong in the repo
+/policy.local.json
+/state.json
+/ledger.jsonl
+.openswarm-wt-*/
