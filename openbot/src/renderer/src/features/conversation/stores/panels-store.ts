@@ -1,0 +1,498 @@
+import {
+  type AttachmentSummary,
+  type BrowserBounds,
+  canPreviewAttachment,
+  type FileAction,
+  type WorkspaceDirectory,
+} from "@openbot/contracts/ipc";
+import { currentText } from "@openbot/ui/text";
+import { createMemo, createSignal, type Store, type StoreSetter, untrack } from "solid-js";
+import { createScopeGuard } from "../../../scope-lifetime";
+import { attachmentFilePreview } from "../attachment-preview";
+import { releaseFilePreviewPage } from "../conversation-port";
+import { conversationRuntime } from "../conversation-runtime";
+import type {
+  ConversationProps,
+  ConversationTarget,
+  RightPanelMode,
+  SidebarFilePreview,
+  SidePanelPane,
+} from "../conversation-types";
+import { agentSkillsMode } from "../installed-skills-source";
+import { filePreviewQuoteId } from "../quoted-text";
+import { conversationOwnerId } from "./composer-store";
+
+// Each member reads the interface language when it is called.
+const { t, errorMessage } = currentText();
+
+export interface RoutineSettingsRequest {
+  agentId: string;
+  /** Null starts a new routine. */
+  routineId: string | null;
+  routineName: string;
+  nonce: number;
+}
+
+/** The panes of one agent's side panel. The panel keeps them while it is closed. */
+export interface SidePanelState {
+  panes: readonly SidePanelPane[];
+  /** The pane on screen, or the last one before the panel closed. */
+  selected: SidePanelPane | null;
+  maximized: boolean;
+}
+
+/** The side panel of each agent, and the subagent in its Subagent pane. */
+export interface SidePanelsState {
+  side: Record<string, SidePanelState>;
+  subagents: Record<string, string>;
+}
+
+const SIDE_PANEL_EMPTY: SidePanelState = { panes: [], selected: null, maximized: false };
+
+/** The panel mode of each pane. */
+export const SIDE_PANEL_MODES = {
+  browser: "browser",
+  files: "files",
+  settings: "settings",
+  question: "question",
+  voice: "voice",
+  subagent: "subagent",
+} as const satisfies Record<SidePanelPane, RightPanelMode>;
+
+function isSidePanelPane(value: string): value is SidePanelPane {
+  return value in SIDE_PANEL_MODES;
+}
+
+/** The pane that shows a panel mode, or null for a mode outside the side panel. */
+function paneOfMode(mode: RightPanelMode): SidePanelPane | null {
+  for (const [pane, paneMode] of Object.entries(SIDE_PANEL_MODES)) {
+    if (paneMode === mode && isSidePanelPane(pane)) return pane;
+  }
+  return null;
+}
+
+export interface PanelsStoreDeps {
+  props: ConversationProps;
+  rightPanels: () => Record<string, RightPanelMode>;
+  setRightPanels: (update: (current: Record<string, RightPanelMode>) => Record<string, RightPanelMode>) => void;
+  /** Owned with `rightPanels`, so that the tabs stay with the open pane when the view of the chat closes. */
+  panels: Store<SidePanelsState>;
+  setPanels: StoreSetter<SidePanelsState>;
+  settingsProvider: () => import("@openbot/contracts/ipc").AgentProviderId;
+  settingsModel: () => import("@openbot/contracts/ipc").AgentModelId;
+  settingsReasoning: () => import("@openbot/contracts/ipc").AgentReasoningEffort;
+  setBrowserPipBounds: (bounds: BrowserBounds | null) => void;
+  sidebarFilePreview: () => SidebarFilePreview | null;
+  setSidebarFilePreview: (preview: SidebarFilePreview | null) => void;
+  setComposerError: (error: string | null, targetOverride?: ConversationTarget) => void;
+  nextFilePreviewGeneration: () => number;
+  currentFilePreviewGeneration: () => number;
+  invalidateFilePreviewGeneration: () => void;
+}
+
+export function createPanelsStore(deps: PanelsStoreDeps) {
+  const scopeActive = createScopeGuard();
+  const [skillSettingsRequest, setSkillSettingsRequest] = createSignal<{ agentId: string; skillId: string } | null>(
+    null,
+  );
+  function openSkillSettings(skill: { skillId: string }): void {
+    const agentId = deps.props.agent?.id;
+    if (!agentId || agentSkillsMode(deps.props.server, deps.props.runtime) === "hidden") return;
+    setSkillSettingsRequest({ agentId, skillId: skill.skillId });
+    setActiveRightPanel("settings", agentId);
+  }
+  const [routineSettingsRequest, setRoutineSettingsRequest] = createSignal<RoutineSettingsRequest | null>(null);
+  let routineSettingsRequestNonce = 0;
+
+  const channel = untrack(() => deps.props.channel);
+  const activeRightPanel = createMemo<RightPanelMode>(() => {
+    // A deleted channel takes no edit, so its panels stay closed.
+    if (channel?.readOnly()) return "none";
+    const agentId = conversationOwnerId(deps.props);
+    return agentId ? (deps.rightPanels()[agentId] ?? "none") : "none";
+  });
+  const { panels, setPanels } = deps;
+  const sidePanel = (): SidePanelState => {
+    const agentId = conversationOwnerId(deps.props);
+    return (agentId && panels.side[agentId]) || SIDE_PANEL_EMPTY;
+  };
+  const sidePanelOpen = () => activeRightPanel() === "side-panel" || paneOfMode(activeRightPanel()) !== null;
+  function updateSidePanel(agentId: string, update: (state: SidePanelState) => SidePanelState) {
+    setPanels((draft) => {
+      draft.side[agentId] = update(draft.side[agentId] ?? SIDE_PANEL_EMPTY);
+    });
+  }
+  function setSidePanelMaximized(maximized: boolean) {
+    const agentId = conversationOwnerId(deps.props);
+    if (agentId) updateSidePanel(agentId, (state) => ({ ...state, maximized }));
+  }
+  /** Removes the tab of a pane. Returns the pane to show in its place, or null when no tab stays. */
+  function removeSidePanelPane(pane: SidePanelPane): SidePanelPane | null {
+    const agentId = conversationOwnerId(deps.props);
+    if (!agentId) return null;
+    const state = panels.side[agentId] ?? SIDE_PANEL_EMPTY;
+    const index = state.panes.indexOf(pane);
+    const panes = state.panes.filter((item) => item !== pane);
+    const selected =
+      state.selected === pane ? (panes[Math.min(Math.max(index, 0), panes.length - 1)] ?? null) : state.selected;
+    updateSidePanel(agentId, () => ({ panes, selected, maximized: panes.length > 0 && state.maximized }));
+    return selected;
+  }
+  const settingsOpen = () => activeRightPanel() === "settings";
+  const filesOpen = () => activeRightPanel() === "files";
+  const panelSubagentId = (): string | null => {
+    const agentId = conversationOwnerId(deps.props);
+    return agentId ? (panels.subagents[agentId] ?? null) : null;
+  };
+  const filePreviewOpen = () =>
+    activeRightPanel() === "file-preview" &&
+    deps.sidebarFilePreview()?.ownerAgentId === conversationOwnerId(deps.props);
+
+  function setActiveRightPanel(mode: RightPanelMode, agentId = conversationOwnerId(deps.props)) {
+    if (!agentId) return;
+    if (mode !== "settings") {
+      setSkillSettingsRequest(null);
+      setRoutineSettingsRequest((current) => (current?.agentId === agentId ? null : current));
+    }
+    deps.setRightPanels((current) => (current[agentId] === mode ? current : { ...current, [agentId]: mode }));
+    const pane = paneOfMode(mode);
+    if (pane)
+      updateSidePanel(agentId, (state) => ({
+        ...state,
+        panes: state.panes.includes(pane) ? state.panes : [...state.panes, pane],
+        selected: pane,
+      }));
+    else if (mode === "side-panel") updateSidePanel(agentId, (state) => ({ ...state, selected: null }));
+    else if (mode === "none" && panels.side[agentId]?.maximized) {
+      updateSidePanel(agentId, (state) => ({ ...state, maximized: false }));
+    }
+  }
+
+  /** Opens the steps of a subagent of this chat in the side panel. */
+  function openSubagentPanel(subagentId: string): void {
+    const agentId = conversationOwnerId(deps.props);
+    if (!agentId) return;
+    setPanels((draft) => {
+      draft.subagents[agentId] = subagentId;
+    });
+    setActiveRightPanel("subagent", agentId);
+  }
+
+  function openRoutineSettings(routine: { routineId: string; name: string } | "new"): void {
+    const agentId = deps.props.agent?.id;
+    if (!agentId) return;
+    routineSettingsRequestNonce += 1;
+    setRoutineSettingsRequest({
+      agentId,
+      routineId: routine === "new" ? null : routine.routineId,
+      routineName: routine === "new" ? "" : routine.name,
+      nonce: routineSettingsRequestNonce,
+    });
+    setActiveRightPanel("settings", agentId);
+  }
+
+  function handleRoutineSettingsRequest(nonce: number): void {
+    setRoutineSettingsRequest((current) => (current?.nonce === nonce ? null : current));
+  }
+
+  function clearRoutineSettingsRequest(): void {
+    setRoutineSettingsRequest(null);
+  }
+
+  function openRoutineRunMessage(messageId: string): void {
+    setActiveRightPanel("none");
+    void deps.props.onOpenSearchMessage?.(messageId);
+  }
+
+  function showBrowserPip() {
+    setActiveRightPanel("browser-pip");
+  }
+
+  function saveBrowserPipBounds(bounds: BrowserBounds) {
+    deps.setBrowserPipBounds(bounds);
+    window.localStorage.setItem(
+      "openbot:browser-pip-native-bounds",
+      [bounds.x, bounds.y, bounds.width, bounds.height].join(","),
+    );
+  }
+
+  function hideBrowserPanel() {
+    setActiveRightPanel("none");
+    if (deps.props.browserEnabled !== false)
+      void conversationRuntime(deps.props).browser.setVisible({ visible: false });
+  }
+
+  /**
+   * Opens an attachment in the file preview panel, the same surface a shared or workspace file
+   * uses. The bytes come from `previewUrl` rather than the preview IPC, because an attachment is
+   * named by its id and has no path on the agent's computer.
+   */
+  async function previewAttachment(attachment: AttachmentSummary) {
+    const ownerAgentId = conversationOwnerId(deps.props);
+    if (!ownerAgentId || !canPreviewAttachment(attachment)) return;
+    const target = { agentId: ownerAgentId, serverId: deps.props.server?.id ?? "local" };
+    const generation = deps.nextFilePreviewGeneration();
+    deps.setComposerError(null, target);
+    try {
+      const preview = await (deps.props.runtime?.previewAttachment?.(attachment) ?? attachmentFilePreview(attachment));
+      if (generation !== deps.currentFilePreviewGeneration() || conversationOwnerId(deps.props) !== ownerAgentId)
+        return;
+      deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "attachment", attachment }, preview });
+      setActiveRightPanel("file-preview", ownerAgentId);
+    } catch (error) {
+      if (generation !== deps.currentFilePreviewGeneration()) return;
+      deps.setComposerError(errorMessage(error, t("attachment.error.preview", { name: attachment.name })), target);
+    }
+  }
+
+  function attachmentAction(attachment: AttachmentSummary, action: FileAction) {
+    // A runtime has no app to open a file in, so a file it can preview opens in the panel.
+    if (action === "open" && deps.props.runtime && canPreviewAttachment(attachment)) {
+      void previewAttachment(attachment);
+      return;
+    }
+    const agentId = conversationOwnerId(deps.props);
+    const target = agentId ? { agentId, serverId: deps.props.server?.id ?? "local" } : undefined;
+    void conversationRuntime(deps.props)
+      .agent.openAttachment({ attachmentId: attachment.id, action })
+      .catch((error) => deps.setComposerError(errorMessage(error, t("attachment.error.open")), target));
+  }
+
+  function openSharedFile(path: string) {
+    const ownerAgentId = conversationOwnerId(deps.props);
+    if (!ownerAgentId) return;
+    const serverId = deps.props.server?.id ?? "local";
+    const target = { agentId: ownerAgentId, serverId };
+    const generation = deps.nextFilePreviewGeneration();
+    deps.setComposerError(null, target);
+    void conversationRuntime(deps.props)
+      .agent.previewSharedFile({ path })
+      .then(
+        (preview) => {
+          if (
+            !scopeActive() ||
+            generation !== deps.currentFilePreviewGeneration() ||
+            conversationOwnerId(deps.props) !== ownerAgentId
+          ) {
+            releaseFilePreviewPage(preview.pageUrl);
+            return;
+          }
+          deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "shared", path }, preview });
+          setActiveRightPanel("file-preview", ownerAgentId);
+        },
+        (error) => {
+          if (!scopeActive() || generation !== deps.currentFilePreviewGeneration()) return;
+          const showError = () => {
+            if (!scopeActive() || generation !== deps.currentFilePreviewGeneration()) return;
+            deps.setComposerError(filePreviewError(error, path), target);
+          };
+          // A link can name a folder. A local one is shown in the file manager; when that fails too,
+          // the preview error stays. A remote or web host cannot show a folder on this computer.
+          if (serverId !== "local" || deps.props.runtime) {
+            showError();
+            return;
+          }
+          void conversationRuntime(deps.props).agent.openSharedFile({ path, action: "reveal" }).catch(showError);
+        },
+      );
+  }
+
+  /**
+   * A chip can name a folder as well as a file. When the file preview fails, the folder listing is
+   * tried; when that fails too, the preview error stays, because it names the path the agent wrote.
+   * `agentId` is the agent whose workspace holds the path; in a channel, the agent that wrote it.
+   */
+  function openWorkspaceFile(path: string, folder?: string, agentId = deps.props.agent?.id) {
+    const ownerAgentId = conversationOwnerId(deps.props);
+    if (!agentId || !ownerAgentId) return;
+    const serverId = deps.props.server?.id ?? "local";
+    const target = { agentId: ownerAgentId, serverId };
+    const generation = deps.nextFilePreviewGeneration();
+    const current = () =>
+      scopeActive() &&
+      generation === deps.currentFilePreviewGeneration() &&
+      conversationOwnerId(deps.props) === ownerAgentId;
+    const agent = conversationRuntime(deps.props).agent;
+    deps.setComposerError(null, target);
+    void agent.previewWorkspaceFile({ agentId, path }).then(
+      (preview) => {
+        if (!current()) {
+          releaseFilePreviewPage(preview.pageUrl);
+          return;
+        }
+        deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "workspace", agentId, path, folder }, preview });
+        setActiveRightPanel("file-preview", ownerAgentId);
+      },
+      (error) =>
+        agent.listWorkspaceDirectory({ agentId, path }).then(
+          (directory) => {
+            if (!current()) return;
+            showWorkspaceFolder(ownerAgentId, agentId, path, directory);
+          },
+          () => {
+            if (!scopeActive() || generation !== deps.currentFilePreviewGeneration()) return;
+            deps.setComposerError(filePreviewError(error, path), target);
+          },
+        ),
+    );
+  }
+
+  /** The agent whose workspace the shown file or folder is in, so that its links open there too. */
+  function previewWorkspaceAgentId(): string | undefined {
+    const source = deps.sidebarFilePreview()?.source;
+    return source?.kind === "workspace" || source?.kind === "workspace-folder" ? source.agentId : deps.props.agent?.id;
+  }
+
+  function openWorkspaceFolder(path: string) {
+    const agentId = previewWorkspaceAgentId();
+    const ownerAgentId = conversationOwnerId(deps.props);
+    if (!agentId || !ownerAgentId) return;
+    const target = { agentId: ownerAgentId, serverId: deps.props.server?.id ?? "local" };
+    const generation = deps.nextFilePreviewGeneration();
+    deps.setComposerError(null, target);
+    void conversationRuntime(deps.props)
+      .agent.listWorkspaceDirectory({ agentId, path })
+      .then(
+        (directory) => {
+          if (generation !== deps.currentFilePreviewGeneration() || conversationOwnerId(deps.props) !== ownerAgentId)
+            return;
+          showWorkspaceFolder(ownerAgentId, agentId, path, directory);
+        },
+        (error) => {
+          if (generation !== deps.currentFilePreviewGeneration()) return;
+          deps.setComposerError(filePreviewError(error, path), target);
+        },
+      );
+  }
+
+  function showWorkspaceFolder(ownerAgentId: string, agentId: string, path: string, directory: WorkspaceDirectory) {
+    deps.setSidebarFilePreview({
+      ownerAgentId,
+      source: { kind: "workspace-folder", agentId, path },
+      preview: null,
+      directory,
+    });
+    setActiveRightPanel("file-preview", ownerAgentId);
+  }
+
+  /**
+   * Opens a file of the folder view, so that the panel can go back to the folder, or a link of the
+   * shown file. Both are in the workspace of the agent the panel shows.
+   */
+  function openWorkspaceFolderEntry(path: string) {
+    const file = deps.sidebarFilePreview();
+    openWorkspaceFile(path, file?.directory?.path, previewWorkspaceAgentId());
+  }
+
+  /** The quote id of the file that the side panel shows. See `filePreviewQuoteId`. */
+  function previewQuoteId(): string | undefined {
+    const file = deps.sidebarFilePreview();
+    const source = file?.source;
+    const workspacePath =
+      deps.props.channel && source?.kind === "workspace"
+        ? deps.props.agents.find((agent) => agent.id === source.agentId)?.workspacePath
+        : undefined;
+    return filePreviewQuoteId(file, workspacePath);
+  }
+
+  /** Back to the folder a file came from, or up one folder. Absent when there is nowhere to go. */
+  function sidebarFileBack(): string | null {
+    const file = deps.sidebarFilePreview();
+    if (file?.directory) return file.directory.parentPath;
+    return file?.source.kind === "workspace" ? (file.source.folder ?? null) : null;
+  }
+
+  function openSidebarFileBack() {
+    const path = sidebarFileBack();
+    if (path !== null) openWorkspaceFolder(path);
+  }
+
+  function openSidebarFileExternally() {
+    sidebarFileAction("open");
+  }
+
+  function downloadSidebarFile() {
+    sidebarFileAction("download");
+  }
+
+  function revealSidebarFile() {
+    sidebarFileAction("reveal");
+  }
+
+  function sidebarFileAction(action: FileAction) {
+    const file = deps.sidebarFilePreview();
+    if (!file) return;
+    const source = file.source;
+    if (source.kind === "attachment") {
+      attachmentAction(source.attachment, action);
+      return;
+    }
+    if (source.kind === "workspace-folder") return;
+    const target = { agentId: file.ownerAgentId, serverId: deps.props.server?.id ?? "local" };
+    const agent = conversationRuntime(deps.props).agent;
+    const request =
+      source.kind === "shared"
+        ? agent.openSharedFile({ path: source.path, action })
+        : agent.openWorkspaceFile({ agentId: source.agentId, path: source.path, action });
+    const fallback = action === "download" ? t("attachment.error.download") : t("attachment.error.openFile");
+    void request.catch((error) => deps.setComposerError(errorMessage(error, fallback), target));
+  }
+
+  function closeSidebarFilePreview() {
+    deps.invalidateFilePreviewGeneration();
+    deps.setSidebarFilePreview(null);
+    setActiveRightPanel("none");
+  }
+
+  return {
+    skillSettingsRequest,
+    openSkillSettings,
+    routineSettingsRequest,
+    activeRightPanel,
+    settingsOpen,
+    filesOpen,
+    panelSubagentId,
+    openSubagentPanel,
+    sidePanel,
+    sidePanelOpen,
+    setSidePanelMaximized,
+    removeSidePanelPane,
+    filePreviewOpen,
+    setActiveRightPanel,
+    openRoutineSettings,
+    handleRoutineSettingsRequest,
+    clearRoutineSettingsRequest,
+    openRoutineRunMessage,
+    showBrowserPip,
+    saveBrowserPipBounds,
+    hideBrowserPanel,
+    previewAttachment,
+    attachmentAction,
+    openSharedFile,
+    openWorkspaceFile,
+    openWorkspaceFolder,
+    openWorkspaceFolderEntry,
+    previewQuoteId,
+    previewWorkspaceAgentId,
+    sidebarFileBack,
+    openSidebarFileBack,
+    openSidebarFileExternally,
+    downloadSidebarFile,
+    revealSidebarFile,
+    closeSidebarFilePreview,
+  };
+}
+
+function filePreviewError(error: unknown, path: string): string {
+  let decodedPath = path;
+  try {
+    decodedPath = decodeURIComponent(path);
+  } catch {
+    // A literal percent sign can be part of a file name.
+  }
+  const name = decodedPath.replaceAll("\\", "/").split("/").pop() || t("attachment.error.fileFallback");
+  if (error instanceof Error && /\bENOENT\b/u.test(error.message)) {
+    return t("attachment.error.fileNotFound", { name });
+  }
+  return errorMessage(error, t("attachment.error.previewFile", { name }));
+}

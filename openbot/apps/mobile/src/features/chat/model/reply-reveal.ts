@@ -1,0 +1,168 @@
+import type { Token, Tokens } from "marked";
+import type { ChatMessage } from "./chat-messages";
+
+export function isStreamingReply(message: ChatMessage): boolean {
+  return message.kind === "message" && message.author === "agent" && message.streaming;
+}
+
+export function replyWordDelay(word: string): number {
+  if (/[.!?…]["'”’)]*\s*$/u.test(word)) return 180;
+  if (/[,;:]["'”’)]*\s*$/u.test(word)) return 100;
+  return Math.min(80, 40 + word.trim().length * 3);
+}
+
+/** Playback time before a complete reply can show its remaining words at once. */
+export const REPLY_FLUSH_AFTER_MS = 1000;
+/** A remaining tail shorter than this plays to its end. */
+const REPLY_FLUSH_TAIL_MS = 500;
+
+/** A complete reply shows its remaining words at once unless only a short tail remains. */
+export function replyFlushes(words: readonly string[], from: number): boolean {
+  let remaining = REPLY_FLUSH_TAIL_MS;
+  for (const word of words.slice(from)) {
+    remaining -= replyWordDelay(word);
+    if (remaining < 0) return true;
+  }
+  return false;
+}
+
+export function replyWordFeedback(word: string, index: number): "selection" | "soft" | "light" {
+  if (/[.!?…]["'”’)]*\s*$/u.test(word)) return "light";
+  return index % 4 === 0 || word.trim().length > 8 ? "soft" : "selection";
+}
+
+function isList(token: Token): token is Tokens.List {
+  return token.type === "list";
+}
+function isTable(token: Token): token is Tokens.Table {
+  return token.type === "table";
+}
+/** Tokens that the reveal shows at once, as one word. */
+function isWholeWord(token: Token): boolean {
+  return (
+    token.type === "agentMention" ||
+    token.type === "skillMention" ||
+    token.type === "code" ||
+    token.type === "inlineMath" ||
+    token.type === "blockMath"
+  );
+}
+function hasChildren(token: Token): token is Token & { tokens: Token[] } {
+  return "tokens" in token && Array.isArray(token.tokens);
+}
+
+/** Read the reveal words in order. History renders never need a clipped copy of the tree. */
+function collectWords(entries: Token[], words: string[]): void {
+  for (const token of entries) {
+    if (isList(token)) {
+      for (const item of token.items) collectWords(item.tokens, words);
+    } else if (isTable(token)) {
+      for (const cell of token.header) collectWords(cell.tokens, words);
+      for (const row of token.rows) {
+        for (const cell of row) collectWords(cell.tokens, words);
+      }
+    } else if (isWholeWord(token)) {
+      words.push(token.type === "code" ? token.text : token.raw);
+    } else if (hasChildren(token)) {
+      collectWords(token.tokens, words);
+    } else if (token.type !== "space" && token.type !== "def" && token.type !== "br" && token.type !== "hr") {
+      const text = "text" in token && typeof token.text === "string" ? token.text : token.raw;
+      for (const part of text.matchAll(/\S+\s*/gu)) words.push(part[0]);
+    }
+  }
+}
+
+const wordCounts = new WeakMap<Token, number>();
+
+function wordCount(token: Token): number {
+  let count = wordCounts.get(token);
+  if (count === undefined) {
+    const words: string[] = [];
+    collectWords([token], words);
+    count = words.length;
+    wordCounts.set(token, count);
+  }
+  return count;
+}
+
+/** Reveal parsed leaves without reparsing Markdown at every animation step. */
+export function createReplyReveal(tokens: Token[]) {
+  const words: string[] = [];
+  collectWords(tokens, words);
+  function clip(limit: number): Token[] {
+    let remaining = limit;
+    function visit(entries: Token[]): Token[] {
+      const result: Token[] = [];
+      for (const token of entries) {
+        if (remaining <= 0) break;
+        const count = wordCount(token);
+        if (remaining > count) {
+          remaining -= count;
+          result.push(token);
+          continue;
+        }
+        if (isList(token)) {
+          const items: Tokens.ListItem[] = [];
+          for (const item of token.items) {
+            if (remaining <= 0) break;
+            const itemCount = wordCount(item);
+            if (remaining > itemCount) {
+              remaining -= itemCount;
+              items.push(item);
+              continue;
+            }
+            items.push({ ...item, tokens: visit(item.tokens) });
+          }
+          result.push({ ...token, items });
+        } else if (isTable(token)) {
+          const cells = (row: Tokens.TableCell[]) => row.map((cell) => ({ ...cell, tokens: visit(cell.tokens) }));
+          const header = cells(token.header);
+          const rows: Tokens.TableCell[][] = [];
+          for (const row of token.rows) {
+            if (remaining <= 0) break;
+            rows.push(cells(row));
+          }
+          result.push({ ...token, header, rows });
+        } else if (isWholeWord(token)) {
+          // Code uses StreamingBlock's entrance. Keep its source intact so Copy
+          // never receives a prefix produced only by the playback animation.
+          // A formula is typeset whole: a prefix of it is not valid LaTeX.
+          remaining -= 1;
+          result.push(token);
+        } else if (hasChildren(token)) {
+          result.push({ ...token, tokens: visit(token.tokens) });
+        } else if (token.type === "space" || token.type === "def" || token.type === "br" || token.type === "hr") {
+          result.push(token);
+        } else {
+          const text = "text" in token && typeof token.text === "string" ? token.text : token.raw;
+          const parts = Array.from(text.matchAll(/\S+\s*/gu));
+          const count = Math.min(remaining, parts.length);
+          remaining -= count;
+          const last = parts[count - 1];
+          const prefix = last ? text.slice(0, last.index + last[0].length) : text;
+          result.push(
+            "text" in token && typeof token.text === "string" ? { ...token, text: prefix } : { ...token, raw: prefix },
+          );
+        }
+      }
+      return result;
+    }
+    return visit(tokens);
+  }
+  return { words, at: (count: number) => (count >= words.length ? tokens : clip(count)) };
+}
+
+const finishedReveals = new WeakMap<Token[], ReturnType<typeof createReplyReveal>>();
+
+/**
+ * The reveal of a parse that does not change. The parse of a finished reply is shared across mounts,
+ * so its reveal is too: a row that scrolls into view again does not collect its words again.
+ */
+export function finishedReplyReveal(tokens: Token[]): ReturnType<typeof createReplyReveal> {
+  let reveal = finishedReveals.get(tokens);
+  if (!reveal) {
+    reveal = createReplyReveal(tokens);
+    finishedReveals.set(tokens, reveal);
+  }
+  return reveal;
+}

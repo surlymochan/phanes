@@ -1,0 +1,72 @@
+/*
+ * Open waits: the "Waiting for replies" card, with a two-line row for each wait and a menu at the
+ * row end.
+ */
+
+.open-waits .task-list-title-name {
+  font-weight: var(--openbot-weight-medium);
+}
+
+.open-waits .task-list-count {
+  color: var(--openbot-warning-text);
+  font-size: var(--openbot-text-sm);
+}
+
+.open-waits-row {
+  align-items: flex-start;
+}
+
+.open-waits-row-text {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: var(--openbot-space-0-5);
+}
+
+.open-waits-row-note {
+  overflow: hidden;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  line-height: var(--openbot-leading-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.open-waits-row-meta {
+  display: flex;
+  min-width: 0;
+  gap: var(--openbot-space-1);
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  white-space: nowrap;
+}
+
+.open-waits-row-request {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--openbot-text-dim);
+  text-overflow: ellipsis;
+}
+
+[data-wait-state="woken"] .open-waits-row-state {
+  color: var(--openbot-warning-text);
+}
+
+[data-wait-state="resuming"] .open-waits-row-state {
+  color: var(--openbot-text-primary);
+  animation: task-list-pulse 1.6s ease-in-out infinite;
+  animation-play-state: var(--task-list-play-state, running);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-wait-state="resuming"] .open-waits-row-state {
+    animation: none;
+  }
+}
+
+.open-waits-menu {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  color: var(--openbot-text-muted);
+}

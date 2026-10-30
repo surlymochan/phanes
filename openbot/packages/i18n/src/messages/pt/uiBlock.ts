@@ -1,0 +1,30 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/uiBlock";
+
+export const messages = {
+  "uiBlock.status.pending": "Precisa da sua resposta",
+  "uiBlock.status.answered": "Respondido",
+  "uiBlock.status.expired": "Expirado",
+  "uiBlock.status.closed": "Fechado",
+  "uiBlock.outcome.expired": "Nenhuma resposta foi dada a tempo",
+  "uiBlock.outcome.closed": "Fechado sem resposta",
+  "uiBlock.confirm.holdHint": "Segure o botão para confirmar, ou toque nele para confirmar na segunda etapa",
+  "uiBlock.confirm.prompt": "Confirmar: {action}?",
+  "uiBlock.confirm.accept": "Confirmar",
+  "uiBlock.confirm.previewLabel": "Prévia",
+  "uiBlock.choice.submit": "Enviar",
+  "uiBlock.choice.shortcutHint": "Pressione de {first} a {last} para escolher",
+  "uiBlock.choice.selectedCount": { one: "{count} selecionado", other: "{count} selecionados" },
+  "uiBlock.choice.noneSelected": "Nada selecionado",
+  "uiBlock.quick.label": "Respostas rápidas",
+  "uiBlock.quick.textLabel": "Sua própria resposta",
+  "uiBlock.quick.textPlaceholder": "Ou escreva sua própria resposta",
+  "uiBlock.quick.send": "Enviar",
+  "uiBlock.form.submit": "Enviar",
+  "uiBlock.form.required": "Este campo é obrigatório",
+  "uiBlock.form.choose": "Escolha uma opção",
+  "uiBlock.form.notSet": "Não definido",
+  "uiBlock.form.invalid": "Algumas respostas estão incorretas. Verifique-as e tente novamente.",
+  "uiBlock.skip": "Pular",
+  "uiBlock.error.answerFailed": "Não foi possível enviar sua resposta. Tente novamente.",
+} as const satisfies PartialTranslation<typeof source>;

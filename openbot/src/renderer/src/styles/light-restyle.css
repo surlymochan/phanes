@@ -1,0 +1,69 @@
+/*
+ * The light restyle: a softer surface with fewer borders. It loads last, so it wins over the
+ * component rules, and every rule is scoped to the light appearance. The dark scheme keeps the
+ * rules it already has.
+ */
+
+/* The sidebar header has no rule under it, and its section names read as quiet labels. */
+:root[data-appearance="light"] .sidebar-topbar {
+  border-bottom-color: transparent;
+}
+
+:root[data-appearance="light"] .sidebar-section-name {
+  color: var(--openbot-text-muted);
+  font-weight: var(--openbot-weight-medium);
+}
+
+/* The composer is one large rounded field on the surface token, with a faint shadow and no border. */
+:root[data-appearance="light"] .composer {
+  border: 0;
+  border-radius: var(--openbot-radius-bubble);
+  background: var(--openbot-bg-surface);
+  box-shadow: var(--openbot-shadow-composer);
+}
+
+/* A question card is a rounded card on the surface token with a soft shadow, not a bordered box. */
+:root[data-appearance="light"] .ui-block-card {
+  border-color: transparent;
+  border-radius: var(--openbot-radius-xl);
+  background: var(--openbot-bg-surface);
+  box-shadow: var(--openbot-shadow-block);
+}
+
+/* An agent message is a soft muted bubble with no border. The user's message keeps its dark pill. */
+:root[data-appearance="light"] .message-entry-agent .ui-bubble > .ui-bubble-content {
+  border: 0;
+  border-radius: var(--openbot-radius-bubble);
+  background: var(--openbot-bg-control);
+}
+
+/* A checked option shows a filled accent badge, not only a coloured outline. */
+:root[data-appearance="light"] .ui-block-option[data-checked] .ui-block-option-key {
+  background: var(--openbot-question-option);
+  color: var(--openbot-text-on-accent);
+}
+
+/* The list rows get more air, and the section names sit one step above the row labels' size. */
+:root[data-appearance="light"] .sidebar-section-toggle {
+  height: 40px;
+}
+
+:root[data-appearance="light"] .sidebar-section-name {
+  font-size: var(--openbot-text-md);
+}
+
+/* The pinned strip is one row of large avatars that scrolls sideways, and the selected bot has a soft
+   highlight. The strip itself hides while nothing is pinned, as it did before. */
+:root[data-appearance="light"] .sidebar-pinned-list {
+  width: 100%;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  margin: 0;
+  overflow-x: auto;
+  padding: 4px 12px 8px;
+}
+
+:root[data-appearance="light"] .sidebar-pinned-row[aria-pressed="true"] {
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-bg-control);
+}

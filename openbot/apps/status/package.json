@@ -1,0 +1,28 @@
+{
+  "name": "@openbot/status",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "bun ../../scripts/type-checker.ts --noEmit -p tsconfig.json",
+    "notify": "bun scripts/notify.ts",
+    "update": "bun scripts/update.ts"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "catalog:",
+    "@openbot/brand": "workspace:*",
+    "@openbot/logging": "workspace:*",
+    "@solidjs/web": "catalog:",
+    "effect": "catalog:",
+    "lucide-solid": "catalog:",
+    "solid-js": "2.0.0-rc.18"
+  },
+  "devDependencies": {
+    "@solidjs/vite-plugin": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}

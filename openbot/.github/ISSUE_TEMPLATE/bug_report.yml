@@ -1,0 +1,233 @@
+name: Bug report
+description: Report a problem that you can reproduce in OpenBot.
+title: "[Bug]: "
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Complete all required fields: we close reports that do not have enough data to reproduce the problem.
+
+        Do not include credentials, private files, conversation contents, or unreviewed diagnostics. Report vulnerabilities through the private security process.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where does the problem occur?
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - iOS
+        - Android
+        - Web client
+        - Docker
+        - Self-hosted server
+        - Hosted server
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-source
+    attributes:
+      label: Installation source
+      options:
+        - Release download from GitHub or openbot.run
+        - In-app update
+        - TestFlight or App Store
+        - Google Play
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenBot version
+      description: "Desktop: Settings → Updates. Phone: Settings → About. From source: the commit SHA."
+      placeholder: 0.42.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and hardware
+      description: The operating system version and the processor architecture or device model.
+      placeholder: macOS 26.1, Apple M3 (arm64)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: providers
+    attributes:
+      label: Providers
+      description: Select every provider that the problem affects.
+      multiple: true
+      options:
+        - ChatGPT (Codex CLI)
+        - Claude (Claude Code)
+        - Grok
+        - OpenCode
+        - Gemini (Antigravity)
+        - Cursor
+        - Cline
+        - Pi
+        - Muse
+        - Custom agent (ACP)
+        - Not related to a provider
+    validations:
+      required: true
+
+  - type: input
+    id: provider-version
+    attributes:
+      label: Provider CLI version
+      description: The output of `codex --version`, `claude --version`, or the version that the provider row shows. Write "n/a" when no provider is related.
+      placeholder: codex-cli 0.150.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Conversations and messages
+        - Agents and providers
+        - Routines and schedules
+        - Team and shared agents
+        - Browser
+        - Computer use
+        - Connectors and channels (Slack, Discord, Telegram, GitHub)
+        - MCP apps
+        - Skills
+        - Memory
+        - Files and attachments
+        - Remote servers and remote desktop
+        - Phone app and pairing
+        - Voice
+        - Updates and installation
+        - Sign-in and account
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Crash or the app does not start
+        - Data loss
+        - Blocked, with no workaround
+        - Works, but incorrectly or slowly
+        - Visual or text problem
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Frequency
+      options:
+        - Every time
+        - Sometimes
+        - One time only
+    validations:
+      required: true
+
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Did this work in an earlier version?
+      options:
+        - "Yes"
+        - "No"
+        - I do not know
+    validations:
+      required: true
+
+  - type: input
+    id: last-good-version
+    attributes:
+      label: Last version that worked
+      placeholder: 0.41.3
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A short summary of the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Start from a new launch of the app. Give each action and its exact values.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Send ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the exact error text and any error code that the app shows.
+    validations:
+      required: true
+
+  - type: textarea
+    id: provider-diagnostics
+    attributes:
+      label: Provider diagnostics
+      description: When a provider row shows an error, open its ⋯ menu, select "Copy diagnostics", and paste the result. Examine it before you submit.
+      render: json
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Only the relevant lines. On a phone, use Settings → Support → "Save log file". Remove tokens, email addresses, and private paths.
+      render: shell
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or recording
+      description: Drag files here. Hide private data first.
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: Anything else that can change the result, for example a team, a paired phone, a remote server, a custom agent, a proxy, or a VPN.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues, and this is not a duplicate.
+          required: true
+        - label: I can reproduce this in the latest release.
+          required: true
+        - label: I removed secrets, tokens, private paths, and personal data.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true

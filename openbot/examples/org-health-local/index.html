@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
+  <title data-i18n="orgHealthDemo.pageTitle"></title>
+  <link rel="stylesheet" href="./styles.css">
+  <script defer src="./app.bundle.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#top" data-i18n-aria="orgHealthDemo.home"><span class="brand-mark">O</span><span><span data-i18n="orgHealthDemo.brand"></span></span></a>
+      <div class="topmeta"><span class="local-pill"><i></i><span data-i18n="orgHealthDemo.local"></span></span><span id="asof-short"><span data-i18n="orgHealthDemo.loading"></span></span></div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="eyebrow-line"></span><span data-i18n="orgHealthDemo.eyebrow"></span></div>
+          <h1><span data-i18n="orgHealthDemo.heroFirst">…</span><br><em><span data-i18n="orgHealthDemo.heroSecond">…</span></em></h1>
+          <p><span data-i18n="orgHealthDemo.history"></span></p>
+          <p class="hero-lead" id="conclusion"><span data-i18n="orgHealthDemo.loadingData"></span></p>
+        </div>
+        <aside class="scope-card">
+          <div class="scope-head"><span class="scope-icon">◎</span><span><span data-i18n="orgHealthDemo.scope"></span></span></div>
+          <div class="scope-row"><span><span data-i18n="orgHealthDemo.month"></span></span><strong id="scope-month">—</strong></div>
+          <div class="scope-row"><span><span data-i18n="orgHealthDemo.cutoff"></span></span><strong id="scope-date">—</strong></div>
+          <div class="scope-row"><span><span data-i18n="orgHealthDemo.source"></span></span><strong id="scope-source">—</strong></div>
+          <div class="scope-foot"><span data-i18n="orgHealthDemo.scopeFoot"></span></div>
+        </aside>
+      </section>
+
+      <section class="time-strip" data-i18n-aria="orgHealthDemo.timeScope">
+        <div class="time-label"><span data-i18n="orgHealthDemo.timeScope"></span></div>
+        <div class="time-point"><span class="time-dot actual"></span><div><b>2026-01</b><small><span data-i18n="orgHealthDemo.yearStart"></span></small></div></div>
+        <div class="time-connector"></div>
+        <div class="time-point"><span class="time-dot frozen"></span><div><b>2026-05</b><small><span data-i18n="orgHealthDemo.h1"></span></small></div></div>
+        <div class="time-connector"></div>
+        <div class="time-point"><span class="time-dot actual"></span><div><b>2026-09</b><small><span data-i18n="orgHealthDemo.sep"></span></small></div></div>
+        <div class="time-connector dashed"></div>
+        <div class="time-point"><span class="time-dot forecast"></span><div><b><span data-i18n="orgHealthDemo.yearEnd"></span></b><small><span data-i18n="orgHealthDemo.targetEstimate"></span></small></div></div>
+        <div class="time-note"><span data-i18n="orgHealthDemo.timeNote"></span></div>
+      </section>
+
+      <section class="section" id="metrics-section">
+        <div class="section-heading"><div><span class="section-kicker"><span data-i18n="orgHealthDemo.kickerSnapshot"></span></span><h2><span data-i18n="orgHealthDemo.metrics">…</span></h2></div><div class="section-note"><span data-i18n="orgHealthDemo.metricsNote"></span></div></div>
+        <div class="metric-grid" id="metric-grid"></div>
+        <div class="metric-foot"><span class="legend-dot"></span><span data-i18n="orgHealthDemo.actual"></span> <span class="legend-dot frozen-dot"></span><span data-i18n="orgHealthDemo.h1"></span> <span class="legend-dot forecast-dot"></span><span data-i18n="orgHealthDemo.yearEndTarget"></span> <span class="metric-foot-note"><span data-i18n="orgHealthDemo.rateNote"></span></span></div>
+      </section>
+
+      <section class="section split-section">
+        <div class="section-heading"><div><span class="section-kicker"><span data-i18n="orgHealthDemo.kickerEvidence"></span></span><h2><span data-i18n="orgHealthDemo.evidence">…</span></h2></div><div class="section-note"><span data-i18n="orgHealthDemo.evidenceNote"></span></div></div>
+        <div class="insight-grid" id="insight-grid"></div>
+      </section>
+
+      <section class="section" id="rules-section">
+        <div class="section-heading"><div><span class="section-kicker"><span data-i18n="orgHealthDemo.kickerRules"></span></span><h2><span data-i18n="orgHealthDemo.rules">…</span></h2></div></div>
+        <div class="definitions-grid" id="definitions-grid"></div>
+        <div class="stage-card">
+          <div class="stage-title"><span class="mini-icon">⌘</span><div><b><span data-i18n="orgHealthDemo.stageTitle"></span></b><small><span data-i18n="orgHealthDemo.stageNote"></span></small></div></div>
+          <div class="stage-list">
+            <div><span class="stage-index">A</span><b><span data-i18n="orgHealthDemo.mature"></span></b><p><span data-i18n="orgHealthDemo.matureNote"></span></p></div>
+            <div><span class="stage-index">B</span><b><span data-i18n="orgHealthDemo.growth"></span></b><p><span data-i18n="orgHealthDemo.growthNote"></span></p></div>
+            <div><span class="stage-index">C</span><b><span data-i18n="orgHealthDemo.incubation"></span></b><p><span data-i18n="orgHealthDemo.incubationNote"></span></p></div>
+            <div><span class="stage-index">D</span><b><span data-i18n="orgHealthDemo.platform"></span></b><p><span data-i18n="orgHealthDemo.platformNote"></span></p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section risk-section">
+        <div class="section-heading"><div><span class="section-kicker"><span data-i18n="orgHealthDemo.kickerQuestions"></span></span><h2><span data-i18n="orgHealthDemo.risks">…</span></h2></div><div class="section-note"><span data-i18n="orgHealthDemo.risksNote"></span></div></div>
+        <div class="risk-grid" id="risk-grid"></div>
+      </section>
+
+      <section class="section recommendations-section">
+        <div class="section-heading"><div><span class="section-kicker"><span data-i18n="orgHealthDemo.kickerNext"></span></span><h2><span data-i18n="orgHealthDemo.next">…</span></h2></div></div>
+        <div class="recommendation-list" id="recommendations"></div>
+      </section>
+      <footer><span><span data-i18n="orgHealthDemo.footer"></span></span><span id="footer-source"><span data-i18n="orgHealthDemo.footerLoading"></span></span></footer>
+    </main>
+  </div>
+
+</body>
+</html>

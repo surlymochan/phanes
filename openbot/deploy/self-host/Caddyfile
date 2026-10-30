@@ -1,0 +1,38 @@
+# The TLS front of a self-hosted OpenBot remote stack.
+#
+# Caddy gets every certificate with ACME HTTP-01. The deployment needs no Cloudflare DNS API
+# token. Each name below must point at this host, and port 80 must be reachable from the
+# internet, because the ACME server answers the challenge there.
+#
+# The services keep their ports on the loopback address. Only Caddy and coturn open ports.
+#
+# The file has placeholders. Change every name before you start Caddy.
+{
+	# The address of the ACME account. It gets the warning before a certificate ends.
+	email admin@example.com
+
+	# The certificates and the ACME account. The `caddy` user must own this directory.
+	storage file_system {
+		root /var/lib/caddy
+	}
+}
+
+# The Signal service (remote/api). The apps open the WebSocket /v1/signal here, and the account
+# service posts the account events to /internal/auth-events.
+signal.example.com {
+	# The metrics need a token, and they stay on the health port of the service. This block keeps
+	# them out of the public name.
+	@metrics path /metrics
+	respond @metrics 404
+
+	# Caddy writes the address of the client in X-Forwarded-For and drops the header of the
+	# request. The service reads that address, because REMOTE_TRUST_PROXY is true.
+	reverse_proxy 127.0.0.1:8081
+
+}
+
+# The TURN domain has no HTTP service. Caddy gets the certificate for it, and coturn uses it on
+# port 5349. The site answers nothing.
+turn.example.com {
+	respond 404
+}

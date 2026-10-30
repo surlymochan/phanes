@@ -1,0 +1,476 @@
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
+import { type ConversationMessage, isQueuedAgentReply, type QueueDelivery } from "@openbot/contracts/ipc";
+import { isQueueEditRejected } from "@openbot/contracts/team-protocol/queue-edit-v1";
+import { type MobileTextKey, sourceText } from "@openbot/i18n/mobile";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import * as Crypto from "expo-crypto";
+import * as SecureStore from "expo-secure-store";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMobileSession } from "@/features/auth/context/mobile-session-context";
+import {
+  useMobileWorkspaceReader,
+  useMobileWorkspaceSelector,
+} from "@/features/workspace/context/mobile-workspace-context";
+import { queryKeys } from "@/features/workspace/model/query-keys";
+import { currentText, useText } from "@/shared/lib/text";
+import { useHiddenReplies } from "../context/queued-messages-context";
+import { awaitingReplies } from "../model/awaiting-replies";
+import {
+  readQueueAttachment,
+  removeQueueAttachment,
+  restoredQueueAttachments,
+  writeQueueAttachment,
+} from "../model/queue-edit-attachment-files";
+import {
+  decodeQueueEditDraft,
+  orderedQueue,
+  type QueueEditDraft,
+  QueueEditDraftError,
+  type StoredQueueAttachment,
+} from "../model/queue-edit-draft";
+import { ChatUploadCancelledError, uploadChatAttachments } from "../model/upload-chat-attachments";
+import type { ChatAttachment } from "./use-chat-attachments";
+
+const EMPTY_DELIVERIES: QueueDelivery[] = [];
+const EMPTY_MESSAGES: readonly ConversationMessage[] = [];
+
+const DRAFT_ERROR_KEYS = {
+  edit: "mobile.chat.queue.readEditFailed",
+  attachments: "mobile.chat.queue.readAttachmentsFailed",
+  pendingSave: "mobile.chat.queue.readPendingSaveFailed",
+} as const satisfies Record<QueueEditDraftError["part"], MobileTextKey>;
+
+export function useChatQueue(
+  agentId: string,
+  serverId: string,
+  online: boolean,
+  activeTurnId: string | null,
+  /** The loaded conversation. Its outgoing exchanges name the teammates the agent waits for. */
+  messages: readonly ConversationMessage[] = EMPTY_MESSAGES,
+) {
+  const workspace = useMobileWorkspaceReader();
+  const canEditQueue = useMobileWorkspaceSelector((current) => current.canEditQueue(serverId));
+  const text = useText();
+  const { session } = useMobileSession();
+  const storageKey = `queue-edit.${session?.user.id}.${serverId}.${agentId}`;
+  const queryClient = useQueryClient();
+  const queryKey = useMemo(() => queryKeys.chatQueue(serverId, agentId), [serverId, agentId]);
+  const query = useQuery({
+    queryKey,
+    queryFn: () => workspace().loadQueue(agentId, serverId),
+    enabled: online,
+    // The chat reads the queue once when it opens, also when the cache holds a recent copy.
+    refetchOnMount: "always",
+    retry: false,
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [restored] = useState(() => {
+    try {
+      return { edit: decodeQueueEditDraft(SecureStore.getItem(storageKey)), error: null };
+    } catch (cause) {
+      const { t, errorMessage } = currentText();
+      return {
+        edit: null,
+        error:
+          cause instanceof QueueEditDraftError
+            ? t(DRAFT_ERROR_KEYS[cause.part])
+            : errorMessage(cause, t("mobile.chat.queue.readEditFailed")),
+      };
+    }
+  });
+  const [edit, setEdit] = useState<QueueEditDraft | null>(restored.edit);
+  const editRef = useRef(edit);
+  editRef.current = edit;
+  const [confirmed, setConfirmed] = useState(Boolean(restored.edit?.pendingSave));
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [progress, setProgress] = useState<number | null>(null);
+  const cancelled = useRef(false);
+  // An edit request in flight still owns the outcome: the queue can report the
+  // delivery as started before the host answers, which flashes the finished
+  // notice on every edit. Settle the request first; a genuinely gone delivery
+  // marks the edit unavailable after the request completes. An unconfirmed Save
+  // owns the outcome the same way: keep it retryable until the host confirms
+  // or rejects it, instead of replacing Save with Close and deleting it.
+  const editUnavailable = Boolean(
+    edit &&
+      !edit.pendingSave &&
+      !busy &&
+      query.data?.deliveries.some((item) => item.id === edit.delivery.id && item.status !== "queued"),
+  );
+  // A teammate's answer waits in the queue until the agent reads it, but it is not the user's
+  // message: it has no edit or reorder actions, only steer. The waiting block shows it instead.
+  const queued = useMemo(
+    () => orderedQueue((query.data?.deliveries ?? []).filter((item) => !isQueuedAgentReply(item))),
+    [query.data],
+  );
+  const replies = useMemo(() => orderedQueue((query.data?.deliveries ?? []).filter(isQueuedAgentReply)), [query.data]);
+  // The questions come from the conversation and the answers from the queue. A teammate that is
+  // still asked or working has a row before any answer arrives.
+  // The person can close the rows when every teammate is done, as on desktop. A closed row that
+  // works again shows.
+  const { hiddenReplyIds, hideReplies } = useHiddenReplies();
+  const waiting = useMemo(
+    () =>
+      awaitingReplies(messages, replies).filter(
+        (row) => !(hiddenReplyIds.has(row.id) && (row.state === "replied" || row.state === "failed")),
+      ),
+    [messages, replies, hiddenReplyIds],
+  );
+  // Persist typing after a pause, without blocking each key event. The edit identity is
+  // persisted synchronously BEFORE requesting the host hold, so a restart can recover it.
+  useEffect(() => {
+    if (!edit) return;
+    const timer = setTimeout(() => {
+      try {
+        if (editRef.current !== edit) return;
+        SecureStore.setItem(storageKey, JSON.stringify(edit));
+      } catch (cause) {
+        const { t, errorMessage } = currentText();
+        setError(errorMessage(cause, t("mobile.chat.queue.saveEditFailed")));
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [edit, storageKey]);
+  useEffect(
+    () => () => {
+      if (editRef.current) {
+        // The host still holds the original if the final local write fails.
+        try {
+          SecureStore.setItem(storageKey, JSON.stringify(editRef.current));
+        } catch {
+          /* Previous durable draft remains available. */
+        }
+      }
+    },
+    [storageKey],
+  );
+  const refresh = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey });
+  }, [queryClient, queryKey]);
+  // A connection that comes back reads the queue again. The chat that opens online has its read
+  // from the query: a second request here would replace it.
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    if (online && !wasOnline.current) void queryClient.invalidateQueries({ queryKey }, { cancelRefetch: false });
+    wasOnline.current = online;
+  }, [online, queryClient, queryKey]);
+
+  const run = useCallback(
+    async (action: () => Promise<void>) => {
+      if (busyRef.current) return false;
+      // A silent refusal leaves a screen that waits for this result with nothing to show.
+      if (!online) {
+        setError(currentText().t("mobile.chat.queue.reconnect"));
+        return false;
+      }
+      busyRef.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        await action();
+        return true;
+      } catch (cause) {
+        const { t, errorMessage } = currentText();
+        setError(
+          cause instanceof ChatUploadCancelledError
+            ? t("mobile.chat.upload.cancelled")
+            : errorMessage(cause, t("mobile.chat.queue.changeFailed")),
+        );
+        return false;
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
+        refresh();
+      }
+    },
+    [online, refresh],
+  );
+  const clearEdit = useCallback(async () => {
+    await SecureStore.deleteItemAsync(storageKey);
+    const previous = editRef.current;
+    editRef.current = null;
+    setEdit(null);
+    setConfirmed(false);
+    if (previous)
+      await Promise.allSettled([
+        ...previous.addedAttachments.map((file) => removeQueueAttachment(previous.editId, file)),
+        ...(previous.pendingSave?.attachmentDraftIds ?? []).map((id) =>
+          workspace().discardAttachment(agentId, id, serverId),
+        ),
+      ]);
+  }, [storageKey, workspace, agentId, serverId]);
+  const begin = useCallback(
+    async (delivery: QueueDelivery) => {
+      if (edit && edit.delivery.id !== delivery.id) return;
+      if (edit?.pendingSave) {
+        setConfirmed(true);
+        return;
+      }
+      const next = edit ?? {
+        editId: Crypto.randomUUID(),
+        initialized: false,
+        delivery,
+        text: delivery.text,
+        keepAttachmentIds: delivery.attachments.map((item) => item.id),
+        addedAttachments: [],
+      };
+      await run(async () => {
+        SecureStore.setItem(storageKey, JSON.stringify(next));
+        editRef.current = next;
+        setEdit(next);
+        const currentQueue = await workspace()
+          .editQueue(agentId, serverId, {
+            action: "begin",
+            deliveryId: delivery.id,
+            editId: next.editId,
+          })
+          .catch(async (cause) => {
+            if (isQueueEditRejected(cause)) await clearEdit();
+            throw cause;
+          });
+        if (!next.initialized) {
+          const currentDelivery = currentQueue.deliveries.find(
+            (item) => item.id === delivery.id && item.status === "queued",
+          );
+          if (!currentDelivery) throw new Error(sourceText("error.backend.queuedMessageUnavailable"));
+          const ready = {
+            ...next,
+            initialized: true,
+            delivery: currentDelivery,
+            text: currentDelivery.text,
+            keepAttachmentIds: currentDelivery.attachments.map((file) => file.id),
+          };
+          SecureStore.setItem(storageKey, JSON.stringify(ready));
+          editRef.current = ready;
+          setEdit(ready);
+        }
+        setConfirmed(true);
+      });
+    },
+    [edit, run, storageKey, workspace, agentId, serverId, clearEdit],
+  );
+  const changeAttachments = useCallback(
+    async (files: ChatAttachment[]) => {
+      const current = editRef.current;
+      if (!current || busyRef.current || current.pendingSave)
+        throw new Error(currentText().t("mobile.chat.queue.editBusy"));
+      busyRef.current = true;
+      setBusy(true);
+      const created: StoredQueueAttachment[] = [];
+      try {
+        const addedAttachments: StoredQueueAttachment[] = [];
+        for (const file of files) {
+          const existing = current.addedAttachments.find((item) => item.id === file.id);
+          if (existing) addedAttachments.push(existing);
+          else {
+            const stored = await writeQueueAttachment(current.editId, file);
+            created.push(stored);
+            addedAttachments.push(stored);
+          }
+        }
+        if (editRef.current?.editId !== current.editId) throw new Error(currentText().t("mobile.chat.queue.editEnded"));
+        const next = { ...editRef.current, addedAttachments };
+        SecureStore.setItem(storageKey, JSON.stringify(next));
+        editRef.current = next;
+        setEdit(next);
+        await Promise.allSettled(
+          current.addedAttachments
+            .filter((file) => !addedAttachments.some((item) => item.id === file.id))
+            .map((file) => removeQueueAttachment(current.editId, file)),
+        );
+      } catch (cause) {
+        await Promise.allSettled(created.map((file) => removeQueueAttachment(current.editId, file)));
+        throw cause;
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
+      }
+    },
+    [storageKey],
+  );
+  const attachments = useMemo(() => (edit ? restoredQueueAttachments(edit.editId, edit.addedAttachments) : []), [edit]);
+  const save = useCallback(
+    async (text: string, files: ChatAttachment[]) => {
+      if (!edit || !confirmed) return false;
+      if (!edit.pendingSave && !text.trim() && !edit.keepAttachmentIds.length && !files.length) return false;
+      cancelled.current = false;
+      const saved = await run(async () => {
+        if (edit.pendingSave) {
+          await workspace().editQueue(agentId, serverId, edit.pendingSave);
+          await clearEdit();
+          return;
+        }
+        if (edit.keepAttachmentIds.length + files.length > INPUT_LIMITS.attachments)
+          throw new Error(currentText().t("mobile.chat.attachment.limit", { limit: INPUT_LIMITS.attachments }));
+        await uploadChatAttachments(files, {
+          upload: async (file) => {
+            const stored = edit.addedAttachments.find((item) => item.id === file.id);
+            return workspace().uploadAttachment(
+              agentId,
+              stored ? { ...file, base64: await readQueueAttachment(edit.editId, stored) } : file,
+              serverId,
+            );
+          },
+          // Once Save can reach the host, these IDs must survive an uncertain response.
+          discard: async (id) => {
+            if (!editRef.current?.pendingSave) await workspace().discardAttachment(agentId, id, serverId);
+          },
+          cancelled: () => cancelled.current,
+          progress: files.length ? setProgress : undefined,
+          send: async (ids) => {
+            if (ids.length)
+              await workspace().editQueue(agentId, serverId, {
+                action: "retain-attachments",
+                deliveryId: edit.delivery.id,
+                editId: edit.editId,
+                attachmentDraftIds: ids,
+              });
+            const pendingSave = {
+              action: "save" as const,
+              deliveryId: edit.delivery.id,
+              editId: edit.editId,
+              text,
+              keepAttachmentIds: edit.keepAttachmentIds,
+              attachmentDraftIds: ids,
+            };
+            const next = { ...edit, text, pendingSave };
+            SecureStore.setItem(storageKey, JSON.stringify(next));
+            editRef.current = next;
+            setEdit(next);
+            await workspace().editQueue(agentId, serverId, pendingSave);
+            return edit.delivery.id;
+          },
+        });
+        await clearEdit();
+      });
+      setProgress(null);
+      return saved;
+    },
+    [edit, confirmed, run, workspace, agentId, serverId, clearEdit, storageKey],
+  );
+  return useMemo(
+    () => ({
+      // The identity the queue sheet is opened with: one chat's controller never answers
+      // for another chat that the native stack keeps mounted behind it.
+      chatId: `${serverId}:${agentId}`,
+      agentId,
+      serverId,
+      attachments,
+      changeAttachments,
+      /** What this host accepts, for files an edit adds. */
+      attachmentSupport: () => workspace().attachmentSupport(serverId),
+      editUnavailable,
+      discardFinishedEdit: () =>
+        run(async () => {
+          if (editUnavailable) await clearEdit();
+        }),
+      queued,
+      replies,
+      waiting,
+      /** Closes the waiting rows. The sheet offers it only when no teammate still works. */
+      hideWaiting: () => hideReplies(waiting.map((row) => row.id)),
+      deliveries: query.data?.deliveries ?? EMPTY_DELIVERIES,
+      edit,
+      confirmed,
+      busy,
+      progress,
+      error:
+        error ??
+        restored.error ??
+        (query.error ? text.errorMessage(query.error, text.t("mobile.chat.queue.loadFailed")) : null),
+      loading: online && query.isPending,
+      canEdit: canEditQueue,
+      online,
+      activeTurnId,
+      begin,
+      save,
+      refresh,
+      changeText: (text: string) =>
+        setEdit((current) => (current && !current.pendingSave && !busyRef.current ? { ...current, text } : current)),
+      removeAttachment: (id: string) =>
+        setEdit((current) =>
+          current && !current.pendingSave && !busyRef.current
+            ? { ...current, keepAttachmentIds: current.keepAttachmentIds.filter((item) => item !== id) }
+            : current,
+        ),
+      cancelUpload: () => {
+        cancelled.current = true;
+      },
+      // Reports whether the host hold is gone. A rejection means the host already finished
+      // this edit, so the local hold goes as well; any other failure keeps the edit for a retry.
+      cancelEdit: async () => {
+        if (!edit) return true;
+        let rejected = false;
+        const released = await run(async () => {
+          try {
+            await workspace().editQueue(agentId, serverId, {
+              action: "cancel",
+              deliveryId: edit.delivery.id,
+              editId: edit.editId,
+            });
+          } catch (cause) {
+            rejected = isQueueEditRejected(cause);
+            throw cause;
+          }
+          await clearEdit();
+        });
+        if (!released && rejected) await clearEdit();
+        return released || rejected;
+      },
+      remove: (delivery: QueueDelivery) =>
+        run(async () => {
+          await workspace().changeQueue(agentId, serverId, "cancel", { deliveryId: delivery.id });
+          if (edit?.delivery.id === delivery.id) await clearEdit();
+        }),
+      steer: (delivery: QueueDelivery) =>
+        run(async () => {
+          if (!activeTurnId) return;
+          await workspace().changeQueue(agentId, serverId, "steer", {
+            deliveryId: delivery.id,
+            expectedTurnId: activeTurnId,
+          });
+        }),
+      moveFirst: (delivery: QueueDelivery) =>
+        run(async () => {
+          // The host checks the order against every queued delivery, so the answers the sheet does
+          // not list keep their places behind the moved message.
+          const waiting = orderedQueue(query.data?.deliveries ?? []);
+          await workspace().changeQueue(agentId, serverId, "reorder", {
+            deliveryIds: [delivery.id, ...waiting.filter((item) => item.id !== delivery.id).map((item) => item.id)],
+          });
+        }),
+    }),
+    [
+      attachments,
+      changeAttachments,
+      queued,
+      replies,
+      waiting,
+      hideReplies,
+      editUnavailable,
+      query.data,
+      edit,
+      confirmed,
+      busy,
+      progress,
+      error,
+      restored.error,
+      query.error,
+      query.isPending,
+      canEditQueue,
+      online,
+      activeTurnId,
+      begin,
+      save,
+      refresh,
+      run,
+      workspace,
+      agentId,
+      serverId,
+      clearEdit,
+      text,
+    ],
+  );
+}
+export type ChatQueueController = ReturnType<typeof useChatQueue>;

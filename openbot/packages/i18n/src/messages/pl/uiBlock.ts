@@ -1,0 +1,35 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/uiBlock";
+
+export const messages = {
+  "uiBlock.status.pending": "Potrzebuje twojej odpowiedzi",
+  "uiBlock.status.answered": "Odpowiedziano",
+  "uiBlock.status.expired": "Wygasło",
+  "uiBlock.status.closed": "Zamknięte",
+  "uiBlock.outcome.expired": "Nie udzielono odpowiedzi na czas",
+  "uiBlock.outcome.closed": "Zamknięte bez odpowiedzi",
+  "uiBlock.confirm.holdHint": "Przytrzymaj przycisk, aby potwierdzić, albo naciśnij go i potwierdź w drugim kroku",
+  "uiBlock.confirm.prompt": "Potwierdź: {action}?",
+  "uiBlock.confirm.accept": "Potwierdź",
+  "uiBlock.confirm.previewLabel": "Podgląd",
+  "uiBlock.choice.submit": "Wyślij",
+  "uiBlock.choice.shortcutHint": "Naciśnij od {first} do {last}, aby wybrać",
+  "uiBlock.choice.selectedCount": {
+    one: "wybrano {count}",
+    few: "wybrano {count}",
+    many: "wybrano {count}",
+    other: "wybrano {count}",
+  },
+  "uiBlock.choice.noneSelected": "Nic nie wybrano",
+  "uiBlock.quick.label": "Szybkie odpowiedzi",
+  "uiBlock.quick.textLabel": "Własna odpowiedź",
+  "uiBlock.quick.textPlaceholder": "Lub napisz własną odpowiedź",
+  "uiBlock.quick.send": "Wyślij",
+  "uiBlock.form.submit": "Wyślij",
+  "uiBlock.form.required": "To pole jest wymagane",
+  "uiBlock.form.choose": "Wybierz opcję",
+  "uiBlock.form.notSet": "Nie ustawiono",
+  "uiBlock.form.invalid": "Niektóre odpowiedzi są nieprawidłowe. Sprawdź je i spróbuj ponownie.",
+  "uiBlock.skip": "Pomiń",
+  "uiBlock.error.answerFailed": "Nie udało się wysłać odpowiedzi. Spróbuj ponownie.",
+} as const satisfies PartialTranslation<typeof source>;

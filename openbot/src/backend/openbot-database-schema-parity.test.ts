@@ -1,0 +1,363 @@
+// @vitest-environment node
+
+// A new install and an upgraded install are built by two different code paths:
+// `createLatestDatabase` execs LATEST_SCHEMA_SQL and stamps every migration as
+// applied without running it, while an existing database runs the migrations.
+// Nothing but a comment keeps the two in agreement, so the first DDL migration
+// that is not also mirrored into LATEST_SCHEMA_SQL would ship new installs a
+// database missing a column while upgraded installs get it - on users' machines,
+// with no backup to fall back on. These tests are that agreement.
+
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import type { DynamicRecord } from "@openbot/contracts/runtime-values";
+import { isDynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
+import { afterEach, describe, expect, it } from "vitest";
+import { AGENT_THREAD_SCHEMA_SQL } from "./agent-threads/agent-thread-schema";
+import { BROWSER_PROFILE_SCHEMA_SQL } from "./browser-profiles/browser-profile-schema";
+import { migrateOpenBotDatabase, tokenizeSql } from "./openbot-database-schema";
+import recordedSchemaHistory from "./openbot-database-schema-history.json";
+import upstreamSchemaHistory from "./openbot-database-upstream-schema-history.json";
+import { WORKFLOW_SCHEMA_SQL } from "./workflows/workflow-schema";
+
+const appliedAt = "2026-09-03T10:00:00.000Z";
+
+const roots: string[] = [];
+const connections: DatabaseSync[] = [];
+
+afterEach(async () => {
+  for (const connection of connections.splice(0)) connection.close();
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("OpenBot database build paths", () => {
+  it("gives a new install the same tables, columns, indexes and foreign keys as an upgraded one", async () => {
+    const fresh = await newInstallDatabase();
+    const upgraded = await upgradedInstallDatabase();
+
+    expect(readTableShapes(upgraded)).toEqual(readTableShapes(fresh));
+  });
+
+  it("gives a new install the same declarations as an upgraded one, including partial index filters", async () => {
+    const fresh = await newInstallDatabase();
+    const upgraded = await upgradedInstallDatabase();
+
+    expect(readNormalizedDeclarations(upgraded)).toEqual(readNormalizedDeclarations(fresh));
+  });
+
+  it("records the same applied migration versions on both paths", async () => {
+    const fresh = await newInstallDatabase();
+    const upgraded = await upgradedInstallDatabase();
+
+    expect(readAppliedVersions(upgraded)).toEqual(readAppliedVersions(fresh));
+  });
+});
+
+// A migration runs on every computer that upgrades past its version, and there is no backup. So a
+// shipped migration must never change: the fix is a new migration. The history file records what each
+// version added, changed or dropped, as normalized DDL, with `null` for a dropped declaration. The
+// entries only grow. A change to a recorded entry is allowed only for a version that has not shipped.
+// Data-only statements, such as an UPDATE, leave no trace in the schema, so review still covers them.
+describe("OpenBot database migration history", () => {
+  it("keeps the released upstream operations at appended fork versions", async () => {
+    const actual = await schemaChangesByVersion();
+    for (const [version, recorded] of Object.entries(upstreamSchemaHistory)) {
+      expect(actual[String(Number(version) + 1)]).toEqual(recorded);
+    }
+    expect(actual["49"]).toEqual({});
+  });
+
+  it("keeps the schema change of every recorded migration", async () => {
+    const actual = await schemaChangesByVersion();
+
+    for (const [version, recorded] of Object.entries(recordedSchemaHistory)) {
+      expect(actual[version], `Migration ${version} shipped. Add a new migration instead of editing it.`).toEqual(
+        recorded,
+      );
+    }
+    const unrecorded = Object.keys(actual).filter((version) => !Object.hasOwn(recordedSchemaHistory, version));
+    const missing = Object.fromEntries(unrecorded.map((version) => [version, actual[version]]));
+    expect(
+      unrecorded,
+      `Add each new migration to openbot-database-schema-history.json: ${JSON.stringify(missing, null, 2)}`,
+    ).toEqual([]);
+  });
+});
+
+describe("OpenBot database reserved schema", () => {
+  // The migration runner builds a reference database from the reserved schema parts and compares
+  // the declarations of the user's database with it, by token sequence. The reference must be the
+  // declaration the upstream release recorded: a database that comes from the upstream release
+  // holds text that this repository does not keep, and the runner must not refuse it for its
+  // formatting alone.
+  const reservedParts: { label: string; sql: string; recorded: Record<string, string | null> }[] = [
+    { label: "browser profiles", sql: BROWSER_PROFILE_SCHEMA_SQL, recorded: upstreamSchemaHistory["45"] },
+    { label: "workflows", sql: WORKFLOW_SCHEMA_SQL, recorded: upstreamSchemaHistory["46"] },
+    { label: "agent threads", sql: AGENT_THREAD_SCHEMA_SQL, recorded: upstreamSchemaHistory["47"] },
+  ];
+
+  it("declares every reserved part the way the upstream release recorded it", () => {
+    for (const part of reservedParts) {
+      const declared = referenceDeclarations(part.sql);
+      const recorded = Object.fromEntries(
+        Object.entries(part.recorded).filter((entry): entry is [string, string] => entry[1] !== null),
+      );
+      expect(Object.keys(declared).sort(), part.label).toEqual(Object.keys(recorded).sort());
+      for (const [name, tokens] of Object.entries(declared)) {
+        expect(tokens, `${part.label}: ${name}`).toEqual(recorded[name]);
+      }
+    }
+  });
+});
+
+// The runner builds its reference the same way: it executes the reserved schema part in an empty
+// database and reads the declarations SQLite kept.
+function referenceDeclarations(sql: string): Record<string, string> {
+  const reference = new DatabaseSync(":memory:");
+  try {
+    reference.exec(sql);
+    return Object.fromEntries(
+      query(reference, "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL").map((row) => [
+        `${text(row, "type")} ${text(row, "name")}`,
+        tokenizeSql(text(row, "sql")).join(" "),
+      ]),
+    );
+  } finally {
+    reference.close();
+  }
+}
+
+type SchemaChanges = Record<string, string | null>;
+
+const STOP_MESSAGE = "stopped after one migration";
+
+// Runs the upgrade path one migration at a time. A temporary trigger lets exactly one more version into
+// `schema_migrations` per call, so the next migration rolls back and the database stays at the version
+// before it. The next call resumes from there, as an install on that version would.
+async function schemaChangesByVersion(): Promise<Record<string, SchemaChanges>> {
+  const database = await openDatabase();
+  database.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  const changes: Record<string, SchemaChanges> = {};
+  let before = new Map<string, string>();
+
+  for (;;) {
+    const appliedBefore = readAppliedVersions(database).length;
+    database.exec(`
+      DROP TRIGGER IF EXISTS temp.stop_after_one_migration;
+      CREATE TEMP TRIGGER stop_after_one_migration BEFORE INSERT ON schema_migrations
+      WHEN (SELECT COUNT(*) FROM schema_migrations) > ${appliedBefore}
+      BEGIN SELECT RAISE(ABORT, '${STOP_MESSAGE}'); END;
+    `);
+    try {
+      migrateOpenBotDatabase(database, { appliedAt });
+    } catch (error) {
+      if (!(error instanceof Error && error.cause instanceof Error && error.cause.message.includes(STOP_MESSAGE))) {
+        throw error;
+      }
+    }
+
+    const applied = readAppliedVersions(database);
+    const version = applied.at(-1);
+    if (applied.length === appliedBefore || version === undefined) return changes;
+    const after = new Map(
+      readNormalizedDeclarations(database).map((declaration) => [
+        `${declaration.type} ${declaration.name}`,
+        declaration.sql.join(" "),
+      ]),
+    );
+    changes[String(version)] = diffDeclarations(before, after);
+    before = after;
+  }
+}
+
+function diffDeclarations(before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>): SchemaChanges {
+  const changes: SchemaChanges = {};
+  for (const [key, sql] of after) if (before.get(key) !== sql) changes[key] = sql;
+  for (const key of before.keys()) if (!after.has(key)) changes[key] = null;
+  return changes;
+}
+
+// An empty database has no tables, so `migrateOpenBotDatabase` takes the
+// `createLatestDatabase` branch - the path every new install follows.
+async function newInstallDatabase(): Promise<DatabaseSync> {
+  const database = await openDatabase();
+  migrateOpenBotDatabase(database, { appliedAt });
+  return database;
+}
+
+// One empty table is enough for `hasExistingSchema` to report an existing
+// database, and an empty `schema_migrations` reads as a version older than the
+// baseline, so every migration runs in order from the v8 baseline SQL upwards -
+// the path every upgraded install follows. Building the fixture this way rather
+// than by stripping rows from a new install matters: a new install already
+// carries the columns a future migration adds, so re-running that migration
+// against it would fail on a duplicate column and go red on correct code.
+async function upgradedInstallDatabase(): Promise<DatabaseSync> {
+  const database = await openDatabase();
+  database.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  migrateOpenBotDatabase(database, { appliedAt });
+  return database;
+}
+
+async function openDatabase(): Promise<DatabaseSync> {
+  const root = await mkdtemp(join(tmpdir(), "openbot-schema-parity-"));
+  roots.push(root);
+  const database = new DatabaseSync(join(root, "openbot.db"));
+  connections.push(database);
+  return database;
+}
+
+interface ColumnShape {
+  readonly name: string;
+  readonly type: string;
+  readonly notNull: number;
+  readonly default: string | null;
+  readonly primaryKey: number;
+}
+
+interface IndexShape {
+  readonly name: string;
+  readonly unique: number;
+  readonly origin: string;
+  readonly partial: number;
+  readonly columns: readonly { readonly name: string | null; readonly descending: number; readonly key: number }[];
+}
+
+interface ForeignKeyShape {
+  readonly table: string;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly onUpdate: string;
+  readonly onDelete: string;
+}
+
+interface TableShape {
+  readonly columns: readonly ColumnShape[];
+  readonly indexes: readonly IndexShape[];
+  readonly foreignKeys: readonly ForeignKeyShape[];
+}
+
+function readTableShapes(database: DatabaseSync): Record<string, TableShape> {
+  const shapes: Record<string, TableShape> = {};
+  for (const table of readTableNames(database)) {
+    shapes[table] = {
+      columns: query(database, `PRAGMA table_info(${quote(table)})`).map((row) => ({
+        name: text(row, "name"),
+        type: text(row, "type"),
+        notNull: count(row, "notnull"),
+        default: optionalText(row, "dflt_value"),
+        primaryKey: count(row, "pk"),
+      })),
+      indexes: query(database, `PRAGMA index_list(${quote(table)})`)
+        .map((row) => ({
+          name: text(row, "name"),
+          unique: count(row, "unique"),
+          origin: text(row, "origin"),
+          partial: count(row, "partial"),
+          columns: query(database, `PRAGMA index_xinfo(${quote(text(row, "name"))})`).map((column) => ({
+            name: optionalText(column, "name"),
+            descending: count(column, "desc"),
+            key: count(column, "key"),
+          })),
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+      foreignKeys: query(database, `PRAGMA foreign_key_list(${quote(table)})`).map((row) => ({
+        table: text(row, "table"),
+        from: optionalText(row, "from"),
+        to: optionalText(row, "to"),
+        onUpdate: text(row, "on_update"),
+        onDelete: text(row, "on_delete"),
+      })),
+    };
+  }
+  return shapes;
+}
+
+interface Declaration {
+  readonly type: string;
+  readonly name: string;
+  readonly table: string;
+  readonly sql: readonly string[];
+}
+
+// The PRAGMAs above cannot express a partial index's WHERE clause or a CHECK
+// constraint, so the declarations are compared too - normalized, because a
+// migration that rewrites a table leaves SQLite's own rendering of the DDL
+// behind rather than the text the schema was written with.
+function readNormalizedDeclarations(database: DatabaseSync): readonly Declaration[] {
+  return query(
+    database,
+    `SELECT type, name, tbl_name, sql FROM sqlite_master
+     WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'
+     ORDER BY type, name`,
+  ).map((row) => ({
+    type: text(row, "type"),
+    name: text(row, "name"),
+    table: text(row, "tbl_name"),
+    sql: tokenizeSql(text(row, "sql")),
+  }));
+}
+
+// SQLite stores a CREATE statement close to how it was written, so this text is
+// as much a record of the author's formatting as of the schema. The two paths
+// declare the same table from two different pieces of source - the latest schema
+// and the migration that produced it - so comparing the text would go red on a
+// space before a comma, `TEXT` against `text`, `x > 0` against `x>0` or a comment
+// only one side carries, none of which any caller can observe.
+//
+// The tokenizer is the one the migration runner uses for the reserved declarations, so the runner
+// and this test cannot drift apart: a database whose reserved declaration differs in text only is
+// accepted by the runner, and this test compares the two build paths the same way.
+
+function readAppliedVersions(database: DatabaseSync): readonly number[] {
+  return query(database, "SELECT version FROM schema_migrations ORDER BY version").map((row) => count(row, "version"));
+}
+
+// `schema_migrations` is excluded from the comparisons: the upgraded fixture has
+// to create that table itself to reach the migration path, so its declaration is
+// the fixture's rather than the product's. Its contents are asserted instead,
+// which is the part `createLatestDatabase` writes without running anything.
+function readTableNames(database: DatabaseSync): readonly string[] {
+  return query(
+    database,
+    `SELECT name FROM sqlite_master
+     WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'
+     ORDER BY name`,
+  ).map((row) => text(row, "name"));
+}
+
+function query(database: DatabaseSync, sql: string): readonly DynamicRecord[] {
+  return database
+    .prepare(sql)
+    .all()
+    .map((row) => {
+      if (!isDynamicRecord(row)) throw new Error(`Unexpected row shape from: ${sql}`);
+      return row;
+    });
+}
+
+function quote(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function text(row: DynamicRecord, column: string): string {
+  const value = row[column];
+  if (!isString(value)) throw new Error(`Expected text in column ${column}.`);
+  return value;
+}
+
+function optionalText(row: DynamicRecord, column: string): string | null {
+  const value = row[column];
+  if (value === null || value === undefined) return null;
+  if (isString(value)) return value;
+  if (isNumber(value)) return String(value);
+  throw new Error(`Expected text or null in column ${column}.`);
+}
+
+function count(row: DynamicRecord, column: string): number {
+  const value = row[column];
+  if (!isNumber(value)) throw new Error(`Expected a number in column ${column}.`);
+  return value;
+}

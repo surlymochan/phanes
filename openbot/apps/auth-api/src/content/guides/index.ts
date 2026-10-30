@@ -1,0 +1,23 @@
+// Slug to guide body, on the same terms as the news bodies: eager, so the prose
+// is in the server's HTML rather than arriving after hydration.
+
+import type { ArticleBody } from "../body";
+import { AgenticAIDefinition } from "./agentic-ai-definition";
+import { AIAgentsExamples } from "./ai-agents-examples";
+import { AIAgentsVsAgenticAI } from "./ai-agents-vs-agentic-ai";
+import { OpenBot101 } from "./openbot-101";
+import { OpenBotHostedServers } from "./openbot-hosted-servers";
+import { OpenBotMarketplace } from "./openbot-marketplace";
+import { WhatAreAIAgents } from "./what-are-ai-agents";
+import { WtfIsOpenBot } from "./wtf-is-openbot";
+
+export const GUIDE_BODIES: Readonly<Record<string, ArticleBody>> = {
+  "ai-agents-examples": AIAgentsExamples,
+  "ai-agents-vs-agentic-ai": AIAgentsVsAgenticAI,
+  "agentic-ai-definition": AgenticAIDefinition,
+  "what-are-ai-agents": WhatAreAIAgents,
+  "openbot-101": OpenBot101,
+  "openbot-hosted-servers": OpenBotHostedServers,
+  "openbot-marketplace": OpenBotMarketplace,
+  "wtf-is-openbot": WtfIsOpenBot,
+};

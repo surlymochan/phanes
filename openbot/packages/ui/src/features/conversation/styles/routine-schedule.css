@@ -1,0 +1,878 @@
+/* Routine schedule row: the frequency and its values as one sentence of chips. */
+.routine-trigger-row,
+.routine-weekday-strip,
+.routine-calendar-days {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+/* Keyboard focus uses the shared focus ring, as the other controls do. The ring is a box shadow, so
+   the native outline goes. This rule has the same weight as the accent outline rule in auth.css,
+   which loads earlier. */
+:is(.routine-schedule-picker, .routine-popover, .routine-chip-select-content)
+:is(button, input, textarea):focus-visible {
+  outline: 0;
+}
+
+:is(.routine-schedule-picker, .routine-popover) .ui-button:focus-visible {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+.routine-schedule-picker {
+  display: grid;
+  min-width: 0;
+  gap: var(--openbot-space-1-5);
+}
+
+/* One line at every width. A narrow row shrinks its flexible chip, not the line count. */
+/* In a panel the row is a form field, so it has the box of the settings inputs around it. */
+.routine-trigger-row {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--openbot-space-2);
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-shadow-popover-ambient);
+  padding: var(--openbot-space-1);
+  transition: border-color var(--openbot-duration-hover) ease;
+}
+
+.routine-trigger-row:focus-within {
+  border-color: var(--openbot-text-muted);
+}
+
+.routine-schedule-picker[data-density="card"] .routine-trigger-row {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+.routine-trigger-icon {
+  display: inline-flex;
+  width: var(--openbot-control-md);
+  height: var(--openbot-control-md);
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--openbot-radius-pill);
+  background: var(--openbot-accent);
+  color: var(--openbot-text-on-accent);
+}
+
+.routine-trigger-icon svg {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+  stroke-width: 2;
+}
+
+.routine-schedule-picker[data-density="panel"] .routine-trigger-icon {
+  width: var(--openbot-control-sm);
+  height: var(--openbot-control-sm);
+}
+
+.routine-schedule-picker[data-density="card"] .routine-trigger-icon {
+  display: none;
+}
+
+.routine-trigger-chips {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  /* Clips a row that is narrower than its fixed chips, and keeps the focus ring visible. */
+  overflow: clip;
+  overflow-clip-margin: var(--openbot-space-1);
+}
+
+.routine-trigger-phrase {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.routine-trigger-phrase-flexible {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.routine-connector {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-lg);
+  line-height: var(--openbot-leading-lg);
+}
+
+.routine-chip-select {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.routine-chip-select-flexible {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.routine-chip {
+  display: inline-flex;
+  height: var(--openbot-control-md);
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: var(--openbot-space-1-5);
+  cursor: pointer;
+  border: 0;
+  border-radius: var(--openbot-radius-md);
+  outline: 0;
+  background: var(--openbot-bg-control-active);
+  padding: 0 var(--openbot-space-3);
+  color: var(--openbot-text-primary);
+  font-family: var(--openbot-font-sans);
+  font-size: var(--openbot-text-lg);
+  line-height: var(--openbot-leading-lg);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  transition: background-color var(--openbot-duration-hover) ease;
+}
+
+.routine-chip-flexible {
+  flex-shrink: 1;
+}
+
+.routine-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The chips sit one padding inside the box, so the row is as tall as an input at every width. */
+.routine-schedule-picker[data-density="panel"] .routine-chip {
+  height: var(--openbot-control-sm);
+  border-radius: var(--openbot-radius-xs);
+}
+
+.routine-schedule-picker[data-density="card"] .routine-chip {
+  height: var(--openbot-control-sm);
+  padding: 0 var(--openbot-space-2);
+  font-size: var(--openbot-text-md);
+}
+
+.routine-chip:focus-visible {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+.routine-chip:is([aria-expanded="true"], [data-expanded]) {
+  background: var(--openbot-bg-control-hover);
+  box-shadow: 0 0 0 1px var(--openbot-border-strong);
+}
+
+.routine-chip:disabled,
+.routine-chip[data-disabled] {
+  cursor: default;
+  background: transparent;
+  padding: 0;
+  color: var(--openbot-text-secondary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .routine-chip:hover:not(:disabled, [data-disabled]) {
+    background: var(--openbot-bg-control-hover);
+    box-shadow: 0 0 0 1px var(--openbot-border-strong);
+  }
+}
+
+.routine-chip-select-content {
+  min-width: 160px;
+}
+
+.routine-chip-select-content .ui-select-item {
+  font-size: var(--openbot-text-lg);
+  line-height: var(--openbot-leading-lg);
+}
+
+.routine-cron-input {
+  min-width: 0;
+  max-width: 220px;
+  flex: 1 1 180px;
+  font-family: var(--openbot-font-mono);
+}
+
+.routine-schedule-hint {
+  margin: 0;
+  padding-left: var(--openbot-space-2);
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.routine-schedule-picker[data-density="card"] .routine-schedule-hint {
+  padding-left: 0;
+}
+
+/* Popovers */
+.routine-popover {
+  z-index: var(--openbot-layer-popover);
+  border-radius: var(--openbot-radius-lg);
+  padding: var(--openbot-space-2);
+}
+
+.routine-weekday-strip {
+  display: flex;
+  gap: var(--openbot-space-1);
+}
+
+.routine-day-item {
+  display: inline-flex;
+}
+
+.routine-day {
+  display: inline-flex;
+  width: var(--openbot-control-md);
+  height: var(--openbot-control-md);
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--openbot-radius-pill);
+  padding: 0;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-medium);
+}
+
+.routine-day-item:has(:focus-visible) .routine-day {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+/* The strip is short, so an unselected day can look like a button. A month grid stays plain. */
+.routine-weekday-strip .routine-day {
+  background: var(--openbot-bg-control-active);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .routine-day:hover:not(:disabled, .routine-day-selected) {
+    background: var(--openbot-hover);
+    color: var(--openbot-text-primary);
+  }
+}
+
+.routine-day.routine-day-selected,
+.routine-day.routine-day-selected:hover {
+  background: var(--openbot-text-primary);
+  color: var(--openbot-bg-canvas);
+}
+
+.routine-day.routine-day-selected:focus-visible {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+/* Time */
+.routine-clock-input {
+  display: flex;
+  align-items: center;
+  gap: var(--openbot-space-1-5);
+}
+
+.routine-clock-segment.ui-input {
+  width: 48px;
+  height: var(--openbot-control-lg);
+  border: 0;
+  background: var(--openbot-bg-control-active);
+  padding: 0;
+  font-size: var(--openbot-text-lg);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.routine-clock-separator {
+  color: var(--openbot-text-muted);
+}
+
+.routine-segmented {
+  display: flex;
+  margin-left: var(--openbot-space-1);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-control-active);
+  padding: var(--openbot-space-0-5);
+}
+
+.routine-segmented-control {
+  display: inline-flex;
+  height: calc(var(--openbot-control-lg) - 2 * var(--openbot-space-0-5));
+  min-width: 44px;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--openbot-radius-sm);
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-medium);
+}
+
+.routine-segmented-control label {
+  cursor: pointer;
+}
+
+.routine-segmented-control[data-checked] {
+  background: var(--openbot-text-primary);
+  color: var(--openbot-bg-canvas);
+}
+
+.routine-segmented-item:has(:focus-visible) .routine-segmented-control {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+/* Hours window: a two-option list and, for "Between hours", the times beside it. */
+.routine-window-menu {
+  display: grid;
+  width: 240px;
+  gap: var(--openbot-space-1);
+  padding: var(--openbot-space-1);
+}
+
+.routine-window-options {
+  display: grid;
+  gap: var(--openbot-space-0-5);
+}
+
+.routine-window-repeat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openbot-space-2);
+  border-top: 1px solid var(--openbot-border);
+  padding: var(--openbot-space-2) var(--openbot-space-1) var(--openbot-space-1) var(--openbot-space-3);
+}
+
+.routine-window-repeat-label {
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-lg);
+  line-height: var(--openbot-leading-lg);
+}
+
+.routine-window-option-control {
+  display: flex;
+  min-height: var(--openbot-control-lg);
+  align-items: center;
+  gap: var(--openbot-space-2);
+  cursor: pointer;
+  border-radius: var(--openbot-radius-md);
+  padding: var(--openbot-space-2) var(--openbot-space-3);
+}
+
+.routine-window-option-control[data-checked] {
+  background: var(--openbot-hover);
+}
+
+.routine-window-option:has(:focus-visible) .routine-window-option-control {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .routine-window-option-control:hover {
+    background: var(--openbot-hover);
+  }
+}
+
+.routine-window-option-label {
+  flex: 1;
+  cursor: pointer;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-lg);
+  line-height: var(--openbot-leading-lg);
+}
+
+.routine-window-option-check {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+  flex: 0 0 auto;
+}
+
+.routine-window-option-check svg {
+  width: 100%;
+  height: 100%;
+}
+
+.routine-window-range {
+  display: grid;
+  gap: var(--openbot-space-1-5);
+  padding: var(--openbot-space-1) var(--openbot-space-3) var(--openbot-space-2);
+}
+
+.routine-window-range-times {
+  display: flex;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.routine-window-range-count {
+  margin: 0;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-md);
+  line-height: var(--openbot-leading-md);
+}
+
+/* Calendar */
+.routine-calendar {
+  display: grid;
+  width: calc(7 * var(--openbot-control-md) + 6 * var(--openbot-space-0-5));
+  gap: var(--openbot-space-1);
+}
+
+.routine-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--openbot-space-1);
+}
+
+.routine-calendar-title {
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-medium);
+}
+
+.routine-calendar-weekdays,
+.routine-calendar-days {
+  display: grid;
+  grid-template-columns: repeat(7, var(--openbot-control-md));
+  gap: var(--openbot-space-0-5);
+}
+
+.routine-calendar-weekdays span {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  text-align: center;
+}
+
+.routine-calendar-day:focus-visible {
+  box-shadow: var(--openbot-focus-ring);
+}
+
+.routine-calendar-day[aria-current="date"]:not(.routine-day-selected) {
+  color: var(--openbot-accent-text);
+}
+
+.routine-calendar-day:disabled {
+  cursor: default;
+  opacity: 0.32;
+}
+
+/* Chat card */
+/*
+ * As wide as its content, as a message is: the row sets the width, and a narrow chat shrinks it.
+ * The minimum keeps the card still while most edits change the chips. It needs the second class
+ * because interaction-cards.css loads later and resets `min-width`.
+ */
+/*
+ * The row takes the most space that still shows every label whole. RoutineSchedulePicker sets
+ * `data-fit` from the labels and the width, so a short row keeps its room in a narrow panel.
+ * Each step keeps the rules of the steps before it.
+ */
+.routine-schedule-picker:not([data-fit="roomy"]) .routine-trigger-chips {
+  gap: var(--openbot-space-1-5);
+}
+
+.routine-schedule-picker:not([data-fit="roomy"]) .routine-trigger-phrase {
+  gap: var(--openbot-space-1);
+}
+
+.routine-schedule-picker:not([data-fit="roomy"]) .routine-connector {
+  font-size: var(--openbot-text-md);
+}
+
+.routine-schedule-picker[data-density="panel"]:not([data-fit="roomy"]) .routine-trigger-row {
+  gap: var(--openbot-space-1-5);
+}
+
+.routine-schedule-picker[data-density="panel"]:not([data-fit="roomy"]) .routine-trigger-icon svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+.routine-schedule-picker[data-density="panel"]:not([data-fit="roomy"]) .routine-chip {
+  gap: var(--openbot-space-1);
+  padding: 0 var(--openbot-space-2);
+  font-size: var(--openbot-text-md);
+}
+
+.routine-schedule-picker[data-density="panel"]:is([data-fit="tight"], [data-fit="minimal"])
+  .routine-connector-optional {
+  display: none;
+}
+
+.routine-schedule-picker[data-density="panel"]:is([data-fit="tight"], [data-fit="minimal"])
+  :is(.routine-trigger-row, .routine-trigger-chips) {
+  gap: var(--openbot-space-1);
+}
+
+.routine-schedule-picker[data-density="panel"]:is([data-fit="tight"], [data-fit="minimal"]) .routine-trigger-icon {
+  width: var(--openbot-control-xs);
+  height: var(--openbot-control-xs);
+  align-self: center;
+}
+
+.routine-schedule-picker[data-density="panel"]:is([data-fit="tight"], [data-fit="minimal"]) .routine-chip {
+  padding: 0 var(--openbot-space-1-5);
+}
+
+/* The value chips then cut their labels short, and the frequency and time chips stay whole. */
+.routine-schedule-picker[data-fit="minimal"] :is(.routine-trigger-icon, .routine-connector) {
+  display: none;
+}
+
+.routine-schedule-picker[data-fit="minimal"] .routine-trigger-chips {
+  gap: var(--openbot-space-1);
+}
+
+/*
+ * The end of a trigger row: the menu that changes the trigger. It sits one padding from the end,
+ * as the icon does at the start. The menu button has the size of a chip, so the row stays as tall
+ * as an input.
+ */
+.routine-trigger-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-self: center;
+  margin-inline-start: calc(var(--openbot-space-1) * -1);
+}
+
+.routine-trigger-action:empty {
+  display: none;
+}
+
+:is(.routine-trigger-row, .routine-trigger-card-header) .routine-trigger-action .ui-button {
+  width: var(--openbot-control-sm);
+  height: var(--openbot-control-sm);
+  border-radius: var(--openbot-radius-xs);
+}
+
+/*
+ * The webhook trigger: a header, then one full-width row for each value. The header icon starts
+ * where the row text starts, and the row actions share one column with the menu button.
+ */
+.routine-trigger-card {
+  display: grid;
+  min-width: 0;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-shadow-popover-ambient);
+}
+
+.routine-trigger-card-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  padding: var(--openbot-space-1) var(--openbot-space-1) var(--openbot-space-1) var(--openbot-space-3);
+}
+
+:is(.routine-trigger-card-header, .routine-trigger-menu) .routine-trigger-icon {
+  width: var(--openbot-control-sm);
+  height: var(--openbot-control-sm);
+}
+
+.routine-trigger-card-title {
+  min-width: 0;
+  flex: 1;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  line-height: var(--openbot-leading-md);
+  /* Mostly lowercase text looks low when its line box is centered. Center the x-height on the icon. */
+  text-box: trim-both ex alphabetic;
+}
+
+.routine-webhook-field {
+  display: grid;
+  /* An action, the row padding and the top border, so a row without an action has the same height. */
+  min-height: calc(var(--openbot-control-sm) + var(--openbot-space-2) + 1px);
+  grid-template-columns: minmax(84px, auto) minmax(0, 1fr) var(--openbot-control-sm);
+  align-items: center;
+  gap: var(--openbot-space-3);
+  border: 0;
+  border-top: 1px solid var(--openbot-border);
+  margin: 0;
+  background: none;
+  padding: var(--openbot-space-1) var(--openbot-space-1) var(--openbot-space-1) var(--openbot-space-3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.routine-webhook-label {
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  white-space: nowrap;
+}
+
+.routine-webhook-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+code.routine-webhook-value {
+  font-family: inherit;
+}
+
+/* A new secret wraps in a fixed-width font, so the user can read each character before copying it. */
+code.routine-webhook-secret {
+  padding-block: var(--openbot-space-1-5);
+  font-family: var(--openbot-font-mono);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.routine-webhook-field > :last-child {
+  justify-self: center;
+}
+
+.routine-webhook-field > .ui-icon-button {
+  width: var(--openbot-control-sm);
+  height: var(--openbot-control-sm);
+}
+
+/* The Events row is a ghost Button; two classes keep the row layout over the button styles. */
+.routine-webhook-field.routine-webhook-events-toggle {
+  width: auto;
+  min-width: 0;
+  height: auto;
+  justify-content: stretch;
+  border-radius: 0 0 calc(var(--openbot-radius-md) - 1px) calc(var(--openbot-radius-md) - 1px);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.routine-webhook-field.routine-webhook-events-toggle[aria-expanded="true"] {
+  background: none;
+}
+
+.routine-webhook-field.routine-webhook-events-toggle:hover {
+  background: var(--openbot-bg-control-hover);
+}
+
+.routine-webhook-events-toggle:focus-visible {
+  outline: 0;
+  box-shadow: var(--openbot-focus-ring);
+}
+
+.routine-webhook-events-toggle > svg {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+  stroke-width: var(--openbot-icon-stroke);
+  color: var(--openbot-text-muted);
+}
+
+/* A status sentence wraps; a URL or a secret stays on one line. */
+.ui-text.routine-webhook-value {
+  white-space: normal;
+}
+
+.routine-webhook-note {
+  padding: 0 var(--openbot-space-3) var(--openbot-space-2);
+}
+
+.routine-trigger-card-header + .routine-webhook-note {
+  border-top: 1px solid var(--openbot-border);
+  padding-top: var(--openbot-space-2);
+}
+
+.routine-webhook-secret-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openbot-space-2);
+}
+
+/* In a chat card the rows are one block, so the card gap does not split them, and they line up
+ * with the card title. */
+.routine-webhook-card-endpoint {
+  display: grid;
+  border-bottom: 1px solid var(--openbot-border);
+}
+
+.routine-webhook-card-endpoint > .routine-webhook-field,
+.routine-webhook-card-endpoint > .routine-webhook-note {
+  padding-left: 0;
+}
+
+/* The setup steps: a number, or a check when done, beside each step. */
+.routine-webhook-steps {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routine-webhook-steps > li {
+  display: grid;
+  grid-template-columns: var(--openbot-control-sm) minmax(0, 1fr);
+  gap: var(--openbot-space-2);
+  border-top: 1px solid var(--openbot-border);
+  padding: var(--openbot-space-3);
+}
+
+.routine-webhook-step-body {
+  display: grid;
+  min-width: 0;
+  gap: var(--openbot-space-1-5);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.routine-webhook-step-body > strong {
+  font-weight: var(--openbot-weight-medium);
+}
+
+.routine-webhook-steps > li[data-disabled] .routine-webhook-step-body > strong {
+  color: var(--openbot-text-muted);
+}
+
+.routine-webhook-step-marker {
+  display: inline-grid;
+  width: var(--openbot-control-sm);
+  height: var(--openbot-control-sm);
+  place-items: center;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-pill);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+}
+
+.routine-webhook-step-marker[data-done] {
+  border-color: var(--openbot-success);
+  background: var(--openbot-success-soft);
+  color: var(--openbot-success-text);
+}
+
+.routine-webhook-step-check {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+/* A value row inside a step has its own border. */
+.routine-webhook-inset {
+  min-width: 0;
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-sm);
+}
+
+.routine-webhook-inset > .routine-webhook-field {
+  border-top: 0;
+}
+
+.routine-webhook-step-button {
+  justify-self: start;
+}
+
+.routine-webhook-disclosure {
+  justify-self: start;
+  margin-inline-start: calc(var(--openbot-space-2) * -1);
+  padding-inline: var(--openbot-space-2);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  font-weight: inherit;
+}
+
+.routine-webhook-disclosure-icon {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.routine-webhook-filter {
+  display: grid;
+  gap: var(--openbot-space-1);
+}
+
+.routine-webhook-events {
+  display: grid;
+  gap: var(--openbot-space-3);
+  border-top: 1px solid var(--openbot-border);
+  padding: var(--openbot-space-3);
+}
+
+.routine-webhook-events .settings-field {
+  display: grid;
+  margin: 0;
+  gap: var(--openbot-space-1-5);
+}
+
+.routine-webhook-events .settings-field > span {
+  margin: 0;
+}
+
+/* Hints are captions, not field labels. */
+.routine-webhook-events .settings-field > .ui-text {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.routine-webhook-add-filter {
+  justify-self: start;
+  margin-left: calc(var(--openbot-space-2) * -1);
+  padding-inline: var(--openbot-space-2);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-md);
+  font-weight: inherit;
+}
+
+/* A quiet link under the rows. Its text starts under the row labels. */
+.routine-webhook-filter-link {
+  justify-self: start;
+  margin: 0 0 var(--openbot-space-1) var(--openbot-space-1);
+  padding-inline: var(--openbot-space-2);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  font-weight: inherit;
+}
+
+.routine-webhook-add-filter svg,
+.routine-webhook-filter-link svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+/* The trigger menu: a name and one line that tells when the routine runs. It is taller than a short
+ * window, so it fits the space left and scrolls; the webhook row stays reachable. */
+.routine-trigger-menu {
+  width: 300px;
+  max-height: min(560px, calc(100dvh - 16px), var(--kb-popper-content-available-height, 560px));
+  overflow-y: auto;
+}
+
+.routine-trigger-menu.ui-action-menu .routine-trigger-menu-item[role="menuitemradio"] {
+  height: auto;
+  padding-block: var(--openbot-space-1-5);
+  gap: var(--openbot-space-3);
+  white-space: normal;
+}
+
+.routine-trigger-menu-text {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+}
+
+.routine-trigger-menu-description {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.routine-trigger-menu.ui-action-menu .routine-trigger-menu-item > .routine-trigger-menu-check {
+  color: var(--openbot-text-primary);
+}

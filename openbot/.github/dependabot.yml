@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Europe/Warsaw
+    open-pull-requests-limit: 5
+    # Match `minimumReleaseAge` in bunfig.toml, which rejects newer versions.
+    cooldown:
+      default-days: 3
+    groups:
+      compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

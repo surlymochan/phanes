@@ -1,0 +1,282 @@
+/**
+ * Every read projection the sidebar renders and drags against: the props sorted, grouped
+ * and indexed. Nothing here mutates and nothing here calls a prop callback, which is what makes it
+ * safe for the drag engine to hold - it satisfies the engine's list model and can do nothing else.
+ */
+
+import { type ChannelSummary, SIDEBAR_PEOPLE_SECTION_ID, SIDEBAR_UNASSIGNED_SECTION_ID } from "@openbot/contracts/ipc";
+import { createMemo } from "solid-js";
+import type { AgentProfile } from "../../../data";
+import { currentText } from "../../../text";
+import { teamMemberName } from "../../team/TeamPersonAvatar";
+import { sidebarPinnedItemKey } from "../sidebar-pins";
+import type { ResolvedPinnedItem, SidebarChatItem, SidebarProps } from "../sidebar-types";
+
+type PinnedItemSource = SidebarProps["agents"][number] | NonNullable<SidebarProps["channels"]>[number];
+
+export function createSidebarDataStore(deps: {
+  props: SidebarProps;
+  /** True while a sidebar drag is in flight. */
+  dragActive: () => boolean;
+}) {
+  const { props } = deps;
+
+  const directThreadByMember = createMemo(
+    () => new Map(props.directThreads.map((thread) => [thread.otherMemberId, thread])),
+  );
+  const chatPinnedItems = createMemo(() =>
+    props.pinnedItems.filter((item) => item.kind === "agent" || item.kind === "channel"),
+  );
+  const pinnedKeys = createMemo(() => new Set(chatPinnedItems().map(sidebarPinnedItemKey)));
+  const agentById = createMemo(() => new Map(props.agents.map((agent) => [agent.id, agent])));
+  /** When the user hid each agent, by agent id. An agent that is not in it is not hidden. */
+  const userHiddenAt = createMemo(
+    () => new Map((props.userHiddenAgents ?? []).map((entry) => [entry.agentId, entry.hiddenAt])),
+  );
+  const agentIsUserHidden = (agentId: string) => userHiddenAt().has(agentId);
+  const personById = createMemo(() => new Map(props.people.map((member) => [member.id, member])));
+  const channels = () => props.channels ?? [];
+  const channelById = createMemo(() => new Map(channels().map((channel) => [channel.id, channel])));
+  let pinnedItemCache = new Map<string, { source: PinnedItemSource; item: ResolvedPinnedItem }>();
+  /** Both kinds of pinned chat, resolved against the chats the sidebar has: a pin that names none is
+   * kept in storage and simply not drawn, because the chat can be absent for a passing reason.
+   *
+   * Keep a resolved wrapper while its source chat is the same store. Solid's `For` keys by object
+   * identity, so rebuilding every wrapper for an unrelated profile update remounted all pinned
+   * tiles and replayed the unread-badge entrance animation. */
+  const resolvedPinnedItems = createMemo<ResolvedPinnedItem[]>(() => {
+    const items: ResolvedPinnedItem[] = [];
+    const nextCache = new Map<string, { source: PinnedItemSource; item: ResolvedPinnedItem }>();
+    const resolve = (ref: ResolvedPinnedItem["ref"], source: PinnedItemSource, item: ResolvedPinnedItem) => {
+      const key = sidebarPinnedItemKey(ref);
+      const cached = pinnedItemCache.get(key);
+      const resolved = cached?.source === source ? cached.item : item;
+      nextCache.set(key, { source, item: resolved });
+      return resolved;
+    };
+    for (const ref of chatPinnedItems()) {
+      if (ref.kind === "agent") {
+        const agent = agentById().get(ref.id);
+        // A hidden agent keeps its pin, so a restore puts it back in the strip.
+        if (agent && !agentIsUserHidden(agent.id))
+          items.push(resolve(ref, agent, { ref, chat: { kind: "agent", id: agent.id, agent } }));
+      }
+      if (ref.kind === "channel") {
+        const channel = channelById().get(ref.id);
+        if (channel) items.push(resolve(ref, channel, { ref, chat: { kind: "channel", id: channel.id, channel } }));
+      }
+    }
+    pinnedItemCache = nextCache;
+    return items;
+  });
+  const listedAgents = createMemo(() =>
+    props.agents.filter(
+      (agent) =>
+        !agentIsUserHidden(agent.id) && !pinnedKeys().has(sidebarPinnedItemKey({ kind: "agent", id: agent.id })),
+    ),
+  );
+  /**
+   * Agents and channels that wait for the user leave their section for the "Needs you" group, the
+   * same way a pinned chat leaves it for the pinned strip. The layout keeps their place, so a chat
+   * goes back to it when the wait ends. A pinned chat stays in its tile, which shows the same badge.
+   *
+   * The set is keyed by a string so that a badge change that keeps the same agents waiting stops
+   * here. Without it, each new reply would rebuild the chat items and remount every row.
+   *
+   * The set holds still during a drag. The drag engine measures the rows when the drag starts, so a
+   * row that moved to the group after that would make the drop land at an old position, and the
+   * dragged row itself would leave the DOM.
+   */
+  let heldWaitingKey = "";
+  const waitingKey = createMemo(() => {
+    const next = [
+      ...Object.keys(props.agentStates).filter((agentId) => props.agentStates[agentId]?.kind === "waiting"),
+      ...Object.keys(props.channelWaits ?? {}),
+    ]
+      .sort()
+      .join("\n");
+    if (!deps.dragActive()) heldWaitingKey = next;
+    return heldWaitingKey;
+  });
+  const waitingIds = createMemo(() => new Set(waitingKey() ? waitingKey().split("\n") : []));
+  const chatWaits = (chatId: string) => waitingIds().has(chatId);
+  const filteredAgents = createMemo(() => listedAgents().filter((agent) => !chatWaits(agent.id)));
+  /** The hidden agents, pinned ones included, in their layout order. They are not drag sources. */
+  const userHiddenAgentList = createMemo(() =>
+    sortByLayoutOrder(props.agents.filter((agent) => agentIsUserHidden(agent.id))),
+  );
+  const listedChannels = createMemo(() =>
+    channels().filter((channel) => !pinnedKeys().has(sidebarPinnedItemKey({ kind: "channel", id: channel.id }))),
+  );
+  const filteredChannels = createMemo(() => listedChannels().filter((channel) => !chatWaits(channel.id)));
+  function sortByLayoutOrder<T extends { id: string }>(items: T[]): T[] {
+    const orderIndex = new Map(props.layout.agentOrder.map((chatId, index) => [chatId, index]));
+    const naturalIndex = new Map(items.map((item, index) => [item.id, index]));
+    return items.sort(
+      (left, right) =>
+        (orderIndex.get(left.id) ?? props.layout.agentOrder.length + (naturalIndex.get(left.id) ?? 0)) -
+        (orderIndex.get(right.id) ?? props.layout.agentOrder.length + (naturalIndex.get(right.id) ?? 0)),
+    );
+  }
+  /**
+   * Agents and channels as one ordered list, because the layout places them together: a channel is a
+   * chat the user files and drags exactly like an agent. `agentOrder` is the persisted sequence and
+   * keeps its released name; an id it does not carry yet falls in behind the ones it does, channels
+   * first, which is where channels sat while they had a list of their own.
+   */
+  type ChatSource = AgentProfile | ChannelSummary;
+  /**
+   * Keep each wrapper while its chat is the same store, as `resolvedPinnedItems` does: a chat that
+   * starts or stops waiting must not remount the rows of every other chat.
+   */
+  function createChatItems(sources: () => { channels: ChannelSummary[]; agents: AgentProfile[] }) {
+    let cache = new Map<ChatSource, SidebarChatItem>();
+    return createMemo<SidebarChatItem[]>(() => {
+      const nextCache = new Map<ChatSource, SidebarChatItem>();
+      const keep = (source: ChatSource, item: () => SidebarChatItem) => {
+        const resolved = cache.get(source) ?? item();
+        nextCache.set(source, resolved);
+        return resolved;
+      };
+      const current = sources();
+      const items = sortByLayoutOrder<SidebarChatItem>([
+        ...current.channels.map((channel) => keep(channel, () => ({ kind: "channel", id: channel.id, channel }))),
+        ...current.agents.map((agent) => keep(agent, () => ({ kind: "agent", id: agent.id, agent }))),
+      ]);
+      cache = nextCache;
+      return items;
+    });
+  }
+  const filteredChats = createChatItems(() => ({ channels: filteredChannels(), agents: filteredAgents() }));
+  /** The "Needs you" group, in the order the chats have in the layout. */
+  const waitingChats = createChatItems(() => ({
+    channels: listedChannels().filter((channel) => chatWaits(channel.id)),
+    agents: listedAgents().filter((agent) => chatWaits(agent.id)),
+  }));
+  const orderedPeople = createMemo(() => {
+    const natural = [...props.people].sort((left, right) => {
+      const leftThread = directThreadByMember().get(left.id);
+      const rightThread = directThreadByMember().get(right.id);
+      if (leftThread || rightThread) {
+        return (rightThread?.updatedAt ?? "").localeCompare(leftThread?.updatedAt ?? "");
+      }
+      if (left.online !== right.online) return left.online ? -1 : 1;
+      return teamMemberName(left).localeCompare(teamMemberName(right));
+    });
+    const orderIndex = new Map(props.peopleOrder.map((memberId, index) => [memberId, index]));
+    const naturalIndex = new Map(natural.map((member, index) => [member.id, index]));
+    return natural.sort(
+      (left, right) =>
+        (orderIndex.get(left.id) ?? props.peopleOrder.length + (naturalIndex.get(left.id) ?? 0)) -
+        (orderIndex.get(right.id) ?? props.peopleOrder.length + (naturalIndex.get(right.id) ?? 0)),
+    );
+  });
+  const customSectionById = createMemo(() => new Map(props.layout.sections.map((section) => [section.id, section])));
+  const collapsedSectionIds = createMemo(() => new Set(props.collapsedSectionIds));
+  const orderedSectionIds = createMemo(() => new Set(props.layout.order));
+  // A section has to be in `order` as well as in `sections` for its group to be drawn, because
+  // `visibleSectionIds` walks `order`. An agent grouped under a section that `order` leaves out is on
+  // no screen while its chat and every message in it are intact, which reads as history that
+  // disappeared -- so it goes to the unassigned section, where the user can still open it and move it.
+  // `isCompleteSectionOrder` rejects such a layout at the IPC boundary; this keeps the agent visible if
+  // one ever reaches the sidebar another way.
+  const filteredChatsBySection = createMemo(() => {
+    const groups = new Map<string, SidebarChatItem[]>();
+    for (const item of filteredChats()) {
+      const assigned = props.layout.agentAssignments[item.id];
+      const sectionId =
+        assigned && customSectionById().has(assigned) && orderedSectionIds().has(assigned)
+          ? assigned
+          : SIDEBAR_UNASSIGNED_SECTION_ID;
+      groups.set(sectionId, [...(groups.get(sectionId) ?? []), item]);
+    }
+    return groups;
+  });
+  const visibleSectionIds = createMemo(() =>
+    props.layout.order.filter((sectionId) => {
+      if (sectionId === SIDEBAR_PEOPLE_SECTION_ID) return props.showPeople !== false && orderedPeople().length > 0;
+      if (customSectionById().has(sectionId)) return true;
+      if (sectionId !== SIDEBAR_UNASSIGNED_SECTION_ID) return false;
+      return (filteredChatsBySection().get(sectionId)?.length ?? 0) > 0;
+    }),
+  );
+
+  function sectionIsCollapsed(sectionId: string): boolean {
+    return collapsedSectionIds().has(sectionId);
+  }
+
+  function sectionPosition(sectionId: string): number {
+    return visibleSectionIds().indexOf(sectionId);
+  }
+
+  function sectionAcceptsChat(sectionId: string): boolean {
+    return sectionId === SIDEBAR_UNASSIGNED_SECTION_ID || customSectionById().has(sectionId);
+  }
+
+  /**
+   * The section a dragged chat counts as leaving. Deliberately not the menu's `currentSectionId`,
+   * which answers `null` for an unassigned chat because that is where its tick goes.
+   */
+  function assignedSectionId(chatId: string): string {
+    const assigned = props.layout.agentAssignments[chatId];
+    return assigned && customSectionById().has(assigned) ? assigned : SIDEBAR_UNASSIGNED_SECTION_ID;
+  }
+
+  /** The name for an announcement, whichever kind of chat the id belongs to. */
+  function chatName(chatId: string): string {
+    return (
+      agentById().get(chatId)?.name ??
+      channelById().get(chatId)?.name ??
+      currentText().t("sidebar.announce.chatFallback")
+    );
+  }
+
+  /** Which kind of chat an id names, or null when the sidebar shows no chat under it. */
+  function chatKind(chatId: string): "agent" | "channel" | null {
+    if (agentById().has(chatId)) return "agent";
+    return channelById().has(chatId) ? "channel" : null;
+  }
+
+  function sectionLabel(sectionId: string): string {
+    const { t } = currentText();
+    if (sectionId === SIDEBAR_PEOPLE_SECTION_ID) return t("sidebar.section.people");
+    if (sectionId === SIDEBAR_UNASSIGNED_SECTION_ID) return t("sidebar.section.unassigned");
+    return customSectionById().get(sectionId)?.name ?? t("sidebar.section.fallback");
+  }
+
+  function visiblePinnedKeys(): string[] {
+    return resolvedPinnedItems().map((item) => sidebarPinnedItemKey(item.ref));
+  }
+
+  /** The ISO time when the user hid the agent, or undefined when the agent is not hidden. */
+  function userHiddenSince(agentId: string): string | undefined {
+    return userHiddenAt().get(agentId);
+  }
+
+  return {
+    assignedSectionId,
+    agentById,
+    channelById,
+    chatKind,
+    chatName,
+    chatPinnedItems,
+    customSectionById,
+    directThreadByMember,
+    filteredAgents,
+    filteredChannels,
+    filteredChats,
+    filteredChatsBySection,
+    orderedPeople,
+    personById,
+    resolvedPinnedItems,
+    sectionAcceptsChat,
+    sectionIsCollapsed,
+    sectionLabel,
+    sectionPosition,
+    visiblePinnedKeys,
+    userHiddenAgentList,
+    userHiddenSince,
+    visibleSectionIds,
+    waitingChats,
+  };
+}

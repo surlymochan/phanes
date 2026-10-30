@@ -1,0 +1,10 @@
+# Backs up instance %i and verifies the backup. openbot-instance-backup@%i.timer starts it. `setup`
+# replaces /opt/openbot-docker/instances/ with the folder of openbot-instance.
+[Unit]
+Description=Back up OpenBot instance %i
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/openbot-docker/instances/openbot-instance backup %i --verify
+TimeoutStartSec=6h

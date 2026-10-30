@@ -1,0 +1,143 @@
+import {
+  type AgentSummary,
+  type ClientAgentSummary,
+  type ForeignProviderId,
+  foreignProvider,
+  isAgentMarketplaceSource,
+  isAgentModel,
+  isAgentProvider,
+  isAgentProviderRef,
+  isAvatarHue,
+  isKnownAgentProvider,
+  isReasoningEffort,
+  isSidebarLayoutSnapshot,
+  type SidebarLayoutSnapshot,
+  type UpdateAgentInput,
+} from "@openbot/contracts/ipc";
+import { isBoolean, isDynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
+import type { TeamProtocolV2Json } from "@openbot/contracts/team-protocol/v2";
+import type { MobileAgent } from "@/features/workspace/model/workspace-types";
+import { formatUpdatedAt } from "@/shared/lib/format-updated-at";
+
+export type RemoteAgent = Pick<
+  AgentSummary,
+  "id" | "name" | "title" | "description" | "preview" | "updatedAt" | "avatarSeed" | "avatarHue"
+> &
+  Partial<
+    Pick<
+      AgentSummary,
+      "provider" | "model" | "reasoningEffort" | "avatarUrl" | "notifications" | "workspacePath" | "marketplaceSource"
+    >
+  > & { foreignProvider?: ForeignProviderId | undefined };
+
+export function projectAgent(serverId: string, agent: RemoteAgent): MobileAgent {
+  return {
+    id: agent.id,
+    serverId,
+    name: agent.name,
+    title: agent.title,
+    description: agent.description,
+    preview: agent.preview,
+    updatedLabel: formatUpdatedAt(agent.updatedAt),
+    provider: agent.provider,
+    foreignProvider: agent.foreignProvider,
+    model: agent.model,
+    reasoningEffort: agent.reasoningEffort,
+    notifications: agent.notifications,
+    workspacePath: agent.workspacePath,
+    avatarUrl: agent.avatarUrl ?? null,
+    avatarSeed: agent.avatarSeed,
+    avatarHue: agent.avatarHue,
+    marketplaceSource: agent.marketplaceSource
+      ? { listingId: agent.marketplaceSource.listingId, version: agent.marketplaceSource.version }
+      : undefined,
+  };
+}
+
+/** An agent of a host event. A provider that this build does not know moves to `foreignProvider`. */
+export function remoteAgentOf(agent: ClientAgentSummary): RemoteAgent {
+  const { provider, ...rest } = agent;
+  return isKnownAgentProvider(provider)
+    ? { ...rest, provider }
+    : { ...rest, provider: undefined, foreignProvider: foreignProvider(provider) };
+}
+
+export function decodeAgent(value: unknown): RemoteAgent {
+  if (
+    !isDynamicRecord(value) ||
+    !isString(value.id) ||
+    !isString(value.name) ||
+    !isString(value.title) ||
+    !isString(value.description) ||
+    !isString(value.preview) ||
+    (value.updatedAt !== null && !isString(value.updatedAt)) ||
+    !isString(value.avatarSeed) ||
+    (value.avatarHue !== null && !isAvatarHue(value.avatarHue))
+  ) {
+    throw new Error("The server returned an invalid agent.");
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    title: value.title,
+    description: value.description,
+    preview: value.preview,
+    updatedAt: value.updatedAt,
+    provider: isAgentProvider(value.provider) ? value.provider : undefined,
+    // A provider of a newer host stays on the agent: the host still runs it.
+    foreignProvider: isAgentProviderRef(value.provider) ? foreignProvider(value.provider) : undefined,
+    model: isAgentModel(value.model) ? value.model : undefined,
+    reasoningEffort: isReasoningEffort(value.reasoningEffort) ? value.reasoningEffort : undefined,
+    notifications: isBoolean(value.notifications) ? value.notifications : undefined,
+    workspacePath: isString(value.workspacePath) && value.workspacePath ? value.workspacePath : undefined,
+    avatarUrl: isString(value.avatarUrl) ? value.avatarUrl : null,
+    avatarSeed: value.avatarSeed,
+    avatarHue: value.avatarHue,
+    // An older host sends no listing; a malformed one is left out rather than failing the agent list.
+    marketplaceSource: isAgentMarketplaceSource(value.marketplaceSource) ? value.marketplaceSource : undefined,
+  };
+}
+
+export function decodeAgentSummaries(value: unknown): RemoteAgent[] {
+  if (!Array.isArray(value)) throw new Error("The server returned an invalid agent list.");
+  return value.map(decodeAgent);
+}
+
+export function decodeConversationReads(value: unknown): Record<string, { unreadCount: number }> {
+  if (!isDynamicRecord(value)) throw new Error("The server returned invalid read states.");
+  const reads: Record<string, { unreadCount: number }> = {};
+  for (const [agentId, readState] of Object.entries(value)) {
+    if (
+      !isDynamicRecord(readState) ||
+      !isNumber(readState.unreadCount) ||
+      !Number.isSafeInteger(readState.unreadCount) ||
+      readState.unreadCount < 0
+    ) {
+      throw new Error("The server returned an invalid read state.");
+    }
+    reads[agentId] = { unreadCount: readState.unreadCount };
+  }
+  return reads;
+}
+
+export function ignoreResponse(): void {}
+
+export function updateAgentPayload(input: UpdateAgentInput): TeamProtocolV2Json {
+  return {
+    agentId: input.agentId,
+    ...(input.name === undefined ? {} : { name: input.name }),
+    ...(input.title === undefined ? {} : { title: input.title }),
+    ...(input.description === undefined ? {} : { description: input.description }),
+    ...(input.notifications === undefined ? {} : { notifications: input.notifications }),
+    ...(input.provider === undefined ? {} : { provider: input.provider }),
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+    ...(input.avatarSeed === undefined ? {} : { avatarSeed: input.avatarSeed }),
+    ...(input.avatarHue === undefined ? {} : { avatarHue: input.avatarHue }),
+  };
+}
+
+export function decodeSidebarLayout(value: unknown): SidebarLayoutSnapshot {
+  if (!isSidebarLayoutSnapshot(value)) throw new Error("The server returned an invalid section layout.");
+  return value;
+}

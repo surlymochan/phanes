@@ -1,0 +1,169 @@
+import { createHash } from "node:crypto";
+import { access, readdir, readFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { createOpenBotLogger } from "@openbot/logging";
+import { bundledLibraryLicense, isPortableLoadPath, readMachOLoadPaths } from "./mac-runtime-dylibs";
+import { createRemoteDesktopInputDigest, loadNativeRuntimeLock } from "./native-runtime-lock";
+import { runtimeTarget } from "./remote-desktop-runtime-release";
+
+const logger = createOpenBotLogger("verify-remote-desktop-runtime");
+
+const platform = process.argv.includes("--windows") ? "win32" : process.argv.includes("--linux") ? "linux" : "darwin";
+const architecture = platform === "win32" ? "x64" : process.arch;
+const distributionRoot = resolve("build/remote-desktop-runtime");
+const root = resolve("build/remote-desktop-runtime", platform, architecture);
+const lock = await loadNativeRuntimeLock();
+const manifest = JSON.parse(await readFile(resolve("build/remote-desktop-runtime/source-manifest.json"), "utf8"));
+
+if (manifest.inputDigest !== createRemoteDesktopInputDigest(lock))
+  throw new Error("The runtime input digest is not approved.");
+if (manifest.sunshine?.commit !== lock.remoteDesktop.sunshine.commit)
+  throw new Error("The Sunshine commit is not approved.");
+if (manifest.moonlightWeb?.commit !== lock.remoteDesktop.moonlightWeb.commit) {
+  throw new Error("The Moonlight Web commit is not approved.");
+}
+if (manifest.sunshine?.patch?.sha256 !== lock.remoteDesktop.sunshine.patch.sha256) {
+  throw new Error("The Sunshine OpenBot patch is not approved.");
+}
+if (manifest.moonlightWeb?.patch?.sha256 !== lock.remoteDesktop.moonlightWeb.patch.sha256) {
+  throw new Error("The Moonlight Web OpenBot patch is not approved.");
+}
+
+const target = runtimeTarget(platform, architecture);
+const names = lock.remoteDesktop.targets[target];
+const sunshinePatch = basename(lock.remoteDesktop.sunshine.patch.path);
+const moonlightPatch = basename(lock.remoteDesktop.moonlightWeb.patch.path);
+await Promise.all([
+  ...names.map((name) => access(join(root, name))),
+  access(join(root, "static/stream.html")),
+  access(resolve("build/remote-desktop-runtime/licenses/Sunshine-GPL-3.0.txt")),
+  access(resolve("build/remote-desktop-runtime/licenses/moonlight-web-stream-GPL-3.0.txt")),
+  access(resolve(`build/remote-desktop-runtime/sources/Sunshine-${lock.remoteDesktop.sunshine.version}-source.tar.gz`)),
+  access(resolve("build/remote-desktop-runtime/sources", sunshinePatch)),
+  access(
+    resolve(
+      `build/remote-desktop-runtime/sources/moonlight-web-stream-${lock.remoteDesktop.moonlightWeb.version}-openbot-source.tar.gz`,
+    ),
+  ),
+  access(resolve("build/remote-desktop-runtime/sources", moonlightPatch)),
+  access(join(distributionRoot, "DISTRIBUTION-SHA256SUMS.txt")),
+]);
+
+await expectMissing(join(root, "static/stream/audio"));
+await expectMissing(join(root, "static/stream/transport/web_socket.js"));
+const embeddedStreamSource = await readFile(join(root, "static/stream/index.js"), "utf8");
+if (embeddedStreamSource.includes("WebSocketTransport") || embeddedStreamSource.includes("buildAudioPipeline")) {
+  throw new Error("The embedded viewer still contains a WebSocket or audio media pipeline.");
+}
+
+const checksumEntries = await verifyChecksums(root, "SHA256SUMS.txt");
+const distributionChecksumEntries = await verifyChecksums(distributionRoot, "DISTRIBUTION-SHA256SUMS.txt");
+for (const name of names) {
+  if (!checksumEntries.some((entry) => entry.name === name)) throw new Error(`Missing runtime checksum for ${name}.`);
+}
+for (const name of [
+  "source-manifest.json",
+  "licenses/Sunshine-GPL-3.0.txt",
+  "licenses/moonlight-web-stream-GPL-3.0.txt",
+  `sources/${sunshinePatch}`,
+  `sources/${moonlightPatch}`,
+]) {
+  if (!distributionChecksumEntries.some((entry) => entry.name === name)) {
+    throw new Error(`Missing distribution checksum for ${name}.`);
+  }
+}
+
+if (platform === "darwin") {
+  const libraries = await bundledLibraries(root, (name) => name.endsWith(".dylib"));
+  await verifyMachOLoadPaths(libraries);
+  verifyBundledLibraryLicenses(libraries, distributionChecksumEntries);
+}
+if (platform === "linux") {
+  verifyBundledLibraryLicenses(
+    await bundledLibraries(root, (name) => /\.so(\.\d+)*$/.test(name)),
+    distributionChecksumEntries,
+  );
+}
+
+logger.info(`Verified the Sunshine and Moonlight Web runtime in ${root}`);
+
+/**
+ * Presence and checksums say the runtime is the approved build; only its load commands say whether
+ * it can start anywhere else. CMake links Sunshine against Homebrew by absolute path, and a binary
+ * that keeps those paths runs on the build runner and on a developer's Mac and nowhere else --
+ * which shows up as a session that never produces a frame, with every check green.
+ */
+async function verifyMachOLoadPaths(libraries: string[]) {
+  const binaries = [...names, ...libraries];
+  const unportable = binaries.flatMap((name) =>
+    readMachOLoadPaths(join(root, name))
+      .filter((path) => !isPortableLoadPath(path))
+      .map((path) => `  ${name} loads ${path}`),
+  );
+  if (unportable.length > 0) {
+    throw new Error(
+      `The runtime loads libraries that exist only on the machine that built it:\n${unportable.join("\n")}`,
+    );
+  }
+}
+
+/**
+ * A bundled library is one OpenBot redistributes, and both of the ones that reach the runtime today
+ * ask for their notice to travel with the binary. Presence in the tree is what creates the
+ * obligation, so this reads the tree rather than a list: a library that starts being bundled arrives
+ * here as a failure with its name in it, not as a release that quietly drops a licence.
+ */
+function verifyBundledLibraryLicenses(libraries: string[], distributionChecksums: { name: string }[]): void {
+  for (const library of libraries) {
+    const entry = bundledLibraryLicense(basename(library));
+    if (!entry) {
+      throw new Error(`${library} ships in the runtime with no licence recorded for it.`);
+    }
+    const file = `licenses/${entry.license}`;
+    if (!distributionChecksums.some((checksum) => checksum.name === file)) {
+      throw new Error(`${library} ships without ${file}, which its licence requires.`);
+    }
+  }
+}
+
+async function bundledLibraries(
+  directory: string,
+  isLibrary: (name: string) => boolean,
+  prefix = "",
+): Promise<string[]> {
+  const libraries: string[] = [];
+  for (const entry of await readdir(join(directory, ...prefix.split("/").filter(Boolean)), { withFileTypes: true })) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) libraries.push(...(await bundledLibraries(directory, isLibrary, relativePath)));
+    else if (isLibrary(entry.name)) libraries.push(relativePath);
+  }
+  return libraries;
+}
+
+async function verifyChecksums(checksumRoot: string, fileName: string) {
+  const checksums = await readFile(join(checksumRoot, fileName), "utf8");
+  const entries = checksums
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const [, digest, name] = /^([a-f0-9]{64}) {2}(.+)$/.exec(line) ?? [];
+      if (digest === undefined || name === undefined) throw new Error(`Invalid runtime checksum line: ${line}`);
+      return { digest, name };
+    });
+  for (const { digest: expectedDigest, name } of entries) {
+    const digest = createHash("sha256")
+      .update(await readFile(join(checksumRoot, ...name.split("/"))))
+      .digest("hex");
+    if (digest !== expectedDigest) throw new Error(`Invalid runtime checksum for ${name}.`);
+  }
+  return entries;
+}
+
+async function expectMissing(path: string) {
+  try {
+    await access(path);
+  } catch {
+    return;
+  }
+  throw new Error(`Forbidden embedded media module exists: ${path}`);
+}

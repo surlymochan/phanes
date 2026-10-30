@@ -1,0 +1,231 @@
+import { PlatformLogo } from "@openbot/brand";
+import { createSignal, createUniqueId, For, onSettled, Show } from "solid-js";
+import { landingAnalytics } from "../../lib/analytics";
+import {
+  DOWNLOAD_PLATFORM_ORDER,
+  DOWNLOAD_PLATFORMS,
+  type DownloadPlatform,
+  detectDownloadPlatform,
+} from "../../lib/download-platforms";
+import { EXTERNAL_LINK_REL } from "../../lib/landing-links";
+import { detectMobilePlatform, MOBILE_APP_ORDER, MOBILE_APPS, type MobilePlatform } from "../../lib/mobile-apps";
+import { LandingIcon } from "./LandingIcon";
+
+type HeroPlatform = DownloadPlatform | MobilePlatform;
+
+interface HeroOffer {
+  action: string;
+  /** Missing while the installer is not out yet. */
+  href?: string;
+  label: string;
+  status: string;
+  /** A store page on another site, which opens in a new tab. */
+  external: boolean;
+}
+
+function heroOffer(platform: HeroPlatform): HeroOffer {
+  if (platform === "ios" || platform === "android") return { ...MOBILE_APPS[platform], external: true };
+  const { href, ...details } = DOWNLOAD_PLATFORMS[platform];
+  return details.available && href ? { ...details, href, external: false } : { ...details, external: false };
+}
+
+interface HeroMenuItemProps {
+  platform: HeroPlatform;
+  selected: boolean;
+  onSelect: () => void;
+}
+
+function HeroMenuItem(props: HeroMenuItemProps) {
+  const offer = () => heroOffer(props.platform);
+  return (
+    <Show
+      when={offer().href}
+      fallback={
+        <button
+          class="landing-download-menu-item"
+          type="button"
+          role="menuitem"
+          data-state="coming-soon"
+          data-selected={props.selected ? "true" : undefined}
+          onClick={() => props.onSelect()}
+        >
+          <PlatformLogo platform={props.platform} />
+          <span>{offer().label}</span>
+          <small>{offer().status}</small>
+        </button>
+      }
+    >
+      {(href) => (
+        <a
+          class="landing-download-menu-item"
+          href={href()}
+          target={offer().external ? "_blank" : undefined}
+          rel={offer().external ? EXTERNAL_LINK_REL : undefined}
+          role="menuitem"
+          data-state="available"
+          data-selected={props.selected ? "true" : undefined}
+          onClick={() => props.onSelect()}
+        >
+          <PlatformLogo platform={props.platform} />
+          <span>{offer().label}</span>
+          <small>{offer().status}</small>
+        </a>
+      )}
+    </Show>
+  );
+}
+
+export function HeroDownloadSelector() {
+  const menuId = createUniqueId();
+  const [platform, setPlatform] = createSignal<HeroPlatform>("macos");
+  const [open, setOpen] = createSignal(false);
+  let root: HTMLDivElement | undefined;
+  let trigger: HTMLButtonElement | undefined;
+
+  const current = () => heroOffer(platform());
+  const menuItems = () => Array.from(root?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+
+  function closeMenu(restoreFocus = false): void {
+    setOpen(false);
+    if (restoreFocus) trigger?.focus();
+  }
+
+  function openMenu(focus: "first" | "last" | false = false): void {
+    setOpen(true);
+    if (!focus) return;
+    queueMicrotask(() => {
+      const items = menuItems();
+      (focus === "first" ? items[0] : items.at(-1))?.focus();
+    });
+  }
+
+  function selectPlatform(nextPlatform: HeroPlatform): void {
+    setPlatform(nextPlatform);
+    landingAnalytics.trackDownloadSelected(nextPlatform, false);
+    closeMenu(true);
+  }
+
+  function handleKeyDown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && open()) {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+
+    if (event.target === trigger && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      openMenu(event.key === "ArrowDown" ? "first" : "last");
+      return;
+    }
+
+    if (!open() || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = menuItems();
+    const activeElement = document.activeElement;
+    const activeIndex = activeElement instanceof HTMLElement ? items.indexOf(activeElement) : -1;
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : (activeIndex + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  }
+
+  onSettled(() => {
+    // A phone cannot run the desktop app, so a visitor on one is offered the phone app.
+    const detected = detectMobilePlatform(globalThis.navigator) ?? detectDownloadPlatform(globalThis.navigator);
+    if (detected) {
+      setPlatform(detected);
+      // Reported separately from the click, so the offer the visitor was given can be compared with
+      // the one they took.
+      landingAnalytics.trackDownloadSelected(detected, true);
+    }
+
+    const handleOutsidePointer = (event: PointerEvent) => {
+      if (open() && event.target instanceof Node && !root?.contains(event.target)) closeMenu();
+    };
+    document.addEventListener("pointerdown", handleOutsidePointer);
+    return () => document.removeEventListener("pointerdown", handleOutsidePointer);
+  });
+
+  return (
+    <div
+      ref={root}
+      class="landing-download-selector"
+      data-detected-platform={platform()}
+      data-open={open() ? "true" : "false"}
+    >
+      <div class="landing-download-split">
+        <Show
+          when={current().href}
+          fallback={
+            <span class="landing-download-primary" data-state="coming-soon" aria-disabled="true">
+              <PlatformLogo platform={platform()} solid />
+              {current().action}
+            </span>
+          }
+        >
+          {(href) => (
+            <a
+              class="landing-download-primary"
+              href={href()}
+              target={current().external ? "_blank" : undefined}
+              rel={current().external ? EXTERNAL_LINK_REL : undefined}
+              data-state="available"
+            >
+              <PlatformLogo platform={platform()} solid />
+              {current().action}
+            </a>
+          )}
+        </Show>
+        <button
+          ref={trigger}
+          class="landing-download-trigger"
+          type="button"
+          aria-label="Choose download platform"
+          aria-haspopup="menu"
+          aria-expanded={open() ? "true" : "false"}
+          aria-controls={menuId}
+          onClick={() => (open() ? closeMenu() : openMenu())}
+          onKeyDown={handleKeyDown}
+        >
+          <LandingIcon name="chevron-down" />
+        </button>
+      </div>
+
+      <Show when={open()}>
+        <div
+          id={menuId}
+          class="landing-download-menu"
+          role="menu"
+          aria-label="Download platforms"
+          onKeyDown={handleKeyDown}
+        >
+          <For each={DOWNLOAD_PLATFORM_ORDER}>
+            {(menuPlatform) => (
+              <HeroMenuItem
+                platform={menuPlatform}
+                selected={platform() === menuPlatform}
+                onSelect={() => selectPlatform(menuPlatform)}
+              />
+            )}
+          </For>
+          <hr class="landing-download-menu-separator" />
+          <span class="landing-download-menu-label" aria-hidden="true">
+            Phone apps
+          </span>
+          <For each={MOBILE_APP_ORDER}>
+            {(menuPlatform) => (
+              <HeroMenuItem
+                platform={menuPlatform}
+                selected={platform() === menuPlatform}
+                onSelect={() => selectPlatform(menuPlatform)}
+              />
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
+}

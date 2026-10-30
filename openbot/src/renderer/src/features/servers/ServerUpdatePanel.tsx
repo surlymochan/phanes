@@ -1,0 +1,418 @@
+import type {
+  HostReleaseStatus,
+  HostUpdateSettingsChange,
+  HostUpdateStatus,
+  OpenBotDesktopApi,
+} from "@openbot/contracts/ipc";
+import { classifyFailure } from "@openbot/telemetry";
+import {
+  Alert,
+  AlertActions,
+  AlertContent,
+  AlertDescription,
+  AlertIcon,
+  AlertTitle,
+  Button,
+  Clock3,
+  Info,
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemTitle,
+  Progress,
+  SettingsSection,
+  SwitchField,
+  TriangleAlert,
+} from "@openbot/ui";
+import { restartReasonKey } from "@openbot/ui/features/updates/restart-reasons";
+import { useText } from "@openbot/ui/text";
+import { createEffect, createSignal, onCleanup, Show, untrack } from "solid-js";
+import { actionToast } from "../../action-toast";
+import { openServerUpdate, serverUpdateStatus } from "./server-update-flow";
+
+/** The update calls of one server's host. The desktop reaches them through main. */
+export type HostUpdateCalls = Pick<
+  OpenBotDesktopApi["hostAdmin"],
+  "getUpdateStatus" | "checkForUpdate" | "startUpdate" | "cancelUpdate" | "setUpdateSettings"
+> &
+  Partial<Pick<OpenBotDesktopApi["hostAdmin"], "getReleaseStatus" | "checkRelease">>;
+
+export interface ServerUpdateOptions {
+  /** Only administrators can change preferences, cancel, or force a restart. */
+  canManage?: boolean;
+  /** The calls of a client with no `window.openbot`, such as the web client. */
+  calls?: HostUpdateCalls;
+}
+
+/** How often the status is read again while the host checks, downloads or waits to restart. */
+const POLL_MS = 1000;
+/** The wait after a read failed, so a host that restarts is not asked every second. */
+const RETRY_MS = 5000;
+
+/**
+ * Server Settings > Updates: the OpenBot update of a joined server's host (`host-update-v1`). The
+ * host sends no progress event, so the panel reads the status again while something runs there.
+ * The host checks permissions again on every call.
+ */
+export function ServerUpdatePanel(
+  props: ServerUpdateOptions & { serverId: string; hostName: string; actionsAvailable: boolean },
+) {
+  const { t, format, errorMessage } = useText();
+  const calls = (): HostUpdateCalls => props.calls ?? window.openbot.hostAdmin;
+  const [release, setRelease] = createSignal<HostReleaseStatus | null>(null);
+  const [status, setStatus] = createSignal<HostUpdateStatus | null>(null);
+  const [loadError, setLoadError] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal<string | null>(null);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  /** Bumped for each server and on unmount, so an answer for an earlier one is dropped. */
+  let generation = 0;
+  let revision = 0;
+
+  function stopPolling(): void {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  }
+
+  function show(next: HostUpdateStatus): void {
+    setStatus(next);
+    setLoadError(null);
+    stopPolling();
+    timer = setTimeout(() => void read(), running(next) || release()?.phase === "checking" ? POLL_MS : 15_000);
+  }
+
+  async function read(): Promise<void> {
+    const current = generation;
+    const request = ++revision;
+    const serverId = props.serverId;
+    try {
+      const [next, nextRelease] = await Promise.all([
+        calls().getUpdateStatus(serverId),
+        calls().getReleaseStatus?.(serverId) ?? Promise.resolve(null),
+      ]);
+      if (current === generation && request === revision) {
+        setRelease(nextRelease);
+        show(next);
+      }
+    } catch (error) {
+      if (current !== generation || request !== revision) return;
+      setLoadError(errorMessage(error, t("server.update.loadFailed", { name: props.hostName })));
+      stopPolling();
+      timer = setTimeout(() => void read(), RETRY_MS);
+    }
+  }
+
+  createEffect(
+    () => [props.serverId, props.actionsAvailable] as const,
+    () => {
+      generation += 1;
+      stopPolling();
+      setStatus(null);
+      setRelease(null);
+      setBusy(null);
+      setLoadError(null);
+      void untrack(read);
+    },
+  );
+  // The update dialog reads the status while the update runs; the panel shows the same one.
+  createEffect(
+    () => serverUpdateStatus(props.serverId),
+    (next) => {
+      if (next && next !== untrack(status)) show(next);
+    },
+  );
+  onCleanup(() => {
+    generation += 1;
+    stopPolling();
+  });
+
+  async function act(key: string, call: (serverId: string) => Promise<HostUpdateStatus>): Promise<void> {
+    if (busy()) return;
+    const current = generation;
+    revision += 1;
+    stopPolling();
+    setBusy(key);
+    try {
+      const next = await call(props.serverId);
+      if (current === generation) show(next);
+    } catch (error) {
+      if (current !== generation) return;
+      timer = setTimeout(() => void read(), RETRY_MS);
+      actionToast.error(t("server.settings.actionFailedTitle"), {
+        ...{
+          description: errorMessage(error, t("server.settings.actionFailed")),
+        },
+        report: { operation: "update", source: "action", cause_code: classifyFailure(error) },
+      });
+    } finally {
+      if (current === generation) setBusy(null);
+    }
+  }
+
+  const changeSettings = (settings: HostUpdateSettingsChange) =>
+    act("settings", (serverId) => calls().setUpdateSettings(settings, serverId));
+  // The update dialog starts the update and follows it after Server Settings closes.
+  const openUpdate = (current: HostUpdateStatus) =>
+    openServerUpdate(
+      { serverId: props.serverId, name: props.hostName, canManage: props.canManage !== false, calls: calls() },
+      current,
+    );
+  const blocked = () => {
+    const remote = status()?.remoteUpdates;
+    return remote === "disabled" || remote === "managed" || status()?.phase === "unsupported";
+  };
+  const readOnlyRelease = () => (release()?.method !== "self-update" || blocked() ? release() : null);
+  const checkDisabled = () =>
+    !props.actionsAvailable ||
+    Boolean(busy()) ||
+    Boolean(loadError()) ||
+    (readOnlyRelease() ? readOnlyRelease()?.phase === "unavailable" || !calls().checkRelease : blocked());
+  const disabled = () => !props.actionsAvailable || Boolean(busy()) || Boolean(loadError()) || blocked();
+  const check = () => {
+    const releaseCheck = calls().checkRelease;
+    const current = generation;
+    return act("check", async (serverId) => {
+      if (!readOnlyRelease() || !releaseCheck) return calls().checkForUpdate(serverId);
+      const next = await releaseCheck(serverId);
+      if (current === generation) setRelease(next);
+      return calls().getUpdateStatus(serverId);
+    });
+  };
+  const version = (current: HostUpdateStatus) => current.availableVersion ?? current.currentVersion;
+  const waitingFor = (current: HostUpdateStatus) =>
+    format.list(current.restart?.waitingFor.map((reason) => t(restartReasonKey(reason))) ?? []);
+
+  function message(current: HostUpdateStatus): string {
+    const name = props.hostName;
+    const checked = readOnlyRelease();
+    if (checked && !running(current) && current.phase !== "ready" && current.errorCode !== "install_failed") {
+      switch (checked.phase) {
+        case "checking":
+          return t("server.update.status.checking");
+        case "available":
+          return t("server.update.status.available", { version: checked.latestVersion ?? "" });
+        case "up-to-date":
+          return t("server.update.status.upToDate", { name });
+        case "error":
+          return t("server.update.releaseCheckFailed", { name });
+        case "unavailable":
+          return t("server.update.releaseUnavailable");
+        default:
+          return t("server.update.status.idle");
+      }
+    }
+    if (current.phase === "unsupported") return t("server.update.releaseUnavailable");
+    if (current.errorCode === "install_failed") return t("server.update.status.installFailed", { name });
+    switch (current.phase) {
+      case "checking":
+        return t("server.update.status.checking");
+      case "available":
+        return t("server.update.status.available", { version: version(current) });
+      case "downloading":
+        return current.progress === null
+          ? t("server.update.status.downloadingUnknown", { version: version(current) })
+          : t("server.update.status.downloading", {
+              version: version(current),
+              progress: format.percent(current.progress / 100),
+            });
+      case "ready":
+        return t("server.update.status.ready", { version: version(current) });
+      case "installing":
+        return t("server.update.status.installing", { name });
+      case "up-to-date":
+        return t("server.update.status.upToDate", { name });
+      case "error":
+        return current.errorCode === "download_failed"
+          ? t("server.update.status.downloadFailed", { name })
+          : t("server.update.status.checkFailed", { name });
+      default:
+        return t("server.update.status.idle");
+    }
+  }
+
+  return (
+    <SettingsSection title={t("server.update.hostTitle", { name: props.hostName })}>
+      <Show when={loadError()}>
+        {(error) => (
+          <Alert tone="danger" role="alert">
+            <AlertIcon>
+              <TriangleAlert />
+            </AlertIcon>
+            <AlertContent>
+              <AlertDescription>{error()}</AlertDescription>
+            </AlertContent>
+          </Alert>
+        )}
+      </Show>
+      <Show when={status()}>
+        {(current) => (
+          <>
+            <BlockedNotice status={current()} release={readOnlyRelease()} hostName={props.hostName} />
+            <ItemGroup class="settings-modal-card">
+              <Item class="settings-modal-row">
+                <ItemContent>
+                  <ItemTitle>{t("server.update.version", { version: current().currentVersion })}</ItemTitle>
+                  <ItemDescription aria-live="polite">{message(current())}</ItemDescription>
+                  <Show when={current().phase === "downloading"}>
+                    <Progress
+                      value={current().progress ?? 0}
+                      indeterminate={current().progress === null}
+                      aria-label={message(current())}
+                    />
+                  </Show>
+                </ItemContent>
+                <ItemActions>
+                  <Show when={current().phase !== "installing" && !current().restart}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      loading={
+                        busy() === "check" || current().phase === "checking" || readOnlyRelease()?.phase === "checking"
+                      }
+                      disabled={checkDisabled()}
+                      onClick={() => void check()}
+                    >
+                      {t("server.update.check")}
+                    </Button>
+                    <Show when={!blocked()}>
+                      <Button
+                        type="button"
+                        size="sm"
+                        // Only a relaunch of the host recovers from a failed install.
+                        disabled={disabled() || !current().availableVersion || current().errorCode === "install_failed"}
+                        onClick={() => openUpdate(current())}
+                      >
+                        {t("server.update.start")}
+                      </Button>
+                    </Show>
+                  </Show>
+                </ItemActions>
+              </Item>
+              <Show when={props.canManage !== false && !blocked()}>
+                <SwitchField
+                  checked={current().autoDownload}
+                  disabled={disabled()}
+                  onChange={(autoDownload) => void changeSettings({ autoDownload })}
+                  label={t("server.update.autoDownloadTitle")}
+                  description={t("server.update.autoDownloadDescription", { name: props.hostName })}
+                />
+                <SwitchField
+                  checked={current().autoInstall}
+                  disabled={disabled()}
+                  onChange={(autoInstall) => void changeSettings({ autoInstall })}
+                  label={t("server.update.autoInstallTitle")}
+                  description={t("server.update.autoInstallDescription", { name: props.hostName })}
+                />
+              </Show>
+            </ItemGroup>
+            <Show when={current().restart}>
+              {(restart) => (
+                <Alert tone="neutral" role="status">
+                  <AlertIcon>
+                    <Clock3 />
+                  </AlertIcon>
+                  <AlertContent>
+                    <AlertTitle>
+                      {restart().mode === "now"
+                        ? t("server.update.scheduledNowTitle", { name: props.hostName })
+                        : t("server.update.scheduledTitle", { name: props.hostName })}
+                    </AlertTitle>
+                    <AlertDescription>
+                      {restart().requestedBy === null
+                        ? t("server.update.automatic", { name: props.hostName })
+                        : t("server.update.requestedBy", { member: restart().requestedBy ?? "" })}
+                      <Show when={restart().waitingFor.length > 0}>
+                        {" "}
+                        {t("server.update.waitingFor", { reasons: waitingFor(current()) })}
+                      </Show>
+                    </AlertDescription>
+                  </AlertContent>
+                  <Show when={props.canManage !== false && current().phase !== "installing"}>
+                    <AlertActions>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        loading={busy() === "cancel"}
+                        disabled={!props.actionsAvailable || Boolean(busy())}
+                        onClick={() => void act("cancel", (serverId) => calls().cancelUpdate(serverId))}
+                      >
+                        {t("server.update.cancel")}
+                      </Button>
+                      <Show when={restart().mode === "when-idle"}>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={disabled()}
+                          onClick={() => openUpdate(current())}
+                        >
+                          {t("server.update.restartNow")}
+                        </Button>
+                      </Show>
+                    </AlertActions>
+                  </Show>
+                </Alert>
+              )}
+            </Show>
+          </>
+        )}
+      </Show>
+    </SettingsSection>
+  );
+}
+
+/** Why no action can run: the host user turned it off, a Host Manager owns updates, or no updater. */
+function BlockedNotice(props: { status: HostUpdateStatus; release: HostReleaseStatus | null; hostName: string }) {
+  const { t } = useText();
+  const notice = (): { title: string; description: string } | null => {
+    const name = props.hostName;
+    if (props.release && props.release.method !== "self-update") {
+      const descriptions = {
+        "host-manager": "server.update.path.hostManager",
+        hosted: "server.update.path.hosted",
+        system: "server.update.path.system",
+        container: "server.update.path.container",
+        manual: "server.update.path.manual",
+        unavailable: "server.update.path.unavailable",
+      } as const;
+      return { title: t("server.update.externalTitle"), description: t(descriptions[props.release.method]) };
+    }
+    if (props.status.remoteUpdates === "disabled")
+      return { title: t("server.update.disabledTitle"), description: t("server.update.disabledDescription", { name }) };
+    if (props.status.remoteUpdates === "managed")
+      return { title: t("server.update.managedTitle"), description: t("server.update.managedDescription", { name }) };
+    if (props.status.phase === "unsupported")
+      return {
+        title: t("server.update.unsupportedTitle", { name }),
+        description: t("server.update.unsupportedDescription", { name }),
+      };
+    return null;
+  };
+  return (
+    <Show when={notice()}>
+      {(current) => (
+        <Alert tone={props.release && props.release.method !== "unavailable" ? "neutral" : "warning"} role="status">
+          <AlertIcon>
+            <Info />
+          </AlertIcon>
+          <AlertContent>
+            <AlertTitle>{current().title}</AlertTitle>
+            <AlertDescription>{current().description}</AlertDescription>
+          </AlertContent>
+        </Alert>
+      )}
+    </Show>
+  );
+}
+
+function running(status: HostUpdateStatus): boolean {
+  return (
+    status.phase === "checking" ||
+    status.phase === "downloading" ||
+    status.phase === "installing" ||
+    status.restart !== null
+  );
+}

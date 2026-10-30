@@ -1,0 +1,34 @@
+[Unit]
+Description=OpenBot TURN (coturn)
+After=network-online.target
+Wants=network-online.target
+Requires=openbot-turn-config.service
+After=openbot-turn-config.service
+
+[Service]
+Type=simple
+User=turnserver
+Group=turnserver
+EnvironmentFile=/etc/openbot/coturn.env
+# The configuration and the certificate are in /run/openbot. The script of the unit
+# openbot-turn-config.service writes them there.
+ExecStart=/usr/bin/turnserver -c /run/openbot/turnserver.conf --pidfile /run/openbot/coturn.pid
+# coturn reads the new certificate on SIGUSR2.
+ExecReload=/bin/kill -USR2 $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# The service writes its pid file in /run/openbot, so /run stays writable.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

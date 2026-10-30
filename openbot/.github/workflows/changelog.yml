@@ -1,0 +1,69 @@
+name: Changelog
+
+# Each pull request writes its release notes in its own `changelog.d` file, so two pull requests
+# never change the same lines. `bun run release:*` moves the files into CHANGELOG.md. The iPhone app
+# has its own files in `apps/mobile/changelog.d`, which `bun run mobile:release:*` moves into
+# apps/mobile/CHANGELOG.md. The label events run the check again: `ci.yml` does not run when a
+# label changes.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  notes:
+    name: Release notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent, the base branch.
+          fetch-depth: 2
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: none
+
+      # A change to a CHANGELOG.md itself also passes: a release, or notes written before `changelog.d`.
+      - name: Require release notes
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref }}
+        # Not `grep -q`: it stops at the first match, and with a long file list the grep before it
+        # then fails with a broken pipe, which `pipefail` reports as no notes.
+        run: |
+          if ! git diff --name-only --diff-filter=ACMR HEAD^1 HEAD |
+            grep -vFx -e changelog.d/README.md -e apps/mobile/changelog.d/README.md |
+            grep -E '^((apps/mobile/)?changelog\.d/.+\.md|(apps/mobile/)?CHANGELOG\.md)$' >/dev/null; then
+            echo "::error::Write the release notes in changelog.d/${BRANCH//\//-}.md, or in apps/mobile/changelog.d/${BRANCH//\//-}.md for the iPhone app (see docs/RELEASING.md#release-notes). Add the no-changelog label when a user sees no change."
+            exit 1
+          fi
+
+      - name: Check changelog fragments
+        shell: bash
+        run: |
+          find changelog.d apps/mobile/changelog.d -name '*.md' \
+            ! -path changelog.d/README.md ! -path apps/mobile/changelog.d/README.md -print0 |
+            xargs -0 -r bun scripts/check-release-notes.ts --fragments
+
+      # A merge that gives a mobile version its second store date posts on Discord
+      # (mobile-release-announcement.yml), so its highlights must be ready before the merge.
+      - name: Check the mobile Discord announcement
+        shell: bash
+        run: |
+          git show HEAD^1:apps/mobile/CHANGELOG.md > "$RUNNER_TEMP/CHANGELOG.before.md"
+          version="$(bun scripts/discord-mobile-release-announcement.ts available "$RUNNER_TEMP/CHANGELOG.before.md")"
+          if [[ -n "$version" ]]; then
+            bun scripts/discord-mobile-release-announcement.ts check "$version"
+          fi

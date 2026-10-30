@@ -1,0 +1,23 @@
+{
+  "name": "@openbot/i18n",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./format": "./src/format.ts",
+    "./languages": "./src/languages.ts",
+    "./mobile": "./src/mobile.ts",
+    "./source": "./src/source-text.ts"
+  },
+  "scripts": {
+    "typecheck": "bun ../../scripts/type-checker.ts --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@openbot/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
+  }
+}

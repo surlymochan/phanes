@@ -1,0 +1,557 @@
+import {
+  type AgentApproval,
+  type AgentContextState,
+  type AgentEvent,
+  type AgentModelChoice,
+  type AgentWaitsSnapshot,
+  isQueuedAgentReply,
+  type QueueSnapshot,
+  type RoutineFields,
+} from "@openbot/contracts/ipc";
+import { currentText } from "@openbot/ui/text";
+import { createEffect, createMemo, createSignal, untrack } from "solid-js";
+import { desktopAnalytics } from "./analytics";
+import { useAnsweredPrompts } from "./answered-prompts";
+import {
+  attentionKey,
+  type PendingAttentionPrompts,
+  seededAttentionPrompts,
+} from "./features/agents/agent-runtime-snapshot";
+import { useAgents } from "./features/agents/agents-context";
+import { agentConversationKey, promptRequestKey } from "./features/conversation/conversation-keys";
+import type { PromptAnswerOptions } from "./features/conversation/conversation-types";
+import type { TurnStepLines } from "./features/conversation/turn-step-lines";
+import { useDynamicIsland } from "./features/dynamic-island/dynamic-island-context";
+import { useServers } from "./features/servers/servers-context";
+import { createScopeGuard } from "./scope-lifetime";
+import { createSimpleContext } from "./simple-context";
+import { turnsPort } from "./turns-port";
+
+type PromptEvent = Extract<AgentEvent, { type: "prompt" }>;
+/** `current` is false while a new list loads. */
+type RoutineSnapshot = { routines: RoutineFields[]; current: boolean };
+
+/**
+ * What each agent is *doing*: the turn it is running, the queue behind it, and
+ * the prompt or approval it is blocked on.
+ *
+ * This is the one domain inside the per-server subtree whose state survives a
+ * server switch. `DynamicIslandCoordinator` lives above the keyed boundary,
+ * keeps six of these maps per server and hands them back through
+ * `serverState(serverId)`, so this provider seeds from that snapshot on mount
+ * instead of starting empty. Keeping turns separate from `conversation` is what
+ * keeps that seam visible - mixed together, the one layer that is restored
+ * would be indistinguishable from the ones that are not.
+ *
+ * Two placements deviate from the plan's inventory, both for the same reason -
+ * the edge only points one way:
+ *
+ * - **This provider sits *outside* `conversation`, not inside it.** The plan had
+ *   conversation first, but `applyConversation` and `applyConversationPage` both
+ *   write `activeTurns` (a snapshot carries the turn that produced it) while
+ *   nothing here needs a conversation *signal*. Nesting turns outside leaves a
+ *   single downward edge; the other order needs two.
+ * - **`presentPromptResolution` is not here.** It is the one turn command that
+ *   reads `liveMessages`, to tell a resolution the user has seen from one main
+ *   has already persisted. It moves to `conversation` with that state.
+ *
+ * `completedTurnByAgent` and `routinesByConversation` used to survive a switch
+ * because nobody cleared them; they now die with the scope, which is the
+ * teardown the old list of setters kept forgetting. `completedTurnByAgent` had
+ * grown for the life of the process.
+ *
+ * `presentedPromptResolutions` and `submittedPromptRequests` are the exception
+ * that proves that rule: they too survived by neglect, but for them the survival
+ * was load-bearing, because an answered prompt is only proved answered by a
+ * snapshot that may arrive after the user has moved to another server. They are
+ * re-exported from here under their own names so nothing downstream can tell,
+ * but they are owned by `answered-prompts.tsx` above the boundary and scoped to
+ * this server by its id - and they are read before `pendingPrompts` exists,
+ * because the seed below is the first thing that has to consult them.
+ */
+const Turns = createSimpleContext({
+  name: "Turns",
+  init: () => {
+    const { activeServerId } = useServers();
+    const { dynamicIslandCoordinator } = useDynamicIsland();
+    const { activeAgent, activeAgentId, agentList, agentStatus, appendUiError } = useAgents();
+    const scopeIsCurrent = createScopeGuard();
+
+    // The layer-2 seed: what this server was doing the last time it was open. The scope is keyed
+    // on the server, so its id and the seed are read once.
+    const scopeServerId = untrack(activeServerId);
+    const seed = dynamicIslandCoordinator.serverState(scopeServerId);
+    const [activeTurns, setActiveTurns] = createSignal<Record<string, string | null>>(seed?.activeTurns ?? {});
+    const [turnProgress, setTurnProgress] = createSignal<
+      Record<string, { turnId: string; detail: string } | undefined>
+    >(seed?.turnProgress ?? {});
+    // Every progress line of the newest turns, by turn, for the steps under the activity line.
+    const [turnStepLines, setTurnStepLines] = createSignal<TurnStepLines>({});
+    const [failedTurns, setFailedTurns] = createSignal<Record<string, string | undefined>>(seed?.failedTurns ?? {});
+    // The agents whose queue waits for a provider plan to reset, in epoch seconds. Only a runtime snapshot of the local host carries it.
+    const [contextStates, setContextStates] = createSignal<Record<string, AgentContextState>>({});
+    const [usageLimits, setUsageLimits] = createSignal<Record<string, number | null>>({});
+    // Each provider account and model that a usage limit holds, also with no agent on it.
+    const [usageLimitedModels, setUsageLimitedModels] = createSignal<AgentModelChoice[]>([]);
+    // The holds whose ask card the user closed with "Wait", by agent, with the reset of that hold.
+    const [waitedUsageLimits, setWaitedUsageLimits] = createSignal<Record<string, number | null>>({});
+    const [queues, setQueues] = createSignal<Record<string, QueueSnapshot>>(seed?.queues ?? {});
+    // Only the active agent's open waits load; a `waits-changed` event updates any agent.
+    const [waits, setWaits] = createSignal<Record<string, AgentWaitsSnapshot>>({});
+    const [routinesByConversation, setRoutinesByConversation] = createSignal<
+      Record<string, RoutineSnapshot | undefined>
+    >({});
+    const {
+      presentedPromptResolutions,
+      setPresentedPromptResolutions,
+      submittedPromptRequests,
+      setSubmittedPromptRequests,
+    } = useAnsweredPrompts().promptMarkersFor(scopeServerId);
+    const [pendingPrompts, setPendingPrompts] = createSignal<PendingAttentionPrompts>(
+      untrack(() =>
+        seededAttentionPrompts(seed?.pendingPrompts, presentedPromptResolutions(), submittedPromptRequests()),
+      ),
+    );
+    // Every waiting approval: the agent's chat and each of its tasks has its own thread.
+    const [approvals, setApprovals] = createSignal<AgentApproval[]>(
+      Object.values(seed?.pendingApprovals ?? {}).filter((approval) => approval !== undefined),
+    );
+    /** The newest waiting approval of each agent, in any thread. */
+    const pendingApprovals = createMemo(() =>
+      Object.fromEntries(approvals().map((approval) => [approval.agentId, approval] as const)),
+    );
+
+    function approvalOfThread(agentId: string, threadId: string | null | undefined): AgentApproval | undefined {
+      return approvals().find((approval) => approval.agentId === agentId && approval.threadId === threadId);
+    }
+
+    function forgetApproval(agentId: string, requestId: string | number): void {
+      setApprovals((current) =>
+        current.some((approval) => approval.agentId === agentId && String(approval.requestId) === String(requestId))
+          ? current.filter(
+              (approval) => approval.agentId !== agentId || String(approval.requestId) !== String(requestId),
+            )
+          : current,
+      );
+    }
+    const completedTurnByAgent = new Map<string, string>();
+    const queueSnapshotRequests = new Map<string, number>();
+    const waitSnapshotRequests = new Map<string, number>();
+    const routineSnapshotRequests = new Map<string, number>();
+
+    function refreshRoutineIds(agentId: string, serverId: string): void {
+      const key = agentConversationKey(serverId, agentId);
+      const request = (routineSnapshotRequests.get(key) ?? 0) + 1;
+      routineSnapshotRequests.set(key, request);
+      setRoutinesByConversation((current) => {
+        const snapshot = current[key];
+        return snapshot ? { ...current, [key]: { ...snapshot, current: false } } : current;
+      });
+      void turnsPort()
+        .agent.listRoutines(agentId)
+        .then((routines) => {
+          if (routineSnapshotRequests.get(key) !== request) return;
+          setRoutinesByConversation((current) => ({ ...current, [key]: { routines, current: true } }));
+        })
+        .catch(() => undefined);
+    }
+
+    createEffect(
+      () => ({ agentId: activeAgentId(), agentPhase: agentStatus().phase, serverId: activeServerId() }),
+      ({ agentId, serverId }) => {
+        if (agentId) refreshRoutineIds(agentId, serverId);
+      },
+    );
+
+    function loadQueue(agentId: string): void {
+      const queueRequest = (queueSnapshotRequests.get(agentId) ?? 0) + 1;
+      queueSnapshotRequests.set(agentId, queueRequest);
+      void turnsPort()
+        .agent.listQueue(agentId)
+        .then((queue) => {
+          if (!scopeIsCurrent() || queueSnapshotRequests.get(agentId) !== queueRequest) return;
+          setQueues((current) => ({ ...current, [agentId]: queue }));
+        })
+        // This background read can time out while chat replies still arrive. Keep the last queue;
+        // the next load or queue-changed event updates it. Queue action failures still report errors.
+        .catch(() => undefined);
+    }
+
+    createEffect(
+      () => ({ agentId: activeAgentId(), agentPhase: agentStatus().phase, serverId: activeServerId() }),
+      ({ agentId }) => {
+        if (agentId) loadQueue(agentId);
+      },
+    );
+
+    function loadWaits(agentId: string, serverId: string): void {
+      const request = (waitSnapshotRequests.get(agentId) ?? 0) + 1;
+      waitSnapshotRequests.set(agentId, request);
+      void turnsPort()
+        .agent.listWaits(agentId)
+        .then((snapshot) => {
+          if (!scopeIsCurrent() || waitSnapshotRequests.get(agentId) !== request) return;
+          setWaits((current) => ({ ...current, [agentId]: snapshot }));
+        })
+        .catch((error) => {
+          if (!scopeIsCurrent() || waitSnapshotRequests.get(agentId) !== request) return;
+          appendUiError(agentId, error, currentText().t("app.errorStatus.waitsLoad"), serverId);
+        });
+    }
+
+    createEffect(
+      () => ({ agentId: activeAgentId(), agentPhase: agentStatus().phase, serverId: activeServerId() }),
+      ({ agentId, serverId }) => {
+        if (agentId) loadWaits(agentId, serverId);
+      },
+    );
+
+    // The active-agent load above misses everyone else. A routine mark needs each agent's real
+    // queue sender, which a runtime snapshot does not carry.
+    createEffect(
+      () => ({
+        agentIds: agentList()
+          .map((agent) => agent.id)
+          .join("\0"),
+        agentPhase: agentStatus().phase,
+        serverId: activeServerId(),
+      }),
+      (next, previous) => {
+        if (
+          previous &&
+          next.agentIds === previous.agentIds &&
+          next.agentPhase === previous.agentPhase &&
+          next.serverId === previous.serverId
+        ) {
+          return;
+        }
+        if (!next.agentIds) return;
+        for (const agentId of next.agentIds.split("\0")) loadQueue(agentId);
+      },
+    );
+
+    async function answerPrompt(answers: Record<string, string[]>, options?: PromptAnswerOptions): Promise<boolean> {
+      const agent = activeAgent();
+      const prompt = agent ? pendingPrompts()[attentionKey(agent.id, agent.threadId)] : undefined;
+      if (!agent || prompt?.type !== "prompt") return false;
+      return submitPromptAnswers(agent.id, prompt, answers, options);
+    }
+
+    async function submitPromptAnswers(
+      agentId: string,
+      prompt: PromptEvent,
+      answers: Record<string, string[]>,
+      options?: PromptAnswerOptions,
+    ): Promise<boolean> {
+      const serverId = activeServerId();
+      const analytics = desktopAnalytics.scope();
+      setSubmittedPromptRequests((current) => ({
+        ...current,
+        [agentId]: promptRequestKey(prompt.turnId, prompt.requestId) ?? undefined,
+      }));
+      try {
+        await turnsPort().agent.respondToPrompt({
+          requestId: prompt.requestId,
+          answers,
+        });
+        analytics.track("agent_input_action", {
+          kind: "prompt",
+          decision: "answered",
+          result: "succeeded",
+        });
+        return true;
+      } catch (error) {
+        setSubmittedPromptRequests((current) => ({ ...current, [agentId]: undefined }));
+        analytics.track("agent_input_action", {
+          kind: "prompt",
+          decision: "answered",
+          result: "failed",
+          failure_code: "response_failed",
+        });
+        if (options?.onError) options.onError(error);
+        else appendUiError(agentId, error, currentText().t("app.errorStatus.answer"), serverId);
+        return false;
+      }
+    }
+
+    async function respondToApprovalRequest(
+      agentId: string,
+      requestId: string | number,
+      decision: "accept" | "decline",
+      options?: { onError?: (error: unknown) => void },
+    ): Promise<boolean> {
+      const serverId = activeServerId();
+      const approval = approvals().find(
+        (item) => item.agentId === agentId && String(item.requestId) === String(requestId),
+      );
+      if (!approval) return false;
+      const analytics = desktopAnalytics.scope();
+      try {
+        await turnsPort().agent.respondToApproval({
+          requestId: approval.requestId,
+          decision,
+        });
+        forgetApproval(agentId, approval.requestId);
+        analytics.track("agent_input_action", { kind: "approval", decision, result: "succeeded" });
+        return true;
+      } catch (error) {
+        analytics.track("agent_input_action", {
+          kind: "approval",
+          decision,
+          result: "failed",
+          failure_code: "response_failed",
+        });
+        if (options?.onError) options.onError(error);
+        else appendUiError(agentId, error, currentText().t("app.errorStatus.approval"), serverId);
+        return false;
+      }
+    }
+
+    async function respondToApproval(decision: "accept" | "decline"): Promise<boolean> {
+      const agent = activeAgent();
+      const approval = agent ? approvalOfThread(agent.id, agent.threadId) : undefined;
+      if (!agent || !approval) return false;
+      return respondToApprovalRequest(agent.id, approval.requestId, decision);
+    }
+
+    async function respondToBrowserTakeover(decision: "complete" | "cancel"): Promise<boolean> {
+      const agent = activeAgent();
+      const key = agent ? attentionKey(agent.id, agent.threadId) : undefined;
+      const event = key ? pendingPrompts()[key] : undefined;
+      if (!agent || !key || event?.type !== "browser-takeover-requested") return false;
+      const serverId = activeServerId();
+      try {
+        await turnsPort().agent.respondToBrowserTakeover({ requestId: event.request.requestId, decision });
+        setPendingPrompts((current) => ({ ...current, [key]: undefined }));
+        return true;
+      } catch (error) {
+        appendUiError(agent.id, error, currentText().t("app.errorStatus.browserTakeover"), serverId);
+        return false;
+      }
+    }
+
+    function cancelQueuedMessage(deliveryId: string) {
+      const agent = activeAgent();
+      if (!agent) return;
+      const serverId = activeServerId();
+      const analytics = desktopAnalytics.scope();
+      void turnsPort()
+        .agent.cancelQueuedMessage({ agentId: agent.id, deliveryId })
+        .then(() => analytics.track("queue_action", { action: "cancel", result: "succeeded" }))
+        .catch((error) => {
+          analytics.track("queue_action", { action: "cancel", result: "failed", failure_code: "cancel_failed" });
+          appendUiError(agent.id, error, currentText().t("app.errorStatus.cancel"), serverId);
+        });
+    }
+
+    function cancelWait(waitId: string) {
+      const agent = activeAgent();
+      if (!agent) return;
+      const serverId = activeServerId();
+      void turnsPort()
+        .agent.cancelWait({ agentId: agent.id, waitId })
+        .catch((error) => appendUiError(agent.id, error, currentText().t("app.errorStatus.waitCancel"), serverId));
+    }
+
+    function steerQueuedMessage(deliveryId: string) {
+      const agent = activeAgent();
+      const turnId = agent ? activeTurns()[agent.id] : null;
+      if (!agent || !turnId) return;
+      const serverId = activeServerId();
+      const analytics = desktopAnalytics.scope();
+      void turnsPort()
+        .agent.steerQueuedMessage({ agentId: agent.id, deliveryId, expectedTurnId: turnId })
+        .then(() => analytics.track("queue_action", { action: "steer", result: "succeeded" }))
+        .catch((error) => {
+          analytics.track("queue_action", { action: "steer", result: "failed", failure_code: "steer_failed" });
+          // After the turn ended, the message runs as the next turn. The refusal is old news (#3206).
+          if (activeTurns()[agent.id] !== turnId) return;
+          appendUiError(agent.id, error, currentText().t("app.errorStatus.steer"), serverId);
+        });
+    }
+
+    async function updateQueuedMessage(
+      deliveryId: string,
+      text: string,
+      keepAttachmentIds: string[],
+      attachmentDraftIds: string[],
+      target?: { agentId: string; serverId: string },
+    ): Promise<boolean> {
+      const agentId = target?.agentId ?? activeAgent()?.id;
+      const serverId = target?.serverId ?? activeServerId();
+      if (!agentId) return false;
+      const analytics = desktopAnalytics.scope();
+      try {
+        const input = {
+          agentId,
+          deliveryId,
+          text,
+          keepAttachmentIds,
+          attachmentDraftIds,
+        };
+        await turnsPort().agent.updateQueuedMessage(input, serverId);
+        analytics.track("queue_action", { action: "edit", result: "succeeded" });
+        return true;
+      } catch (error) {
+        analytics.track("queue_action", { action: "edit", result: "failed", failure_code: "edit_failed" });
+        appendUiError(agentId, error, currentText().t("app.errorStatus.edit"), serverId);
+        return false;
+      }
+    }
+
+    function reorderQueue(deliveryIds: string[]) {
+      const agent = activeAgent();
+      if (!agent) return;
+      const serverId = activeServerId();
+      const analytics = desktopAnalytics.scope();
+      void turnsPort()
+        .agent.reorderQueue({ agentId: agent.id, deliveryIds })
+        .then(() => analytics.track("queue_action", { action: "reorder", result: "succeeded" }))
+        .catch((error) => {
+          analytics.track("queue_action", { action: "reorder", result: "failed", failure_code: "reorder_failed" });
+          appendUiError(agent.id, error, currentText().t("app.errorStatus.reorder"), serverId);
+        });
+    }
+
+    function setQueuePaused(paused: boolean) {
+      const agent = activeAgent();
+      if (!agent) return;
+      const serverId = activeServerId();
+      void turnsPort()
+        .agent.setQueuePaused({ agentId: agent.id, paused })
+        .catch((error) => appendUiError(agent.id, error, currentText().t("app.errorStatus.queuePause"), serverId));
+    }
+
+    /** Continues an agent that an `agent-pause` marker holds. */
+    function continueAgentPause(messageId: string) {
+      const agent = activeAgent();
+      if (!agent) return;
+      const serverId = activeServerId();
+      void turnsPort()
+        .agent.continueAgentPause({ agentId: agent.id, messageId })
+        .catch((error) => appendUiError(agent.id, error, currentText().t("app.errorStatus.continuePause"), serverId));
+    }
+
+    /** Stops the running turn for one queued message, which starts next. */
+    function runQueuedMessageNow(deliveryId: string) {
+      const agent = activeAgent();
+      if (!agent) return;
+      const serverId = activeServerId();
+      void turnsPort()
+        .agent.runQueuedMessageNow({ agentId: agent.id, deliveryId })
+        .catch((error) => appendUiError(agent.id, error, currentText().t("app.errorStatus.runNow"), serverId));
+    }
+
+    /** Cancels every queued message the user sees, one request each, so a failure names its row. */
+    function clearQueue() {
+      const queue = activeQueue();
+      if (!queue) return;
+      for (const delivery of queue.deliveries)
+        if (delivery.status === "queued" && !delivery.editing && !isQueuedAgentReply(delivery))
+          cancelQueuedMessage(delivery.id);
+    }
+
+    function stopActiveTurn() {
+      const agent = activeAgent();
+      const turnId = agent ? activeTurns()[agent.id] : null;
+      if (!agent || !turnId) return;
+      const serverId = activeServerId();
+      const analytics = desktopAnalytics.scope();
+      void turnsPort()
+        .agent.interrupt({ agentId: agent.id, turnId })
+        .then(() => analytics.track("queue_action", { action: "interrupt", result: "succeeded" }))
+        .catch((error) => {
+          analytics.track("queue_action", {
+            action: "interrupt",
+            result: "failed",
+            failure_code: "interrupt_failed",
+          });
+          appendUiError(agent.id, error, currentText().t("app.errorStatus.stop"), serverId);
+        });
+    }
+
+    const activeQueue = createMemo(() => {
+      const agent = activeAgent();
+      return agent ? queues()[agent.id] : undefined;
+    });
+    const activeWaits = createMemo(() => {
+      const agent = activeAgent();
+      return agent ? (waits()[agent.id]?.waits ?? []) : [];
+    });
+    const activeRoutineSnapshot = createMemo(() => {
+      const agent = activeAgent();
+      return agent ? routinesByConversation()[agentConversationKey(activeServerId(), agent.id)] : undefined;
+    });
+    // A routine link opens only a routine the newest list has; a deleted one must not open.
+    const activeRoutineIds = createMemo(() => {
+      const snapshot = activeRoutineSnapshot();
+      return snapshot?.current ? snapshot.routines.map((routine) => routine.id) : undefined;
+    });
+    // A chat card keeps the last list while a new one loads, so it does not blink.
+    const activeRoutines = createMemo(() => activeRoutineSnapshot()?.routines);
+
+    /**
+     * The seed is `dynamicIslandCoordinator.serverState(serverId)`, which is
+     * `undefined` for a server the coordinator has not seen. Each field falls
+     * back to empty, exactly as `selectServer` did inline.
+     */
+    return {
+      activeTurns,
+      setActiveTurns,
+      turnProgress,
+      setTurnProgress,
+      turnStepLines,
+      setTurnStepLines,
+      failedTurns,
+      setFailedTurns,
+      contextStates,
+      setContextStates,
+      usageLimits,
+      setUsageLimits,
+      usageLimitedModels,
+      setUsageLimitedModels,
+      waitedUsageLimits,
+      setWaitedUsageLimits,
+      queues,
+      setQueues,
+      setWaits,
+      waitSnapshotRequests,
+      routinesByConversation,
+      pendingPrompts,
+      setPendingPrompts,
+      presentedPromptResolutions,
+      setPresentedPromptResolutions,
+      submittedPromptRequests,
+      setSubmittedPromptRequests,
+      approvals,
+      setApprovals,
+      pendingApprovals,
+      approvalOfThread,
+      forgetApproval,
+      completedTurnByAgent,
+      queueSnapshotRequests,
+      activeQueue,
+      activeWaits,
+      activeRoutineIds,
+      activeRoutines,
+      refreshRoutineIds,
+      answerPrompt,
+      respondToApproval,
+      respondToApprovalRequest,
+      respondToBrowserTakeover,
+      cancelQueuedMessage,
+      cancelWait,
+      steerQueuedMessage,
+      updateQueuedMessage,
+      reorderQueue,
+      setQueuePaused,
+      continueAgentPause,
+      runQueuedMessageNow,
+      clearQueue,
+      stopActiveTurn,
+    };
+  },
+});
+
+export const TurnsProvider = Turns.provider;
+export const useTurns = Turns.use;

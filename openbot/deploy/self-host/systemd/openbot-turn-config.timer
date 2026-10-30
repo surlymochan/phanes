@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh the OpenBot TURN runtime configuration each day
+
+[Timer]
+# The certificate of Caddy ends after some time, and Caddy replaces it before that. The timer
+# copies the new certificate into the runtime directory of coturn.
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

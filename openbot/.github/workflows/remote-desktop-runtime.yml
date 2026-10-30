@@ -1,0 +1,625 @@
+name: Remote desktop runtime
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/remote-desktop-runtime.yml"
+      - "native-runtime.lock.json"
+      - "scripts/build-remote-desktop-runtime.ts"
+      - "scripts/create-remote-desktop-release-manifest.ts"
+      - "scripts/install-remote-desktop-runtime.ts"
+      - "scripts/mac-runtime-dylibs.ts"
+      - "scripts/native-runtime-lock.ts"
+      - "scripts/package-remote-desktop-runtime.ts"
+      - "scripts/pin-remote-desktop-runtime.ts"
+      - "scripts/remote-desktop-runtime-release.ts"
+      - "scripts/remote-desktop-runtime-smoke.ts"
+      - "scripts/verify-remote-desktop-runtime.ts"
+      - "vendor/remote-desktop/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/remote-desktop-runtime.yml"
+      - "native-runtime.lock.json"
+      - "scripts/build-remote-desktop-runtime.ts"
+      - "scripts/create-remote-desktop-release-manifest.ts"
+      - "scripts/install-remote-desktop-runtime.ts"
+      - "scripts/mac-runtime-dylibs.ts"
+      - "scripts/native-runtime-lock.ts"
+      - "scripts/package-remote-desktop-runtime.ts"
+      - "scripts/pin-remote-desktop-runtime.ts"
+      - "scripts/remote-desktop-runtime-release.ts"
+      - "scripts/verify-remote-desktop-runtime.ts"
+      - "vendor/remote-desktop/**"
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: Verify an existing immutable runtime release without rebuilding or publishing
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: remote-desktop-runtime-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  # Let native builds finish so the next push can reuse their successful output.
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Read build identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      input_digest: ${{ steps.identity.outputs.digest }}
+      release_tag: ${{ steps.identity.outputs.tag }}
+      release_exists: ${{ steps.release.outputs.exists }}
+      stable_release: ${{ steps.release.outputs.stable }}
+      should_build: ${{ steps.mode.outputs.should_build }}
+      should_publish: ${{ steps.identity.outputs.should_publish }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Require a recipe version bump for build process changes
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA")"
+          if printf '%s\n' "$changed" | grep -Eq '^(\.github/workflows/remote-desktop-runtime\.yml|scripts/build-remote-desktop-runtime\.ts|scripts/create-remote-desktop-release-manifest\.ts|scripts/mac-runtime-dylibs\.ts|scripts/native-runtime-lock\.ts|scripts/package-remote-desktop-runtime\.ts|scripts/remote-desktop-runtime-release\.ts)$'; then
+            current="$(jq -r '.remoteDesktop.recipeVersion' native-runtime.lock.json)"
+            base="$(git show "$BASE_SHA:native-runtime.lock.json" 2>/dev/null | jq -r '.remoteDesktop.recipeVersion // 0' || echo 0)"
+            if (( current <= base )); then
+              echo "Increase remoteDesktop.recipeVersion for a runtime build process change." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Read input digest
+        id: identity
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          digest="$(bun -e 'import { createRemoteDesktopInputDigest, loadNativeRuntimeLock } from "./scripts/native-runtime-lock"; console.log(createRemoteDesktopInputDigest(await loadNativeRuntimeLock()))')"
+          tag="remote-desktop-runtime-${digest}"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check existing release and stable release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          stable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+
+      - name: Select build mode
+        id: mode
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_EXISTS: ${{ steps.release.outputs.exists }}
+          VERIFY_ONLY: ${{ inputs.verify_only == true }}
+        run: |
+          if [[ "$VERIFY_ONLY" == "true" ]]; then
+            if [[ "$RELEASE_EXISTS" != "true" ]]; then
+              echo "Verification requires a published release for the current native inputs." >&2
+              exit 1
+            fi
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" != "workflow_dispatch" && "$RELEASE_EXISTS" == "true" ]]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Export build mode
+        id: identity-mode
+        shell: bash
+        env:
+          SHOULD_BUILD: ${{ steps.mode.outputs.should_build }}
+        run: echo "The runtime build decision is $SHOULD_BUILD."
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin
+            architecture: arm64
+            target: darwin-arm64
+          - os: macos-15-intel
+            platform: darwin
+            architecture: x64
+            target: darwin-x64
+          - os: windows-2025
+            platform: win32
+            architecture: x64
+            target: win32-x64
+          - os: ubuntu-24.04
+            platform: linux
+            architecture: x64
+            target: linux-x64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # PR caches stay separate from release builds. No prefix fallback: changed
+      # native inputs or build tools must compile again. Verification and smoke
+      # tests still run against the current checkout on every cache hit.
+      - name: Restore successful PR runtime build
+        if: github.event_name == 'pull_request'
+        id: runtime-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/remote-desktop-runtime
+          key: remote-desktop-pr-${{ github.event.pull_request.number }}-${{ matrix.os }}-${{ matrix.target }}-${{ needs.prepare.outputs.input_digest }}-${{ hashFiles('.github/workflows/remote-desktop-runtime.yml', 'scripts/**', 'vendor/remote-desktop/**', 'bun.lock', 'package.json', 'packages/**/package.json') }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Set up Windows Node.js
+        if: runner.os == 'Windows' && steps.runtime-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Export Windows tool paths
+        if: runner.os == 'Windows' && steps.runtime-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          "OPENBOT_BUN_DIR=$(Split-Path (Get-Command bun).Source -Parent)" >> $env:GITHUB_ENV
+          "OPENBOT_CARGO_DIR=$(Split-Path (Get-Command cargo).Source -Parent)" >> $env:GITHUB_ENV
+          "OPENBOT_NODE_DIR=$(Split-Path (Get-Command node).Source -Parent)" >> $env:GITHUB_ENV
+          "OPENBOT_PERL_DIR=$(Split-Path (Get-Command perl).Source -Parent)" >> $env:GITHUB_ENV
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS' && steps.runtime-cache.outputs.cache-hit != 'true'
+        run: brew install cmake ninja node pkgconf icu4c@78 miniupnpc openssl@3 opus
+
+      - name: Set up Windows build dependencies
+        if: runner.os == 'Windows' && steps.runtime-cache.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2.31.1
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-graphviz
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-toolchain
+
+      # The Linux build captures X11 and encodes in software; the packages match
+      # LINUX_SUNSHINE_OPTIONS in scripts/build-remote-desktop-runtime.ts.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux' && steps.runtime-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake gcc-14 g++-14 ninja-build pkg-config clang libclang-dev \
+            libcap-dev libcurl4-openssl-dev libdrm-dev libevdev-dev libgbm-dev libminiupnpc-dev libnuma-dev \
+            libopus-dev libpulse-dev libssl-dev libsystemd-dev systemd-dev libudev-dev libva-dev libwayland-dev \
+            libx11-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb1-dev libxfixes-dev libxrandr-dev libxtst-dev \
+            python3-jinja2 python3-setuptools
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build runtime on Linux
+        if: runner.os == 'Linux' && steps.runtime-cache.outputs.cache-hit != 'true'
+        env:
+          CC: gcc-14
+          CXX: g++-14
+          CMAKE_GENERATOR: Ninja
+        run: bun run build:remote-desktop-runtime
+
+      - name: Build runtime on macOS
+        if: runner.os == 'macOS' && steps.runtime-cache.outputs.cache-hit != 'true'
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: bun run build:remote-desktop-runtime
+
+      - name: Build runtime on Windows
+        if: runner.os == 'Windows' && steps.runtime-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: |
+          native_perl="$(cygpath "$OPENBOT_PERL_DIR")/perl.exe"
+          "$native_perl" -e 'die "Windows Perl is required\n" unless $^O eq "MSWin32";'
+          export OPENSSL_SRC_PERL="$(cygpath -w "$native_perl")"
+          export PATH="$PATH:$(cygpath "$OPENBOT_BUN_DIR"):$(cygpath "$OPENBOT_CARGO_DIR"):$(cygpath "$OPENBOT_NODE_DIR")"
+          bun run build:remote-desktop-runtime
+
+      - name: Verify runtime
+        shell: bash
+        run: bun scripts/verify-remote-desktop-runtime.ts ${{ matrix.platform == 'win32' && '--windows' || matrix.platform == 'linux' && '--linux' || '' }}
+
+      - name: Run macOS smoke test
+        if: runner.os == 'macOS'
+        run: bun run test:remote-desktop-runtime
+
+      - name: Run Linux smoke test
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libxtst6
+          xvfb-run -a bun run test:remote-desktop-runtime
+
+      # The runner is Ubuntu 24.04. On Ubuntu 26.04 with only the runtime libraries of
+      # scripts/hosting/packages.txt, each executable must find every library that it loads.
+      - name: Check Linux runtime libraries on Ubuntu 26.04
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD/build/remote-desktop-runtime/linux/x64:/runtime:ro" \
+            -v "$PWD/scripts/hosting/packages.txt:/packages.txt:ro" \
+            ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 \
+            bash -euo pipefail -c '
+              apt-get update -qq
+              sed -n "/^# The remote desktop runtime\./,\$p" /packages.txt | grep -v "^#" |
+                xargs apt-get install -y -qq --no-install-recommends >/dev/null
+              missing=$(ldd /runtime/sunshine /runtime/web-server /runtime/streamer | grep "not found" || true)
+              if [ -n "$missing" ]; then echo "$missing" >&2; exit 1; fi'
+
+      - name: Create deterministic archive
+        run: bun scripts/package-remote-desktop-runtime.ts ${{ matrix.platform }} ${{ matrix.architecture }}
+
+      - name: Generate runtime SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: build/remote-desktop-runtime/${{ matrix.platform }}/${{ matrix.architecture }}
+          format: spdx-json
+          output-file: build/remote-desktop-release/remote-desktop-runtime-${{ matrix.target }}.spdx.json
+          artifact-name: remote-desktop-runtime-${{ matrix.target }}-SBOM
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest runtime provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: build/remote-desktop-release/remote-desktop-runtime-${{ matrix.target }}.tar.gz
+
+      - name: Upload runtime build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: remote-desktop-runtime-${{ matrix.target }}
+          path: |
+            build/remote-desktop-release/remote-desktop-runtime-${{ matrix.target }}.tar.gz
+            build/remote-desktop-release/remote-desktop-runtime-${{ matrix.target }}.spdx.json
+            build/remote-desktop-release/${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish immutable runtime prerelease
+    needs: [prepare, build]
+    if: github.event_name != 'pull_request' && always() && needs.prepare.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download macOS ARM64 build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-desktop-runtime-darwin-arm64
+          path: release-assets
+
+      - name: Download macOS x64 build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-desktop-runtime-darwin-x64
+          path: release-assets
+
+      - name: Download Windows build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-desktop-runtime-win32-x64
+          path: release-assets
+
+      - name: Download Linux x64 build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-desktop-runtime-linux-x64
+          path: release-assets
+
+      - name: Create common release manifest
+        run: >-
+          bun scripts/create-remote-desktop-release-manifest.ts
+          "$GITHUB_REPOSITORY"
+          release-assets/remote-desktop-runtime-manifest.json
+          release-assets/darwin-arm64.json
+          release-assets/darwin-x64.json
+          release-assets/win32-x64.json
+          release-assets/linux-x64.json
+
+      - name: Publish or verify immutable prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          assets=(
+            release-assets/remote-desktop-runtime-darwin-arm64.tar.gz
+            release-assets/remote-desktop-runtime-darwin-x64.tar.gz
+            release-assets/remote-desktop-runtime-win32-x64.tar.gz
+            release-assets/remote-desktop-runtime-linux-x64.tar.gz
+            release-assets/remote-desktop-runtime-darwin-arm64.spdx.json
+            release-assets/remote-desktop-runtime-darwin-x64.spdx.json
+            release-assets/remote-desktop-runtime-win32-x64.spdx.json
+            release-assets/remote-desktop-runtime-linux-x64.spdx.json
+            release-assets/remote-desktop-runtime-manifest.json
+          )
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing="$RUNNER_TEMP/existing-runtime-release"
+            mkdir -p "$existing"
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$existing" \
+              --pattern 'remote-desktop-runtime-*.tar.gz' \
+              --pattern 'remote-desktop-runtime-*.spdx.json' \
+              --pattern 'remote-desktop-runtime-manifest.json'
+            for asset in \
+              remote-desktop-runtime-darwin-arm64.tar.gz \
+              remote-desktop-runtime-darwin-x64.tar.gz \
+              remote-desktop-runtime-win32-x64.tar.gz \
+              remote-desktop-runtime-linux-x64.tar.gz \
+              remote-desktop-runtime-darwin-arm64.spdx.json \
+              remote-desktop-runtime-darwin-x64.spdx.json \
+              remote-desktop-runtime-win32-x64.spdx.json \
+              remote-desktop-runtime-linux-x64.spdx.json \
+              remote-desktop-runtime-manifest.json; do
+              if ! cmp --silent "release-assets/$asset" "$existing/$asset"; then
+                echo "Immutable runtime asset differs: $asset" >&2
+                exit 1
+              fi
+            done
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Remote desktop runtime ${{ needs.prepare.outputs.input_digest }}" \
+              --notes "Pinned Sunshine and Moonlight Web runtime for OpenBot. This prerelease is not an OpenBot application update." \
+              --prerelease \
+              --latest=false
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -Fx latest.yml; then
+            echo "A runtime prerelease must not contain latest.yml." >&2
+            exit 1
+          fi
+
+      - name: Confirm stable OpenBot release did not change
+        shell: bash
+        env:
+          BEFORE: ${{ needs.prepare.outputs.stable_release }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          after="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          test "$BEFORE" = "$after"
+
+  verify-published:
+    name: Verify published ${{ matrix.target }}
+    needs: [prepare, publish]
+    if: always() && needs.prepare.result == 'success' && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.verify_only == true && needs.prepare.outputs.release_exists == 'true'))
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin
+            architecture: arm64
+            target: darwin-arm64
+          - os: macos-15-intel
+            platform: darwin
+            architecture: x64
+            target: darwin-x64
+          - os: windows-2025
+            platform: win32
+            architecture: x64
+            target: win32-x64
+          - os: ubuntu-24.04
+            platform: linux
+            architecture: x64
+            target: linux-x64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Restore Whisper model cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .openbot-build/whisper/model
+          key: openbot-whisper-model-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-whisper.ts') }}
+          restore-keys: |
+            openbot-whisper-model-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download and pin release manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern remote-desktop-runtime-manifest.json --dir "$RUNNER_TEMP/runtime-manifest"
+          bun scripts/pin-remote-desktop-runtime.ts "$RUNNER_TEMP/runtime-manifest/remote-desktop-runtime-manifest.json"
+
+      - name: Install published runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/install-remote-desktop-runtime.ts ${{ matrix.platform }} ${{ matrix.architecture }}
+
+      - name: Verify published runtime
+        shell: bash
+        run: bun scripts/verify-remote-desktop-runtime.ts ${{ matrix.platform == 'win32' && '--windows' || matrix.platform == 'linux' && '--linux' || '' }}
+
+      - name: Run published macOS smoke test
+        if: runner.os == 'macOS'
+        run: bun run test:remote-desktop-runtime
+
+      # This runner did not install the build packages. It installs only the runtime libraries that
+      # scripts/hosting/provision.sh installs, so a library missing from the template stops here.
+      - name: Run published Linux smoke test
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb \
+            libcap2 libcurl4t64 libevdev2 libglib2.0-0t64 libnuma1 libpulse0 libssl3t64 libva2 \
+            libx11-6 libxcb-shm0 libxcb-xfixes0 libxcb1 libxfixes3 libxrandr2 libxtst6
+          xvfb-run -a bun run test:remote-desktop-runtime
+
+      - name: Package OpenBot from the downloaded runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ${{ matrix.platform == 'win32' && 'bun run package:win:verify' || matrix.platform == 'linux' && 'bun run package:linux' || 'bun run package:verify' }}
+
+  pin:
+    name: Open runtime lock PR
+    needs: [prepare, publish, verify-published]
+    # Only from main, because the pin is computed against the checked-out lock: `pinRemoteDesktopRuntime`
+    # derives the input digest from the recipe it finds on disk and refuses a manifest that does not
+    # match it. Dispatched from a branch that changes the recipe -- the one case where publishing before
+    # merging is the point -- this job checks out main, whose digest is still the old one, and throws.
+    # Folding the pin into the branch is a manual step there -- `docs/RELEASING.md` has the sequence.
+    if: github.ref == 'refs/heads/main' && needs.publish.result == 'success' && needs.verify-published.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Pin immutable artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern remote-desktop-runtime-manifest.json --dir "$RUNNER_TEMP/runtime-manifest"
+          bun scripts/pin-remote-desktop-runtime.ts "$RUNNER_TEMP/runtime-manifest/remote-desktop-runtime-manifest.json"
+          # `JSON.stringify` puts every array on its own lines and Biome collapses the short ones, so
+          # the pin lands unformatted. A commit is made here with no hook to catch that, and the lock
+          # PR would open with `lint` already red.
+          bunx biome check --write native-runtime.lock.json
+          changed="$(git diff --name-only)"
+          if [[ -z "$changed" ]]; then
+            echo "The runtime lock already pins this immutable release."
+            exit 0
+          fi
+          if [[ "$changed" != "native-runtime.lock.json" ]]; then
+            echo "The pin step changed an unexpected file: $changed" >&2
+            exit 1
+          fi
+          branch="codex/runtime-lock-${{ needs.prepare.outputs.input_digest }}"
+          branch="${branch:0:31}"
+          if gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq 'length > 0' | grep -Fx true; then
+            echo "A runtime lock PR already exists."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add native-runtime.lock.json
+          git commit -m "build(runtime): pin $RELEASE_TAG"
+          git push origin "$branch"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --draft \
+            --title "build(runtime): pin reusable desktop artifacts" \
+            --body "Pins the immutable Sunshine and Moonlight Web prerelease built from digest \`${{ needs.prepare.outputs.input_digest }}\`."
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"

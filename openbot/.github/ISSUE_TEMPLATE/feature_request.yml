@@ -1,0 +1,100 @@
+name: Feature request
+description: Propose a change to OpenBot. A maintainer must approve it before anyone writes code.
+title: "[Feature]: "
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OpenBot is a local-first app: workspaces, conversations, and files stay on the user's computer. We accept requests that fit this product and solve a real problem for many users.
+
+        Do not open a pull request for a new feature or a change to existing behavior until a maintainer adds the `approved` label to this issue. We close such pull requests. Read [What you can send](https://github.com/nightly-labs/openbot/blob/main/CONTRIBUTING.md#what-you-can-send) first. For questions and open ideas, use [Discussions](https://github.com/nightly-labs/openbot/discussions).
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type of request
+      options:
+        - Small improvement to an existing feature
+        - New provider
+        - New MCP app or connector
+        - New feature
+        - Change to existing behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Which user problem does this solve? Describe what you tried to do and what stopped you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: audience
+    attributes:
+      label: Who has this problem?
+      description: Which users have it, and how often. Give examples or links when you have them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: What do you do now? Write "None" when there is no workaround.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: The smallest useful change, and how a user interacts with it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: fit
+    attributes:
+      label: Fit with OpenBot
+      description: Why does this belong in OpenBot and not in a plugin, an MCP app, or a separate tool? See the README for what OpenBot is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Out of scope
+      description: What this request does not include.
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and local-data impact
+      description: New permissions, network access, stored data, files, or external services. Write "None" when there is no impact.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Do you plan to send a pull request?
+      options:
+        - "No"
+        - Yes, after a maintainer approves this issue
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues and discussions, and this is not a duplicate.
+          required: true
+        - label: I read CONTRIBUTING.md.
+          required: true
+        - label: I will not open a pull request for a feature or a behavior change before a maintainer adds the `approved` label.
+          required: true

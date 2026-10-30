@@ -1,0 +1,936 @@
+html:has(.dynamic-island-surface),
+body:has(.dynamic-island-surface),
+#root:has(.dynamic-island-surface) {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+.dynamic-island-surface {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  background: transparent;
+  color: var(--openbot-text-primary);
+  font-family: var(--openbot-font-sans);
+  user-select: none;
+}
+
+.openbot-dynamic-island-transition-root {
+  display: contents;
+}
+
+.dynamic-island-mode-swap {
+  position: relative;
+  min-width: 0;
+  display: inline-grid;
+  align-items: center;
+}
+
+.dynamic-island-mode-swap-block {
+  width: 100%;
+  display: grid;
+  align-items: stretch;
+}
+
+.dynamic-island-mode-layer {
+  min-width: 0;
+  display: inline-flex;
+  grid-area: 1 / 1;
+  align-items: center;
+  transform-origin: center;
+}
+
+.dynamic-island-mode-swap-block > .dynamic-island-mode-layer {
+  width: 100%;
+  display: block;
+}
+
+.dynamic-island-mode-layer-outgoing {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  pointer-events: none;
+}
+
+.dynamic-island-mode-swap[data-island-mode-slot="compact-leading"] > .dynamic-island-mode-layer-outgoing {
+  right: 0;
+}
+
+.dynamic-island-external
+  .dynamic-island-mode-swap[data-island-mode-slot="compact-leading"]
+  > .dynamic-island-mode-layer-outgoing {
+  right: auto;
+  left: 0;
+}
+
+.dynamic-island-mode-swap[data-island-mode-slot="compact-trailing"] > .dynamic-island-mode-layer-outgoing {
+  left: 0;
+}
+
+.dynamic-island-external
+  .dynamic-island-mode-swap[data-island-mode-slot="compact-trailing"]
+  > .dynamic-island-mode-layer-outgoing {
+  right: 0;
+  left: auto;
+}
+
+.dynamic-island-mode-swap-block > .dynamic-island-mode-layer-outgoing {
+  inset: 0;
+}
+
+.openbot-dynamic-island-transition-root[data-mode-transitioning="true"] .dynamic-island-mode-layer {
+  will-change: opacity, transform;
+}
+
+.openbot-dynamic-island-transition-root[data-mode-transitioning="true"]
+  .dynamic-island-mode-layer[data-island-mode-layer="incoming"] {
+  opacity: 0;
+  transform: none;
+}
+
+.openbot-dynamic-island-transition-root[data-mode-transitioning="true"]
+  .dynamic-island-mode-swap[data-island-mode-slot="expanded"]
+  > .dynamic-island-mode-layer[data-island-mode-layer="incoming"] {
+  transform: scale(0.965);
+}
+
+.openbot-dynamic-island-transition-root[data-mode-transitioning="true"]
+  .dynamic-island[data-layout-state="expanded"]
+  .dynamic-island-mode-swap[data-island-mode-slot="compact-leading"]
+  > .dynamic-island-mode-layer[data-island-mode-layer="incoming"] {
+  transform: none;
+}
+
+.openbot-dynamic-island-transition-root[data-mode-transitioning="true"]
+  .dynamic-island-mode-layer[data-island-mode-layer="incoming"]
+  [data-island-motion-content] {
+  filter: blur(4px);
+}
+
+.dynamic-island-surface-anchor {
+  width: fit-content;
+  height: fit-content;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+}
+
+.dynamic-island-surface-logo {
+  width: 100%;
+  height: 100%;
+  flex: 0 0 auto;
+  border-radius: var(--openbot-radius-xs);
+  transition:
+    border-radius var(--openbot-duration-slow) var(--openbot-ease-out),
+    filter var(--openbot-duration-slow) var(--openbot-ease-out),
+    scale var(--openbot-duration-slow) var(--openbot-ease-out);
+}
+
+/* While the island moves, the logo blurs more than the ear around it, so it reads as a shape in
+   motion, gets a little smaller, and half closes its eyes. All three follow the size of the move
+   (`--dynamic-island-compact-motion`, 0 to 1): a slow slider step barely changes the logo, and a
+   large move changes it in full. A large move also rounds its corners a little. These are
+   transitions, not a keyframe pulse, so they are interruptible and a drag keeps one steady state.
+   The logo is sharp and square again as the island settles. The squint scales the eye group, not
+   the eyes, so the blink keeps running. */
+.dynamic-island-shell[data-compact-resize] .dynamic-island-surface-logo {
+  --app-logo-eye-squint: calc(1 - 0.45 * var(--dynamic-island-compact-motion, 1));
+  filter: blur(calc(0.8px * var(--dynamic-island-compact-motion, 1)));
+  scale: calc(1 - 0.03 * var(--dynamic-island-compact-motion, 1));
+}
+
+.dynamic-island-shell[data-compact-motion="large"] .dynamic-island-surface-logo {
+  border-radius: var(--openbot-radius-sm);
+}
+
+.dynamic-island-external.dynamic-island-idle .dynamic-island-surface-logo {
+  transform: translateX(4px);
+}
+
+.dynamic-island-surface-leading-anchor {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+}
+
+/* The idle greeting is a little larger than the 14px trailing slot of a status. */
+.dynamic-island-idle .dynamic-island-trailing-content {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+}
+
+.dynamic-island-surface-idle-greeting {
+  position: relative;
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+  display: block;
+  flex: 0 0 auto;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  font-size: var(--openbot-text-xl);
+  line-height: 1;
+  transition:
+    opacity var(--openbot-duration-slow) var(--openbot-ease-out),
+    scale var(--openbot-duration-slow) var(--openbot-ease-out);
+}
+
+/* While the island moves, the greeting gets a little fainter, as much as the move is large. When
+   a large move lands, it pops: a short overshoot with a small tilt each way, then rest. A small move,
+   such as one slow slider step, has no pop, so a slow drag stays quiet. */
+.dynamic-island-shell[data-compact-resize] .dynamic-island-surface-idle-greeting {
+  opacity: calc(1 - 0.1 * var(--dynamic-island-compact-motion, 1));
+}
+
+.dynamic-island-shell[data-compact-settled] .dynamic-island-surface-idle-greeting {
+  animation: dynamic-island-greeting-pop 600ms var(--dynamic-island-greeting-pop-ease);
+}
+
+/* One damped spring (damping 0.5, response 0.4s, with a push), sampled, so the pop is one smooth
+   overshoot to about 1.01 and back, not a curve per keyframe. The tilt rides the same spring. */
+.dynamic-island-shell {
+  --dynamic-island-greeting-pop-ease: linear(
+    0,
+    0.571 4.2%,
+    1.01 8.3%,
+    1.306 12.5%,
+    1.467 16.7%,
+    1.517 20.8%,
+    1.485 25.0%,
+    1.403 29.2%,
+    1.297 33.3%,
+    1.188 37.5%,
+    1.09 41.7%,
+    1.013 45.8%,
+    0.96 50.0%,
+    0.928 54.2%,
+    0.916 58.3%,
+    0.919 62.5%,
+    0.931 66.7%,
+    0.947 70.8%,
+    0.965 75.0%,
+    0.982 79.2%,
+    0.995 83.3%,
+    1.005 87.5%,
+    1.011 91.7%,
+    1.013 95.8%,
+    1
+  );
+}
+
+@keyframes dynamic-island-greeting-pop {
+  from {
+    opacity: 0.9;
+    scale: 0.98;
+    rotate: -1deg;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+    rotate: 0deg;
+  }
+}
+
+/* One greeting hands over to the next: the old one shrinks a little and blurs as it fades, and the
+   new one comes out of the blur, so the two read as one change. */
+.dynamic-island-surface-idle-greeting-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition:
+    opacity 600ms var(--openbot-ease-in-out),
+    scale 650ms var(--openbot-ease-in-out),
+    filter 600ms var(--openbot-ease-in-out);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dynamic-island-surface-idle-greeting-layer:not([data-active]) {
+    scale: 0.88;
+    filter: blur(2px);
+  }
+}
+
+/* Mirrors the logo: its 20px box sits 10px from the left edge, this 16px box sits 6px from the right. */
+.dynamic-island-external.dynamic-island-idle .dynamic-island-surface-idle-greeting-layer {
+  transform: translateX(-6px);
+}
+
+.dynamic-island-surface-idle-greeting[data-active-slot="0"] .dynamic-island-surface-idle-greeting-layer:first-child,
+.dynamic-island-surface-idle-greeting[data-active-slot="1"] .dynamic-island-surface-idle-greeting-layer:last-child {
+  opacity: 1;
+}
+
+/* Each greeting is a small 3D card with a front and a back face. `idle-greeting-motion.ts` moves it
+   once as it shows: it turns the wave, the smile and the raised hands, and lights up and twinkles
+   each sparkle. Reduce motion turns the motions off, so the front face stays. */
+.dynamic-island-surface-idle-greeting-layer {
+  perspective: 60px;
+}
+
+.dynamic-island-surface-idle-greeting-card {
+  display: grid;
+  place-items: center;
+  transform-style: preserve-3d;
+}
+
+.dynamic-island-surface-idle-greeting-face {
+  grid-area: 1 / 1;
+  backface-visibility: hidden;
+}
+
+.dynamic-island-surface-idle-greeting-face-back {
+  transform: rotateY(180deg);
+}
+
+/* Each copy of the sparkles glyph shows one star, through a star-shaped mask a little larger than the
+   star. The transform origin is the star's centre, so it twinkles in place. */
+.dynamic-island-surface-idle-greeting-face:has(.dynamic-island-surface-idle-greeting-sparkle) {
+  display: grid;
+}
+
+.dynamic-island-surface-idle-greeting-sparkle {
+  grid-area: 1 / 1;
+  mask-repeat: no-repeat;
+  mask-size: 100% 100%;
+}
+
+.dynamic-island-surface-idle-greeting-sparkle-large {
+  transform-origin: 60% 48%;
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Cpath%20d='M60%207.9Q70.3%2036.0%2094.2%2048Q70.3%2060.0%2060%2088.1Q49.7%2060.0%2025.8%2048Q49.7%2036.0%2060%207.9Z'/%3E%3C/svg%3E");
+}
+
+.dynamic-island-surface-idle-greeting-sparkle-upper {
+  transform-origin: 24% 28%;
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Cpath%20d='M24%207.4Q28.2%2021.8%2038.2%2028Q28.2%2034.2%2024%2048.6Q19.8%2034.2%209.8%2028Q19.8%2021.8%2024%207.4Z'/%3E%3C/svg%3E");
+}
+
+.dynamic-island-surface-idle-greeting-sparkle-lower {
+  transform-origin: 36% 70%;
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Cpath%20d='M36%2051.1Q40.8%2064.3%2051.9%2070Q40.8%2075.7%2036%2088.9Q31.2%2075.7%2020.1%2070Q31.2%2064.3%2036%2051.1Z'/%3E%3C/svg%3E");
+}
+
+.dynamic-island-surface-avatar-stack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.dynamic-island-surface-avatar-stack-item {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.dynamic-island-surface-avatar-stack > :not(:first-child) {
+  margin-left: -6px;
+}
+
+.dynamic-island-surface-avatar-stack > * {
+  transform: translate3d(0, 0, 0);
+  transform-origin: center;
+  transition:
+    opacity var(--openbot-duration-fast) var(--openbot-ease-out),
+    transform 450ms var(--dynamic-island-shared-ease);
+}
+
+.dynamic-island-surface-avatar {
+  --agent-avatar-optical-offset: -3px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border: 1px solid var(--openbot-bg-notch);
+  border-radius: var(--openbot-radius-pill);
+}
+
+.dynamic-island-surface-compact-identity {
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-compact-name {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + var(--openbot-space-1-5));
+  width: max-content;
+  overflow: hidden;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-semibold);
+  line-height: var(--openbot-leading-sm);
+  text-align: left;
+  text-overflow: ellipsis;
+  transform: translateY(-50%);
+  transition: opacity var(--openbot-duration-fast) var(--openbot-ease-out);
+}
+
+.dynamic-island-surface-status-badge {
+  font-weight: var(--openbot-weight-semibold);
+}
+
+.dynamic-island-surface-status-badge-label {
+  min-width: 0;
+  display: inline-block;
+  overflow: hidden;
+}
+
+.dynamic-island-surface-status-badge-icon {
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.dynamic-island-surface-question-badge {
+  background: var(--openbot-question-badge-soft);
+  color: var(--openbot-question-badge-text);
+}
+
+.dynamic-island-surface-message-badge {
+  background: var(--openbot-message-badge-soft);
+  color: var(--openbot-message-badge-text);
+}
+
+.dynamic-island-surface-working-badge .ui-spinner {
+  border-color: var(--openbot-success-soft);
+  border-top-color: currentColor;
+}
+
+.dynamic-island[data-layout-state="expanded"] .dynamic-island-surface-compact-name {
+  opacity: 0;
+}
+
+.dynamic-island-surface-leading-anchor .dynamic-island-surface-avatar {
+  width: 100%;
+  height: 100%;
+}
+
+.dynamic-island-surface-avatar-stack .dynamic-island-surface-avatar {
+  width: 20px;
+  height: 20px;
+}
+
+.dynamic-island-working[data-state="expanded"] .dynamic-island-surface-avatar-stack > * {
+  transition-duration: var(--openbot-duration-fast), var(--dynamic-island-shared-duration);
+}
+
+.dynamic-island-working[data-state="expanded"] .dynamic-island-surface-avatar-stack > :nth-child(2) {
+  transform: translate3d(-14px, 28.75px, 0);
+}
+
+.dynamic-island-working[data-state="expanded"] .dynamic-island-surface-avatar-stack > :nth-child(3) {
+  transform: translate3d(-28px, 57.5px, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dynamic-island-surface-avatar-stack > * {
+    transition-duration: var(--openbot-duration-hover);
+  }
+}
+
+.dynamic-island-surface-approval-badge {
+  background: var(--openbot-approval-badge-soft);
+  color: var(--openbot-warning);
+}
+
+.dynamic-island-surface-takeover-badge {
+  background: var(--openbot-accent-soft);
+  color: var(--openbot-accent-text);
+}
+
+.dynamic-island-surface-content-swap {
+  min-width: 0;
+  display: flex;
+}
+
+.dynamic-island-surface-content-swap[data-swap-phase="update"] {
+  animation: dynamic-island-surface-swap var(--text-swap-dur) var(--text-swap-ease) both;
+}
+
+.dynamic-island-surface-compact-swap {
+  align-items: center;
+}
+
+.dynamic-island-surface-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.dynamic-island-surface-list {
+  display: grid;
+  gap: 2px;
+}
+
+.dynamic-island-surface-row {
+  min-width: 0;
+  width: calc(100% + 2 * var(--openbot-space-2));
+  height: auto;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--openbot-space-2);
+  margin-inline: calc(-1 * var(--openbot-space-2));
+  border: 0;
+  border-radius: var(--openbot-radius-md);
+  background: transparent;
+  padding: var(--openbot-space-1-5) var(--openbot-space-2);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  outline: none;
+  text-align: left;
+  transition:
+    background-color var(--openbot-duration-normal) var(--openbot-ease-out),
+    transform var(--openbot-duration-normal) var(--openbot-ease-out);
+}
+
+.dynamic-island-surface-row .dynamic-island-surface-avatar,
+.dynamic-island-surface-working-avatar-slot {
+  width: 32px;
+  height: 32px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dynamic-island-surface-row:hover {
+    background: var(--openbot-hover);
+  }
+}
+
+.dynamic-island-surface-row:active {
+  transform: scale(0.98);
+}
+
+.dynamic-island-surface-row:focus-visible {
+  background: var(--openbot-hover);
+  box-shadow: inset 0 0 0 1px var(--openbot-border-focus);
+}
+
+.dynamic-island-surface-row-group {
+  position: relative;
+  min-width: 0;
+}
+
+/* The stop button sits over the end of the row, so the row keeps the place the avatars move to. */
+.dynamic-island-surface-row-group:has(.dynamic-island-surface-row-stop) .dynamic-island-surface-row {
+  padding-right: calc(var(--openbot-control-sm) + var(--openbot-space-2));
+}
+
+.dynamic-island-surface-row-stop {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  color: var(--openbot-text-muted);
+  transform: translateY(-50%);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dynamic-island-surface-row-stop:hover {
+    color: var(--openbot-danger-text);
+  }
+}
+
+.dynamic-island-surface-row-copy {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  gap: 1px;
+}
+
+.dynamic-island-surface-row strong {
+  overflow: hidden;
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-medium);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-row small {
+  overflow: hidden;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-regular);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dynamic-island-message-first-panel {
+  display: grid;
+  gap: var(--openbot-space-3);
+}
+
+.dynamic-island-message-first-unread {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-regular);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--openbot-leading-sm);
+}
+
+.dynamic-island-message-first-footer {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openbot-space-3);
+  border-top: 1px solid var(--openbot-border);
+  padding-top: var(--openbot-space-2);
+}
+
+.dynamic-island-message-first-footer .ui-button {
+  min-width: 92px;
+  transition: transform var(--openbot-duration-normal) var(--openbot-ease-out);
+}
+
+.dynamic-island-message-first-footer .ui-button:active {
+  transform: scale(0.96);
+}
+
+.dynamic-island-message-first-footer svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.dynamic-island-surface-attention-panel {
+  gap: var(--openbot-space-3);
+}
+
+.dynamic-island-reply {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  gap: var(--openbot-space-1-5);
+  margin: 0;
+}
+
+.dynamic-island-reply .dynamic-island-reply-input {
+  height: var(--openbot-control-md);
+  border-color: var(--openbot-border);
+  border-radius: var(--openbot-radius-pill);
+  background: var(--openbot-hover);
+  padding-right: calc(var(--openbot-control-md) + var(--openbot-space-1));
+  padding-left: var(--openbot-space-3);
+  font-size: var(--openbot-text-sm);
+  user-select: text;
+}
+
+.dynamic-island-reply .dynamic-island-reply-input:focus-visible {
+  border-color: var(--openbot-border-focus);
+}
+
+.dynamic-island-reply-send {
+  position: absolute;
+  top: calc((var(--openbot-control-md) - var(--openbot-control-xs)) / 2);
+  right: calc((var(--openbot-control-md) - var(--openbot-control-xs)) / 2);
+  border-radius: var(--openbot-radius-pill);
+}
+
+.dynamic-island-reply-send svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.dynamic-island-surface-question-step .dynamic-island-reply {
+  margin-top: 6px;
+}
+
+.dynamic-island-surface-request-copy {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  gap: var(--openbot-space-2);
+}
+
+.dynamic-island-surface-command {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  border-left: 1px solid var(--openbot-warning);
+  padding: 2px 0 2px 10px;
+}
+
+.dynamic-island-surface-command-meta {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--openbot-space-2);
+}
+
+.dynamic-island-surface-command-meta small,
+.dynamic-island-surface-command-meta span {
+  overflow: hidden;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-command-meta small {
+  flex: 0 0 auto;
+}
+
+.dynamic-island-surface-command-meta span {
+  min-width: 0;
+  text-align: right;
+}
+
+.dynamic-island-surface-command code {
+  overflow: hidden;
+  color: var(--openbot-text-primary);
+  font-family: var(--openbot-font-mono);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-context-line {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: var(--openbot-space-2);
+  align-items: baseline;
+}
+
+.dynamic-island-surface-context-line small,
+.dynamic-island-surface-more {
+  color: var(--openbot-text-dim);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+div.dynamic-island-surface-context-line span {
+  overflow: hidden;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-question-options {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dynamic-island-surface-question-options > li {
+  min-width: 0;
+}
+
+.dynamic-island-surface-question-options button {
+  width: 100%;
+  min-height: 48px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--openbot-space-2);
+  border: 0;
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-question-option-soft);
+  padding: 7px 10px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  outline: none;
+  transition:
+    background-color var(--openbot-duration-fast) var(--openbot-ease-out),
+    transform var(--openbot-duration-fast) var(--openbot-ease-out);
+}
+
+.dynamic-island-surface-question-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.dynamic-island-surface-question-option-copy strong,
+.dynamic-island-surface-question-option-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-question-option-copy strong {
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-medium);
+  line-height: var(--openbot-leading-sm);
+}
+
+.dynamic-island-surface-question-option-copy small {
+  min-width: 0;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.dynamic-island-surface-question-option-index {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--openbot-radius-sm);
+  background: var(--openbot-question-option-hover);
+  color: var(--openbot-question-option);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dynamic-island-surface-question-options button:hover:not(:disabled):not([data-disabled]) {
+    background: var(--openbot-question-option-hover);
+  }
+}
+
+.dynamic-island-surface-question-options button:active:not(:disabled):not([data-disabled]) {
+  background: var(--openbot-question-option-pressed);
+  transform: scale(0.96);
+}
+
+.dynamic-island-surface-question-options button:focus-visible {
+  box-shadow:
+    inset 0 0 0 1px var(--openbot-question-option),
+    0 0 0 3px var(--openbot-question-option-soft);
+}
+
+.dynamic-island-surface-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--openbot-space-1);
+  border-top: 1px solid var(--openbot-border);
+  padding-top: var(--openbot-space-2);
+}
+
+.dynamic-island-surface-action-error {
+  min-width: 0;
+  margin: 0 auto 0 0;
+  flex: 1 1 auto;
+  align-self: center;
+  color: var(--openbot-danger-text);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.dynamic-island-surface-actions svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.dynamic-island-surface-attention-panel .ui-button {
+  transition: transform var(--openbot-duration-normal) var(--openbot-ease-out);
+}
+
+.dynamic-island-surface-attention-panel .ui-button:active {
+  transform: scale(0.96);
+}
+
+.dynamic-island-surface-question-panel {
+  gap: 10px;
+}
+
+.dynamic-island-surface-question-progress {
+  display: inline-flex;
+  align-items: baseline;
+  padding-top: 2px;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--openbot-leading-sm);
+  white-space: nowrap;
+}
+
+.dynamic-island-surface-question-progress-stack {
+  position: relative;
+  width: 1.5em;
+  display: inline-grid;
+  overflow: hidden;
+  text-align: right;
+}
+
+.dynamic-island-surface-question-progress-digit {
+  grid-area: 1 / 1;
+  display: inline-block;
+  text-align: right;
+  will-change: transform, opacity, filter;
+}
+
+.dynamic-island-surface-question-progress-digit.is-outgoing {
+  position: absolute;
+  inset: 0;
+}
+
+.dynamic-island-surface-question-step {
+  width: 100%;
+  min-width: 0;
+}
+
+.dynamic-island-surface-question-actions {
+  align-items: center;
+}
+
+.dynamic-island-surface-question-actions .dynamic-island-surface-more {
+  margin-right: auto;
+}
+
+.dynamic-island-surface-animated-row {
+  animation: dynamic-island-surface-row-in var(--openbot-duration-slow) var(--openbot-ease-out) both;
+}
+
+.dynamic-island-surface-row-group:nth-child(2) .dynamic-island-surface-animated-row {
+  animation-delay: 40ms;
+}
+
+.dynamic-island-surface-row-group:nth-child(3) .dynamic-island-surface-animated-row {
+  animation-delay: 80ms;
+}
+
+@keyframes dynamic-island-surface-swap {
+  from {
+    opacity: 0;
+    filter: blur(var(--text-swap-blur));
+    transform: translateY(calc(var(--text-swap-translate-y) * -1)) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes dynamic-island-surface-row-in {
+  from {
+    opacity: 0;
+    filter: blur(var(--text-swap-blur));
+    transform: translateY(var(--text-swap-translate-y)) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}

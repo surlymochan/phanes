@@ -1,0 +1,1315 @@
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # A manual run publishes nothing. `host-signing` exercises the Host signing keychain on its own,
+  # so a credential or keychain problem is found without pushing a tag; it builds nothing, and it
+  # must run on a tag ref because the `release` environment admits only tags. `windows-signing`
+  # does the same for Azure Artifact Signing, also on a tag ref. `dry-run` runs the
+  # release path on any ref, without the macOS job and the publish job: they need the tag-only
+  # `release` secrets. It also makes no provenance attestation, because an attestation of a public
+  # repository is a public Sigstore record.
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What the manual run checks
+        type: choice
+        options:
+          - host-signing
+          - windows-signing
+          - dry-run
+        default: host-signing
+
+permissions: {}
+
+# All tag pushes share one queue and run in push order. With one group per tag, two tags pushed
+# close together publish in parallel: if the older one publishes last, `--latest` and the updater
+# manifests point users back to it. `queue: max` keeps every pending run; the default keeps only the
+# newest pending run and cancels the others. Manual signing checks use their own queue.
+concurrency:
+  group: release-${{ github.event_name }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  validate:
+    name: Validate release tag
+    # Gating the one job every build and the publish depend on keeps a host signing run off the
+    # release path entirely, rather than relying on each of them to opt out.
+    if: github.event_name == 'push' || inputs.mode == 'dry-run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      release_version: ${{ steps.release.outputs.version }}
+      release_tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require release commit on main
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          git fetch origin main --no-tags
+          release_commit="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Release tag $GITHUB_REF_NAME does not point to a commit on origin/main." >&2
+            exit 1
+          fi
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: none
+
+      - name: Validate release version
+        id: release
+        shell: bash
+        env:
+          DISCORD_RELEASE_ROLE_ID: ${{ vars.DISCORD_RELEASE_ROLE_ID }}
+        run: |
+          package_version="$(bun -p 'require("./package.json").version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$package_version" != "$tag_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $package_version." >&2
+            exit 1
+          fi
+          bun scripts/check-release-notes.ts
+          # The `discord-announce` job of a tag push needs the role, so stop before the release.
+          if [[ "$GITHUB_EVENT_NAME" == "push" && -z "$DISCORD_RELEASE_ROLE_ID" ]]; then
+            echo "DISCORD_RELEASE_ROLE_ID is not set. See docs/RELEASING.md#discord-announcement." >&2
+            exit 1
+          fi
+          bun scripts/discord-release-announcement.ts check "$package_version"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Require deployed Universal Links support
+        shell: bash
+        run: |
+          verification_dir="$(mktemp -d)"
+          trap 'rm -rf "$verification_dir"' EXIT
+          join_status="$(curl --silent --show-error --retry 5 --retry-all-errors \
+            --max-redirs 0 --dump-header "$verification_dir/join.headers" \
+            --output "$verification_dir/join.html" --write-out '%{http_code}' \
+            https://openbot.run/join)"
+          test "$join_status" = "200"
+          tr -d '\r' < "$verification_dir/join.headers" | grep -Eiq '^cache-control:.*no-store'
+          association_status="$(curl --silent --show-error --retry 5 --retry-all-errors \
+            --max-redirs 0 --dump-header "$verification_dir/association.headers" \
+            --output "$verification_dir/association.json" --write-out '%{http_code}' \
+            https://openbot.run/.well-known/apple-app-site-association)"
+          test "$association_status" = "200"
+          tr -d '\r' < "$verification_dir/association.headers" | grep -Eiq '^content-type: application/json'
+          jq -e '.applinks.details == [{"appID":"ZTRDTUL87R.app.openbot.desktop","paths":["/join"]},{"appID":"ZTRDTUL87R.run.openbot.mobile","paths":["/join","/agents/*"]}]' \
+            "$verification_dir/association.json" >/dev/null
+
+  host-signing:
+    name: Check Host signing keychain
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'host-signing'
+    runs-on: macos-14
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: ignore-scripts
+
+      - name: Build the Host signing keychain and sign a throwaway package
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.CSC_INSTALLER_KEY_PASSWORD }}
+          CSC_INSTALLER_LINK: ${{ secrets.CSC_INSTALLER_LINK }}
+        run: |
+          set -euo pipefail
+          source scripts/host-signing-keychain.sh
+          echo "Application identity: $HOST_APPLICATION_IDENTITY"
+          echo "Installer identity: $HOST_INSTALLER_IDENTITY"
+          # Signs a throwaway package with the installer identity and holds the real
+          # `verifyHostInstaller` wording against it. Apple writes that status text and a runner can
+          # word it differently from a developer's own Mac, so the release path must not be the first
+          # place the comparison runs: it gets there with the package already built and notarized.
+          probe="$host_signing_dir/pkg-probe"
+          mkdir -p "$probe/root/usr/local/bin"
+          cp /usr/bin/true "$probe/root/usr/local/bin/openbot-signing-probe"
+          /usr/bin/pkgbuild --root "$probe/root" --identifier app.openbot.host.signing-probe \
+            --version 0.0.0 --install-location / --ownership recommended \
+            --sign "$HOST_INSTALLER_IDENTITY" --keychain "$HOST_SIGNING_KEYCHAIN" "$probe/probe.pkg"
+          HOST_PROBE_PKG="$probe/probe.pkg" bun -e '
+            import { execFileSync } from "node:child_process";
+            import { verifyHostSignature } from "./scripts/verify-host-installer";
+            const pkg = process.env.HOST_PROBE_PKG;
+            if (!pkg) throw new Error("Missing HOST_PROBE_PKG.");
+            const status = execFileSync("/usr/sbin/pkgutil", ["--check-signature", pkg]).toString();
+            process.stdout.write(status);
+            verifyHostSignature(status);
+            process.stdout.write("This runner reports a wording verifyHostSignature accepts.\n");
+          '
+          # `verifyHostBom` allows only the fixed host paths. A macOS that stamps every new file with
+          # `com.apple.provenance` makes `pkgbuild` record an AppleDouble entry beside each one, which
+          # that allowlist rejects, so print the payload listing rather than infer it from one OS.
+          /usr/sbin/pkgutil --expand-full "$probe/probe.pkg" "$probe/expanded"
+          /usr/bin/lsbom -p fmug "$probe/expanded/Bom"
+          if /usr/bin/lsbom -p f "$probe/expanded/Bom" | grep -q '/\._'; then
+            echo "This runner records AppleDouble metadata entries, which verifyHostBom rejects." >&2
+            exit 1
+          fi
+          echo "This runner records no AppleDouble metadata entries."
+
+  windows-signing:
+    name: Check Windows Artifact Signing
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'windows-signing'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: ignore-scripts
+
+      # The same login and token cache as the `windows` job.
+      - name: Log in to Azure Artifact Signing
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: d6b8edfc-2bac-4da5-969a-64101dd2ec02
+          tenant-id: 286de395-f5c5-499b-9999-5cff1631ef5a
+          subscription-id: 3004c497-bc0d-40ca-b79d-be9ff034692f
+
+      - name: Cache Azure Artifact Signing token
+        run: az account get-access-token --resource https://codesigning.azure.net --output none
+
+      # Runs the commands that electron-builder runs for `azureSignOptions`, with the values of
+      # `electron-builder.windows-signing.yml`, on a throwaway executable that is never uploaded.
+      # The first signature checks the role, the profile and the module. The second one comes after
+      # the delay between login and signing in a release build, so it checks the token cache.
+      - name: Sign a throwaway executable now and after a release build's delay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          $options = bun -e 'const { parse } = require("yaml"); const config = parse(require("fs").readFileSync("electron-builder.windows-signing.yml", "utf8")); console.log(JSON.stringify(config.win.azureSignOptions))' | ConvertFrom-Json
+          Install-Module -Name TrustedSigning -MinimumVersion 0.5.0 -Force -Repository PSGallery -Scope CurrentUser
+          $probe = Join-Path $env:RUNNER_TEMP "openbot-signing-probe"
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          Set-Content -LiteralPath "$probe/probe.cs" -Value "class Probe { static void Main() {} }"
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo "/out:$probe\probe.exe" "$probe\probe.cs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          function Test-ProbeSigning([string] $label) {
+            $file = Join-Path $probe "$label.exe"
+            Copy-Item -LiteralPath "$probe/probe.exe" -Destination $file
+            Invoke-TrustedSigning -Endpoint $options.endpoint -CodeSigningAccountName $options.codeSigningAccountName `
+              -CertificateProfileName $options.certificateProfileName -FileDigest SHA256 `
+              -TimestampRfc3161 http://timestamp.acs.microsoft.com -TimestampDigest SHA256 -Files $file
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            if ($signature.Status -ne "Valid" -or -not $signature.SignerCertificate.Subject.StartsWith("CN=$($options.publisherName),")) {
+              Write-Error "The $label signature is not valid for $($options.publisherName): $($signature.Status) $($signature.SignerCertificate.Subject)."
+            }
+            Write-Output "Signed the $label probe: $($signature.SignerCertificate.Subject)"
+          }
+          Test-ProbeSigning "immediate"
+          # The delay is the condition under test: a release build signs about 15 minutes after login.
+          Start-Sleep -Seconds 1200
+          Test-ProbeSigning "delayed"
+
+      - name: Log out of Azure Artifact Signing
+        if: always()
+        run: az account clear
+
+  # Each architecture builds on a runner of its own kind. The install scripts run every provider
+  # runtime they download, and the voice runtime and the remote desktop runtime are downloaded or
+  # verified for the runner's architecture, so one runner cannot produce both. The ARM64 job keeps
+  # the asset names every earlier release used, and it alone builds the Host PKG, which is Apple
+  # silicon only.
+  macos:
+    name: Build signed macOS ${{ matrix.label }} release
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            label: ARM64
+            os: macos-14
+            app_dir: mac-arm64
+            suffix: macos
+          - arch: x64
+            label: x64
+            os: macos-15-intel
+            app_dir: mac
+            suffix: macos-x64
+    environment: release
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: none
+
+      - name: Require signing and notarization credentials
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_INSTALLER_LINK: ${{ secrets.CSC_INSTALLER_LINK }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.CSC_INSTALLER_KEY_PASSWORD }}
+          MAC_PROVISIONING_PROFILE: ${{ secrets.MAC_PROVISIONING_PROFILE }}
+        run: |
+          missing=()
+          for name in CSC_LINK CSC_KEY_PASSWORD CSC_INSTALLER_LINK CSC_INSTALLER_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID MAC_PROVISIONING_PROFILE; do
+            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing release secrets: ${missing[*]}" >&2
+            echo "See docs/RELEASING.md before publishing a tag." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The code is the same for both architectures, so the check runs once.
+      - name: Run repository check
+        if: matrix.arch == 'arm64'
+        run: |
+          bun run check:desktop
+          bun run test:desktop -- --maxWorkers=2
+          # The account service check needs more than the default Node heap of this 7 GB runner (about 2 GB).
+          # Its build sets a larger heap itself, in `apps/auth-api/package.json`.
+          NODE_OPTIONS=--max-old-space-size=4096 bun run check:api
+
+      - name: Install and verify native runtimes
+        run: |
+          bun run install:codex-runtime
+          bun run install:claude-runtime
+          bun run install:grok-runtime
+          bun run install:remote-desktop-runtime
+          bun run verify:remote-desktop-runtime
+          bun run prepare:cua-driver
+
+      - name: Install Developer ID provisioning profile
+        shell: bash
+        env:
+          MAC_PROVISIONING_PROFILE: ${{ secrets.MAC_PROVISIONING_PROFILE }}
+        run: |
+          profile_path="$RUNNER_TEMP/OpenBot.provisionprofile"
+          printf '%s' "$MAC_PROVISIONING_PROFILE" | /usr/bin/base64 -D > "$profile_path"
+          security cms -D -i "$profile_path" >/dev/null
+          echo "OPENBOT_PROVISIONING_PROFILE=$profile_path" >> "$GITHUB_ENV"
+
+      - name: Build, sign, and notarize ${{ matrix.label }} update artifacts
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+        # On a hosted macOS runner, `hdiutil create` can fail with "Device not configured" or
+        # "Resource busy" when nothing is wrong with the app; v0.21.1 failed this way. The connection
+        # to Apple's ticket service or to GitHub can also drop: `stapler` failed with code 68 and
+        # "The network connection was lost" in v0.38.2 and v0.39.1, and a DMG tool download
+        # failed with `ENOTFOUND github.com` in v0.31.0. Only these errors get another attempt.
+        # Each attempt signs and notarizes again, about 6 minutes.
+        shell: bash
+        run: |
+          bun run voice:prepare-runtime
+          bun run build
+          log="$RUNNER_TEMP/electron-builder-mac.log"
+          for attempt in 1 2 3; do
+            if bun x electron-builder --mac --${{ matrix.arch }} --publish never \
+              --config.mac.provisioningProfile="$OPENBOT_PROVISIONING_PROFILE" 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if grep -Eq 'hdiutil: create failed - (Device not configured|Resource busy)' "$log"; then
+              echo "::warning::hdiutil could not create the DMG (attempt $attempt of 3)."
+              hdiutil info || true
+            elif grep -Eq 'The network connection was lost|getaddrinfo ENOTFOUND' "$log"; then
+              echo "::warning::A network connection failed during the build (attempt $attempt of 3)."
+            else
+              exit 1
+            fi
+          done
+          exit 1
+
+      - name: Verify packaged application metadata and launch
+        run: bun run verify:package
+
+      - name: Verify application signature and notarization
+        shell: bash
+        run: |
+          app_path="dist/${{ matrix.app_dir }}/OpenBot.app"
+          test -d "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          runtime_path="$app_path/Contents/Resources/remote-desktop-runtime/darwin/${{ matrix.arch }}"
+          codesign --verify --deep --strict --verbose=2 "$runtime_path/Sunshine.app"
+          codesign --verify --strict --verbose=2 "$runtime_path/web-server"
+          codesign --verify --strict --verbose=2 "$runtime_path/streamer"
+          verify_provider_signature() {
+            local executable="$1"
+            local team_id="$2"
+            codesign --verify --strict --verbose=2 "$executable"
+            codesign -d --verbose=4 "$executable" 2>&1 | grep -Fx "TeamIdentifier=$team_id"
+          }
+          verify_provider_signature build/codex/mac/${{ matrix.arch }}/bin/codex 2DC432GLL2
+          verify_provider_signature build/claude/mac/${{ matrix.arch }}/bin/claude Q6L2SF6YDW
+          verify_provider_signature build/grok/mac/${{ matrix.arch }}/bin/grok 5Y6N3AJ54S
+          test -f "$app_path/Contents/embedded.provisionprofile"
+          codesign -d --entitlements :- "$app_path" > "$RUNNER_TEMP/openbot-entitlements.plist"
+          test -s "$RUNNER_TEMP/openbot-entitlements.plist"
+          plutil -lint "$RUNNER_TEMP/openbot-entitlements.plist"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.associated-domains:0' \
+            "$RUNNER_TEMP/openbot-entitlements.plist" | grep -Fx 'applinks:openbot.run'
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' \
+            "$RUNNER_TEMP/openbot-entitlements.plist" | grep -Fx 'ZTRDTUL87R'
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' \
+            "$RUNNER_TEMP/openbot-entitlements.plist" | grep -Fx 'true'
+          plutil -extract NSUserActivityTypes.0 raw "$app_path/Contents/Info.plist" \
+            | grep -Fx 'NSUserActivityTypeBrowsingWeb'
+          plutil -extract ElectronTeamID raw "$app_path/Contents/Info.plist" | grep -Fx 'ZTRDTUL87R'
+          spctl --assess --type execute --verbose=2 "$app_path"
+          # `stapler` reads the ticket from Apple's ticket service. The connection to it can drop
+          # (Error 68 in v0.38.1), so the check gets five attempts. It must pass to continue.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler validate "$app_path" && break
+            if (( attempt == 5 )); then exit 1; fi
+            echo "::warning::stapler could not validate the ticket (attempt $attempt of 5)."
+            sleep 30
+          done
+
+      - name: Verify updater metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          dmgs=(dist/*.dmg)
+          zips=(dist/*.zip)
+          metadata=(dist/latest-mac.yml)
+          if (( ${#dmgs[@]} != 1 || ${#zips[@]} != 1 || ${#metadata[@]} != 1 )); then
+            echo "Expected one DMG, one ZIP, and latest-mac.yml." >&2
+            find dist -maxdepth 1 -type f -print
+            exit 1
+          fi
+          grep -F "version: $RELEASE_VERSION" dist/latest-mac.yml
+          grep -F '.zip' dist/latest-mac.yml
+          bun run verify:update-artifacts macos
+          current_size=$(stat -f%z "${zips[0]}")
+          if (( current_size >= 800000000 )); then
+            echo "The macOS ZIP is ${current_size} bytes. The limit is 800000000 bytes." >&2
+            exit 1
+          fi
+          # v0.1.21 shipped only an ARM64 ZIP, so only that one has a size to stay under.
+          if [[ "${{ matrix.arch }}" != "arm64" ]]; then exit 0; fi
+          mkdir -p "$RUNNER_TEMP/openbot-0.1.21"
+          gh release download v0.1.21 --repo "$GITHUB_REPOSITORY" --pattern '*.zip' \
+            --dir "$RUNNER_TEMP/openbot-0.1.21"
+          old_zips=("$RUNNER_TEMP/openbot-0.1.21"/*.zip)
+          if (( ${#old_zips[@]} != 1 )); then
+            echo "Expected one macOS ZIP in v0.1.21." >&2
+            exit 1
+          fi
+          old_size=$(stat -f%z "${old_zips[0]}")
+          if (( current_size >= old_size )); then
+            echo "The macOS ZIP is not smaller than v0.1.21 (${current_size} >= ${old_size})." >&2
+            exit 1
+          fi
+
+      - name: Test native tenant setup
+        if: matrix.arch == 'arm64'
+        run: |
+          xcrun swiftc -parse-as-library -D TENANT_SETUP_TESTS scripts/macos-tenant-setup.swift scripts/macos-tenant-setup-tests.swift -o "$RUNNER_TEMP/openbot-tenant-setup-tests"
+          "$RUNNER_TEMP/openbot-tenant-setup-tests"
+
+      - name: Build, sign, notarize, and verify Host installer
+        if: matrix.arch == 'arm64'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_INSTALLER_LINK: ${{ secrets.CSC_INSTALLER_LINK }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.CSC_INSTALLER_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          source scripts/host-signing-keychain.sh
+          bun scripts/build-host-installer.ts
+          host_pkg="dist/OpenBot-Host-$RELEASE_VERSION-arm64.pkg"
+          xcrun notarytool store-credentials openbot-host-release --keychain "$HOST_SIGNING_KEYCHAIN" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID"
+          xcrun notarytool submit "$host_pkg" --keychain "$HOST_SIGNING_KEYCHAIN" \
+            --keychain-profile openbot-host-release --wait --timeout 20m --output-format json > "$host_signing_dir/notarization.json"
+          jq -e '.status == "Accepted"' "$host_signing_dir/notarization.json" >/dev/null
+          # The connection to Apple's ticket service can drop, as in the app check.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler staple "$host_pkg" && break
+            if (( attempt == 5 )); then exit 1; fi
+            echo "::warning::stapler could not staple the Host installer (attempt $attempt of 5)."
+            sleep 30
+          done
+          bun scripts/verify-host-installer.ts "$host_pkg" "$RELEASE_VERSION"
+          # Host infrastructure is never an Electron auto-update target.
+          if grep -F '.pkg' dist/latest-mac.yml; then exit 1; fi
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          shopt -s nullglob
+          artifacts=("OpenBot-$RELEASE_VERSION-${{ matrix.arch }}.dmg" "OpenBot-$RELEASE_VERSION-${{ matrix.arch }}.zip")
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then artifacts+=("OpenBot-Host-$RELEASE_VERSION-arm64.pkg"); fi
+          shasum -a 256 "${artifacts[@]}" > "SHA256SUMS-${{ matrix.suffix }}.txt"
+
+      - name: Generate macOS release SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist/${{ matrix.app_dir }}/OpenBot.app
+          format: spdx-json
+          output-file: dist/OpenBot-${{ env.RELEASE_VERSION }}-${{ matrix.suffix }}.spdx.json
+          artifact-name: OpenBot-${{ env.RELEASE_VERSION }}-${{ matrix.suffix }}-SBOM
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate Host package SBOM
+        if: matrix.arch == 'arm64'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist/host-sbom
+          format: spdx-json
+          output-file: dist/OpenBot-Host-${{ env.RELEASE_VERSION }}-macos.spdx.json
+          artifact-name: OpenBot-Host-${{ env.RELEASE_VERSION }}-macOS-SBOM
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest macOS release provenance
+        id: macos-provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS-${{ matrix.suffix }}.txt
+
+      - name: Include macOS provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.macos-provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" "dist/OpenBot-$RELEASE_VERSION-${{ matrix.suffix }}.sigstore.json"
+
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.suffix }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/OpenBot-Host-*-arm64.pkg
+            dist/latest-mac.yml
+            dist/*.blockmap
+            dist/*.spdx.json
+            dist/*-${{ matrix.suffix }}.sigstore.json
+            dist/SHA256SUMS-${{ matrix.suffix }}.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Build ${{ github.event_name == 'push' && 'signed' || 'unsigned' }} Windows x64 release
+    needs: validate
+    runs-on: windows-2025
+    timeout-minutes: 35
+    # This job reads no secrets. The environment limits a tag build to tags, and the Azure federated
+    # credential trusts only this environment, so a dry run has no environment and stays unsigned.
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      WINDOWS_SIGNED: ${{ github.event_name == 'push' }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+
+      # The Linux job checks types with tsrs, as PR CI does. tsrs has no Windows binary, so a type check
+      # here would use `tsc` from another TypeScript version and could stop a release that CI passed.
+      - name: Run Windows checks
+        run: bun run lint
+
+      # Without a token, the GitHub API rate limit for the runner's address can refuse the release
+      # lookup with HTTP 403.
+      - name: Install and verify remote desktop runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/install-remote-desktop-runtime.ts win32 x64 && bun run verify:remote-desktop-runtime --windows
+
+      - name: Install and verify provider control artifacts
+        run: |
+          bun scripts/install-codex-runtime.ts win32 x64
+          bun scripts/install-claude-runtime.ts win32 x64
+          bun scripts/install-grok-runtime.ts win32 x64
+
+      # Azure Artifact Signing: the `openbot-release-signing` app registration in the Synthetify
+      # tenant holds the Signer role on the SYNTHETIFY certificate profile only. These IDs are not
+      # secrets; the federated credential admits only this repository's `release` environment.
+      - name: Log in to Azure Artifact Signing
+        if: env.WINDOWS_SIGNED == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: d6b8edfc-2bac-4da5-969a-64101dd2ec02
+          tenant-id: 286de395-f5c5-499b-9999-5cff1631ef5a
+          subscription-id: 3004c497-bc0d-40ca-b79d-be9ff034692f
+
+      # The GitHub token that the login exchanged can expire before electron-builder signs, about
+      # 15 minutes later. Azure CLI caches this token for the signing service for about an hour,
+      # and the TrustedSigning module gets it from Azure CLI.
+      - name: Cache Azure Artifact Signing token
+        if: env.WINDOWS_SIGNED == 'true'
+        run: az account get-access-token --resource https://codesigning.azure.net --output none
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_SIGNED -eq "true") {
+            bun run dist:win --config electron-builder.windows-signing.yml
+          } else {
+            bun run dist:win
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Signing ends with the build. The later steps, which include third-party actions, get no Azure
+      # session and no cached signing token.
+      - name: Log out of Azure Artifact Signing
+        if: always() && env.WINDOWS_SIGNED == 'true'
+        run: az account clear
+
+      - name: Verify packaged application metadata and launch
+        shell: pwsh
+        run: |
+          $signatureArguments = @()
+          if ($env:WINDOWS_SIGNED -eq "true") { $signatureArguments = @("--require-signature") }
+          bun run verify:package:win --require-update-metadata @signatureArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify installer and updater metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem -Path dist -File -Filter *.exe)
+          if ($installers.Count -ne 1 -or -not (Test-Path dist/latest.yml)) {
+            Write-Error "Expected one EXE installer and latest.yml."
+          }
+          # The package verifier ties the signer of OpenBot.exe to the publisher in app-update.yml.
+          # A signed install verifies the next update's installer against that publisher.
+          $signature = Get-AuthenticodeSignature -LiteralPath $installers[0].FullName
+          if ($env:WINDOWS_SIGNED -eq "true") {
+            $applicationSigner = (Get-AuthenticodeSignature -LiteralPath dist/win-unpacked/OpenBot.exe).SignerCertificate.Subject
+            if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -ne $applicationSigner) {
+              Write-Error "The installer signer differs from the application signer: $($signature.Status) $($signature.SignerCertificate.Subject)."
+            }
+          } elseif ($signature.Status -ne "NotSigned") {
+            Write-Error "The unsigned installer contract changed: $($signature.Status)."
+          }
+          $vendorRuntimeExecutables = @(
+            "build/codex/win/x64/bin/codex.exe",
+            "build/codex/win/x64/bin/codex-code-mode-host.exe",
+            "build/claude/win/x64/bin/claude.exe",
+            "build/grok/win/x64/bin/grok.exe"
+          )
+          foreach ($runtimeExecutable in $vendorRuntimeExecutables) {
+            $runtimeSignature = Get-AuthenticodeSignature -LiteralPath $runtimeExecutable
+            if ($runtimeSignature.Status -ne "Valid") {
+              Write-Error "The vendor runtime signature is not valid for ${runtimeExecutable}: $($runtimeSignature.Status)."
+            }
+          }
+          $providerVendorPatterns = @{
+            "build/codex/win/x64/bin/codex.exe" = "OpenAI"
+            "build/codex/win/x64/bin/codex-code-mode-host.exe" = "OpenAI"
+            "build/claude/win/x64/bin/claude.exe" = "Anthropic"
+            "build/grok/win/x64/bin/grok.exe" = "X\.AI|xAI"
+          }
+          foreach ($runtimeExecutable in $providerVendorPatterns.Keys) {
+            $runtimeSignature = Get-AuthenticodeSignature -LiteralPath $runtimeExecutable
+            if ($runtimeSignature.SignerCertificate.Subject -notmatch $providerVendorPatterns[$runtimeExecutable]) {
+              Write-Error "The provider runtime has an unexpected signer: ${runtimeExecutable}."
+            }
+          }
+          Select-String -Path dist/latest.yml -SimpleMatch "version: $env:RELEASE_VERSION"
+          Select-String -Path dist/latest.yml -SimpleMatch ".exe"
+          bun run verify:update-artifacts windows
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem -Path dist -File -Filter *.exe)
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer[0].Name)" | Set-Content -Encoding ascii dist/SHA256SUMS-windows.txt
+
+      - name: Generate Windows release SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist/win-unpacked
+          format: spdx-json
+          output-file: dist/OpenBot-${{ env.RELEASE_VERSION }}-windows.spdx.json
+          artifact-name: OpenBot-${{ env.RELEASE_VERSION }}-Windows-SBOM
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest Windows release provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS-windows.txt
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+            dist/*.spdx.json
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Build unsigned Linux ${{ matrix.arch }} release
+    needs: validate
+    # Each architecture builds on a native runner: the launch check runs the packaged binary, and
+    # the provider checks run each pinned CLI's `--version`, so neither can cross-build.
+    # `suffix` is electron-builder's own name for the target: it names the unpacked directory
+    # (`linux-unpacked`, `linux-arm64-unpacked`) and the updater manifest (`latest-linux.yml`,
+    # `latest-linux-arm64.yml`) that electron-updater looks for on that architecture.
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            suffix: linux
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            suffix: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    # These jobs read no secrets. The environment limits a tag build to tags; a dry run has none.
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install a virtual display for the launch check
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes xvfb
+
+      # Lint and typecheck do not depend on the architecture, so one runner is enough.
+      - name: Run Linux checks
+        if: matrix.arch == 'x64'
+        run: bun run lint && bun run typecheck
+
+      - name: Install and verify provider control artifacts
+        run: |
+          bun scripts/install-codex-runtime.ts linux ${{ matrix.arch }}
+          bun scripts/install-claude-runtime.ts linux ${{ matrix.arch }}
+          bun scripts/install-grok-runtime.ts linux ${{ matrix.arch }}
+
+      - name: Build AppImage
+        run: bun run ${{ matrix.arch == 'arm64' && 'dist:linux:arm64' || 'dist:linux' }}
+
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, which is the same
+      # restriction the shipped profile answers for an installed AppImage. The verifier starts the
+      # unpacked build from the workspace, so that path needs its own profile, and the SUID helper
+      # needs the ownership a package manager would give it. The sandbox stays on either way:
+      # `--no-sandbox` would make the launch check prove nothing about a real install.
+      - name: Permit the Electron sandbox for the verification build
+        run: |
+          set -euo pipefail
+          sudo chown root:root "dist/$SUFFIX-unpacked/chrome-sandbox"
+          sudo chmod 4755 "dist/$SUFFIX-unpacked/chrome-sandbox"
+          sudo tee /etc/apparmor.d/openbot-verify >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile openbot-verify "$GITHUB_WORKSPACE/dist/$SUFFIX-unpacked/openbot" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/openbot-verify
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+
+      - name: Verify packaged application metadata and launch
+        run: xvfb-run -a bun run verify:package:linux "dist/${{ matrix.suffix }}-unpacked" --require-update-metadata
+
+      - name: Verify AppImage and updater metadata
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          appImages=(dist/*.AppImage)
+          if [ "${#appImages[@]}" -ne 1 ] || [ ! -f "dist/latest-$SUFFIX.yml" ]; then
+            echo "Expected one AppImage and latest-$SUFFIX.yml." >&2
+            exit 1
+          fi
+          # The AppImage has to stay executable, or the download is unusable without a chmod.
+          if [ ! -x "${appImages[0]}" ]; then
+            echo "The AppImage is not executable." >&2
+            exit 1
+          fi
+          grep -Fq "version: $RELEASE_VERSION" "dist/latest-$SUFFIX.yml"
+          grep -Fq ".AppImage" "dist/latest-$SUFFIX.yml"
+          bun run verify:update-artifacts "$SUFFIX"
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+
+      # Arch Linux and Omarchy have no libfuse.so.2. The AppImage runtime must be static and mount the
+      # AppImage with only `fusermount3`, as it does when a user starts the download.
+      - name: Mount the AppImage without libfuse2
+        run: |
+          set -euo pipefail
+          sudo apt-get install --no-install-recommends --yes fuse3
+          appImage=$(echo dist/*.AppImage)
+          headers=$(readelf --program-headers "$appImage")
+          if grep -Fq "program interpreter" <<<"$headers"; then
+            echo "The AppImage runtime is not static, so it needs system libraries such as libfuse.so.2." >&2
+            exit 1
+          fi
+          # The runtime prints the mount point and keeps the mount until it stops.
+          output=$(mktemp)
+          "$appImage" --appimage-mount >"$output" &
+          runtime=$!
+          for _ in $(seq 1 60); do
+            [ -s "$output" ] && break
+            sleep 1
+          done
+          mountPoint=$(head -n 1 "$output")
+          if [ -z "$mountPoint" ] || [ ! -x "$mountPoint/openbot" ]; then
+            echo "The AppImage did not mount with fusermount3, or its mount has no openbot executable." >&2
+            cat "$output" >&2
+            exit 1
+          fi
+          kill "$runtime" 2>/dev/null || true
+          wait "$runtime" || true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 ./*.AppImage | sed 's| \./| |' > "SHA256SUMS-$SUFFIX.txt"
+          cat "SHA256SUMS-$SUFFIX.txt"
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+
+      - name: Generate Linux release SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist/${{ matrix.suffix }}-unpacked
+          format: spdx-json
+          output-file: dist/OpenBot-${{ env.RELEASE_VERSION }}-${{ matrix.suffix }}.spdx.json
+          artifact-name: OpenBot-${{ env.RELEASE_VERSION }}-${{ matrix.suffix }}-SBOM
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest Linux release provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS-${{ matrix.suffix }}.txt
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.suffix }}
+          # An AppImage embeds its block map, so there is no sidecar file to upload beside it.
+          path: |
+            dist/*.AppImage
+            dist/latest-${{ matrix.suffix }}.yml
+            dist/*.spdx.json
+            dist/SHA256SUMS-${{ matrix.suffix }}.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  # The Docker image of each architecture (docs/docker.md). It unpacks the AppImage that the Linux
+  # job built and checked, and starts the image once before the release publishes. This job has no
+  # write token: `docker-publish` pushes the saved images after the GitHub Release exists.
+  docker:
+    name: Build Docker image ${{ matrix.platform }}
+    needs: [validate, linux]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suffix: linux
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            suffix: linux-arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    permissions:
+      contents: read
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Linux release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ matrix.suffix }}
+          path: release-assets
+
+      - name: Check the AppImage against the release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release-assets && sha256sum --check --strict "SHA256SUMS-$SUFFIX.txt")
+          mkdir image
+          mv release-assets/*.AppImage image/OpenBot.AppImage
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+
+      - name: Build the image
+        run: |
+          docker build --file docker/Dockerfile --platform "$PLATFORM" \
+            --build-arg "VERSION=$RELEASE_VERSION" --build-arg "REVISION=$GITHUB_SHA" \
+            --tag openbot:release image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
+      # The image starts with the sandbox on, its control socket answers, and a stop lets OpenBot
+      # exit by itself. A signed-out server needs no account.
+      - name: Start and stop the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'docker logs openbot' ERR
+          docker run --detach --name openbot --shm-size 1g \
+            --security-opt seccomp=docker/seccomp.json --security-opt no-new-privileges:true openbot:release
+          # The socket opens before the account state loads, so wait for that state too.
+          status=
+          for _ in $(seq 1 120); do
+            if docker exec openbot test -S /run/openbot/control.sock; then
+              status=$(docker exec openbot openbot status)
+              grep -Fxq "Account: loading" <<<"$status" || break
+            fi
+            sleep 1
+          done
+          echo "$status"
+          grep -Fxq "OpenBot $RELEASE_VERSION" <<<"$status"
+          grep -Fxq "Account: signed out. Sign in with: openbot login" <<<"$status"
+          docker stop --time 60 openbot
+          test "$(docker inspect openbot --format '{{.State.ExitCode}}')" = 0
+
+      - name: Save the image
+        shell: bash
+        run: docker save openbot:release | gzip --fast > "openbot-image-$SUFFIX.tar.gz"
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+
+      - name: Upload the image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-${{ matrix.suffix }}
+          path: openbot-image-${{ matrix.suffix }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, macos, windows, linux, docker]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: ignore-scripts
+
+      - name: Download macOS ARM64 release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-macos
+          path: release-assets/macos
+
+      - name: Download macOS x64 release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-macos-x64
+          path: release-assets/macos-x64
+
+      # Both macOS jobs write a `latest-mac.yml`, and a release holds one asset of that name. The
+      # merged file lists both ZIPs; electron-updater picks the one for the Mac's architecture.
+      - name: Merge macOS update manifests
+        shell: bash
+        run: |
+          bun scripts/merge-mac-update-manifests.ts \
+            release-assets/macos/latest-mac.yml \
+            release-assets/macos-x64/latest-mac.yml \
+            release-assets/latest-mac.yml
+          rm release-assets/macos/latest-mac.yml release-assets/macos-x64/latest-mac.yml
+
+      - name: Download Windows release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-windows
+          path: release-assets/windows
+
+      - name: Download Linux x64 release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-linux
+          path: release-assets/linux
+
+      - name: Download Linux arm64 release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-linux-arm64
+          path: release-assets/linux-arm64
+
+      - name: Generate combined checksums
+        shell: bash
+        run: |
+          cat release-assets/macos/SHA256SUMS-macos.txt \
+            release-assets/macos-x64/SHA256SUMS-macos-x64.txt \
+            release-assets/windows/SHA256SUMS-windows.txt \
+            release-assets/linux/SHA256SUMS-linux.txt \
+            release-assets/linux-arm64/SHA256SUMS-linux-arm64.txt \
+            > release-assets/SHA256SUMS.txt
+
+      # Only this step gets the write token: the steps before it run dependency code.
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          artifacts=(release-assets/macos/* release-assets/macos-x64/* release-assets/latest-mac.yml release-assets/windows/* release-assets/linux/* release-assets/linux-arm64/* release-assets/SHA256SUMS.txt)
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" \
+              "${artifacts[@]}" \
+              --generate-notes \
+              --latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "OpenBot $RELEASE_TAG"
+          fi
+
+  # Posts the highlights of `.github/release-announcement.json`, which the `validate` job checked, as
+  # OpenBot through a channel webhook (docs/RELEASING.md#discord-announcement). It waits for the
+  # Docker image and the boat snapshot, so the post says "is out" only when every channel has the
+  # version. A failure here does not undo the release: re-run this job. A re-run after a success
+  # posts the message again.
+  discord-announce:
+    name: Announce the release on Discord
+    needs: [validate, publish, docker-publish, hosted-release]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: none
+
+      - name: Post the announcement
+        env:
+          DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          DISCORD_RELEASE_ROLE_ID: ${{ vars.DISCORD_RELEASE_ROLE_ID }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: bun scripts/discord-release-announcement.ts send "$RELEASE_VERSION"
+
+  hosted-release:
+    name: Publish boat server snapshot
+    needs: [validate, publish]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: cloudflare-production
+    permissions:
+      contents: read
+    # The same lock as the production Worker deploy. Keep every pending release.
+    concurrency:
+      group: cloudflare-production-worker
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: ignore-scripts
+
+      - name: Build and select production snapshot
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          BOAT_TEMPLATE_API_KEY: ${{ secrets.BOAT_TEMPLATE_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_DEPLOY_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/hosting/release-boat-template.sh
+
+  # Pushes the images that the `docker` job checked, after the GitHub Release exists, so `latest` on
+  # GHCR never names a release that did not publish. It runs no build code: it only loads, tags and
+  # pushes. Each architecture also keeps its own tag; the release tags name an index of both.
+  docker-publish:
+    name: Publish Docker image
+    needs: [validate, docker, publish]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      attestations: write
+      id-token: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+    steps:
+      - name: Download the amd64 image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docker-linux
+          path: images
+
+      - name: Download the arm64 image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docker-linux-arm64
+          path: images
+
+      - name: Push the image
+        id: push
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for pair in linux:amd64 linux-arm64:arm64; do
+            suffix=${pair%%:*} architecture=${pair#*:}
+            gunzip --stdout "images/openbot-image-$suffix.tar.gz" | docker load
+            docker tag openbot:release "$IMAGE:$RELEASE_VERSION-$architecture"
+            docker push "$IMAGE:$RELEASE_VERSION-$architecture"
+            docker rmi openbot:release
+          done
+          docker buildx imagetools create \
+            --tag "$IMAGE:$RELEASE_VERSION" --tag "$IMAGE:v$RELEASE_VERSION" \
+            --tag "$IMAGE:latest" --tag "$IMAGE:sha-${GITHUB_SHA::7}" \
+            "$IMAGE:$RELEASE_VERSION-amd64" "$IMAGE:$RELEASE_VERSION-arm64"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$RELEASE_VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # The attestation goes to GHCR too, with the login of the step before.
+      - name: Attest Docker image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # An authenticated push can succeed while the package is still private.
+      - name: Verify anonymous Docker image access
+        shell: bash
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          trap 'rm -rf "$anonymous_config"' EXIT
+          for tag in "$RELEASE_VERSION" "v$RELEASE_VERSION" latest; do
+            if ! docker --config "$anonymous_config" manifest inspect "$IMAGE:$tag" > "$anonymous_config/manifest.json"; then
+              echo "::error::Cannot read $IMAGE:$tag without authentication. Check the GHCR package visibility and set it to Public. See docs/RELEASING.md."
+              exit 1
+            fi
+            jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' \
+              "$anonymous_config/manifest.json" >/dev/null
+          done
+
+  # `nix/sources.json` names the release that the Nix flake installs. It can only name a published
+  # release, because its hashes come from the release's SHA256SUMS.txt. So the update goes to main in
+  # its own PR. The PR's own workflow runs wait for approval because GITHUB_TOKEN opened it, and the
+  # merge waits for them, so the job approves them. It also starts CI on the branch. The PR merges
+  # itself when the required checks pass.
+  nix-sources:
+    name: Open Nix sources PR
+    needs: [validate, publish]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out main
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: ignore-scripts
+
+      - name: Update nix/sources.json
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: bun scripts/nix-sources.ts "$RELEASE_VERSION"
+
+      # Only this step gets the write token: the steps before it run dependency code, which can change
+      # the Git configuration and hooks of the checkout. So this step runs outside the checkout and
+      # makes the branch and the commit with the GitHub API, from the commit that the checkout fetched.
+      - name: Open the PR
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+          BASE_SHA: ${{ steps.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
+          path=nix/sources.json
+          file="$GITHUB_WORKSPACE/$path"
+          current="$(gh api "repos/$GITHUB_REPOSITORY/contents/$path?ref=$BASE_SHA")"
+          if jq -r .content <<<"$current" | base64 -d | cmp -s - "$file"; then
+            echo "$path needs no change."
+            exit 0
+          fi
+          branch="build/nix-sources-$RELEASE_VERSION"
+          created=false
+          if gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq 'length > 0' | grep -Fx true; then
+            echo "A Nix sources PR already exists."
+          else
+            created=true
+            # A rerun after a failed run can find the branch. No open PR uses it, so reset it.
+            if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$branch" -f "sha=$BASE_SHA" >/dev/null; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" -f "sha=$BASE_SHA" -F force=true >/dev/null
+            fi
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$path" \
+              -f "branch=$branch" \
+              -f "sha=$(jq -r .sha <<<"$current")" \
+              -f "message=build(nix): install OpenBot $RELEASE_VERSION" \
+              -f "content=$(base64 -w0 "$file")" >/dev/null
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --label no-changelog \
+              --title "build(nix): install OpenBot $RELEASE_VERSION" \
+              --body "Points the Nix flake at the published v$RELEASE_VERSION release. The hashes come from its \`SHA256SUMS.txt\`."
+          fi
+          # A failed call below gives a warning, so that the steps after it still run.
+          if ! gh pr merge "$branch" --repo "$GITHUB_REPOSITORY" --auto --squash; then
+            echo "::warning::Auto-merge is not on for the Nix sources PR. Merge it when its checks pass."
+          fi
+          head_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq .object.sha)"
+          waiting_runs() {
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$head_sha&event=pull_request&status=action_required" \
+              --jq '.workflow_runs[].id' || echo "::warning::Could not list the PR workflow runs." >&2
+          }
+          # The runs of a new PR can appear some seconds after the PR. The runs of an existing PR are there.
+          attempts=1
+          if [ "$created" = true ]; then attempts=12; fi
+          approved=0
+          for attempt in $(seq 1 "$attempts"); do
+            runs="$(waiting_runs)"
+            for run in $runs; do
+              if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/approve" >/dev/null; then
+                approved=$((approved + 1))
+              fi
+            done
+            if [ -z "$runs" ] && { [ "$approved" -ge 1 ] || [ "$created" = false ]; }; then break; fi
+            if [ "$attempt" -lt "$attempts" ]; then sleep 5; fi
+          done
+          if [ -n "$(waiting_runs)" ] || { [ "$created" = true ] && [ "$approved" -eq 0 ]; }; then
+            echo "::warning::Some PR workflow runs were not approved. Approve the waiting runs on the PR so that it can merge."
+          fi
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"

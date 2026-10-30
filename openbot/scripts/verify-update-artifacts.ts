@@ -1,0 +1,124 @@
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { isDynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
+import { createOpenBotLogger } from "@openbot/logging";
+import { parse } from "yaml";
+
+const logger = createOpenBotLogger("verify-update-artifacts");
+
+const MIB = 1024 * 1024;
+const platform = process.argv[2];
+if (platform !== "linux" && platform !== "linux-arm64" && platform !== "macos" && platform !== "windows") {
+  throw new Error("Usage: bun scripts/verify-update-artifacts.ts <linux|linux-arm64|macos|windows>");
+}
+
+/**
+ * The artifact electron-updater downloads, and the manifest that names it, for each platform.
+ * electron-updater on Linux arm64 reads `latest-linux-arm64.yml`, so each Linux architecture has its
+ * own manifest and its own unpacked directory.
+ */
+const UPDATE_ARTIFACTS = {
+  linux: { extension: ".AppImage", manifest: "latest-linux.yml" },
+  "linux-arm64": { extension: ".AppImage", manifest: "latest-linux-arm64.yml" },
+  macos: { extension: ".zip", manifest: "latest-mac.yml" },
+  windows: { extension: ".exe", manifest: "latest.yml" },
+} as const;
+
+const distRoot = resolve("dist");
+const artifactExtension = UPDATE_ARTIFACTS[platform].extension;
+const manifestPath = join(distRoot, UPDATE_ARTIFACTS[platform].manifest);
+const [artifact, ...extraArtifacts] = (await readdir(distRoot)).filter((name) => name.endsWith(artifactExtension));
+if (artifact === undefined || extraArtifacts.length > 0)
+  throw new Error(`Expected one ${artifactExtension} update artifact.`);
+
+const artifactPath = join(distRoot, artifact);
+await verifyMaximumSize(artifactPath, 700 * MIB);
+if (platform === "macos") {
+  const [dmg, ...extraDmgs] = (await readdir(distRoot)).filter((name) => name.endsWith(".dmg"));
+  if (dmg === undefined || extraDmgs.length > 0) throw new Error("Expected one DMG artifact.");
+  await verifyMaximumSize(join(distRoot, dmg), 750 * MIB);
+}
+const embeddedBlockMapBytes = await verifyManifest(manifestPath, artifactPath);
+// An AppImage carries its block map inside the file, so the size the manifest records is what proves
+// a differential update is possible. The other targets write the block map beside the artifact.
+if (platform === "linux" || platform === "linux-arm64") {
+  if (embeddedBlockMapBytes === null) {
+    throw new Error(`The manifest records no embedded block map for ${basename(artifactPath)}.`);
+  }
+} else if (!existsSync(`${artifactPath}.blockmap`)) {
+  throw new Error(`Missing blockmap for ${basename(artifactPath)}.`);
+}
+
+// Each macOS job builds its own architecture, and electron-builder writes x64 to `dist/mac`.
+const resourcesRoot =
+  platform === "macos"
+    ? join(distRoot, process.arch === "arm64" ? "mac-arm64" : "mac", "OpenBot.app", "Contents", "Resources")
+    : join(distRoot, platform === "windows" ? "win-unpacked" : `${platform}-unpacked`, "resources");
+// Every platform ships the voice runtime and downloads the model on first use.
+if (!existsSync(join(resourcesRoot, "voice", "runtime", "sherpa-onnx.node"))) {
+  throw new Error("The packaged application has no voice runtime.");
+}
+if (
+  existsSync(join(resourcesRoot, "voice", "model")) ||
+  existsSync(join(resourcesRoot, "voice", "bark-3.0-plus-int8")) ||
+  existsSync(join(resourcesRoot, "voice", "whisper-turbo-int8")) ||
+  existsSync(join(resourcesRoot, "voice", "supertonic-3-int8")) ||
+  existsSync(join(resourcesRoot, "voice", "runtime", "encoder.int8.onnx")) ||
+  existsSync(join(resourcesRoot, "voice", "runtime", "turbo-encoder.int8.onnx"))
+) {
+  throw new Error("The packaged application contains an on-demand voice model.");
+}
+const unpackedRoot = join(resourcesRoot, "app.asar.unpacked", "node_modules", "@anthropic-ai");
+if (existsSync(unpackedRoot)) {
+  const entries = await walk(unpackedRoot);
+  if (entries.some((path) => /claude-agent-sdk-(?:darwin|linux|win32)-/u.test(path))) {
+    throw new Error("The packaged application contains a duplicate native Claude runtime.");
+  }
+}
+logger.info(`Verified ${platform} update artifact ${basename(artifactPath)}.`);
+
+async function verifyMaximumSize(path: string, maximumBytes: number): Promise<void> {
+  const size = (await stat(path)).size;
+  if (size > maximumBytes) {
+    throw new Error(`${basename(path)} is ${size} bytes. The limit is ${maximumBytes} bytes.`);
+  }
+}
+
+/**
+ * Checks the manifest describes the artifact on disk, and reports the size of the block map the
+ * manifest records inside it, or `null` when it records none.
+ */
+async function verifyManifest(path: string, artifact: string): Promise<number | null> {
+  const manifest = parse(await readFile(path, "utf8"));
+  if (!isDynamicRecord(manifest) || !Array.isArray(manifest.files)) {
+    throw new Error("The update manifest has no file list.");
+  }
+  const artifactName = basename(artifact);
+  const entry = manifest.files?.find((candidate) => {
+    if (!isDynamicRecord(candidate) || !isString(candidate.url)) return false;
+    return basename(decodeURIComponent(candidate.url)) === artifactName;
+  });
+  if (!isDynamicRecord(entry)) throw new Error(`The update manifest does not contain ${artifactName}.`);
+  const size = (await stat(artifact)).size;
+  if (!isNumber(entry.size) || entry.size !== size) {
+    throw new Error(`The manifest size does not match ${artifactName}.`);
+  }
+  const hash = createHash("sha512");
+  for await (const chunk of createReadStream(artifact)) hash.update(chunk);
+  if (!isString(entry.sha512) || entry.sha512 !== hash.digest("base64")) {
+    throw new Error(`The manifest SHA-512 does not match ${artifactName}.`);
+  }
+  return isNumber(entry.blockMapSize) && entry.blockMapSize > 0 ? entry.blockMapSize : null;
+}
+
+async function walk(root: string): Promise<string[]> {
+  const result: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    result.push(path);
+    if (entry.isDirectory()) result.push(...(await walk(path)));
+  }
+  return result;
+}

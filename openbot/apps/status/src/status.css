@@ -1,0 +1,578 @@
+@import "@fontsource-variable/inter";
+@import "@openbot/brand/tokens.css";
+@import "@openbot/brand/logo.css";
+
+/* The status page. Every rule is under `.status-page`, so the page also renders in Storybook. */
+
+/* The site stylesheet sets this for every element. The widths below depend on it. */
+.status-page,
+.status-page *,
+.status-page *::before,
+.status-page *::after {
+  box-sizing: border-box;
+}
+
+.status-page {
+  --status-hairline: color-mix(in srgb, var(--openbot-text-primary) 8%, transparent);
+  --status-fill: color-mix(in srgb, var(--openbot-text-primary) 5%, transparent);
+  min-height: 100vh;
+  background: var(--openbot-bg-canvas);
+  color: var(--openbot-text-primary);
+  font-family: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.status-page [data-state="operational"] {
+  --status-color: var(--openbot-success);
+  --status-text: var(--openbot-success-text);
+}
+
+.status-page [data-state="degraded"] {
+  --status-color: var(--openbot-warning);
+  --status-text: var(--openbot-warning-text);
+}
+
+.status-page [data-state="partial"] {
+  --status-color: color-mix(in srgb, var(--openbot-warning) 50%, var(--openbot-danger));
+  --status-text: color-mix(in srgb, var(--openbot-warning-text) 50%, var(--openbot-danger-text));
+}
+
+.status-page [data-state="major"] {
+  --status-color: var(--openbot-danger);
+  --status-text: var(--openbot-danger-text);
+}
+
+.status-page [data-state="maintenance"] {
+  --status-color: var(--openbot-accent);
+  --status-text: var(--openbot-accent-text);
+}
+
+/* A day or a service that no check has covered. */
+.status-page [data-state="none"] {
+  --status-color: var(--openbot-text-muted);
+  --status-text: var(--openbot-text-muted);
+}
+
+:where(.status-page) :where(h1, h2, h3, p, ol, ul) {
+  margin: 0;
+}
+
+:where(.status-page) :where(ol, ul) {
+  padding: 0;
+  list-style: none;
+}
+
+:where(.status-page) a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Header and footer ------------------------------------------------------ */
+
+.status-header,
+.status-main,
+.status-footer {
+  width: min(100%, 960px);
+  margin: 0 auto;
+  padding-inline: clamp(20px, 4vw, 48px);
+}
+
+.status-header {
+  padding-top: 24px;
+}
+
+.status-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: var(--openbot-radius-md);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.status-brand-logo {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.status-main {
+  padding-bottom: clamp(48px, 6vw, 80px);
+}
+
+.status-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 20px;
+  padding-block: 24px 40px;
+  border-top: 1px solid var(--status-hairline);
+}
+
+/* Shared pieces ------------------------------------------------------ */
+
+.status-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--status-color);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--status-color) 18%, transparent);
+}
+
+.status-state {
+  color: var(--status-text);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status-muted {
+  color: var(--openbot-text-muted);
+  font-size: 14px;
+}
+
+.status-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  margin-bottom: 16px;
+}
+
+.status-section-title {
+  color: var(--openbot-text-primary);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.status-card {
+  border: 1px solid var(--status-hairline);
+  border-radius: 20px;
+  background: var(--status-fill);
+}
+
+.status-link {
+  color: var(--openbot-text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--status-hairline);
+  text-underline-offset: 3px;
+}
+
+.status-notice-title .status-link {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.status-brand:focus-visible,
+.status-link:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 3px var(--openbot-accent-strong);
+  border-radius: 6px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .status-link:hover {
+    color: var(--openbot-text-primary);
+  }
+
+  .status-button:hover {
+    border-color: color-mix(in srgb, var(--openbot-text-primary) 32%, transparent);
+    color: var(--openbot-text-primary);
+  }
+}
+
+/* The site's small secondary button (`landing-button-secondary landing-button-sm`). */
+.status-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+  gap: 7px;
+  padding: 0 17px;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-pill);
+  background: transparent;
+  color: var(--openbot-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    border-color var(--openbot-duration-normal) ease,
+    color var(--openbot-duration-normal) ease;
+}
+
+.status-button-icon,
+.status-button[data-icon="github"]::before {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+}
+
+/* Lucide has no brand icons, so the GitHub mark is a mask. */
+.status-button[data-icon="github"]::before {
+  content: "";
+  background: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.91-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.36-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.38 9.38 0 0 1 12 6.95a9.4 9.4 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.35 4.8-4.58 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.25 10.25 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z'/%3E%3C/svg%3E");
+}
+
+.status-button:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 3px var(--openbot-accent-strong);
+}
+
+.status-button:active {
+  transform: scale(0.97);
+}
+
+/* The range toggle: the look of the changelog's app switch, on buttons. */
+.status-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: var(--openbot-radius-pill);
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow:
+    0 0 0 1px var(--status-hairline),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.status-toggle button {
+  border: 0;
+  border-radius: var(--openbot-radius-pill);
+  background: none;
+  padding: 5px 12px;
+  color: var(--openbot-text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color var(--openbot-duration-normal) ease,
+    background-color var(--openbot-duration-normal) ease;
+}
+
+.status-toggle button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--openbot-text-primary);
+}
+
+.status-toggle button:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 2px var(--openbot-accent-strong);
+}
+
+/* Updates of one incident, newest first. */
+.status-updates {
+  display: grid;
+  gap: 16px;
+}
+
+.status-update {
+  display: grid;
+  gap: 4px;
+  padding-left: 16px;
+  border-left: 2px solid var(--status-hairline);
+}
+
+.status-update:first-child {
+  border-left-color: var(--status-color, var(--status-hairline));
+}
+
+.status-update-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.status-update-stage {
+  color: var(--openbot-text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.status-update-body {
+  max-width: 64ch;
+  color: var(--openbot-text-secondary);
+  font-size: 15px;
+  line-height: 1.55;
+  text-wrap: pretty;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.status-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--status-hairline);
+  border-radius: var(--openbot-radius-pill);
+  color: var(--openbot-text-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Page ------------------------------------------------------------------ */
+
+.status-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: clamp(24px, 5vw, 64px) 0 clamp(24px, 3vw, 36px);
+}
+
+.status-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.status-title {
+  color: var(--openbot-text-primary);
+  font-size: clamp(36px, 5vw, 56px);
+  font-weight: 600;
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
+.status-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 22px 24px;
+  border-color: color-mix(in srgb, var(--status-color) 32%, transparent);
+  background: color-mix(in srgb, var(--status-color) 9%, transparent);
+}
+
+.status-banner-title {
+  flex: 1 1 auto;
+  color: var(--openbot-text-primary);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.status-stack {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.status-notice {
+  display: grid;
+  gap: 16px;
+  padding: 22px 24px;
+}
+
+.status-notice-head {
+  display: grid;
+  gap: 8px;
+}
+
+.status-notice-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--openbot-text-primary);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.status-section {
+  margin-top: clamp(40px, 5vw, 56px);
+}
+
+.status-service {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 20px 24px;
+}
+
+.status-service + .status-service {
+  border-top: 1px solid var(--status-hairline);
+}
+
+.status-service-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.status-service-name {
+  color: var(--openbot-text-primary);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.status-service-description {
+  margin-top: 2px;
+  color: var(--openbot-text-muted);
+  font-size: 13px;
+}
+
+.status-bars {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  height: 34px;
+}
+
+.status-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 2px;
+  background: var(--status-color);
+  opacity: 0.88;
+}
+
+.status-bar[data-state="operational"] {
+  opacity: 0.5;
+}
+
+.status-bar[data-state="none"] {
+  opacity: 0.25;
+}
+
+.status-bar[data-hover] {
+  opacity: 1;
+}
+
+.status-bars-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--openbot-text-muted);
+  font-size: 12px;
+}
+
+.status-bars-foot strong {
+  color: var(--openbot-text-secondary);
+  font-weight: 500;
+}
+
+.status-tooltip {
+  position: absolute;
+  z-index: 2;
+  bottom: calc(100% + 8px);
+  width: max-content;
+  max-width: 260px;
+  padding: 10px 12px;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: 12px;
+  background: var(--openbot-bg-surface-raised);
+  box-shadow: 0 12px 30px -12px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  transform: translateX(calc(var(--status-tooltip-at) * -100%));
+}
+
+.status-tooltip-date {
+  color: var(--openbot-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.status-tooltip p + p {
+  margin-top: 4px;
+}
+
+.status-empty {
+  padding: 22px 24px;
+}
+
+.status-month + .status-month {
+  margin-top: 28px;
+}
+
+.status-month-title {
+  margin-bottom: 10px;
+  color: var(--openbot-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.status-incident {
+  display: grid;
+  gap: 10px;
+  padding: 18px 0;
+  border-top: 1px solid var(--status-hairline);
+}
+
+.status-incident-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--openbot-text-primary);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.status-incident-title:focus-visible {
+  outline: 0;
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px var(--openbot-accent-strong);
+}
+
+.status-incident-chevron {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--openbot-text-muted);
+  transition: transform var(--openbot-duration-normal) ease;
+}
+
+.status-incident-title[aria-expanded="true"] .status-incident-chevron {
+  transform: rotate(180deg);
+}
+
+.status-incident-meta {
+  padding-left: 22px;
+}
+
+.status-incident-body {
+  display: grid;
+  justify-items: start;
+  gap: 16px;
+  padding: 6px 0 4px 22px;
+}
+
+@media (max-width: 640px) {
+  .status-service {
+    padding: 18px;
+  }
+
+  .status-bars {
+    gap: 1px;
+  }
+}

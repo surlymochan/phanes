@@ -1,0 +1,71 @@
+name: Contribution policy
+
+# Applies "What you can send" in CONTRIBUTING.md to people outside the organization. The rules are in
+# `scripts/contribution-policy.ts`; organization members, users with write access and the trusted
+# bots skip all of them.
+#
+# `pull_request_target` gives a fork's pull request a token that can label, comment and set a status.
+# It is safe here because no step checks out or runs the pull request's code: the job checks out the
+# default branch and reads the pull request only through the API.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+  # Only `opened`: a maintainer who reopens a closed issue has decided to keep it.
+  issues:
+    types: [opened, labeled]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  policy:
+    # Not "Contribution policy": that is the name of the commit status that the script sets.
+    name: Apply contribution policy
+    # A new `approved` label sweeps at once, so a pull request that links the issue passes without
+    # waiting for the daily run. Other issue labels do nothing.
+    if: >-
+      github.event_name != 'issues' ||
+      github.event.action == 'opened' ||
+      github.event.label.name == 'approved'
+    # On the job, not the workflow: a run that the `if` skips, such as the `bug` label that a new
+    # issue gets, must not take the group and cancel the pending `opened` run. An `approved` label
+    # runs the sweep, so it shares the group of the daily sweep.
+    concurrency:
+      group: contribution-policy-${{ github.event.pull_request.number || (github.event.action == 'opened' && github.event.issue.number) || 'sweep' }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install: none
+
+      - name: Apply the policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ "$EVENT" = pull_request_target ]; then
+            bun scripts/contribution-policy.ts pr "$PR_NUMBER"
+          elif [ "$EVENT" = issues ] && [ "$ACTION" = opened ]; then
+            bun scripts/contribution-policy.ts issue "$ISSUE_NUMBER"
+          else
+            bun scripts/contribution-policy.ts sweep
+          fi

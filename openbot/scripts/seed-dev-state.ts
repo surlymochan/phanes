@@ -1,0 +1,1825 @@
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, parse, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { serializeAttachmentReference } from "@openbot/contracts/attachment-references";
+import { serializeChatTagReference } from "@openbot/contracts/chat-tag-references";
+import { sortConversationMessages } from "@openbot/contracts/conversation-order";
+import { DEVELOPMENT_CLAUDE_DEFAULT, DEVELOPMENT_FREE_DEFAULT } from "@openbot/contracts/development-defaults";
+import type {
+  AgentModelId,
+  AgentProviderId,
+  AgentReasoningEffort,
+  AgentSummary,
+  AttachmentSummary,
+  ChannelMessage,
+  ChannelTask,
+  ConversationMessage,
+  Routine,
+} from "@openbot/contracts/ipc";
+import { channelRoutingConversationEventItemType } from "@openbot/contracts/ipc";
+import { createOpenBotLogger, toLogValue } from "@openbot/logging";
+import { strToU8, zipSync } from "fflate";
+import { z } from "zod";
+import { agentNamesById, displayMessageReferences } from "../src/backend/agent/delivery-content";
+import { AgentMemoryStore } from "../src/backend/agent-memory-store";
+import { AgentRoutineStore } from "../src/backend/agent-routine-store";
+import { AgentStore, DEFAULT_AGENT_PROVIDER } from "../src/backend/agent-store";
+import { ChannelMemoryStore } from "../src/backend/channel-memory-store";
+import { ChannelRoutineStore } from "../src/backend/channel-routine-store";
+import { ChannelStore } from "../src/backend/channel-store";
+import { resolveClaudeCli } from "../src/backend/cli";
+import { runCauseEffect } from "../src/backend/effect-boundary";
+import { isMissingFileError } from "../src/backend/file-errors";
+import { MailboxStore } from "../src/backend/mailbox-store";
+import { TeamChatStore } from "../src/backend/team-chat-store";
+import { developmentUserDataName, readDevelopmentInstanceId } from "../src/main/development-profile";
+import { ProviderRuntimeManager, providerRuntimeRoot } from "../src/main/provider-runtime-manager";
+import { writeSetupState } from "../src/main/setup-store";
+import { TeamStore } from "../src/main/team-store";
+import { resolveDevelopmentAppDataRoot } from "./development-state-paths";
+import { readScriptArguments } from "./script-arguments";
+import { NO_SCALE, parseSeedScale, type SeedScale, seedScale } from "./seed-dev-scale";
+
+export const DEVELOPMENT_SEED_MANIFEST_FILE = "openbot-dev-seed-v1.json";
+
+const logger = createOpenBotLogger("seed-dev-state");
+
+const TEAM_FILE = "openbot-team-server-v2.json";
+/** Read only, exactly as the app reads it: the file a build without accounts owns. */
+const LEGACY_TEAM_FILE = "openbot-team-server-v1.json";
+const SETUP_FILE = "openbot-setup-v2.json";
+const SEED_VERSION = 1;
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const CHANNEL_LAUNCH_ROOM = "channel-launch-room";
+const CHANNEL_BETA_FEEDBACK = "channel-beta-feedback";
+/**
+ * The reader id `HostService.channelActor` uses while no account is signed in. The signed-in reader
+ * adopts these cursors through `ChannelStore.adoptReads`, so the seeded read state follows it.
+ */
+const LOCAL_MEMBER_ID = "local";
+/** The provider, model and effort every seeded agent shares. Not per-agent data: one answer. */
+export interface SeededAgentModel {
+  provider: AgentProviderId;
+  model: AgentModelId;
+  reasoningEffort: AgentReasoningEffort;
+}
+
+/**
+ * What the seeded agents run on: Claude Haiku while Claude Code is signed in, and OpenCode's free
+ * DeepSeek otherwise, never Codex.
+ *
+ * The app asks the CLI it spawns. A seed has no provider runtime, so it asks the same binary
+ * directly, and reads anything that fails -- nothing downloaded yet, no sign-in, a command that
+ * moved -- as "signed out". The free model needs no sign-in, so it is not checked: the app
+ * downloads its OpenCode when the first agent starts.
+ */
+async function seededAgentModel(appDataRoot: string): Promise<SeededAgentModel> {
+  return (await claudeSignedIn(appDataRoot)) ? DEVELOPMENT_CLAUDE_DEFAULT : DEVELOPMENT_FREE_DEFAULT;
+}
+
+/**
+ * Whether Claude Code is signed in on the default account, the one a new dev profile uses.
+ * `claude auth status` exits 1 when signed out, which `execFileSync` throws.
+ */
+async function claudeSignedIn(appDataRoot: string): Promise<boolean> {
+  try {
+    const cli = await runCauseEffect(resolveClaudeCli({ bundledExecutable: managedClaudeExecutable(appDataRoot) }));
+    const status = execFileSync(cli.executable, ["auth", "status", "--json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+      // The flag the app spawns a managed CLI with. A managed binary that updates itself while a
+      // profile is seeded stops being the exact version the app verifies, and the app downloads it
+      // again on the next start.
+      env: { ...process.env, ...(cli.source === "managed" ? { DISABLE_AUTOUPDATER: "1" } : {}) },
+    });
+    return z.object({ loggedIn: z.literal(true) }).safeParse(JSON.parse(status)).success;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where the app's own Claude Code is: the runtime store this computer shares, which is where a CLI
+ * the user downloaded in OpenBot is the only copy there is.
+ *
+ * The store, not the status: the manager is read for the path it computes, and nothing here creates
+ * a directory, downloads, or collects an old version.
+ */
+function managedClaudeExecutable(appDataRoot: string): string | null {
+  const runtimes = new ProviderRuntimeManager({
+    root: providerRuntimeRoot({ appData: appDataRoot, userDataOverride: "" }),
+  });
+  return runtimes.executablePath("claude");
+}
+
+const GENERATED_DIRECTORY_PATTERN =
+  /^generated\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const SHOWCASE_IMAGE_PATH = resolve(process.cwd(), "src", "renderer", "src", "assets", "openbot-logo-dev.png");
+
+function previewPdf(): string {
+  const stream = "BT /F1 18 Tf 24 150 Td (OpenBot file preview) Tj ET";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  const offsets: number[] = [];
+  let body = "%PDF-1.4\n";
+  objects.forEach((object, index) => {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const startXref = body.length;
+  const entries = offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("");
+  return `${body}xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${entries}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF\n`;
+}
+
+function previewMp3(): Uint8Array {
+  const frameBytes = 417;
+  const frames = 40;
+  const result = new Uint8Array(frameBytes * frames);
+  for (let index = 0; index < frames; index += 1) result.set([0xff, 0xfb, 0x90, 0x00], index * frameBytes);
+  return result;
+}
+
+function previewXlsx(): Uint8Array {
+  return zipSync({
+    "xl/workbook.xml": strToU8(
+      '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><workbookPr date1904="1"/><sheets><sheet name="Operating plan" sheetId="1" r:id="rId1"/><sheet name="Regional view" sheetId="2" r:id="rId2"/></sheets></workbook>',
+    ),
+    "xl/_rels/workbook.xml.rels": strToU8(
+      '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>',
+    ),
+    "xl/styles.xml": strToU8(
+      '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="3"><numFmt numFmtId="165" formatCode="0.0%"/><numFmt numFmtId="166" formatCode="yyyy-mm-dd"/><numFmt numFmtId="167" formatCode="h:mm"/></numFmts><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="165"/><xf numFmtId="166"/><xf numFmtId="167"/></cellXfs></styleSheet>',
+    ),
+    "xl/worksheets/sheet1.xml": strToU8(
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Workstream</t></is></c><c r="B1" t="inlineStr"><is><t>Owner</t></is></c><c r="C1" t="inlineStr"><is><t>Status</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Product QA</t></is></c><c r="B2" t="inlineStr"><is><t>Builder</t></is></c><c r="C2" t="inlineStr"><is><t>Ready</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Evidence</t></is></c><c r="B3" t="inlineStr"><is><t>Research</t></is></c><c r="C3" t="inlineStr"><is><t>In review</t></is></c></row></sheetData></worksheet>',
+    ),
+    "xl/worksheets/sheet2.xml": strToU8(
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c><c r="B1" t="inlineStr"><is><t>Activation</t></is></c><c r="C1" t="inlineStr"><is><t>Date</t></is></c><c r="D1" t="inlineStr"><is><t>Time</t></is></c><c r="E1" t="inlineStr"><is><t>Empty</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>North</t></is></c><c r="B2" s="1"><v>0.55</v></c><c r="C2" s="2"><v>0</v></c><c r="D2" s="3"><v>0.5</v></c><c r="E2" s="1"/></row></sheetData></worksheet>',
+    ),
+  });
+}
+
+interface DevelopmentSeedManifest {
+  version: 1;
+  createdAt: string;
+  transferDirectories: string[];
+}
+
+const developmentSeedManifestSchema = z.object({
+  version: z.literal(1),
+  createdAt: z.string(),
+  transferDirectories: z.array(z.string()),
+});
+
+export interface DevelopmentSeedOptions {
+  appDataRoot?: string;
+  homeDirectory?: string;
+  dryRun?: boolean;
+  ifMissing?: boolean;
+  instanceId?: string | null;
+  /**
+   * What the seeded agents run on. Left out, it is resolved from this computer's OpenCode CLI,
+   * which is what makes it an option: a test pins the answer instead of asking the machine.
+   */
+  agentModel?: SeededAgentModel;
+  /** Generated agents, histories, channels and images on top of the showcase, for benchmarks. */
+  scale?: SeedScale | undefined;
+}
+
+export interface DevelopmentSeedSummary {
+  targetProfile: string;
+  dryRun: boolean;
+  profileActive: boolean;
+  /** The model every seeded agent runs on, which a dry run reports before anything is written. */
+  agentModel: AgentModelId;
+  agents: number;
+  conversations: number;
+  attachments: number;
+  teamMembers: number;
+  activeInvites: number;
+  sessions: number;
+  directThreads: number;
+  queuedDeliveries: number;
+  memories: number;
+  routines: number;
+  routineRuns: number;
+  channels: number;
+  channelMessages: number;
+  channelTasks: number;
+  channelMemories: number;
+  channelRoutines: number;
+  channelRoutineRuns: number;
+}
+
+const SEED_SUMMARY = {
+  agents: 4,
+  conversations: 4,
+  attachments: 12,
+  teamMembers: 2,
+  activeInvites: 1,
+  sessions: 2,
+  directThreads: 1,
+  queuedDeliveries: 0,
+  memories: 7,
+  routines: 6,
+  routineRuns: 3,
+  channels: 2,
+  channelMessages: 12,
+  channelTasks: 5,
+  channelMemories: 3,
+  channelRoutines: 2,
+  channelRoutineRuns: 2,
+} as const;
+
+const AGENTS = [
+  {
+    id: "chief",
+    name: "Chief",
+    title: "Chief of staff",
+    description: "Coordinates priorities, decisions, and handoffs across the team.",
+    avatarHue: 245,
+  },
+  {
+    id: "research",
+    name: "Research",
+    title: "Research partner",
+    description: "Finds reliable sources and turns them into concise briefs.",
+    avatarHue: 185,
+  },
+  {
+    id: "builder",
+    name: "Builder",
+    title: "Product engineer",
+    description: "Builds product changes and records clear technical decisions.",
+    avatarHue: 30,
+  },
+  {
+    id: "launch",
+    name: "Launch",
+    title: "Go-to-market lead",
+    description: "Prepares launch assets, messaging, and release checklists.",
+    avatarHue: 320,
+  },
+] as const;
+
+export async function seedDevelopmentState(options: DevelopmentSeedOptions = {}): Promise<DevelopmentSeedSummary> {
+  const homeDirectory = resolve(options.homeDirectory ?? homedir());
+  const appDataRoot = resolve(
+    options.appDataRoot ?? resolveDevelopmentAppDataRoot(process.platform, process.env, homeDirectory),
+  );
+  assertSafeAppDataRoot(appDataRoot);
+  const targetProfile = resolve(appDataRoot, developmentUserDataName("app", options.instanceId ?? null));
+  if (dirname(targetProfile) !== appDataRoot) throw new Error(`Unsafe OpenBot dev profile path: ${targetProfile}`);
+
+  const profileActive = await isDevelopmentProfileActive(targetProfile);
+  const agentModel = options.agentModel ?? (await seededAgentModel(appDataRoot));
+  const scale = options.scale ?? NO_SCALE;
+  const summary: DevelopmentSeedSummary = {
+    targetProfile,
+    dryRun: options.dryRun ?? false,
+    profileActive,
+    agentModel: agentModel.model,
+    ...SEED_SUMMARY,
+    agents: SEED_SUMMARY.agents + scale.agents,
+    conversations: SEED_SUMMARY.conversations + scale.agents,
+    attachments: SEED_SUMMARY.attachments + scale.attachments,
+    channels: SEED_SUMMARY.channels + scale.channels,
+    channelMessages: SEED_SUMMARY.channelMessages + scale.channels * scale.channelMessages,
+  };
+  if (options.dryRun) return summary;
+  if (options.ifMissing && (await pathExists(targetProfile))) return summary;
+  if (profileActive) {
+    throw new Error("Quit the OpenBot dev app before you seed its local state.");
+  }
+
+  await mkdir(appDataRoot, { recursive: true, mode: 0o700 });
+  const stagingProfile = await mkdtemp(join(appDataRoot, ".openbot-dev-seed-"));
+  const newTransferDirectories: string[] = [];
+  try {
+    await buildSeedProfile(stagingProfile, homeDirectory, newTransferDirectories, agentModel, scale);
+    if (await isDevelopmentProfileActive(targetProfile)) {
+      throw new Error("Quit the OpenBot dev app before you seed its local state.");
+    }
+    if (options.ifMissing && (await pathExists(targetProfile))) {
+      await cleanupStagedSeed(stagingProfile, homeDirectory, newTransferDirectories);
+      return summary;
+    }
+    await replaceDevelopmentProfile(targetProfile, stagingProfile, homeDirectory);
+  } catch (error) {
+    await cleanupStagedSeed(stagingProfile, homeDirectory, newTransferDirectories);
+    throw error;
+  }
+
+  return summary;
+}
+
+export async function isDevelopmentProfileActive(
+  profilePath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  // Chromium on Windows has no `SingletonLock`. It holds `lockfile` open while it runs.
+  if (platform === "win32") {
+    try {
+      await lstat(join(profilePath, "lockfile"));
+      return true;
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+    }
+  }
+  const lockPath = join(profilePath, "SingletonLock");
+  try {
+    const lock = await lstat(lockPath);
+    if (!lock.isSymbolicLink()) return true;
+  } catch (error) {
+    if (isMissingFileError(error)) return false;
+    throw error;
+  }
+
+  let target: string;
+  try {
+    target = await readlink(lockPath);
+  } catch {
+    return true;
+  }
+  const processId = Number(target.match(/-(\d+)$/u)?.[1]);
+  if (!Number.isSafeInteger(processId) || processId <= 0) return true;
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
+  }
+}
+
+export async function cleanupSeedOwnedTransfers(profilePath: string, homeDirectory = homedir()): Promise<string[]> {
+  const directories = await readSeedTransferDirectories(profilePath);
+  return removeTransferDirectories(homeDirectory, directories);
+}
+
+async function buildSeedProfile(
+  profilePath: string,
+  homeDirectory: string,
+  transferDirectories: string[],
+  agentModel: SeededAgentModel,
+  scale: SeedScale,
+): Promise<void> {
+  const agentStore = new AgentStore(profilePath, homeDirectory);
+  await runCauseEffect(agentStore.initialize());
+  const mailbox = new MailboxStore(profilePath, agentStore.sharedRoot, agentStore.database);
+  await runCauseEffect(mailbox.initialize());
+
+  const clock = createSeedClock();
+  try {
+    const agents = await seedAgents(agentStore, agentModel);
+    const attachments = await seedAttachments(mailbox, agents, transferDirectories);
+    seedMemories(agentStore);
+    await seedRoutines(agentStore, mailbox, clock);
+    await seedAgentExchanges(mailbox);
+    await seedConversations(agentStore, mailbox, agents, attachments, clock);
+    await seedChannels(agentStore, mailbox, agents, clock, transferDirectories);
+    await seedScale({
+      agentStore,
+      mailbox,
+      scale,
+      agentModel,
+      channelMembers: ["chief", "research", "builder"],
+      now: clock.now.getTime(),
+      transferDirectories,
+    });
+    await seedTeam(profilePath, agentStore, clock);
+    // No model beside the provider, and the built-in provider: a seeded profile records no choice
+    // of the developer's, which is what lets the app apply its own development default to an agent
+    // created later. `AgentService` decides that one against the live catalog; this script cannot.
+    await runCauseEffect(
+      writeSetupState(join(profilePath, SETUP_FILE), {
+        preferredProvider: DEFAULT_AGENT_PROVIDER,
+        preferredModel: null,
+      }),
+    );
+    await writeSeedManifest(profilePath, clock, transferDirectories);
+  } finally {
+    agentStore.database.close();
+  }
+}
+
+function seedMemories(agentStore: AgentStore): void {
+  const memories = new AgentMemoryStore(agentStore.database);
+  for (const fixture of [
+    {
+      agentId: "chief",
+      text: "The user prefers concise status updates with clear owners and next steps.",
+      origin: "manual" as const,
+    },
+    {
+      agentId: "chief",
+      text: "Use Europe/Warsaw when presenting launch dates and times.",
+      origin: "manual" as const,
+    },
+    {
+      agentId: "chief",
+      text: "The current priority is a traceable OpenBot launch plan.",
+      origin: "automatic" as const,
+      sourceTurnId: "dev-seed-turn-chief-plan",
+    },
+    {
+      agentId: "research",
+      text: "Prioritize primary sources and call out claims that still need verification.",
+      origin: "manual" as const,
+    },
+    {
+      agentId: "research",
+      text: "The launch evidence map contains one claim that still needs a primary source.",
+      origin: "automatic" as const,
+      sourceTurnId: "dev-seed-turn-research-evidence",
+    },
+    {
+      agentId: "builder",
+      text: "Implementation plans should include typecheck, tests, and a rollback step.",
+      origin: "manual" as const,
+    },
+    {
+      agentId: "launch",
+      text: "Use calm, evidence-based release messaging and review final assets before publication.",
+      origin: "manual" as const,
+    },
+  ]) {
+    if (fixture.origin === "automatic") {
+      memories.saveAutomatic({
+        agentId: fixture.agentId,
+        text: fixture.text,
+        sourceTurnId: fixture.sourceTurnId,
+      });
+    } else {
+      memories.createManual(fixture.agentId, fixture.text);
+    }
+  }
+}
+
+/** Not a ciphertext of any secret: the app cannot decrypt it, so the webhook stays closed until regenerated. */
+const SEED_WEBHOOK_SECRET_PLACEHOLDER = Buffer.from("openbot-dev-seed: regenerate this secret").toString("base64");
+
+async function seedRoutines(agentStore: AgentStore, mailbox: MailboxStore, clock: SeedClock): Promise<void> {
+  const routines = new AgentRoutineStore(agentStore.database);
+  const timezone = seedTimezone();
+  const now = clock.now;
+  const morningBrief = routines.create(
+    {
+      agentId: "chief",
+      name: "Morning launch brief",
+      instruction: "Summarize launch progress, blockers, owners, and the next decision in five bullets.",
+      active: true,
+      timezone,
+      schedule: { kind: "weekdays", time: "09:00" },
+    },
+    now,
+  );
+  const fridayReview = routines.create(
+    {
+      agentId: "chief",
+      name: "Friday launch review",
+      instruction: "Prepare the weekly launch review with decisions, risks, and unresolved ownership gaps.",
+      active: true,
+      timezone,
+      schedule: { kind: "weekly", weekday: 5, time: "16:00" },
+    },
+    now,
+  );
+  const sourceCheck = routines.create(
+    {
+      agentId: "research",
+      name: "Daily source check",
+      instruction: "Recheck open launch claims against primary sources and report only material changes.",
+      active: true,
+      timezone,
+      schedule: { kind: "daily", time: "08:30" },
+    },
+    now,
+  );
+  routines.create(
+    {
+      agentId: "builder",
+      name: "Dependency health check",
+      instruction: "Review dependency health and prepare a short risk report without changing the codebase.",
+      active: false,
+      timezone,
+      schedule: { kind: "weekly", weekday: 1, time: "10:00" },
+    },
+    now,
+  );
+  routines.create(
+    {
+      agentId: "launch",
+      name: "Release readiness pulse",
+      instruction: "Check release assets, messaging, and approvals, then list anything blocking publication.",
+      active: true,
+      timezone,
+      schedule: { kind: "weekdays", time: "15:30" },
+    },
+    now,
+  );
+
+  // One routine that a webhook starts, so the canvas and the routine settings show a webhook. The app
+  // keeps the signing secret encrypted with Electron's safe storage, which this script cannot reach,
+  // so the seed stores a placeholder: requests answer 503 until the secret is regenerated in the app.
+  routines.saveRecord(
+    "launch",
+    undefined,
+    {
+      name: "Release published",
+      instruction: "Check the published release's notes and assets, then list the three things the team does next.",
+      active: true,
+      timezone,
+      trigger: {
+        kind: "webhook",
+        eventType: "release.published",
+        filters: [{ pointer: "/release/prerelease", value: false }],
+        secretCiphertext: SEED_WEBHOOK_SECRET_PLACEHOLDER,
+      },
+    },
+    now,
+  );
+
+  // Each run holds its own `scheduledFor`, but the request it delivers carries the mailbox clock,
+  // which is the moment the seed runs. So two runs of one routine would render as one instruction
+  // repeated at one time. Two routines keep the scheduled and the manual run apart in the thread.
+  await seedRoutineRun(routines, mailbox, morningBrief, "scheduled", clock.at(26 * HOUR), "succeeded");
+  await seedRoutineRun(routines, mailbox, fridayReview, "manual", clock.at(2 * HOUR), "succeeded");
+  await seedRoutineRun(
+    routines,
+    mailbox,
+    sourceCheck,
+    "scheduled",
+    clock.at(25 * HOUR),
+    "failed",
+    "One source was temporarily unavailable.",
+  );
+}
+
+async function seedRoutineRun(
+  routines: AgentRoutineStore,
+  mailbox: MailboxStore,
+  routine: Routine,
+  kind: "scheduled" | "manual",
+  scheduledFor: string,
+  status: "succeeded" | "failed",
+  error: string | null = null,
+): Promise<void> {
+  const run = routines.createRun(
+    routine,
+    kind === "scheduled" ? routine.trigger.id : null,
+    kind === "scheduled" ? "scheduled" : "test",
+    scheduledFor,
+  );
+  const receipt = await runCauseEffect(
+    mailbox.enqueue({
+      sender: {
+        kind: "routine",
+        routineId: routine.id,
+        runId: run.id,
+        routineName: routine.name,
+        scheduledFor,
+      },
+      recipientAgentIds: [routine.agentId],
+      text: routine.instruction,
+      idempotencyKey: `dev-seed:routine-run:${run.id}`,
+    }),
+  );
+  const delivery = receipt.deliveries[0];
+  if (!delivery) throw new Error("The seeded routine run did not create a delivery.");
+  routines.attachDelivery(run.id, delivery.id);
+  await runCauseEffect(mailbox.markStarting(delivery.id));
+  await runCauseEffect(mailbox.markRunning(delivery.id, `dev-seed-routine-turn-${run.id}`));
+  await runCauseEffect(mailbox.markTerminal(delivery.id, status === "succeeded" ? "completed" : "failed", error));
+  routines.updateRunStatus(run.id, status, error);
+}
+
+async function seedAgents(agentStore: AgentStore, agentModel: SeededAgentModel): Promise<Map<string, AgentSummary>> {
+  const agents = new Map<string, AgentSummary>();
+  for (const fixture of AGENTS) {
+    await runCauseEffect(agentStore.getOrCreate(fixture.id, fixture.name, fixture.title));
+    const agent = await runCauseEffect(
+      agentStore.updateAgent({
+        agentId: fixture.id,
+        name: fixture.name,
+        title: fixture.title,
+        description: fixture.description,
+        // The provider travels with the model: a record left on the built-in provider while its
+        // model belongs to another one names a model that provider cannot run.
+        provider: agentModel.provider,
+        model: agentModel.model,
+        reasoningEffort: agentModel.reasoningEffort,
+        avatarSeed: fixture.id,
+        avatarHue: fixture.avatarHue,
+      }),
+    );
+    await runCauseEffect(agentStore.ensureThreadId(fixture.id));
+    agents.set(fixture.id, agentStore.list().find((candidate) => candidate.id === fixture.id) ?? agent);
+  }
+  return agents;
+}
+
+const spreadsheetDateWorkbooks: {
+  system: "1900" | "1904";
+  cases: { id: string; serial: number; style: number }[];
+}[] = [
+  {
+    system: "1900",
+    cases: [
+      { id: "date-1", serial: 1, style: 1 },
+      { id: "date-59", serial: 59, style: 1 },
+      { id: "date-60", serial: 60, style: 1 },
+      { id: "date-61", serial: 61, style: 1 },
+      { id: "datetime-1.5", serial: 1.5, style: 2 },
+      { id: "datetime-60.5", serial: 60.5, style: 2 },
+      { id: "modern-45292", serial: 45292, style: 1 },
+      { id: "plain-number", serial: 60, style: 0 },
+      { id: "time-only", serial: 0.5, style: 3 },
+    ],
+  },
+  {
+    system: "1904",
+    cases: [
+      { id: "date-0", serial: 0, style: 1 },
+      { id: "date-59", serial: 59, style: 1 },
+      { id: "plain-number", serial: 60, style: 0 },
+      { id: "time-only", serial: 0.5, style: 3 },
+    ],
+  },
+];
+
+const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const PACKAGE_REL = "http://schemas.openxmlformats.org/package/2006/relationships";
+
+const spreadsheetNumberFormatCases: { id: string; value: number; format: string }[] = [
+  { id: "dollar-prefix", value: 1234.5, format: '"$"#,##0.00' },
+  { id: "negative-dollar-prefix", value: -1234.5, format: '"$"#,##0.00' },
+  { id: "spaced-prefix", value: 1234.5, format: '"USD "0.00' },
+  { id: "prefix-and-percent", value: 0.125, format: '"Gain "0.0%' },
+  { id: "suffix", value: 2.5, format: '0.00" kg"' },
+  { id: "text-only", value: 1234.5, format: '"Total"' },
+];
+
+const escapeXmlAttribute = (value: string): string => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+
+/** A one-sheet workbook with a Case column and a styled Value column. */
+function caseWorkbookXlsx(input: {
+  sheetName: string;
+  date1904: boolean;
+  /** Format codes for the custom IDs 164 and up. */
+  formats: string[];
+  /** The numFmtId of each cell style. */
+  styles: number[];
+  cases: { id: string; value: number; style: number }[];
+}): Uint8Array {
+  const entries = {
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+      <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+    </Types>`,
+    "_rels/.rels": `<Relationships xmlns="${PACKAGE_REL}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    "xl/workbook.xml": `<workbook xmlns="${NS}" xmlns:r="${REL}">${input.date1904 ? '<workbookPr date1904="1"/>' : ""}<sheets><sheet name="${input.sheetName}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": `<Relationships xmlns="${PACKAGE_REL}">
+      <Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>
+      <Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>
+    </Relationships>`,
+    "xl/styles.xml": `<styleSheet xmlns="${NS}">
+      ${input.formats.length ? `<numFmts count="${input.formats.length}">${input.formats.map((code, index) => `<numFmt numFmtId="${164 + index}" formatCode="${escapeXmlAttribute(code)}"/>`).join("")}</numFmts>` : ""}
+      <fonts count="1"><font/></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+      <borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+      <cellXfs count="${input.styles.length}">${input.styles.map((id) => `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`).join("")}</cellXfs>
+    </styleSheet>`,
+    "xl/worksheets/sheet1.xml": `<worksheet xmlns="${NS}"><sheetData>
+      <row r="1"><c r="A1" t="inlineStr"><is><t>Case</t></is></c><c r="B1" t="inlineStr"><is><t>Value</t></is></c></row>
+      ${input.cases
+        .map(
+          (entry, index) =>
+            `<row r="${index + 2}"><c r="A${index + 2}" t="inlineStr"><is><t>${entry.id}</t></is></c><c r="B${index + 2}" s="${entry.style}"><v>${entry.value}</v></c></row>`,
+        )
+        .join("")}
+    </sheetData></worksheet>`,
+  };
+  return zipSync(Object.fromEntries(Object.entries(entries).map(([name, xml]) => [name, strToU8(xml)])));
+}
+
+function spreadsheetDatesXlsx(system: "1900" | "1904"): Uint8Array {
+  const workbook = spreadsheetDateWorkbooks.find((entry) => entry.system === system);
+  if (!workbook) throw new Error("Missing spreadsheet date fixture.");
+  return caseWorkbookXlsx({
+    sheetName: `Dates ${workbook.system}`,
+    // No workbookPr in the 1900 fixture: Excel uses that system by default.
+    date1904: workbook.system === "1904",
+    formats: [],
+    styles: [0, 14, 22, 21],
+    cases: workbook.cases.map((entry) => ({ id: entry.id, value: entry.serial, style: entry.style })),
+  });
+}
+
+function spreadsheetNumberFormatsXlsx(): Uint8Array {
+  const formats = [...new Set(spreadsheetNumberFormatCases.map((entry) => entry.format))];
+  return caseWorkbookXlsx({
+    sheetName: "Number formats",
+    date1904: false,
+    formats,
+    styles: [0, ...formats.map((_format, index) => 164 + index)],
+    cases: spreadsheetNumberFormatCases.map((entry) => ({
+      id: entry.id,
+      value: entry.value,
+      style: formats.indexOf(entry.format) + 1,
+    })),
+  });
+}
+
+async function seedAttachments(
+  mailbox: MailboxStore,
+  agents: Map<string, AgentSummary>,
+  transferDirectories: string[],
+): Promise<
+  Record<
+    | "brief"
+    | "metrics"
+    | "evidence"
+    | "image"
+    | "log"
+    | "svg"
+    | "pdf"
+    | "audio"
+    | "spreadsheet"
+    | "spreadsheetDates1900"
+    | "spreadsheetDates1904"
+    | "spreadsheetNumberFormats",
+    AttachmentSummary
+  >
+> {
+  const chief = requireAgent(agents, "chief");
+  const research = requireAgent(agents, "research");
+  const launch = requireAgent(agents, "launch");
+  async function store(
+    owner: AgentSummary,
+    input:
+      | { name: string; mimeType: string; bytes: Uint8Array }
+      | { name: string; mimeType: string; sourcePath: string },
+  ): Promise<AttachmentSummary> {
+    const attachment = await runCauseEffect(
+      mailbox.storeGeneratedAttachment({
+        ...input,
+        ownerAgentId: owner.id,
+        ownerThreadId: owner.threadId,
+      }),
+    );
+    transferDirectories.push(`generated/${attachment.id}`);
+    return attachment;
+  }
+
+  return {
+    brief: await store(chief, {
+      name: "launch-brief.md",
+      mimeType: "text/markdown",
+      bytes: bytes("# Launch brief\n\n- Confirm owners\n- Verify evidence\n- Publish the release note\n"),
+    }),
+    metrics: await store(chief, {
+      name: "launch-metrics.csv",
+      mimeType: "text/csv",
+      bytes: bytes("metric,baseline,target\nactivation,42%,55%\nretention,61%,68%\n"),
+    }),
+    evidence: await store(research, {
+      name: "evidence-map.json",
+      mimeType: "application/json",
+      bytes: bytes(`${JSON.stringify({ sources: 8, verified: 7, needsReview: 1 }, null, 2)}\n`),
+    }),
+    image: await store(launch, {
+      name: "openbot-launch-concept.png",
+      mimeType: "image/png",
+      sourcePath: SHOWCASE_IMAGE_PATH,
+    }),
+    log: await store(chief, {
+      name: "provider-session.log",
+      mimeType: "text/plain",
+      bytes: bytes(
+        [
+          "2026-09-16T09:12:04.118Z  info   provider.claude-code   session started",
+          "2026-09-16T09:12:04.402Z  debug  ipc.attachments        preview requested",
+          "2026-09-16T09:12:06.311Z  error  provider.codex         spawn failed code=ENOENT",
+          "  retry 1 of 3 in 500 ms",
+          "  retry 2 of 3 in 1000 ms",
+          "2026-09-16T09:12:08.044Z  info   provider.codex         ready",
+        ].join("\n"),
+      ),
+    }),
+    svg: await store(chief, {
+      name: "trust-boundary.svg",
+      mimeType: "image/svg+xml",
+      bytes: bytes(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200"><rect width="320" height="200" rx="12" fill="#12141a"/><rect x="24" y="32" width="120" height="56" rx="10" fill="#2f6df6"/><rect x="176" y="112" width="120" height="56" rx="10" fill="#f6a62f"/><path d="M144 60 H210 V112" stroke="#8d94a5" stroke-width="3" fill="none"/></svg>',
+      ),
+    }),
+    pdf: await store(chief, {
+      name: "invoice-2026-09.pdf",
+      mimeType: "application/pdf",
+      bytes: bytes(previewPdf()),
+    }),
+    audio: await store(chief, {
+      name: "standup-recap.mp3",
+      mimeType: "audio/mpeg",
+      bytes: previewMp3(),
+    }),
+    spreadsheet: await store(chief, {
+      name: "operating-plan.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      bytes: previewXlsx(),
+    }),
+    spreadsheetDates1900: await store(chief, {
+      name: "spreadsheet-dates-1900.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      bytes: spreadsheetDatesXlsx("1900"),
+    }),
+    spreadsheetDates1904: await store(chief, {
+      name: "spreadsheet-dates-1904.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      bytes: spreadsheetDatesXlsx("1904"),
+    }),
+    spreadsheetNumberFormats: await store(chief, {
+      name: "spreadsheet-number-formats.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      bytes: spreadsheetNumberFormatsXlsx(),
+    }),
+  };
+}
+
+async function seedConversations(
+  agentStore: AgentStore,
+  mailbox: MailboxStore,
+  agents: Map<string, AgentSummary>,
+  attachments: Record<
+    | "brief"
+    | "metrics"
+    | "evidence"
+    | "image"
+    | "log"
+    | "svg"
+    | "pdf"
+    | "audio"
+    | "spreadsheet"
+    | "spreadsheetDates1900"
+    | "spreadsheetDates1904"
+    | "spreadsheetNumberFormats",
+    AttachmentSummary
+  >,
+  clock: SeedClock,
+): Promise<void> {
+  const message = (id: string, author: ConversationMessage["author"], text: string, ago: number): ConversationMessage =>
+    conversationMessage(clock, id, author, text, ago);
+  const mention = (agentId: string): string => mentionAgent(agents, agentId);
+  const file = (attachment: AttachmentSummary): string => serializeAttachmentReference(attachment.name, attachment.id);
+  const conversations: Record<string, ConversationMessage[]> = {
+    chief: [
+      message(
+        "chief-user-plan",
+        "user",
+        `Prepare the launch plan, tag ${mention("research")}, and keep every decision traceable.`,
+        26 * HOUR,
+      ),
+      {
+        ...message(
+          "chief-assistant-plan",
+          "assistant",
+          [
+            "## Launch plan",
+            "",
+            `I asked ${mention("research")} to verify the evidence. The working documents are`,
+            `${file(attachments.brief)} and ${file(attachments.metrics)}.`,
+            "",
+            "| Workstream | Owner | Status |",
+            "| --- | --- | --- |",
+            `| Product QA | ${mention("builder")} | Ready |`,
+            `| Evidence | ${mention("research")} | In review |`,
+            `| Release | ${mention("launch")} | Ready |`,
+            "",
+            "Next: review the [OpenBot documentation](https://openbot.run/docs), then run:",
+            "",
+            "```bash",
+            "bun run check",
+            "```",
+          ].join("\n"),
+          26 * HOUR - 4 * MINUTE,
+        ),
+        turnId: "dev-seed-turn-chief-plan",
+        attachments: [attachments.brief, attachments.metrics],
+      },
+      {
+        ...message("chief-user-rollback", "user", "Who owns the rollback if the release note is wrong?", 25 * HOUR),
+        replyToMessageId: "chief-assistant-plan",
+      },
+      message(
+        "chief-assistant-rollback",
+        "assistant",
+        `${mention("builder")} owns the rollback. The steps are in the implementation checklist, and ${mention("launch")} holds publication until they pass.`,
+        25 * HOUR - 3 * MINUTE,
+      ),
+      message("chief-user-image", "user", "Generate a banner concept for the launch post.", 6 * HOUR),
+      {
+        ...message("chief-image-completed", "assistant", "", 6 * HOUR - 2 * MINUTE),
+        itemType: "image_generation",
+        attachments: [attachments.image],
+        imageGeneration: {
+          prompt: "A calm OpenBot launch command center at blue hour",
+          resolution: "1024 × 1024",
+          aspectRatio: "square",
+        },
+      },
+      message("chief-user-image-variant", "user", "Try a wide variant of the same concept.", 5 * HOUR),
+      {
+        ...message("chief-image-failed", "assistant", "", 5 * HOUR - MINUTE),
+        status: "failed",
+        itemType: "image_generation",
+        imageGeneration: {
+          prompt: "A second launch concept",
+          resolution: "1536 × 1024",
+          aspectRatio: "landscape",
+          error: "The image service was temporarily unavailable.",
+        },
+      },
+      message("chief-user-sources", "user", "Re-check the external sources in the brief before I share it.", 3 * HOUR),
+      {
+        ...message("chief-assistant-failed", "assistant", "I could not load one external source.", 3 * HOUR - MINUTE),
+        status: "failed",
+      },
+      message("chief-user-audit", "user", "Run the full launch audit and stop if anything is unclear.", 95 * MINUTE),
+      {
+        ...message(
+          "chief-assistant-interrupted",
+          "assistant",
+          "The long audit stopped when the app restarted.",
+          92 * MINUTE,
+        ),
+        status: "interrupted",
+      },
+      {
+        ...message(
+          "chief-assistant-file-previews",
+          "assistant",
+          [
+            "Here is a file preview pack. Open each one to check its renderer:",
+            "",
+            `- ${file(attachments.brief)}`,
+            `- ${file(attachments.metrics)}`,
+            `- ${file(attachments.evidence)}`,
+            `- ${file(attachments.log)}`,
+            `- ${file(attachments.svg)}`,
+            `- ${file(attachments.pdf)}`,
+            `- ${file(attachments.audio)}`,
+            `- ${file(attachments.image)}`,
+            `- ${file(attachments.spreadsheet)}`,
+          ].join("\n"),
+          43 * MINUTE,
+        ),
+        attachments: [
+          attachments.brief,
+          attachments.metrics,
+          attachments.evidence,
+          attachments.log,
+          attachments.svg,
+          attachments.pdf,
+          attachments.audio,
+          attachments.image,
+          attachments.spreadsheet,
+        ],
+      },
+      {
+        ...message(
+          "chief-assistant-spreadsheet-dates",
+          "assistant",
+          [
+            "Open these workbooks to check spreadsheet dates and number formats:",
+            "",
+            `- ${file(attachments.spreadsheetDates1900)}`,
+            `- ${file(attachments.spreadsheetDates1904)}`,
+            `- ${file(attachments.spreadsheetNumberFormats)}`,
+          ].join("\n"),
+          42 * MINUTE,
+        ),
+        attachments: [
+          attachments.spreadsheetDates1900,
+          attachments.spreadsheetDates1904,
+          attachments.spreadsheetNumberFormats,
+        ],
+      },
+      message(
+        "chief-assistant-rich-previews",
+        "assistant",
+        [
+          "The launch flow and its status card:",
+          "",
+          "```mermaid",
+          "flowchart LR",
+          '  QA[Product QA] --> Evidence["Evidence<br/>review"]',
+          "  Evidence --> Release{Release ready?}",
+          "  Release -- yes --> Publish[Publish]",
+          "  Release -- no --> Rollback[Rollback]",
+          "```",
+          "",
+          "```html",
+          '<div style="display:grid;gap:8px;max-width:420px;padding:16px;border-radius:12px;background:#f4f1fb">',
+          '  <strong style="font-size:18px">Launch status</strong>',
+          '  <span style="color:#3d7a3d">QA ready · Evidence in review · Release ready</span>',
+          '  <a href="https://openbot.run/docs">Release checklist</a>',
+          "</div>",
+          "```",
+        ].join("\n"),
+        40 * MINUTE,
+      ),
+    ],
+    research: [
+      message("research-user", "user", "Check the launch claims and return a compact evidence map.", 27 * HOUR),
+      {
+        ...message(
+          "research-assistant",
+          "assistant",
+          `Seven of eight claims are verified. One claim still needs a primary source. See ${file(attachments.evidence)}.`,
+          27 * HOUR - 5 * MINUTE,
+        ),
+        turnId: "dev-seed-turn-research-evidence",
+        attachments: [attachments.evidence],
+      },
+      message(
+        "research-user-open-claim",
+        "user",
+        "Which claim is still open, and what would close it?",
+        3 * HOUR + 30 * MINUTE,
+      ),
+      message(
+        "research-assistant-open-claim",
+        "assistant",
+        "The retention claim is open. Only a vendor blog supports it. A primary source, or a measurement from our own data, would close it.",
+        3 * HOUR + 28 * MINUTE,
+      ),
+    ],
+    builder: [
+      message("builder-user", "user", "Turn the launch plan into a safe implementation checklist.", 25 * HOUR),
+      message(
+        "builder-assistant",
+        "assistant",
+        "### Implementation checklist\n\n1. Run typecheck.\n2. Run Biome.\n3. Test the dev app.\n4. Record the rollback step.\n\n```ts\nconst ready = checks.every(Boolean);\n```",
+        25 * HOUR - 10 * MINUTE,
+      ),
+      message("builder-user-rollback", "user", "Add the rollback step to the checklist and keep the order.", 4 * HOUR),
+      message(
+        "builder-assistant-rollback",
+        "assistant",
+        "The rollback step is now step five: revert the release tag, then republish the previous note. The order of the checks is unchanged.",
+        4 * HOUR - 2 * MINUTE,
+      ),
+    ],
+    launch: [
+      message("launch-user", "user", "Prepare the final release message and asset review.", 23 * HOUR),
+      {
+        ...message(
+          "launch-assistant",
+          "assistant",
+          `The release package is ready. Review ${file(attachments.image)} before publication.`,
+          23 * HOUR - 5 * MINUTE,
+        ),
+        attachments: [attachments.image],
+      },
+      message(
+        "launch-user-hold",
+        "user",
+        `Hold publication until ${mention("research")} closes the open claim.`,
+        2 * HOUR,
+      ),
+      message(
+        "launch-assistant-hold",
+        "assistant",
+        "Publication is on hold. The release note keeps the verified claims only, and I publish after the open claim is closed.",
+        2 * HOUR - 3 * MINUTE,
+      ),
+    ],
+  };
+
+  const agentNames = agentNamesById([...agents.values()]);
+  for (const [agentId, messages] of Object.entries(conversations)) {
+    const agent = requireAgent(agents, agentId);
+    const persistedMessages = [...messages, ...mailbox.conversationMessages(agentId)];
+    sortConversationMessages(persistedMessages);
+    agentStore.database.persistConversation(
+      { agentId, threadId: agent.threadId, activeTurnId: null, revision: 0, messages: persistedMessages },
+      "dev-seed.created",
+      { seedVersion: SEED_VERSION },
+      `dev-seed:conversation:${agentId}`,
+    );
+    // The app writes the preview from the user's last request with its references expanded
+    // (`agent-service.ts`), never from a reply. A hand-written line contradicts the transcript
+    // beside it as soon as the transcript changes.
+    const request = [...messages].reverse().find((entry) => entry.author === "user" && entry.text.trim());
+    if (request)
+      await runCauseEffect(
+        agentStore.updatePreview(
+          agentId,
+          displayMessageReferences(request.text, request.attachments ?? [], agentNames),
+        ),
+      );
+  }
+  await runCauseEffect(mailbox.setReaction("chief", "chief-assistant-plan", { kind: "user" }, "🎉"));
+  await runCauseEffect(mailbox.setReaction("research", "research-assistant", { kind: "user" }, "✅"));
+}
+
+async function seedAgentExchanges(mailbox: MailboxStore): Promise<void> {
+  const completed = await runCauseEffect(
+    mailbox.enqueue({
+      sender: { kind: "agent", agentId: "chief" },
+      recipientAgentIds: ["research", "builder"],
+      text: "Please verify the launch evidence and implementation checklist.",
+      replyToMessageId: "chief-assistant-plan",
+      idempotencyKey: "dev-seed:exchange:completed",
+    }),
+  );
+  for (const [index, delivery] of completed.deliveries.entries()) {
+    await runCauseEffect(mailbox.markStarting(delivery.id));
+    await runCauseEffect(mailbox.markRunning(delivery.id, `dev-seed-turn-completed-${index + 1}`));
+    await runCauseEffect(mailbox.markTerminal(delivery.id, "completed"));
+  }
+
+  // A teammate passing information on without asking for an answer: the state the marker reads as
+  // "Informed" for the sender and "Update from" for the recipient.
+  const notice = await runCauseEffect(
+    mailbox.enqueue({
+      sender: { kind: "agent", agentId: "builder" },
+      recipientAgentIds: ["chief"],
+      text: "The staging build is live. I am continuing with the checklist; no answer needed.",
+      expectsReply: false,
+      idempotencyKey: "dev-seed:exchange:notice",
+    }),
+  );
+  const noticeDelivery = notice.deliveries[0];
+  if (!noticeDelivery) throw new Error("The seeded notice exchange did not create a delivery.");
+  await runCauseEffect(mailbox.markStarting(noticeDelivery.id));
+  await runCauseEffect(mailbox.markRunning(noticeDelivery.id, "dev-seed-turn-notice"));
+  await runCauseEffect(mailbox.markTerminal(noticeDelivery.id, "completed"));
+
+  const failed = await runCauseEffect(
+    mailbox.enqueue({
+      sender: { kind: "agent", agentId: "research" },
+      recipientAgentIds: ["launch"],
+      text: "I could not verify the final launch claim. Please keep it out of the release note.",
+      idempotencyKey: "dev-seed:exchange:failed",
+    }),
+  );
+  const failedDelivery = failed.deliveries[0];
+  if (!failedDelivery) throw new Error("The failed seed exchange did not create a delivery.");
+  await runCauseEffect(mailbox.markStarting(failedDelivery.id));
+  await runCauseEffect(mailbox.markRunning(failedDelivery.id, "dev-seed-turn-failed"));
+  await runCauseEffect(mailbox.markTerminal(failedDelivery.id, "failed", "The primary source was not available."));
+}
+
+/**
+ * The two channels the app cannot show without them: a working room with a delegated run, and one
+ * archived room behind the sidebar toggle. No seeded task is `queued` and no seeded routine run is
+ * open, so the channel service recovers this state at startup without starting a provider turn.
+ */
+async function seedChannels(
+  agentStore: AgentStore,
+  mailbox: MailboxStore,
+  agents: Map<string, AgentSummary>,
+  clock: SeedClock,
+  transferDirectories: string[],
+): Promise<void> {
+  const store = new ChannelStore(agentStore.database);
+  await seedLaunchRoom(store, mailbox, agents, clock, transferDirectories);
+  seedBetaFeedbackChannel(store, agents, clock);
+}
+
+async function seedLaunchRoom(
+  store: ChannelStore,
+  mailbox: MailboxStore,
+  agents: Map<string, AgentSummary>,
+  clock: SeedClock,
+  transferDirectories: string[],
+): Promise<void> {
+  const channelId = CHANNEL_LAUNCH_ROOM;
+  const created = store.update(
+    {
+      ...store.create(channelId, {
+        name: "Launch room",
+        title: "Ship OpenBot 1.0",
+        instructions:
+          "Keep every decision traceable. Name the owner and the evidence in each result, and leave an unverified claim out.",
+        members: [{ agentId: "chief" }, { agentId: "research" }, { agentId: "builder" }, { agentId: "launch" }],
+        leadAgentId: "chief",
+      }),
+      createdAt: clock.at(3 * DAY),
+    },
+    {},
+    "dev-seed:channel-launch-room",
+  );
+  // The execution threads come first: a file an agent generates in a channel belongs to the shared
+  // transcript, so it has to be owned by the channel thread rather than by the agent's own chat.
+  for (const agentId of ["chief", "research", "builder"]) store.context(channelId, agentId);
+  const launchThread = store.context(channelId, "launch").threadId;
+  const draft = await runCauseEffect(
+    mailbox.storeGeneratedAttachment({
+      name: "release-note-draft.md",
+      mimeType: "text/markdown",
+      bytes: bytes(
+        [
+          "# OpenBot 1.0 release note (draft)",
+          "",
+          "## What is new",
+          "- Channels: several agents share one chat and one task list.",
+          "- Routines: a schedule can start work in a channel.",
+          "",
+          "## Evidence",
+          "- Cold start: 1.9 s on the release benchmark. Owner: Builder.",
+          "- Search: 120 ms median on the release benchmark. Owner: Builder.",
+          "",
+          "## Open",
+          "- The retention claim has no primary source. It stays out of this note.",
+          "",
+        ].join("\n"),
+      ),
+      ownerAgentId: "launch",
+      ownerThreadId: launchThread,
+    }),
+  );
+  transferDirectories.push(`generated/${draft.id}`);
+
+  // The routine exists before the message it fired: the author id of a routine request carries the
+  // routine id, the way `ChannelService` writes it for a `request` command.
+  const routines = new ChannelRoutineStore(store.database);
+  const timezone = seedTimezone();
+  const standup = routines.create(
+    {
+      channelId,
+      name: "Daily launch standup",
+      instruction: "Post the launch standup: progress since yesterday, blockers, and the next decision.",
+      active: true,
+      timezone,
+      schedule: { kind: "weekdays", time: "09:15" },
+    },
+    clock.now,
+  );
+  routines.create(
+    {
+      channelId,
+      name: "Weekly launch retro",
+      instruction: "Collect what changed this week, what slipped, and one improvement for the next release.",
+      active: false,
+      timezone,
+      schedule: { kind: "weekly", weekday: 5, time: "16:30" },
+    },
+    clock.now,
+  );
+
+  const requestReleaseNote = "channel-launch-request-release-note";
+  const requestStandup = "channel-launch-request-standup";
+  const requestRollback = "channel-launch-request-rollback";
+  const taskReleaseNote = "channel-launch-task-release-note";
+  const taskEvidence = "channel-launch-task-evidence";
+  const taskStandup = "channel-launch-task-standup";
+  const taskRollback = "channel-launch-task-rollback";
+  const releaseNoteText =
+    "Draft the release note for OpenBot 1.0. Keep the evidence with every claim and name an owner for each section.";
+  const evidenceText = "Verify the two performance claims in the draft and name a primary source for each.";
+  const rollbackText = `Add the rollback owner to the release note. ${mentionAgent(agents, "builder")} should confirm the steps.`;
+  const message = (input: SeedChannelMessage): ChannelMessage => channelMessage(channelId, clock, input);
+  const agentAuthor = (agentId: string): ChannelMessage["author"] => ({
+    kind: "agent",
+    id: agentId,
+    name: requireAgent(agents, agentId).name,
+  });
+
+  const messages: ChannelMessage[] = [
+    message({
+      id: requestReleaseNote,
+      taskId: taskReleaseNote,
+      author: { kind: "member", id: LOCAL_MEMBER_ID, name: "You" },
+      text: releaseNoteText,
+      ago: 2 * DAY,
+    }),
+    message({
+      id: "channel-launch-dispatch-release-note",
+      taskId: taskReleaseNote,
+      author: agentAuthor("chief"),
+      text: "Assigned to Launch.",
+      assignedAgentId: "launch",
+      ago: 2 * DAY - 2 * MINUTE,
+    }),
+    message({
+      id: "channel-launch-handoff-evidence",
+      taskId: taskReleaseNote,
+      author: agentAuthor("launch"),
+      text: `Research: ${evidenceText}`,
+      replyToMessageId: requestReleaseNote,
+      ago: 2 * DAY - 6 * MINUTE,
+    }),
+    message({
+      id: "channel-launch-result-evidence",
+      taskId: taskEvidence,
+      author: agentAuthor("research"),
+      text: "Both performance claims match the release benchmark. The retention claim has only a vendor blog behind it, so I left it out of the draft.",
+      turnId: "dev-seed-turn-channel-evidence",
+      ago: 2 * DAY - 42 * MINUTE,
+    }),
+    message({
+      id: "channel-launch-result-release-note",
+      taskId: taskReleaseNote,
+      author: agentAuthor("launch"),
+      text: `The draft is ready: ${serializeAttachmentReference(draft.name, draft.id)}. It cites the two verified claims and names an owner for each section.`,
+      turnId: "dev-seed-turn-channel-release-note",
+      attachments: [draft],
+      ago: 2 * DAY - 55 * MINUTE,
+    }),
+    message({
+      id: requestStandup,
+      taskId: taskStandup,
+      author: { kind: "member", id: `routine:${standup.id}`, name: standup.name },
+      text: standup.instruction,
+      ago: 26 * HOUR,
+    }),
+    message({
+      id: "channel-launch-result-standup",
+      taskId: taskStandup,
+      author: agentAuthor("chief"),
+      text: "Progress: the release note draft is ready. Blocker: the retention claim has no primary source. Next decision: publish without the claim, or wait for the source.",
+      turnId: "dev-seed-turn-channel-standup",
+      ago: 26 * HOUR - 4 * MINUTE,
+    }),
+    message({
+      id: requestRollback,
+      taskId: taskRollback,
+      author: { kind: "member", id: LOCAL_MEMBER_ID, name: "You" },
+      text: rollbackText,
+      ago: 3 * HOUR,
+    }),
+    message({
+      id: "channel-launch-dispatch-rollback",
+      taskId: taskRollback,
+      author: agentAuthor("chief"),
+      text: "Assigned to Builder.",
+      assignedAgentId: "builder",
+      ago: 3 * HOUR - 2 * MINUTE,
+    }),
+  ];
+  const tasks: ChannelTask[] = [
+    channelTask(channelId, {
+      id: taskReleaseNote,
+      ownerAgentId: "launch",
+      requestMessageId: requestReleaseNote,
+      instruction: releaseNoteText,
+      state: "completed",
+      dependencies: [taskEvidence],
+      assignmentCount: 1,
+    }),
+    channelTask(channelId, {
+      id: taskEvidence,
+      parentTaskId: taskReleaseNote,
+      rootTaskId: taskReleaseNote,
+      ownerAgentId: "research",
+      requestMessageId: requestReleaseNote,
+      instruction: evidenceText,
+      expectedResult: "Name the primary source of each verified claim, or report the claim as open.",
+      state: "completed",
+    }),
+    channelTask(channelId, {
+      id: taskStandup,
+      ownerAgentId: "chief",
+      requestMessageId: requestStandup,
+      instruction: standup.instruction,
+      state: "completed",
+    }),
+    channelTask(channelId, {
+      id: taskRollback,
+      ownerAgentId: "builder",
+      requestMessageId: requestRollback,
+      instruction: rollbackText,
+      state: "failed",
+      error: "The agent could not complete this task.",
+    }),
+  ];
+  store.update(created, { messages, tasks }, "dev-seed:channel-launch-room:transcript");
+  // Two messages the user did not write stay unread, so the sidebar count and the unread divider
+  // both have something to show.
+  store.markRead(channelId, LOCAL_MEMBER_ID, 6, "dev-seed:channel-launch-room:read");
+
+  const standupRun = routines.createRun(standup, standup.trigger.id, "scheduled", clock.at(26 * HOUR));
+  routines.attachRequest(standupRun.id, requestStandup);
+  routines.updateRunStatus(standupRun.id, "succeeded");
+  // A fire that never reached the channel: the run holds the error and no request message.
+  const blockedRun = routines.createRun(standup, null, "test", clock.at(4 * HOUR));
+  routines.updateRunStatus(blockedRun.id, "failed", "Every member was busy when the routine fired.");
+
+  const memories = new ChannelMemoryStore(store.database);
+  memories.createManual(channelId, "Name the owner and the evidence for every release claim.");
+  memories.createManual(channelId, "Use Europe/Warsaw when presenting launch dates and times.");
+  memories.saveFromTool(
+    channelId,
+    "The retention claim has no primary source, so it stays out of the release note.",
+    "dev-seed-turn-channel-evidence",
+    "dev-seed:channel-memory:retention-claim",
+  );
+}
+
+/** Finished work behind the sidebar's archived toggle, which is empty without it. */
+function seedBetaFeedbackChannel(store: ChannelStore, agents: Map<string, AgentSummary>, clock: SeedClock): void {
+  const channelId = CHANNEL_BETA_FEEDBACK;
+  const created = store.update(
+    {
+      ...store.create(channelId, {
+        name: "Beta feedback",
+        title: "Read the beta reports",
+        instructions: "Report counts, not impressions. Name the source of every number.",
+        members: [{ agentId: "research" }, { agentId: "launch" }],
+        leadAgentId: "launch",
+      }),
+      createdAt: clock.at(12 * DAY),
+    },
+    {},
+    "dev-seed:channel-beta-feedback",
+  );
+  store.context(channelId, "research");
+  const requestSummary = "channel-beta-request-summary";
+  const taskSummary = "channel-beta-task-summary";
+  const summaryText = "Summarize the beta feedback and list the three most common requests.";
+  const messages: ChannelMessage[] = [
+    channelMessage(channelId, clock, {
+      id: requestSummary,
+      taskId: taskSummary,
+      author: { kind: "member", id: LOCAL_MEMBER_ID, name: "You" },
+      text: summaryText,
+      ago: 8 * DAY,
+    }),
+    channelMessage(channelId, clock, {
+      id: "channel-beta-dispatch-summary",
+      taskId: taskSummary,
+      author: { kind: "agent", id: "launch", name: requireAgent(agents, "launch").name },
+      text: "Assigned to Research.",
+      assignedAgentId: "research",
+      ago: 8 * DAY - 2 * MINUTE,
+    }),
+    channelMessage(channelId, clock, {
+      id: "channel-beta-result-summary",
+      taskId: taskSummary,
+      author: { kind: "agent", id: "research", name: requireAgent(agents, "research").name },
+      text: "Ninety-four reports. The three most common requests are a shared inbox, faster search, and per-agent notification control.",
+      turnId: "dev-seed-turn-channel-beta",
+      ago: 8 * DAY - 35 * MINUTE,
+    }),
+  ];
+  store.update(
+    created,
+    {
+      messages,
+      tasks: [
+        channelTask(channelId, {
+          id: taskSummary,
+          ownerAgentId: "research",
+          requestMessageId: requestSummary,
+          instruction: summaryText,
+          state: "completed",
+        }),
+      ],
+    },
+    "dev-seed:channel-beta-feedback:transcript",
+  );
+  store.markRead(channelId, LOCAL_MEMBER_ID, messages.length, "dev-seed:channel-beta-feedback:read");
+  store.update({ ...store.get(channelId), archived: true }, {}, "dev-seed:channel-beta-feedback:archive");
+}
+
+interface SeedChannelMessage {
+  id: string;
+  taskId: string;
+  author: ChannelMessage["author"];
+  text: string;
+  ago: number;
+  turnId?: string;
+  replyToMessageId?: string;
+  attachments?: AttachmentSummary[];
+  /** The member a routing receipt names, which makes the row a channel activity marker. */
+  assignedAgentId?: string;
+}
+
+/**
+ * The same message shape `ChannelService` writes: a member request is a `user` message, a lead
+ * dispatch or a handoff is a `system` message, and a reported result is an `assistant` message
+ * with the turn that produced it.
+ */
+function channelMessage(channelId: string, clock: SeedClock, input: SeedChannelMessage): ChannelMessage {
+  return {
+    id: input.id,
+    channelId,
+    taskId: input.taskId,
+    author: input.author,
+    sequence: 0,
+    superseded: false,
+    message: {
+      id: input.id,
+      text: input.text,
+      author: input.author.kind === "member" ? "user" : input.turnId ? "assistant" : "system",
+      createdAt: clock.at(input.ago),
+      status: "completed",
+      turnId: input.turnId,
+      replyToMessageId: input.replyToMessageId,
+      attachments: input.attachments,
+      itemType: input.assignedAgentId
+        ? channelRoutingConversationEventItemType("assigned", input.assignedAgentId)
+        : undefined,
+    },
+  };
+}
+
+interface SeedChannelTask {
+  id: string;
+  ownerAgentId: string;
+  requestMessageId: string;
+  instruction: string;
+  state: ChannelTask["state"];
+  parentTaskId?: string;
+  rootTaskId?: string;
+  expectedResult?: string;
+  dependencies?: string[];
+  assignmentCount?: number;
+  error?: string;
+}
+
+function channelTask(channelId: string, input: SeedChannelTask): ChannelTask {
+  return {
+    id: input.id,
+    channelId,
+    parentTaskId: input.parentTaskId ?? null,
+    rootTaskId: input.rootTaskId ?? input.id,
+    ownerAgentId: input.ownerAgentId,
+    requestMessageId: input.requestMessageId,
+    instruction: input.instruction,
+    attachmentDraftIds: [],
+    expectedResult: input.expectedResult ?? "Complete the requested work and report the result.",
+    sourceMessageIds: [input.requestMessageId],
+    dependencies: input.dependencies ?? [],
+    resources: ["host"],
+    state: input.state,
+    revision: 0,
+    assignmentCount: input.assignmentCount ?? 0,
+    error: input.error ?? null,
+  };
+}
+
+function mentionAgent(agents: Map<string, AgentSummary>, agentId: string): string {
+  return serializeChatTagReference("agent", requireAgent(agents, agentId).name, agentId);
+}
+
+async function seedTeam(profilePath: string, agentStore: AgentStore, clock: SeedClock): Promise<void> {
+  const team = new TeamStore(join(profilePath, TEAM_FILE), join(profilePath, LEGACY_TEAM_FILE));
+  await runCauseEffect(team.initialize());
+  const owner = {
+    id: "openbot-dev-owner",
+    email: "openbot-dev-host@example.com",
+    name: "Dev Owner",
+    avatarUrl: null,
+  };
+  const teamIdentity = await runCauseEffect(team.configureWithAccount("OpenBot Dev Team", owner));
+  const joined = [];
+  for (const member of [
+    { id: "openbot-dev-alice", email: "alice@example.com", name: "Alice Chen", role: "admin" as const },
+  ]) {
+    const invite = await runCauseEffect(team.createInvite(member.role, member.email));
+    joined.push(
+      await runCauseEffect(
+        team.acceptInviteWithAccount(invite.token, {
+          id: member.id,
+          email: member.email,
+          name: member.name,
+          avatarUrl: null,
+        }),
+      ),
+    );
+  }
+  await runCauseEffect(team.createInvite("member", "new-person@example.com"));
+  const ownerSession = await runCauseEffect(team.loginWithAccount(owner));
+  await runCauseEffect(team.setEnabledOnLaunch(teamIdentity.serverId, true));
+
+  // The owner and Alice leave the third seat of the default limit to the dev test client.
+  const [alice] = joined;
+  if (!alice) throw new Error("The development team members could not be created.");
+  const chat = new TeamChatStore(agentStore.database);
+  chat.sendMessage({
+    clientMessageId: "dev-seed-dm-owner-alice-1",
+    senderMemberId: ownerSession.member.id,
+    recipientMemberId: alice.member.id,
+    text: "I added the launch notes. Can you review the last section?",
+    createdAt: clock.at(3 * HOUR),
+  });
+  chat.sendMessage({
+    clientMessageId: "dev-seed-dm-alice-owner-1",
+    senderMemberId: alice.member.id,
+    recipientMemberId: ownerSession.member.id,
+    text: "The notes look good. I left one comment on the rollout section.",
+    createdAt: clock.at(2 * HOUR + 40 * MINUTE),
+  });
+}
+
+async function replaceDevelopmentProfile(target: string, staging: string, homeDirectory: string): Promise<void> {
+  const backup = resolve(dirname(target), `.openbot-dev-backup-${randomUUID()}`);
+  const targetExists = await pathExists(target);
+  if (targetExists) await rename(target, backup);
+  try {
+    await rename(staging, target);
+  } catch (error) {
+    if (targetExists) await rename(backup, target);
+    throw error;
+  }
+  if (!targetExists) return;
+  try {
+    await cleanupSeedOwnedTransfers(backup, homeDirectory);
+  } catch (error) {
+    logger.warn(`The new seed is ready, but old seed files could not be removed: ${errorMessage(error)}`);
+  } finally {
+    await rm(backup, { recursive: true, force: true }).catch((error: unknown) => {
+      logger.warn(`The new seed is ready, but its temporary backup could not be removed: ${errorMessage(error)}`);
+    });
+  }
+}
+
+async function writeSeedManifest(profilePath: string, clock: SeedClock, transferDirectories: string[]): Promise<void> {
+  const manifest: DevelopmentSeedManifest = {
+    version: 1,
+    createdAt: clock.at(0),
+    transferDirectories: [...transferDirectories],
+  };
+  await writeFile(join(profilePath, DEVELOPMENT_SEED_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+async function readSeedTransferDirectories(profilePath: string): Promise<string[]> {
+  try {
+    const parsed = developmentSeedManifestSchema.safeParse(
+      JSON.parse(await readFile(join(profilePath, DEVELOPMENT_SEED_MANIFEST_FILE), "utf8")),
+    );
+    if (!parsed.success) return [];
+    return parsed.data.transferDirectories.filter((entry) => GENERATED_DIRECTORY_PATTERN.test(entry));
+  } catch (error) {
+    if (isMissingFileError(error) || error instanceof SyntaxError) return [];
+    throw error;
+  }
+}
+
+async function removeTransferDirectories(homeDirectory: string, directories: string[]): Promise<string[]> {
+  const root = resolve(homeDirectory, "OpenBot", "Shared", "Transfers");
+  const generatedRoot = resolve(root, "generated");
+  const removed: string[] = [];
+  for (const relativePath of directories) {
+    if (!GENERATED_DIRECTORY_PATTERN.test(relativePath)) continue;
+    const target = resolve(root, ...relativePath.split("/"));
+    if (dirname(target) !== generatedRoot) continue;
+    if (!(await pathExists(target))) continue;
+    await rm(target, { recursive: true, force: true });
+    removed.push(target);
+  }
+  return removed;
+}
+
+async function cleanupStagedSeed(
+  stagingProfile: string,
+  homeDirectory: string,
+  transferDirectories: string[],
+): Promise<void> {
+  await Promise.all([
+    rm(stagingProfile, { recursive: true, force: true }),
+    removeTransferDirectories(homeDirectory, transferDirectories),
+  ]);
+}
+
+/**
+ * Every seeded record is dated backwards from the run. A fixed date would put the whole showcase
+ * weeks before the routine runs, which the schedulers date from the real clock, and would make the
+ * date separators and the sidebar order read wrong on the day a developer seeds.
+ */
+interface SeedClock {
+  now: Date;
+  at(millisecondsAgo: number): string;
+}
+
+function createSeedClock(now = new Date()): SeedClock {
+  return { now, at: (millisecondsAgo) => new Date(now.getTime() - millisecondsAgo).toISOString() };
+}
+
+function seedTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function conversationMessage(
+  clock: SeedClock,
+  id: string,
+  author: ConversationMessage["author"],
+  text: string,
+  millisecondsAgo: number,
+): ConversationMessage {
+  return {
+    id,
+    author,
+    source: author === "assistant" ? "assistant" : author,
+    text,
+    createdAt: clock.at(millisecondsAgo),
+    status: "completed",
+  };
+}
+
+function requireAgent(agents: Map<string, AgentSummary>, agentId: string): AgentSummary {
+  const agent = agents.get(agentId);
+  if (!agent?.threadId) throw new Error(`Seed agent ${agentId} does not have a thread.`);
+  return agent;
+}
+
+function bytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function assertSafeAppDataRoot(appDataRoot: string): void {
+  if (appDataRoot === parse(appDataRoot).root) {
+    throw new Error("The application data root cannot be a filesystem root.");
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isMissingFileError(error)) return false;
+    throw error;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isMainModule(): boolean {
+  const entryPath = process.argv[1];
+  return entryPath !== undefined && import.meta.url === pathToFileURL(resolve(entryPath)).href;
+}
+
+const USAGE = [
+  "Usage: bun run dev:seed [--dry-run] [--if-missing] [--scale=<spec>]",
+  "",
+  "Replaces the app development profile with showcase data. It refuses while the dev app is open.",
+  "  --dry-run      Print the target and the fixture counts. Change no files.",
+  "  --if-missing   Keep an existing profile.",
+  "  --scale=<spec> Add generated data: agents:N,messages:M,channels:C,channelMessages:K,attachments:A",
+].join("\n");
+
+async function main(): Promise<void> {
+  const parsed = readScriptArguments({
+    usage: USAGE,
+    options: { "dry-run": { type: "boolean" }, "if-missing": { type: "boolean" }, scale: { type: "string" } },
+  });
+  if (parsed === null) return;
+  const dryRun = parsed.values["dry-run"] ?? false;
+  const summary = await seedDevelopmentState({
+    dryRun,
+    ifMissing: parsed.values["if-missing"] ?? false,
+    scale: parsed.values.scale === undefined ? undefined : parseSeedScale(parsed.values.scale),
+    instanceId: readDevelopmentInstanceId(process.env.OPENBOT_DEV_INSTANCE_ID),
+  });
+  logger.info(dryRun ? "OpenBot development seed dry run:" : "OpenBot development state seeded:");
+  logger.info(`- profile: ${summary.targetProfile}`);
+  logger.info(`- profile active: ${summary.profileActive ? "yes" : "no"}`);
+  logger.info(`- agent model: ${summary.agentModel}`);
+  logger.info(`- agents: ${summary.agents}`);
+  logger.info(`- conversations: ${summary.conversations}`);
+  logger.info(`- managed attachments: ${summary.attachments}`);
+  logger.info(`- team members: ${summary.teamMembers}`);
+  logger.info(`- active invites: ${summary.activeInvites}`);
+  logger.info(`- direct threads: ${summary.directThreads}`);
+  logger.info(`- queued deliveries: ${summary.queuedDeliveries}`);
+  logger.info(`- memories: ${summary.memories}`);
+  logger.info(`- routines: ${summary.routines}`);
+  logger.info(`- routine runs: ${summary.routineRuns}`);
+  logger.info(`- channels: ${summary.channels}`);
+  logger.info(`- channel messages: ${summary.channelMessages}`);
+  logger.info(`- channel tasks: ${summary.channelTasks}`);
+  logger.info(`- channel memories: ${summary.channelMemories}`);
+  logger.info(`- channel routines: ${summary.channelRoutines}`);
+  logger.info(`- channel routine runs: ${summary.channelRoutineRuns}`);
+  if (dryRun) logger.info("No files were changed.");
+  else logger.info("Run `bun run dev` to open the seeded showcase.");
+}
+
+if (isMainModule()) {
+  main().catch((error: unknown) => {
+    logger.error(toLogValue(error));
+    process.exitCode = 1;
+  });
+}

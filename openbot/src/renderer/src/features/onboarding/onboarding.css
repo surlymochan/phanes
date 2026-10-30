@@ -1,0 +1,1109 @@
+.onboarding-screen {
+  position: absolute;
+  z-index: var(--openbot-layer-dialog);
+  inset: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  background: var(--openbot-bg-canvas);
+  color: var(--openbot-text-primary);
+  -webkit-app-region: drag;
+}
+
+.onboarding-shell {
+  width: min(100%, 680px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 52px 24px;
+  -webkit-app-region: no-drag;
+}
+
+.onboarding-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--openbot-space-1-5);
+  margin-bottom: 20px;
+}
+
+.onboarding-progress span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--openbot-radius-pill);
+  background: var(--openbot-border-strong);
+  transition:
+    width var(--openbot-duration-normal) var(--openbot-ease-out),
+    background-color var(--openbot-duration-normal) ease;
+}
+
+.onboarding-progress span.is-complete {
+  background: var(--openbot-text-muted);
+}
+
+.onboarding-progress span.is-active {
+  width: 22px;
+  background: var(--openbot-text-primary);
+}
+
+.onboarding-step {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.onboarding-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.onboarding-panel h1 {
+  max-width: 620px;
+  margin: 0;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-display);
+  font-weight: var(--openbot-weight-medium);
+  letter-spacing: -0.045em;
+  line-height: 1.12;
+}
+
+.onboarding-description {
+  max-width: 560px;
+  margin: 10px 0 0;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-lg);
+  line-height: 1.45;
+}
+
+.onboarding-computer-visual svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.onboarding-provider {
+  width: min(100%, 480px);
+  margin-top: 26px;
+  text-align: left;
+}
+
+.onboarding-provider .provider-picker-standalone {
+  margin-top: 0;
+}
+
+.onboarding-provider .provider-picker-label {
+  color: var(--openbot-text-secondary);
+}
+
+.onboarding-provider .provider-picker-heading {
+  padding-inline: 1px;
+}
+
+.onboarding-provider .provider-picker-list {
+  background: var(--openbot-bg-control);
+}
+
+.onboarding-provider .provider-picker-hint {
+  color: var(--openbot-text-muted);
+}
+
+.onboarding-computer-visual {
+  position: relative;
+  width: min(100%, 400px);
+  margin-top: 20px;
+}
+
+.onboarding-computer-stop-mist,
+.onboarding-computer-highlight-start {
+  stop-color: var(--openbot-onboarding-desktop-mist);
+}
+
+.onboarding-computer-stop-blue,
+.onboarding-computer-highlight-end {
+  stop-color: var(--openbot-onboarding-desktop-blue);
+}
+
+.onboarding-computer-stop-indigo {
+  stop-color: var(--openbot-onboarding-desktop-indigo);
+}
+
+.onboarding-computer-highlight-start {
+  stop-opacity: 0.92;
+}
+
+.onboarding-computer-highlight-end {
+  stop-opacity: 0;
+}
+
+.onboarding-computer-desktop {
+  stroke: var(--openbot-paper-border);
+  stroke-width: 1;
+  filter: drop-shadow(0 16px 22px var(--openbot-shadow-popover-ambient));
+}
+
+.onboarding-computer-desktop-highlight {
+  pointer-events: none;
+}
+
+.onboarding-computer-desktop-beam {
+  fill: var(--openbot-onboarding-desktop-mist);
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+.onboarding-computer-window-shadow {
+  fill: var(--openbot-shadow-dialog);
+  opacity: 0.46;
+}
+
+.onboarding-computer-window {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: onboarding-computer-window-drag 4.6s var(--openbot-ease-in-out) infinite;
+}
+
+.onboarding-computer-window-body {
+  fill: var(--openbot-onboarding-window);
+  stroke: var(--openbot-paper-border);
+  stroke-width: 1;
+}
+
+.onboarding-computer-window-bar,
+.onboarding-computer-window-bar-fill {
+  fill: var(--openbot-paper-text-muted);
+  opacity: 0.24;
+}
+
+.onboarding-computer-window-bar {
+  stroke: var(--openbot-paper-border);
+  stroke-width: 1;
+}
+
+.onboarding-computer-window-pane {
+  fill: var(--openbot-paper-text-dim);
+  opacity: 0.18;
+}
+
+.onboarding-computer-window-card {
+  fill: var(--openbot-paper-text-dim);
+  opacity: 0.24;
+}
+
+.onboarding-computer-window-line {
+  fill: var(--openbot-paper-text-dim);
+  opacity: 0.54;
+}
+
+.onboarding-computer-window-line-short {
+  opacity: 0.44;
+}
+
+.onboarding-computer-dot-danger {
+  fill: var(--openbot-danger);
+}
+
+.onboarding-computer-dot-warning {
+  fill: var(--openbot-warning);
+}
+
+.onboarding-computer-dot-success {
+  fill: var(--openbot-success);
+}
+
+.onboarding-computer-cursor {
+  transform-box: fill-box;
+  transform-origin: 0 0;
+  animation: onboarding-computer-cursor-drag 4.6s var(--openbot-ease-in-out) infinite;
+}
+
+.onboarding-computer-cursor path {
+  fill: var(--openbot-paper-text);
+  stroke: var(--openbot-onboarding-window);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  filter: drop-shadow(0 2px 3px var(--openbot-shadow-popover-ambient));
+  paint-order: stroke fill;
+}
+
+.onboarding-computer-avatar {
+  position: absolute;
+  z-index: 1;
+  top: 40%;
+  left: 73%;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  animation: onboarding-computer-avatar-drag 4.6s var(--openbot-ease-in-out) infinite;
+}
+
+.onboarding-computer-avatar .agent-avatar {
+  width: 34px;
+  height: 34px;
+}
+
+.onboarding-computer-avatar .agent-avatar > svg {
+  width: 128%;
+  height: 128%;
+  filter: drop-shadow(0 2px 4px var(--openbot-shadow-popover-ambient));
+}
+
+@keyframes onboarding-computer-window-drag {
+  0%,
+  34% {
+    transform: translate(0, 0);
+  }
+
+  56%,
+  78% {
+    transform: translate(18px, 8px);
+  }
+
+  100% {
+    transform: translate(0, 0);
+  }
+}
+
+@keyframes onboarding-computer-cursor-drag {
+  0%,
+  8% {
+    opacity: 0;
+    transform: translate(352px, 190px) scale(0.68);
+  }
+
+  18%,
+  32% {
+    opacity: 1;
+    transform: translate(282px, 72px) scale(0.76);
+  }
+
+  38% {
+    opacity: 1;
+    transform: translate(282px, 72px) scale(0.71);
+  }
+
+  56%,
+  70% {
+    opacity: 1;
+    transform: translate(300px, 80px) scale(0.71);
+  }
+
+  78% {
+    opacity: 1;
+    transform: translate(300px, 80px) scale(0.76);
+  }
+
+  92%,
+  100% {
+    opacity: 0;
+    transform: translate(352px, 190px) scale(0.68);
+  }
+}
+
+@keyframes onboarding-computer-avatar-drag {
+  0%,
+  8% {
+    opacity: 0;
+    transform: translate(68px, 112px) scale(0.88);
+  }
+
+  18%,
+  32% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+
+  38% {
+    opacity: 1;
+    transform: translate(0, 0) scale(0.94);
+  }
+
+  56%,
+  70% {
+    opacity: 1;
+    transform: translate(18px, 8px) scale(0.94);
+  }
+
+  78% {
+    opacity: 1;
+    transform: translate(18px, 8px) scale(1);
+  }
+
+  92%,
+  100% {
+    opacity: 0;
+    transform: translate(68px, 112px) scale(0.88);
+  }
+}
+
+.onboarding-error {
+  width: min(100%, 480px);
+  margin: 12px 0 0;
+  color: var(--openbot-danger);
+  font-size: var(--openbot-text-sm);
+  line-height: 1.45;
+  text-align: center;
+}
+
+.onboarding-actions {
+  width: min(100%, 288px);
+  display: grid;
+  gap: var(--openbot-space-2);
+  margin-top: 22px;
+}
+
+.onboarding-screen[data-step="computer"] .onboarding-actions {
+  margin-top: 16px;
+}
+
+.onboarding-actions .ui-button {
+  width: 100%;
+  min-height: 44px;
+  border-radius: var(--openbot-radius-pill);
+}
+
+.onboarding-next {
+  order: -1;
+}
+
+.onboarding-next-reason {
+  margin: 0;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: 1.45;
+  text-align: center;
+}
+
+@media (max-width: 620px) {
+  .onboarding-shell {
+    padding: 48px 18px;
+  }
+
+  .onboarding-panel h1 {
+    font-size: var(--openbot-text-3xl);
+  }
+
+  .onboarding-description {
+    font-size: var(--openbot-text-md);
+  }
+
+  .onboarding-computer-visual {
+    width: min(100%, 320px);
+    margin-top: 16px;
+  }
+
+  .onboarding-computer-avatar {
+    width: 30px;
+    height: 30px;
+  }
+
+  .onboarding-computer-avatar .agent-avatar {
+    width: 30px;
+    height: 30px;
+  }
+}
+
+@media (max-width: 460px) {
+  .onboarding-provider .provider-picker-option-selection {
+    grid-template-columns: 16px 18px minmax(0, 1fr);
+  }
+
+  .onboarding-provider .provider-picker-state {
+    grid-column: 3;
+    justify-self: start;
+  }
+
+  .onboarding-computer-visual {
+    width: min(100%, 320px);
+    margin-top: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-progress span,
+  .onboarding-computer-window,
+  .onboarding-computer-cursor,
+  .onboarding-computer-avatar {
+    animation: none;
+    transition: none;
+  }
+
+  .onboarding-computer-window {
+    transform: translate(18px, 8px);
+  }
+
+  .onboarding-computer-cursor {
+    opacity: 1;
+    transform: translate(300px, 80px) scale(0.76);
+  }
+
+  .onboarding-computer-avatar {
+    opacity: 1;
+    transform: translate(18px, 8px);
+  }
+}
+
+/* The OpenCode note sits outside the list, so the list lets it through and its first and last rows
+   round their own corners instead of relying on the clip. The first run and the setup dialog both
+   show the note; without the row as its containing block, it points at a different row. */
+:is(.onboarding-provider, .setup-local-content) .provider-picker-list {
+  overflow: visible;
+}
+
+:is(.onboarding-provider, .setup-local-content) .provider-picker-list > :first-child,
+:is(.onboarding-provider, .setup-local-content)
+  .provider-picker-list
+  > :first-child
+  > .provider-picker-option:first-child {
+  border-top-left-radius: calc(var(--openbot-radius-md) - 1px);
+  border-top-right-radius: calc(var(--openbot-radius-md) - 1px);
+}
+
+:is(.onboarding-provider, .setup-local-content) .provider-picker-list > :last-child,
+:is(.onboarding-provider, .setup-local-content)
+  .provider-picker-list
+  > :last-child
+  > .provider-picker-option:last-child {
+  border-bottom-left-radius: calc(var(--openbot-radius-md) - 1px);
+  border-bottom-right-radius: calc(var(--openbot-radius-md) - 1px);
+}
+
+:is(.onboarding-provider, .setup-local-content) .provider-picker-option-with-callout {
+  position: relative;
+}
+
+/* Drawn like the drag hint of the macOS installer: a note, then a thin arrow into the row. */
+.provider-picker-callout {
+  position: absolute;
+  right: calc(100% + 10px);
+  bottom: 50%;
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  color: var(--openbot-onboarding-desktop-indigo);
+  pointer-events: none;
+  animation: provider-picker-callout-in 420ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.provider-picker-callout-title {
+  font-size: var(--openbot-text-md);
+  font-weight: 620;
+  line-height: 18px;
+}
+
+.provider-picker-callout-detail {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: 16px;
+}
+
+.provider-picker-callout-arrow {
+  width: 92px;
+  height: 40px;
+  align-self: flex-end;
+  margin-top: 2px;
+  /* The note ends at the middle of its target; this puts the arrowhead (y 30 of 40) there too. */
+  margin-bottom: -10px;
+}
+
+@keyframes provider-picker-callout-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The same note on the right of the list, for "More providers": the text aligns right and the
+   arrow is mirrored to point left. */
+.provider-picker-callout-end {
+  right: auto;
+  left: calc(100% + 10px);
+  align-items: flex-end;
+  text-align: right;
+}
+
+.provider-picker-callout-end .provider-picker-callout-arrow {
+  align-self: flex-start;
+  transform: scaleX(-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .provider-picker-callout {
+    animation: none;
+  }
+}
+
+/* No room beside the list: the row's own description says the same. */
+@media (max-width: 860px) {
+  .provider-picker-callout {
+    display: none;
+  }
+}
+
+/* The setup dialog is 620px wide, and a note needs 160px on each side of it. */
+@media (max-width: 960px) {
+  .setup-local-content .provider-picker-callout {
+    display: none;
+  }
+}
+
+/* The provider step of a joined server covers the window, over the rail and the sidebar. */
+.server-onboarding-screen {
+  position: fixed;
+}
+
+.server-onboarding-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  -webkit-app-region: no-drag;
+}
+
+/* The first question of first run. The team rises in from the sides to the large agent in the
+   middle; the two answers are rows of one grouped list. */
+
+.first-run-screen[data-step="choose"] .onboarding-shell {
+  width: min(100%, 960px);
+}
+
+/* First run changes steps in a view transition (`first-run-transition.ts`). The old step blurs and
+   fades out while the next one comes into focus in the same place; the progress and the actions
+   move to their new place. Opening the app blurs the setup screen away into
+   the app. The motion stays small: blur and fade carry the change, not travel. */
+.first-run-screen .onboarding-shell > .onboarding-step {
+  view-transition-name: first-run-step;
+}
+
+.first-run-screen .onboarding-shell > .onboarding-progress {
+  view-transition-name: first-run-progress;
+}
+
+.first-run-screen .onboarding-shell > .onboarding-actions {
+  view-transition-name: first-run-actions;
+}
+
+::view-transition-group(first-run-step),
+::view-transition-group(first-run-progress),
+::view-transition-group(first-run-actions) {
+  animation-duration: 440ms;
+  animation-timing-function: var(--openbot-ease-out);
+}
+
+/* The steps are not the same width. Each image keeps its own size in the middle, so none stretches. */
+::view-transition-old(first-run-step),
+::view-transition-new(first-run-step) {
+  inset-inline-start: 50%;
+  inline-size: auto;
+  translate: -50% 0;
+}
+
+html:active-view-transition-type(step)::view-transition-old(first-run-step) {
+  animation: first-run-step-out 220ms var(--openbot-ease-out) both;
+}
+
+html:active-view-transition-type(step)::view-transition-new(first-run-step) {
+  animation: first-run-step-in 440ms var(--openbot-ease-out) 40ms both;
+}
+
+/* The live dots animate their own width, so the old picture of them is not needed. */
+::view-transition-old(first-run-progress):not(:only-child) {
+  animation: none;
+  opacity: 0;
+}
+
+::view-transition-new(first-run-progress):not(:only-child) {
+  animation: none;
+}
+
+::view-transition-new(first-run-progress):only-child,
+::view-transition-new(first-run-actions):only-child {
+  animation: first-run-step-rise 440ms var(--openbot-ease-out) 40ms both;
+}
+
+/* The buttons change their labels in place, so the old ones blur away under the new ones. */
+::view-transition-old(first-run-actions),
+::view-transition-old(first-run-progress):only-child {
+  animation: first-run-blur-out 220ms var(--openbot-ease-out) both;
+}
+
+::view-transition-new(first-run-actions):not(:only-child) {
+  animation: first-run-blur-in 440ms var(--openbot-ease-out) 40ms both;
+}
+
+html:active-view-transition-type(open)::view-transition-old(*) {
+  animation: first-run-open-out 320ms var(--openbot-ease-out) both;
+}
+
+html:active-view-transition-type(open)::view-transition-new(*) {
+  animation: first-run-open-in 520ms var(--openbot-ease-out) 60ms both;
+}
+
+@keyframes first-run-step-out {
+  to {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+@keyframes first-run-step-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+@keyframes first-run-step-rise {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+  }
+}
+
+@keyframes first-run-blur-out {
+  to {
+    opacity: 0;
+    filter: blur(8px);
+  }
+}
+
+@keyframes first-run-blur-in {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+  }
+}
+
+@keyframes first-run-open-out {
+  to {
+    opacity: 0;
+    filter: blur(8px);
+  }
+}
+
+@keyframes first-run-open-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+.first-run-choice {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.first-run-choice-team {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--openbot-space-3);
+  margin-bottom: 40px;
+}
+
+.first-run-choice-avatar {
+  width: 52px;
+  height: 52px;
+  flex: none;
+  animation: first-run-rise var(--openbot-duration-overlay) var(--openbot-ease-out) both;
+}
+
+.first-run-choice-avatar:nth-child(1),
+.first-run-choice-avatar:nth-child(7) {
+  width: 40px;
+  height: 40px;
+  transform: translateY(24px);
+}
+
+.first-run-choice-avatar:nth-child(2),
+.first-run-choice-avatar:nth-child(6) {
+  transform: translateY(8px);
+}
+
+.first-run-choice-avatar:nth-child(3),
+.first-run-choice-avatar:nth-child(5) {
+  width: 68px;
+  height: 68px;
+}
+
+.first-run-choice-avatar:nth-child(4) {
+  width: 104px;
+  height: 104px;
+  transform: translateY(-12px);
+}
+
+.first-run-choice-avatar:nth-child(2) {
+  animation-delay: calc(var(--openbot-duration-fast) * 1);
+}
+
+.first-run-choice-avatar:nth-child(3) {
+  animation-delay: calc(var(--openbot-duration-fast) * 2);
+}
+
+.first-run-choice-avatar:nth-child(4) {
+  animation-delay: calc(var(--openbot-duration-fast) * 3);
+}
+
+.first-run-choice-avatar:nth-child(5) {
+  animation-delay: calc(var(--openbot-duration-fast) * 4);
+}
+
+.first-run-choice-avatar:nth-child(6) {
+  animation-delay: calc(var(--openbot-duration-fast) * 5);
+}
+
+.first-run-choice-avatar:nth-child(7) {
+  animation-delay: calc(var(--openbot-duration-fast) * 6);
+}
+
+.first-run-choice-title {
+  margin: 0;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-hero);
+  font-weight: var(--openbot-weight-semibold);
+  letter-spacing: -0.055em;
+  line-height: 1;
+  text-wrap: balance;
+}
+
+.first-run-choice .onboarding-description {
+  margin-top: var(--openbot-space-4);
+}
+
+.first-run-choice-rows {
+  width: min(100%, 440px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin-top: var(--openbot-space-8);
+  border: 1px solid var(--openbot-border-grouped);
+  border-radius: var(--openbot-radius-grouped);
+  background: var(--openbot-bg-grouped);
+}
+
+.first-run-choice-rows .first-run-choice-row {
+  height: auto;
+  min-height: 64px;
+  justify-content: flex-start;
+  gap: var(--openbot-space-3);
+  border-radius: 0;
+  padding: var(--openbot-space-3) var(--openbot-space-4);
+  text-align: left;
+  white-space: normal;
+}
+
+.first-run-choice-rows .first-run-choice-row + .first-run-choice-row {
+  border-top-color: var(--openbot-border-grouped);
+}
+
+.first-run-choice-row-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-regular);
+  line-height: var(--openbot-leading-sm);
+}
+
+.first-run-choice-row-text strong {
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-medium);
+}
+
+.first-run-choice-logos {
+  display: flex;
+  gap: 6px;
+}
+
+.first-run-choice-logo {
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  fill: var(--openbot-provider-current);
+}
+
+.first-run-choice-row-chevron {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--openbot-text-dim);
+}
+
+.first-run-choice-reason {
+  margin-top: var(--openbot-space-3);
+}
+
+@keyframes first-run-rise {
+  from {
+    opacity: 0;
+    translate: 0 16px;
+  }
+}
+
+@media (max-width: 760px) {
+  .first-run-choice-team {
+    gap: var(--openbot-space-1-5);
+  }
+
+  .first-run-choice-avatar:nth-child(1),
+  .first-run-choice-avatar:nth-child(7) {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .first-run-choice-avatar {
+    animation: none;
+  }
+}
+
+/*
+ * The agents of the first screen and of the splash watch the pointer with their eyes (see
+ * `followPointer`). A hovered agent grows a little and a pressed one squeezes, then both spring back.
+ * The `scale` property leaves `transform` and `translate` to the arc and to the jumps. On the splash
+ * the hover is on the member, which stays still: a jump under a still pointer must not start it.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .first-run-choice-avatar,
+  .first-run-launch-avatar {
+    --first-run-spring: linear(
+      0,
+      0.035 2.1%,
+      0.281 6.7%,
+      0.723 12.9%,
+      0.938 16.7%,
+      1.077 21%,
+      1.149 24.3%,
+      1.163 27%,
+      1.154 29.9%,
+      1.129 32.8%,
+      1.051 39.6%,
+      1.017 43.1%,
+      0.977 51%,
+      0.974 53.8%,
+      0.975 57.1%,
+      0.997 69.8%,
+      1.003 76.9%,
+      1
+    );
+
+    transition: scale 560ms var(--first-run-spring);
+  }
+
+  .first-run-choice-avatar:hover,
+  .first-run-launch-member:hover .first-run-launch-avatar {
+    scale: 1.12;
+  }
+
+  .first-run-choice-avatar:active,
+  .first-run-launch-member:active .first-run-launch-avatar {
+    scale: 0.9;
+    transition-duration: var(--openbot-duration-fast);
+    transition-timing-function: var(--openbot-ease-out);
+  }
+}
+
+/*
+ * While first run waits to open the app, a splash covers it. The team from the first screen stands
+ * in the same arc and jumps in a slow wave, one agent after the other. The scribble under the team
+ * fills with the download; a wait with no percent draws and erases it.
+ */
+.first-run-launch {
+  --first-run-launch-accent: var(--openbot-logo-production);
+  position: absolute;
+  z-index: var(--openbot-layer-dialog);
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--openbot-bg-canvas);
+  -webkit-app-region: drag;
+}
+
+.first-run-launch[data-variant="dev"] {
+  --first-run-launch-accent: var(--openbot-logo-dev);
+}
+
+.first-run-launch[data-variant="preview"] {
+  --first-run-launch-accent: var(--openbot-logo-preview);
+}
+
+.first-run-launch-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 40px;
+}
+
+.first-run-launch-team {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--openbot-space-3);
+}
+
+.first-run-launch-member {
+  display: grid;
+  flex: none;
+}
+
+.first-run-launch-avatar {
+  width: 52px;
+  height: 52px;
+}
+
+/* The same arc as the team on the first screen. */
+.first-run-launch-member:nth-child(1),
+.first-run-launch-member:nth-child(7) {
+  translate: 0 24px;
+}
+
+.first-run-launch-member:nth-child(1) .first-run-launch-avatar,
+.first-run-launch-member:nth-child(7) .first-run-launch-avatar {
+  width: 40px;
+  height: 40px;
+}
+
+.first-run-launch-member:nth-child(2),
+.first-run-launch-member:nth-child(6) {
+  translate: 0 8px;
+}
+
+.first-run-launch-member:nth-child(3) .first-run-launch-avatar,
+.first-run-launch-member:nth-child(5) .first-run-launch-avatar {
+  width: 68px;
+  height: 68px;
+}
+
+.first-run-launch-member:nth-child(4) {
+  translate: 0 -12px;
+}
+
+.first-run-launch-member:nth-child(4) .first-run-launch-avatar {
+  width: 104px;
+  height: 104px;
+}
+
+.first-run-launch-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.first-run-launch-scribble {
+  display: block;
+  width: 112px;
+  height: 14px;
+  overflow: visible;
+}
+
+.first-run-launch-scribble polyline {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.4px;
+}
+
+.first-run-launch-track {
+  stroke: color-mix(in srgb, var(--first-run-launch-accent) 18%, transparent);
+}
+
+.first-run-launch-fill {
+  stroke: var(--first-run-launch-accent);
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: calc(1 - var(--first-run-launch-percent));
+  transition: stroke-dashoffset var(--openbot-duration-overlay) var(--openbot-ease-out);
+}
+
+.first-run-launch-label {
+  margin: 0;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-md);
+}
+
+@media (max-width: 760px) {
+  .first-run-launch-team {
+    gap: var(--openbot-space-1-5);
+  }
+
+  .first-run-launch-member:nth-child(1),
+  .first-run-launch-member:nth-child(7) {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .first-run-launch-avatar {
+    animation: first-run-launch-hop 1.8s var(--openbot-ease-in-out) infinite;
+  }
+
+  .first-run-launch-member:nth-child(2) .first-run-launch-avatar {
+    animation-delay: 120ms;
+  }
+
+  .first-run-launch-member:nth-child(3) .first-run-launch-avatar {
+    animation-delay: 240ms;
+  }
+
+  .first-run-launch-member:nth-child(4) .first-run-launch-avatar {
+    animation-delay: 360ms;
+  }
+
+  .first-run-launch-member:nth-child(5) .first-run-launch-avatar {
+    animation-delay: 480ms;
+  }
+
+  .first-run-launch-member:nth-child(6) .first-run-launch-avatar {
+    animation-delay: 600ms;
+  }
+
+  .first-run-launch-member:nth-child(7) .first-run-launch-avatar {
+    animation-delay: 720ms;
+  }
+
+  .first-run-launch-progress[data-known="false"] .first-run-launch-fill {
+    stroke-dasharray: 0.35 1.2;
+    transition: none;
+    animation: first-run-launch-scribble 1.8s var(--openbot-ease-in-out) infinite;
+  }
+}
+
+/* A short jump, then a rest, so the wave reads as one team and not as noise. */
+@keyframes first-run-launch-hop {
+  0%,
+  36%,
+  100% {
+    transform: translateY(0);
+  }
+  16% {
+    transform: translateY(-12px);
+  }
+}
+
+@keyframes first-run-launch-scribble {
+  from {
+    stroke-dashoffset: 0.35;
+  }
+  to {
+    stroke-dashoffset: -1.2;
+  }
+}
+
+/* The read error reuses the sign-in screen; its one secondary action sits under the primary button. */
+.setup-read-error-actions {
+  justify-content: center;
+  margin-top: var(--openbot-space-3);
+}

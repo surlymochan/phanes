@@ -1,0 +1,164 @@
+import type { ShjToken } from "@speed-highlight/core";
+import * as Clipboard from "expo-clipboard";
+import { Button, Typography } from "heroui-native";
+import { useThemeColor } from "heroui-native/hooks";
+import Check from "lucide-react-native/icons/check";
+import Copy from "lucide-react-native/icons/copy";
+import { memo, useEffect, useRef, useState } from "react";
+import { type ColorValue, ScrollView, useWindowDimensions, View } from "react-native";
+import { useCSSVariable } from "uniwind";
+import { showFailureAlert } from "@/features/analytics/failure-reports";
+import { haptics } from "@/shared/lib/haptics";
+import { useText } from "@/shared/lib/text";
+import { type CodeToken, cachedHighlight, codeLanguageLabel, highlightCode } from "../model/code-highlight";
+import { useListSettled } from "./use-list-settled";
+
+/** A streaming block grows each frame. Highlight it at most this often; the new tail stays plain until then. */
+const STREAMING_HIGHLIGHT_INTERVAL_MS = 250;
+
+interface ChatCodeBlockProps {
+  text: string;
+  language?: string;
+  selectable?: boolean;
+  /** The text will not change, so its highlight is kept for the app run. */
+  finished?: boolean;
+}
+
+export const ChatCodeBlock = memo(function ChatCodeBlock(props: ChatCodeBlockProps) {
+  // A block that mounts during a fast fling of the chat colours its code when the list slows down.
+  const settled = useListSettled();
+  return <CodeBlockBody {...props} highlight={settled} />;
+});
+
+const CodeBlockBody = memo(function CodeBlockBody({
+  text,
+  language,
+  selectable = true,
+  finished = false,
+  highlight: highlightAllowed,
+}: ChatCodeBlockProps & { highlight: boolean }) {
+  const { fontScale } = useWindowDimensions();
+  const { t } = useText();
+  const { foreground, muted, colors } = useCodeTokenColors();
+  const [highlight, setHighlight] = useState<{ text: string; language?: string; tokens: CodeToken[] } | null>(() => {
+    const tokens = cachedHighlight(text, language);
+    return tokens ? { text, language, tokens } : null;
+  });
+  const [copiedText, setCopiedText] = useState<string | null>(null);
+  const lastHighlight = useRef<number | null>(null);
+  useEffect(() => {
+    const cached = cachedHighlight(text, language);
+    if (cached) {
+      setHighlight((current) =>
+        current?.text === text && current.language === language ? current : { text, language, tokens: cached },
+      );
+      return;
+    }
+    if (!highlightAllowed) return;
+    let active = true;
+    const run = () => {
+      lastHighlight.current = Date.now();
+      void highlightCode(text, language, finished)
+        .then((tokens) => {
+          if (active) setHighlight({ text, language, tokens });
+        })
+        .catch(() => {
+          if (active) setHighlight(null);
+        });
+    };
+    const last = lastHighlight.current;
+    const delay = last === null ? 0 : Math.max(0, STREAMING_HIGHLIGHT_INTERVAL_MS - (Date.now() - last));
+    const timer = delay === 0 ? null : setTimeout(run, delay);
+    if (timer === null) run();
+    return () => {
+      active = false;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [text, language, finished, highlightAllowed]);
+  const tokens =
+    !highlight || highlight.language !== language || !text.startsWith(highlight.text)
+      ? [{ text, offset: 0 }]
+      : highlight.text === text
+        ? highlight.tokens
+        : [...highlight.tokens, { text: text.slice(highlight.text.length), offset: highlight.text.length }];
+  const copied = copiedText === text;
+  async function copy() {
+    try {
+      await Clipboard.setStringAsync(text);
+      setCopiedText(text);
+      void haptics.notification("success");
+    } catch (error) {
+      void haptics.notification("error");
+      showFailureAlert(error, "turn", t("mobile.chat.code.copyFailed"), t("mobile.chat.copyFailedMessage"));
+    }
+  }
+  return (
+    <View className="overflow-hidden bg-control/50" style={{ borderRadius: 18, borderCurve: "continuous" }}>
+      <View className="flex-row items-center justify-between gap-3 pl-3 pr-1 pt-1">
+        <Typography.Paragraph type="body-xs" className="shrink text-muted" numberOfLines={1}>
+          {codeLanguageLabel(language, t)}
+        </Typography.Paragraph>
+        <Button
+          isIconOnly
+          variant="ghost"
+          size="sm"
+          accessibilityLabel={copied ? t("mobile.chat.code.copied") : t("mobile.chat.code.copy")}
+          onPress={copy}
+        >
+          {copied ? <Check size={14} color={String(muted)} /> : <Copy size={14} color={String(muted)} />}
+        </Button>
+      </View>
+      <ScrollView
+        horizontal
+        bounces={false}
+        style={{ flexGrow: 0, flexShrink: 0, height: text.split("\n").length * 20 * fontScale + 20, maxWidth: "100%" }}
+        contentContainerStyle={{ paddingHorizontal: 12, paddingTop: 6, paddingBottom: 14, alignItems: "flex-start" }}
+      >
+        <Typography.Code
+          selectable={selectable}
+          className="bg-transparent p-0"
+          style={{ color: foreground, fontSize: 14, lineHeight: 20 }}
+        >
+          {tokens.map((token) => (
+            <Typography.Code
+              key={token.offset}
+              className="bg-transparent p-0"
+              style={{
+                color: token.type ? (colors[token.type] ?? foreground) : foreground,
+                fontSize: 14,
+                lineHeight: 20,
+              }}
+            >
+              {token.text}
+            </Typography.Code>
+          ))}
+        </Typography.Code>
+      </ScrollView>
+    </View>
+  );
+});
+
+/** The colours of highlighted code, shared by the code block in a message and the code view of a preview. */
+export function useCodeTokenColors() {
+  const [foreground, muted, keyword] = useThemeColor(["foreground", "muted", "link"]);
+  const [string, number, error] = useCSSVariable([
+    "--openbot-success-text",
+    "--openbot-warning-text",
+    "--openbot-danger-text",
+  ]).map(String);
+  const colors: Partial<Record<ShjToken, ColorValue>> = {
+    kwd: keyword,
+    type: keyword,
+    class: keyword,
+    func: keyword,
+    str: string,
+    insert: string,
+    num: number,
+    bool: number,
+    esc: number,
+    cmnt: muted,
+    deleted: error,
+    err: error,
+  };
+  return { foreground, muted, colors };
+}

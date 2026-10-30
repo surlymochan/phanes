@@ -1,0 +1,439 @@
+#!/bin/bash
+# Keeps a hosted server on the newest OpenBot release. systemd runs it as root:
+#
+#   openbot-hosted-update stage   openbot-update.timer. Downloads a newer release, checks it against
+#                                 the release manifest, copies it to /opt/OpenBot/staged, and installs
+#                                 the packages that it needs. OpenBot keeps running.
+#   openbot-hosted-update boot    openbot-update-apply.service, at boot before openbot.service. Runs
+#                                 `apply` when the disk of the server is complete. After a boat wake,
+#                                 boat restores the disk for some minutes, and OpenBot does not wait
+#                                 for that: OpenBot installs the staged release with `request` when
+#                                 no client uses the server.
+#   openbot-hosted-update apply   Copies the staged release into place while OpenBot is stopped. A
+#                                 self-hosted server seldom reboots, so `openbot update` stops
+#                                 OpenBot, runs `stage` and `apply`, and starts it again.
+#   openbot-hosted-update request openbot-update-request.service, when OpenBot asks for an update in
+#                                 Server Settings. Runs `stage`, or stops OpenBot, runs `apply` and
+#                                 starts it again.
+#   openbot-hosted-update trigger openbot.service, as root before OpenBot starts. Installs the units
+#                                 of `request` and the boat pre-stop hook when an older release moved
+#                                 this one into place.
+#
+# The manifest is the one that the Linux desktop updater reads, so a server trusts the same source as
+# a desktop install. A server only moves to a newer version: an older OpenBot cannot open a database
+# that a newer one migrated. provision.sh sources this file for the same install steps.
+set -euo pipefail
+export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+umask 022
+
+INSTALL=/opt/OpenBot
+RELEASES=https://github.com/nightly-labs/openbot/releases
+LOCK=/run/openbot-update.lock
+# Not in a directory that boat saves, so a download that a stop interrupts does not stay.
+SCRATCH=/var/tmp
+# The session of the lazy disk restore that boat runs after a resume.
+RESTORE=/var/lib/ascii-lazy
+HOSTED_FILES=(openbot-hosted-server openbot-hosted-env openbot-hosted-update openbot)
+# OpenBot asks for an update with an empty file in its runtime directory, which the service user
+# owns. The path unit starts the request service as root when a file is there.
+REQUESTS=/run/openbot
+# What a request or a stage does now, for OpenBot to show. Root writes it, and each user can read it.
+# It is there only while a request or a download runs.
+STATE=/run/openbot-update.state
+UNIT_DIRECTORY=/etc/systemd/system
+REQUEST_UNITS=(openbot-update-request.path openbot-update-request.service)
+UNITS=(openbot.service openbot-update.service openbot-update.timer openbot-update-apply.service "${REQUEST_UNITS[@]}")
+# boat runs this file as `user` before it saves the disk at a stop (openbot-boat-pre-stop).
+BOAT_USER=user
+BOAT_PRE_STOP=/home/$BOAT_USER/.boat/pre-stop
+# All that `install_hosting` reads from a release.
+RELEASE_FILES=(packages.txt openbot-hosted.apparmor openbot-boat-pre-stop "${HOSTED_FILES[@]}" "${UNITS[@]}")
+
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+
+fetch() {
+  curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error --retry 3 "$@"
+}
+
+# The version that electron-builder writes to the desktop entry of the AppImage. Empty when unknown.
+version_of() {
+  local entry
+  for entry in "$1"/*.desktop; do
+    if [ -f "$entry" ]; then
+      sed -n 's/^X-AppImage-Version=//p' "$entry" | head -n 1
+      return 0
+    fi
+  done
+  return 0
+}
+
+# boat restores the disk of a server lazily after a resume, and starts the units before the restore
+# ends. Until then a directory can show no files. Observed on boat, not documented by it: the session
+# has `active` while the restore runs and `hydration-done` when it ends.
+restoring() {
+  [ -e "$RESTORE/active" ] && [ ! -e "$RESTORE/hydration-done" ]
+}
+
+wait_for_restore() {
+  local second
+  for ((second = 0; second < 240; second++)); do
+    restoring || return 0
+    sleep 1
+  done
+  fail "The disk of the server is still being restored."
+}
+
+# The version of the complete staged release, or nothing. `staged.ready` comes after the last file.
+staged_version() {
+  local ready
+  [ -f "$INSTALL/staged.ready" ] || return 0
+  ready=$(<"$INSTALL/staged.ready")
+  if [ -n "$ready" ] && [ "$(version_of "$INSTALL/staged")" = "$ready" ]; then echo "$ready"; fi
+  return 0
+}
+
+# Succeeds when $1 is a newer version than $2. Each version is newer than an unknown one.
+newer() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -n 1)" = "$1" ]
+}
+
+installed_package() {
+  dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null | grep -qx installed
+}
+
+available_package() {
+  local candidate
+  candidate=$(apt-cache policy "$1" 2>/dev/null | sed -n 's/^ *Candidate: *//p')
+  [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
+}
+
+# Installs only the missing packages, so a check that finds nothing new does not use apt.
+# packages.txt has the Ubuntu 24.04 names. Debian 12 names some libraries without the "t64" suffix,
+# and newer releases replace some libraries of the remote desktop runtime. A package that the system
+# does not have is skipped with a warning; then only the feature that uses it can fail.
+install_packages() {
+  local package missing=() available=()
+  while read -r package; do
+    [[ -z $package || $package == \#* ]] && continue
+    [[ $package =~ ^[a-z0-9][a-z0-9.+-]+$ ]] || fail "The package name is not valid: $package"
+    installed_package "$package" || installed_package "${package%t64}" || missing+=("$package")
+  done <"$1"
+  [ "${#missing[@]}" -eq 0 ] && return 0
+  # boat keeps the dpkg state, so an install that a stop interrupted must end first.
+  dpkg --configure -a
+  apt-get -o DPkg::Lock::Timeout=600 update
+  for package in "${missing[@]}"; do
+    if available_package "$package"; then
+      available+=("$package")
+    elif available_package "${package%t64}"; then
+      available+=("${package%t64}")
+    else
+      echo "This system has no package $package. OpenBot continues without it." >&2
+    fi
+  done
+  [ "${#available[@]}" -eq 0 ] && return 0
+  apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends "${available[@]}"
+  apt-get clean
+}
+
+# Unpacks an AppImage that the caller checked to squashfs-root next to it. The unpacked build is the
+# layout that the release verifier starts, and it needs no FUSE.
+unpack() {
+  chmod 0700 "$1"
+  (cd "$(dirname "$1")" && "./$(basename "$1")" --appimage-extract >/dev/null)
+}
+
+# Root owns the release. The service user must read and run each file, and must not write any of them.
+prepare_release() {
+  [ -x "$1/openbot" ] || fail "The AppImage has no openbot executable."
+  chown -R root:root "$1"
+  # The extract keeps the umask of the shell, which can be 077 under sudo.
+  chmod -R u+rwX,go=rX "$1"
+  # The Electron sandbox stays on. It needs the SUID helper, owned as a package manager would own it,
+  # and an unprivileged user namespace, which Ubuntu 24.04 restricts through AppArmor. This is the
+  # same setup as the release verifier; `--no-sandbox` is never the answer.
+  chmod 4755 "$1/chrome-sandbox"
+}
+
+# boat saves /opt by the paths that change. It does not look into a directory that a rename moves,
+# so after the next stop that directory is empty or has its old files. A release gets to its place
+# in /opt as a copy of each file, never with `mv`.
+copy_release() {
+  rm -rf "$2"
+  cp -a "$1" "$2"
+}
+
+# Copies the staged release into place. `.applying` and `staged` stay until `finish_swap`, after the
+# hosting files of the release are installed. A stop or a failure before then leaves `.applying`, and
+# `apply` does all of it again at the next boot.
+swap_in() {
+  : >"$INSTALL/.applying"
+  copy_release "$INSTALL/staged" "$INSTALL/app"
+}
+
+finish_swap() {
+  rm -f "$INSTALL/.applying"
+  rm -rf "$INSTALL/staged" "$INSTALL/staged.ready"
+}
+
+stage_release() {
+  rm -f "$INSTALL/staged.ready"
+  copy_release "$1" "$INSTALL/staged"
+  version_of "$INSTALL/staged" >"$INSTALL/staged.ready"
+}
+
+recover() {
+  rm -rf "$SCRATCH"/openbot-update.*
+}
+
+set_state() {
+  printf '%s\n' "$*" >"$STATE.new"
+  mv -f "$STATE.new" "$STATE"
+}
+
+# Downloads $1 to $2, and writes the percent to $STATE. $3 is the size that the manifest gives.
+download() {
+  local pid bytes percent
+  fetch --output "$2" "$1" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    bytes=$(stat -c %s "$2" 2>/dev/null || echo 0)
+    percent=0
+    if [[ $3 =~ ^[1-9][0-9]{0,11}$ && $bytes =~ ^[0-9]+$ ]]; then percent=$((bytes * 100 / $3)); fi
+    set_state downloading "$((percent > 100 ? 100 : percent))"
+    sleep 1
+  done
+  wait "$pid"
+}
+
+# Installs the server scripts, the AppArmor profile and the units of $1. A script is written next to
+# its target and then renamed, so a running script never reads a half-written file.
+install_hosting() {
+  local source=$1 user file unit changed=0
+  user=$(<"$INSTALL/hosted/service-user")
+  [[ $user =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || fail "The service user is not valid."
+  for file in "${HOSTED_FILES[@]}"; do
+    install -m 0755 "$source/$file" "$INSTALL/hosted/.$file.new"
+    mv -f "$INSTALL/hosted/.$file.new" "$INSTALL/hosted/$file"
+  done
+  install -m 0644 "$source/openbot-hosted.apparmor" /etc/apparmor.d/openbot-hosted
+  if command -v apparmor_parser >/dev/null && [ -d /sys/kernel/security/apparmor ]; then
+    apparmor_parser --replace /etc/apparmor.d/openbot-hosted
+  fi
+  for unit in "${UNITS[@]}"; do
+    sed "s/@SERVICE_USER@/$user/g" "$source/$unit" >"$INSTALL/hosted/.unit.new"
+    if ! cmp -s "$INSTALL/hosted/.unit.new" "$UNIT_DIRECTORY/$unit"; then
+      install -m 0644 "$INSTALL/hosted/.unit.new" "$UNIT_DIRECTORY/$unit"
+      changed=1
+    fi
+  done
+  rm -f "$INSTALL/hosted/.unit.new"
+  if [ "$changed" -eq 1 ]; then systemctl daemon-reload; fi
+  systemctl enable --quiet openbot.service openbot-update-apply.service openbot-update.timer \
+    openbot-update-request.path
+  # The terminal command of a self-hosted server. A hosted server has no person at a terminal.
+  if self_hosted; then
+    ln -sfn "$INSTALL/hosted/openbot" /usr/local/bin/openbot
+  fi
+  install_pre_stop "$source" || echo "The boat pre-stop hook is not installed." >&2
+}
+
+self_hosted() {
+  [ -r "$INSTALL/hosted/mode" ] && [ "$(<"$INSTALL/hosted/mode")" = self ]
+}
+
+# Installs the boat pre-stop hook of $1 on a hosted server. The user reads and writes it, so root
+# does not open a link or a FIFO in a directory of the user. A hook that OpenBot did not write stays.
+install_pre_stop() {
+  local source=$1/openbot-boat-pre-stop
+  if self_hosted || [ ! -f "$source" ] || ! id "$BOAT_USER" >/dev/null 2>&1; then return 0; fi
+  if [ -L "$BOAT_PRE_STOP" ] || { [ -e "$BOAT_PRE_STOP" ] && [ ! -f "$BOAT_PRE_STOP" ]; } ||
+    { [ -f "$BOAT_PRE_STOP" ] && ! runuser -u "$BOAT_USER" -- grep -q '^# openbot-boat-pre-stop:' "$BOAT_PRE_STOP"; }; then
+    echo "$BOAT_PRE_STOP is not from OpenBot. It stays, and OpenBot is not stopped before a disk save." >&2
+    return 0
+  fi
+  runuser -u "$BOAT_USER" -- cmp -s "$source" "$BOAT_PRE_STOP" 2>/dev/null && return 0
+  runuser -u "$BOAT_USER" -- install -D -m 0755 "$source" "${BOAT_PRE_STOP%/*}/.pre-stop.new"
+  runuser -u "$BOAT_USER" -- mv -f "${BOAT_PRE_STOP%/*}/.pre-stop.new" "$BOAT_PRE_STOP"
+}
+
+stage() {
+  local architecture manifest version path sha512 size current
+  case $(uname -m) in
+    x86_64) architecture=x86_64 manifest=latest-linux.yml ;;
+    aarch64) architecture=arm64 manifest=latest-linux-arm64.yml ;;
+    *) fail "OpenBot has no release for this machine." ;;
+  esac
+  # `apply` did not complete its copy. A new stage could remove the only complete copy.
+  if [ -e "$INSTALL/.applying" ]; then
+    echo "The last update is not complete. It completes at the next start of the server." >&2
+    return 0
+  fi
+  [ -x "$INSTALL/app/openbot" ] || fail "OpenBot is not installed."
+  manifest=$(fetch "$RELEASES/latest/download/$manifest")
+  version=$(sed -n 's/^version: *//p' <<<"$manifest" | head -n 1)
+  path=$(sed -n 's/^path: *//p' <<<"$manifest" | head -n 1)
+  sha512=$(sed -n 's/^sha512: *//p' <<<"$manifest" | head -n 1)
+  # Only for the percent. A Linux manifest has one file, the AppImage.
+  size=$(sed -n 's/^ *size: *//p' <<<"$manifest" | head -n 1)
+  [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "The release manifest has no valid version."
+  [ "$path" = "OpenBot-$version-$architecture.AppImage" ] || fail "The release manifest names another file."
+  [[ $sha512 =~ ^[A-Za-z0-9+/]{86}==$ ]] || fail "The release manifest has no valid SHA-512."
+  # A release that is no longer the latest one, for example because it was withdrawn, is removed. A
+  # server that starts before this check applies it. This also removes a copy that a stop interrupted.
+  if [ "$(staged_version)" != "$version" ]; then rm -rf "$INSTALL/staged" "$INSTALL/staged.ready"; fi
+  current=$(version_of "$INSTALL/app")
+  # With an unknown version, each release looks newer, and an update could be a downgrade.
+  [ -n "$current" ] || fail "The installed version is not known."
+  newer "$version" "$current" || return 0
+  [ -d "$INSTALL/staged" ] && return 0
+  echo "Staging OpenBot $version (installed: ${current:-unknown})."
+  # Global: the trap runs after this function returns.
+  work=$(mktemp -d "$SCRATCH/openbot-update.XXXXXX")
+  trap 'rm -rf "$work"; rm -f "$STATE"' EXIT
+  download "$RELEASES/download/v$version/$path" "$work/OpenBot.AppImage" "$size"
+  set_state preparing
+  [ "$(openssl dgst -sha512 -binary "$work/OpenBot.AppImage" | openssl base64 -A)" = "$sha512" ] ||
+    fail "The AppImage does not match the release manifest."
+  unpack "$work/OpenBot.AppImage"
+  [ "$(version_of "$work/squashfs-root")" = "$version" ] || fail "The AppImage has another version."
+  # The release names its own packages and units. A release without them cannot update a server.
+  local file
+  for file in "${RELEASE_FILES[@]}"; do
+    [ -f "$work/squashfs-root/resources/hosting/$file" ] || fail "The release has no hosting files."
+  done
+  prepare_release "$work/squashfs-root"
+  install_packages "$work/squashfs-root/resources/hosting/packages.txt"
+  stage_release "$work/squashfs-root"
+  echo "OpenBot $version starts at the next start of the server."
+}
+
+apply() {
+  recover
+  local staged current
+  staged=$(staged_version)
+  # An incomplete release stays. `stage` removes it when it is not the latest one.
+  if [ -z "$staged" ]; then
+    if [ -d "$INSTALL/staged" ]; then echo "The staged release is not complete." >&2; fi
+    return 0
+  fi
+  current=$(version_of "$INSTALL/app")
+  # `.applying` means that a stop came during the last copy, so `app` is not complete.
+  if [ ! -e "$INSTALL/.applying" ] && [ -d "$INSTALL/app" ] && ! newer "$staged" "$current"; then
+    rm -rf "$INSTALL/staged" "$INSTALL/staged.ready"
+    return 0
+  fi
+  swap_in
+  install_hosting "$INSTALL/app/resources/hosting"
+  finish_swap
+  echo "Updated OpenBot from ${current:-unknown} to $staged."
+}
+
+# openbot.service waits for this. A restore after a wake takes minutes, and a staged release waits
+# for it: OpenBot starts first, and asks for the install when no client uses the server. A copy that
+# a stop interrupted completes first, because a partial release cannot start. A staged release that
+# the restore does not show yet stays for the next start. boat starts the unit a second time after a
+# wake, and a failed `boot` is not active then, so `boot` does nothing while OpenBot runs.
+boot() {
+  local pid
+  pid=$(systemctl show --property=MainPID --value openbot.service || true)
+  if [ "${pid:-0}" != 0 ]; then
+    return 0
+  elif [ -e "$INSTALL/.applying" ]; then
+    wait_for_restore
+  elif [ ! -e "$INSTALL/staged.ready" ] || restoring; then
+    recover
+    return 0
+  fi
+  apply
+}
+
+# A release that an older script moved into place has the units of `request`, but that script
+# installed only the units that it knew. The start of OpenBot does not wait for the update lock.
+trigger() {
+  local source=$INSTALL/app/resources/hosting unit changed=0
+  for unit in "${REQUEST_UNITS[@]}"; do
+    if [ ! -e "$UNIT_DIRECTORY/$unit" ] && [ -f "$source/$unit" ]; then
+      install -m 0644 "$source/$unit" "$UNIT_DIRECTORY/$unit"
+      changed=1
+    fi
+  done
+  if [ "$changed" -eq 1 ]; then
+    systemctl daemon-reload
+    systemctl enable --quiet openbot-update-request.path
+  fi
+  install_pre_stop "$source" || echo "The boat pre-stop hook is not installed." >&2
+  [ -e "$UNIT_DIRECTORY/openbot-update-request.path" ] || return 0
+  # Without --no-block, a start during the start of openbot.service could wait for it.
+  systemctl is-active --quiet openbot-update-request.path ||
+    systemctl start --no-block openbot-update-request.path
+}
+
+# The service user owns the request directory, so root only tests a request and removes it. It never
+# reads or follows one. `stage` and `apply` run as their own process and take the update lock, so a
+# request that comes during a download waits for it.
+request() {
+  local install=0 status=0 keeper
+  if [ -e "$REQUESTS/update-install" ] || [ -L "$REQUESTS/update-install" ]; then install=1; fi
+  if [ "$install" -eq 1 ]; then set_state installing; else set_state waiting; fi
+  rm -f -- "$REQUESTS/update-stage" "$REQUESTS/update-install"
+  # OpenBot sees that the request runs while the time of $STATE changes. The `stage` of the timer
+  # removes $STATE when it ends, so the keeper makes it again while this request waits for the lock.
+  (while sleep 5; do touch "$STATE"; done) >/dev/null 2>&1 &
+  keeper=$!
+  # An install stages first, so OpenBot runs while it waits for a `stage` of the timer. When that
+  # fails, for example with no network, a release that is already staged still applies.
+  "$INSTALL/hosted/openbot-hosted-update" stage || status=$?
+  if [ "$install" -eq 1 ]; then
+    status=0
+    # OpenBot starts again also when `apply` fails, or when systemd stops this service. A copy that
+    # did not complete is done again first, because a partial release cannot start. `set -e` applies
+    # in the trap, so a second failure must not stop it before the start.
+    trap '[ ! -e "$INSTALL/.applying" ] || "$INSTALL/hosted/openbot-hosted-update" apply || true
+      systemctl start --no-block openbot.service' EXIT
+    trap 'exit 1' TERM
+    if systemctl stop openbot.service; then
+      "$INSTALL/hosted/openbot-hosted-update" apply || status=$?
+    else
+      status=1
+    fi
+  fi
+  kill "$keeper" 2>/dev/null || true
+  rm -f "$STATE"
+  return "$status"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  [ "$(id -u)" -eq 0 ] || fail "Run this as root."
+  case ${1:-} in
+    trigger)
+      trigger
+      exit 0
+      ;;
+    request)
+      request
+      exit 0
+      ;;
+  esac
+  exec 9>"$LOCK"
+  flock 9
+  if [ "${1:-}" = boot ]; then
+    boot
+    exit 0
+  fi
+  # The openbot-update-apply.service of an older release runs `apply` at boot. With no work, it does
+  # not wait for the restore.
+  if [ "${1:-}" = apply ] && [ ! -e "$INSTALL/staged.ready" ] && [ ! -e "$INSTALL/.applying" ]; then
+    recover
+    exit 0
+  fi
+  wait_for_restore
+  case ${1:-} in
+    stage) stage ;;
+    apply) apply ;;
+    *) fail "usage: $0 boot|stage|apply|request|trigger" ;;
+  esac
+fi

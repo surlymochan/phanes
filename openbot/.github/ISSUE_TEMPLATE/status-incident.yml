@@ -1,0 +1,67 @@
+name: Status incident (maintainers)
+description: Post an incident or planned maintenance on status.openbot.run. The page shows only issues from maintainers.
+title: "[Status]: "
+labels: [status]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only maintainers use this form. The page at https://status.openbot.run shows the issue within about 5 minutes. Each comment from a maintainer is an update. Start a comment with `Identified:`, `Monitoring:` or `Resolved:` to set its stage. Close the issue when the incident is resolved, or as "not planned" to remove a false alarm from the page.
+
+        To report a problem with the app, use the bug report form.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Incident
+        - Maintenance
+    validations:
+      required: true
+
+  - type: dropdown
+    id: services
+    attributes:
+      label: Services
+      multiple: true
+      options:
+        - Accounts and sign-in
+        - Connections
+        - Hosted servers
+        - App updates
+        - Marketplace
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      description: For an incident. Maintenance always shows as maintenance.
+      options:
+        - Degraded
+        - Partial outage
+        - Major outage
+
+  - type: input
+    id: start
+    attributes:
+      label: Maintenance start (UTC)
+      description: For maintenance only.
+      placeholder: "2026-10-20 06:00"
+
+  - type: input
+    id: end
+    attributes:
+      label: Maintenance end (UTC)
+      description: For maintenance only.
+      placeholder: "2026-10-20 06:30"
+
+  - type: textarea
+    id: update
+    attributes:
+      label: Update
+      description: The first update, as users read it. Plain text.
+    validations:
+      required: true

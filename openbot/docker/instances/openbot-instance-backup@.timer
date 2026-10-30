@@ -1,0 +1,13 @@
+# A daily backup of instance %i. Enable it with
+# `systemctl enable --now openbot-instance-backup@<name>.timer`, and change the time with
+# `systemctl edit openbot-instance-backup@<name>.timer`.
+[Unit]
+Description=Daily backup of OpenBot instance %i
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

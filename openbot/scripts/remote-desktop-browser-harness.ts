@@ -1,0 +1,96 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { createOpenBotLogger, toLogValue } from "@openbot/logging";
+import { Effect } from "effect";
+import { z } from "zod";
+import { runCauseEffect } from "../src/backend/effect-boundary";
+import { resolveRemoteDesktopRuntime } from "../src/main/remote-desktop-runtime-artifact";
+import { RemoteScreenGateway } from "../src/main/remote-screen-gateway";
+
+const logger = createOpenBotLogger("remote-desktop-browser-harness");
+
+const platform = process.platform === "darwin" || process.platform === "win32" ? process.platform : "linux";
+const runtimePaths = await Effect.runPromise(
+  resolveRemoteDesktopRuntime({
+    isPackaged: false,
+    resourcesPath: process.cwd(),
+    sourceRoot: resolve("."),
+    platform,
+    architecture: process.arch,
+  }),
+);
+if (!runtimePaths) throw new Error("Build the remote desktop runtime before the browser E2E test.");
+
+const clientCount = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .max(4)
+  .parse(process.env.OPENBOT_REMOTE_E2E_CLIENTS ?? "1");
+const stateDirectory = await mkdtemp(join(tmpdir(), "openbot-remote-browser-e2e-"));
+const gateway = new RemoteScreenGateway({
+  platform,
+  unattended: false,
+  runtimePaths,
+  runtimeStateDirectory: stateDirectory,
+  getRuntimeCredentials: () => Effect.succeed({ username: "openbot-e2e", password: "openbot-local-e2e-only" }),
+  getDisplays: () => [{ id: "1", label: "Primary display", width: 1920, height: 1080, primary: true }],
+  getIceServers: () => Effect.succeed([{ urls: "stun:127.0.0.1:3478" }]),
+  audit: (event) => {
+    // Machine-readable: the E2E runner parses OPENBOT_REMOTE_E2E_AUDIT lines.
+    process.stdout.write(`OPENBOT_REMOTE_E2E_AUDIT=${JSON.stringify(event)}\n`);
+  },
+  onDiagnostic: (source, message) => process.stdout.write(`[${source}] ${message}`),
+});
+
+const server = createServer((request, response) => {
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  if (!gateway.handlesHttp(url)) {
+    response.writeHead(404, { "Content-Type": "text/plain" });
+    response.end("Not found");
+    return;
+  }
+  void runCauseEffect(gateway.handleHttp(request, response, url));
+});
+server.on("upgrade", (request, socket, head) => {
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  if (gateway.handlesUpgrade(url)) {
+    gateway.handleUpgrade(request, socket, head, url);
+    return;
+  }
+  socket.destroy();
+});
+
+await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+const { port } = z.object({ port: z.number().int() }).parse(server.address());
+const origin = `http://127.0.0.1:${port}`;
+for (let index = 0; index < clientCount; index += 1) {
+  const session = await runCauseEffect(
+    gateway.createSession({
+      serverId: "local-e2e-server",
+      memberId: `local-e2e-member-${index + 1}`,
+      teamSessionId: `local-e2e-team-session-${index + 1}`,
+      teamSessionExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      publicHttpBaseUrl: origin,
+    }),
+  );
+  const viewerUrl = `${session.viewerUrl}#${session.viewerGrant}`;
+  // Machine-readable: the E2E runner parses OPENBOT_REMOTE_E2E_URL lines.
+  if (index === 0) process.stdout.write(`OPENBOT_REMOTE_E2E_URL=${viewerUrl}\n`);
+  process.stdout.write(`OPENBOT_REMOTE_E2E_URL_${index + 1}=${viewerUrl}\n`);
+}
+
+let stopping = false;
+async function stop() {
+  if (stopping) return;
+  stopping = true;
+  await runCauseEffect(gateway.stop());
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  await rm(stateDirectory, { force: true, recursive: true });
+}
+process.once("SIGINT", () => void stop().finally(() => process.exit(0)));
+process.once("SIGTERM", () => void stop().finally(() => process.exit(0)));
+process.once("uncaughtException", (error) => void stop().finally(() => logger.error(toLogValue(error))));
+await new Promise(() => undefined);

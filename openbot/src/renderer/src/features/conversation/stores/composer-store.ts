@@ -1,0 +1,179 @@
+import { attachmentReferenceIds } from "@openbot/contracts/attachment-references";
+import { createMemo } from "solid-js";
+import { appendVoiceTranscript } from "../../../voice-recording";
+import { EMPTY_DRAFT, type StoredQueueEdit } from "../composer-draft";
+import { composerDraftKey } from "../conversation-keys";
+import type { ComposerDraft, ConversationProps, ConversationTarget } from "../conversation-types";
+
+export interface ComposerStoreDeps {
+  props: ConversationProps;
+  drafts: () => Record<string, ComposerDraft>;
+  setDrafts: (update: (current: Record<string, ComposerDraft>) => Record<string, ComposerDraft>) => void;
+  conversationErrors: () => Record<string, string>;
+  setConversationErrors: (update: (current: Record<string, string>) => Record<string, string>) => void;
+  composerErrors: () => Record<string, string>;
+  setComposerErrors: (update: (current: Record<string, string>) => Record<string, string>) => void;
+  editingAgentId: () => string | null;
+  editingServerId: () => string | null;
+  editingDeliveryId: () => string | null;
+  editingPendingSave: () => StoredQueueEdit["pendingSave"] | null;
+  seenMessageIds: Set<string>;
+}
+
+/** The agent, or for a channel the channel, that owns the drafts, errors and panels of the view. */
+export function conversationOwnerId(props: ConversationProps): string | undefined {
+  return props.channel?.id ?? props.agent?.id;
+}
+
+export function currentConversationTarget(props: ConversationProps): ConversationTarget | undefined {
+  const agentId = conversationOwnerId(props);
+  return agentId ? { agentId, serverId: props.server?.id ?? "local" } : undefined;
+}
+
+export function createComposerStore(deps: ComposerStoreDeps) {
+  const currentTarget = (): ConversationTarget | undefined => currentConversationTarget(deps.props);
+  const currentEditingDeliveryId = createMemo(() => {
+    const target = currentTarget();
+    return target && deps.editingAgentId() === target.agentId && deps.editingServerId() === target.serverId
+      ? deps.editingDeliveryId()
+      : null;
+  });
+  const currentDraft = createMemo(() => {
+    const target = currentTarget();
+    return target ? (deps.drafts()[composerDraftKey(target)] ?? EMPTY_DRAFT) : EMPTY_DRAFT;
+  });
+  const currentConversationError = createMemo(() => {
+    const target = currentTarget();
+    return target ? (deps.conversationErrors()[composerDraftKey(target)] ?? null) : null;
+  });
+  const currentComposerError = createMemo(() => {
+    const target = currentTarget();
+    return target ? (deps.composerErrors()[composerDraftKey(target)] ?? null) : null;
+  });
+  const currentChatError = createMemo(() => currentComposerError() ?? currentConversationError());
+  const unreferencedDraftAttachments = createMemo(() => {
+    const referencedIds = attachmentReferenceIds(currentDraft().text);
+    return currentDraft().attachments.filter((attachment) => !referencedIds.has(attachment.id));
+  });
+  const composerHasContent = createMemo(
+    () => Boolean(currentDraft().text.trim()) || currentDraft().attachments.length > 0,
+  );
+  const replyTarget = createMemo(() => {
+    const id = currentDraft().replyToMessageId;
+    return id ? deps.props.messages.find((message) => message.id === id) : undefined;
+  });
+
+  const markMessageSeen = (messageId: string): boolean => {
+    const key = `${conversationOwnerId(deps.props) ?? "none"}:${messageId}`;
+    if (deps.seenMessageIds.has(key)) return false;
+    deps.seenMessageIds.add(key);
+    return true;
+  };
+
+  function clearConversationError(target: ConversationTarget): void {
+    const key = composerDraftKey(target);
+    deps.setConversationErrors((current) => {
+      if (!(key in current)) return current;
+      const { [key]: _removed, ...next } = current;
+      return next;
+    });
+  }
+
+  function clearComposerError(target: ConversationTarget): void {
+    const key = composerDraftKey(target);
+    deps.setComposerErrors((current) => {
+      if (!(key in current)) return current;
+      const { [key]: _removed, ...next } = current;
+      return next;
+    });
+  }
+
+  function clearChatErrors(target: ConversationTarget): void {
+    clearComposerError(target);
+    clearConversationError(target);
+  }
+
+  function setComposerErrorForTarget(target: ConversationTarget, message: string): void {
+    const key = composerDraftKey(target);
+    deps.setComposerErrors((current) => (current[key] === message ? current : { ...current, [key]: message }));
+  }
+
+  const updateCurrentDraft = (patch: Partial<ComposerDraft>) => {
+    const target = currentTarget();
+    if (!target) return;
+    // A pending Save owns the outcome: keep the exact request for retry.
+    if (
+      deps.editingPendingSave() &&
+      deps.editingAgentId() === target.agentId &&
+      deps.editingServerId() === target.serverId &&
+      deps.editingDeliveryId()
+    )
+      return;
+    clearConversationError(target);
+    const key = composerDraftKey(target);
+    deps.setDrafts((current) => ({
+      ...current,
+      [key]: { ...(current[key] ?? EMPTY_DRAFT), ...patch },
+    }));
+  };
+
+  function clearSubmittedDraft(target: ConversationTarget, submitted: ComposerDraft): void {
+    const key = composerDraftKey(target);
+    const submittedAttachmentIds = new Set(submitted.attachments.map((attachment) => attachment.id));
+    deps.setDrafts((current) => {
+      const draft = current[key] ?? EMPTY_DRAFT;
+      const next: ComposerDraft = {
+        text: draft.text === submitted.text ? "" : draft.text,
+        attachments: draft.attachments.filter((attachment) => !submittedAttachmentIds.has(attachment.id)),
+        replyToMessageId: draft.replyToMessageId === submitted.replyToMessageId ? null : draft.replyToMessageId,
+      };
+      return { ...current, [key]: next };
+    });
+  }
+
+  function setConversationError(target: ConversationTarget, message: string): void {
+    deps.setConversationErrors((current) => ({
+      ...current,
+      [composerDraftKey(target)]: message,
+    }));
+  }
+
+  function restoreVoiceTranscript(target: ConversationTarget, transcript: string): void {
+    if (
+      deps.editingPendingSave() &&
+      deps.editingAgentId() === target.agentId &&
+      deps.editingServerId() === target.serverId &&
+      deps.editingDeliveryId()
+    )
+      return;
+    const key = composerDraftKey(target);
+    deps.setDrafts((current) => {
+      const draft = current[key] ?? EMPTY_DRAFT;
+      return {
+        ...current,
+        [key]: { ...draft, text: appendVoiceTranscript(draft.text, transcript) },
+      };
+    });
+  }
+
+  return {
+    currentTarget,
+    currentEditingDeliveryId,
+    currentDraft,
+    currentConversationError,
+    currentComposerError,
+    currentChatError,
+    unreferencedDraftAttachments,
+    composerHasContent,
+    replyTarget,
+    markMessageSeen,
+    updateCurrentDraft,
+    clearSubmittedDraft,
+    clearConversationError,
+    setConversationError,
+    clearComposerError,
+    setComposerErrorForTarget,
+    clearChatErrors,
+    restoreVoiceTranscript,
+  };
+}

@@ -1,0 +1,77 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/remoteDesktop";
+
+export const messages = {
+  "remoteDesktop.controlFailed": "Сбой удалённого управления. Подключитесь снова и повторите попытку.",
+  "remoteDesktop.startFailed": "Не удалось запустить удалённое управление.",
+  "remoteDesktop.disconnectFailed": "Не удалось отключить удалённое управление.",
+  "remoteDesktop.switchDisplayFailed": "Не удалось переключить общий монитор.",
+  "remoteDesktop.workspaceLabel": "Удалённое управление",
+  "remoteDesktop.displayLabel": "Удалённый экран",
+  "remoteDesktop.selectDisplay": "Выбрать экран",
+  "remoteDesktop.backToOpenBot": "Вернуться в OpenBot",
+  "remoteDesktop.disconnect": "Отключить",
+  "remoteDesktop.viewerTitle": "Удалённый рабочий стол Sunshine",
+  "remoteDesktop.viewerLoadFailed": "Не удалось загрузить просмотр Moonlight.",
+  "remoteDesktop.streamNotReady":
+    "Сервер не запустил поток. Возможно, Sunshine остановился на сервере. Повторите попытку.",
+  "remoteDesktop.hostOfflineTitle": "Сервер не в сети",
+  "remoteDesktop.hostOfflineMessage": "Подключитесь к серверу, прежде чем открывать его рабочий стол.",
+  "remoteDesktop.openFailed": "Не удалось открыть рабочий стол",
+  "remoteDesktop.notSharingTitle": "{name} не показывает свой экран",
+  "remoteDesktop.notSharingDescription":
+    "Сервер не разрешает OpenBot записывать экран. На этом сервере откройте «Системные настройки» → «Конфиденциальность и безопасность» → «Запись экрана», включите OpenBot и повторите попытку здесь.",
+  "remoteDesktop.setup.check.screenRecording": "Запись экрана",
+  "remoteDesktop.setup.check.accessibility": "Универсальный доступ",
+  "remoteDesktop.setup.check.service": "Служба Sunshine",
+  "remoteDesktop.setup.check.displays": "Доступность экранов",
+  "remoteDesktop.setup.check.guiSession": "Сессия пользователя macOS",
+  "remoteDesktop.setup.state.notChecked": "Не проверено",
+  "remoteDesktop.setup.state.checking": "Проверка…",
+  "remoteDesktop.setup.state.allowed": "Разрешено",
+  "remoteDesktop.setup.state.blocked": "Заблокировано",
+  "remoteDesktop.setup.state.unavailable": "Недоступно",
+  "remoteDesktop.setup.state.failed": "Проверка не удалась",
+  "remoteDesktop.setup.state.available": "Доступно",
+  "remoteDesktop.setup.checkFailed": "Не удалось проверить настройку удалённого рабочего стола.",
+  "remoteDesktop.setup.openFailed": "Не удалось открыть настройки macOS.",
+  "remoteDesktop.setup.cleanupUnconfirmed": "Тестовое подключение завершилось, не подтвердив очистку.",
+  "remoteDesktop.setup.endSessionFirst":
+    "Завершите сессию удалённого рабочего стола этого компьютера, прежде чем начинать проверку.",
+  "remoteDesktop.setup.startFailed": "Не удалось запустить проверку удалённого рабочего стола.",
+  "remoteDesktop.setup.connectionLost": "Тестовое подключение потеряно.",
+  "remoteDesktop.setup.hostUpdateRequired":
+    "Обновите OpenBot на сервере, чтобы проверить разрешения и удалённый рабочий стол.",
+  "remoteDesktop.setup.permissions": "Разрешения",
+  "remoteDesktop.setup.checked": "Проверено",
+  "remoteDesktop.setup.checkAgain": "Проверить снова",
+  "remoteDesktop.setup.grantAccess": "Предоставить доступ: {name}",
+  "remoteDesktop.setup.grant": "Разрешить",
+  "remoteDesktop.setup.grantHelp":
+    "Не выходите из учётной записи Sunshine на Mac. В ней предоставьте доступ в «Системных настройках» → «Конфиденциальность и безопасность». Кнопка «Разрешить» открывает вспомогательное окно. Перетащите Sunshine.app в список разрешений.",
+  "remoteDesktop.setup.restartRequired":
+    "Sunshine нужно перезапустить. Завершите активные сессии удалённого рабочего стола и проверьте снова. Активные сессии перезапущены не будут.",
+  "remoteDesktop.setup.showInFinder": "Показать Sunshine в Finder",
+  "remoteDesktop.setup.liveTest": "Проверка живого подключения",
+  "remoteDesktop.setup.liveTestLocal": "Проверьте изображение, мышь и клавиатуру на этом Mac.",
+  "remoteDesktop.setup.liveTestRemote":
+    "Проверка открывает временную панель на сервере. Сначала нужно завершить другие удалённые сессии. Ввод остаётся внутри панели.",
+  "remoteDesktop.setup.testSummary": "Видео: {video} · Изображение: {picture} · Мышь: {mouse} · Клавиатура: {keyboard}",
+  "remoteDesktop.setup.received": "получено",
+  "remoteDesktop.setup.notReceived": "не получено",
+  "remoteDesktop.setup.confirmed": "подтверждено",
+  "remoteDesktop.setup.notConfirmed": "не подтверждено",
+  "remoteDesktop.setup.notTested": "не проверено",
+  "remoteDesktop.setup.waiting": "ожидание",
+  "remoteDesktop.setup.testLocal": "Проверить на этом Mac",
+  "remoteDesktop.setup.testRemote": "Проверить удалённый рабочий стол",
+  "remoteDesktop.setup.videoFailed": "Видеоподключение для проверки не удалось.",
+  "remoteDesktop.setup.inputInstructions":
+    "Нажмите на цель в тестовой панели, затем введите {code}. Мышь: {mouse}. Клавиатура: {keyboard}.",
+  "remoteDesktop.setup.videoOnly":
+    "Проверка только видео. Для проверки мыши и клавиатуры нужна обновлённая среда Sunshine.",
+  "remoteDesktop.setup.pictureConfirmed": "Изображение подтверждено",
+  "remoteDesktop.setup.seeDesktop": "Я вижу свой рабочий стол",
+  "remoteDesktop.setup.seeTestPanel": "Я вижу тестовую панель",
+  "remoteDesktop.setup.finishTest": "Завершить проверку",
+} as const satisfies PartialTranslation<typeof source>;

@@ -1,0 +1,148 @@
+import { Typography } from "heroui-native";
+import { useThemeColor } from "heroui-native/hooks";
+import Pin from "lucide-react-native/icons/pin";
+import PinOff from "lucide-react-native/icons/pin-off";
+import type { PropsWithChildren } from "react";
+import { Pressable, View } from "react-native";
+import { GestureDetector } from "react-native-gesture-handler";
+import ReanimatedSwipeable from "react-native-gesture-handler/ReanimatedSwipeable";
+import Animated, { type SharedValue, useAnimatedStyle } from "react-native-reanimated";
+import { useAppDrawer } from "@/features/servers/components/app-drawer-shell";
+import { useReducedMotion } from "@/shared/lib/motion";
+import { useText } from "@/shared/lib/text";
+
+import { PIN_COMMIT_DISTANCE, PIN_REVEAL_DISTANCE, useAgentPinSwipe } from "./use-agent-pin-swipe";
+
+function PinAction({
+  agentName,
+  pinned = false,
+  pinBlocked,
+  revealed,
+  translation,
+  onPress,
+}: {
+  agentName: string;
+  pinned?: boolean;
+  pinBlocked: boolean;
+  revealed: boolean;
+  translation: SharedValue<number>;
+  onPress: () => void;
+}) {
+  const [accent, accentForeground, danger, dangerForeground] = useThemeColor([
+    "accent",
+    "accent-foreground",
+    "danger",
+    "danger-foreground",
+  ]);
+  const foreground = pinBlocked ? dangerForeground : accentForeground;
+  const reducedMotion = useReducedMotion();
+  const circleStyle = useAnimatedStyle(() => ({
+    transform: [
+      { scale: reducedMotion ? 1 : 0.65 + Math.min(1, Math.max(0, -translation.get() / PIN_COMMIT_DISTANCE)) * 0.55 },
+    ],
+  }));
+
+  const { t } = useText();
+  const actionStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: Math.min(0, (translation.get() + PIN_REVEAL_DISTANCE) / 2) }],
+  }));
+
+  return (
+    <Animated.View
+      className="w-[88px] items-center justify-center"
+      style={actionStyle}
+      accessibilityElementsHidden={!revealed}
+      importantForAccessibility={revealed ? "auto" : "no-hide-descendants"}
+    >
+      <Pressable
+        accessibilityLabel={t(pinned ? "mobile.agent.pin.unpinNamed" : "mobile.agent.pin.pinNamed", {
+          name: agentName,
+        })}
+        accessibilityRole="button"
+        accessibilityHint={pinBlocked ? t("mobile.agent.pin.limitReached") : undefined}
+        className="size-16 items-center justify-center"
+        onPress={onPress}
+        style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
+      >
+        <Animated.View
+          pointerEvents="none"
+          className="absolute size-16 rounded-full"
+          style={[{ backgroundColor: pinBlocked ? danger : accent }, circleStyle]}
+        />
+        {pinned ? (
+          <PinOff color={String(foreground)} size={22} strokeWidth={1.8} />
+        ) : (
+          <Pin color={String(foreground)} fill={String(foreground)} size={22} strokeWidth={1.8} />
+        )}
+        <Typography.Paragraph type="body-xs" weight="semibold" style={{ color: foreground }}>
+          {t(pinned ? "mobile.agent.pin.unpin" : "mobile.agent.pin.pin")}
+        </Typography.Paragraph>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+export function AgentPinSwipeRow({
+  agentName,
+  pinned = false,
+  pinBlocked,
+  onPin,
+  children,
+}: PropsWithChildren<{
+  agentName: string;
+  pinned?: boolean;
+  pinBlocked: boolean;
+  onPin: (withHaptic: boolean) => void;
+}>) {
+  const [background] = useThemeColor(["background"]);
+  const { openingGesture } = useAppDrawer();
+  const swipe = useAgentPinSwipe(openingGesture, onPin, pinBlocked);
+  const { t } = useText();
+
+  return (
+    <GestureDetector gesture={swipe.detectorGesture}>
+      <ReanimatedSwipeable
+        ref={swipe.swipeable}
+        enabled={!swipe.pinPending}
+        containerStyle={{ backgroundColor: background, overflow: "hidden" }}
+        childrenContainerStyle={{ backgroundColor: background }}
+        friction={1}
+        overshootRight
+        overshootFriction={1}
+        rightThreshold={PIN_REVEAL_DISTANCE / 2}
+        enableTrackpadTwoFingerGesture
+        simultaneousWith={swipe.gesture}
+        requireToFail={swipe.swipeRequires}
+        onSwipeableWillOpen={swipe.onWillOpen}
+        onSwipeableWillClose={swipe.onWillClose}
+        onSwipeableClose={swipe.onClose}
+        renderRightActions={(_progress, translation) => (
+          <PinAction
+            revealed={swipe.revealed}
+            agentName={agentName}
+            pinned={pinned}
+            pinBlocked={pinBlocked}
+            translation={translation}
+            onPress={() => swipe.pin()}
+          />
+        )}
+      >
+        <View
+          pointerEvents={swipe.revealed ? "none" : "auto"}
+          accessibilityElementsHidden={swipe.revealed}
+          importantForAccessibility={swipe.revealed ? "no-hide-descendants" : "auto"}
+        >
+          {children}
+        </View>
+        {swipe.revealed ? (
+          <Pressable
+            className="absolute inset-0"
+            accessibilityRole="button"
+            accessibilityLabel={t("mobile.agent.pin.closeAction", { name: agentName })}
+            onPress={swipe.close}
+          />
+        ) : null}
+      </ReanimatedSwipeable>
+    </GestureDetector>
+  );
+}

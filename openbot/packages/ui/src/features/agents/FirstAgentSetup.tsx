@@ -1,0 +1,581 @@
+import { agentProviderDescriptor } from "@openbot/contracts/agent-providers";
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
+import type {
+  AgentModelId,
+  AgentProviderId,
+  AgentReasoningEffort,
+  AgentStatus,
+  AvatarHue,
+  ClientAgentModelOption,
+  CustomAgentSummary,
+  CustomProviderSummary,
+  ProviderRuntimeStatus,
+} from "@openbot/contracts/ipc";
+import type { AppTextKey, AppTranslate } from "@openbot/i18n";
+import { Button, Field, Input, Textarea } from "@openbot/ui";
+import { createSignal, For, onSettled, Show } from "solid-js";
+import { AVATAR_HUE_CHOICES, avatarCandidateSeeds, avatarHeadColor, avatarHueSwatch } from "../../bloub-avatar";
+import { ProviderModelPicker } from "../../components/ProviderModelPicker";
+import { currentText, useText } from "../../text";
+import { prefersReducedMotion } from "../../utils";
+import { AgentAvatar } from "./AgentAvatar";
+import { AVATAR_HUE_LABEL } from "./avatar-hue-label";
+import { InstructionsLimit, instructionsTooLong } from "./InstructionsLimit";
+
+export interface FirstAgentDraft {
+  name: string;
+  purpose: string;
+  avatarSeed: string;
+  avatarHue: AvatarHue | null;
+  suggestionId: string | null;
+  provider: AgentProviderId;
+  model: AgentModelId;
+  /** The reasoning level the user chose. Absent, the agent starts on the model's default level. */
+  reasoningEffort?: AgentReasoningEffort | undefined;
+}
+
+/**
+ * A suggested agent. The name, description and purpose are catalog keys: selecting the suggestion
+ * copies their text in the interface language into the draft, so the created agent gets that text.
+ */
+export interface FirstAgentSuggestion {
+  id: string;
+  nameKey: AppTextKey;
+  descriptionKey: AppTextKey;
+  purposeKey: AppTextKey;
+  avatarSeed: string;
+  avatarHue: AvatarHue;
+  animationCycleOffset: number;
+  animationOffset: number;
+}
+
+export interface FirstAgentSetupProps {
+  value: FirstAgentDraft;
+  suggestions: FirstAgentSuggestion[];
+  mode?: "first" | "additional";
+  submitting?: boolean;
+  error?: string | null;
+  /** The live catalog behind the model picker. Absent, the form keeps no model choice. */
+  modelOptions?: ClientAgentModelOption[] | undefined;
+  agentStatus?: AgentStatus | undefined;
+  runtimeStatuses?: Partial<Record<AgentProviderId, ProviderRuntimeStatus>> | undefined;
+  customProviders?: readonly CustomProviderSummary[] | undefined;
+  /** The user's own ACP agents on this computer, for the model picker's Custom tab. */
+  customAgents?: readonly CustomAgentSummary[] | undefined;
+  onDownloadProvider?: ((provider: AgentProviderId) => void | Promise<void>) | undefined;
+  onCancelProviderDownload?: ((provider: AgentProviderId) => void | Promise<void>) | undefined;
+  onConnectProvider?: ((provider: AgentProviderId) => void | Promise<void>) | undefined;
+  onAddCustomProvider?: ((trigger: HTMLElement) => void) | undefined;
+  /** Opens the provider settings from a plus button in the model picker. */
+  onManageProviders?: ((trigger: HTMLElement) => void) | undefined;
+  onChange: (value: FirstAgentDraft) => void;
+  onSubmit: (value: FirstAgentDraft) => void | Promise<void>;
+  onCancel?: (() => void) | undefined;
+}
+
+export const FIRST_AGENT_AVATAR_SEEDS = avatarCandidateSeeds("first-bot", "first-bot", 0);
+
+const SUGGESTION_MOMENTUM_FRICTION = 0.88;
+const SUGGESTION_MOMENTUM_MINIMUM = 0.01;
+const SUGGESTION_MOMENTUM_MAXIMUM = 1.75;
+const SUGGESTION_DRAG_THRESHOLD = 8;
+const MOTION_FRAME_DURATION = 1000 / 60;
+
+/**
+ * A new draft. Its name is the default name in the interface language when the draft is made: the
+ * name is the user's value from then on, and becomes the created agent's name.
+ */
+export function createFirstAgentDraft(random: () => number = Math.random): FirstAgentDraft {
+  const index = Math.min(FIRST_AGENT_AVATAR_SEEDS.length - 1, Math.floor(random() * FIRST_AGENT_AVATAR_SEEDS.length));
+  return {
+    name: currentText().t("agent.setup.nameFallback"),
+    purpose: "",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[index] ?? "first-bot",
+    avatarHue: null,
+    suggestionId: null,
+    provider: "codex",
+    model: agentProviderDescriptor("codex").defaultModel,
+  };
+}
+
+export const FIRST_AGENT_SUGGESTIONS: FirstAgentSuggestion[] = [
+  {
+    id: "inbox-helper",
+    nameKey: "agent.setup.suggestion.inboxHelper.name",
+    descriptionKey: "agent.setup.suggestion.inboxHelper.description",
+    purposeKey: "agent.setup.suggestion.inboxHelper.purpose",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[1] ?? "first-bot:inbox",
+    avatarHue: 320,
+    animationCycleOffset: 0,
+    animationOffset: 0.15,
+  },
+  {
+    id: "trip-planner",
+    nameKey: "agent.setup.suggestion.tripPlanner.name",
+    descriptionKey: "agent.setup.suggestion.tripPlanner.description",
+    purposeKey: "agent.setup.suggestion.tripPlanner.purpose",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[2] ?? "first-bot:travel",
+    avatarHue: 215,
+    animationCycleOffset: 2,
+    animationOffset: 0.65,
+  },
+  {
+    id: "personal-organizer",
+    nameKey: "agent.setup.suggestion.personalOrganizer.name",
+    descriptionKey: "agent.setup.suggestion.personalOrganizer.description",
+    purposeKey: "agent.setup.suggestion.personalOrganizer.purpose",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[3] ?? "first-bot:organizer",
+    avatarHue: 55,
+    animationCycleOffset: 4,
+    animationOffset: 1.2,
+  },
+  {
+    id: "shopping-scout",
+    nameKey: "agent.setup.suggestion.shoppingScout.name",
+    descriptionKey: "agent.setup.suggestion.shoppingScout.description",
+    purposeKey: "agent.setup.suggestion.shoppingScout.purpose",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[4] ?? "first-bot:shopping",
+    avatarHue: 150,
+    animationCycleOffset: 6,
+    animationOffset: 1.8,
+  },
+  {
+    id: "writing-partner",
+    nameKey: "agent.setup.suggestion.writingPartner.name",
+    descriptionKey: "agent.setup.suggestion.writingPartner.description",
+    purposeKey: "agent.setup.suggestion.writingPartner.purpose",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[5] ?? "first-bot:writing",
+    avatarHue: 30,
+    animationCycleOffset: 8,
+    animationOffset: 2.45,
+  },
+  {
+    id: "learning-coach",
+    nameKey: "agent.setup.suggestion.learningCoach.name",
+    descriptionKey: "agent.setup.suggestion.learningCoach.description",
+    purposeKey: "agent.setup.suggestion.learningCoach.purpose",
+    avatarSeed: FIRST_AGENT_AVATAR_SEEDS[6] ?? "first-bot:learning",
+    avatarHue: 245,
+    animationCycleOffset: 10,
+    animationOffset: 3.15,
+  },
+];
+
+function matchesSuggestion(draft: FirstAgentDraft, suggestion: FirstAgentSuggestion, t: AppTranslate): boolean {
+  return (
+    draft.name === t(suggestion.nameKey) &&
+    draft.purpose === t(suggestion.purposeKey) &&
+    draft.avatarSeed === suggestion.avatarSeed &&
+    draft.avatarHue === suggestion.avatarHue
+  );
+}
+
+export function FirstAgentSetup(props: FirstAgentSetupProps) {
+  const { t, sourceText } = useText();
+  let suggestionList: HTMLUListElement | undefined;
+  let activeSuggestionPointer: number | null = null;
+  let suggestionDragStartX = 0;
+  let suggestionDragStartScrollLeft = 0;
+  let suggestionDragPreviousX = 0;
+  let suggestionDragPreviousTime = 0;
+  let suggestionDragVelocity = 0;
+  let suggestionDragMoved = false;
+  let suppressSuggestionClick = false;
+  let suggestionMomentumFrame: number | null = null;
+  const [canScrollSuggestionsBack, setCanScrollSuggestionsBack] = createSignal(false);
+  const [canScrollSuggestionsForward, setCanScrollSuggestionsForward] = createSignal(false);
+  const [draggingSuggestions, setDraggingSuggestions] = createSignal(false);
+  const canSubmit = () =>
+    Boolean(props.value.name.trim()) && !instructionsTooLong(props.value.purpose) && !props.submitting;
+  const displayName = () => props.value.name.trim() || t("agent.setup.nameFallback");
+
+  function updateSuggestionFades(): void {
+    if (!suggestionList) return;
+    const maximumScroll = Math.max(0, suggestionList.scrollWidth - suggestionList.clientWidth);
+    setCanScrollSuggestionsBack(suggestionList.scrollLeft > 1);
+    setCanScrollSuggestionsForward(suggestionList.scrollLeft < maximumScroll - 1);
+  }
+
+  function stopSuggestionMomentum(): void {
+    if (suggestionMomentumFrame === null) return;
+    cancelAnimationFrame(suggestionMomentumFrame);
+    suggestionMomentumFrame = null;
+  }
+
+  function startSuggestionMomentum(): void {
+    if (!suggestionList || Math.abs(suggestionDragVelocity) < SUGGESTION_MOMENTUM_MINIMUM || prefersReducedMotion()) {
+      return;
+    }
+
+    let previousFrameTime = performance.now();
+    const move = (frameTime: number) => {
+      if (!suggestionList) return;
+      const elapsed = Math.min(frameTime - previousFrameTime, MOTION_FRAME_DURATION * 2);
+      previousFrameTime = frameTime;
+      const previousScrollLeft = suggestionList.scrollLeft;
+      suggestionList.scrollLeft += suggestionDragVelocity * elapsed;
+      suggestionDragVelocity *= SUGGESTION_MOMENTUM_FRICTION ** (elapsed / MOTION_FRAME_DURATION);
+      updateSuggestionFades();
+
+      const reachedEdge = Math.abs(suggestionList.scrollLeft - previousScrollLeft) < 0.1;
+      if (!reachedEdge && Math.abs(suggestionDragVelocity) >= SUGGESTION_MOMENTUM_MINIMUM) {
+        suggestionMomentumFrame = requestAnimationFrame(move);
+      } else {
+        suggestionMomentumFrame = null;
+      }
+    };
+
+    suggestionMomentumFrame = requestAnimationFrame(move);
+  }
+
+  onSettled(() => {
+    updateSuggestionFades();
+    const observer = new ResizeObserver(updateSuggestionFades);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (props.mode !== "additional" || props.submitting || !props.onCancel) return;
+      event.preventDefault();
+      props.onCancel();
+    };
+    const list = suggestionList;
+    if (list) observer.observe(list);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      observer.disconnect();
+      document.removeEventListener("keydown", closeOnEscape);
+      stopSuggestionMomentum();
+    };
+  });
+
+  function startSuggestionDrag(event: PointerEvent): void {
+    if (props.submitting || event.button !== 0 || !suggestionList) return;
+    stopSuggestionMomentum();
+    activeSuggestionPointer = event.pointerId;
+    suggestionDragStartX = event.clientX;
+    suggestionDragStartScrollLeft = suggestionList.scrollLeft;
+    suggestionDragPreviousX = event.clientX;
+    suggestionDragPreviousTime = event.timeStamp;
+    suggestionDragVelocity = 0;
+    suggestionDragMoved = false;
+  }
+
+  function moveSuggestionDrag(event: PointerEvent): void {
+    if (event.pointerId !== activeSuggestionPointer || !suggestionList) return;
+    const distance = event.clientX - suggestionDragStartX;
+    if (!suggestionDragMoved && Math.abs(distance) > SUGGESTION_DRAG_THRESHOLD) {
+      suggestionDragMoved = true;
+      setDraggingSuggestions(true);
+      suggestionList.setPointerCapture(event.pointerId);
+    }
+    if (!suggestionDragMoved) return;
+    event.preventDefault();
+    const elapsed = Math.max(1, event.timeStamp - suggestionDragPreviousTime);
+    const immediateVelocity = Math.max(
+      -SUGGESTION_MOMENTUM_MAXIMUM,
+      Math.min(SUGGESTION_MOMENTUM_MAXIMUM, (suggestionDragPreviousX - event.clientX) / elapsed),
+    );
+    suggestionDragVelocity = suggestionDragVelocity * 0.65 + immediateVelocity * 0.35;
+    suggestionDragPreviousX = event.clientX;
+    suggestionDragPreviousTime = event.timeStamp;
+    suggestionList.scrollLeft = suggestionDragStartScrollLeft - distance;
+    updateSuggestionFades();
+  }
+
+  function finishSuggestionDrag(event: PointerEvent): void {
+    if (event.pointerId !== activeSuggestionPointer || !suggestionList) return;
+    if (suggestionList.hasPointerCapture(event.pointerId)) suggestionList.releasePointerCapture(event.pointerId);
+    suppressSuggestionClick = suggestionDragMoved;
+    activeSuggestionPointer = null;
+    suggestionDragMoved = false;
+    setDraggingSuggestions(false);
+    if (suppressSuggestionClick && event.type === "pointerup") startSuggestionMomentum();
+    window.setTimeout(() => {
+      suppressSuggestionClick = false;
+    }, 0);
+  }
+
+  function updateDraft(updates: Partial<FirstAgentDraft>): void {
+    if (props.submitting) return;
+    const next = { ...props.value, ...updates };
+    const selected = props.suggestions.find((suggestion) => suggestion.id === next.suggestionId);
+    props.onChange({
+      ...next,
+      suggestionId: selected && matchesSuggestion(next, selected, t) ? selected.id : null,
+    });
+  }
+
+  function selectSuggestion(suggestion: FirstAgentSuggestion): void {
+    if (props.submitting) return;
+    props.onChange({
+      name: t(suggestion.nameKey),
+      purpose: t(suggestion.purposeKey),
+      avatarSeed: suggestion.avatarSeed,
+      avatarHue: suggestion.avatarHue,
+      suggestionId: suggestion.id,
+      provider: props.value.provider,
+      model: props.value.model,
+      reasoningEffort: props.value.reasoningEffort,
+    });
+  }
+
+  const modelOption = (provider: AgentProviderId, model: AgentModelId) =>
+    props.modelOptions?.find((option) => option.provider === provider && option.id === model);
+  /** The level the agent starts on: the user's choice, else the model's default. */
+  const reasoningEffort = () =>
+    props.value.reasoningEffort ?? modelOption(props.value.provider, props.value.model)?.defaultReasoningEffort;
+
+  /** A new model keeps the chosen level when it supports it, and else starts on its own default. */
+  function selectModel(model: AgentModelId, provider: AgentProviderId): void {
+    const kept = props.value.reasoningEffort;
+    updateDraft({
+      model,
+      provider,
+      reasoningEffort:
+        kept && modelOption(provider, model)?.supportedReasoningEfforts.includes(kept) ? kept : undefined,
+    });
+  }
+
+  return (
+    <main class="conversation-panel first-agent-setup-panel" aria-labelledby="first-agent-setup-title">
+      <header class="window-drag first-agent-setup-header">
+        <div
+          class="first-agent-header-identity"
+          data-avatar-seed={props.value.avatarSeed}
+          data-avatar-hue={props.value.avatarHue ?? "automatic"}
+        >
+          <AgentAvatar seed={props.value.avatarSeed} hue={props.value.avatarHue} motion="idle" />
+          <h1 aria-live="polite">{displayName()}</h1>
+        </div>
+        <Show when={props.mode === "additional" && props.onCancel}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="first-agent-cancel no-drag"
+            disabled={props.submitting}
+            onClick={() => props.onCancel?.()}
+          >
+            {t("common.cancel")}
+          </Button>
+        </Show>
+      </header>
+
+      <div class="first-agent-setup-content">
+        <form
+          class="first-agent-editor"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canSubmit()) void props.onSubmit(props.value);
+          }}
+        >
+          <h2 id="first-agent-setup-title" class="sr-only">
+            {props.mode === "additional" ? t("agent.setup.titleAdditional") : t("agent.setup.titleFirst")}
+          </h2>
+
+          <div
+            class="first-agent-live-avatar"
+            data-avatar-seed={props.value.avatarSeed}
+            data-avatar-hue={props.value.avatarHue ?? "automatic"}
+          >
+            <AgentAvatar
+              seed={props.value.avatarSeed}
+              hue={props.value.avatarHue}
+              motion="idle"
+              animationOffset={0.4}
+            />
+          </div>
+
+          <fieldset class="first-agent-avatar-fieldset first-agent-color-fieldset" disabled={props.submitting}>
+            <legend class="sr-only">{t("agent.setup.color")}</legend>
+            <div class="first-agent-color-options">
+              <Button
+                variant="ghost"
+                type="button"
+                size="sm"
+                class="first-agent-color-choice"
+                aria-label={t("agent.setup.colorAutomatic")}
+                aria-pressed={props.value.avatarHue === null ? "true" : "false"}
+                data-cuelume-tap="select"
+                onClick={() => updateDraft({ avatarHue: null })}
+              >
+                <span
+                  class="first-agent-color-swatch"
+                  style={{ background: avatarHeadColor(props.value.avatarSeed, null) }}
+                />
+              </Button>
+              <For each={AVATAR_HUE_CHOICES}>
+                {(option) => (
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    size="sm"
+                    class="first-agent-color-choice"
+                    aria-label={t("agent.setup.colorOption", { color: t(AVATAR_HUE_LABEL[option.hue]) })}
+                    aria-pressed={props.value.avatarHue === option.hue ? "true" : "false"}
+                    data-cuelume-tap="select"
+                    onClick={() => updateDraft({ avatarHue: option.hue })}
+                  >
+                    <span class="first-agent-color-swatch" style={{ background: avatarHueSwatch(option.hue) }} />
+                  </Button>
+                )}
+              </For>
+            </div>
+          </fieldset>
+
+          <fieldset class="first-agent-avatar-fieldset first-agent-face-fieldset" disabled={props.submitting}>
+            <legend class="sr-only">{t("agent.setup.face")}</legend>
+            <div class="first-agent-face-options">
+              <For each={FIRST_AGENT_AVATAR_SEEDS}>
+                {(seed, index) => (
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    size="sm"
+                    class="first-agent-face-choice"
+                    aria-label={t("agent.setup.faceOption", { number: index() + 1 })}
+                    aria-pressed={props.value.avatarSeed === seed ? "true" : "false"}
+                    data-cuelume-tap="select"
+                    onClick={() => updateDraft({ avatarSeed: seed })}
+                  >
+                    <AgentAvatar
+                      seed={seed}
+                      hue={props.value.avatarHue}
+                      motion="idle"
+                      animationOffset={index() * 0.16}
+                    />
+                  </Button>
+                )}
+              </For>
+            </div>
+          </fieldset>
+
+          <div class="first-agent-fields">
+            <Field label={t("agent.setup.name")} required>
+              <Input
+                value={props.value.name}
+                maxlength={INPUT_LIMITS.agentName}
+                autocomplete="off"
+                disabled={props.submitting}
+                onValueChange={(name) => updateDraft({ name })}
+              />
+            </Field>
+            <Field label={t("agent.setup.purpose")}>
+              <Textarea
+                value={props.value.purpose}
+                rows={2}
+                invalid={instructionsTooLong(props.value.purpose)}
+                placeholder={t("agent.setup.purposePlaceholder")}
+                disabled={props.submitting}
+                onValueChange={(purpose) => updateDraft({ purpose })}
+              />
+              <InstructionsLimit text={props.value.purpose} />
+            </Field>
+            <Show when={props.modelOptions}>
+              {(options) => (
+                <Show when={props.agentStatus}>
+                  {(status) => (
+                    <ProviderModelPicker
+                      variant="field"
+                      ariaLabel={t("agent.setup.model")}
+                      provider={props.value.provider}
+                      value={props.value.model}
+                      modelOptions={options()}
+                      agentStatus={status()}
+                      runtimeStatuses={props.runtimeStatuses}
+                      customProviders={props.customProviders}
+                      customAgents={props.customAgents}
+                      onDownloadProvider={props.onDownloadProvider}
+                      onCancelProviderDownload={props.onCancelProviderDownload}
+                      onConnectProvider={props.onConnectProvider}
+                      onAddCustomProvider={props.onAddCustomProvider}
+                      onManageProviders={props.onManageProviders}
+                      disabled={props.submitting}
+                      reasoningEffort={reasoningEffort()}
+                      onReasoningEffortChange={(effort) => updateDraft({ reasoningEffort: effort })}
+                      onChange={selectModel}
+                    />
+                  )}
+                </Show>
+              )}
+            </Show>
+          </div>
+
+          <Show when={props.error}>
+            {(error) => (
+              <p class="first-agent-error" role="alert">
+                {sourceText(error())}
+              </p>
+            )}
+          </Show>
+
+          <div class="first-agent-submit-actions">
+            <Button
+              type="submit"
+              variant="default"
+              size="default"
+              class="first-agent-submit"
+              disabled={!canSubmit()}
+              loading={props.submitting}
+              loadingLabel={t("agent.setup.creating")}
+            >
+              {t("agent.setup.create")}
+            </Button>
+          </div>
+        </form>
+
+        <section class="first-agent-suggestions" aria-labelledby="first-agent-suggestions-title">
+          <h2 id="first-agent-suggestions-title">{t("agent.setup.suggestions")}</h2>
+          <div
+            class={`first-agent-suggestion-viewport${canScrollSuggestionsBack() ? " can-scroll-back" : ""}${canScrollSuggestionsForward() ? " can-scroll-forward" : ""}${draggingSuggestions() ? " is-dragging" : ""}`}
+          >
+            <ul
+              ref={suggestionList}
+              class="first-agent-suggestion-list"
+              onScroll={updateSuggestionFades}
+              onPointerDown={startSuggestionDrag}
+              onPointerMove={moveSuggestionDrag}
+              onPointerUp={finishSuggestionDrag}
+              onPointerCancel={finishSuggestionDrag}
+            >
+              <For each={props.suggestions}>
+                {(suggestion) => (
+                  <li class="first-agent-suggestion-item">
+                    <Button
+                      variant="ghost"
+                      type="button"
+                      class="first-agent-suggestion-card"
+                      data-animation-cycle-offset={suggestion.animationCycleOffset}
+                      data-animation-offset={suggestion.animationOffset}
+                      aria-label={t("agent.setup.suggestion.label", {
+                        name: t(suggestion.nameKey),
+                        description: t(suggestion.descriptionKey),
+                      })}
+                      aria-pressed={props.value.suggestionId === suggestion.id ? "true" : "false"}
+                      data-cuelume-tap="select"
+                      disabled={props.submitting}
+                      onClick={() => {
+                        if (!suppressSuggestionClick) selectSuggestion(suggestion);
+                      }}
+                    >
+                      <AgentAvatar
+                        seed={suggestion.avatarSeed}
+                        hue={suggestion.avatarHue}
+                        motion="always"
+                        cycleOffset={suggestion.animationCycleOffset}
+                        animationOffset={suggestion.animationOffset}
+                      />
+                      <span>
+                        <strong>{t(suggestion.nameKey)}</strong>
+                        <small>{t(suggestion.descriptionKey)}</small>
+                      </span>
+                    </Button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}

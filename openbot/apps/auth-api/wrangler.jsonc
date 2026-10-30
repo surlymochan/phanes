@@ -1,0 +1,299 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openbot-auth-api",
+  "compatibility_date": "2026-08-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/worker-entry.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "cache": {
+    "enabled": true,
+    "cross_version_cache": false
+  },
+  "observability": {
+    "enabled": true
+  },
+  // The outbox, the hosted-site cleanup and the hosted server checks are retry paths: the request path
+  // and the webhooks do the first attempt. A run each minute only repeated empty reads. An idle server
+  // stops 15 to 20 minutes after its last use.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "routes": [
+    {
+      "pattern": "openbot.run/*",
+      "zone_id": "bac5e044ba951c390229f0e93673ebd3"
+    },
+    // `www` has no origin. The Worker answers it only with a redirect to openbot.run.
+    {
+      "pattern": "www.openbot.run/*",
+      "zone_id": "bac5e044ba951c390229f0e93673ebd3"
+    },
+    {
+      "pattern": "api.openbot.run",
+      "custom_domain": true
+    }
+  ],
+  "secrets": {
+    "required": [
+      "EMAIL_SMTP_PASSWORD",
+      "SKILLS_ADMIN_TOKEN",
+      "SITE_REPORT_HASH_SECRET",
+      "REMOTE_TICKET_PRIVATE_JWK",
+      "REMOTE_TICKET_PUBLIC_JWKS",
+      "REMOTE_AUTH_WEBHOOK_SECRET"
+    ]
+  },
+  "vars": {
+    "AUTH_EXPOSE_DEVELOPMENT_CODE": "false",
+    "EMAIL_SMTP_HOST": "mail.privateemail.com",
+    "EMAIL_SMTP_PORT": "465",
+    "EMAIL_SMTP_USERNAME": "hello@openbot.run",
+    "EMAIL_FROM": "hello@openbot.run",
+    "REMOTE_TICKET_KEY_ID": "openbot-remote-1",
+    "REMOTE_SIGNAL_URL": "wss://signal.openbot.run/v1/signal",
+    "REMOTE_AUTH_WEBHOOK_URL": "https://signal.openbot.run/internal/auth-events",
+    // Creates stay off until the boat and Stripe secrets and the template are set. "false" stops new
+    // servers only.
+    "HOSTED_SERVERS_ENABLED": "true",
+    // Each account can buy a server in production. Put account IDs here to limit creates to them.
+    "HOSTED_SERVERS_ALLOWED_USER_IDS": "*",
+    // The public Client ID of the OpenBotGit GitHub App. Its private key is the optional secret
+    // GITHUB_APP_PRIVATE_KEY (PKCS #8). Without the key, agents act on GitHub as the signed-in user.
+    "GITHUB_APP_CLIENT_ID": "Iv23lik5pzHz70cb0RUL",
+    "APNS_TEAM_ID": "ZTRDTUL87R",
+    "APNS_TOPIC": "run.openbot.mobile"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "openbot-auth",
+      "database_id": "0cf7e5c1-63ad-4089-810a-e9eb67dd863d",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AVATARS",
+      "bucket_name": "openbot-avatars",
+      "preview_bucket_name": "openbot-avatars-test"
+    },
+    {
+      "binding": "SKILLS",
+      "bucket_name": "openbot-skills",
+      "preview_bucket_name": "openbot-skills-test"
+    },
+    {
+      "binding": "SITES",
+      "bucket_name": "openbot-sites",
+      "preview_bucket_name": "openbot-sites-test"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "MARKETPLACE_INGRESS_RATE_LIMITER",
+      "namespace_id": "2026082701",
+      "simple": { "limit": 300, "period": 60 }
+    },
+    {
+      "name": "MARKETPLACE_MUTATION_RATE_LIMITER",
+      "namespace_id": "2026082702",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "MARKETPLACE_UPLOAD_RATE_LIMITER",
+      "namespace_id": "2026082703",
+      "simple": { "limit": 5, "period": 60 }
+    },
+    {
+      "name": "SITE_REPORT_RATE_LIMITER",
+      "namespace_id": "2026083101",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      "name": "GITHUB_TOKEN_RATE_LIMITER",
+      "namespace_id": "2026092911",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "LIVE_ACTIVITY_RATE_LIMITER",
+      "namespace_id": "2026092901",
+      "simple": { "limit": 300, "period": 60 }
+    }
+  ],
+  "env": {
+    "preview": {
+      "name": "openbot-landing-preview",
+      "workers_dev": true,
+      "preview_urls": true,
+      "routes": [],
+      "triggers": {
+        "crons": []
+      },
+      "secrets": {
+        "required": []
+      },
+      "vars": {
+        "AUTH_EXPOSE_DEVELOPMENT_CODE": "false",
+        "EMAIL_SMTP_HOST": "mail.privateemail.com",
+        "EMAIL_SMTP_PORT": "465",
+        "EMAIL_SMTP_USERNAME": "hello@openbot.run",
+        "EMAIL_FROM": "hello@openbot.run",
+        "SITE_PUBLISH_ENABLED": "false",
+        "SITE_COOKIE_ISOLATION_READY": "false",
+        "REMOTE_TICKET_KEY_ID": "openbot-remote-1",
+        "REMOTE_SIGNAL_URL": "ws://127.0.0.1:8081/v1/signal",
+        "REMOTE_AUTH_WEBHOOK_URL": "http://127.0.0.1:8081/internal/auth-events"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "openbot-auth-test",
+          "database_id": "38f1a836-6c70-44bb-bbf3-f0bbc5b766b3",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "AVATARS",
+          "bucket_name": "openbot-avatars-test"
+        },
+        {
+          "binding": "SKILLS",
+          "bucket_name": "openbot-skills-test"
+        },
+        {
+          "binding": "SITES",
+          "bucket_name": "openbot-sites-test"
+        }
+      ],
+      "ratelimits": [
+        {
+          "name": "MARKETPLACE_INGRESS_RATE_LIMITER",
+          "namespace_id": "2026082704",
+          "simple": { "limit": 300, "period": 60 }
+        },
+        {
+          "name": "MARKETPLACE_MUTATION_RATE_LIMITER",
+          "namespace_id": "2026082705",
+          "simple": { "limit": 30, "period": 60 }
+        },
+        {
+          "name": "MARKETPLACE_UPLOAD_RATE_LIMITER",
+          "namespace_id": "2026082706",
+          "simple": { "limit": 5, "period": 60 }
+        },
+        {
+          "name": "SITE_REPORT_RATE_LIMITER",
+          "namespace_id": "2026083102",
+          "simple": { "limit": 10, "period": 60 }
+        },
+        {
+          "name": "GITHUB_TOKEN_RATE_LIMITER",
+          "namespace_id": "2026092912",
+          "simple": { "limit": 30, "period": 60 }
+        },
+        {
+          "name": "LIVE_ACTIVITY_RATE_LIMITER",
+          "namespace_id": "2026092902",
+          "simple": { "limit": 300, "period": 60 }
+        }
+      ]
+    },
+    "test": {
+      "name": "openbot-auth-api-test",
+      "workers_dev": true,
+      "preview_urls": false,
+      "routes": [],
+      // Each minute: the cron starts hosted servers that stopped again, and checks servers that a webhook missed.
+      "triggers": {
+        "crons": ["* * * * *"]
+      },
+      // Hosted servers stay off until these are set. `api:deploy:test` sets the Stripe pair, BOAT_API_KEY,
+      // BOAT_WEBHOOK_SECRET and HOSTED_SERVERS_DEVELOPER_KEY from the `.env.dev`, and
+      // HOSTED_SERVERS_ALLOWED_USER_IDS from its HOSTED_SERVERS_TEST_ALLOW_LIST.
+      // Set HOSTED_SERVER_TEMPLATE with `wrangler secret put <name> --env test`.
+      // They are not required, so the test Worker deploys without them. See docs/hosted-servers.md.
+      "secrets": {
+        "required": [
+          "EMAIL_SMTP_PASSWORD",
+          "SKILLS_ADMIN_TOKEN",
+          "SITE_REPORT_HASH_SECRET",
+          "REMOTE_TICKET_PRIVATE_JWK",
+          "REMOTE_TICKET_PUBLIC_JWKS",
+          "REMOTE_AUTH_WEBHOOK_SECRET"
+        ]
+      },
+      "vars": {
+        "AUTH_EXPOSE_DEVELOPMENT_CODE": "false",
+        "EMAIL_SMTP_HOST": "mail.privateemail.com",
+        "EMAIL_SMTP_PORT": "465",
+        "EMAIL_SMTP_USERNAME": "hello@openbot.run",
+        "EMAIL_FROM": "hello@openbot.run",
+        "SITE_PUBLISH_ENABLED": "false",
+        "SITE_COOKIE_ISOLATION_READY": "false",
+        "REMOTE_TICKET_KEY_ID": "openbot-remote-1",
+        "REMOTE_SIGNAL_URL": "wss://signal.openbot.run/v1/signal",
+        "REMOTE_AUTH_WEBHOOK_URL": "https://signal.openbot.run/internal/auth-events",
+        "HOSTED_SERVERS_ENABLED": "true",
+        "GITHUB_APP_CLIENT_ID": "Iv23lik5pzHz70cb0RUL",
+        "APNS_TEAM_ID": "ZTRDTUL87R",
+        "APNS_TOPIC": "run.openbot.mobile"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "openbot-auth-test",
+          "database_id": "38f1a836-6c70-44bb-bbf3-f0bbc5b766b3",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "AVATARS",
+          "bucket_name": "openbot-avatars-test"
+        },
+        {
+          "binding": "SKILLS",
+          "bucket_name": "openbot-skills-test"
+        },
+        {
+          "binding": "SITES",
+          "bucket_name": "openbot-sites-test"
+        }
+      ],
+      "ratelimits": [
+        {
+          "name": "MARKETPLACE_INGRESS_RATE_LIMITER",
+          "namespace_id": "2026082707",
+          "simple": { "limit": 300, "period": 60 }
+        },
+        {
+          "name": "MARKETPLACE_MUTATION_RATE_LIMITER",
+          "namespace_id": "2026082708",
+          "simple": { "limit": 30, "period": 60 }
+        },
+        {
+          "name": "MARKETPLACE_UPLOAD_RATE_LIMITER",
+          "namespace_id": "2026082709",
+          "simple": { "limit": 5, "period": 60 }
+        },
+        {
+          "name": "SITE_REPORT_RATE_LIMITER",
+          "namespace_id": "2026083103",
+          "simple": { "limit": 10, "period": 60 }
+        },
+        {
+          "name": "GITHUB_TOKEN_RATE_LIMITER",
+          "namespace_id": "2026092913",
+          "simple": { "limit": 30, "period": 60 }
+        },
+        {
+          "name": "LIVE_ACTIVITY_RATE_LIMITER",
+          "namespace_id": "2026092903",
+          "simple": { "limit": 300, "period": 60 }
+        }
+      ]
+    }
+  }
+}

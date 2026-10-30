@@ -1,0 +1,197 @@
+import type { AttachmentSummary } from "./ipc-attachments";
+import { isIdentifier } from "./ipc-bounded-values";
+import { type ConversationMessage, isConversationMessage, type MessageReaction } from "./ipc-conversation-messages";
+import { isDynamicRecord, isNumber } from "./runtime-values";
+
+/**
+ * The most recent completed messages that main keeps and sends for one conversation, plus the
+ * active turn. A snapshot with fewer messages is the whole conversation.
+ */
+export const CONVERSATION_SNAPSHOT_MESSAGE_LIMIT = 100;
+
+export interface ConversationSnapshot {
+  agentId: string;
+  threadId: string | null;
+  activeTurnId: string | null;
+  revision: number;
+  messages: ConversationMessage[];
+}
+
+export function isConversationSnapshot(value: unknown): value is ConversationSnapshot {
+  return (
+    isDynamicRecord(value) &&
+    isIdentifier(value.agentId) &&
+    (value.threadId === null || isIdentifier(value.threadId)) &&
+    (value.activeTurnId === null || isIdentifier(value.activeTurnId)) &&
+    isNumber(value.revision) &&
+    Number.isInteger(value.revision) &&
+    value.revision >= 0 &&
+    Array.isArray(value.messages) &&
+    value.messages.every(isConversationMessage)
+  );
+}
+
+export interface ConversationReadState {
+  unreadCount: number;
+  firstUnreadMessageId: string | null;
+  throughMessageId: string | null;
+}
+
+export function isConversationReadState(value: unknown): value is ConversationReadState {
+  return (
+    isDynamicRecord(value) &&
+    isNumber(value.unreadCount) &&
+    Number.isInteger(value.unreadCount) &&
+    value.unreadCount >= 0 &&
+    (value.firstUnreadMessageId === null || isIdentifier(value.firstUnreadMessageId)) &&
+    (value.throughMessageId === null || isIdentifier(value.throughMessageId))
+  );
+}
+
+export interface ConversationWithReadState extends ConversationSnapshot {
+  readState?: ConversationReadState;
+}
+
+export function isConversationWithReadState(value: unknown): value is ConversationWithReadState {
+  return (
+    isDynamicRecord(value) &&
+    isConversationSnapshot(value) &&
+    (value.readState === undefined || isConversationReadState(value.readState))
+  );
+}
+
+export type ConversationPageAnchor =
+  | { type: "latest" }
+  | { type: "before"; cursor: string }
+  | { type: "around"; messageId: string };
+
+export interface ConversationPageInfo {
+  hasOlder: boolean;
+  olderCursor: string | null;
+  /**
+   * How many messages are older than the page, and the time of the oldest one. The chat's scroll rail
+   * draws the part that is not loaded from these. A host that does not send them leaves them out,
+   * and the Team API never carries them.
+   */
+  olderCount?: number;
+  oldestAt?: string;
+}
+
+export interface ReadConversationPageInput {
+  agentId: string;
+  anchor?: ConversationPageAnchor | undefined;
+  limit?: number;
+}
+
+export interface ConversationPage {
+  agentId: string;
+  threadId: string | null;
+  activeTurnId: string | null;
+  revision: number;
+  messages: ConversationMessage[];
+  references: Record<string, ConversationMessage>;
+  pageInfo: ConversationPageInfo;
+  readState?: ConversationReadState;
+}
+
+/** A link in an agent's conversation that the user opened. */
+export interface OpenMessageLinkInput {
+  agentId: string;
+  url: string;
+}
+
+/** The address that the browser shows at the end of a relayed sign-in link. */
+export interface PasteMessageLinkInput {
+  url: string;
+  address: string;
+}
+
+/** A relayed sign-in link that the user stopped. */
+export interface CancelMessageLinkInput {
+  url: string;
+}
+
+export interface SearchConversationMessagesInput {
+  query: string;
+  agentId?: string;
+  cursor?: string;
+  limit?: number;
+  /**
+   * Also search the open side threads. Only this computer's server reads it: the Team API search
+   * returns the agents' own chats.
+   */
+  includeSideThreads?: boolean;
+}
+
+export interface ConversationSearchResult {
+  agentId: string;
+  message: ConversationMessage;
+  /** The side thread that has the message. A message of the agent's own chat has none. */
+  taskId?: string;
+}
+
+export interface ConversationSearchPage {
+  results: ConversationSearchResult[];
+  total: number;
+  nextCursor: string | null;
+}
+
+/** A file name search across the local agent chats. An empty query lists the newest files. */
+export interface SearchConversationFilesInput {
+  query: string;
+  cursor?: string;
+  limit?: number;
+}
+
+/** One file that a message in an agent chat carries. */
+export interface ConversationFileSearchResult {
+  agentId: string;
+  messageId: string;
+  createdAt: string;
+  attachment: AttachmentSummary;
+}
+
+export interface ConversationFileSearchPage {
+  results: ConversationFileSearchResult[];
+  nextCursor: string | null;
+}
+
+export interface MarkConversationReadInput {
+  agentId: string;
+  throughMessageId: string | null;
+}
+
+export interface SendMessageInput {
+  agentId: string;
+  text: string;
+  attachmentDraftIds?: string[];
+  replyToMessageId?: string | null;
+  /**
+   * The sender's id for this message. A second send with the same id, from the same sender to the
+   * same agent, returns the first receipt instead of a new message, so a lost reply can be retried.
+   */
+  clientMessageId?: string;
+  /** The open task of this agent that takes the message. Without it, the agent's own chat takes it. */
+  taskId?: string;
+  /**
+   * Stop the running turn and start this message next, before the other queued messages. Without
+   * it, a message to a busy agent follows the agent's busy message mode. Local hosts only.
+   */
+  interrupt?: boolean;
+  /**
+   * An audio draft of what the user said, when the text came from a voice turn. The host keeps it with
+   * the message for replay and never gives it to the agent.
+   */
+  voiceRecordingDraftId?: string;
+}
+
+export interface SetMessageReactionInput {
+  agentId: string;
+  messageId: string;
+  emoji: MessageReaction | null;
+}
+
+export interface RespondToPromptInput {
+  requestId: string | number;
+  answers: Record<string, string[]>;
+}

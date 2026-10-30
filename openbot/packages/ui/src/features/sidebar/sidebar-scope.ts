@@ -1,0 +1,213 @@
+/**
+ * Everything `Sidebar` is, minus the markup. The component builds this once and reads it, and the
+ * regions read it through the scope context.
+ *
+ * The body here is composition: each store under `stores/` owns one concern and is built in
+ * dependency order, because a store can only be handed what already exists. The drag&drop pipeline
+ * is the one part that needs a closure of its own, and `createSidebarDragEngine` is it.
+ */
+
+import { createContext, createEffect, onCleanup, useContext } from "solid-js";
+import { createScrollFades } from "../../components/createScrollFades";
+import { createSidebarDragEngine } from "./createSidebarDragEngine";
+import type { SidebarProps } from "./sidebar-types";
+import { createSidebarAnnouncementStore } from "./stores/announcement-store";
+import { createSidebarDataStore } from "./stores/data-store";
+import { createSidebarDragStateStore } from "./stores/drag-state-store";
+import { createSidebarLayoutActions } from "./stores/layout-actions";
+import { createSidebarPendingStore } from "./stores/pending-store";
+
+export function createSidebarScope(props: SidebarProps) {
+  const layoutMutable = () => props.layoutMutable !== false;
+  const scrollFades = createScrollFades();
+
+  const { announce, announceError, reorderAnnouncement } = createSidebarAnnouncementStore();
+  // The drag state is built from the data store, so the data store reads it through this reference,
+  // which is set once the drag state exists.
+  let dragActive = () => false;
+  const {
+    assignedSectionId,
+    chatKind,
+    chatName,
+    chatPinnedItems,
+    customSectionById,
+    directThreadByMember,
+    filteredAgents,
+    filteredChats,
+    filteredChatsBySection,
+    orderedPeople,
+    personById,
+    resolvedPinnedItems,
+    sectionAcceptsChat,
+    sectionIsCollapsed,
+    sectionLabel,
+    sectionPosition,
+    userHiddenAgentList,
+    userHiddenSince,
+    visiblePinnedKeys,
+    visibleSectionIds,
+    waitingChats,
+  } = createSidebarDataStore({ props, dragActive: () => dragActive() });
+  const {
+    cancelSectionEditor,
+    closeDelete,
+    confirmDelete,
+    confirmSectionDelete,
+    deleteError,
+    deleteTarget,
+    channelDeleteTarget,
+    deleting,
+    openDelete,
+    pending,
+    releaseSectionNameInput,
+    saveSectionEditor,
+    sectionDeleteTarget,
+    setSectionNameInput,
+    startCreateSection,
+    startRenameSection,
+    updateSectionEditorName,
+  } = createSidebarPendingStore({ customSectionById, props });
+  let agentList: HTMLElement | undefined;
+
+  const dragState = createSidebarDragStateStore({ chatKind, sectionAcceptsChat });
+  dragActive = () => dragState.draggingKind() !== undefined;
+  const { assignChatSection, commitSidebarDrop, duplicateSection, movePersonByKeyboard, movePinnedItem, moveSection } =
+    createSidebarLayoutActions({
+      announce,
+      announceError,
+      assignedSectionId,
+      canPinDraggedSidebarItem: dragState.canPinDraggedSidebarItem,
+      chatName,
+      chatPinnedItems,
+      draggedSidebarItem: dragState.draggedSidebarItem,
+      filteredChatsBySection,
+      layoutMutable,
+      orderedPeople,
+      personById,
+      props,
+      sectionLabel,
+      visiblePinnedKeys,
+      visibleSectionIds,
+    });
+  const {
+    dropSidebarNativeDrag,
+    endChatDragging,
+    handleListDragLeave,
+    sidebarClickIsSuppressed,
+    startChatDragging,
+    startNativeItemDragging,
+    startPersonDragging,
+    startSectionDragging,
+    stopSidebarDragging,
+    updateSidebarNativeDrag,
+  } = createSidebarDragEngine({
+    assignedSectionId,
+    canPinDraggedItem: dragState.canPinDraggedSidebarItem,
+    chatKind,
+    chatPinnedItems,
+    commitSidebarDrop,
+    dragState,
+    filteredChatsBySection,
+    getAgentList: () => agentList,
+    orderedPeople,
+    props,
+    scrollFades,
+    sectionAcceptsChat,
+    visiblePinnedKeys,
+    visibleSectionIds,
+  });
+
+  onCleanup(() => {
+    stopSidebarDragging();
+    scrollFades.stop();
+  });
+
+  createEffect(
+    () => [resolvedPinnedItems(), waitingChats(), filteredChats(), orderedPeople(), userHiddenAgentList()],
+    () => {
+      scrollFades.remeasure();
+    },
+  );
+
+  /** The two statements the list's `ref` used to run inline, in the same order. */
+  const setAgentListElement = (element: HTMLElement) => {
+    agentList = element;
+    scrollFades.bind(element);
+  };
+
+  /**
+   * The scope's public surface, and the whole of what a region component may reach for. The drag
+   * store's writers are deliberately absent: only the engine may move a drag along.
+   */
+  return {
+    assignChatSection,
+    cancelSectionEditor,
+    closeDelete,
+    confirmDelete,
+    confirmSectionDelete,
+    customSectionById,
+    deleteError,
+    deleteTarget,
+    channelDeleteTarget,
+    deleting,
+    chatPinnedItems,
+    directThreadByMember,
+    dragOffset: dragState.dragOffset,
+    dragOverPinnedKey: dragState.dragOverPinnedKey,
+    draggedChatId: dragState.draggedChatId,
+    draggedPinnedKey: dragState.draggedPinnedKey,
+    draggingKind: dragState.draggingKind,
+    dropSidebarNativeDrag,
+    duplicateSection,
+    emptyPinnedDropVisible: dragState.emptyPinnedDropVisible,
+    endChatDragging,
+    filteredAgents,
+    filteredChats,
+    filteredChatsBySection,
+    handleListDragLeave,
+    layoutMutable,
+    movePersonByKeyboard,
+    movePinnedItem,
+    moveSection,
+    openDelete,
+    orderedPeople,
+    pending,
+    pinnedDropActive: dragState.pinnedDropActive,
+    props,
+    releaseSectionNameInput,
+    reorderAnnouncement,
+    resolvedPinnedItems,
+    saveSectionEditor,
+    scrollFades,
+    sectionDeleteTarget,
+    sectionDragClasses: dragState.sectionDragClasses,
+    sectionIsCollapsed,
+    sectionPosition,
+    setAgentListElement,
+    setSectionNameInput,
+    sidebarClickIsSuppressed,
+    startChatDragging,
+    startCreateSection,
+    startNativeItemDragging,
+    startPersonDragging,
+    startRenameSection,
+    startSectionDragging,
+    stopSidebarDragging,
+    updateSectionEditorName,
+    updateSidebarNativeDrag,
+    userHiddenAgentList,
+    userHiddenSince,
+    visibleSectionIds,
+    waitingChats,
+  };
+}
+
+export type SidebarScope = ReturnType<typeof createSidebarScope>;
+
+export const SidebarScopeContext = createContext<SidebarScope>();
+
+export function useSidebarScope(): SidebarScope {
+  const scope = useContext(SidebarScopeContext);
+  if (!scope) throw new Error("Sidebar scope is unavailable outside Sidebar.");
+  return scope;
+}

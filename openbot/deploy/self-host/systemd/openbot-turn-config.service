@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenBot TURN runtime configuration
+After=openbot-caddy.service
+Wants=openbot-caddy.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=330
+EnvironmentFile=/etc/openbot/coturn.env
+# The script writes the configuration and the certificate into /run/openbot. It runs as root,
+# because the certificate of Caddy has the mode 0600 and the `caddy` user owns it.
+ExecStart=/usr/local/sbin/openbot-turn-config
