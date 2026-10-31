@@ -3543,8 +3543,13 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
                                                        rdir, timeout, event_file)
         seconds = round(NOW() - started, 3)
         error_class = executor_error_class(rc, final, err_text, backend)
-        # run_proc has reaped a normal 403 or reported early-result exit.
-        if error_class in (None, "rate_limit", "risk_blocked") or (
+        # A normal non-zero child exit is terminal too: run_proc observed the
+        # child exit via poll() before returning.  Retaining its shared slot
+        # would turn startup/configuration failures into a permanent capacity
+        # leak.  Keep the conservative path only for interrupted executions,
+        # where timeout/risk/I/O recovery may still need descendant inspection.
+        normal_child_exit = rc not in (124, 133, 134)
+        if normal_child_exit or error_class in (None, "rate_limit", "risk_blocked") or (
                 backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
                                                    or (meta or {}).get("finished_reason"))):
             release_fleet_slot(rdir)

@@ -300,5 +300,21 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertIsNone(final)
         self.assertEqual(self.call('gocc', op='status')['reservations'], [])
 
+    def test_normal_executor_startup_failure_releases_one_shot_reservation(self):
+        """A reaped non-zero executor must not strand a fleet slot."""
+        rdir = os.path.join(self.temp.name, 'runs', 'startup-failure')
+        os.makedirs(rdir)
+        fake = mock.Mock(return_value=(1, None, {'usage': {}}, 'isolated Pi dependencies unavailable'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake}):
+            attempts, final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        self.assertEqual(error, 'exec_error')
+        self.assertIsNone(final)
+        self.assertEqual(attempts[0]['error_class'], 'exec_error')
+        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
 if __name__ == '__main__':
     unittest.main()
