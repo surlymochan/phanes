@@ -150,7 +150,7 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(call.call_count, 3)
         self.assertIn(rdir, xs._FLEET_RESERVATIONS)
 
-    def test_remote_review_assignment_passes_read_only_to_lane(self):
+    def test_remote_assignment_uses_configured_execution_target(self):
         root = pathlib.Path(self.temp.name)
         binary = root / '.local/bin/openswarm'
         binary.parent.mkdir(parents=True)
@@ -162,16 +162,43 @@ class FleetCapacityTests(unittest.TestCase):
         self.env['HOME'] = str(root)
         self.env['FAKE_ARGS'] = str(root / 'args.json')
         self.env['OPENSWARM_EXECUTOR_HOME'] = str(root / 'formal-runtime')
-        response = self.call('gores1', op='assign', lane='M2', prompt='review', base='abcdef0',
+        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
+        response = self.call('gores1', op='assign', lane='A2', prompt='review', base='abcdef0',
                              budget_minutes=3, title='review', verify=None, read_only=True)
         self.assertTrue(response['ok'])
         captured = json.loads((root / 'args.json').read_text())
         self.assertIn('--read-only', captured['argv'])
         self.assertEqual(captured['runtime'], str(root / 'formal-runtime'))
 
-    def test_dispatcher_rejects_a_lane_owned_by_another_host(self):
-        response = self.call('govpn', op='assign', lane='M2', prompt='wrong host', base='abcdef0',
+    def test_dispatcher_rejects_a_lane_not_owned_by_execution_target(self):
+        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
+        response = self.call('gores1', op='assign', lane='M2', prompt='wrong host', base='abcdef0',
                              budget_minutes=3, title='wrong host', verify=None, read_only=False)
+        self.assertFalse(response['ok'])
+        self.assertIn('invalid lane', response['error'])
+
+    def test_gocc_can_target_govpn_without_reverse_credentials(self):
+        root = pathlib.Path(self.temp.name)
+        binary = root / '.local/bin/openswarm'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"ok":True,"id":"test"}))\n')
+        binary.chmod(0o755)
+        self.env['HOME'] = str(root)
+        self.env['OPENSWARM_EXECUTOR_HOME'] = str(root / 'formal-runtime')
+        self.env['OPENSWARM_EXECUTOR_HOST'] = 'govpn'
+        self.assertTrue(self.call('gocc', op='assign', lane='K1', prompt='cursor', base='abcdef0',
+                                  budget_minutes=3, title='cursor', verify=None, read_only=False)['ok'])
+        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
+        reverse = self.call('govpn', op='assign', lane='A1', prompt='agy', base='abcdef0',
+                            budget_minutes=3, title='agy', verify=None, read_only=False)
+        self.assertFalse(reverse['ok'])
+        self.assertIn('not allowed', reverse['error'])
+
+    def test_payload_cannot_override_configured_execution_target(self):
+        self.env['OPENSWARM_EXECUTOR_HOST'] = 'govpn'
+        response = self.call('gocc', op='assign', lane='K2', prompt='cursor', base='abcdef0',
+                             budget_minutes=3, title='cursor', verify=None, read_only=False,
+                             executor_host='govpn2')
         self.assertFalse(response['ok'])
         self.assertIn('invalid lane', response['error'])
 
