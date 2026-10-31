@@ -31,6 +31,11 @@ src/
 scripts/             Development, smoke, release, and package verification entry points
 tools/               Biome GritQL rules, the UI foundation check, the vitest sequencer and setup, and the type baseline
 .agents/skills/      Task instructions for coding agents, such as release and smoke checks
+examples/            Runnable examples, such as the local org-health diagnosis example
+marketplace/         Published plugin, skill, and agent catalogs
+resources/           Managed skills, agent import bundles, the agent runtime, the CLI, and the plugin catalog
+deploy/              Self-host files for the Signal service, coturn, Caddy, and systemd
+vendor/              Patches for the vendored remote desktop runtime
 ```
 
 The desktop application stays at the repository root. Its package metadata is also the release

@@ -51,9 +51,14 @@ safe to replay. Keep domain retry and recovery rules at their existing owners.
    only repository lint and format tools.
 7. Put renderer state in a domain context module inside that domain's feature directory,
    `src/renderer/src/features/<domain>/<domain>-context.tsx`, beside the logic, views and tests that
-   read it, and place it by lifetime: state that belongs to one team server goes inside the keyed scope in
-   `app-providers.tsx`, everything else above it. A server switch discards and rebuilds that scope,
-   so it is the only per-server teardown there is - a signal on the wrong side of that boundary
+   read it. Name the file after the sub-domain when the context serves one:
+   `<sub-domain>-context.tsx`. The current exceptions are
+   `conversation/direct-messages-context.tsx`, `conversation/conversation-controller-context.tsx`,
+   `custom-providers/provider-detection-context.tsx`, `updates/whats-new-context.tsx` and
+   `window/window-page-context.tsx`. Place it by lifetime: state that belongs to one team server
+   goes inside the keyed scope in `app-providers.tsx`, everything else above it. A server switch
+   discards and rebuilds that scope, so it is the only per-server teardown there is - a signal on
+   the wrong side of that boundary
    either survives a switch it should not or dies in one it should not, and no list of setters can
    fix it. A context reaches another one with `use*()` only downwards, in the nesting order of
    `app-providers.tsx`, or through a provider prop; a command that writes to several domains lives
@@ -72,7 +77,9 @@ safe to replay. Keep domain retry and recovery rules at their existing owners.
 10. Log through `@openbot/logging` (`ts-log` Logger), never bare `console.*` - Biome's `noConsole`
     enforces this in `src`, `scripts` and `packages`. The remote-desktop build recipe scripts that the
     `noConsole` override in `biome.json` excludes are exempt. The `Require a recipe version bump` step
-    of `.github/workflows/remote-desktop-runtime.yml` lists them: any edit to them, cosmetic or not, forces `remoteDesktop.recipeVersion` up and a full
+    of `.github/workflows/remote-desktop-runtime.yml` covers a wider list: those scripts, the workflow
+    file itself, and `scripts/mac-runtime-dylibs.ts`, which has no `console.` call and needs no
+    exemption. An edit to any of them, cosmetic or not, forces `remoteDesktop.recipeVersion` up and a full
     native runtime rebuild, so their logging is frozen until the recipe changes for a real reason. Every line is timestamped, prefixed and
     secret-redacted, and redaction covers a serialized payload passed as one string, not only a
     structured param. Patterns cannot find a secret with no label, such as a token in an error
