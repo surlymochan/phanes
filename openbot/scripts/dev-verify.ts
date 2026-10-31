@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { extname, resolve } from "node:path";
+import { extname, relative, resolve, sep } from "node:path";
 import { supportedBunVersion } from "./prepare-dev-environment";
 import { readScriptArguments } from "./script-arguments";
 
@@ -197,16 +197,29 @@ function createVerificationCommandPlan(
 }
 
 function changedFiles(projectRoot: string): string[] {
-  const tracked = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: projectRoot, encoding: "utf8" });
-  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+  const repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: projectRoot,
     encoding: "utf8",
+  }).trim();
+  const projectPath = relative(repositoryRoot, resolve(projectRoot)).split(sep).join("/");
+  // Git names paths from the Phanes root. Scope and then remove this prefix.
+  const pathspec = projectPath || ".";
+  const tracked = execFileSync("git", ["diff", "--name-only", "HEAD", "--", pathspec], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
   });
+  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", pathspec], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  });
+  const prefix = projectPath ? `${projectPath}/` : "";
   return [
     ...new Set(
       `${tracked}\n${untracked}`
         .split("\n")
         .map((file) => file.trim())
+        .filter((file) => !prefix || file.startsWith(prefix))
+        .map((file) => (prefix ? file.slice(prefix.length) : file))
         .filter(Boolean),
     ),
   ].sort();
