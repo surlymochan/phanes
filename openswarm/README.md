@@ -504,6 +504,13 @@ through to each `run --detach`. One line is printed per state change; detached o
 
 Provider caps in `policy.local.json` also constrain batch dispatch across the hosts listed in `fleet.json`. The planner checks fleet status before each launch and leaves excess cards queued until a provider slot frees. This fleet-wide coordination is planner-owned and uses no `concurrency_url`; direct `fleet exec ... lane assign` only observes the target host's local cap, so use `batch` when multiple hosts share one provider account.
 
+现行的运行边界（这里只描述已有行为）：lane 分配由共享的容量守卫统一放行，守卫命令来自
+`/etc/openswarm-fleet-capacity.json`，通常是 `bin/fleet-capacity`；协调器不可达或拒绝时按失败关闭处理，
+任务留在队列里，不会先启动执行器。回收（recover）不是可以随手调用的开关：在执行器进程组可能仍然存活时，
+运维不得调用回收；只有协调器收到显式的停机确认后才释放容量槽位（本机 TTL 回收用
+`runner-and-executors-stopped-after-ttl`，跨主机运维恢复用 `all-executor-processes-stopped`）。
+回收资格也不能只看 lane 目录里的旧状态文件（`state.json`）：旧状态可能已经过期，不能作为执行器已经停止的证据。
+
 Base synchronization and result collection use git bundles through the transport: no git remotes or pushes.
 Each completed run's `openswarm/<run-id>` branch is fetched into the planner checkout, then removed on the
 executor host after its commit is confirmed locally. Local runs in the planner checkout retain their branches.
