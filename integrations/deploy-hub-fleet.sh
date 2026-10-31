@@ -87,6 +87,17 @@ if (( ! apply )); then
 fi
 
 git -C "$source_root" cat-file -e "$sha^{commit}"
+backup_id="$(date -u +%Y%m%dT%H%M%SZ)-${sha:0:12}-$$"
+backup_root="$HOME/.local/state/phanes-deploy-backups/$backup_id"
+umask 077
+mkdir -p "$backup_root"
+for config in "$hub_plist" "$bridge_config" \
+  "$HOME/Library/LaunchAgents/app.openswarm.phanes.k1.plist" \
+  "$HOME/Library/LaunchAgents/app.openswarm.phanes.k2.plist"; do
+  test -f "$config" || { echo "missing local configuration to back up: $config" >&2; exit 1; }
+  cp -p "$config" "$backup_root/$(basename "$config")"
+done
+echo "local rollback configuration: $backup_root"
 stage="$(mktemp -d "${TMPDIR:-/tmp}/phanes-hub-fleet.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 bundle="$stage/phanes-$sha.bundle"
@@ -186,9 +197,28 @@ PY
 remote_apply() {
   local host="$1" runtime="$2" repo="$3" lanes="$4" remote_bundle="/tmp/phanes-$sha.bundle"
   scp -q "$bundle" "$host:$remote_bundle"
-  ssh -T -o BatchMode=yes -o ConnectTimeout=8 "$host" bash -s -- "$runtime" "$repo" "$remote_bundle" "$sha" "$bundle_ref" "$lanes" <<'REMOTE'
+  ssh -T -o BatchMode=yes -o ConnectTimeout=8 "$host" bash -s -- "$runtime" "$repo" "$remote_bundle" "$sha" "$bundle_ref" "$lanes" "$backup_id" <<'REMOTE'
 set -euo pipefail
-runtime="$1"; repo="$2"; bundle="$3"; sha="$4"; bundle_ref="$5"; lanes="${6//,/ }"
+runtime="$1"; repo="$2"; bundle="$3"; sha="$4"; bundle_ref="$5"; lanes="${6//,/ }"; backup_id="$7"
+umask 077
+backup_root="$HOME/.local/state/phanes-deploy-backups/$backup_id"
+mkdir -p "$backup_root"
+if [ "$(uname -s)" = Darwin ]; then
+  for label in app.openswarm.executor.codex app.openswarm.executor.agy app.openswarm.executor.agy2 \
+    app.openswarm.executor.copilot app.openswarm.executor.copilot-complex; do
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    test -f "$plist" || { echo "missing launchd configuration to back up: $plist" >&2; exit 1; }
+    cp -p "$plist" "$backup_root/$(basename "$plist")"
+  done
+else
+  for unit in openswarm-executor-cursor.service openswarm-executor-pi.service \
+    openswarm-executor-pi2.service openswarm-executor-m3.service openswarm-executor-m4.service; do
+    unit_path="$(systemctl show -p FragmentPath --value "$unit")"
+    test -f "$unit_path" || { echo "missing systemd configuration to back up: $unit" >&2; exit 1; }
+    cp -p "$unit_path" "$backup_root/$(basename "$unit_path")"
+  done
+fi
+echo "remote rollback configuration: $backup_root"
 git -C "$repo" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
 git -C "$repo" cat-file -e "$sha^{commit}"
 
