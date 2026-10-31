@@ -63,3 +63,26 @@ runtime 的 `bin/` 同级放置 `openswarm-fleet-bundle-adapter` 和
 委托旧 runtime。它不是常驻服务，也不携带凭据。
 
 入口指向 `openswarm/bin/` 中同名实现，以兼容现有部署路径，避免维护两份代码。Hub 的准入调用仍在 `openbot/src/backend/`，OpenSwarm 的路由和并发协调仍在 `openswarm/`。这些入口尚需随 Phanes 版本部署并完成端到端验收。
+
+### 变更类远端任务的结果验收
+
+对已完成的变更类（mutating）远端任务，操作员按以下步骤确认结果已交回本机映射仓库：
+
+1. 通过正式 Hub bridge 查询任务（不要直接 SSH 到执行主机）：
+
+   ```bash
+   hub-openswarm-bridge fleet _run-info <run-id>
+   ```
+
+2. 确认返回为终态，且 `result.branch` 为 `openswarm/<run-id>`、`result.commit` 为非空提交哈希。
+3. 在本机映射仓库中检查 bridge 已取回的引用：
+
+   ```bash
+   git -C <repo> show --stat refs/openswarm/<run-id>
+   ```
+
+   其提交哈希应与第 2 步的 `result.commit` 一致（可用 `git -C <repo> rev-parse refs/openswarm/<run-id>` 核对）。
+
+只读任务不产生提交，因此没有 bundle，也没有 `refs/openswarm/<run-id>`；对只读任务不要按上述步骤判定失败。
+
+以上验收只确认任务状态与本机引用，不验证 bundle 传输本身。
