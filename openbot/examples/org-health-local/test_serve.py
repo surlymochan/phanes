@@ -185,12 +185,10 @@ class DistRootServeTests(unittest.TestCase):
                 self.assertEqual(body, expected_body)
 
     def test_dist_root_path_serves_the_index_page(self):
+        # SimpleHTTPRequestHandler 在所有 Python 3 版本里都会用目录下的 index.html 回应 "/"。
         status, body = self.request('/')
-        if getattr(serve.SimpleHTTPRequestHandler, 'index_pages', None):
-            self.assertEqual(status, 200)
-            self.assertEqual(body, self.index.read_bytes())
-        else:
-            self.assertEqual(status, 404)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, self.index.read_bytes())
 
     def test_dist_data_option_overrides_default_dist_data(self):
         override_data = Path(self.tmp.name) / 'override.json'
