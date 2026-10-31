@@ -44,6 +44,13 @@ class CheckSiteTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("站点检查通过", result.stdout)
 
+    def test_unregistered_file_warns_without_failing(self) -> None:
+        dist = self.make_dist()
+        (dist / "debug.log").write_text("fixture", encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("警告：debug.log 未在 build-report 中登记", result.stdout)
+
     def test_missing_file_fails(self) -> None:
         dist = self.make_dist()
         (dist / "styles.css").unlink()

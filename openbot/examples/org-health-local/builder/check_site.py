@@ -132,6 +132,12 @@ def check_site(dist: Path) -> list[str]:
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
             hashes = report_hashes(report)
+            registered = set(hashes)
+            for path in sorted(dist.rglob("*")):
+                if path.is_file():
+                    relative = path.relative_to(dist).as_posix()
+                    if relative != "build-report.json" and relative not in registered:
+                        print(f"警告：{relative} 未在 build-report 中登记")
             for relative in REQUIRED_FILES[:-1]:
                 expected = hashes.get(relative)
                 if not isinstance(expected, str) or not HASH_RE.fullmatch(expected):
