@@ -288,6 +288,7 @@ class FleetCapacityTests(unittest.TestCase):
             (rdir / 'status.json').write_text(json.dumps({
                 'id': 'live-descendant', 'state': 'running', 'runner_pid': runner.pid,
                 'executor_pid': executor.pid, 'executor_pgid': os.getpgid(executor.pid), 'fleet_host': 'gocc',
+                'executor_identity': xs.process_identity(executor.pid),
                 'fleet_reserved_at': 100.0,
             }))
             policy = {'fleet': {'recovery_ttl_seconds': 10}}
@@ -302,7 +303,9 @@ class FleetCapacityTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env), \
                  mock.patch.object(xs, 'RUNS', str(runs)), \
                  mock.patch.object(xs, 'NOW', return_value=110.1):
+                # Termination alone is not enough: a still-unreaped process group retains its slot.
                 self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+            self.assertIsNotNone(executor.poll())
             executor.wait()
             with mock.patch.dict(os.environ, env), \
                  mock.patch.object(xs, 'RUNS', str(runs)), \

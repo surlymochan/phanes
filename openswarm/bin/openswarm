@@ -3151,7 +3151,7 @@ def exec_hermes(d, st, prompt, wd, rdir, timeout, evp):
     try:
         child = LaneChild(lane, wd, policy,
                           on_started=lambda started: set_status(
-                              rdir, executor_pid=started.pid, executor_pgid=started.pgid,
+                              rdir, **executor_status_fields(started.pid, started.pgid),
                               events=evp, attempt_started=NOW()))
         spec = {"started": NOW(), "budget_minutes": timeout / 60, "_event_file": evp}
         final, usage, error, rc, _, detail = lane_run_turn(lane, child, spec, prompt, {"path": wd}, rdir,
@@ -3366,6 +3366,14 @@ def fleet_recovery_ttl_seconds(policy):
     return value
 
 
+def fleet_recovery_poll_seconds(policy):
+    """How often an already-running lane checks for expired local reservations."""
+    value = (policy.get("fleet") or {}).get("recovery_poll_seconds", 5)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("fleet.recovery_poll_seconds must be a positive finite number")
+    return value
+
+
 def recover_expired_fleet_slots(command, policy):
     """Recover dead local runners only after their executor process tree is gone."""
     owner = fleet_guard_host(command)
@@ -3385,7 +3393,9 @@ def recover_expired_fleet_slots(command, policy):
         if not executor_stopped(rdir):
             stop_orphaned_executor(rdir)
         if not executor_stopped(rdir):
-            set_status(rdir, fleet_reservation_error="retained after TTL: executor process group is still live")
+            latest = jload(path, {}) or {}
+            if not latest.get("fleet_reservation_error"):
+                set_status(rdir, fleet_reservation_error="retained after TTL: executor process group is still live")
             continue
         try:
             answer = fleet_guard_call(command, {"op": "recover", "host": owner, "run_id": run_id,
@@ -3397,6 +3407,21 @@ def recover_expired_fleet_slots(command, policy):
             set_status(rdir, fleet_recovered_at=now, fleet_reservation_error=None)
             recovered.append(run_id)
     return recovered
+
+
+def lane_recover_expired_fleet_slots(lane, policy):
+    """Use the resident lane supervisor as the local TTL reaper; never start another service."""
+    try:
+        command = fleet_guard_command()
+        recovered = recover_expired_fleet_slots(command, policy) if command else []
+        lane_write_state(lane["name"], fleet_recovery_error=None,
+                         fleet_recovery_checked_at=NOW(), fleet_recovered_runs=recovered)
+        return recovered
+    except (RuntimeError, ValueError) as error:
+        # A bad/unreachable coordinator must not take down a resident executor.  Admission remains fail-closed.
+        lane_write_state(lane["name"], fleet_recovery_error=short(error, 250),
+                         fleet_recovery_checked_at=NOW())
+        return []
 
 
 def release_fleet_slot(rdir):
@@ -3691,6 +3716,52 @@ def process_group_alive(pgid):
         return False
 
 
+def process_identity(pid):
+    """Best-effort process birth identity, so a recycled PID is never killed as an orphan."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+            # Field 22 is starttime. The comm field can contain spaces and parentheses, hence rsplit.
+            fields = stream.read().rsplit(")", 1)[1].split()
+        if len(fields) > 19:
+            return f"linux-start:{fields[19]}"
+    except (OSError, TypeError, ValueError, IndexError):
+        pass
+    try:
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], text=True,
+                                capture_output=True, timeout=2)
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            return f"ps-lstart:{value}"
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def executor_status_fields(pid, pgid=None):
+    if pgid is None and pid_alive(pid):
+        try:
+            pgid = os.getpgid(int(pid))
+        except (OSError, TypeError, ValueError):
+            pgid = None
+    return {"executor_pid": pid, "executor_pgid": pgid, "executor_identity": process_identity(pid)}
+
+
+def recorded_executor_group_matches(rdir):
+    """Only signal a group which is provably the group persisted for this run."""
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    pid, pgid, identity = status.get("executor_pid"), status.get("executor_pgid"), status.get("executor_identity")
+    if not process_group_alive(pgid) or not isinstance(identity, str) or not identity:
+        return False
+    if not pid_alive(pid):
+        # A group id cannot be reused while the original group still has a member. Its persisted
+        # birth identity proves this was the group's original leader when it was recorded.
+        return True
+    try:
+        return os.getpgid(int(pid)) == int(pgid) and process_identity(pid) == identity
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def executor_stopped(rdir):
     """A failure may release capacity only after its executor and group are both gone."""
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
@@ -3703,6 +3774,9 @@ def stop_orphaned_executor(rdir):
     pgid, pid = status.get("executor_pgid"), status.get("executor_pid")
     set_status(rdir, fleet_recovery_stop_requested=NOW())
     if process_group_alive(pgid):
+        if not recorded_executor_group_matches(rdir):
+            set_status(rdir, fleet_reservation_error="retained after TTL: executor identity cannot be confirmed")
+            return False
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(int(pgid), sig)
@@ -3713,7 +3787,12 @@ def stop_orphaned_executor(rdir):
             if not process_group_alive(pgid):
                 break
     elif pid_alive(pid):
-        kill_tree(pid, grace=0.2)
+        if status.get("executor_identity") and process_identity(pid) == status.get("executor_identity"):
+            kill_tree(pid, grace=0.2)
+        else:
+            set_status(rdir, fleet_reservation_error="retained after TTL: executor identity cannot be confirmed")
+            return False
+    return executor_stopped(rdir)
 
 
 ENFORCED_RISKS = ["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]
@@ -4041,7 +4120,7 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
             pgid = os.getpgid(p.pid)
         except OSError:
             pgid = None
-        set_status(rdir, executor_pid=p.pid, executor_pgid=pgid, events=out_path, attempt_started=NOW())
+        set_status(rdir, **executor_status_fields(p.pid, pgid), events=out_path, attempt_started=NOW())
         end = NOW() + timeout
         policy = load_policy()
         offset, pending = 0, ""
@@ -7395,14 +7474,14 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
-               executor_pid=child.pid, executor_pgid=getattr(child, "pgid", None))
+               **executor_status_fields(child.pid, getattr(child, "pgid", None)))
     lane_record_event(event_file, {"type": "lane_start", "lane": lane["name"]})
     if continuation:
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
         lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn)
     if lane_headless(lane):
-        set_status(rdir, executor_pid=child.pid, executor_pgid=getattr(child, "pgid", None))
+        set_status(rdir, **executor_status_fields(child.pid, getattr(child, "pgid", None)))
     while pending:
         kind, value = pending.pop(0)
         if kind == "steer":
@@ -7437,7 +7516,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     "Correction to the interrupted task: apply this update while continuing the task.\n\n"
                     + correction + "\n\n" + REPORT_INSTRUCTION,
                     model=lane["model"], effort=lane.get("effort"), conversation=turn.get("conversation_id"))
-        set_status(rdir, executor_pid=child.pid, executor_pgid=getattr(child, "pgid", None))
+        set_status(rdir, **executor_status_fields(child.pid, getattr(child, "pgid", None)))
         turn["id"] = "agy-" + uuid.uuid4().hex
         return True
 
@@ -8002,6 +8081,7 @@ def cmd_lane_serve(lane, policy):
     server = lane_ctl_listener(name)
     current, child = {}, None
     started, backoff, next_start = NOW(), 1, 0
+    next_fleet_recovery = NOW()
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
                      started=started, last_error=None, resolved_model=None)
@@ -8034,6 +8114,12 @@ def cmd_lane_serve(lane, policy):
         next_start = NOW() + backoff
     shutdown = False
     while not shutdown:
+        # This is the existing resident lane polling loop, not a second daemon.
+        # A killed runner otherwise cannot release its host capacity until a later admission.
+        if NOW() >= next_fleet_recovery:
+            recovery_policy = load_policy()
+            lane_recover_expired_fleet_slots(lane, recovery_policy)
+            next_fleet_recovery = NOW() + fleet_recovery_poll_seconds(recovery_policy)
         if child and not child.alive():
             if current.get("run_id"):
                 spec = current
@@ -8103,7 +8189,8 @@ def cmd_lane_serve(lane, policy):
                 lane_write_state(name, quota_until=NOW() + 3600)
                 if agy_quota_available(lane, child):
                     lane_write_state(name, quota_model=None, quota_until=None)
-        timeout = max(0, min(0.5, next_start - NOW())) if child is None else 0.5
+        until_recovery = max(0, next_fleet_recovery - NOW())
+        timeout = max(0, min(0.5, next_start - NOW(), until_recovery)) if child is None else min(0.5, until_recovery)
         try:
             ready, _, _ = select.select([server], [], [], timeout)
         except Exception:

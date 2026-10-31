@@ -129,9 +129,101 @@ class LaneTests(unittest.TestCase):
         self.env["OPENSWARM_FLEET_CAPACITY_DIR"] = str(capacity_dir)
 
     def fleet_reservations(self):
-        result = subprocess.run([str(FLEET_CAPACITY), "gocc"], input=json.dumps({"op": "status"}),
-                                text=True, capture_output=True, check=True, env=self.env)
+        result = self.fleet_call({"op": "status"})
         return json.loads(result.stdout)["reservations"]
+
+    def fleet_call(self, payload):
+        return subprocess.run([str(FLEET_CAPACITY), "gocc"], input=json.dumps(payload),
+                                text=True, capture_output=True, check=True, env=self.env)
+
+    @staticmethod
+    def process_identity(pid):
+        try:
+            with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+            if len(fields) > 19:
+                return f"linux-start:{fields[19]}"
+        except (OSError, ValueError, IndexError):
+            pass
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], text=True,
+                                capture_output=True, check=False)
+        return f"ps-lstart:{result.stdout.strip()}" if result.returncode == 0 and result.stdout.strip() else None
+
+    def test_lane_supervisor_recovers_killed_runner_after_ttl_without_new_admission(self):
+        self.enable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
+            "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
+        self.start_lane()
+        run_id, token = "killed-runner", "a" * 32
+        answer = json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
+                                             "backend": "pi", "provider": "minimax-cn"}).stdout)
+        self.assertTrue(answer["admitted"])
+        runner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        executor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            rdir = self.data / "runs" / run_id
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({
+                "id": run_id, "state": "running", "runner_pid": runner.pid,
+                "executor_pid": executor.pid, "executor_pgid": os.getpgid(executor.pid),
+                "executor_identity": self.process_identity(executor.pid),
+                "fleet_host": "gocc", "fleet_reserved_at": time.time() - 1,
+            }))
+            # No later assignment/reserve occurs: the existing lane polling loop must stop only this
+            # recorded group and perform recovery after the group is gone.
+            self.wait_for(lambda: (s if (s := self.run_state(run_id)).get("fleet_recovery_stop_requested") else None),
+                          timeout=5, description="resident lane to stop the recorded executor group")
+            self.assertIsNotNone(executor.poll())
+            executor.wait()
+            self.wait_for(lambda: not self.fleet_reservations(), timeout=5,
+                          description="resident lane to recover a dead runner")
+            status = self.run_state(run_id)
+            self.assertIn("fleet_recovered_at", status)
+            self.assertIsNone(status.get("fleet_reservation_error"))
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
+
+    def test_lane_supervisor_never_kills_unconfirmed_executor_group(self):
+        self.enable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
+            "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
+        self.start_lane()
+        run_id, token = "unknown-group", "b" * 32
+        self.assertTrue(json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
+                                                    "backend": "pi", "provider": "minimax-cn"}).stdout)["admitted"])
+        runner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        executor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            rdir = self.data / "runs" / run_id
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({
+                "id": run_id, "state": "running", "runner_pid": runner.pid,
+                "executor_pid": executor.pid, "executor_pgid": os.getpgid(executor.pid),
+                "executor_identity": "not-this-process", "fleet_host": "gocc", "fleet_reserved_at": time.time() - 1,
+            }))
+            retained = self.wait_for(lambda: (s if "identity cannot be confirmed" in
+                                               str((s := self.run_state(run_id)).get("fleet_reservation_error")) else None),
+                                     timeout=5, description="unconfirmed executor group to be retained")
+            self.assertEqual(len(self.fleet_reservations()), 1)
+            self.assertIsNone(executor.poll(), retained)
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
 
     def test_assign_commits_and_writes_normal_result(self):
         self.set_config("pi")
