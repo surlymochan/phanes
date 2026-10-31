@@ -920,7 +920,7 @@ def build_recommendations(plan: dict, facts: dict, raw: dict) -> list[dict]:
         {
             "优先级": "P2",
             "标题": "核对年末测算与年末目标的口径差异",
-            "依据": f"收入同时给出{FORECAST_LABEL} {fmt_number(facts['income']['forecast'])} 与"
+            "依据": f"收入同时给出{FORECAST_LABEL} {fmt_number(facts['income']['forecast'])} 万美元/月 与"
             f"{TARGET_LABEL} {fmt_number(facts['income']['target'])} 万美元/月，口径不同却同屏展示。",
             "缺失证据": "目标制定依据、测算假设与两者的换算说明。",
             "验证方式": "与业务负责人核对目标口径与测算假设，并在方法说明中记录差异。",

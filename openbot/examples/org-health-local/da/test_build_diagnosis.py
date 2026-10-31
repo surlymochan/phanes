@@ -549,6 +549,21 @@ class BuildDiagnosisTest(unittest.TestCase):
             [metric["标题"] for metric in self.build()["metrics"]],
         )
 
+    def test_recommendation_units_follow_both_income_values(self) -> None:
+        """年末测算与年末目标的收入数值各自带万美元/月单位。"""
+        brief = build_diagnosis.load_brief(self.brief_path)
+        plan = build_diagnosis.parse_plan(brief, SAMPLE_RAW)
+        raw = build_diagnosis.load_raw(SAMPLE_RAW)
+        facts = build_diagnosis.build_facts(plan, raw)
+        recommendations = build_diagnosis.build_recommendations(plan, facts, raw)
+
+        recommendation = next(
+            item for item in recommendations if item["标题"] == "核对年末测算与年末目标的口径差异"
+        )
+        basis = recommendation["依据"]
+        self.assertIn("年末测算 14.8 万美元/月", basis)
+        self.assertIn("年末目标 15.2 万美元/月", basis)
+
     def test_answer_question_revops_cost_and_heads_share(self) -> None:
         """必答问题涉及营收业务与占比/比例时，回答包含成本与人头数值及明确的成本占比与人头占比数字。"""
         brief = json.loads(json.dumps(BRIEF))
