@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+# 交叉审查产物路径：审查失败时同样写出，便于核对失败原因。
+REVIEW_REPORT = 'review.md'
 
 
 def parse_args(argv=None):
@@ -19,7 +21,7 @@ def parse_args(argv=None):
     parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py')
     parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py')
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py')
-    parser.add_argument('--review', action='store_true', help='检查后运行交叉审阅并写入 review.md')
+    parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
     return parser.parse_args(argv)
 
 
@@ -65,7 +67,7 @@ def main(argv=None):
             return 1
     if args.review:
         review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
-        with (workdir / 'review.md').open('w', encoding='utf-8') as output:
+        with (workdir / REVIEW_REPORT).open('w', encoding='utf-8') as output:
             if not run_step('审查', review, stdout=output):
                 return 1
     print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)

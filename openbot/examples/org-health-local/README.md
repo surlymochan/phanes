@@ -60,6 +60,9 @@ cd openbot/examples/org-health-local && python3 run_tests.py
 
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder、检查和独立审查。审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本，`--reviewer` 默认使用 `review/cross_check.py`。
 
+加 `--review` 时审查记录写到 `<workdir>/review.md`：审查通过写 PASS 行，审查失败仍写 FAIL 行并让整体返回非 0，
+即失败路径也留有产物可查。
+
 仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
 
 服务边界测试覆盖 loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务、`--data` 指定的数据文件、启动提示和端口占用处理；全部单元测试均由 `python3 run_tests.py` 运行。
@@ -118,6 +121,9 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 - 隐私边界：快照的字段名（含嵌套）不含个人/薪酬/编制粒度黑名单词条；黑名单写在脚本里。
 
 审查单元测试只用测试内构造的最小样本，不依赖其他角色的脚本，并包含在 `python3 run_tests.py` 中。
+
+退出码契约：`0` 全部 PASS，`1` 至少一项 FAIL，`2` 输入不可读或不是 JSON 对象。失败路径仍写产物：
+`--out` 的 Markdown 报告照常落盘（含 FAIL 项与汇总），`run_e2e.py --review` 也照常写出 `review.md`。
 
 ## 构建静态站点
 
