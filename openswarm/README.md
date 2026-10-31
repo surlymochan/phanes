@@ -118,7 +118,7 @@ Routing decisions use live quota data, not guesses.
   - `SKILL.md` teaches Claude Code the whole loop.
   - `templates/openswarm-workflow.js` fans tasks out in parallel.
   - `openswarm report` gives scheduled check-ins.
-- **GitHub issue bus.** Routes tasks to uncontrolled external executors through a dedicated repository, while controlled hosts continue to use SSH fleet lanes.
+- **GitHub issue bus.** Routes tasks to uncontrolled external executors through a dedicated repository, while controlled hosts continue to use SSH fleet lanes. See the [Phanes dual-mode issue bus smoke guide](../docs/dual-mode-issue-bus.md).
 - **Learning loop.** The ledger records the pass decision, the injected lessons and patterns, and the routing advice of every run. `lessons propose`, `patterns propose`, and `retro` turn those records into reviewable drafts.
 - **Zero dependencies.** One Python file using only the standard library.
 
