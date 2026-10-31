@@ -8641,7 +8641,13 @@ def generate_lane_service_definition(lane, service_manager):
 
     if service_manager == "systemd-unit":
         import pwd
-        user = pwd.getpwuid(os.getuid()).pw_name
+        try:
+            user = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            # Containers and minimal CI images ship without a passwd entry for the
+            # current uid.  systemd accepts the numeric id in User=, so a missing
+            # entry must not abort the whole unit definition.
+            user = str(os.getuid())
         home = os.path.expanduser("~")
         path = os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         local_bin = os.path.join(home, ".local", "bin")

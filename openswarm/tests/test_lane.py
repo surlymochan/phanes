@@ -49,12 +49,33 @@ class LaneTests(unittest.TestCase):
         self.set_config()
 
     def tearDown(self):
+        supervisor = self.lane_state().get("supervisor_pid")
         if self.data.exists():
             try:
                 self.cli("lane", "down", check=False, timeout=45)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        self.tmp.cleanup()
+        # The lane supervisor keeps writing into the temporary directory until it
+        # exits, and git may still run background maintenance there.  Wait for the
+        # supervisor and retry the removal instead of failing the test on that race.
+        if supervisor:
+            deadline = time.monotonic() + 10
+            while process_alive(supervisor) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        tmp_path = self.tmp.name
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            for attempt in range(3):
+                if not os.path.exists(tmp_path):
+                    break
+                try:
+                    shutil.rmtree(tmp_path)
+                    break
+                except OSError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05)
 
     def set_config(self, backend=None, model=None, fallback_models=None):
         if backend:

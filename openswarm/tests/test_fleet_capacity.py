@@ -17,6 +17,21 @@ sys.path.insert(0, str(HERE))
 import _load
 xs = _load.load()
 
+
+def stop_executor_group(pgid, timeout=5):
+    """Stop a recorded executor group and wait for it to disappear.
+
+    The lane may already have reaped the group when the executor exits early,
+    so a missing group is the expected outcome rather than an error.
+    """
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, TypeError, ValueError):
+        return
+    deadline = time.monotonic() + timeout
+    while xs.process_group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+
 class FleetCapacityTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -695,7 +710,7 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(attempts[0]['rc'], 17)
         self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
         pgid = json.loads(pathlib.Path(rdir, 'status.json').read_text())['executor_pgid']
-        os.killpg(pgid, signal.SIGKILL)
+        stop_executor_group(pgid)
         self.assertTrue(xs.release_fleet_slot(rdir))
 
     def test_detached_descendant_retains_then_ttl_reaper_stops_recorded_group(self):
@@ -769,7 +784,7 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertTrue(marker.exists(), attempts)
             self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
             pgid = json.loads((rdir / 'status.json').read_text())['executor_pgid']
-            os.killpg(pgid, signal.SIGKILL)
+            stop_executor_group(pgid)
             self.assertTrue(xs.release_fleet_slot(str(rdir)))
         finally:
             if marker.exists():
@@ -803,7 +818,7 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertTrue(marker.exists(), attempts)
             self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
             pgid = json.loads((rdir / 'status.json').read_text())['executor_pgid']
-            os.killpg(pgid, signal.SIGKILL)
+            stop_executor_group(pgid)
             self.assertTrue(xs.release_fleet_slot(str(rdir)))
         finally:
             if marker.exists():
