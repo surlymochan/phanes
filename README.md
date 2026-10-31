@@ -5,7 +5,7 @@
 - [`openbot/`](openbot/)：OpenBot Hub 和界面。
 - [`openswarm/`](openswarm/)：执行器、路由与跨主机并发。
 - [`integrations/`](integrations/)：Hub 与执行网络的连接入口。
-- Issue、PR 和 Discussions 以本仓库为入口，既有 Phanes Project 保留历史与跨项目视图。
+- Issue、PR 和 Discussions 以本仓库为入口；当前执行看板为 [phanes RSI 异构 Agent 网络](https://github.com/users/surlymochan/projects/6)（SSH fleet + GitHub issue bus）。既有 Phanes / Agent Task Project 保留历史与跨项目视图。
 
 组件保留各自许可证：OpenBot 使用 [PolyForm Noncommercial 1.0.0](openbot/LICENSE)，OpenSwarm 使用 [Apache 2.0](openswarm/LICENSE)。其他文件适用其自身声明。
 
