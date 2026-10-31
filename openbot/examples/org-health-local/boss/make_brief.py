@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""生成组织健康诊断任务书 brief.json。
+
+用法：
+    python3 make_brief.py --out brief.json [--goal 文本] [--month YYYY-MM]
+
+任务书只写口径、问题与字段映射，不含真实组织数据或真实数字。
+默认口径与合成示例 data/diagnosis.json 一致：观察月份 2026-09、数据截止
+2026-09-30、指标标题与顺序同站点的 metrics。--goal 覆盖“目标”，--month 覆盖
+观察月份（数据截止与期次锚点随之推算）。结构定义见同目录 brief.schema.json，
+校验复用上一级目录的 validate.py；只使用 Python 标准库。
+"""
+from __future__ import annotations
+
+import argparse
+import calendar
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+EX = ROOT.parent
+if str(EX) not in sys.path:
+    sys.path.insert(0, str(EX))
+
+from validate import Validator, load_schema  # noqa: E402
+
+SCHEMA_PATH = ROOT / "brief.schema.json"
+
+EXIT_OK = 0
+EXIT_INVALID = 1
+EXIT_USAGE = 2
+
+SCHEMA_VERSION = 4
+DEFAULT_MONTH = "2026-09"
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+# 站点期望的四个指标标题，顺序与 data/diagnosis.json 的 metrics 一致。
+METRIC_TITLES = (
+    "整体技术人力成本",
+    "整体折算人头",
+    "营收业务（含共享平台）技术人力成本与折算人头",
+    "收入与成本率",
+)
+
+DEFAULT_GOALS = [
+    "复核观察期间内整体技术人力成本与折算人头的水平与变化幅度。",
+    "说明营收业务（含共享平台）口径的成本、折算人头与收入的匹配情况。",
+    "给出整体、营收业务与全口径三个成本率的水平，并解释差异来源。",
+    "列明缺少同口径数据的期次与领域，说明缺口对上述结论的影响。",
+]
+
+DEFAULT_QUESTIONS = [
+    "观察期间内整体技术人力成本是多少？相对期初实际增减多少（金额与百分比）？",
+    "整体折算人头的变化与整体技术人力成本的变化是否同向？折算人头口径是否与成本口径一致？",
+    "营收业务（含共享平台）的技术人力成本与折算人头分别是多少？占整体口径的比例是多少？",
+    "观察期间的收入是多少（万美元/月）？整体技术人力成本率与营收业务技术人力成本率各是多少？",
+    "全口径技术成本率（含运维与设施）在哪些期次有同口径值？缺同口径值的期次如何呈现？",
+    "哪些结论只能由聚合口径支撑，哪些领域因缺少证据而无法回答？",
+]
+
+# 字段路径是逻辑路径：数据提供方的原始表与列名由 DA 按实际来源映射。
+DEFAULT_DATA_NEEDS = [
+    {
+        "字段路径": "月度成本/技术人力成本",
+        "单位": "万元/月",
+        "口径": "计入技术人力的成本合计，不含运维与设施；需可按期次与业务口径拆分。",
+        "对应指标": "整体技术人力成本",
+    },
+    {
+        "字段路径": "月度人力/折算人头",
+        "单位": "人（当量）",
+        "口径": "按投入当量折算的人数，非自然人数；与成本口径同源同范围。",
+        "对应指标": "整体折算人头",
+    },
+    {
+        "字段路径": "月度成本/营收业务技术人力成本",
+        "单位": "万元/月",
+        "口径": "只含营收业务（含共享平台）的技术人力成本，与整体口径同定义、不同范围。",
+        "对应指标": "营收业务（含共享平台）技术人力成本与折算人头",
+    },
+    {
+        "字段路径": "月度人力/营收业务折算人头",
+        "单位": "人（当量）",
+        "口径": "营收业务（含共享平台）口径的折算人头，范围与上一条一致。",
+        "对应指标": "营收业务（含共享平台）技术人力成本与折算人头",
+    },
+    {
+        "字段路径": "月度收入/营收业务收入",
+        "单位": "万美元/月",
+        "口径": "营收业务口径月度收入；成本率按同期收入折算为同一币种后计算。",
+        "对应指标": "收入与成本率",
+    },
+    {
+        "字段路径": "月度成本/运维与设施成本",
+        "单位": "万元/月",
+        "口径": "运维与设施成本，用于全口径技术成本率；缺失时该口径留空，不用整体成本代替。",
+        "对应指标": "收入与成本率",
+    },
+]
+
+DEFAULT_FORBIDS = [
+    "不得写入真实组织数据：任务书只写口径、问题与字段映射，真实数字与明细只留在仓库外的工作目录。",
+    "不作个人/薪酬/编制判断：只输出聚合口径，不含个人级字段、薪酬明细与编制明细。",
+    "不得编造数字：没有取数支撑的值一律写 null，并在 risks/recommendations 的“缺失证据”里写明缺口。",
+    "不得改动指标标题与顺序：metrics 的四个标题与顺序与站点期望一致，改动会被页面判为结构错误。",
+    "不得把推断写成事实：洞察按“事实/推断/边界”标注，推断必须写明依据与核实方式。",
+    "不得把仓库外的真实数据复制进仓库：诊断 JSON 写在仓库外，交接只给路径与校验值。",
+]
+
+
+def period_keys(month: str) -> list[str]:
+    """按观察月份给出期次锚点，顺序与站点期望一致。
+
+    2026-09 的期次为 2026-01实际、2026-05H1参考、2026-09实际、年末测算、年末目标，
+    与合成示例 data/diagnosis.json 的数值序列键名一致。
+    """
+    year = month[:4]
+    keys = [f"{year}-01实际", f"{year}-05H1参考", f"{month}实际", "年末测算", "年末目标"]
+    ordered: list[str] = []
+    for key in keys:
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def month_end(month: str) -> str:
+    """返回观察月份的最后一天，格式 YYYY-MM-DD。"""
+    year, number = int(month[:4]), int(month[5:7])
+    return f"{month}-{calendar.monthrange(year, number)[1]:02d}"
+
+
+def period_line(keys: list[str], month: str) -> str:
+    """写出期间口径：哪些是已发生实际、参考基准与前瞻估算。"""
+    actual = f"{month}实际"
+    reference = f"{month[:4]}-05H1参考"
+    return (
+        f"按观察期间期次取值：{'、'.join(keys)}；"
+        f"其中 {keys[0]} 与 {actual} 为已发生实际期次，{reference} 为 H1 冻结对照基准，"
+        "年末测算与年末目标为前瞻预算与目标估算，不代表已发生实际。"
+    )
+
+
+def build_definitions(keys: list[str], month: str) -> dict:
+    """按指标标题给出口径定义：单位、定义、期间与缺失处理。"""
+    period = period_line(keys, month)
+    reference = f"{month[:4]}-05H1参考"
+    missing = "该期次没有同口径取数时写 null，界面显示为未提供，不以 0 或推测值替代。"
+    return {
+        "整体技术人力成本": {
+            "单位": "万元/月",
+            "定义": "技术人力成本为当期计入的技术人力相关成本合计，不含运维与设施。",
+            "期间": period,
+            "缺失处理": f"{missing}（例如 {reference} 未单独拆分整体成本与人头）。",
+        },
+        "整体折算人头": {
+            "单位": "人（当量）",
+            "定义": "折算人头为按投入当量折算的人数，非自然人数；与成本口径同源同范围。",
+            "期间": period,
+            "缺失处理": f"{missing}（例如 {reference} 未单独拆分整体成本与人头）。",
+        },
+        "营收业务（含共享平台）技术人力成本与折算人头": {
+            "单位": "成本：万元/月；折算人头：人（当量）",
+            "定义": "只统计营收业务（含共享平台）口径的技术人力成本与折算人头，与整体口径同定义、不同范围。",
+            "期间": period,
+            "缺失处理": "营收业务口径缺任一分项时该分项写 null，不用整体口径回填。",
+        },
+        "收入与成本率": {
+            "单位": "收入：万美元/月；成本率：百分比（按原文显示，如 约2%）",
+            "定义": (
+                "收入为营收业务口径月度收入；成本率 = 技术人力成本 ÷ 同期收入，"
+                "成本与收入折算为同一币种后计算；全口径技术成本率额外包含运维与设施成本。"
+            ),
+            "期间": period,
+            "缺失处理": "收入或成本缺同口径值时成本率写 null，不用其他期次或其他口径替代。",
+        },
+    }
+
+
+def build_brief(goals: list[str] | None = None, month: str | None = None) -> dict:
+    """生成任务书。goals 覆盖“目标”，month 覆盖观察月份。"""
+    observed = DEFAULT_MONTH if month is None else month
+    if not MONTH_PATTERN.match(observed):
+        raise ValueError(f"观察月份必须是 YYYY-MM（月份在 01-12 之间）：{observed}")
+    keys = period_keys(observed)
+    return {
+        "目标": list(goals) if goals else list(DEFAULT_GOALS),
+        "观察期间": {
+            "观察月份": observed,
+            "数据截止": month_end(observed),
+            "期次": keys,
+            "说明": (
+                f"观察月份 {observed}，数据截止 {month_end(observed)}；"
+                f"期次锚点 {'、'.join(keys)}，与站点数值序列的键名一致。"
+            ),
+        },
+        "口径": build_definitions(keys, observed),
+        "必答问题": list(DEFAULT_QUESTIONS),
+        "数据需求": [dict(item) for item in DEFAULT_DATA_NEEDS],
+        "禁止事项": list(DEFAULT_FORBIDS),
+        "schema版本": SCHEMA_VERSION,
+    }
+
+
+def validate_brief(brief: dict) -> list[str]:
+    """按 brief.schema.json 校验任务书，返回错误说明列表。"""
+    return Validator(load_schema(SCHEMA_PATH)).errors(brief)
+
+
+def write_brief(brief: dict, path: Path) -> None:
+    """把任务书写成 JSON 文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(brief, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """解析命令行参数。"""
+    parser = argparse.ArgumentParser(description="生成组织健康诊断任务书 brief.json。")
+    parser.add_argument("--out", type=Path, required=True, help="任务书输出路径。")
+    parser.add_argument(
+        "--goal",
+        action="append",
+        default=None,
+        help="覆盖“目标”。可重复给出；不给时用默认目标。",
+    )
+    parser.add_argument(
+        "--month",
+        default=None,
+        help=f"覆盖观察月份，格式 YYYY-MM。默认 {DEFAULT_MONTH}。",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """生成任务书并写出文件。返回进程退出码。"""
+    args = parse_args(argv)
+    try:
+        brief = build_brief(args.goal, args.month)
+    except ValueError as cause:
+        print(str(cause), file=sys.stderr)
+        return EXIT_USAGE
+    errors = validate_brief(brief)
+    if errors:
+        print(f"生成的任务书不符合 {SCHEMA_PATH.name}：", file=sys.stderr)
+        for message in errors:
+            print(f"  {message}", file=sys.stderr)
+        return EXIT_INVALID
+    try:
+        write_brief(brief, args.out)
+    except OSError as cause:
+        print(f"无法写出 {args.out}：{cause}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"已写出任务书：{args.out}")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
