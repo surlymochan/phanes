@@ -248,7 +248,7 @@ https.request = (_options, callback) => {
                     except OSError: pass
                 proc.terminate(); proc.wait(timeout=5); proc.stderr.close()
 
-    def test_rotation_waits_for_both_boundary_requests_to_finish(self):
+    def test_more_than_64_requests_keep_broker_running(self):
         with tempfile.TemporaryDirectory() as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
@@ -265,8 +265,7 @@ https.request = (_options, callback) => {
     const count = Number(fs.existsSync(process.env.COUNTER) ? fs.readFileSync(process.env.COUNTER, 'utf8') : 0) + 1;
     fs.writeFileSync(process.env.COUNTER, String(count));
     const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {}; upstream.complete = true;
-    callback(upstream);
-    setTimeout(() => upstream.end('ok-' + count), count === 63 ? 80 : count === 64 ? 360 : 0);
+    callback(upstream); upstream.end('ok-' + count);
   };
   return req;
 };
@@ -280,30 +279,17 @@ https.request = (_options, callback) => {
                 while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertTrue(os.path.exists(path), 'broker did not start')
-                for _ in range(62):
+                for _ in range(68):
                     client = UnixHTTP(path)
                     client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
                     self.assertEqual(client.getresponse().status, 200)
                     client.close()
-                replies = []
-                def request():
-                    client = UnixHTTP(path)
-                    client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
-                    response = client.getresponse()
-                    replies.append((response.status, response.read()))
-                    client.close()
-                workers = [threading.Thread(target=request) for _ in range(4)]
-                for worker in workers: worker.start()
-                for worker in workers: worker.join(timeout=5)
-                self.assertTrue(all(not worker.is_alive() for worker in workers))
-                # The 64-request rotation budget accepts only two of these
-                # four boundary uploads; neither accepted stream is cut off
-                # when the first one finishes.
-                self.assertEqual(sorted(status for status, _body in replies), [200, 200, 503, 503])
-                # Once both terminal responses have drained the supervised broker may rotate.
-                while proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertEqual(proc.poll(), 0)
+                self.assertIsNone(proc.poll(), 'normal request volume must not rotate the broker')
+                client = UnixHTTP(path)
+                client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                self.assertEqual(client.getresponse().status, 200)
+                client.close()
+                self.assertEqual(counter.read_text(), '69')
             finally:
                 if proc.poll() is None:
                     proc.terminate()

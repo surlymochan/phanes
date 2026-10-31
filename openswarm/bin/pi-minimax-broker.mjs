@@ -19,19 +19,12 @@ const maxBytes = 8 * 1024 * 1024;
 // Four resident Pi lanes share this broker. Track every in-flight request so
 // one completion cannot admit a fifth while peers are still streaming. The
 // fleet coordinator remains responsible for the cross-host/global limit.
-const maxInFlight = 4, maxAccepted = 64;
-let inFlight = 0, accepted = 0, rotating = false;
-
-function rotateWhenDrained() {
-  if (!rotating || inFlight !== 0) return;
-  // Stop accepting only after every accepted response has drained. Do not use
-  // closeAllConnections: at the rotation boundary it could cut off a peer.
-  server.close(() => { try { unlinkSync(socket); } catch {} process.exit(0); });
-}
+const maxInFlight = 4;
+let inFlight = 0;
 
 const server = createServer((req, res) => {
   const fail = (status, message) => { if (!res.headersSent) res.writeHead(status, {'content-type': 'text/plain'}); res.end(message); };
-  if (inFlight >= maxInFlight || accepted >= maxAccepted) return fail(503, 'broker temporarily unavailable');
+  if (inFlight >= maxInFlight) return fail(503, 'broker temporarily unavailable');
   if (req.method !== 'POST' || !['/v1/messages', '/v1/messages?beta=true'].includes(req.url)) return fail(403, 'request refused');
   const beta = req.headers['anthropic-beta'];
   if (beta !== undefined && (typeof beta !== 'string' || !/^[a-z0-9, -]{1,512}$/i.test(beta))) return fail(400, 'invalid beta header');
@@ -44,7 +37,6 @@ const server = createServer((req, res) => {
     if (settled) return;
     settled = true;
     inFlight -= 1;
-    rotateWhenDrained();
   };
   let size = 0; const parts = [];
   req.on('data', chunk => { size += chunk.length; if (size <= maxBytes) parts.push(chunk); else req.destroy(); });
@@ -57,14 +49,6 @@ const server = createServer((req, res) => {
     if (size !== length || !parsed || parsed.model !== model || !Array.isArray(parsed.messages)) {
       release(); return fail(403, 'model or request refused');
     }
-    // A request reserves an in-flight slot before its body is validated. Check
-    // the rotation budget again here so several simultaneously uploaded bodies
-    // cannot all cross the budget boundary after their initial admission.
-    if (accepted >= maxAccepted) {
-      release(); return fail(503, 'broker temporarily unavailable');
-    }
-    accepted += 1;
-    if (accepted >= maxAccepted) rotating = true;
     // Forward the parsed value, not the original bytes: duplicate JSON keys must not
     // let the upstream select a different model from the one checked above.
     const payload = Buffer.from(JSON.stringify(parsed));
