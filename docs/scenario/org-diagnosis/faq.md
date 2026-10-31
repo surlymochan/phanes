@@ -114,7 +114,15 @@ python3 serve.py --data /absolute/path/to/diagnosis.json
   （`/`、`/index.html`、`/app.bundle.js`、`/styles.css`、`/data/diagnosis.json`）返回 404，目录列表关闭、请求日志不落盘
   （`openbot/examples/org-health-local/serve.py:14`、`:28-33`、`:41-47`）。
 - 端口被占用时打印明确错误并以非 0 退出，**不会**静默换端口（`openbot/examples/org-health-local/serve.py:81`、`:106-110`）；
-  先停掉旧进程，或用 `--port 8766` 换端口。
+  可以先查找并结束占用默认端口的旧服务：
+
+  ```bash
+  lsof -nP -iTCP:8765 -sTCP:LISTEN
+  lsof -tiTCP:8765 -sTCP:LISTEN | xargs -r kill
+  ```
+
+  确认端口已释放后重新启动；如果不希望结束该进程，则直接用一个未占用的端口，
+  例如 `python3 serve.py --root <dist> --port 8766`，并访问终端打印的新地址。
 
 **实测：** `python3 serve.py --root <dist> --port 8791` 后，`/` 返回 200、`/data/diagnosis.json` 返回 200、
 非本机 `Host` 返回 403。
