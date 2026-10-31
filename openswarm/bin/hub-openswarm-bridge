@@ -98,7 +98,11 @@ def local_gateway(payload):
                        '--budget-minutes', str(budget)]
             if verify:
                 command += ['--verify', str(verify)]
-            return local_command(command, timeout=100)
+            # `openswarm-auto` queries fleet hosts serially (35 seconds per
+            # host) before a possible 45-second assignment.  Its bridge
+            # deadline must cover that valid work, or an accepted task can
+            # lose its acknowledgement and leave the Hub journal pending.
+            return local_command(command, timeout=15 + 35 * len(local_fleet_hosts()) + 45 + 10)
     run_id, host = payload.get('id'), payload.get('host')
     if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id):
         raise RuntimeError('local fleet command rejected request')

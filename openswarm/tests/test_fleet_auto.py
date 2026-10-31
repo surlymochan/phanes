@@ -109,6 +109,22 @@ class FleetAutoTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'backend configuration'):
                     G['backend_filters'](G['fleet_hosts']())
 
+    def test_empty_local_allowlist_skips_missing_local_lane_runtime(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gocc":["agy"]}',
+        }
+        local = mock.Mock(side_effect=RuntimeError('local lane status unavailable'))
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {
+                    'local_lanes': local,
+                    'fleet_lanes': lambda host: [{'name':'A1','state':'idle','backend':'agy','model':'gemini'}],
+                }):
+            rows = G['discovered_lanes']()
+        self.assertEqual([(row['name'], row['_origin']) for row in rows], [('A1', 'fleet')])
+        local.assert_not_called()
+
     def test_copilot_prefers_sonnet_for_hard_and_haiku_for_routine_work(self):
         lanes = [
             {'name': 'GH1', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-haiku-5.5'},
