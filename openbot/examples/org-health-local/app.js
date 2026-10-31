@@ -233,9 +233,10 @@ fetch("./data/diagnosis.json", { cache: "no-store" })
     ["metric-grid", "insight-grid", "definitions-grid", "risk-grid", "recommendations"].forEach((id) => {
       document.getElementById(id).replaceChildren();
     });
-    ["scope-month", "scope-date", "scope-source", "footer-source"].forEach((id) => {
+    ["scope-month", "scope-date", "scope-source", "footer-source", "stage-title", "stage-note"].forEach((id) => {
       document.getElementById(id).textContent = "—";
     });
+    $("#stage-list").replaceChildren();
     $("#asof-short").textContent = t("orgHealthDemo.loadFailed");
     $("#conclusion").textContent = error.message || t("orgHealthDemo.genericError");
   });

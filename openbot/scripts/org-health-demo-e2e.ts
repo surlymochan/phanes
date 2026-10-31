@@ -53,7 +53,8 @@ try {
       .getByText(language === "zh" ? "整体技术人力成本" : "Total technical labor cost", { exact: false })
       .first()
       .waitFor();
-    assert.equal(await page.locator("#metric-grid .metric-card").count(), 6);
+    assert.equal(await page.getByText("15", { exact: true }).count(), 1);
+    assert.equal(await page.getByText(language === "zh" ? "未提供" : "Not provided", { exact: true }).count(), 6);
     assert.notEqual(await page.locator("#asof-short").innerText(), language === "zh" ? "加载失败" : "Loading failed");
     checks.push(`${language} valid snapshot`);
   }
@@ -80,13 +81,13 @@ try {
   await writeFile(data, JSON.stringify(legacy));
   await page.goto(`${url}/?lang=zh`);
   await page.getByText("整体技术人力成本", { exact: false }).first().waitFor();
-  assert.equal(await page.locator("#metric-grid .metric-card").count(), 6);
   assert.equal(await page.locator("#scope-month").innerText(), "2026-09");
-  assert.equal(await page.locator("#stage-list > div").count(), 2);
   assert.equal(await page.locator("#stage-title").innerText(), "Synthetic categories");
   assert.equal(await page.locator("#stage-note").innerText(), "Synthetic only");
   assert.equal(await page.locator("#stage-list > div").first().locator("b").innerText(), "A");
   assert.equal(await page.locator("#stage-list > div").first().locator("p").innerText(), "Example A");
+  assert.equal(await page.locator("#stage-list > div").nth(1).locator("b").innerText(), "B");
+  assert.equal(await page.locator("#stage-list > div").nth(1).locator("p").innerText(), "Example B");
   checks.push("legacy snapshot valid");
   const missingStage = structuredClone(legacy);
   missingStage.指标.pop();
@@ -94,6 +95,9 @@ try {
   await page.goto(`${url}/?lang=zh`);
   await page.getByText("加载失败", { exact: true }).waitFor();
   assert.equal(await page.locator("#metric-grid").innerText(), "");
+  assert.equal(await page.locator("#stage-title").innerText(), "—");
+  assert.equal(await page.locator("#stage-note").innerText(), "—");
+  assert.equal(await page.locator("#stage-list").innerText(), "");
   checks.push("legacy snapshot without stage rejected");
   const invalid = structuredClone(snapshot);
   delete invalid.metrics[3].数值["收入万美元每月"]["年末目标"];
@@ -106,6 +110,7 @@ try {
     await page.getByText(expected, { exact: true }).waitFor();
     assert.equal(await page.locator("#metric-grid").innerText(), "");
     assert.equal(await page.locator("#scope-month").innerText(), "—");
+    assert.equal(await page.locator("#stage-list").innerText(), "");
     checks.push(`${language} invalid snapshot`);
   }
   const denied = await fetch(`${url}/data/diagnosis.json`, { method: "HEAD", headers: { Host: "invalid.example" } });
