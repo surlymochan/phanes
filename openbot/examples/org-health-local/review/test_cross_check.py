@@ -363,6 +363,45 @@ class CrossCheckTest(unittest.TestCase):
         self.assertIn("PASS", result.stdout)
         self.assertNotIn("FAIL", result.stdout)
 
+    def test_command_line_help_lists_arguments(self) -> None:
+        """--help 成功退出并列出全部命令行参数。"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for argument in ("--brief", "--data", "--dist", "--out"):
+            self.assertIn(argument, result.stdout)
+
+    def test_command_line_missing_required_arguments_exits_two(self) -> None:
+        """缺少 --brief 或 --data 时 argparse 以退出码 2 结束。"""
+        missing_brief = subprocess.run(
+            [sys.executable, str(SCRIPT), "--data", "missing.json"],
+            capture_output=True,
+            text=True,
+        )
+        missing_data = subprocess.run(
+            [sys.executable, str(SCRIPT), "--brief", "missing.json"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(missing_brief.returncode, 2, missing_brief.stderr)
+        self.assertEqual(missing_data.returncode, 2, missing_data.stderr)
+
+    def test_command_line_writes_successful_markdown_report(self) -> None:
+        """合法输入带 --out 时成功写出含汇总与逐条 PASS/FAIL 列表的报告。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            report = base / "report.md"
+            result = run_script(brief, data, out=report)
+            content = report.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("**汇总：共 5 项检查，5 项通过，0 项失败。**", content)
+        self.assertIn("- **PASS 期间一致**", content)
+        self.assertIn("- **PASS 隐私边界**", content)
+        self.assertNotIn("- **FAIL ", content)
+
     def test_command_line_reports_failure(self) -> None:
         """命令行核对失败时退出码非 0，并打印 FAIL 行。"""
         self.brief["schema版本"] = 3
