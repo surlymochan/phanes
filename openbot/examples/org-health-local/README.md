@@ -25,3 +25,22 @@ python3 validate.py /absolute/path/to/diagnosis.json
 ```bash
 cd openbot/examples/org-health-local && python3 -m unittest test_validate -v
 ```
+
+## 构建静态站点
+
+`builder/build_site.py` 把诊断快照构建成可预览的静态目录：先用 `validate.py` 校验数据，
+不合格时退出码非 0 且不生成 `dist`；合格时复制 `index.html`、`styles.css` 与数据到
+`dist/data/diagnosis.json`，并写出 `build-report.json`（输入路径、输入 sha256、文件清单、生成时间）。
+
+```bash
+cd openbot/examples/org-health-local
+python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle app.bundle.js
+```
+
+产物为 `dist/index.html`、`dist/app.bundle.js`、`dist/styles.css`、`dist/data/diagnosis.json`
+和 `dist/build-report.json`。不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）；
+单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络：
+
+```bash
+cd openbot/examples/org-health-local && python3 -m unittest builder.test_build_site -v
+```
