@@ -8,6 +8,7 @@
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -461,6 +462,77 @@ class ValidateTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("/: 期望类型 object，实际为 string", output)
         self.assertNotIn("Traceback", output)
+
+    def test_command_line_nonexistent_file_reports_exit_code_two_and_path(self) -> None:
+        """待校验文件不存在时退出码为 2（输入不可读），stderr 提示里含该路径。"""
+        with temporary_directory() as folder:
+            missing = Path(folder) / "does_not_exist.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(missing)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(str(missing), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_command_line_corrupted_json_reports_exit_code_two_and_line_col(self) -> None:
+        """待校验文件是损坏 JSON 时退出码为 2，错误消息含「第 N 行第 M 列」。"""
+        with temporary_directory() as folder:
+            broken = Path(folder) / "corrupted.json"
+            broken.write_text("{\n  \"field\": \n}", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(broken)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertRegex(result.stderr, r"第 \d+ 行第 \d+ 列")
+        self.assertIn(str(broken), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_command_line_json_nonexistent_file_reports_exit_code_two_and_json_errors(self) -> None:
+        """待校验文件不存在加 --json 时退出码为 2，stdout 为单个合法 JSON 对象且 ok 为 false、含 path 与 message。"""
+        with temporary_directory() as folder:
+            missing = Path(folder) / "does_not_exist.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--json", str(missing)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        raw_stdout = result.stdout.strip()
+        output = json.loads(result.stdout)
+        self.assertIsInstance(output, dict)
+        self.assertEqual(raw_stdout, json.dumps(output, ensure_ascii=False))
+        self.assertFalse(output["ok"])
+        self.assertIsInstance(output["errors"], list)
+        self.assertEqual(len(output["errors"]), 1)
+        self.assertEqual(output["errors"][0]["path"], str(missing))
+        self.assertIn(str(missing), output["errors"][0]["message"])
+        self.assertEqual(result.stderr, "")
+
+    def test_command_line_json_corrupted_file_reports_exit_code_two_and_json_errors(self) -> None:
+        """待校验文件是损坏 JSON 加 --json 时退出码为 2，stdout 为单个合法 JSON 对象且 ok 为 false、含 path 与 message。"""
+        with temporary_directory() as folder:
+            broken = Path(folder) / "corrupted.json"
+            broken.write_text("{\n  \"field\": \n}", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--json", str(broken)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        raw_stdout = result.stdout.strip()
+        output = json.loads(result.stdout)
+        self.assertIsInstance(output, dict)
+        self.assertEqual(raw_stdout, json.dumps(output, ensure_ascii=False))
+        self.assertFalse(output["ok"])
+        self.assertIsInstance(output["errors"], list)
+        self.assertEqual(len(output["errors"]), 1)
+        self.assertEqual(output["errors"][0]["path"], str(broken))
+        self.assertRegex(output["errors"][0]["message"], r"第 \d+ 行第 \d+ 列")
+        self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":
