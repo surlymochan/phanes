@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the synthetic Boss to DA to Builder pipeline."""
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -22,11 +23,17 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def run_step(name, command):
+def run_step(name, command, timings):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
     result = subprocess.run(command)
     elapsed = time.monotonic() - started
+    timings.append({
+        'name': name,
+        'command': list(map(str, command)),
+        'elapsed_seconds': elapsed,
+        'exit_code': result.returncode,
+    })
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
         print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr, flush=True)
@@ -53,11 +60,17 @@ def main(argv=None):
         ('检查', [sys.executable, str(args.checker), str(dist)]),
         ('审查', [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]),
     ])
-    for name, command in commands:
-        if not run_step(name, command):
-            return 1
-    print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
-    return 0
+    timings = []
+    try:
+        for name, command in commands:
+            if not run_step(name, command, timings):
+                return 1
+        print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
+        return 0
+    finally:
+        (workdir / 'timings.json').write_text(
+            json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
+        )
 
 
 if __name__ == '__main__':

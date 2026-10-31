@@ -69,6 +69,11 @@ elif role == 'builder':
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([step['name'] for step in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertTrue(all(step['exit_code'] == 0 for step in timings))
+        self.assertTrue(all(step['elapsed_seconds'] >= 0 for step in timings))
+        self.assertTrue(all(isinstance(step['command'], list) for step in timings))
 
     def test_failure_stops_pipeline_and_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
@@ -77,6 +82,9 @@ elif role == 'builder':
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('步骤失败: DA', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([step['exit_code'] for step in timings], [0, 7])
+        self.assertEqual([step['name'] for step in timings], ['Boss', 'DA'])
 
     def test_review_failure_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
@@ -85,6 +93,9 @@ elif role == 'builder':
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('步骤失败: 审查', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker', 'reviewer'])
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual(timings[-1]['exit_code'], 7)
+        self.assertEqual(timings[-1]['name'], '审查')
 
 
 if __name__ == '__main__':
