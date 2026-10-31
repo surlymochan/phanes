@@ -420,6 +420,30 @@ class ValidateTest(unittest.TestCase):
             f"错误信息未指出路径：{errors}",
         )
 
+    def test_empty_metrics_array_fails(self) -> None:
+        """metrics 为空数组时失败，并指出路径 /metrics。"""
+        broken = copy.deepcopy(self.data)
+        broken["metrics"] = []
+        errors = self.errors(broken)
+        self.assertTrue(errors, "metrics 为空数组时未报出错误")
+        paths = [message.split(":", 1)[0] for message in errors]
+        self.assertIn("/metrics", paths, f"错误信息未指出路径 /metrics：{errors}")
+
+    def test_command_line_reports_empty_metrics_array(self) -> None:
+        """命令行校验 metrics 为空数组的数据时退出码非 0，并打印出错路径 /metrics。"""
+        broken = copy.deepcopy(self.data)
+        broken["metrics"] = []
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, validate.EXIT_INVALID)
+        self.assertIn("/metrics", result.stdout + result.stderr)
+
     def test_string_value_allowed_only_in_ratio_series(self) -> None:
         """同一个字符串值放在比率序列通过、放在数值序列失败（按结构定义判定）。"""
         allowed = copy.deepcopy(self.data)
