@@ -56,19 +56,18 @@ def temporary_directory() -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory()
 
 
-def run_cli(brief_path: Path, raw_dir: Path, out_path: Path) -> subprocess.CompletedProcess:
+def run_cli(
+    brief_path: Path | None,
+    raw_dir: Path | None,
+    out_path: Path | None,
+) -> subprocess.CompletedProcess:
     """调用 build_diagnosis.py 命令行。"""
+    command = [sys.executable, str(SCRIPT)]
+    for option, value in (("--brief", brief_path), ("--raw", raw_dir), ("--out", out_path)):
+        if value is not None:
+            command.extend((option, str(value)))
     return subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--brief",
-            str(brief_path),
-            "--raw",
-            str(raw_dir),
-            "--out",
-            str(out_path),
-        ],
+        command,
         capture_output=True,
         text=True,
     )
@@ -246,6 +245,44 @@ class BuildDiagnosisTest(unittest.TestCase):
         result = run_cli(self.brief_path, raw_dir, self.out_path)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("heads.csv", result.stdout + result.stderr)
+
+    def test_help_succeeds(self) -> None:
+        """帮助信息可正常显示。"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--brief", result.stdout)
+        self.assertIn("--raw", result.stdout)
+
+    def test_missing_brief_exits_nonzero_with_readable_error(self) -> None:
+        """缺少 --brief 时退出码非 0，错误信息指出缺少任务书。"""
+        result = run_cli(None, SAMPLE_RAW, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("缺少 --brief", result.stderr)
+        self.assertIn("任务书", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_raw_directory_exits_nonzero_with_readable_error(self) -> None:
+        """原始数据目录不存在时退出码非 0，错误信息可读。"""
+        missing = self.folder / "does-not-exist"
+        result = run_cli(self.brief_path, missing, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据目录不存在", result.stderr)
+        self.assertIn(str(missing), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_invalid_brief_json_exits_nonzero_with_readable_error(self) -> None:
+        """任务书不是 JSON 时退出码非 0，错误信息指出 JSON 无效。"""
+        invalid = self.folder / "invalid-brief.json"
+        invalid.write_text("{not-json", encoding="utf-8")
+        result = run_cli(invalid, SAMPLE_RAW, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("不是合法 JSON", result.stderr)
+        self.assertIn("任务书", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_brief_without_rate_exits_nonzero(self) -> None:
         """任务书缺汇率时退出码非 0。"""

@@ -1004,16 +1004,28 @@ def write_snapshot(path: Path, snapshot: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     """命令行入口。返回进程退出码。"""
     parser = argparse.ArgumentParser(description="按任务书口径生成 schema v4 诊断快照。")
-    parser.add_argument("--brief", type=Path, required=True, help="任务书 JSON 路径。")
-    parser.add_argument("--raw", type=Path, required=True, help="原始数据目录（若干 CSV）。")
-    parser.add_argument("--out", type=Path, required=True, help="输出诊断快照 JSON 路径。")
+    parser.add_argument("--brief", type=Path, help="任务书 JSON 路径。")
+    parser.add_argument("--raw", type=Path, help="原始数据目录（若干 CSV）。")
+    parser.add_argument("--out", type=Path, help="输出诊断快照 JSON 路径。")
     args = parser.parse_args(argv)
+    missing = [
+        ("--brief", args.brief, "任务书 JSON 路径"),
+        ("--raw", args.raw, "原始数据目录"),
+        ("--out", args.out, "输出诊断快照 JSON 路径"),
+    ]
+    for option, value, description in missing:
+        if value is None:
+            parser.error(f"缺少 {option}（{description}）")
     try:
         snapshot = build_from_files(args.brief, args.raw)
     except (BriefError, RawDataError, SnapshotError) as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_DATA
-    write_snapshot(args.out, snapshot)
+    try:
+        write_snapshot(args.out, snapshot)
+    except OSError as cause:
+        print(f"无法写出诊断快照 {args.out}：{cause}", file=sys.stderr)
+        return EXIT_DATA
     print(f"{args.out}: 已生成诊断快照")
     return EXIT_OK
 
