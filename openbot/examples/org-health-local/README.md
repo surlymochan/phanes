@@ -41,6 +41,10 @@ python3 run_e2e.py --workdir demo --review
   `demo/diagnosis.json`；仓库里的这两个文件按 `demo/boss-notes.md` 记的 `--goal` 参数生成，
   与重建结果不同（快照的「口径说明」随之不同）。
 
+未指定 `--bundle` 时，若 `demo/vendor/app.bundle.js` 存在，`run_e2e.py` 会自动复用它；否则
+Builder 会调用 Bun 打包，因此无可用预构建包时依赖 Bun。显式指定预构建 bundle（例如
+`--bundle demo/vendor/app.bundle.js`）则不需要 Bun。
+
 以下章节按角色逐个说明本示例的脚本与产物。
 
 仅展示人工构造的示例数据，不包含真实组织数据。在已安装仓库依赖和 Bun 的环境中运行 `python3 serve.py`；服务启动时编译共享翻译目录，在本机访问 http://127.0.0.1:8765/。启动后终端打印可点击的预览地址与当前服务信息，例如 `预览地址: http://127.0.0.1:8765/`，并给出站点根目录、诊断数据文件和路径白名单（`--root`/`--data` 指定的路径按实际值打印）。默认中文，使用 `?lang=en` 查看英文界面；其他未翻译语言回退英文，诊断数据是用户内容，保持原文。默认端口 8765，可用 `--port` 指定；端口已被占用时打印明确错误并以非 0 退出，不会静默改用其他端口，请先停止其他示例服务。
@@ -162,6 +166,16 @@ cd openbot/examples/org-health-local && python3 run_tests.py
 ```
 
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。
+
+从仓库根目录运行、只使用 Python 标准库的测试命令：
+
+```bash
+python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'
+```
+
+这条命令不需要 Bun、网络或真实组织数据。若未指定 `--bundle`，Builder 在没有可复用的
+`demo/vendor/app.bundle.js` 时会依赖 Bun；指定预构建 bundle 则不需要 Bun。端到端产物仍写入
+`<workdir>/dist`，而预览命令中 `demo/site` 与 `demo/dist` 的用途保持不变。
 
 加 `--review` 时审查记录写到 `<workdir>/review.md`：审查通过写 PASS 行，审查失败仍写 FAIL 行并让整体返回非 0，
 即失败路径也留有产物可查。
