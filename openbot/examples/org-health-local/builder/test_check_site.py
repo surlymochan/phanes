@@ -70,6 +70,38 @@ class CheckSiteTest(unittest.TestCase):
         (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
 
+    def test_corrupted_build_report_json_fails(self) -> None:
+        """损坏的 JSON 报告必须让检查失败，失败信息能定位到 build-report.json。"""
+        dist = self.make_dist()
+        (dist / "build-report.json").write_text("{not json", encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build-report.json", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_non_string_hash_value_fails(self) -> None:
+        """摘要值不是字符串时 report_hashes 报错，检查失败并指向 build-report.json。"""
+        dist = self.make_dist()
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        report["files"]["styles.css"]["sha256"] = 12345
+        (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build-report.json", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_non_hex_hash_value_fails(self) -> None:
+        """摘要不是 64 位十六进制时检查失败，并指出缺失的有效 sha256。"""
+        dist = self.make_dist()
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        report["files"]["styles.css"]["sha256"] = "not-a-sha256"
+        (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build-report.json", result.stdout)
+        self.assertIn("styles.css", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_external_resource_fails(self) -> None:
         dist = self.make_dist()
         (dist / "index.html").write_text(
