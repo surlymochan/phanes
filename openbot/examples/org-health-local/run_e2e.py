@@ -37,6 +37,13 @@ def run_step(name, command, stdout=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    bundle = args.bundle
+    if bundle is None:
+        bundled_demo = ROOT / 'demo' / 'vendor' / 'app.bundle.js'
+        if bundled_demo.is_file():
+            bundle = bundled_demo
+    if bundle is not None:
+        print(f'使用 bundle: {bundle}', flush=True)
     workdir = args.workdir.resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     brief = workdir / 'brief.json'
@@ -47,8 +54,8 @@ def main(argv=None):
         ('DA', [sys.executable, str(args.da), '--brief', str(brief), '--raw', str(args.raw), '--out', str(diagnosis)]),
     ]
     build = [sys.executable, str(args.builder), '--data', str(diagnosis), '--out', str(dist)]
-    if args.bundle:
-        build.extend(['--bundle', str(args.bundle)])
+    if bundle:
+        build.extend(['--bundle', str(bundle)])
     commands.extend([
         ('Builder', build),
         ('检查', [sys.executable, str(args.checker), str(dist)]),

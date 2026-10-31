@@ -68,6 +68,16 @@ elif role == 'builder':
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
 
+    def test_uses_demo_bundle_by_default(self):
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        command = [argument for argument in self.command() if argument not in ('--bundle', str(self.bundle))]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        builder_call = self.calls()[2][1]
+        self.assertEqual(builder_call[-2:], ['--bundle', str(ROOT / 'demo' / 'vendor' / 'app.bundle.js')])
+        self.assertIn(str(ROOT / 'demo' / 'vendor' / 'app.bundle.js'), result.stdout)
+
     def test_failure_stops_pipeline_and_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
             self.write_stub(path, role, failing=(index == 1))
