@@ -32,6 +32,7 @@ class BusTests(unittest.TestCase):
                           "OPENSWARM_PI_BIN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
                           "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1")
         self.old_env = {key: os.environ.get(key) for key in self.env_names}
+        self.addCleanup(self.restore_env)
         # Git's detached auto-maintenance can write into these temporary bare
         # repositories after a worker's clone or push exits.  Install this
         # fixture-only override before creating any of the repositories.
@@ -73,14 +74,17 @@ class BusTests(unittest.TestCase):
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
+        self.restore_env()
+        for key, value in self.constants.items():
+            setattr(xs, key, value)
+        self.tmp.cleanup()
+
+    def restore_env(self):
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        for key, value in self.constants.items():
-            setattr(xs, key, value)
-        self.tmp.cleanup()
 
     @staticmethod
     def git(cwd, *args):
@@ -380,6 +384,32 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         self.assertTrue(any("Ignored task verify" in note for note in report["followups"]))
         self.assertTrue(report["commit"])
         self.assertIn("worker.txt", self.git(None, "--git-dir", str(self.bare), "ls-tree", "-r", "--name-only", report["commit"]))
+
+    def test_setup_failure_restores_git_environment(self):
+        saved = {key: os.environ.get(key) for key in self.env_names}
+        sentinel = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "test.sentinel",
+                    "GIT_CONFIG_VALUE_0": "preserved"}
+        failed = BusTests("runTest")
+        try:
+            for key in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+                        "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"):
+                os.environ.pop(key, None)
+            os.environ.update(sentinel)
+            with mock.patch.object(BusTests, "git", side_effect=OSError("initial git failure")):
+                with self.assertRaisesRegex(OSError, "initial git failure"):
+                    failed.setUp()
+            failed.doCleanups()
+            self.assertEqual({key: os.environ.get(key) for key in sentinel}, sentinel)
+            self.assertIsNone(os.environ.get("GIT_CONFIG_KEY_1"))
+            self.assertIsNone(os.environ.get("GIT_CONFIG_VALUE_1"))
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if hasattr(failed, "tmp"):
+                failed.tmp.cleanup()
 
     def test_worker_rejects_changed_task_body_and_unlisted_repo(self):
         metadata = {"run_id": "digest-check", "repo": "org/target", "base": self.base,
