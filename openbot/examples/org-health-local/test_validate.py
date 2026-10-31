@@ -54,6 +54,23 @@ class ValidateTest(unittest.TestCase):
         """合成示例通过校验。"""
         self.assertEqual(self.errors(self.data), [])
 
+    def test_optional_calibration_can_be_omitted(self) -> None:
+        """口径说明为可选字段，字段缺失时仍可通过校验（不改变旧数据接受范围）。"""
+        data = copy.deepcopy(self.data)
+        data.pop("口径说明", None)
+        self.assertEqual(self.errors(data), [])
+
+    def test_invalid_calibration_fails(self) -> None:
+        """口径说明包含空字符串或非法格式时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["口径说明"] = [""]
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/口径说明/0" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
     def test_missing_field_fails(self) -> None:
         """缺少必需字段时失败，并指出路径。"""
         broken = copy.deepcopy(self.data)
@@ -149,6 +166,35 @@ class ValidateTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_command_line_json_accepts_example(self) -> None:
+        """JSON 输出包含通过状态及 schema 版本。"""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "validate.py"), "--json", str(EXAMPLE_PATH)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output, {"ok": True, "errors": [], "schema_version": 4})
+
+    def test_command_line_json_reports_failure(self) -> None:
+        """JSON 输出失败状态与字段路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = 3
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--json", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 1)
+        output = json.loads(result.stdout)
+        self.assertFalse(output["ok"])
+        self.assertTrue(any("/scope/schema版本" in error["path"] for error in output["errors"]))
+        self.assertEqual(output["schema_version"], 3)
 
     def test_command_line_reports_failure(self) -> None:
         """命令行校验失败数据时退出码非 0，并打印出错路径。"""
