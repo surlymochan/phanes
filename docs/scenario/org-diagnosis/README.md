@@ -101,6 +101,7 @@
 ### 5.2 验证
 
 - [ ] 仓库内合成示例的回归脚本 `bun run test:org-health-demo` 通过（`openbot/package.json:194`），覆盖中英文与回退语言、无效数据、无效 Host 与私有路径（`openbot/scripts/org-health-demo-e2e.ts:107`、`openbot/scripts/org-health-demo-e2e.ts:189-193`）。
+- [ ] 从仓库根目录运行 `python3 openbot/examples/org-health-local/run_tests.py`，执行全量 Python 单测，覆盖 Boss、DA、Builder、Reviewer、服务与编排器测试（`openbot/examples/org-health-local/run_tests.py:9-22`）。
 - [ ] 站点在本机可访问：服务只绑定回环地址 `127.0.0.1`（`openbot/examples/org-health-local/serve.py:87`），启动后打印预览地址、站点根目录、诊断数据文件与路径白名单（`openbot/examples/org-health-local/serve.py:94-100`）。
 - [ ] 端口被占用时打印明确错误并以非 0 退出，不静默改用其他端口（`openbot/examples/org-health-local/serve.py:74-81`、`openbot/examples/org-health-local/serve.py:105-121`）。
 - [ ] 非 `127.0.0.1:<port>` / `localhost:<port>` 的 Host 头被拒（403），白名单外路径返回 404（`openbot/examples/org-health-local/serve.py:26-34`）。
