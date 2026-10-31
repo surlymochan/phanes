@@ -144,6 +144,12 @@ def available_in_preference(lanes, backends, kind, difficulty):
     idle = [row for row in lanes if row.get('state') == 'idle']
     ordered = []
     for backend in backends:
+        candidates = [row for row in idle if row.get('backend') == backend]
+        # The high-difficulty Copilot contract is intentionally strict: GH2's
+        # Sonnet lane may be busy, but that must not silently turn a difficult
+        # task into a Haiku run.  Let a later backend be considered instead.
+        if backend == 'copilot' and difficulty >= 4:
+            candidates = [row for row in candidates if 'sonnet' in str(row.get('model') or '').lower()]
         def lane_key(row):
             model = str(row.get('model') or '').lower()
             if backend == 'copilot':
@@ -152,7 +158,7 @@ def available_in_preference(lanes, backends, kind, difficulty):
             else:
                 model_rank = 0
             return (model_rank, row.get('name', ''), row.get('_origin', ''), row.get('_fleet_host', ''))
-        ordered.extend(sorted((row for row in idle if row.get('backend') == backend), key=lane_key))
+        ordered.extend(sorted(candidates, key=lane_key))
     return ordered
 
 def main():
