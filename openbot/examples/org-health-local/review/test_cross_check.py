@@ -509,6 +509,43 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(base / "missing.json", data)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_corrupt_brief_json_fails(self) -> None:
+        """brief.json 损坏时命令行非零退出且 stderr 输出包含可读错误。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = base / "brief.json"
+            brief.write_text("{不是合法 JSON", encoding="utf-8")
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            result = run_script(brief, data)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("不是合法 JSON", result.stderr)
+        self.assertIn(str(brief), result.stderr)
+
+    def test_diagnosis_json_not_object_fails(self) -> None:
+        """diagnosis.json 顶层非对象时命令行非零退出且 stderr 输出包含可读错误。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = base / "diagnosis.json"
+            data.write_text("[]", encoding="utf-8")
+            result = run_script(brief, data)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("必须是 JSON 对象", result.stderr)
+        self.assertIn(str(data), result.stderr)
+
+    def test_dist_nonexistent_fails(self) -> None:
+        """dist 不存在时命令行非零退出且输出包含可读错误。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "nonexistent_dist"
+            result = run_script(brief, data, dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FAIL 站点数据一致", result.stdout)
+        self.assertIn("站点目录缺少 `data/diagnosis.json`", result.stdout)
+        self.assertIn(str(dist), result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
