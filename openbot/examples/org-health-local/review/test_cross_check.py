@@ -342,9 +342,51 @@ class CrossCheckTest(unittest.TestCase):
         self.assertEqual(failures[0].name, "隐私边界")
         self.assertIn("编制", failures[0].detail)
 
+    def test_nested_forbidden_compound_field_names_fail_with_paths(self) -> None:
+        """深层指标序列与建议对象中的复合黑名单键必须输出完整路径。"""
+        cases = (
+            ("岗位", "metrics", "岗位明细", "/metrics/0/数值/按组织/岗位明细"),
+            ("工号", "metrics", "人员工号", "/metrics/0/数值/按组织/人员工号"),
+            ("绩效", "metrics", "绩效结果", "/metrics/0/数值/按组织/绩效结果"),
+            ("职级", "recommendations", "负责人职级", "/recommendations/0/行动/负责人职级"),
+            ("薪酬", "recommendations", "薪酬调整", "/recommendations/0/行动/薪酬调整"),
+            ("编制", "recommendations", "编制规划", "/recommendations/0/行动/编制规划"),
+        )
+        for token, container, field_name, expected_path in cases:
+            with self.subTest(token=token, container=container):
+                diagnosis = copy.deepcopy(self.diagnosis)
+                if container == "metrics":
+                    diagnosis["metrics"][0]["数值"]["按组织"] = {field_name: 1}
+                else:
+                    diagnosis["recommendations"][0]["行动"] = {field_name: "仅用于测试"}
+
+                results = self.check(diagnosis=diagnosis)
+                failures = self.failing(results)
+                self.assertTrue(failures)
+                privacy = next(result for result in failures if result.name == "隐私边界")
+                self.assertIn(expected_path, privacy.detail)
+                report = cross_check.markdown_report(results)
+                self.assertIn("FAIL 隐私边界", report)
+                self.assertIn(expected_path, report)
+
     def test_aggregate_field_names_pass(self) -> None:
         """聚合口径字段名（折算人头、成本）不算越界。"""
         self.assertEqual(self.failing(self.check()), [])
+
+    def test_nested_aggregate_compound_field_names_pass(self) -> None:
+        """深层合法聚合指标名不应因复合命名被误报。"""
+        diagnosis = copy.deepcopy(self.diagnosis)
+        diagnosis["metrics"].append(
+            {
+                "标题": "营收业务技术人力成本",
+                "数值": {"整体折算人头": {"2026-09实际": 12}},
+            }
+        )
+        diagnosis["recommendations"][0]["行动"] = {
+            "整体折算人头": "保持聚合口径",
+            "营收业务技术人力成本": "保持聚合口径",
+        }
+        self.assertEqual(self.failing(self.check(diagnosis=diagnosis)), [])
 
     def test_extract_keywords(self) -> None:
         """关键词提取保留日期片段并去掉疑问词。"""
