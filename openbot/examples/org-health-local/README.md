@@ -1,5 +1,47 @@
 # 本机组织健康诊断示例
 
+## 三 Bot demo：一分钟查看
+
+`demo/` 是三棒（Boss → DA → Builder）加独立审查在本目录用合成样本实跑出来的产物，按
+`demo/brief.json` → `demo/diagnosis.json` → `demo/site/` → `demo/review.md` 依次传递。
+
+| 环节 | 产物 | 内容 |
+| --- | --- | --- |
+| Boss | `demo/brief.json` | 任务书：目标、观察期间、口径、必答问题、禁止事项 |
+| DA | `demo/diagnosis.json` | 诊断快照（schema v4），输入是 `demo/brief.json` 与 `da/sample-raw/` 的合成 CSV |
+| Builder | `demo/site/` | 静态站点：`index.html`、`app.bundle.js`、`styles.css`、`data/diagnosis.json`、`build-report.json` |
+| Review | `demo/review.md` | 交叉审查报告，`review/cross_check.py` 逐条 PASS/FAIL；本地跑 `run_e2e.py --review` 时写出，仓库未提交 |
+
+各环节的产出说明另见 `demo/boss-notes.md` 与 `demo/da-notes.md`。
+
+预览（两条命令，都不需要 Bun）：
+
+```bash
+cd openbot/examples/org-health-local
+python3 builder/build_site.py --data demo/diagnosis.json --out demo/site --bundle demo/vendor/app.bundle.js
+python3 serve.py --root demo/site
+```
+
+服务启动后在浏览器打开 http://127.0.0.1:8765/ 。仓库里 `demo/site/` 只提交了 `build-report.json`
+（`app.bundle.js` 约 7.5 MB，不入库），所以第一次预览要先跑上面第一条命令重建站点。
+
+重新生成整条产物链：
+
+```bash
+cd openbot/examples/org-health-local
+python3 run_e2e.py --workdir demo --review
+```
+
+`run_e2e.py` 依次跑 Boss → DA → Builder → 站点自检 → 交叉审查，产物写到 `--workdir`：
+`brief.json`、`diagnosis.json`、`dist/`（站点）、`review.md`。两点注意：
+
+- 站点落在 `demo/dist/`，`demo/site/` 仍由上面那条 Builder 命令产出；
+- 该命令用 `boss/make_brief.py` 的内置默认目标重建任务书，会覆盖 `demo/brief.json` 与
+  `demo/diagnosis.json`；仓库里的这两个文件按 `demo/boss-notes.md` 记的 `--goal` 参数生成，
+  与重建结果不同（快照的「口径说明」随之不同）。
+
+以下章节按角色逐个说明本示例的脚本与产物。
+
 仅展示人工构造的示例数据，不包含真实组织数据。在已安装仓库依赖和 Bun 的环境中运行 `python3 serve.py`；服务启动时编译共享翻译目录，在本机访问 http://127.0.0.1:8765/。启动后终端打印可点击的预览地址与当前服务信息，例如 `预览地址: http://127.0.0.1:8765/`，并给出站点根目录、诊断数据文件和路径白名单（`--root`/`--data` 指定的路径按实际值打印）。默认中文，使用 `?lang=en` 查看英文界面；其他未翻译语言回退英文，诊断数据是用户内容，保持原文。默认端口 8765，可用 `--port` 指定；端口已被占用时打印明确错误并以非 0 退出，不会静默改用其他端口，请先停止其他示例服务。
 
 页面使用固定的 2026 年示例口径；实际诊断数据必须保存在仓库外，替换使用前需核对期间、指标定义和结构。使用 `python3 serve.py --data /absolute/path/to/diagnosis.json` 读取该文件，不要将真实数据复制到仓库或提交。
