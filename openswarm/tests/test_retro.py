@@ -116,6 +116,24 @@ class RetroTests(unittest.TestCase):
         self.assertIn("fleet ledger pull", [name for name, _ in calls])
         self.assertEqual(json.loads(output)["counts"]["runs"], 3)
 
+    def test_empty_ledger_writes_markdown_sections_with_zero_counts(self):
+        self.write_ledger()
+        code, output, error, calls = self.run_retro("--days", "7", "--no-pull")
+
+        self.assertEqual((code, error), (0, ""))
+        summary = json.loads(output)
+        self.assertEqual(summary["counts"], {"runs": 0, "groups": 0, "failures": 0, "rejected": 0,
+                                             "exec_pass_null": 0,
+                                             "lesson_proposals": 0, "guard_proposals": 0,
+                                             "routing_comparisons": 0})
+        self.assertFalse(any(name == "fleet ledger pull" for name, _ in calls))
+
+        report = Path(summary["paths"]["report"]).read_text(encoding="utf-8")
+        for heading in ("Runs by backend/model/card_type", "Top failure error_classes", "Rejected runs",
+                        "New lesson and guard proposals", "Routing advice vs actual", "Proposed changes"):
+            self.assertIn(heading, report)
+        self.assertIn("0", report)
+
     def test_missing_knowledge_repo_fails_before_running_steps(self):
         missing = {"knowledge": {"repo": str(self.root / "missing")}}
         code, output, error, calls = self.run_retro(policy=missing)
