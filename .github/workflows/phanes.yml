@@ -3,9 +3,25 @@ on:
   push:
     branches: [main, codex/phanes-unification]
   pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
 jobs:
+  example-json:
+    name: Validate example JSON
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse example JSON files
+        run: |
+          while IFS= read -r -d '' file; do
+            if ! python3 -m json.tool "$file" >/dev/null; then
+              echo "Invalid JSON: $file" >&2
+              exit 1
+            fi
+          done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
   openswarm:
     name: OpenSwarm tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
@@ -46,3 +62,25 @@ jobs:
       - run: bun run typecheck:node
       - run: bun run i18n:check
       - run: bun run build
+  openbot-scenario-tests:
+    name: OpenBot scenario tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run scenario unit tests
+        run: |
+          find openbot/examples/org-health-local -type f -name 'test_*.py' -print0 |
+            while IFS= read -r -d '' test_file; do
+              test_dir="$(dirname "$test_file")"
+              test_name="$(basename "$test_file" .py)"
+              (cd "$test_dir" && python -m unittest "$test_name" -v)
+            done
+      - name: Validate scenario data
+        run: python openbot/examples/org-health-local/validate.py

@@ -1,6 +1,7 @@
 """validate.py 的单元测试。
 
 合成示例必须通过；缺字段、错误版本、错误类型各有一个失败用例。
+口径说明 是可选字段：缺省、合法值都通过，类型不对时失败。
 """
 import copy
 import json
@@ -85,6 +86,60 @@ class ValidateTest(unittest.TestCase):
             any("/metrics/0/数值/2026-01实际" in message for message in errors),
             f"错误信息未指出路径：{errors}",
         )
+
+    def test_calibration_note_is_optional(self) -> None:
+        """口径说明 在定义里声明为可选字段：出现在 properties 里，不在 required 里。"""
+        self.assertIn("口径说明", self.schema["properties"])
+        self.assertNotIn("口径说明", self.schema["required"])
+
+    def test_calibration_note_absent_passes(self) -> None:
+        """缺省口径说明 时通过校验。"""
+        without = copy.deepcopy(self.data)
+        del without["口径说明"]
+        self.assertEqual(self.errors(without), [])
+
+    def test_calibration_note_valid_passes(self) -> None:
+        """口径说明 为非空字符串数组时通过校验。"""
+        valid = copy.deepcopy(self.data)
+        valid["口径说明"] = ["期间：2026-01 与 2026-09 为实际期次。", "null 含义：未统计。"]
+        self.assertEqual(self.errors(valid), [])
+
+    def test_calibration_note_wrong_type_fails(self) -> None:
+        """口径说明 类型不对时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["口径说明"] = "口径：2026-01 与 2026-09 为实际期次。"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/口径说明" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_calibration_note_empty_item_fails(self) -> None:
+        """口径说明 里出现空字符串时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["口径说明"] = ["期间说明", ""]
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/口径说明/1" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_command_line_reports_calibration_note_type_error(self) -> None:
+        """命令行校验口径说明 类型错误的数据时退出码非 0，并打印出错路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["口径说明"] = 2026
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/口径说明", result.stdout + result.stderr)
 
     def test_command_line_accepts_example(self) -> None:
         """命令行校验合成示例时退出码为 0。"""

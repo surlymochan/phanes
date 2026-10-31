@@ -1,5 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Git 只把 GIT_DIR 传给 hook，不传 GIT_WORK_TREE。linked worktree 里 GIT_DIR 指向 worktree
+# 自己的 git 目录，于是 git 把当前目录当成工作树根；清掉这两个变量后，仓库根由 git 正常发现，
+# 普通检出与 worktree 的行为一致。GIT_INDEX_FILE 保留：hook 必须操作同一个索引。
+unset GIT_DIR GIT_WORK_TREE
+
 repository_root=$(git rev-parse --show-toplevel)
 exec "$repository_root/openbot/.githooks/pre-commit"
