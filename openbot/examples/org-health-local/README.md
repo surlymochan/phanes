@@ -10,11 +10,17 @@
 
 ## E2E 编排
 
+运行目录内全部单元测试（包括根目录及 boss、da、builder、review 子包）推荐使用：
+
+```bash
+cd openbot/examples/org-health-local && python3 run_tests.py
+```
+
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder、检查和独立审查。审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本，`--reviewer` 默认使用 `review/cross_check.py`。
 
 仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
 
-示例目录内运行 `python3 -m unittest test_serve -v` 可验证本机服务边界（仅标准库，不调用 Bun）：loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务，以及 `--data` 指定的数据文件；另含启动时的预览地址与路径提示、端口占用时非 0 退出。
+服务边界测试覆盖 loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务、`--data` 指定的数据文件、启动提示和端口占用处理；全部单元测试均由 `python3 run_tests.py` 运行。
 
 ## Boss 角色：生成诊断任务书
 
@@ -37,7 +43,7 @@ python3 validate.py <diagnosis.json>
 - 任务书可用 DA 格式 `观察期间.起始期次/参考期次/截止期次`，或 Boss 格式 `观察期间.期次`、`观察月份`、`数据截止`。Boss 格式按列表顺序取首个“实际”为起始、首个含“参考”的期次为参考、与观察月份匹配的“实际”为截止。`口径` 提供指标定义；汇率可写在任务书，缺省时从 `fx.csv` 读取。
 - 原始数据目录放 `cost.csv`（月度技术人力成本与运维设施成本）、`heads.csv`（月度折算人头）、`revenue.csv`（月度收入）、`forecast.csv`（年末测算与年末目标）和汇率缺省时使用的 `fx.csv`（`人民币每美元` 列）。`da/sample-raw/` 包含纯合成样本，含合成汇率 7.2，数值与 `data/diagnosis.json` 同量级。
 - 缺列、缺文件、缺汇率时退出码非 0；缺数据的期次写 `null`，不填估算值。输出确定性：同一份任务书与原始数据得到同一份 JSON，键序固定。
-- 单元测试：`cd openbot/examples/org-health-local && python3 -m unittest da.test_build_diagnosis -v`。
+- DA 单元测试包含在 `python3 run_tests.py` 中。
 
 ## 结构定义与校验
 
@@ -52,11 +58,7 @@ python3 validate.py /absolute/path/to/diagnosis.json
 python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结果
 ```
 
-校验失败时退出码非 0，并逐条打印出错路径，例如 `/scope/schema版本`。单元测试：
-
-```bash
-cd openbot/examples/org-health-local && python3 -m unittest test_validate -v
-```
+校验失败时退出码非 0，并逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
 
 ## Review 角色：独立交叉审查
 
@@ -73,11 +75,7 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 - 站点数据一致：给出 `--dist` 时 `dist/data/diagnosis.json` 与 `--data` 字节相同，并打印 sha256 前 12 位。
 - 隐私边界：快照的字段名（含嵌套）不含个人/薪酬/编制粒度黑名单词条；黑名单写在脚本里。
 
-单元测试只用测试内构造的最小样本，不依赖其他角色的脚本：
-
-```bash
-cd openbot/examples/org-health-local && python3 -m unittest review.test_cross_check -v
-```
+审查单元测试只用测试内构造的最小样本，不依赖其他角色的脚本，并包含在 `python3 run_tests.py` 中。
 
 ## 构建静态站点
 
@@ -92,8 +90,4 @@ python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle app
 
 产物为 `dist/index.html`、`dist/app.bundle.js`、`dist/styles.css`、`dist/data/diagnosis.json`
 和 `dist/build-report.json`。不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）；
-单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络：
-
-```bash
-cd openbot/examples/org-health-local && python3 -m unittest builder.test_build_site -v
-```
+单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络，并包含在 `python3 run_tests.py` 中。
