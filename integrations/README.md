@@ -19,9 +19,13 @@ lane 状态。路由按 backend 选择空闲 lane，而不是依赖固定 lane �
 若 Hub 所在主机只能到达 `gocc`，而 `gocc` 才能到达新执行主机，额外 source 应设为
 `{"host":"govpn","ssh_alias":"openswarm-pi-broker","via":"gocc"}`（同理
 适用于 `govpn2`）。现有 `openswarm-pi-broker` 的 gocc 强制命令将 `relay` 操作委派给
-`hub-fleet-relay`；后者仅按 gocc 服务配置
-`OPENSWARM_FLEET_RELAY_TARGETS` 中的固定 host/alias 映射转发 `lanes`、`assign`、
+`hub-fleet-relay`；后者仅按 gocc 服务固定文件
+`/etc/openswarm-fleet-relay.json`（可用 `OPENSWARM_FLEET_RELAY_CONFIG` 指向另一服务配置文件）
+中的 host/alias 映射转发 `lanes`、`assign`、
 `run_info`、`bundle`、`stop`。这不是常驻代理，也不新增凭据。部署必须先验证该 SSH
 入口实际存在，以及远端 runner 已接入同一容量协调器；relay 本身不构成全局并发限制。
+relay 默认使用 gocc 既有的默认 SSH 配置；服务配置文件可设置 `ssh_config` 使用一个指定的
+既有 SSH config，且不由任务输入选择。示例：
+`{"targets":[{"host":"govpn","ssh_alias":"openswarm-govpn-gateway"},{"host":"govpn2","ssh_alias":"openswarm-govpn2-gateway"}]}`。
 
 入口指向 `openswarm/bin/` 中同名实现，以兼容现有部署路径，避免维护两份代码。Hub 的准入调用仍在 `openbot/src/backend/`，OpenSwarm 的路由和并发协调仍在 `openswarm/`。这些入口尚需随 Phanes 版本部署并完成端到端验收。
