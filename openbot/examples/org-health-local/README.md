@@ -8,6 +8,10 @@
 
 页面可直接用浏览器打印为 PDF。
 
+## E2E 编排
+
+运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder、检查和独立审查。审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本，`--reviewer` 默认使用 `review/cross_check.py`。
+
 仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
 
 示例目录内运行 `python3 -m unittest test_serve -v` 可验证本机服务边界（仅标准库，不调用 Bun）：loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务，以及 `--data` 指定的数据文件；另含启动时的预览地址与路径提示、端口占用时非 0 退出。

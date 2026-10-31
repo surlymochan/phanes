@@ -21,7 +21,7 @@ class RunE2ETest(unittest.TestCase):
         self.raw.mkdir()
         self.bundle = self.root / 'fake.bundle.js'
         self.bundle.write_text('fake', encoding='utf-8')
-        self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker')]
+        self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
     def write_stub(self, path, role, failing=False):
         source = '''import json, pathlib, sys
@@ -45,36 +45,46 @@ elif role == 'builder':
     def command(self):
         return [sys.executable, str(RUNNER), '--workdir', str(self.workdir), '--raw', str(self.raw),
                 '--bundle', str(self.bundle), '--boss', str(self.scripts[0]), '--da', str(self.scripts[1]),
-                '--builder', str(self.scripts[2]), '--checker', str(self.scripts[3])]
+                '--builder', str(self.scripts[2]), '--checker', str(self.scripts[3]), '--reviewer', str(self.scripts[4])]
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text(encoding='utf-8').splitlines()]
 
     def test_runs_in_order_with_expected_arguments_and_artifacts(self):
-        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker')):
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
             self.write_stub(path, role)
         result = subprocess.run(self.command(), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
-        self.assertEqual([call[0] for call in calls], ['boss', 'da', 'builder', 'checker'])
+        self.assertEqual([call[0] for call in calls], ['boss', 'da', 'builder', 'checker', 'reviewer'])
         self.assertEqual(calls[0][1], ['--out', str(self.workdir / 'brief.json')])
         self.assertEqual(calls[1][1], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
                                        '--out', str(self.workdir / 'diagnosis.json')])
         self.assertEqual(calls[2][1], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
                                        '--bundle', str(self.bundle)])
         self.assertEqual(calls[3][1], [str(self.workdir / 'dist')])
+        self.assertEqual(calls[4][1], ['--brief', str(self.workdir / 'brief.json'), '--data',
+                                       str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')])
         self.assertTrue((self.workdir / 'brief.json').is_file())
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
 
     def test_failure_stops_pipeline_and_returns_nonzero(self):
-        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker'))):
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
             self.write_stub(path, role, failing=(index == 1))
         result = subprocess.run(self.command(), capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('步骤失败: DA', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+
+    def test_review_failure_returns_nonzero(self):
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 4))
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker', 'reviewer'])
 
 
 if __name__ == '__main__':
