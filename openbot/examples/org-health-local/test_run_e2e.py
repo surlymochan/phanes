@@ -5,6 +5,7 @@
 """
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 
 from run_e2e import REVIEW_REPORT  # noqa: E402  (需要先让示例目录可被导入)
@@ -110,6 +112,43 @@ elif role == 'builder':
         self.assertTrue((self.workdir / 'brief.json').is_file())
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+        self.assertIn('serve.py --root', result.stdout)
+
+    def test_runs_from_repo_root_with_relative_workdir_and_default_raw(self):
+        """以仓库根为 cwd、相对路径为 --workdir 运行，产物落在相对工作目录且默认 raw 路径仍指向示例目录。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        try:
+            rel_workdir = self.workdir.relative_to(REPO_ROOT)
+        except ValueError:
+            rel_workdir = Path(os.path.relpath(self.workdir, REPO_ROOT))
+        self.assertFalse(rel_workdir.is_absolute())
+        command = [
+            sys.executable, str(RUNNER),
+            '--workdir', str(rel_workdir),
+            '--bundle', str(self.bundle),
+            '--boss', str(self.scripts[0]),
+            '--da', str(self.scripts[1]),
+            '--builder', str(self.scripts[2]),
+            '--checker', str(self.scripts[3]),
+        ]
+        result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertEqual([call[0] for call in calls], ['boss', 'da', 'builder', 'checker'])
+        expected_workdir = (REPO_ROOT / rel_workdir).resolve()
+        expected_raw = ROOT / 'da' / 'sample-raw'
+        self.assertEqual(calls[0][1], ['--out', str(expected_workdir / 'brief.json')])
+        self.assertEqual(calls[1][1], ['--brief', str(expected_workdir / 'brief.json'),
+                                       '--raw', str(expected_raw),
+                                       '--out', str(expected_workdir / 'diagnosis.json')])
+        self.assertEqual(calls[2][1], ['--data', str(expected_workdir / 'diagnosis.json'),
+                                       '--out', str(expected_workdir / 'dist'),
+                                       '--bundle', str(self.bundle)])
+        self.assertEqual(calls[3][1], [str(expected_workdir / 'dist')])
+        self.assertTrue((expected_workdir / 'brief.json').is_file())
+        self.assertTrue((expected_workdir / 'diagnosis.json').is_file())
+        self.assertTrue((expected_workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
 
     def test_custom_raw_and_bundle_are_forwarded_and_artifacts_are_checkable(self):
