@@ -2,6 +2,8 @@
 
 合成示例必须通过；缺字段、错误版本、错误类型各有一个失败用例。
 口径说明 是可选字段：缺省、合法值都通过，类型不对时失败。
+另有结构定义边界用例：缺 scope、schema版本 号形态错误、指标数值为字符串、
+多余顶层字段（按结构定义是否声明该字段判定）。
 """
 import copy
 import json
@@ -35,7 +37,7 @@ def temporary_directory() -> tempfile.TemporaryDirectory:
 
 
 class ValidateTest(unittest.TestCase):
-    """按结构定义校验合成示例。"""
+    """按结构定义校验合成示例与边界情况。"""
 
     def setUp(self) -> None:
         self.schema = load_json(SCHEMA_PATH)
@@ -210,6 +212,212 @@ class ValidateTest(unittest.TestCase):
             )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("/scope/schema版本", result.stdout + result.stderr)
+
+    def test_missing_scope_fails(self) -> None:
+        """顶层缺少 scope 时失败，并指出路径 /scope。"""
+        broken = copy.deepcopy(self.data)
+        del broken["scope"]
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope: 缺少必需字段" in message for message in errors),
+            f"错误信息未指出缺少 scope：{errors}",
+        )
+
+    def test_scope_not_an_object_fails(self) -> None:
+        """scope 不是对象时失败，并指出路径 /scope。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"] = "2026-09"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope: 期望类型 object" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_schema_version_missing_fails(self) -> None:
+        """scope 里缺少 schema版本 时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        del broken["scope"]["schema版本"]
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope/schema版本: 缺少必需字段" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_schema_version_wrong_type_fails(self) -> None:
+        """schema版本 是字符串 "4" 时失败：版本号必须是数值 4。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = "4"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope/schema版本" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_schema_version_null_fails(self) -> None:
+        """schema版本 为 null 时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = None
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope/schema版本" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_schema_version_boolean_fails(self) -> None:
+        """schema版本 为 true 时失败：布尔值不是版本号 4。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = True
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope/schema版本" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_schema_version_future_value_fails(self) -> None:
+        """schema版本 为 5 时失败：页面与结构定义只接受 4。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = 5
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope/schema版本" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_schema_version_float_matches_number_value(self) -> None:
+        """schema版本 为 4.0 时通过：JSON 数值相等按数学值比较。
+
+        结构定义用 const: 4 固定版本号；draft 2020-12 的 JSON 相等规则（第 4.2.3 节）
+        规定两个数值按数学值比较，所以 4.0 与 4 相等。页面 app.js 用 `!== 4` 判断，
+        JavaScript 里 4.0 === 4，两侧口径一致。
+        """
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = 4.0
+        self.assertEqual(self.errors(broken), [])
+
+    def test_metric_value_as_string_fails(self) -> None:
+        """指标数值整体写成字符串时失败，并指出路径 /metrics/0/数值。"""
+        broken = copy.deepcopy(self.data)
+        broken["metrics"][0]["数值"] = "十二"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/metrics/0/数值" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_numeric_series_string_value_fails(self) -> None:
+        """成本数值序列里出现字符串时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["metrics"][2]["数值"]["成本"]["2026-01实际"] = "十"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/metrics/2/数值/成本/2026-01实际" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_string_value_allowed_only_in_ratio_series(self) -> None:
+        """同一个字符串值放在比率序列通过、放在数值序列失败（按结构定义判定）。"""
+        allowed = copy.deepcopy(self.data)
+        allowed["metrics"][3]["数值"]["整体技术人力成本率"]["2026-01实际"] = "约1%"
+        self.assertEqual(self.errors(allowed), [])
+
+        rejected = copy.deepcopy(self.data)
+        rejected["metrics"][0]["数值"]["2026-01实际"] = "约1%"
+        errors = self.errors(rejected)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/metrics/0/数值/2026-01实际" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_top_level_schema_forbids_extra_fields(self) -> None:
+        """顶层结构定义声明 additionalProperties 为 false，多余字段因此被拒绝。"""
+        self.assertIs(self.schema["additionalProperties"], False)
+
+    def test_extra_top_level_field_fails(self) -> None:
+        """顶层多余字段被拒绝，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["备注"] = "多余字段"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/备注: 不允许的额外字段" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_declared_top_level_field_passes(self) -> None:
+        """结构定义里声明的可选顶层字段（stage）出现时通过校验。"""
+        broken = copy.deepcopy(self.data)
+        broken["stage"] = {
+            "标题": "规模分档",
+            "来源口径": "合成示例口径",
+            "指标": [{"分档": "A", "例证": "示例"}],
+        }
+        self.assertEqual(self.errors(broken), [])
+
+    def test_extra_field_inside_scope_fails(self) -> None:
+        """scope 里多余字段同样被拒绝，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["备注"] = "多余字段"
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/scope/备注: 不允许的额外字段" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
+    def test_command_line_reports_missing_scope(self) -> None:
+        """命令行校验缺少 scope 的数据时退出码非 0，并打印出错路径。"""
+        broken = copy.deepcopy(self.data)
+        del broken["scope"]
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/scope", result.stdout + result.stderr)
+
+    def test_command_line_reports_extra_top_level_field(self) -> None:
+        """命令行校验含多余顶层字段的数据时退出码非 0，并打印出错路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["备注"] = "多余字段"
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/备注", result.stdout + result.stderr)
+
+    def test_command_line_reports_string_metric_value(self) -> None:
+        """命令行校验指标数值为字符串的数据时退出码非 0，并打印出错路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["metrics"][0]["数值"] = "十二"
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/metrics/0/数值", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
