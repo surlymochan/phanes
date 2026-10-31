@@ -14,6 +14,17 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "openswarm"
 FLEET_CAPACITY = ROOT / "bin" / "fleet-capacity"
 FIXTURES = ROOT / "tests" / "fixtures"
+# Running bin/openswarm as a script recompiles the whole ~600 KB source on every
+# invocation. Loading it as a module reuses the cached bytecode instead, the same
+# way tests/_load.py does; the command line, output and exit status are unchanged.
+CLI_BOOTSTRAP = (
+    "import importlib.machinery, importlib.util;"
+    "loader = importlib.machinery.SourceFileLoader('openswarm_cli', {path!r});"
+    "spec = importlib.util.spec_from_loader('openswarm_cli', loader);"
+    "module = importlib.util.module_from_spec(spec);"
+    "loader.exec_module(module);"
+    "module.main()"
+)
 
 
 class LaneTests(unittest.TestCase):
@@ -76,8 +87,8 @@ class LaneTests(unittest.TestCase):
             policy = json.loads(policy_file.read_text()) if policy_file.exists() else {}
             policy.setdefault("pi", {})["require_isolation"] = False
             policy_file.write_text(json.dumps(policy))
-        result = subprocess.run([sys.executable, str(CLI), *map(str, args)], env=self.env, text=True,
-                                capture_output=True, timeout=timeout)
+        result = subprocess.run([sys.executable, "-c", CLI_BOOTSTRAP.format(path=str(CLI)), *map(str, args)],
+                                env=self.env, text=True, capture_output=True, timeout=timeout)
         if check and result.returncode:
             self.fail(f"CLI failed ({result.returncode}): {result.stdout}\n{result.stderr}")
         return result

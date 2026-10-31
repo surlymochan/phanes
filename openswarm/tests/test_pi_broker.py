@@ -340,14 +340,21 @@ https.request = (_options, callback) => {
         with tempfile.TemporaryDirectory() as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            # The upload timeout is shortened instead of waiting out the production
+            # 20s value: the inference below still outlives it, which is what the
+            # broker has to survive.
+            upload_timeout_ms = 1000
+            inference_delay_ms = upload_timeout_ms + 1500
             stub = pathlib.Path(root, 'stub.mjs')
             stub.write_text("import https from 'node:https'; import {Writable, Readable} from 'node:stream';\n"
                             "https.request = (_options, callback) => { const w = new Writable({write(c,e,done){done()}}); "
                             "w.on('finish', () => setTimeout(() => { const r = Readable.from(['{}']); "
-                            "r.statusCode=200; r.headers={'content-type':'application/json'}; callback(r); }, 21000)); return w; };\n")
+                            "r.statusCode=200; r.headers={'content-type':'application/json'}; callback(r); }, "
+                            + str(inference_delay_ms) + ")); return w; };\n")
             path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, OPENSWARM_BROKER_UPLOAD_TIMEOUT_MS=str(upload_timeout_ms))
             proc = subprocess.Popen(['node', '--import', str(stub), str(BROKER), path, str(module), 'allowed-model'],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 deadline = time.monotonic() + 5
                 while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:

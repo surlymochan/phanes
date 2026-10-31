@@ -77,7 +77,7 @@ class PeerReviewTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env), mock.patch.object(xs, 'review_command', return_value=[sys.executable, str(script)]):
             with self.assertRaisesRegex(RuntimeError, 'reviewer timed out'):
                 xs.invoke_reviewer({'backend': 'agy'}, 'review', str(self.repo), str(self.run_dir),
-                                   {'review': {'timeout_seconds': 2}})
+                                   {'review': {'timeout_seconds': 1}})
             status = subprocess.run([str(coordinator), 'gocc'], input=json.dumps({'op': 'status'}),
                                     text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(status.stdout)['reservations'], [])

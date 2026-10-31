@@ -70,7 +70,7 @@ for line in sys.stdin:
                      else "rm -rf /etc/fake-outside" if "LANE_TEST_RM_OUTSIDE" in prompt else "python fake task"}}})
         steered = ""
         aborted = False
-        wait_until = time.time() + (20 if "LANE_TEST_WAIT" in prompt else 0.25)
+        wait_until = time.time() + (20 if "LANE_TEST_WAIT" in prompt else 0.1)
         while time.time() < wait_until:
             ready, _, _ = select.select([sys.stdin], [], [], 0.1)
             if not ready:

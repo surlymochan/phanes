@@ -3804,6 +3804,21 @@ def descendants(pid):
     return out
 
 
+def process_running(pid):
+    """Whether a process is still running.
+
+    A child that exited but has not been reaped yet is gone already: reporting it as
+    running would only make the caller wait for a grace period that nothing needs.
+    """
+    try:
+        exited = os.waitid(os.P_PID, int(pid), os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except (AttributeError, OSError, ValueError, TypeError):
+        exited = False
+    if exited:
+        return False
+    return pid_alive(pid)
+
+
 def kill_tree(pid, grace=3):
     """Terminate a process, its process group and every descendant (executors spawn shells in new groups)."""
     procs = [int(pid)] + descendants(pid)
@@ -3815,8 +3830,14 @@ def kill_tree(pid, grace=3):
                 except Exception:
                     pass
         if sig == signal.SIGTERM:
-            time.sleep(grace)
-            procs = [p for p in procs if pid_alive(p)]
+            # The tree still gets the whole grace period to exit on its own, but a tree
+            # that is already gone must not hold the caller for the remaining grace.
+            deadline = time.monotonic() + grace
+            while True:
+                procs = [p for p in procs if process_running(p)]
+                if not procs or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
             if not procs:
                 return
 
