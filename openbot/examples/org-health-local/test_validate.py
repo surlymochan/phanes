@@ -64,6 +64,84 @@ class ValidateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "引用不是结构对象"):
             validator._resolve("#/$defs/list_type")
 
+    def test_all_of_reports_each_failing_branch(self) -> None:
+        """allOf 任一分支失败，并保留各分支说明对应的错误信息。"""
+        validator = validate.Validator(
+            {
+                "allOf": [
+                    {"type": "object", "required": ["基础信息"]},
+                    {"type": "object", "required": ["诊断结论"]},
+                ]
+            }
+        )
+
+        errors = validator.errors({})
+
+        self.assertIn("/基础信息: 缺少必需字段", errors)
+        self.assertIn("/诊断结论: 缺少必需字段", errors)
+
+    def test_any_of_reports_no_matching_candidate(self) -> None:
+        """anyOf 所有候选分支都不匹配时报告候选结构错误。"""
+        validator = validate.Validator(
+            {"anyOf": [{"type": "string"}, {"type": "integer"}]}
+        )
+
+        errors = validator.errors(True)
+
+        self.assertTrue(any("不满足任何一个候选结构" in error for error in errors))
+
+    def test_one_of_reports_zero_matching_candidates(self) -> None:
+        """oneOf 没有匹配分支时报告匹配数量为 0。"""
+        validator = validate.Validator(
+            {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+        )
+
+        errors = validator.errors(True)
+
+        self.assertTrue(any("满足的候选结构数量为 0，期望 1 个" in error for error in errors))
+
+    def test_one_of_reports_two_matching_candidates(self) -> None:
+        """oneOf 有两个匹配分支时报告匹配数量为 2。"""
+        validator = validate.Validator(
+            {"oneOf": [{"type": "number"}, {"type": "integer"}]}
+        )
+
+        errors = validator.errors(1)
+
+        self.assertTrue(any("满足的候选结构数量为 2，期望 1 个" in error for error in errors))
+
+    def test_prefix_items_then_items_validate_array_positions(self) -> None:
+        """prefixItems 按位置校验前缀，剩余元素按 items 校验。"""
+        validator = validate.Validator(
+            {
+                "type": "array",
+                "prefixItems": [{"type": "string"}, {"type": "integer"}],
+                "items": {"type": "boolean"},
+            }
+        )
+
+        errors = validator.errors(["名称", 1, False, "不是布尔值"])
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("/3: 期望类型 boolean，实际为 string", errors)
+
+    def test_items_true_does_not_validate_array_elements(self) -> None:
+        """items 为 True 时不校验数组元素内容。"""
+        validator = validate.Validator({"type": "array", "items": True})
+
+        self.assertEqual(validator.errors(["任意内容", {}, None]), [])
+
+    def test_items_schema_validates_each_remaining_array_element(self) -> None:
+        """items 为子结构时校验每个数组元素。"""
+        validator = validate.Validator(
+            {"type": "array", "items": {"type": "integer"}}
+        )
+
+        errors = validator.errors([1, "不是整数", 3])
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("/1: 期望类型 integer，实际为 string", errors)
+
     def errors(self, data) -> list[str]:
         """返回校验错误列表。"""
         return self.validator.errors(data)
