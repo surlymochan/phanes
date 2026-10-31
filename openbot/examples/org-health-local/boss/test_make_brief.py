@@ -178,6 +178,15 @@ class MakeBriefTest(unittest.TestCase):
         self.assertIn("2026-01实际", period["期次"])
         self.assertEqual(self.errors(brief), [])
 
+    def test_leap_year_month_end(self) -> None:
+        """闰年二月的数据截止日为 29 日，截止期次锚点与观察月份一致。"""
+        brief = make_brief.build_brief(month="2024-02")
+        period = brief["观察期间"]
+        self.assertEqual(period["观察月份"], "2024-02")
+        self.assertEqual(period["数据截止"], "2024-02-29")
+        self.assertIn(f"{period['观察月份']}实际", period["期次"])
+        self.assertEqual(self.errors(brief), [])
+
     def test_optional_fx_and_period_anchors(self) -> None:
         """可选汇率和期间锚点符合 DA 契约。"""
         brief = make_brief.build_brief(fx=7.2)
