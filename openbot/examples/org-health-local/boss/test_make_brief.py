@@ -15,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 EX = ROOT.parent
@@ -339,7 +340,28 @@ class PeriodOrderTest(unittest.TestCase):
         实现补上去重校验后，删掉 expectedFailure 标记。
         """
         errors = self.errors(brief_with_period(DUPLICATED_PERIODS))
-        self.assertTrue(any("期次" in message for message in errors), "重复期次时未报出错误")
+        self.assertTrue(
+            any("重复" in message and "期次" in message for message in errors),
+            "重复期次时未报出指向重复期次的错误",
+        )
+
+    @unittest.expectedFailure
+    def test_命令行拒绝重复期次且不写出任务书(self) -> None:
+        """生成结果含重复期次时命令行应报错，且不写出有效任务书。
+
+        已知 bug：main 当前只校验 schema 与锚点归属，重复期次仍会通过校验并写出文件。
+        实现补上重复校验后，删掉 expectedFailure 标记。
+        """
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            duplicate = brief_with_period(DUPLICATED_PERIODS)
+            output = StringIO()
+            with patch.object(make_brief, "build_brief", return_value=duplicate), redirect_stderr(output):
+                code = make_brief.main(["--out", str(path)])
+        self.assertNotEqual(code, 0)
+        self.assertFalse(path.exists())
+        self.assertIn("重复", output.getvalue())
+        self.assertIn("期次", output.getvalue())
 
     @unittest.expectedFailure
     def test_起始晚于截止_应报出错误(self) -> None:
