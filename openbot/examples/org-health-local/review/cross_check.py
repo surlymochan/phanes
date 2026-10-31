@@ -3,9 +3,11 @@
 
 用法：
     python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>]
+                                    [--out <report.md>]
 
 逐条输出 PASS/FAIL，任一 FAIL 时退出码非 0；输入不可读或不是 JSON 对象时退出码为 2。
-只使用 Python 3.9+ 标准库，只读取命令行给出的文件，不写任何文件。
+只使用 Python 3.9+ 标准库；除 `--out` 指定的报告文件外不写任何文件，
+`--out` 的父目录不存在时自动创建。
 
 检查项：
 
@@ -492,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     results = run_checks(brief, diagnosis, args.data, args.dist)
     if args.out is not None:
         try:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(markdown_report(results), encoding="utf-8")
         except OSError as cause:
             print(f"无法写入报告 {args.out}：{cause}", file=sys.stderr)
