@@ -126,6 +126,15 @@ class HubBridgeTests(unittest.TestCase):
         self.assertEqual(db.execute('select state from handoffs').fetchall(), [('rejected',)])
         db.close()
 
+    def test_direct_auto_timeout_covers_serial_discovery_and_assignment(self):
+        command = mock.Mock(return_value={'id':'run-1','state':'queued','host':'gocc','backend':'agy','model':'x'})
+        payload = {'op':'submit','prompt':'task','title':'title','base':'a' * 40,
+                   'type':'impl','difficulty':3,'budget':10,'verify':None}
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'local_command': command}):
+            self.assertEqual(MOD['local_gateway'](payload)['id'], 'run-1')
+        self.assertEqual(command.call_args.kwargs['timeout'], 140)
+
     def test_local_command_classifies_changed_lane_error_as_unavailable(self):
         response = mock.Mock(returncode=0, stdout=json.dumps(
             {'ok': False, 'error': 'available lanes changed or rejected the task'}))

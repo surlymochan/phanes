@@ -123,8 +123,12 @@ def discovered_lanes():
     hosts = fleet_hosts()
     filters = backend_filters(hosts)
     local_allowed = filters.get(local_host())
-    rows = [{**row, '_origin': 'local'} for row in local_lanes()
-            if local_allowed is None or row.get('backend') in local_allowed]
+    # An explicit empty local allowlist makes this a Hub-only router.  Do not
+    # probe a local lane runtime or require its lanes.json in that layout.
+    rows = [] if local_allowed == set() else [
+        {**row, '_origin': 'local'} for row in local_lanes()
+        if local_allowed is None or row.get('backend') in local_allowed
+    ]
     if hosts:
         for host in hosts:
             try:
