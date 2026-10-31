@@ -41,15 +41,27 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         pass
 
 def parse_args(argv=None):
-    """解析命令行参数，--data 指向服务使用的诊断数据文件。"""
+    """解析命令行参数，--data 指向服务使用的诊断数据文件，--root 指向静态站点根目录。"""
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--data', type=Path, default=DATA)
-    return parser.parse_args(argv)
+    parser.add_argument('--root', type=Path, default=None)
+    parser.add_argument('--data', type=Path, default=None)
+    args = parser.parse_args(argv)
+    if args.root is not None:
+        args.root = args.root.resolve()
+    if args.data is not None:
+        args.data = args.data.resolve()
+    elif args.root is not None:
+        args.data = (args.root / 'data' / 'diagnosis.json').resolve()
+    else:
+        args.data = DATA
+    return args
 
-def create_server(port=8765, data=DATA):
+def create_server(port=8765, data=None, root=None):
     """创建只监听 loopback 的服务；调用方决定何时 serve_forever。"""
-    handler = partial(LocalOnlyHandler, data=Path(data), directory=ROOT)
+    root_path = Path(root).resolve() if root is not None else ROOT
+    data_path = Path(data).resolve() if data is not None else (root_path / 'data' / 'diagnosis.json')
+    handler = partial(LocalOnlyHandler, data=data_path, directory=root_path)
     return ThreadingHTTPServer(('127.0.0.1', port), handler)
 
 def build_bundle():
@@ -58,11 +70,14 @@ def build_bundle():
                    check=True, cwd=ROOT)
 
 def main(argv=None):
-    # 保持原有行为：相对 --data 与 bundle 输出都以示例目录为基准。
-    os.chdir(ROOT)
+    # 保持原有行为：相对 --data 与 bundle 输出都以示例目录为基准；指定 --root 时不再构建且直接服务该目录。
     args = parse_args(argv)
-    build_bundle()
-    server = create_server(args.port, args.data.resolve())
+    if args.root is None:
+        os.chdir(ROOT)
+        build_bundle()
+        server = create_server(args.port, args.data, root=ROOT)
+    else:
+        server = create_server(args.port, args.data, root=args.root)
     print(f'http://127.0.0.1:{server.server_address[1]}', flush=True)
     server.serve_forever()
 
