@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Add source-host result bundles without replacing an executor's OpenSwarm.
+
+The Hub fleet inventory may point a remote host at this executable while that
+host still runs an older candidate runtime.  Every ordinary argument is
+delegated unchanged to the adjacent ``openswarm-fleet`` wrapper.  The only
+extension is ``fleet _bundle <run-id>``: it obtains run metadata from that
+same runtime and invokes the adjacent ``fleet-result-bundle`` on the executor
+host, where the worktree path is valid.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+root = Path(__file__).resolve().parent
+base = Path(os.environ.get('OPENSWARM_FLEET_BASE_BIN', root / 'openswarm-fleet'))
+bundle = Path(os.environ.get('OPENSWARM_FLEET_BUNDLE_BIN', root / 'fleet-result-bundle'))
+args = sys.argv[1:]
+
+if args[:2] != ['fleet', '_bundle']:
+    os.execv(str(base), [str(base), *args])
+
+if len(args) != 3 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', args[2]):
+    sys.exit('invalid fleet bundle run id')
+if not base.is_file() or not os.access(base, os.X_OK):
+    sys.exit('fleet base runtime is unavailable')
+if not bundle.is_file():
+    sys.exit('fleet result bundle helper is unavailable')
+
+info = subprocess.run([str(base), 'fleet', '_run-info', args[2]], text=True,
+                      capture_output=True, timeout=60)
+if info.returncode:
+    sys.stderr.write(info.stderr)
+    sys.exit(info.returncode)
+try:
+    metadata = json.loads(info.stdout)
+except ValueError:
+    sys.exit('fleet base runtime returned invalid run metadata')
+if isinstance(metadata, dict) and metadata.get('ok') is False:
+    # Older fleet wrappers keep a zero process exit for a command-level
+    # failure.  Do not turn a missing/failed remote run into an empty bundle.
+    sys.stdout.write(json.dumps(metadata) + '\n')
+    sys.exit(1)
+if isinstance(metadata, dict) and metadata.get('ok') is True:
+    metadata = metadata.get('result')
+if not isinstance(metadata, dict):
+    sys.exit('fleet base runtime returned invalid run metadata')
+
+result = subprocess.run([sys.executable, str(bundle)], input=json.dumps(metadata), text=True,
+                        capture_output=True, timeout=140)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+sys.exit(result.returncode)
