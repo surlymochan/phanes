@@ -24,7 +24,10 @@ def remote_sources():
         raise ValueError('invalid automatic routing remote source configuration') from error
     if not isinstance(sources, list) or not sources:
         raise ValueError('invalid automatic routing remote source configuration')
-    out = []
+    # Preserve the legacy gocc transport for persisted handoffs.  A configured
+    # expansion adds hosts; it never replaces the route used by old receipts.
+    out = [DEFAULT_REMOTE_SOURCE]
+    seen = {'gocc'}
     for source in sources:
         if not isinstance(source, dict):
             raise ValueError('invalid automatic routing remote source configuration')
@@ -33,6 +36,13 @@ def remote_sources():
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
             raise ValueError('invalid automatic routing remote source configuration')
+        if host == 'gocc':
+            if alias != DEFAULT_REMOTE_SOURCE['ssh_alias']:
+                raise ValueError('conflicting automatic routing remote source configuration')
+            continue
+        if host == 'gores1' or host in seen:
+            raise ValueError('conflicting automatic routing remote source configuration')
+        seen.add(host)
         out.append({'host': host, 'ssh_alias': alias})
     return out
 

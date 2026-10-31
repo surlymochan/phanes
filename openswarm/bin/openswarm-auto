@@ -32,7 +32,11 @@ def remote_sources():
         raise RuntimeError('invalid automatic routing remote source configuration') from error
     if not isinstance(sources, list) or not sources:
         raise RuntimeError('invalid automatic routing remote source configuration')
-    validated = []
+    # Keep the legacy gocc route even after extra hosts are configured.  Hub
+    # handoff rows persist their executor host and old rows must remain
+    # queryable after a fleet expansion.
+    validated = [DEFAULT_REMOTE_SOURCE]
+    seen = {'gocc'}
     for source in sources:
         if not isinstance(source, dict):
             raise RuntimeError('invalid automatic routing remote source configuration')
@@ -41,6 +45,13 @@ def remote_sources():
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
             raise RuntimeError('invalid automatic routing remote source configuration')
+        if host == 'gocc':
+            if alias != DEFAULT_REMOTE_SOURCE['ssh_alias']:
+                raise RuntimeError('conflicting automatic routing remote source configuration')
+            continue
+        if host == 'gores1' or host in seen:
+            raise RuntimeError('conflicting automatic routing remote source configuration')
+        seen.add(host)
         validated.append({'host': host, 'ssh_alias': alias})
     return validated
 
