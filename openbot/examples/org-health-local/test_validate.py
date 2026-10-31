@@ -409,6 +409,33 @@ class ValidateTest(unittest.TestCase):
             f"错误信息未指出路径：{errors}",
         )
 
+    def test_metric_name_field_missing_fails(self) -> None:
+        """metrics 数组元素缺少名称字段（标题）时失败，并指出缺哪个字段。"""
+        broken = copy.deepcopy(self.data)
+        del broken["metrics"][0]["标题"]
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/metrics/0/标题: 缺少必需字段" in message for message in errors),
+            f"错误信息未指出缺少名称字段：{errors}",
+        )
+
+    def test_metric_item_written_with_name_key_fails(self) -> None:
+        """metrics 数组元素用 name 字段代替名称字段（标题）时失败，错误信息含字段名。"""
+        broken = copy.deepcopy(self.data)
+        metric = broken["metrics"][0]
+        metric["name"] = metric.pop("标题")
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/metrics/0/标题: 缺少必需字段" in message for message in errors),
+            f"错误信息未指出缺少名称字段：{errors}",
+        )
+        self.assertTrue(
+            any("/metrics/0/name" in message for message in errors),
+            f"错误信息未指出 name 字段：{errors}",
+        )
+
     def test_numeric_series_string_value_fails(self) -> None:
         """成本数值序列里出现字符串时失败，并指出路径。"""
         broken = copy.deepcopy(self.data)
@@ -539,6 +566,21 @@ class ValidateTest(unittest.TestCase):
             )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("/metrics/0/数值", result.stdout + result.stderr)
+
+    def test_command_line_reports_metric_name_missing(self) -> None:
+        """命令行校验缺少名称字段的 metrics 元素时退出码非 0，并打印出错字段名。"""
+        broken = copy.deepcopy(self.data)
+        del broken["metrics"][0]["标题"]
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, validate.EXIT_INVALID)
+        self.assertIn("/metrics/0/标题", result.stdout + result.stderr)
 
     def test_command_line_reports_top_level_array(self) -> None:
         """命令行校验顶层数组时退出码非 0，并报告顶层类型错误而非 traceback。"""
