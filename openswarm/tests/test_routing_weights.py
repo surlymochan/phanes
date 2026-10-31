@@ -35,6 +35,20 @@ class RoutingWeightsTests(unittest.TestCase):
         self.data.mkdir(parents=True, exist_ok=True)
         self.ledger.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
 
+    def test_routing_median_and_tokens_are_pure_data_operations(self):
+        self.assertIsNone(xs.routing_median([]))
+        self.assertEqual(xs.routing_median([9, 1, 5]), 5)
+        self.assertEqual(xs.routing_median([8, 1, 5, 3]), 4.0)
+
+        self.assertEqual(xs.routing_tokens({"tokens": {"total": 12}}), 12)
+        self.assertEqual(xs.routing_tokens({"tokens": 13}), 13)
+        self.assertEqual(xs.routing_tokens({"usage": {"totalTokens": 14}}), 14)
+        self.assertEqual(xs.routing_tokens({"attempts": [
+            {"meta": {"usage": {"totalTokens": 2}}},
+            {"usage": {"totalTokens": 3}},
+        ]}), 5)
+        self.assertIsNone(xs.routing_tokens({}))
+
     def test_fixture_ledger_computes_all_routing_metrics(self):
         rows = [
             {"backend": "codex", "model": "m1", "card_type": "fix", "status": "done", "exec_pass": True,
