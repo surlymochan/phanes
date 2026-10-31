@@ -1,0 +1,12 @@
+# 仅用于非受控执行器；受控执行器不应运行此服务。
+[Unit]
+Description=OpenSwarm bus worker
+
+[Service]
+Type=simple
+User=openswarm
+ExecStart=openswarm bus-worker
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
