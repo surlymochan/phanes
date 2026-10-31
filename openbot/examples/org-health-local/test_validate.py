@@ -45,6 +45,25 @@ class ValidateTest(unittest.TestCase):
         self.validator = validate.Validator(self.schema)
         self.data = load_json(EXAMPLE_PATH)
 
+    def test_resolve_rejects_external_reference(self) -> None:
+        """解析非文档内引用时抛出 ValueError。"""
+        with self.assertRaisesRegex(ValueError, "只支持文档内引用"):
+            self.validator._resolve("http://example.com/schema.json")
+
+    def test_resolve_rejects_missing_internal_reference(self) -> None:
+        """解析不存在的文档内路径时抛出 ValueError。"""
+        with self.assertRaisesRegex(ValueError, "引用不存在"):
+            self.validator._resolve("#/$defs/missing_type")
+
+    def test_resolve_rejects_non_object_reference_target(self) -> None:
+        """引用目标不是结构对象时抛出 ValueError。"""
+        validator = validate.Validator({"$defs": {"string_type": "文本", "list_type": []}})
+
+        with self.assertRaisesRegex(ValueError, "引用不是结构对象"):
+            validator._resolve("#/$defs/string_type")
+        with self.assertRaisesRegex(ValueError, "引用不是结构对象"):
+            validator._resolve("#/$defs/list_type")
+
     def errors(self, data) -> list[str]:
         """返回校验错误列表。"""
         return self.validator.errors(data)
