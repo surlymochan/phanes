@@ -306,8 +306,16 @@ def parse_number(value: str | None, path: Path, column: str, number: int) -> flo
     return round(number_value, 4)
 
 
-def load_table(path: Path, key_column: str, columns: tuple[str, ...]) -> dict[str, dict[str, float | None]]:
-    """读取一张 CSV，按期次索引各列数值。"""
+def load_table(
+    path: Path,
+    key_column: str,
+    columns: tuple[str, ...],
+    non_negative: bool = False,
+) -> dict[str, dict[str, float | None]]:
+    """读取一张 CSV，按期次索引各列数值。
+
+    non_negative 为真时，各列数值必须是非负数，负数按原始数据错误报出。
+    """
     rows = read_table(path, (key_column,) + columns)
     table: dict[str, dict[str, float | None]] = {}
     for number, row in enumerate(rows, start=2):
@@ -316,7 +324,13 @@ def load_table(path: Path, key_column: str, columns: tuple[str, ...]) -> dict[st
             raise RawDataError(f"原始数据 {path.name} 第 {number} 行缺少 {key_column}")
         if key in table:
             raise RawDataError(f"原始数据 {path.name} 中 {key_column} {key} 重复")
-        table[key] = {name: parse_number(row.get(name), path, name, number) for name in columns}
+        values: dict[str, float | None] = {}
+        for name in columns:
+            value = parse_number(row.get(name), path, name, number)
+            if non_negative and value is not None and value < 0:
+                raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {name} 必须是非负数：{value}")
+            values[name] = value
+        table[key] = values
     return table
 
 
@@ -329,7 +343,7 @@ def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
     forecast_columns = cost_columns + heads_columns + (REVENUE,)
     return {
         "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns),
-        "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns),
+        "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True),
         "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,)),
         "forecast": load_table(raw_dir / FORECAST_FILE, "期次", forecast_columns),
     }
