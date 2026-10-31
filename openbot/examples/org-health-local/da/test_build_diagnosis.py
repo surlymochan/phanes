@@ -325,6 +325,24 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("汇率", result.stdout + result.stderr)
 
+    def test_brief_without_rate_uses_fx_csv(self) -> None:
+        """任务书缺汇率时从原始数据目录的 fx.csv 回落读取。"""
+        folder = self.folder / "rate-from-fx"
+        folder.mkdir(parents=True, exist_ok=True)
+        brief = json.loads(json.dumps(BRIEF))
+        del brief["口径"]["汇率"]
+        path = write_brief(folder, brief)
+        raw_dir = copy_raw(folder, "raw")
+
+        result = run_cli(path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertIn("汇率：7.2 人民币/美元", "\n".join(data["口径说明"]))
+        self.assertEqual(
+            data["metrics"][3]["数值"]["整体技术人力成本率"]["2026-01实际"],
+            "约12.9%",
+        )
+
     def test_unwritable_out_target_exits_nonzero(self) -> None:
         """--out 指向无法作为文件写出的目标时退出码非 0，stderr 报错且不留下部分 JSON。"""
         # 情形 1：--out 指向已存在的目录
