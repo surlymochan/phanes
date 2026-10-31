@@ -26,6 +26,19 @@ class BusTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.data = self.root / "planner"
         self.data.mkdir()
+        self.env_names = ("OPENSWARM_HOME", "OPENSWARM_GH_BIN", "OPENSWARM_FAKE_GH_STATE",
+                          "OPENSWARM_FAKE_GH_LOGIN", "OPENSWARM_FAKE_GH_ISSUE_LOGIN",
+                          "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
+                          "OPENSWARM_PI_BIN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                          "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1")
+        self.old_env = {key: os.environ.get(key) for key in self.env_names}
+        self.addCleanup(self.restore_env)
+        # Git's detached auto-maintenance can write into these temporary bare
+        # repositories after a worker's clone or push exits.  Install this
+        # fixture-only override before creating any of the repositories.
+        os.environ.update({"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto",
+                           "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "gc.auto",
+                           "GIT_CONFIG_VALUE_1": "0"})
         self.state_path = self.root / "github.json"
         self.state_path.write_text(json.dumps({"repos": {"org/bus": {"labels": [], "issues": [], "files": {}}}}))
         self.bare = self.root / "target.git"
@@ -42,11 +55,6 @@ class BusTests(unittest.TestCase):
         self.git(self.repo, "branch", "-M", "main")
         self.git(self.repo, "remote", "add", "origin", str(self.bare))
         self.git(self.repo, "push", "-q", "origin", "main")
-        self.env_names = ("OPENSWARM_HOME", "OPENSWARM_GH_BIN", "OPENSWARM_FAKE_GH_STATE",
-                          "OPENSWARM_FAKE_GH_LOGIN", "OPENSWARM_FAKE_GH_ISSUE_LOGIN",
-                          "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
-                          "OPENSWARM_PI_BIN")
-        self.old_env = {key: os.environ.get(key) for key in self.env_names}
         os.environ.update({"OPENSWARM_HOME": str(self.data), "OPENSWARM_GH_BIN": str(FAKE_GH),
                            "OPENSWARM_FAKE_GH_STATE": str(self.state_path), "OPENSWARM_FAKE_GH_LOGIN": "planner",
                            "OPENSWARM_FAKE_GH_ISSUE_LOGIN": "planner",
@@ -66,14 +74,17 @@ class BusTests(unittest.TestCase):
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
+        self.restore_env()
+        for key, value in self.constants.items():
+            setattr(xs, key, value)
+        self.tmp.cleanup()
+
+    def restore_env(self):
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        for key, value in self.constants.items():
-            setattr(xs, key, value)
-        self.tmp.cleanup()
 
     @staticmethod
     def git(cwd, *args):
@@ -373,6 +384,32 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         self.assertTrue(any("Ignored task verify" in note for note in report["followups"]))
         self.assertTrue(report["commit"])
         self.assertIn("worker.txt", self.git(None, "--git-dir", str(self.bare), "ls-tree", "-r", "--name-only", report["commit"]))
+
+    def test_setup_failure_restores_git_environment(self):
+        saved = {key: os.environ.get(key) for key in self.env_names}
+        sentinel = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "test.sentinel",
+                    "GIT_CONFIG_VALUE_0": "preserved"}
+        failed = BusTests("runTest")
+        try:
+            for key in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+                        "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"):
+                os.environ.pop(key, None)
+            os.environ.update(sentinel)
+            with mock.patch.object(BusTests, "git", side_effect=OSError("initial git failure")):
+                with self.assertRaisesRegex(OSError, "initial git failure"):
+                    failed.setUp()
+            failed.doCleanups()
+            self.assertEqual({key: os.environ.get(key) for key in sentinel}, sentinel)
+            self.assertIsNone(os.environ.get("GIT_CONFIG_KEY_1"))
+            self.assertIsNone(os.environ.get("GIT_CONFIG_VALUE_1"))
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if hasattr(failed, "tmp"):
+                failed.tmp.cleanup()
 
     def test_worker_rejects_changed_task_body_and_unlisted_repo(self):
         metadata = {"run_id": "digest-check", "repo": "org/target", "base": self.base,

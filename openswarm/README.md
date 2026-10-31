@@ -687,6 +687,17 @@ shows today's ledger usage. Admission reserves requested minutes for live runs; 
 lane assignments and batches refuse excess work with `budget_exceeded_daily` (exit 3).
 Budgets apply to the ledger on each host; remote runs also check that host's policy.
 
+For a shared `fleet-capacity` coordinator reached through a restricted SSH
+forced-command endpoint, use a **dedicated fleet-control SSH key**; never reuse
+the Pi inference-broker key, whose socket is intentionally available to isolated
+Pi clients. Its forced command runs `fleet-capacity gores1`, while gores1's
+guard config uses the fleet-only SSH config and an explicit owner, for example
+`["/usr/bin/ssh", "-T", "-F", "/root/.ssh/openswarm-fleet/config", "openswarm-fleet-capacity", "gores1"]`.
+The forced command pins the authenticated owner; OpenSwarm also records the final
+`gores1` argument in run status and reuses it for release and TTL recovery. Do
+not infer ownership from an SSH alias or expose the fleet-control key/socket to
+an executor sandbox.
+
 `risk.enforce` defaults to `["push", "publish", "secret print", "rm outside worktree", "sudo"]`.
 The runner stops one-shot executors or aborts lane turns on matching command events,
 without requiring `watch`. Results include `status: stopped`, `error_class: risk_blocked`

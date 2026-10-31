@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Relay one SSH stdio stream to the local broker without exposing a shell."""
+"""Relay only Pi inference bytes over restricted SSH stdio."""
+import errno
 import os
 import pathlib
 import select
 import socket
 
 path = pathlib.Path.home() / 'Library' / 'Caches' / 'openswarm-pi-broker' / 'broker.sock'
+first = os.read(0, 1)
+
 sock = socket.socket(socket.AF_UNIX)
 sock.connect(str(path))
+if first:
+    sock.sendall(first)
 stdin_open = True
 while True:
     readers = [sock] + ([0] if stdin_open else [])
@@ -18,7 +23,14 @@ while True:
             sock.sendall(data)
         else:
             stdin_open = False
-            sock.shutdown(socket.SHUT_WR)
+            # stdin EOF and the upstream response/close can become ready in
+            # the same select cycle. On macOS the peer may win that race,
+            # making the write-half close report a normal disconnection.
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError as error:
+                if error.errno not in (errno.ENOTCONN, errno.EPIPE):
+                    raise
     if sock in ready:
         data = sock.recv(65536)
         if not data:

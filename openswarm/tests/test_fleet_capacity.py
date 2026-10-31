@@ -128,6 +128,29 @@ class FleetCapacityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'required but missing'):
                 xs.fleet_guard_command()
 
+    def test_ssh_guard_trailing_owner_is_recorded_and_recovers(self):
+        """An SSH alias is transport only; the explicit final owner drives lifecycle."""
+        command = ['/usr/bin/ssh', '-T', '-F', '/fixed/config', 'openswarm-pi-broker', 'gores1']
+        rdir = pathlib.Path(self.temp.name, 'runs', 'gores-turn')
+        with mock.patch.object(xs, 'fleet_guard_command', return_value=command), \
+             mock.patch.object(xs, 'fleet_guard_call', return_value={'admitted': True}):
+            self.assertTrue(xs.reserve_provider_slot(str(rdir), 'pi', 'minimax-cn',
+                                                      {'concurrency': {'total': 8}}, keep_waiting=lambda: True))
+        status = json.loads((rdir / 'status.json').read_text())
+        self.assertEqual(status['fleet_host'], 'gores1')
+        self.assertIn('fleet_reserved_at', status)
+        status.update({'state': 'running', 'runner_pid': 999999999,
+                       'executor_pid': None, 'executor_pgid': None, 'fleet_reserved_at': 0.0})
+        (rdir / 'status.json').write_text(json.dumps(status))
+        with mock.patch.object(xs, 'RUNS', str(rdir.parent)), \
+             mock.patch.object(xs, 'NOW', return_value=601.0), \
+             mock.patch.object(xs, 'pid_alive', return_value=False), \
+             mock.patch.object(xs, 'executor_stopped', return_value=True), \
+             mock.patch.object(xs, 'fleet_guard_call', return_value={'recovered': 1}) as call:
+            self.assertEqual(xs.recover_expired_fleet_slots(command, {'fleet': {'recovery_ttl_seconds': 600}}),
+                             ['gores-turn'])
+        self.assertEqual(call.call_args.args[1]['host'], 'gores1')
+
     def test_release_retries_transient_connection_failure(self):
         rdir = os.path.realpath(os.path.join(self.temp.name, 'run'))
         xs._FLEET_RESERVATIONS[rdir] = (['guard'], {'run_id': 'run', 'token': 'a' * 32})
