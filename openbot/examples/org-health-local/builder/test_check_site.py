@@ -144,6 +144,39 @@ class CheckSiteTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing.js 不存在", result.stdout)
 
+    def test_absolute_and_protocol_relative_references_are_skipped(self) -> None:
+        """绝对路径与协议相对地址跳过本地文件检查，相对路径缺失仍失败。"""
+        dist = self.make_dist()
+        (dist / "index.html").write_text(
+            '<script src="/app.bundle.js"></script>\n'
+            '<script src="//cdn.example.invalid/x.js"></script>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for relative in (
+            "index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "build-report.json"
+        ):
+            self.assertIn(f"通过：{relative} 存在且非空", result.stdout)
+        self.assertIn("通过：data/diagnosis.json 通过 validate.py", result.stdout)
+        for relative in ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json"):
+            self.assertIn(f"通过：{relative} 的 sha256 一致", result.stdout)
+        self.assertNotIn("引用的本地文件 /app.bundle.js 不存在", result.stdout)
+        self.assertNotIn("引用的本地文件 //cdn.example.invalid/x.js 不存在", result.stdout)
+
+        (dist / "index.html").write_text(
+            '<script src="/app.bundle.js"></script>\n'
+            '<script src="//cdn.example.invalid/x.js"></script>\n'
+            '<script src="./missing.js"></script>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.js 不存在", result.stdout)
+        self.assertIn("站点检查失败：1 项", result.stdout)
+
     def test_local_reference_with_query_and_encoded_name_passes(self) -> None:
         """带查询串与 URL 编码文件名的本地引用必须落到真实文件（check_site.py:114-128）。"""
         dist = self.make_dist()
