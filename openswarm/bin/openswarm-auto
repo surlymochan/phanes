@@ -60,7 +60,7 @@ def backend_filters(hosts):
     allowed_hosts = {local_host(), *hosts}
     if (not isinstance(filters, dict) or not filters
             or any(not isinstance(host, str) or host not in allowed_hosts
-                   or not isinstance(backends, list) or not backends
+                   or not isinstance(backends, list)
                    or any(not isinstance(backend, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', backend)
                           for backend in backends)
                    for host, backends in filters.items())):

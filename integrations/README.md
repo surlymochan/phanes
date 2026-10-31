@@ -14,12 +14,13 @@ OPENSWARM_HUB_LOCAL_ROUTER=1
 OPENSWARM_AUTO_LOCAL_HOST=local
 OPENSWARM_AUTO_FLEET_HOSTS=["gores1","gocc"]
 OPENSWARM_AUTO_CLI=/absolute/path/to/openswarm-fleet
-OPENSWARM_AUTO_HOST_BACKENDS={"local":["cursor"],"gores1":["pi"],"gocc":["agy"]}
+OPENSWARM_AUTO_HOST_BACKENDS={"local":[],"gores1":["pi"],"gocc":["agy","copilot"]}
 ```
 
 `OPENSWARM_AUTO_HOST_BACKENDS` 是管理员部署时设置的主机后端白名单。它避免旧
 lane 残留或同名 lane（例如远端 K1）混入 4:2:2 布局；任务卡本身不能指定主机。
-`local` 的 K1/K2、gores1 的 M1–M4 与 gocc 的 A1/A2 每次派发都会经
+`local` 不参与这个 4:2:2 方案；gores1 的 M1–M4 与 gocc 的 A1/A2、GH1/GH2
+每次派发都会经
 `fleet exec ... lane status` 重新发现；派发、状态查询、停止和结果 bundle
 同样使用已配置 fleet 的直接 SSH 传输。lane supervisor 的共享 guard 仍是最终
 准入点。手工任务卡不能指定 host 或 SSH 参数。未列入这个配置的历史回执继续走
