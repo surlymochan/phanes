@@ -276,10 +276,10 @@ with os.fdopen(fd, 'wb') as out: plistlib.dump(data, out)
 os.chmod(temp, 0o600); os.replace(temp, path)
 PY
     domain="gui/$(id -u)"
-    launchctl bootout "$domain/$label"
-    launchctl bootstrap "$domain" "$plist"
-    launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm-fleet" >/dev/null
-    launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
+    launchctl bootout "$domain/$label" || true
+    launchctl bootstrap "$domain" "$plist" || return
+    launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm-fleet" >/dev/null || return
+    launchctl print "$domain/$label" | grep -F "state = running" >/dev/null || return
   else
     case "$lane" in
       K1) unit=openswarm-executor-cursor.service ;; M1) unit=openswarm-executor-pi.service ;;
@@ -297,10 +297,38 @@ fd, temp = tempfile.mkstemp(prefix='openswarm-lane.', dir=path.parent)
 with os.fdopen(fd, 'w') as out: out.write(updated)
 os.chmod(temp, 0o644); os.replace(temp, path)
 PY
+    systemctl daemon-reload || return
+    systemctl restart "$unit" || return
+    test "$(systemctl show -p ActiveState --value "$unit")" = active || return
+    systemctl show -p ExecStart --value "$unit" | grep -F "$release_bin/openswarm-fleet" >/dev/null || return
+  fi
+}
+
+restore_service() {
+  lane="$1"
+  if [ "$(uname -s)" = Darwin ]; then
+    case "$lane" in
+      C1) label=app.openswarm.executor.codex ;; A1) label=app.openswarm.executor.agy ;;
+      A2) label=app.openswarm.executor.agy2 ;; GH1) label=app.openswarm.executor.copilot ;;
+      GH2) label=app.openswarm.executor.copilot-complex ;; *) return 2 ;;
+    esac
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    cp -p "$backup_root/$label.plist" "$plist"
+    domain="gui/$(id -u)"
+    launchctl bootout "$domain/$label" || true
+    launchctl bootstrap "$domain" "$plist"
+    launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
+  else
+    case "$lane" in
+      K1) unit=openswarm-executor-cursor.service ;; M1) unit=openswarm-executor-pi.service ;;
+      M2) unit=openswarm-executor-pi2.service ;; M3) unit=openswarm-executor-m3.service ;;
+      M4) unit=openswarm-executor-m4.service ;; *) return 2 ;;
+    esac
+    unit_path="$(systemctl show -p FragmentPath --value "$unit")"
+    cp -p "$backup_root/$(basename "$unit_path")" "$unit_path"
     systemctl daemon-reload
     systemctl restart "$unit"
     test "$(systemctl show -p ActiveState --value "$unit")" = active
-    systemctl show -p ExecStart --value "$unit" | grep -F "$release_bin/openswarm-fleet" >/dev/null
   fi
 }
 rolled=0
@@ -329,7 +357,11 @@ PY
   # receives the selected object before its worktree is detached at main.
   git -C "$wt" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
   git -C "$wt" checkout --detach "$sha"
-  roll_service "$lane"
+  if ! roll_service "$lane"; then
+    echo "service reload failed; restoring lane: $lane" >&2
+    restore_service "$lane"
+    exit 1
+  fi
   ready=0
   for attempt in $(seq 1 15); do
     after="$("$runtime/bin/openswarm-fleet" lane status)"
@@ -345,7 +377,11 @@ PY
     then ready=1; break; fi
     sleep 1
   done
-  test "$ready" -eq 1 || { echo "new lane supervisor did not become ready: $lane" >&2; exit 1; }
+  if [ "$ready" -ne 1 ]; then
+    echo "new lane supervisor did not become ready; restoring lane: $lane" >&2
+    restore_service "$lane"
+    exit 1
+  fi
   rolled=1
   echo "rolled lane: $lane"
 done
@@ -373,9 +409,24 @@ with os.fdopen(fd, 'wb') as out: plistlib.dump(data, out)
 os.chmod(temp, 0o600); os.replace(temp, path)
 PY
   domain="gui/$(id -u)"
-  launchctl bootout "$domain/$label"
+  launchctl bootout "$domain/$label" || true
+  launchctl bootstrap "$domain" "$plist" || return
+  launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm" >/dev/null || return
+  launchctl print "$domain/$label" | grep -F "state = running" >/dev/null || return
+}
+
+local_restore_service() {
+  local lane="$1" label plist domain
+  case "$lane" in
+    K1) label=app.openswarm.phanes.k1 ;;
+    K2) label=app.openswarm.phanes.k2 ;;
+    *) return 2 ;;
+  esac
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  cp -p "$backup_root/$label.plist" "$plist"
+  domain="gui/$(id -u)"
+  launchctl bootout "$domain/$label" || true
   launchctl bootstrap "$domain" "$plist"
-  launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm" >/dev/null
   launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
 }
 
@@ -407,7 +458,11 @@ PY
     fi
     git -C "$wt" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
     git -C "$wt" checkout --detach "$sha"
-    local_roll_service "$lane" "$release_bin"
+    if ! local_roll_service "$lane" "$release_bin"; then
+      echo "local service reload failed; restoring lane: $lane" >&2
+      local_restore_service "$lane"
+      return 1
+    fi
     ready=0
     for attempt in $(seq 1 15); do
       after="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
@@ -423,7 +478,11 @@ PY
       then ready=1; break; fi
       sleep 1
     done
-    test "$ready" -eq 1 || { echo "new local supervisor did not become ready: $lane" >&2; return 1; }
+    if [ "$ready" -ne 1 ]; then
+      echo "new local supervisor did not become ready; restoring lane: $lane" >&2
+      local_restore_service "$lane"
+      return 1
+    fi
     echo "rolled local lane: $lane"
   done
 }
