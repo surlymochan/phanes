@@ -48,10 +48,27 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
 
 def parse_args(argv=None):
     """解析命令行参数，--data 指向服务使用的诊断数据文件，--root 指向静态站点根目录。"""
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, default=DEFAULT_PORT)
-    parser.add_argument('--root', type=Path, default=None)
-    parser.add_argument('--data', type=Path, default=None)
+    parser = argparse.ArgumentParser(
+        description="Serve the static diagnostic site on IPv4 loopback only.",
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=DEFAULT_PORT,
+        help=f'服务监听端口（0-65535，默认 {DEFAULT_PORT}）',
+    )
+    parser.add_argument(
+        '--root',
+        type=Path,
+        default=None,
+        help='静态站点根目录（默认当前示例目录）',
+    )
+    parser.add_argument(
+        '--data',
+        type=Path,
+        default=None,
+        help='诊断数据 JSON 文件路径（默认使用 root 下的 data/diagnosis.json）',
+    )
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error(f'--port 需要在 0-65535 之间，收到 {args.port}')

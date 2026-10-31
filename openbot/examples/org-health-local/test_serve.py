@@ -435,6 +435,60 @@ class PortRangeArgumentTests(unittest.TestCase):
         self.assertEqual(serve.parse_args(['--port', '65535']).port, 65535)
 
 
+class CliContractTests(unittest.TestCase):
+    """CLI 契约单测：--help 选项参数说明与未知参数报错。"""
+
+    def run_cli(self, *args):
+        """运行 serve.py 命令行，返回 (退出码, stdout, stderr)。"""
+        result = subprocess.run(
+            [sys.executable, str(serve.ROOT / 'serve.py'), *args],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_help_option_displays_description_and_arguments(self):
+        # 运行 python3 serve.py --help 断言退出码为 0，stdout 包含 --port、--root、--data 参数说明与描述
+        code, out, err = self.run_cli('--help')
+        self.assertEqual(code, 0)
+        self.assertIn("Serve the static diagnostic site on IPv4 loopback only.", out)
+        self.assertIn('--port', out)
+        self.assertIn('--root', out)
+        self.assertIn('--data', out)
+        self.assertIn('服务监听端口', out)
+        self.assertIn('静态站点根目录', out)
+        self.assertIn('诊断数据', out)
+        self.assertEqual(err, '')
+
+    def test_unknown_argument_fails_with_usage_error(self):
+        # 传入未知参数（如 --bogus）断言退出码非 0，stderr 输出用法错误提示
+        code, out, err = self.run_cli('--bogus')
+        self.assertNotEqual(code, 0)
+        self.assertIn('usage:', err.lower())
+        self.assertIn('unrecognized arguments: --bogus', err)
+        self.assertNotIn('预览地址', out)
+
+    def test_parse_args_help(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as caught:
+                serve.parse_args(['--help'])
+        self.assertEqual(caught.exception.code, 0)
+        out = stdout.getvalue()
+        self.assertIn("Serve the static diagnostic site on IPv4 loopback only.", out)
+        self.assertIn('--port', out)
+        self.assertIn('--root', out)
+        self.assertIn('--data', out)
+
+    def test_parse_args_unknown_argument_reports_usage_error(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                serve.parse_args(['--bogus'])
+        self.assertNotEqual(caught.exception.code, 0)
+        self.assertIn('unrecognized arguments: --bogus', stderr.getvalue())
+
+
 class PortInUseTests(unittest.TestCase):
     """端口被占用时明确报错并以非 0 退出，不静默改用其他端口。"""
 
