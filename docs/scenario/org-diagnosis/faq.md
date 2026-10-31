@@ -255,7 +255,7 @@ python3 builder/check_site.py <dist>
   `demo/site-summary.md`：指标卡片的标题与各期次数值、口径说明条目、洞察/建议条数，
   以及页面字段与快照字段的对应关系。
 
-**实测：** `python3 run_tests.py` 输出 `Ran 165 tests: 0 failures, 0 errors`，退出码 0。
+**实测：** `python3 run_tests.py` 输出 `Ran 237 tests: 0 failures, 0 errors`，退出码 0；其中包含已知边界 `expected failures`，不计为回归失败。
 
 ---
 
@@ -308,7 +308,7 @@ python3 da/build_diagnosis.py --brief "$W/brief-fx.json" --raw da/sample-raw --o
 python3 run_e2e.py --workdir "$W/e2e" --review                # 退出码 0，review.md 10 项全 PASS
 
 # Q9 单元测试
-python3 run_tests.py                                          # Ran 165 tests: 0 failures, 0 errors
+python3 run_tests.py                                          # Ran 237 tests: 0 failures, 0 errors（含已知边界 expected failures）
 ```
 
 ## 已知边界（本文不展开）
