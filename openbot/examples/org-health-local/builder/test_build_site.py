@@ -70,6 +70,25 @@ class BuildSiteTest(unittest.TestCase):
         self.assertEqual((self.out / "app.bundle.js").read_bytes(), self.bundle.read_bytes())
         self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), EXAMPLE_PATH.read_bytes())
 
+    def test_existing_output_overwrites_required_files_and_keeps_unrelated_files(self) -> None:
+        """已有输出目录中的固定产物会更新，无关旧文件按当前实现保留。"""
+        old_content = b"old build artifact\n"
+        for relative in ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "build-report.json"):
+            path = self.out / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old_content)
+        unrelated = self.out / "keep-me.txt"
+        unrelated.write_bytes(b"unrelated old file\n")
+
+        self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
+
+        self.assertEqual((self.out / "index.html").read_bytes(), (EX_ROOT / "index.html").read_bytes())
+        self.assertEqual((self.out / "styles.css").read_bytes(), (EX_ROOT / "styles.css").read_bytes())
+        self.assertEqual((self.out / "app.bundle.js").read_bytes(), self.bundle.read_bytes())
+        self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), EXAMPLE_PATH.read_bytes())
+        self.assertNotEqual((self.out / "build-report.json").read_bytes(), old_content)
+        self.assertEqual(unrelated.read_bytes(), b"unrelated old file\n")
+
     def test_utf8_diagnosis_copy_matches_input_and_report(self) -> None:
         """含 UTF-8 中文内容的诊断快照复制后保持字节与摘要一致。"""
         diagnosis = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
