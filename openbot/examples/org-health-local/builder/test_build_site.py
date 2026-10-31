@@ -102,8 +102,15 @@ class BuildSiteTest(unittest.TestCase):
         self.assertFalse(self.out.exists(), "数据缺失时不应生成 dist")
 
     def test_missing_bundle_file_fails(self) -> None:
-        """bundle 文件不存在时退出码非 0，且不生成 dist。"""
-        self.assertNotEqual(self.build(bundle=self.root / "nope.js"), build_site.EXIT_OK)
+        """bundle 文件不存在时以 1 退出并提示示例 bundle，且不生成 dist。"""
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            code = self.build(bundle=self.root / "nope.js")
+        self.assertEqual(code, 1)
+        self.assertIn("demo/vendor/app.bundle.js", stderr.getvalue())
         self.assertFalse(self.out.exists(), "bundle 缺失时不应生成 dist")
 
     def test_bun_command_matches_serve(self) -> None:

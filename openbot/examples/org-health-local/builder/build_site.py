@@ -145,8 +145,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"数据文件不存在：{data_path}", file=sys.stderr)
         return EXIT_USAGE
     if bundle_path is not None and not bundle_path.is_file():
-        print(f"bundle 文件不存在：{bundle_path}", file=sys.stderr)
-        return EXIT_USAGE
+        print(
+            f"bundle 文件不存在：{bundle_path}；请先生成 demo/vendor/app.bundle.js，或指定有效的 --bundle 文件。",
+            file=sys.stderr,
+        )
+        return EXIT_INVALID
 
     validate = load_module("org_health_validate", VALIDATE_PATH)
     try:
