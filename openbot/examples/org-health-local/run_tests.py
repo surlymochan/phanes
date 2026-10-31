@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Discover and run all unit tests in this example."""
+"""Discover and run all unit tests in this example.
+
+Test modules:
+  - test_run_e2e.py
+  - test_serve.py
+  - test_validate.py
+"""
 
 import pathlib
 import sys
