@@ -88,6 +88,13 @@ while True:
                 with open(marker, "w") as stream:
                     stream.write(str(child.pid))
             os.kill(os.getpid(), signal.SIGKILL)
+        if "LANE_TEST_EXIT_WITH_CHILD" in prompt:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            marker = os.environ.get("FAKE_CURSOR_CHILD_PID")
+            if marker:
+                with open(marker, "w") as stream:
+                    stream.write(str(child.pid))
+            os._exit(17)
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,
               "update": {"sessionUpdate": "plan", "entries": [{"content": "Apply the requested change"}]}}})
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,

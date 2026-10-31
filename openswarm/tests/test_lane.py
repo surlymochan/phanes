@@ -696,6 +696,27 @@ class LaneTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_normally_exited_lane_parent_with_child_retains_shared_fleet_slot(self):
+        """A normal wrapper exit must not release a slot held by its child."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "normal-exit-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_CHILD")
+        try:
+            self.assertEqual(self.wait_run(run_id)["status"], "failed")
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_live_lane_turn_keeps_shared_fleet_slot(self):
         self.set_config("cursor")
         self.enable_fleet_guard()

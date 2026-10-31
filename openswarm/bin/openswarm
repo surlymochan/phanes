@@ -3548,10 +3548,11 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
         # would turn startup/configuration failures into a permanent capacity
         # leak.  Keep the conservative path only for interrupted executions,
         # where timeout/risk/I/O recovery may still need descendant inspection.
-        # A negative return code means the executor was killed by a signal.
-        # Its process group can still contain a surviving descendant, so it is
-        # not evidence that the shared slot is safe to reuse.
-        normal_child_exit = rc >= 0 and rc not in (124, 133, 134)
+        # A non-negative parent exit is not proof its process group is gone:
+        # a wrapper may have spawned a child and then exited normally.  Keep
+        # the shared slot while the dedicated executor process group exists.
+        normal_child_exit = (rc >= 0 and rc not in (124, 133, 134)
+                             and not executor_process_group_alive(rdir))
         if normal_child_exit or error_class in (None, "rate_limit", "risk_blocked") or (
                 backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
                                                    or (meta or {}).get("finished_reason"))):
@@ -3621,6 +3622,23 @@ def kill_tree(pid, grace=3):
             procs = [p for p in procs if pid_alive(p)]
             if not procs:
                 return
+
+
+def process_group_alive(pgid):
+    """Whether a dedicated executor process group still has a member."""
+    try:
+        os.killpg(int(pgid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def executor_process_group_alive(rdir):
+    return process_group_alive((jload(os.path.join(rdir, "status.json"), {}) or {}).get("executor_pgid"))
 
 
 ENFORCED_RISKS = ["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]
@@ -3944,7 +3962,11 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
     with open(out_path, "w") as out, open(out_path + ".err", "w") as err:
         p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
                              start_new_session=True)
-        set_status(rdir, executor_pid=p.pid, events=out_path, attempt_started=NOW())
+        try:
+            pgid = os.getpgid(p.pid)
+        except OSError:
+            pgid = None
+        set_status(rdir, executor_pid=p.pid, executor_pgid=pgid, events=out_path, attempt_started=NOW())
         end = NOW() + timeout
         policy = load_policy()
         offset, pending = 0, ""
@@ -6663,6 +6685,10 @@ class LaneChild:
         self.proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True,
                                      env=child_env)
+        try:
+            self.pgid = os.getpgid(self.proc.pid)
+        except OSError:
+            self.pgid = None
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
         if backend == "codex":
@@ -6792,6 +6818,10 @@ class AgyChild:
                                 stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True)
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
+        try:
+            self.pgid = os.getpgid(proc.pid)
+        except OSError:
+            self.pgid = None
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
         threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True).start()
         return proc.pid
@@ -7771,13 +7801,12 @@ def lane_do_run(lane, spec, child, server, current):
                 # failure; otherwise a local startup failure permanently
                 # consumes fleet capacity.  Do not use this for timeout/risk
                 # or I/O interruption paths, nor while the child is alive.
-                # `LaneChild.alive()` polls the parent, whose negative return
-                # code records signal death.  A dead parent is not enough to
-                # prove its process group is gone: retain the reservation for
-                # SIGKILL/OOM-style exits until an explicit recovery check.
+                # `LaneChild.alive()` polls only the parent.  Retain the slot
+                # while its dedicated group still contains a descendant,
+                # including after a normal wrapper exit or SIGKILL/OOM.
                 child_returncode = child.proc.returncode if not child.alive() else None
                 normal_child_exit = (error_class == "exec_error" and child_returncode is not None
-                                     and child_returncode >= 0)
+                                     and child_returncode >= 0 and not process_group_alive(child.pgid))
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
                         or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
                                                            and lane["backend"] == "agy" and not child.alive())

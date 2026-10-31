@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -331,6 +332,29 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertIsNone(final)
         self.assertEqual(attempts[0]['rc'], -9)
         self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        self.assertTrue(xs.release_fleet_slot(rdir))
+
+    def test_normally_exited_one_shot_parent_with_child_retains_reservation(self):
+        """A non-zero parent exit must not release while its process group lives."""
+        rdir = os.path.join(self.temp.name, 'runs', 'normal-exit-with-child')
+        os.makedirs(rdir)
+        runner = pathlib.Path(self.temp.name, 'spawn-child.py')
+        runner.write_text('import subprocess, sys, time\nsubprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])\nsys.exit(17)\n')
+
+        def fake_executor(_decision, _state, _prompt, wd, _rdir, timeout, events):
+            return xs.run_proc([sys.executable, str(runner)], wd, {}, timeout, events), None, {}, 'executor exited'
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake_executor}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        self.assertEqual(error, 'exec_error')
+        self.assertEqual(attempts[0]['rc'], 17)
+        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        pgid = json.loads(pathlib.Path(rdir, 'status.json').read_text())['executor_pgid']
+        os.killpg(pgid, signal.SIGKILL)
         self.assertTrue(xs.release_fleet_slot(rdir))
 
 if __name__ == '__main__':
