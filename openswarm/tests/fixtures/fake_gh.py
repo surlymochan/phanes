@@ -10,6 +10,21 @@ import urllib.parse
 from datetime import datetime, timezone
 
 
+def now_iso():
+    """Timestamp for created objects.
+
+    OPENSWARM_FAKE_GH_NOW pins the clock so tests can create comments with a
+    known order (or with identical timestamps) without depending on wall clock jitter.
+    """
+    return os.environ.get("OPENSWARM_FAKE_GH_NOW") or datetime.now(timezone.utc).isoformat()
+
+
+def acting_login(query):
+    """The GitHub account a request acts as. ?as=<login> overrides the ambient login."""
+    override = query.get("as") or []
+    return override[0] if override else os.environ.get("OPENSWARM_FAKE_GH_LOGIN", "executor")
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] != "api":
@@ -44,7 +59,7 @@ def main():
 
 def route(state, parts, query, method, payload):
     if parts == ["user"] and method == "GET":
-        return {"login": os.environ.get("OPENSWARM_FAKE_GH_LOGIN", "executor")}
+        return {"login": acting_login(query)}
     if len(parts) < 3 or parts[0] != "repos":
         return None
     repo = "/".join(parts[1:3])
@@ -82,7 +97,7 @@ def route(state, parts, query, method, payload):
                  "labels": [{"name": label} for label in payload.get("labels", [])], "comments": [],
                  "user": {"login": os.environ.get("OPENSWARM_FAKE_GH_ISSUE_LOGIN",
                                                    os.environ.get("OPENSWARM_FAKE_GH_LOGIN", "planner"))},
-                 "created_at": datetime.now(timezone.utc).isoformat(), "state": "open",
+                 "created_at": now_iso(), "state": "open",
                  "html_url": f"https://github.com/{repo}/issues/{number}"}
         bucket["issues"].append(issue)
         return issue
@@ -99,8 +114,8 @@ def route(state, parts, query, method, payload):
             if method == "POST":
                 comment_id = max([row["id"] for row in issue["comments"]] or [0]) + 1
                 comment = {"id": comment_id, "body": payload["body"],
-                           "user": {"login": os.environ.get("OPENSWARM_FAKE_GH_LOGIN", "executor")},
-                           "created_at": datetime.now(timezone.utc).isoformat()}
+                           "user": {"login": acting_login(query)},
+                           "created_at": now_iso()}
                 issue["comments"].append(comment)
                 return comment
         if tail[2:] == ["labels"] and method == "PUT":
