@@ -112,6 +112,46 @@ class MakeSiteSummaryTests(unittest.TestCase):
             "0%",
         )
 
+    def test_parse_time_points_reads_period_and_label(self):
+        html = (
+            '<div class="time-point"><b>2026-01实际</b>'
+            '<span data-i18n="orgHealthDemo.yearStart"></span></div>'
+        )
+        self.assertEqual(
+            make_site_summary.parse_time_points(html), ["2026-01实际（年初实际）"]
+        )
+
+        fallback_html = (
+            '<div class="time-point"><span data-i18n="orgHealthDemo.yearStart"></span></div>'
+        )
+        self.assertEqual(
+            make_site_summary.parse_time_points(fallback_html), ["年初实际（年初实际）"]
+        )
+
+    def test_check_ids_requires_all_containers(self):
+        with self.assertRaisesRegex(ValueError, "index.html 缺少容器 id"):
+            make_site_summary.check_ids('<div id="conclusion"></div>')
+
+        html = "".join(f'<div id="{name}"></div>' for name in make_site_summary.REQUIRED_IDS)
+        make_site_summary.check_ids(html)
+
+    def test_escape_cell_escapes_pipes_only(self):
+        self.assertEqual(make_site_summary.escape_cell("a|b 文字"), "a\\|b 文字")
+
+    def test_period_keys_uses_scope_and_sequence_keys(self):
+        periods = make_site_summary.period_keys(
+            {"观察月份": "2026-09"},
+            {"2026-01实际": 1, "2026-05H1参考": 2, "2026-09实际": 3},
+        )
+        self.assertEqual(
+            {periods[key] for key in ("start", "reference", "end")},
+            {"2026-01实际", "2026-05H1参考", "2026-09实际"},
+        )
+
+        fallback = make_site_summary.period_keys({}, {"2026-01实际": 1})
+        self.assertEqual(fallback["observation_month"], "2026-09")
+        self.assertEqual(fallback["reference"], "2026-05H1参考")
+
 
 if __name__ == "__main__":
     unittest.main()
