@@ -160,6 +160,21 @@ class BuildSiteTest(unittest.TestCase):
         self.assertIn("demo/vendor/app.bundle.js", stderr.getvalue())
         self.assertFalse(self.out.exists(), "bundle 缺失时不应生成 dist")
 
+    def test_bundle_path_is_directory_fails(self) -> None:
+        """bundle 路径是目录时以 1 退出，报错含路径且不生成 dist。"""
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        bundle_dir = self.root / "bundle_dir"
+        bundle_dir.mkdir()
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            code = self.build(bundle=bundle_dir)
+        self.assertEqual(code, build_site.EXIT_INVALID)
+        self.assertIn(str(bundle_dir), stderr.getvalue())
+        self.assertIn("不是有效文件", stderr.getvalue())
+        self.assertFalse(self.out.exists(), "bundle 路径是目录时不应生成 dist")
+
     def test_data_path_is_directory_fails(self) -> None:
         """输入路径是目录时以 2 退出，且不生成 dist。"""
         from contextlib import redirect_stderr
