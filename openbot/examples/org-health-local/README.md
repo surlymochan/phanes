@@ -283,6 +283,7 @@ python3 da/write_method.py --brief <brief.json> --data <diagnosis.json> --raw da
 ## 结构定义与校验
 
 `schema/diagnosis.schema.json` 是 `data/diagnosis.json` 的结构定义（JSON Schema draft 2020-12）。字段与 `app.js` 读取的字段一致：`scope` 给出口径和 `schema版本`（固定为 4），`metrics` 按页面顺序给出四个指标，数值区分数值序列（数值或 `null`）与比率序列（数值、`null` 或字符串）。`口径说明` 是可选字段：缺省不报错，出现时必须是非空字符串数组，页面据此显示"数据口径"折叠面板。定义只覆盖当前格式；`app.js` 仍兼容的旧中文键格式不在定义内。
+顶层未声明的未知键不被忽略；由于 `additionalProperties` 为 `false`，`validate.py` 会将其作为额外字段报错并使校验失败。
 
 `validate.py` 只用标准库，按该定义校验数据文件：
 
