@@ -69,6 +69,44 @@ class FleetCapacityTests(unittest.TestCase):
         cursor = [acquire('cursor', number) for number in range(11, 14)]
         self.assertEqual(sum(bool(answer.get('admitted')) for answer in cursor), 2)
 
+    def test_mixed_422_allocation_requires_four_hosts_and_releases_a_slot(self):
+        """The target allocation is atomic across four two-turn hosts.
+
+        gores1 and local each carry two MiniMax turns; gocc carries two
+        Antigravity turns; govpn and govpn2 carry one non-fast Cursor turn
+        each.  A ninth request is rejected by the total cap.  Once a finished
+        turn releases its reservation, that same request may proceed.
+        """
+        requests = [
+            ('gores1', 'pi', 'minimax-cn', 'minimax-gores1-1'),
+            ('gores1', 'pi', 'minimax-cn', 'minimax-gores1-2'),
+            ('local', 'pi', 'minimax-cn', 'minimax-local-1'),
+            ('local', 'pi', 'minimax-cn', 'minimax-local-2'),
+            ('gocc', 'agy', None, 'agy-1'),
+            ('gocc', 'agy', None, 'agy-2'),
+            ('govpn', 'cursor', None, 'cursor-govpn'),
+            ('govpn2', 'cursor', None, 'cursor-govpn2'),
+        ]
+        admitted = []
+        for number, (host, backend, provider, run_id) in enumerate(requests):
+            token = f'{number + 100:032x}'
+            result = self.call(host, op='acquire', token=token, run_id=run_id,
+                               backend=backend, provider=provider)
+            self.assertTrue(result['admitted'], (run_id, result))
+            admitted.append((host, token, run_id))
+
+        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 8)
+        ninth = self.call('govpn', op='acquire', token='f' * 32, run_id='extra-codex',
+                          backend='codex', provider=None)
+        self.assertFalse(ninth['admitted'])
+        self.assertEqual(ninth['blocked'], ['total'])
+
+        host, token, run_id = admitted[-1]
+        self.assertTrue(self.call(host, op='release', token=token, run_id=run_id)['released'])
+        self.assertTrue(self.call('govpn', op='acquire', token='f' * 32,
+                                  run_id='extra-codex', backend='codex', provider=None)['admitted'])
+
+
     def test_disconnected_coordinator_fails_closed(self):
         config = pathlib.Path(self.temp.name, 'guard.json')
         config.write_text(json.dumps({'command': ['/nonexistent/coordinator']}))
