@@ -133,6 +133,11 @@ class RoutingScenarios(unittest.TestCase):
         self.assertEqual(xs.outcome_label({"accepted": "unknown"}), "unknown")
         self.assertEqual(xs.outcome_label({"accepted": False, "status": ""}), "fail/unknown")
 
+    def test_22_unknown_outcome_maps_to_default_bucket(self):
+        entry = {"accepted": "unexpected", "exec_pass": "unexpected", "status": "done"}
+        self.assertIsNone(xs.routing_outcome(entry))
+        self.assertEqual(xs.outcome_label(entry), "unknown")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
