@@ -443,6 +443,21 @@ def run_checks(
     return results
 
 
+def markdown_report(results: list[Result]) -> str:
+    """将检查结果格式化为 Markdown 报告。"""
+    failed = sum(not result.ok for result in results)
+    lines = [
+        "# 组织诊断交叉审查报告",
+        "",
+        f"**汇总：共 {len(results)} 项检查，{len(results) - failed} 项通过，{failed} 项失败。**",
+        "",
+    ]
+    for result in results:
+        status = "PASS" if result.ok else "FAIL"
+        lines.append(f"- **{status} {result.name}**：{result.detail}")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     """核对三方一致性。返回进程退出码。"""
     parser = argparse.ArgumentParser(
@@ -456,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="站点产物目录；给出时核对 `data/diagnosis.json` 与 `--data` 是否字节相同。",
     )
+    parser.add_argument("--out", type=Path, default=None, help="可选的 Markdown 报告输出路径。")
     args = parser.parse_args(argv)
     try:
         brief = load_json(args.brief)
@@ -464,6 +480,12 @@ def main(argv: list[str] | None = None) -> int:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
     results = run_checks(brief, diagnosis, args.data, args.dist)
+    if args.out is not None:
+        try:
+            args.out.write_text(markdown_report(results), encoding="utf-8")
+        except OSError as cause:
+            print(f"无法写入报告 {args.out}：{cause}", file=sys.stderr)
+            return EXIT_USAGE
     failed = 0
     for result in results:
         if result.ok:

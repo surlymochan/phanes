@@ -166,11 +166,15 @@ def rename_period_key(node: dict, old: str, new: str) -> None:
             rename_period_key(node[key], old, new)
 
 
-def run_script(brief: Path, data: Path, dist: Path | None = None) -> subprocess.CompletedProcess:
+def run_script(
+    brief: Path, data: Path, dist: Path | None = None, out: Path | None = None
+) -> subprocess.CompletedProcess:
     """调用命令行脚本，返回进程结果。"""
     argv = [sys.executable, str(SCRIPT), "--brief", str(brief), "--data", str(data)]
     if dist is not None:
         argv.extend(["--dist", str(dist)])
+    if out is not None:
+        argv.extend(["--out", str(out)])
     return subprocess.run(argv, capture_output=True, text=True)
 
 
@@ -369,6 +373,22 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(brief, data)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FAIL", result.stdout)
+
+    def test_command_line_writes_markdown_report(self) -> None:
+        """--out 写入含标题、汇总与逐条检查结果的 Markdown。"""
+        self.brief["schema版本"] = 3
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            report = base / "report.md"
+            result = run_script(brief, data, out=report)
+            content = report.read_text(encoding="utf-8")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("# 组织诊断交叉审查报告", content)
+        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", content)
+        self.assertIn("- **FAIL 版本一致**", content)
+        self.assertIn("- **PASS 期间一致**", content)
 
     def test_command_line_prints_one_line_per_check(self) -> None:
         """命令行逐条输出检查结果并给出汇总。"""
