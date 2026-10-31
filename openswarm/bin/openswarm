@@ -3353,8 +3353,15 @@ def fleet_guard_call(command, payload, timeout=15):
 
 
 def fleet_guard_host(command):
-    """The existing guard command ends with the authenticated reservation owner."""
-    if command and command[-1] in FLEET_HOSTS:
+    """The existing guard command ends with the authenticated reservation owner.
+
+    Hosts beyond the built-in three join via OPENSWARM_FLEET_HOSTS (comma list),
+    matching the coordinator's topology.json.
+    """
+    hosts = set(FLEET_HOSTS)
+    hosts.update(h.strip() for h in (envvar("FLEET_HOSTS") or "").split(",")
+                 if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", h.strip()))
+    if command and command[-1] in hosts:
         return command[-1]
     return None
 

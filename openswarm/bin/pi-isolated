@@ -60,7 +60,15 @@ else
     --tools "$3" --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-session "$4"
 fi
 '''
-    cmd = ['bwrap', '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
+    # Some nested sandboxes (e.g. instabox VMs) refuse a fresh /proc inside a new
+    # PID namespace. Keep every other namespace (network stays isolated) and fall
+    # back to sharing only the PID namespace there.
+    unshare = ['--unshare-all']
+    probe = subprocess.run(['bwrap', '--unshare-all', '--ro-bind', '/usr', '/usr', '--proc', '/proc',
+                            '--dev', '/dev', '/usr/bin/true'], capture_output=True, timeout=20)
+    if probe.returncode != 0:
+        unshare = ['--unshare-user', '--unshare-ipc', '--unshare-net', '--unshare-uts', '--unshare-cgroup-try']
+    cmd = ['bwrap', *unshare, '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
            '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib',
            '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
            '--tmpfs', '/home', '--dir', '/run', '--ro-bind', runtime, '/runtime',

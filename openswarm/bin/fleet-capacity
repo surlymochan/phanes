@@ -12,7 +12,27 @@ import time
 ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
 LIMITS = {'total': 8, 'host:gocc': 4, 'host:gores1': 4, 'host:local': 2,
           'codex': 1, 'pi': 4, 'cursor': 2, 'agy': 2, 'copilot': 2, 'minimax-cn': 4}
-if len(sys.argv) != 2 or sys.argv[1] not in ('gocc', 'gores1', 'local'):
+HOSTS = ('gocc', 'gores1', 'local')
+# Optional fleet topology next to the database: {"hosts": [...], "limits": {...}}.
+# It replaces the built-in host list and limits so new executor hosts can join
+# without editing this script. A malformed file fails closed.
+_topology = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
+                 (Path.home() / '.claude/openswarm-fleet-capacity')) / 'topology.json'
+if _topology.exists():
+    try:
+        _conf = json.loads(_topology.read_text())
+        _hosts, _limits = _conf['hosts'], _conf['limits']
+        if (not isinstance(_hosts, list) or not _hosts or
+                any(not isinstance(h, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', h) for h in _hosts)):
+            raise ValueError('hosts')
+        if not isinstance(_limits, dict) or any(not isinstance(k, str) or isinstance(v, bool) or
+                                                not isinstance(v, int) or v < 0 for k, v in _limits.items()):
+            raise ValueError('limits')
+        HOSTS, LIMITS = tuple(_hosts), dict(_limits)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(json.dumps({'ok': False, 'error': f'invalid fleet topology: {error}'}))
+        sys.exit(1)
+if len(sys.argv) != 2 or sys.argv[1] not in HOSTS:
     sys.exit('invalid authenticated host')
 host = sys.argv[1]
 try:
@@ -84,7 +104,7 @@ try:
         # The owner runs the local liveness check before requesting TTL recovery.
         # gocc retains the existing operator-recovery path for cross-host repair.
         owner, run_id = request.get('host'), request.get('run_id')
-        if owner not in ('gocc', 'gores1', 'local') or not isinstance(run_id, str) or not run_id:
+        if owner not in HOSTS or not isinstance(run_id, str) or not run_id:
             raise ValueError('invalid reservation owner or run id')
         confirmation = request.get('confirm')
         if not ((host == 'gocc' and confirmation == 'all-executor-processes-stopped') or

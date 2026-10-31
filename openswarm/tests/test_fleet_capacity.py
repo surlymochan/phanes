@@ -814,3 +814,32 @@ class FleetCapacityTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FleetTopologyTests(unittest.TestCase):
+    """topology.json lets new executor hosts join with their own limits."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
+
+    def call(self, host, **payload):
+        p = subprocess.run([str(BIN), host], input=json.dumps(payload), text=True,
+                           capture_output=True, env=self.env, timeout=15)
+        return p.returncode, (json.loads(p.stdout) if p.stdout.strip().startswith('{') else p.stderr)
+
+    def test_topology_hosts_and_limits(self):
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps(
+            {'hosts': ['ib1', 'gocc'], 'limits': {'total': 10, 'host:ib1': 1, 'pi': 4, 'minimax-cn': 4}}))
+        rc, out = self.call('ib1', op='acquire', token='a' * 32, run_id='r1', backend='pi', provider='minimax-cn')
+        self.assertTrue(out['admitted'])
+        rc, out = self.call('ib1', op='acquire', token='b' * 32, run_id='r2', backend='codex', provider=None)
+        self.assertEqual(out['blocked'], ['host:ib1'])
+        rc, out = self.call('gores1', op='status')
+        self.assertNotEqual(rc, 0)
+
+    def test_malformed_topology_fails_closed(self):
+        pathlib.Path(self.temp.name, 'topology.json').write_text('{"hosts": "ib1"}')
+        rc, out = self.call('gocc', op='status')
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(out['ok'])
