@@ -26,4 +26,11 @@ OPENSWARM_AUTO_CLI=/absolute/path/to/openswarm-fleet
 fleet 配置部署前，旧 `auto` 仍由 gores1 执行，任务回执因而会显示 gores1。
 不要把这个历史执行路径表述为远端 Hub。
 
+若某个既有执行器 runtime 还没有 `fleet _bundle`，无需覆盖它。只在该执行器
+runtime 的 `bin/` 同级放置 `openswarm-fleet-bundle-adapter` 和
+`fleet-result-bundle`，并把 Hub 本机 `fleet.json` 中该 host 的 `openswarm`
+改为 adapter 路径。adapter 仅处理 `fleet _bundle <run-id>`：先调用相邻的
+旧 `openswarm-fleet fleet _run-info`，再在目标主机生成 bundle；其余命令原样
+委托旧 runtime。它不是常驻服务，也不携带凭据。
+
 入口指向 `openswarm/bin/` 中同名实现，以兼容现有部署路径，避免维护两份代码。Hub 的准入调用仍在 `openbot/src/backend/`，OpenSwarm 的路由和并发协调仍在 `openswarm/`。这些入口尚需随 Phanes 版本部署并完成端到端验收。

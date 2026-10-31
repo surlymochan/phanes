@@ -115,6 +115,24 @@ class HubBridgeTests(unittest.TestCase):
         self.assertEqual(db.execute('select state from handoffs').fetchall(), [('rejected',)])
         db.close()
 
+    def test_local_router_exhausted_busy_lanes_are_rejected_without_pending_handoff(self):
+        local = mock.Mock(side_effect=MOD['NoAvailableLane']('available lanes changed or rejected the task'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'local_gateway': local}):
+            with self.assertRaisesRegex(RuntimeError, 'no available fleet lane.*retry'):
+                MOD['run_submit'](self.args)
+        db = MOD['db_open']()
+        self.assertEqual(db.execute('select state from handoffs').fetchall(), [('rejected',)])
+        db.close()
+
+    def test_local_command_classifies_changed_lane_error_as_unavailable(self):
+        response = mock.Mock(returncode=0, stdout=json.dumps(
+            {'ok': False, 'error': 'available lanes changed or rejected the task'}))
+        with mock.patch.object(MOD['subprocess'], 'run', return_value=response), \
+                self.assertRaisesRegex(MOD['NoAvailableLane'], 'available lanes changed'):
+            MOD['local_command'](['auto', '--type', 'impl'])
+
     def test_finished_remote_commit_is_fetched_for_local_review(self):
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)

@@ -2,7 +2,10 @@
 # A separate runtime for the executor candidate; it never changes the existing fleet home.
 set -eu
 root=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$0")
-export OPENSWARM_HOME="${OPENSWARM_HOME:-$HOME/.claude/openswarm-executor-candidate}"
+# This wrapper is itself the candidate-runtime entry point.  Do not inherit a
+# caller's generic OPENSWARM_HOME, or `auto` can silently inspect the old
+# runtime while dispatching through the candidate binary.
+export OPENSWARM_HOME="$HOME/.claude/openswarm-executor-candidate"
 if [ "${1:-}" = auto ]; then
   shift
   exec "$root/bin/openswarm-auto" "$@"
