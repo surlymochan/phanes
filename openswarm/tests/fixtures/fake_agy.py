@@ -47,11 +47,13 @@ if mode == "auth":
 if mode == "sleep":
     time.sleep(30)
     sys.exit(0)
-if mode == "silent-eof":
+if mode in ("silent-eof", "silent-eof-stderr"):
     # Simulate a provider/CLI exit after progress events but before its final
     # stream-json result.  The lane must retain the real exit status.
     send({"type": "init", "conversation_id": "conv-silent"})
     send({"type": "step_update", "text": "progress before unexpected EOF"})
+    if mode == "silent-eof-stderr":
+        sys.stderr.write("transient provider transport failure\\n")
     sys.exit(17)
 if mode == "print-timeout":
     partial = {"status":"done", "summary":"partial", "files_changed":[], "tests":"none", "followups":[]}
