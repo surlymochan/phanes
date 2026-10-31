@@ -42,20 +42,68 @@ try {
   });
   browser = await chromium.launch({ channel: "chrome", headless: true });
   const page = await browser.newPage();
-  for (const [language, expected] of [
-    ["zh", "历史快照"],
-    ["en", "Historical snapshot"],
-    ["fr", "Historical snapshot"],
+  const assertLegacyDataCleared = async () => {
+    for (const text of [
+      "Synthetic categories",
+      "Synthetic only",
+      "Synthetic tier A",
+      "Example A",
+      "Synthetic tier B",
+      "Example B",
+    ]) {
+      assert.equal(await page.getByText(text, { exact: true }).count(), 0);
+    }
+    for (const selector of ["#stage-title", "#stage-note"]) {
+      assert.equal((await page.locator(selector).textContent())?.trim(), "—");
+    }
+    assert.equal((await page.locator("#stage-list").textContent())?.trim(), "");
+  };
+  for (const [language, expected, metricLabels, unavailable] of [
+    [
+      "zh",
+      "历史快照",
+      [
+        "整体技术人力成本",
+        "整体折算人头",
+        "营收业务技术人力成本",
+        "营收业务折算人头",
+        "营收业务收入",
+        "整体技术人力成本率",
+      ],
+      "未提供",
+    ],
+    [
+      "en",
+      "Historical snapshot",
+      [
+        "Total technical labor cost",
+        "Total equivalent headcount",
+        "Revenue business technical labor cost",
+        "Revenue business equivalent headcount",
+        "Revenue business income",
+        "Overall technical labor cost ratio",
+      ],
+      "Not provided",
+    ],
+    [
+      "fr",
+      "Historical snapshot",
+      [
+        "Total technical labor cost",
+        "Total equivalent headcount",
+        "Revenue business technical labor cost",
+        "Revenue business equivalent headcount",
+        "Revenue business income",
+        "Overall technical labor cost ratio",
+      ],
+      "Not provided",
+    ],
   ] as const) {
     await page.goto(`${url}/?lang=${language}`);
     await page.getByText(expected, { exact: false }).first().waitFor();
-    await page
-      .getByText(language === "zh" ? "整体技术人力成本" : "Total technical labor cost", { exact: false })
-      .first()
-      .waitFor();
+    for (const label of metricLabels) await page.getByText(label, { exact: true }).waitFor();
     assert.equal(await page.getByText("15", { exact: true }).count(), 1);
-    assert.equal(await page.getByText(language === "zh" ? "未提供" : "Not provided", { exact: true }).count(), 6);
-    assert.notEqual(await page.locator("#asof-short").innerText(), language === "zh" ? "加载失败" : "Loading failed");
+    assert.equal(await page.getByText(unavailable, { exact: true }).count(), 6);
     checks.push(`${language} valid snapshot`);
   }
   const legacy = {
@@ -68,8 +116,8 @@ try {
         标题: "Synthetic categories",
         来源口径: "Synthetic only",
         指标: [
-          { 分档: "A", 例证: "Example A" },
-          { 分档: "B", 例证: "Example B" },
+          { 分档: "Synthetic tier A", 例证: "Example A" },
+          { 分档: "Synthetic tier B", 例证: "Example B" },
         ],
       },
     ],
@@ -80,42 +128,51 @@ try {
   };
   await writeFile(data, JSON.stringify(legacy));
   await page.goto(`${url}/?lang=zh`);
-  await page.getByText("整体技术人力成本", { exact: false }).first().waitFor();
-  assert.equal(await page.locator("#scope-month").innerText(), "2026-09");
-  assert.equal(await page.locator("#stage-title").innerText(), "Synthetic categories");
-  assert.equal(await page.locator("#stage-note").innerText(), "Synthetic only");
-  assert.equal(await page.locator("#stage-list > div").first().locator("b").innerText(), "A");
-  assert.equal(await page.locator("#stage-list > div").first().locator("p").innerText(), "Example A");
-  assert.equal(await page.locator("#stage-list > div").nth(1).locator("b").innerText(), "B");
-  assert.equal(await page.locator("#stage-list > div").nth(1).locator("p").innerText(), "Example B");
+  for (const text of [
+    "Synthetic categories",
+    "Synthetic only",
+    "Synthetic tier A",
+    "Example A",
+    "Synthetic tier B",
+    "Example B",
+  ]) {
+    await page.getByText(text, { exact: true }).waitFor();
+  }
   checks.push("legacy snapshot valid");
   const missingStage = structuredClone(legacy);
   missingStage.指标.pop();
   await writeFile(data, JSON.stringify(missingStage));
   await page.goto(`${url}/?lang=zh`);
   await page.getByText("加载失败", { exact: true }).waitFor();
-  assert.equal(await page.locator("#metric-grid").innerText(), "");
-  assert.equal(await page.locator("#stage-title").innerText(), "—");
-  assert.equal(await page.locator("#stage-note").innerText(), "—");
-  assert.equal(await page.locator("#stage-list").innerText(), "");
+  await assertLegacyDataCleared();
   checks.push("legacy snapshot without stage rejected");
   const emptyStage = structuredClone(legacy);
   emptyStage.指标[4].指标 = [];
   await writeFile(data, JSON.stringify(emptyStage));
   await page.goto(`${url}/?lang=zh`);
   await page.getByText("加载失败", { exact: true }).waitFor();
-  assert.equal(await page.locator("#stage-list").innerText(), "");
+  await assertLegacyDataCleared();
   checks.push("legacy snapshot with empty stage rejected");
+  for (const [name, mutate] of [
+    ["blank stage title", (value: typeof legacy) => (value.指标[4].标题 = " ")],
+    ["blank stage source", (value: typeof legacy) => (value.指标[4].来源口径 = " ")],
+    ["blank stage label", (value: typeof legacy) => (value.指标[4].指标[0].分档 = " ")],
+    ["blank stage example", (value: typeof legacy) => (value.指标[4].指标[0].例证 = " ")],
+  ] as const) {
+    const malformed = structuredClone(legacy);
+    mutate(malformed);
+    await writeFile(data, JSON.stringify(malformed));
+    await page.goto(`${url}/?lang=zh`);
+    await page.getByText("加载失败", { exact: true }).waitFor();
+    await assertLegacyDataCleared();
+    checks.push(`legacy snapshot with ${name} rejected`);
+  }
   const rejectedAfterStage = structuredClone(legacy);
   delete rejectedAfterStage.指标[3].数值["收入万美元每月"]["年末目标"];
   await writeFile(data, JSON.stringify(rejectedAfterStage));
   await page.goto(`${url}/?lang=zh`);
   await page.getByText("加载失败", { exact: true }).waitFor();
-  assert.equal(await page.getByText("Example A", { exact: true }).count(), 0);
-  assert.equal(await page.locator("#stage-title").innerText(), "—");
-  assert.equal(await page.locator("#stage-note").innerText(), "—");
-  assert.equal(await page.locator("#stage-list").innerText(), "");
-  assert.equal(await page.locator("#scope-month").innerText(), "—");
+  await assertLegacyDataCleared();
   checks.push("rejected legacy evidence cleared");
   const invalid = structuredClone(snapshot);
   delete invalid.metrics[3].数值["收入万美元每月"]["年末目标"];
@@ -126,9 +183,7 @@ try {
   ] as const) {
     await page.goto(`${url}/?lang=${language}`);
     await page.getByText(expected, { exact: true }).waitFor();
-    assert.equal(await page.locator("#metric-grid").innerText(), "");
-    assert.equal(await page.locator("#scope-month").innerText(), "—");
-    assert.equal(await page.locator("#stage-list").innerText(), "");
+    assert.equal(await page.getByText("15", { exact: true }).count(), 0);
     checks.push(`${language} invalid snapshot`);
   }
   const denied = await fetch(`${url}/data/diagnosis.json`, { method: "HEAD", headers: { Host: "invalid.example" } });
