@@ -46,6 +46,36 @@ class HubBridgeTests(unittest.TestCase):
             self.assertTrue(MOD['mapped']('run-1','info'))
             self.assertIn('Executor host: gores1',json.loads(output.getvalue())['result']['result']['summary'])
 
+    def test_local_router_uses_existing_fleet_for_remote_lifecycle(self):
+        response = {'id': 'gocc-a1', 'result': {'result': {'summary': 'done'}}}
+        command = mock.Mock(return_value=response)
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'local_command': command}):
+            self.assertEqual(MOD['dispatch_gateway']({'op': 'info', 'id': 'gocc-a1', 'host': 'gocc'}), response)
+        self.assertEqual(command.call_args.args[0],
+                         [G['native'], 'fleet', 'exec', 'gocc', '--', 'fleet', '_run-info', 'gocc-a1'])
+
+    def test_local_router_keeps_unlisted_historical_host_on_legacy_gateway(self):
+        legacy = mock.Mock(return_value={'id': 'old', 'result': {}})
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'gateway': legacy}):
+            self.assertEqual(MOD['dispatch_gateway']({'op': 'info', 'id': 'old', 'host': 'old-host'}),
+                             {'id': 'old', 'result': {}})
+        legacy.assert_called_once()
+
+    def test_local_router_no_lane_is_rejected_without_pending_handoff(self):
+        local = mock.Mock(side_effect=MOD['NoAvailableLane']('no available fleet lane'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'local_gateway': local}):
+            with self.assertRaisesRegex(RuntimeError, 'no available fleet lane.*retry'):
+                MOD['run_submit'](self.args)
+        db = MOD['db_open']()
+        self.assertEqual(db.execute('select state from handoffs').fetchall(), [('rejected',)])
+        db.close()
+
     def test_finished_remote_commit_is_fetched_for_local_review(self):
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)
