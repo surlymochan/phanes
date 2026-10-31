@@ -5,7 +5,12 @@
 
 异常原始数据（缺期次、负数、重复行、CSV 多余列）按当前行为断言：已支持的情形断言
 退出码与错误信息，已知 bug 用 `unittest.expectedFailure` 标注并写明原因，不改实现。
+
+输入错误（必需数字列为空、CSV 出现重复列名）另用最小 raw fixture 覆盖：命令行退出码
+非 0，错误信息指出文件与列名。
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -99,6 +104,29 @@ def csv_lines(path: Path) -> list[str]:
 def write_csv_lines(path: Path, lines: list[str]) -> None:
     """写回 CSV 的文本行。"""
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# 最小 raw fixture：只保留观察期间的起止两个月与年末两行，表头按必需列写全。
+MINIMAL_COST_CSV = (
+    "月份,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元\n"
+    "2026-01,10.4,8.3,2.1\n"
+    "2026-09,12.4,9.9,2.5\n"
+)
+MINIMAL_HEADS_CSV = (
+    "月份,整体折算人头,营收业务折算人头\n"
+    "2026-01,10.4,8.3\n"
+    "2026-09,12.4,9.9\n"
+)
+MINIMAL_REVENUE_CSV = (
+    "月份,收入万美元\n"
+    "2026-01,11.2\n"
+    "2026-09,13.6\n"
+)
+MINIMAL_FORECAST_CSV = (
+    "期次,整体技术人力成本万元,营收业务技术人力成本万元,整体折算人头,营收业务折算人头,运维设施成本万元,收入万美元\n"
+    "年末测算,13.4,10.7,13.4,10.7,,14.8\n"
+    "年末目标,,,,,,15.2\n"
+)
 
 
 class BuildDiagnosisTest(unittest.TestCase):
@@ -311,7 +339,7 @@ class BuildDiagnosisTest(unittest.TestCase):
 
 
 class AbnormalRawDataTest(unittest.TestCase):
-    """异常原始数据：缺期次、负数、重复行与 CSV 多余列。"""
+    """异常原始数据：缺期次、负数、重复行、CSV 多余列与重复列名。"""
 
     def setUp(self) -> None:
         self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -465,14 +493,8 @@ class AbnormalRawDataTest(unittest.TestCase):
         second = self.build_bytes(extra, self.folder / "extra.json")
         self.assertEqual(first, second)
 
-    @unittest.expectedFailure
     def test_duplicated_column_name_is_rejected(self) -> None:
-        """表头出现重复列名时应报错。
-
-        已知 bug：csv.DictReader 对重复列名只保留最后一次出现（da/build_diagnosis.py:264-281）。
-        cost.csv 表头里出现两个“整体技术人力成本万元”时，10.4 被静默丢弃、99.9 被当成
-        整体技术人力成本，属于静默取错数。修复后本用例应改回普通用例。
-        """
+        """表头出现重复列名时报错退出，并指出文件与重复的列名。"""
         raw_dir = copy_raw(self.folder, "raw-duplicated-column")
         cost = raw_dir / "cost.csv"
         lines = csv_lines(cost)
@@ -482,6 +504,89 @@ class AbnormalRawDataTest(unittest.TestCase):
         result = run_cli(self.brief_path, raw_dir, self.out_path)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cost.csv", result.stdout + result.stderr)
+        self.assertIn("整体技术人力成本万元", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+
+class MinimalRawInputErrorTest(unittest.TestCase):
+    """最小 raw fixture：必需数字列为空与 CSV 出现重复列名两种输入错误。
+
+    fixture 只有起止两个月与年末两行，其余按必需表头写全，用来断言输入错误路径，
+    不依赖 `da/sample-raw/` 的合成样本。
+    """
+
+    def setUp(self) -> None:
+        self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.temporary = temporary_directory()
+        self.folder = Path(self.temporary.name)
+        self.brief_path = write_brief(self.folder, BRIEF)
+        self.out_path = self.folder / "diagnosis.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_minimal_raw(self, name: str, files: dict[str, str] | None = None) -> Path:
+        """写出最小 raw 目录；`files` 里给出要覆盖的 CSV 文件名与文本。"""
+        raw_dir = self.folder / name
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        content = {
+            "cost.csv": MINIMAL_COST_CSV,
+            "heads.csv": MINIMAL_HEADS_CSV,
+            "revenue.csv": MINIMAL_REVENUE_CSV,
+            "forecast.csv": MINIMAL_FORECAST_CSV,
+        }
+        content.update(files or {})
+        for filename, text in content.items():
+            (raw_dir / filename).write_text(text, encoding="utf-8")
+        return raw_dir
+
+    def test_minimal_raw_builds_valid_snapshot(self) -> None:
+        """最小 raw fixture 本身可生成零结构错误的诊断快照。"""
+        raw_dir = self.write_minimal_raw("raw-minimal")
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+
+    def test_required_numeric_column_empty_exits_nonzero(self) -> None:
+        """必需数字列为空时退出码非 0，并指出文件与列名。
+
+        “列为空”有两种写法：表头里列名写空（该列没有名字，等同缺列），
+        以及数据行字段数少于表头（该列在行里没有取值）。两者都按输入错误处理。
+        """
+        cases = {
+            "empty-header-name": (
+                "表头里必需数字列的列名写空",
+                "月份,,营收业务技术人力成本万元,运维设施成本万元\n2026-01,10.4,8.3,2.1\n",
+            ),
+            "no-value-in-row": (
+                "数据行字段数少于表头，该列在行里没有取值",
+                "月份,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元\n2026-01\n",
+            ),
+        }
+        for slug, (label, text) in cases.items():
+            with self.subTest(scenario=label):
+                raw_dir = self.write_minimal_raw(f"raw-empty-column-{slug}", {"cost.csv": text})
+                result = run_cli(self.brief_path, raw_dir, self.out_path)
+                self.assertNotEqual(result.returncode, 0)
+                message = result.stdout + result.stderr
+                self.assertIn("cost.csv", message)
+                self.assertIn("整体技术人力成本万元", message)
+                self.assertFalse(self.out_path.exists())
+
+    def test_duplicate_column_name_exits_nonzero(self) -> None:
+        """CSV 出现重复列名时退出码非 0，并指出文件与重复的列名。"""
+        duplicated = (
+            "月份,整体技术人力成本万元,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元\n"
+            "2026-01,10.4,99.9,8.3,2.1\n"
+        )
+        raw_dir = self.write_minimal_raw("raw-duplicated-column", {"cost.csv": duplicated})
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("cost.csv", message)
+        self.assertIn("整体技术人力成本万元", message)
+        self.assertFalse(self.out_path.exists())
 
 
 if __name__ == "__main__":
