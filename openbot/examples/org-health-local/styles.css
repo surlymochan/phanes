@@ -752,3 +752,46 @@ noscript {
     flex-direction: column;
   }
 }
+
+@media print {
+  html,
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  body * {
+    color: #000 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+
+  .topbar,
+  nav,
+  button,
+  summary,
+  [role="button"] {
+    display: none !important;
+  }
+
+  details,
+  details[hidden] {
+    display: block !important;
+  }
+
+  details > :not(summary) {
+    display: block !important;
+  }
+
+  .metric-card,
+  .insight-card,
+  .definition,
+  .scope-card,
+  .time-strip,
+  .calibration-panel,
+  .stage-card,
+  .risk-card,
+  .recommendation {
+    break-inside: avoid;
+  }
+}
