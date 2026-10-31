@@ -702,6 +702,36 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(output["schema_version"], 4)
         self.assertEqual(result.stderr, "")
 
+    def test_supported_keywords_contains_exclusive_maximum(self) -> None:
+        """SUPPORTED_KEYWORDS 常量集合中包含 exclusiveMaximum。"""
+        self.assertIn("exclusiveMaximum", validate.SUPPORTED_KEYWORDS)
+
+    def test_exclusive_maximum_passes_when_value_is_less(self) -> None:
+        """数值严格小于 exclusiveMaximum 时校验通过。"""
+        v = validate.Validator({"type": "number", "exclusiveMaximum": 100})
+        self.assertEqual(v.errors(50), [])
+        self.assertEqual(v.errors(99.9), [])
+
+    def test_exclusive_maximum_fails_when_value_is_equal_or_greater(self) -> None:
+        """数值大于等于 exclusiveMaximum 时校验失败，并按指定格式输出错误信息。"""
+        v = validate.Validator({"type": "number", "exclusiveMaximum": 100})
+        self.assertEqual(v.errors(100), ["/: 数值必须小于 100"])
+        self.assertEqual(v.errors(100.5), ["/: 数值必须小于 100"])
+        self.assertEqual(v.errors(150), ["/: 数值必须小于 100"])
+
+    def test_exclusive_maximum_nested_property_and_type_exclusion(self) -> None:
+        """对象嵌套属性及布尔值排除：报错带 JSON Pointer 路径，布尔值不触发数值比较。"""
+        v = validate.Validator(
+            {"type": "object", "properties": {"threshold": {"exclusiveMaximum": 1.0}}}
+        )
+        self.assertEqual(v.errors({"threshold": 0.99}), [])
+        self.assertEqual(v.errors({"threshold": 1.0}), ["/threshold: 数值必须小于 1.0"])
+        self.assertEqual(v.errors({"threshold": 1.5}), ["/threshold: 数值必须小于 1.0"])
+
+        # 布尔值虽然是 int 子类，但不应触发数值比较
+        bool_v = validate.Validator({"exclusiveMaximum": 0})
+        self.assertEqual(bool_v.errors(True), [])
+
 
 
 if __name__ == "__main__":
