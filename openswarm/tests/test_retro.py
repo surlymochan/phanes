@@ -220,6 +220,106 @@ class RetroTests(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in xs.retro_rejected(entries)], ["reject-2"])
         self.assertEqual(xs.retro_failure_counts(entries), [("exec_error", 1)])
 
+    def test_retro_ratio_empty_and_non_boolean_items_and_formatting(self):
+        self.assertEqual(xs.retro_ratio([], "accepted"), "— (0/0)")
+        non_booleans = [
+            {"accepted": 1},
+            {"accepted": 0},
+            {"accepted": "true"},
+            {"accepted": "false"},
+            {"accepted": None},
+            {"accepted": [True]},
+            {},
+        ]
+        self.assertEqual(xs.retro_ratio(non_booleans, "accepted"), "— (0/0)")
+        entries = [
+            {"accepted": True},
+            {"accepted": False},
+            {"accepted": True},
+            {"accepted": 1},
+            {"accepted": "true"},
+            {"accepted": None},
+            {},
+        ]
+        self.assertEqual(xs.retro_ratio(entries, "accepted"), "2/3 (67%)")
+        self.assertEqual(xs.retro_ratio([{"accepted": True}, {"accepted": True}], "accepted"), "2/2 (100%)")
+        self.assertEqual(xs.retro_ratio([{"accepted": False}, {"accepted": False}], "accepted"), "0/2 (0%)")
+
+    def test_retro_peer_review_p1_ratio_filters_corrupted_entries_and_counts_priority(self):
+        self.assertEqual(xs.retro_peer_review_p1_ratio([]), "— (0/0)")
+        corrupted = [
+            {},
+            {"peer_review": None},
+            {"peer_review": "approve"},
+            {"peer_review": 123},
+            {"peer_review": [1, 2, 3]},
+            {"peer_review": {"p0": 0, "p1": 0}},
+            {"peer_review": {"p1": 0, "p2": 0}},
+            {"peer_review": {"p0": 0, "p2": 0}},
+            {"peer_review": {"p0": "0", "p1": 0, "p2": 0}},
+            {"peer_review": {"p0": True, "p1": 0, "p2": 0}},
+            {"peer_review": {"p0": 0, "p1": False, "p2": 0}},
+            {"peer_review": {"p0": -1, "p1": 0, "p2": 0}},
+            {"peer_review": {"p0": 0, "p1": -2, "p2": 0}},
+            {"peer_review": {"p0": 0, "p1": 0, "p2": -1}},
+        ]
+        self.assertEqual(xs.retro_peer_review_p1_ratio(corrupted), "— (0/0)")
+
+        p2_only = [{"peer_review": {"p0": 0, "p1": 0, "p2": 5}}]
+        self.assertEqual(xs.retro_peer_review_p1_ratio(p2_only), "0/1 (0%)")
+
+        entries = [
+            {"peer_review": {"p0": 1, "p1": 0, "p2": 0}},
+            {"peer_review": {"p0": 0, "p1": 2, "p2": 0}},
+            {"peer_review": {"p0": 1, "p1": 1, "p2": 0}},
+            {"peer_review": {"p0": 0, "p1": 0, "p2": 3}},
+            {"peer_review": {"p0": 0, "p1": 0, "p2": 0}},
+            {"peer_review": "corrupted"},
+            {"peer_review": {"p0": -1, "p1": 0, "p2": 0}},
+            {},
+        ]
+        self.assertEqual(xs.retro_peer_review_p1_ratio(entries), "3/5 (60%)")
+
+    def test_retro_exec_pass_ratio_counts_boolean_ratio_and_nulls(self):
+        self.assertEqual(xs.retro_exec_pass_ratio([]), "0/0; null=0")
+        all_null = [
+            {"exec_pass": None},
+            {"exec_pass": "pass"},
+            {"exec_pass": 1},
+            {},
+        ]
+        self.assertEqual(xs.retro_exec_pass_ratio(all_null), "0/0; null=4")
+        mixed = [
+            {"exec_pass": True},
+            {"exec_pass": False},
+            {"exec_pass": True},
+            {"exec_pass": None},
+            {"exec_pass": "ignored"},
+            {},
+        ]
+        self.assertEqual(xs.retro_exec_pass_ratio(mixed), "2/3 (67%); null=3")
+        self.assertEqual(xs.retro_exec_pass_ratio([{"exec_pass": True}, {"exec_pass": True}]), "2/2 (100%); null=0")
+        self.assertEqual(xs.retro_exec_pass_ratio([{"exec_pass": False}]), "0/1 (0%); null=0")
+
+    def test_retro_safe_escapes_markdown_and_truncates_length(self):
+        raw = "tag <script>alert(1)</script> | `code` [label](link) \\ path\r\nline2"
+        expected = "tag &lt;script&gt;alert(1)&lt;/script&gt; \\| \\`code\\` \\[label\\](link) \\\\ path  line2"
+        self.assertEqual(xs.retro_safe(raw), expected)
+
+        self.assertEqual(xs.retro_safe(""), "-")
+        self.assertEqual(xs.retro_safe(None), "-")
+
+        long_str = "a" * 300
+        self.assertEqual(len(xs.retro_safe(long_str)), 240)
+        self.assertEqual(xs.retro_safe(long_str), "a" * 240)
+        self.assertEqual(xs.retro_safe("a" * 240), "a" * 240)
+        self.assertEqual(xs.retro_safe("a" * 239), "a" * 239)
+
+        self.assertEqual(xs.retro_safe("abcdef", limit=3), "abc")
+        self.assertEqual(xs.retro_safe("abcdef", limit=6), "abcdef")
+        self.assertEqual(xs.retro_safe("abcdef", limit=10), "abcdef")
+        self.assertEqual(xs.retro_safe("<>", limit=4), "&lt;")
+
 
 if __name__ == "__main__":
     unittest.main()
