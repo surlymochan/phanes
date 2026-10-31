@@ -374,6 +374,32 @@ class CrossCheckTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FAIL", result.stdout)
 
+    def test_command_line_exit_code_is_one_on_failure(self) -> None:
+        """任一检查失败时退出码为 1。"""
+        self.brief["schema版本"] = 3
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            result = run_script(brief, data)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_command_line_exit_code_is_two_on_unreadable_input(self) -> None:
+        """输入不可读或不是 JSON 对象时退出码为 2。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            missing = run_script(base / "missing.json", data)
+            broken = base / "broken.json"
+            broken.write_text("{不是 JSON", encoding="utf-8")
+            invalid = run_script(broken, data)
+            array = base / "array.json"
+            array.write_text("[]", encoding="utf-8")
+            not_object = run_script(array, data)
+        self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertEqual(not_object.returncode, 2, not_object.stdout + not_object.stderr)
+
     def test_command_line_writes_markdown_report(self) -> None:
         """--out 写入含标题、汇总与逐条检查结果的 Markdown。"""
         self.brief["schema版本"] = 3
@@ -389,6 +415,24 @@ class CrossCheckTest(unittest.TestCase):
         self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", content)
         self.assertIn("- **FAIL 版本一致**", content)
         self.assertIn("- **PASS 期间一致**", content)
+
+    def test_command_line_writes_report_on_site_mismatch(self) -> None:
+        """站点数据与快照不一致时仍写出 Markdown 报告，报告里记 FAIL。"""
+        stale = copy.deepcopy(self.diagnosis)
+        stale["metrics"][0]["数值"]["2026-09实际"] = 99
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "dist"
+            (dist / "data").mkdir(parents=True)
+            write_json(dist / "data" / "diagnosis.json", stale)
+            report = base / "report.md"
+            result = run_script(brief, data, dist, out=report)
+            content = report.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("- **FAIL 站点数据一致**", content)
+        self.assertIn("**汇总：共 6 项检查，5 项通过，1 项失败。**", content)
 
     def test_command_line_prints_one_line_per_check(self) -> None:
         """命令行逐条输出检查结果并给出汇总。"""
