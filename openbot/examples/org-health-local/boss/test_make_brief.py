@@ -285,6 +285,38 @@ class MakeBriefTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("期望值 4", output.getvalue())
 
+    def test_check_rejects_non_object_top_level(self) -> None:
+        """--check 校验顶层不是 JSON 对象的任务书时报错，不抛 AttributeError。"""
+        cases = {"数组": "[]", "字符串": '"只是字符串"'}
+        for name, content in cases.items():
+            with self.subTest(顶层=name), temporary_directory() as folder:
+                path = Path(folder) / "brief.json"
+                path.write_text(content, encoding="utf-8")
+                output, error = StringIO(), StringIO()
+                with redirect_stdout(output), redirect_stderr(error):
+                    code = make_brief.main(["--check", str(path)])
+                self.assertEqual(code, 1)
+                self.assertIn("任务书必须是 JSON 对象", output.getvalue() + error.getvalue())
+                self.assertNotIn("Traceback", output.getvalue())
+                self.assertNotIn("Traceback", error.getvalue())
+
+    def test_check_non_object_top_level_exits_one_without_traceback(self) -> None:
+        """命令行 --check 顶层非对象时退出码为 1，且不打印 traceback。"""
+        cases = {"数组": "[]", "字符串": '"只是字符串"'}
+        for name, content in cases.items():
+            with self.subTest(顶层=name), temporary_directory() as folder:
+                path = Path(folder) / "brief.json"
+                path.write_text(content, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("任务书必须是 JSON 对象", result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
 
 class PeriodOrderTest(unittest.TestCase):
     """观察期间的期次顺序、重复期次与起止倒置。"""
