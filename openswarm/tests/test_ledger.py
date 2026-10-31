@@ -128,20 +128,35 @@ class LedgerTests(unittest.TestCase):
         return path
 
     def test_old_records_remain_readable_and_json_returns_full_entries(self):
-        old = {"id": "old-run", "ts": 1, "status": "done", "backend": "pi", "title": "old"}
+        required = {"id": "old-run", "ts": 1, "status": "done", "backend": "pi", "title": "old"}
+        optional = {
+            "model": "old-model", "effort": "medium", "card_type": "fix", "error_class": None,
+            "exec_pass": True, "accepted": True, "verify_rc": 0, "attempts": [],
+            "rework_of": None, "tokens": {"input": 1, "output": 2, "total": 3}, "seconds": 1,
+            "branch": "main", "commit": "abc", "host": "old-host", "lane": "old-lane",
+            "lessons_injected": [], "patterns_injected": [], "routing_advice": {},
+            "peer_review": {}, "pr": None, "review_findings": None, "merged": None,
+            "defect_within_7d": None,
+        }
+        old_records = [
+            {**required, **{key: value for key, value in optional.items() if key != omitted}}
+            for omitted in optional
+        ]
         Path(xs.LEDGER).parent.mkdir(parents=True)
-        Path(xs.LEDGER).write_text(json.dumps(old) + "\n")
-        self.assertEqual(list(xs.ledger_entries()), [old])
+        Path(xs.LEDGER).write_text("".join(json.dumps(record) + "\n" for record in old_records))
+        self.assertEqual(list(xs.ledger_entries()), old_records)
+        for record in old_records:
+            self.assertEqual({key: record[key] for key in required}, required)
 
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "ledger", "--json"]
+            sys.argv = ["openswarm", "ledger", "--json", "-n", str(len(old_records))]
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 xs.main()
         finally:
             sys.argv = original_argv
-        self.assertEqual(json.loads(output.getvalue()), [old])
+        self.assertEqual(json.loads(output.getvalue()), old_records)
 
     def test_known_card_types_reject_unknown_before_creating_run(self):
         knowledge = self.root / "knowledge"
