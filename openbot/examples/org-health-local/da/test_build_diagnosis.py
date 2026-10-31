@@ -325,6 +325,28 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("汇率", result.stdout + result.stderr)
 
+    def test_unwritable_out_target_exits_nonzero(self) -> None:
+        """--out 指向无法作为文件写出的目标时退出码非 0，stderr 报错且不留下部分 JSON。"""
+        # 情形 1：--out 指向已存在的目录
+        out_dir = self.folder / "existing-dir-target"
+        out_dir.mkdir()
+        result = run_cli(self.brief_path, SAMPLE_RAW, out_dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(str(out_dir), result.stderr)
+        self.assertTrue("IsADirectoryError" in result.stderr or "Is a directory" in result.stderr)
+        self.assertEqual(list(out_dir.iterdir()), [])
+
+        # 情形 2：--out 指向父级为常规文件的非法路径
+        file_as_parent = self.brief_path / "diagnosis.json"
+        result2 = run_cli(self.brief_path, SAMPLE_RAW, file_as_parent)
+        self.assertNotEqual(result2.returncode, 0)
+        self.assertIn(str(file_as_parent), result2.stderr)
+        self.assertTrue("NotADirectoryError" in result2.stderr or "Not a directory" in result2.stderr)
+        self.assertFalse(file_as_parent.exists())
+
+        # 全程未在默认位置留下部分快照
+        self.assertFalse(self.out_path.exists())
+
     def test_module_builds_snapshot_without_command_line(self) -> None:
         """模块接口可被直接调用，输出结构确定。"""
         brief = build_diagnosis.load_brief(self.brief_path)
