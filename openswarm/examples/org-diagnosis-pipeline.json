@@ -6,7 +6,7 @@
   "parent_issue": "phanes#6",
   "doc": "docs/scenario/org-diagnosis/pipeline.md",
   "kind": "example",
-  "summary": "用 OpenSwarm 编排 Boss→DA→Builder 三阶段流水线：每阶段有任务提示、产物路径和 --verify 门禁；下一阶段的 --base 取上一阶段的提交；每阶段后做一次跨执行器交叉审查；真实组织数据只经仓库外的 --data 绝对路径进入。",
+  "summary": "用 OpenSwarm 编排 Boss→DA→Builder 三阶段流水线：每阶段有任务提示、产物路径和 --verify 门禁；下一阶段的 --base 取上一阶段的提交；每阶段后做一次跨执行器交叉审查；真实组织数据只经仓库外的数据参数绝对路径进入。",
   "prerequisites": {
     "openswarm_cli": "openswarm（或 openswarm/bin/openswarm）",
     "python": ">=3.9",
@@ -59,7 +59,7 @@
     "diagnosis_output": "${DIAGNOSIS}",
     "repo_fixture": "openbot/examples/org-health-local/data/diagnosis.json",
     "rules": [
-      "真实组织数据只经仓库外的绝对路径读入（openbot/examples/org-health-local/serve.py:39-42 的 --data）。",
+      "真实组织数据只经仓库外的绝对路径读入（openbot/examples/org-health-local/serve.py:39-42 的数据参数）。",
       "仓库内只保留合成示例 openbot/examples/org-health-local/data/diagnosis.json。",
       "DA 阶段的诊断 JSON 写在仓库外，不随 openswarm 分支提交。",
       "每个阶段只把不含真实数据的说明文件提交进仓库，保证交叉审查有 diff 可看。",
@@ -153,9 +153,9 @@
           "description": "字段来源与计算口径说明，不含真实数字；保证本阶段有提交可审。"
         }
       ],
-      "verify": "python3 openbot/examples/org-health-local/validate.py --data \"${DIAGNOSIS}\" && test -s docs/scenario/org-diagnosis/out/da-method.md",
-      "verify_status": "pending_issue",
-      "verify_note": "openbot/examples/org-health-local/validate.py 由 DA 校验器 issue 提供，当前仓库没有该文件；在它落地前本阶段的 --verify 不可执行，临时替代为 python3 -m json.tool \"${DIAGNOSIS}\" >/dev/null（只查 JSON 形状，不查 schema）。",
+      "verify": "python3 openbot/examples/org-health-local/validate.py \"${DIAGNOSIS}\" && test -s docs/scenario/org-diagnosis/out/da-method.md",
+      "verify_status": "available",
+      "verify_note": "validate.py 接受诊断 JSON 位置参数；当前仓库已提供该校验器，--verify 同时校验 schema 与 DA 产物非空。",
       "command": [
         "${OPENSWARM}",
         "run",
@@ -176,7 +176,7 @@
         "--task-file",
         "${WORKSPACE}/tasks/da.md",
         "--verify",
-        "python3 openbot/examples/org-health-local/validate.py --data \"${DIAGNOSIS}\" && test -s docs/scenario/org-diagnosis/out/da-method.md"
+        "python3 openbot/examples/org-health-local/validate.py \"${DIAGNOSIS}\" && test -s docs/scenario/org-diagnosis/out/da-method.md"
       ]
     },
     {
@@ -190,7 +190,7 @@
       "budget_minutes": 25,
       "title": "组织诊断站点接入",
       "task_file": "${WORKSPACE}/tasks/builder.md",
-      "prompt": "# 组织诊断站点接入（Builder 阶段）\n\n输入：\n\n1. 诊断数据：`${DIAGNOSIS}`（仓库外绝对路径，schema v4 结构）；\n2. 上一阶段的口径说明 `docs/scenario/org-diagnosis/out/da-method.md`；\n3. 现有站点实现 `openbot/examples/org-health-local/`（`serve.py`、`app.js`、`index.html`）。\n\n任务：让本机组织健康诊断站点能加载并正确渲染真实诊断数据。\n\n- 保留 `serve.py --data /absolute/path/to/diagnosis.json` 这个外部数据入口，不要改成读仓库内固定路径；\n- 真实数据不得进入仓库；仓库内只保留合成示例 `openbot/examples/org-health-local/data/diagnosis.json`；\n- 需要扩展渲染或校验时，改动限于 `openbot/examples/org-health-local/` 下的文件；\n- 在 `docs/scenario/org-diagnosis/out/builder-notes.md` 记录改动点、本地验证命令与已知限制；\n- 不引入新的运行时依赖（当前只用 Python 标准库加 bun 构建前端）。\n\n完成后说明改动文件与验证方式。\n",
+      "prompt": "# 组织诊断站点接入（Builder 阶段）\n\n输入：\n\n1. 诊断数据：`${DIAGNOSIS}`（仓库外绝对路径，schema v4 结构）；\n2. 上一阶段的口径说明 `docs/scenario/org-diagnosis/out/da-method.md`；\n3. 现有站点实现 `openbot/examples/org-health-local/`（`serve.py`、`app.js`、`index.html`）。\n\n任务：让本机组织健康诊断站点能加载并正确渲染真实诊断数据。\n\n- 保留 `serve.py` 的外部数据入口（使用绝对路径传入 diagnosis.json），不要改成读仓库内固定路径；\n- 真实数据不得进入仓库；仓库内只保留合成示例 `openbot/examples/org-health-local/data/diagnosis.json`；\n- 需要扩展渲染或校验时，改动限于 `openbot/examples/org-health-local/` 下的文件；\n- 在 `docs/scenario/org-diagnosis/out/builder-notes.md` 记录改动点、本地验证命令与已知限制；\n- 不引入新的运行时依赖（当前只用 Python 标准库加 bun 构建前端）。\n\n完成后说明改动文件与验证方式。\n",
       "artifacts": [
         {
           "path": "openbot/examples/org-health-local/",
@@ -207,9 +207,9 @@
           "description": "改动点、本地验证命令与已知限制。"
         }
       ],
-      "verify": "python3 openbot/examples/org-health-local/test_serve.py --data \"${DIAGNOSIS}\"",
-      "verify_status": "pending_issue",
-      "verify_note": "openbot/examples/org-health-local/test_serve.py 由 Builder 测试 issue 提供，当前仓库没有该文件；在它落地前本阶段没有自动门禁，可先用仓库已有的 bun run test:org-health-demo（openbot/package.json:194）覆盖合成示例。",
+      "verify": "python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'",
+      "verify_status": "available",
+      "verify_note": "仓库已提供 org-health-local 的 unittest 测试；--verify 使用标准库 discover 执行全部 test_*.py。",
       "command": [
         "${OPENSWARM}",
         "run",
@@ -230,7 +230,7 @@
         "--task-file",
         "${WORKSPACE}/tasks/builder.md",
         "--verify",
-        "python3 openbot/examples/org-health-local/test_serve.py --data \"${DIAGNOSIS}\""
+        "python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'"
       ]
     }
   ],
@@ -266,18 +266,6 @@
     "optional": "openswarm compare --task-file <card> --title <t> --a codex --b pi 可以让两个执行器并行产出 DA 结论再对比。"
   },
   "pending": [
-    {
-      "id": "da-validator",
-      "provides": "openbot/examples/org-health-local/validate.py",
-      "used_by": "da",
-      "note": "DA 校验器 issue（与 #54 同批次的并行 issue）；落地前 DA 阶段没有 schema 级门禁。"
-    },
-    {
-      "id": "serve-test",
-      "provides": "openbot/examples/org-health-local/test_serve.py",
-      "used_by": "builder",
-      "note": "Builder 测试 issue；落地前 Builder 阶段没有自动门禁。"
-    },
     {
       "id": "org-health-demo-e2e",
       "provides": "bun run test:org-health-demo",
