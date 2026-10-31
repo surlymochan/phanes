@@ -143,6 +143,19 @@ class FleetCapacityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'required but missing'):
                 xs.fleet_guard_command()
 
+    def test_capacity_configuration_missing_field_reports_readable_error(self):
+        """A capacity configuration without its required field must fail readably."""
+        config = pathlib.Path(self.temp.name, 'fleet-capacity.json')
+        config.write_text(json.dumps({'hosts': ['gocc'], 'limits': {'total': 4}}))
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_GUARD_CONFIG': str(config)}):
+            with self.assertRaises(RuntimeError) as caught:
+                xs.fleet_guard_command()
+        message = str(caught.exception)
+        self.assertIn('fleet capacity configuration invalid', message)
+        self.assertIn('command', message)
+        for leak in ('Traceback', 'KeyError', 'json.decoder', 'File "'):
+            self.assertNotIn(leak, message)
+
     def test_ssh_guard_trailing_owner_is_recorded_and_recovers(self):
         """An SSH alias is transport only; the explicit final owner drives lifecycle."""
         command = ['/usr/bin/ssh', '-T', '-F', '/fixed/config', 'openswarm-pi-broker', 'gores1']
@@ -858,3 +871,16 @@ class FleetTopologyTests(unittest.TestCase):
         rc, out = self.call('gocc', op='status')
         self.assertNotEqual(rc, 0)
         self.assertFalse(out['ok'])
+
+    def test_topology_missing_limits_fails_closed_without_traceback(self):
+        """A capacity topology without its required field must fail closed readably."""
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps({'hosts': ['gocc']}))
+        process = subprocess.run([str(BIN), 'gocc'], input=json.dumps({'op': 'status'}), text=True,
+                                 capture_output=True, env=self.env, timeout=15)
+        self.assertNotEqual(process.returncode, 0)
+        answer = json.loads(process.stdout)
+        self.assertFalse(answer['ok'])
+        self.assertIn('invalid fleet topology', answer['error'])
+        self.assertIn('limits', answer['error'])
+        self.assertNotIn('Traceback', process.stdout)
+        self.assertNotIn('Traceback', process.stderr)
