@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -207,6 +209,40 @@ class MakeBriefTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             written = load_json(path)
         self.assertEqual(self.errors(written), [])
+
+    def test_check_accepts_existing_brief(self) -> None:
+        """--check 校验符合 schema 的已有任务书。"""
+        output = StringIO()
+        with redirect_stdout(output):
+            code = make_brief.main(["--check", str(EX / "demo" / "brief.json")])
+        self.assertEqual(code, 0)
+        self.assertEqual(output.getvalue(), "任务书校验通过\n")
+
+    def test_check_reports_required_field_error(self) -> None:
+        """--check 逐条报告缺少必需字段。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            brief = make_brief.build_brief()
+            del brief["目标"]
+            path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = make_brief.main(["--check", str(path)])
+        self.assertEqual(code, 1)
+        self.assertIn("缺少必需字段", output.getvalue())
+
+    def test_check_reports_type_error(self) -> None:
+        """--check 逐条报告字段类型错误。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            brief = make_brief.build_brief()
+            brief["schema版本"] = "4"
+            path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = make_brief.main(["--check", str(path)])
+        self.assertEqual(code, 1)
+        self.assertIn("期望值 4", output.getvalue())
 
 
 if __name__ == "__main__":

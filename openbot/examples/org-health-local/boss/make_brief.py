@@ -3,6 +3,7 @@
 
 用法：
     python3 make_brief.py --out brief.json [--goal 文本] [--month YYYY-MM]
+    python3 make_brief.py --check brief.json
 
 任务书只写口径、问题与字段映射，不含真实组织数据或真实数字。
 默认口径与合成示例 data/diagnosis.json 一致：观察月份 2026-09、数据截止
@@ -231,10 +232,26 @@ def write_brief(brief: dict, path: Path) -> None:
     )
 
 
+def load_brief(path: Path) -> object:
+    """读取已有任务书 JSON。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as cause:
+        raise ValueError(f"无法读取任务书 {path}：{cause}") from cause
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as cause:
+        raise ValueError(
+            f"任务书 {path} 不是合法 JSON：第 {cause.lineno} 行第 {cause.colno} 列 {cause.msg}"
+        ) from cause
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数。"""
     parser = argparse.ArgumentParser(description="生成组织健康诊断任务书 brief.json。")
-    parser.add_argument("--out", type=Path, required=True, help="任务书输出路径。")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--out", type=Path, help="任务书输出路径。")
+    output.add_argument("--check", type=Path, help="校验已有任务书路径。")
     parser.add_argument(
         "--goal",
         action="append",
@@ -253,6 +270,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """生成任务书并写出文件。返回进程退出码。"""
     args = parse_args(argv)
+    if args.out is None and args.check is None:
+        raise SystemExit("必须指定 --out 或 --check")
+    if args.check is not None:
+        try:
+            brief = load_brief(args.check)
+        except ValueError as cause:
+            print(str(cause))
+            return EXIT_INVALID
+        errors = validate_brief(brief)
+        if errors:
+            print("任务书校验失败：")
+            for message in errors:
+                print(f"  {message}")
+            return EXIT_INVALID
+        print("任务书校验通过")
+        return EXIT_OK
     try:
         brief = build_brief(args.goal, args.month, args.fx)
     except ValueError as cause:
