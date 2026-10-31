@@ -138,6 +138,17 @@ class FleetAutoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'invalid automatic routing'):
                 G['remote_sources']()
 
+    def test_hub_local_source_inventory_can_replace_legacy_remote_default(self):
+        raw = json.dumps([
+            {'host':'gores1','ssh_alias':'openswarm-gores-hub'},
+            {'host':'gocc','ssh_alias':'openswarm-gores-hub','via':'gores1'},
+        ])
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCE_MODE':'replace',
+                                          'OPENSWARM_AUTO_REMOTE_SOURCES':raw,
+                                          'OPENSWARM_AUTO_LOCAL_HOST':'local'}):
+            self.assertEqual(G['remote_sources'](), json.loads(raw))
+            self.assertEqual(G['local_host'](), 'local')
+
     def test_same_lane_name_on_remote_hosts_keeps_gateway_origin(self):
         govpn = {'host': 'govpn', 'ssh_alias': 'openswarm-govpn-gateway'}
         calls = []

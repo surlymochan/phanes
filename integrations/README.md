@@ -28,4 +28,14 @@ relay 默认使用 gocc 既有的默认 SSH 配置；服务配置文件可设置
 既有 SSH config，且不由任务输入选择。示例：
 `{"targets":[{"host":"govpn","ssh_alias":"openswarm-govpn-gateway"},{"host":"govpn2","ssh_alias":"openswarm-govpn2-gateway"}]}`。
 
+当 Hub 本机持有 executor lane（例如本机 Pi）时，设置 `OPENSWARM_HUB_LOCAL_ROUTER=1`，
+由 `hub-openswarm-bridge` 在本机运行 route decision。此时本机的 `openswarm-auto` 以
+`OPENSWARM_AUTO_LOCAL_HOST=local` 标记本机回执，并使用
+`OPENSWARM_AUTO_REMOTE_SOURCE_MODE=replace` 配置既有 Hub SSH 入口，例如：
+`[{"host":"gores1","ssh_alias":"openswarm-gores-hub"},{"host":"gocc","ssh_alias":"openswarm-gores-hub","via":"gores1"},{"host":"govpn","ssh_alias":"openswarm-gores-hub","via":"gores1"},{"host":"govpn2","ssh_alias":"openswarm-gores-hub","via":"gores1"}]`。
+本机 `openswarm-auto` 可用 `OPENSWARM_AUTO_SSH_CONFIG` 选择该既有 Hub SSH config，
+`OPENSWARM_AUTO_CLI` 指向本机的 executor runtime。gores1 的现有 Hub endpoint 只暴露
+`lanes`/`assign` 和固定 source relay；它不重新做 route decision。每个目标的 lane supervisor
+仍须由同一全局协调器准入，尤其本机 `local` 与 gores1 不得合并为同一 host 计数。
+
 入口指向 `openswarm/bin/` 中同名实现，以兼容现有部署路径，避免维护两份代码。Hub 的准入调用仍在 `openbot/src/backend/`，OpenSwarm 的路由和并发协调仍在 `openswarm/`。这些入口尚需随 Phanes 版本部署并完成端到端验收。
