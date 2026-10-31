@@ -130,6 +130,19 @@ DIAGNOSIS = {
 }
 
 
+# Boss 格式的观察期间（与 boss/make_brief.py 产出一致）：期次是字符串数组。
+BOSS_PERIOD = {
+    "观察月份": "2026-09",
+    "数据截止": "2026-09-30",
+    "期次": ["2026-01实际", "2026-05H1参考", "2026-09实际", "年末测算", "年末目标"],
+    "说明": (
+        "观察月份 2026-09，数据截止 2026-09-30；"
+        "期次锚点 2026-01实际、2026-05H1参考、2026-09实际、年末测算、年末目标，"
+        "与站点数值序列的键名一致。"
+    ),
+}
+
+
 def temporary_directory() -> tempfile.TemporaryDirectory:
     """在 TMPDIR 下建临时目录；TMPDIR 不可用时用系统默认目录。"""
     parent = os.environ.get("TMPDIR")
@@ -142,6 +155,15 @@ def write_json(path: Path, payload: object) -> Path:
     """把数据写成 JSON 文件。"""
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def rename_period_key(node: dict, old: str, new: str) -> None:
+    """把字典里的期次键改名（就地修改，嵌套字典一并处理）。"""
+    for key in list(node.keys()):
+        if key == old:
+            node[new] = node.pop(key)
+        elif isinstance(node[key], dict):
+            rename_period_key(node[key], old, new)
 
 
 def run_script(brief: Path, data: Path, dist: Path | None = None) -> subprocess.CompletedProcess:
@@ -202,6 +224,41 @@ class CrossCheckTest(unittest.TestCase):
         failures = self.failing(self.check())
         self.assertTrue(failures)
         self.assertEqual(failures[0].name, "期间一致")
+
+    def test_brief_period_mismatch_fails(self) -> None:
+        """任务书期次与快照期次不一致时必须报出。"""
+        self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
+        self.diagnosis["scope"]["观察月份"] = "2026-08"
+        failures = self.failing(self.check())
+        self.assertTrue(failures)
+        self.assertEqual(failures[0].name, "期间一致")
+        self.assertIn("观察月份", failures[0].detail)
+
+    @unittest.expectedFailure
+    def test_brief_observed_month_mismatch_fails(self) -> None:
+        """快照期次落在任务书提到的其他期次上时必须报出。
+
+        当前实现只检查 `scope.观察月份` 是否落在任务书 `观察期间` 里出现过的月份集合内；
+        Boss 格式任务书的 `说明` 会列出全部期次锚点，快照落到 2026-01 时集合内命中，漏报。
+        实现补上“任务书观察月份与快照期次”比较后，删掉 expectedFailure 标记。
+        """
+        self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
+        self.diagnosis["scope"]["观察月份"] = "2026-01"
+        failures = self.failing(self.check())
+        self.assertTrue(failures, "快照期次与任务书观察月份不一致时未报出")
+
+    @unittest.expectedFailure
+    def test_brief_period_keys_mismatch_fails(self) -> None:
+        """快照数值序列的期次键与任务书 `观察期间.期次` 不一致时必须报出。
+
+        当前实现只核对 `scope.观察月份`，没有比对快照各指标的期次键与任务书期次锚点，
+        DA 用错期次锚点时漏报。实现补上该比较后，删掉 expectedFailure 标记。
+        """
+        self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
+        for metric in self.diagnosis["metrics"]:
+            rename_period_key(metric["数值"], "2026-09实际", "2026-08实际")
+        failures = self.failing(self.check())
+        self.assertTrue(failures, "快照期次键与任务书期次不一致时未报出")
 
     def test_version_mismatch_fails(self) -> None:
         """任务书与快照的 schema版本 不一致时失败。"""
@@ -351,6 +408,22 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(brief, data, dist)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FAIL 站点数据一致", result.stdout)
+
+    def test_dist_numeric_value_mismatch_fails(self) -> None:
+        """站点产物与工作目录快照的某个数值不一致时必须报出。"""
+        stale = copy.deepcopy(self.diagnosis)
+        stale["metrics"][0]["数值"]["2026-09实际"] = 99
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "dist"
+            (dist / "data").mkdir(parents=True)
+            write_json(dist / "data" / "diagnosis.json", stale)
+            result = run_script(brief, data, dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FAIL 站点数据一致", result.stdout)
+        self.assertIn("字节不同", result.stdout)
 
     def test_dist_missing_data_fails(self) -> None:
         """站点目录缺少 data/diagnosis.json 时失败。"""
