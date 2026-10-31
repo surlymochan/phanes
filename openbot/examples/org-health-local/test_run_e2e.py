@@ -132,6 +132,24 @@ elif role == 'builder':
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
+        for item in timings:
+            self.assertIsInstance(item['command'], list)
+            self.assertGreaterEqual(item['duration_seconds'], 0)
+            self.assertEqual(item['exit_code'], 0)
+
+    def test_timings_are_written_when_a_step_fails(self):
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 1), exit_code=9)
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
+        self.assertEqual(timings[-1]['exit_code'], 9)
+        self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
 
     def test_runs_from_repo_root_with_relative_workdir_and_default_raw(self):
         """以仓库根为 cwd、相对路径为 --workdir 运行，产物落在相对工作目录且默认 raw 路径仍指向示例目录。"""
@@ -348,6 +366,8 @@ elif role == 'builder':
         self.assertEqual(review_call, ['--brief', str(self.workdir / 'brief.json'), '--data',
                                        str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')])
         self.assertTrue((self.workdir / 'review.md').is_file())
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
 
     def test_checker_failure_skips_review_and_returns_nonzero(self):
         """站点自检失败时以非零退出，开启 --review 也不执行审查，且不打印预览命令。"""
