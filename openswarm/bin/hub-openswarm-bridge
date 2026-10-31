@@ -42,6 +42,20 @@ def gateway(payload):
 def local_router_enabled():
     return os.environ.get('OPENSWARM_HUB_LOCAL_ROUTER') == '1'
 
+def local_fleet_hosts():
+    raw = os.environ.get('OPENSWARM_AUTO_FLEET_HOSTS')
+    if raw is None:
+        return []
+    try:
+        hosts = json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError('local fleet host configuration invalid') from error
+    if (not isinstance(hosts, list) or any(not isinstance(host, str)
+            or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host) or host == 'local' for host in hosts)
+            or len(set(hosts)) != len(hosts)):
+        raise RuntimeError('local fleet host configuration invalid')
+    return hosts
+
 def local_command(command, payload=None, timeout=100):
     proc = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
                           text=True, capture_output=True, timeout=timeout)
@@ -52,6 +66,13 @@ def local_command(command, payload=None, timeout=100):
     if proc.returncode or not isinstance(data, dict) or data.get('ok') is False:
         raise RuntimeError('local fleet command rejected request')
     return data
+
+def local_host_command(host, command, payload=None, timeout=100):
+    if host == 'local':
+        return local_command(command, payload, timeout)
+    if host not in local_fleet_hosts():
+        raise RuntimeError('local fleet host is not configured')
+    return local_command([native, 'fleet', 'exec', host, '--', *command], payload, timeout)
 
 def local_gateway(payload):
     """Run routing/lifecycle locally when Hub owns local executor lanes."""
@@ -71,15 +92,15 @@ def local_gateway(payload):
             if verify:
                 command += ['--verify', str(verify)]
             return local_command(command, timeout=100)
-    run_id = payload.get('id')
+    run_id, host = payload.get('id'), payload.get('host')
     if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id):
         raise RuntimeError('local fleet command rejected request')
     if op == 'info':
-        return local_command([native, 'fleet', '_run-info', run_id])
+        return local_host_command(host, ['fleet', '_run-info', run_id])
     if op == 'stop':
-        return local_command([native, 'stop', run_id])
+        return local_host_command(host, ['stop', run_id])
     if op == 'bundle':
-        info = local_command([native, 'fleet', '_run-info', run_id])
+        info = local_host_command(host, ['fleet', '_run-info', run_id])
         return local_command([sys.executable, str(root / 'fleet-result-bundle')], info, timeout=140)
     raise RuntimeError('local fleet command rejected request')
 
@@ -87,8 +108,9 @@ def dispatch_gateway(payload):
     # Hub-local automatic routing is opt-in so old gores1-owned installations
     # retain their receipt and transport behaviour until their local lanes and
     # shared coordinator are configured.
-    if local_router_enabled() and (payload.get('op') == 'submit' or payload.get('host') == 'local'):
-        return local_gateway(payload)
+    if local_router_enabled():
+        if payload.get('op') == 'submit' or payload.get('host') in {'local', *local_fleet_hosts()}:
+            return local_gateway(payload)
     return gateway(payload)
 
 def db_open():

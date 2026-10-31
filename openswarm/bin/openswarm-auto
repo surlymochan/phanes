@@ -90,6 +90,58 @@ def remote(payload):
     """Compatibility wrapper for the legacy gocc gateway and its tests."""
     return remote_from(DEFAULT_REMOTE_SOURCE, payload)
 
+def fleet_hosts():
+    """Return Hub-owned remote hosts from the existing local fleet inventory.
+
+    This is deliberately a list of logical fleet names, never SSH aliases or
+    task-supplied host data.  `fleet exec` resolves the already-configured
+    transport and executor path for each host.
+    """
+    raw = os.environ.get('OPENSWARM_AUTO_FLEET_HOSTS')
+    if raw is None:
+        return []
+    try:
+        hosts = json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError('invalid automatic routing fleet host configuration') from error
+    if not isinstance(hosts, list) or not hosts:
+        raise RuntimeError('invalid automatic routing fleet host configuration')
+    if any(not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
+           or host == 'local' for host in hosts) or len(set(hosts)) != len(hosts):
+        raise RuntimeError('invalid automatic routing fleet host configuration')
+    return hosts
+
+def fleet_lanes(host):
+    command = [cli, 'fleet', 'exec', host, '--', 'lane', 'status']
+    process = subprocess.run(command, capture_output=True, text=True, timeout=35)
+    try:
+        rows = json.loads(process.stdout)
+    except ValueError as error:
+        raise RuntimeError('fleet lane status unavailable') from error
+    if process.returncode or not isinstance(rows, list):
+        raise RuntimeError('fleet lane status unavailable')
+    return rows
+
+def fleet_assign(host, lane, prompt, base, title, verify, budget, read_only):
+    command = [cli, 'fleet', 'exec', host, '--', 'lane', 'assign', lane,
+               '--prompt', prompt, '--base', base, '--budget-minutes', str(budget)]
+    if title:
+        command += ['--title', title]
+    if verify:
+        command += ['--verify', verify]
+    if read_only:
+        command.append('--read-only')
+    process = subprocess.run(command, capture_output=True, text=True, timeout=45)
+    try:
+        response = json.loads(process.stdout)
+    except ValueError as error:
+        raise RuntimeError('fleet dispatch acknowledgement unavailable') from error
+    if response.get('ok') is False and response.get('error') == f'lane {lane} is busy (busy)':
+        raise LaneBusy('fleet lane is busy')
+    if process.returncode or not isinstance(response, dict) or not response.get('id'):
+        raise RuntimeError('fleet dispatch acknowledgement unavailable')
+    return response
+
 def local_lanes():
     p = subprocess.run([cli, 'lane', 'status'], capture_output=True, text=True, timeout=15)
     if p.returncode: raise RuntimeError('local lane status unavailable')
@@ -128,6 +180,15 @@ def discovered_lanes():
     rows = []
     for row in local_lanes():
         rows.append({**row, '_origin': 'local'})
+    hosts = fleet_hosts()
+    if hosts:
+        for host in hosts:
+            try:
+                for row in fleet_lanes(host):
+                    rows.append({**row, '_origin': 'fleet', '_fleet_host': host})
+            except (RuntimeError, OSError, subprocess.SubprocessError):
+                pass
+        return rows
     for source in remote_sources():
         try:
             request = {'op':'lanes'}
@@ -144,7 +205,8 @@ def available_in_preference(lanes, backends):
     ordered = []
     for backend in backends:
         matches = [row for row in idle if row.get('backend') == backend]
-        ordered.extend(sorted(matches, key=lambda row: (row.get('name', ''), row.get('_origin', ''))))
+        ordered.extend(sorted(matches, key=lambda row: (row.get('name', ''), row.get('_origin', ''),
+                                                         row.get('_fleet_host', ''))))
     return ordered
 
 def main():
@@ -175,8 +237,9 @@ def main():
     for row in ordered:
         lane = row['name']
         local = row['_origin'] == 'local'
+        fleet = row['_origin'] == 'fleet'
         result = {'ok': True, 'lane': lane, 'backend': row['backend'], 'model': row['model'],
-                  'host': local_host() if local else row['_remote_source']['host'],
+                  'host': local_host() if local else (row['_fleet_host'] if fleet else row['_remote_source']['host']),
                   'profile': {'type': args.type, 'difficulty': args.difficulty}}
         if read_only: result['read_only'] = True
         if local and row['backend'] == 'pi' and read_only:
@@ -210,6 +273,12 @@ def main():
                 raise RuntimeError('local dispatch acknowledgement unavailable')
             if proc.returncode or not response.get('id'):
                 raise RuntimeError('local dispatch acknowledgement unavailable')
+        elif fleet:
+            try:
+                response = fleet_assign(row['_fleet_host'], lane, prompt, base, args.title, args.verify,
+                                        args.budget_minutes, read_only)
+            except LaneBusy:
+                continue
         else:
             try:
                 request = {'op':'assign','lane':lane,'prompt':prompt,'base':base,
