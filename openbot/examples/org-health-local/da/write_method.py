@@ -27,8 +27,11 @@ class MethodError(Exception):
 
 
 def load_json(path: Path) -> Any:
-    with path.open(encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with Path(path).open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as cause:
+        raise MethodError(f"无法读取 JSON 文件 {path}：{cause}") from cause
 
 
 def count_data_rows(path: Path) -> int:
@@ -211,15 +214,15 @@ def main(argv: List[str] = None) -> int:
     parser.add_argument("--raw", type=Path, help="原始 CSV 目录；给出时列出数据来源文件与行数。")
     args = parser.parse_args(argv)
 
-    brief = load_json(args.brief)
-    diagnosis = load_json(args.data)
-    sources = None
-    if args.raw is not None:
-        try:
+    try:
+        brief = load_json(args.brief)
+        diagnosis = load_json(args.data)
+        sources = None
+        if args.raw is not None:
             sources = data_sources(args.raw)
-        except MethodError as cause:
-            print(str(cause), file=sys.stderr)
-            return 1
+    except MethodError as cause:
+        print(str(cause), file=sys.stderr)
+        return 1
     output = render(brief, diagnosis, sources)
     # Period labels and array indexes are deliberately present in source paths;
     # exclude those structural strings from the value-only leak check.
