@@ -10,7 +10,7 @@ Refs #6, Refs #156。
 
 ## 1. 一条命令跑完三 Bot Demo
 
-主理人可以使用编排脚本 `run_e2e.py` 一次性串联执行 Boss 任务书生成、DA 数据分析、Builder 静态建站、站点静态检查与独立三方审查：
+主理人可以使用编排脚本 `run_e2e.py` 一次性串联执行 Boss 任务书生成、DA 数据分析、Builder 静态建站与站点静态检查；加上 `--review` 时再执行一次独立三方审查：
 
 ### 1.1 执行命令
 
@@ -29,9 +29,11 @@ cd openbot/examples/org-health-local
 python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bundle.js
 ```
 
+默认只跑 Boss → DA → Builder → 站点自检 4 步；追加 `--review` 会在站点自检之后再执行一次独立三方审查，并把审查记录写到 `<workdir>/review.md`。
+
 ### 1.2 参数说明
 
-参数定义见 `openbot/examples/org-health-local/run_e2e.py:12-22`：
+参数定义见 `openbot/examples/org-health-local/run_e2e.py:16-24`：
 
 | 参数 | 必需/可选 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -43,12 +45,13 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 | `--builder` | 可选 | `openbot/examples/org-health-local/builder/build_site.py` | Builder 角色脚本路径，用于根据诊断快照构建可本地浏览的静态站点目录 `dist`。 |
 | `--checker` | 可选 | `openbot/examples/org-health-local/builder/check_site.py` | 静态合规检查脚本路径，用于检查 `dist` 产物的完整性与安全性。 |
 | `--reviewer` | 可选 | `openbot/examples/org-health-local/review/cross_check.py` | 独立审查脚本路径，核对任务书、诊断快照与站点产物的三方一致性与隐私边界。 |
+| `--review` | 可选 | 关闭（不审查） | 站点自检通过后追加独立三方交叉审查，并把审查记录写入 `<workdir>/review.md`（`openbot/examples/org-health-local/run_e2e.py:24`、`:68-72`）。审查不通过时流水线返回非 0，但报告文件仍然保留。 |
 
 ---
 
 ## 2. 每步流水线执行与产物路径
 
-`run_e2e.py:44-55` 按照预定流程依次调用 5 个步骤。每步均校验返回码，任一步非 0 立即中断流水线并报错退出：
+`run_e2e.py:54-67` 固定按 Boss → DA → Builder → 站点自检 4 步执行；带上 `--review` 时才追加第 5 步独立审查（`run_e2e.py:68-72`）。每步均校验返回码，任一步非 0 立即中断流水线并报错退出（返回码 1，`run_e2e.py:34-36`、`:65-67`）：
 
 ```
 [Boss] make_brief.py
@@ -63,11 +66,14 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 [检查] check_site.py <workdir>/dist
    │
    ▼ (静态合规校验，不产出新文件)
-[审查] cross_check.py --brief ... --data ... --dist ...
+[审查] cross_check.py --brief ... --data ... --dist ...   ← 仅 --review 时执行
    │
-   ▼ (三方交叉比对，不产出新文件)
+   ▼ 产物: <workdir>/review.md (审查记录；审查失败也照常写出)
 完成，输出预览命令
 ```
+
+- 站点自检失败时流水线在第 4 步中断，**不会**执行审查步骤，也不会生成 `<workdir>/review.md`。
+- 审查不通过时 `<workdir>/review.md` **仍然写出**（内含 `FAIL` 行），`run_e2e.py` 返回非 0，并且不再打印成功路径才有的预览命令（`run_e2e.py:70-73`）。
 
 ### 步骤 1：Boss 任务书生成
 - **命令**：`python3 boss/make_brief.py --out <workdir>/brief.json`
@@ -110,15 +116,17 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
   - 检查 `index.html` 内部引用的本地静态资源是否存在。
   - 核验 `build-report.json` 中记录的文件 sha256 哈希值与磁盘实际文件一致。
 
-### 步骤 5：Reviewer 独立三方交叉审查
+### 步骤 5：Reviewer 独立三方交叉审查（仅 `--review` 时执行）
 - **命令**：`python3 review/cross_check.py --brief <workdir>/brief.json --data <workdir>/diagnosis.json --dist <workdir>/dist`
-- **产物**：无新文件生成（只读审查）。
+  （由 `run_e2e.py --review` 调用，见 `openbot/examples/org-health-local/run_e2e.py:68-72`；审查脚本本身只读输入、不写文件，`--out <报告.md>` 可另存一份 Markdown 报告）
+- **产物路径**：`<workdir>/review.md`——由 `run_e2e.py` 捕获审查者的标准输出写入（`openbot/examples/org-health-local/run_e2e.py:11`、`:70`），内容是逐条 `PASS`/`FAIL` 行加一行汇总（例如「共 10 项检查：10 项通过，0 项失败」）。
+- **失败行为**：审查不通过时审查者返回非 0，`run_e2e.py` 中断并返回 1，但 `<workdir>/review.md` **照常保留**（含 FAIL 行）便于核对失败原因；若在站点自检阶段就已中断，则本步骤不执行、也不生成该报告。
 - **审查内容**（见 `review/cross_check.py:10-39`）：
   - **期间一致**：核对任务书 `观察期间` 与诊断快照 `scope.观察月份`、`scope.数据截止` 严格一致。
   - **版本一致**：核对任务书与快照的 `schema版本` 均为 4。
   - **必答问题覆盖**：检查任务书中的 6 个必答问题在快照的 `insights` 或 `recommendations` 中均有明确提及（通过 ID、原文或关键词匹配）。
   - **站点数据一致**：若指定 `--dist`，核验 `<workdir>/dist/data/diagnosis.json` 与 `<workdir>/diagnosis.json` 的字节 sha256 完全相同。
-  - **隐私边界**：递归核验诊断快照的所有字段名，确保不包含 27 个敏感黑名单词条（如姓名、个人、员工、薪酬、工资、编制、职级等）。
+  - **隐私边界**：递归核验诊断快照的所有字段名，确保不包含 28 个敏感黑名单词条（如姓名、个人、员工、薪酬、工资、编制、职级等，见 `review/cross_check.py:108-137`）。
 
 ---
 
@@ -252,6 +260,17 @@ python3 serve.py --root /path/to/workdir/dist
   ```
   若由自定义 Builder 脚本产出，请确保生成的构建报告包含 `"files"` 映射字典。
 
+### ⑥ 独立审查未通过（`run_e2e.py --review`）
+- **错误字符串**：`步骤失败: 审查 (退出码 1)`
+- **文件与行号**：
+  - 打印位置：`openbot/examples/org-health-local/run_e2e.py:35`（`print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr)`）
+  - 中断退出：`openbot/examples/org-health-local/run_e2e.py:71-72`（审查返回非 0 时 `return 1`）
+- **原因**：三方交叉审查存在未通过项（期间一致、版本一致、必答问题覆盖、站点数据一致、隐私边界），或审查输入不可读、不是 JSON 对象（审查脚本退出码 2，见 `review/cross_check.py:461-481`）。
+- **排查**：
+  1. 打开 `<workdir>/review.md`：其中的 `FAIL <检查项>：<原因>` 行即为未通过项，末行给出「共 N 项检查：X 项通过，Y 项失败」汇总。
+  2. 该报告在审查失败时**依然写出**（`run_e2e.py:10-11`、`:70-72`），不会被删除，可据此逐项修正后重跑流水线。
+  3. 若流水线在站点自检阶段就已中断，则审查步骤未执行，`<workdir>/review.md` 不会生成——先解决自检失败再回来看审查结论。
+
 ---
 
 ## 5. 补充故障排查速查
@@ -262,3 +281,4 @@ python3 serve.py --root /path/to/workdir/dist
 | `任务书 \`口径.汇率\` 缺失或不是正数，无法计算成本率` | `da/build_diagnosis.py:207` | 任务书中未声明汇率且原始数据目录下缺少 `fx.csv`。在 raw 目录下提供包含合成汇率（如 7.2）的 `fx.csv` 文件。 |
 | `数据文件不存在：{data_path}` / `bundle 文件不存在：{bundle_path}` | `builder/build_site.py:145, 148` | 构建站点时传入的数据快照或 bundle 文件路径不存在。核对前置步骤是否成功生成快照，或检查 bundle 路径是否正确。 |
 | `失败：{relative} 引用了外部 http(s) 资源` | `builder/check_site.py:102` | `index.html` 或 `styles.css` 中引入了 CDN、外部字体或远程样式。移除所有外部链接，确保所有资源均为本地静态文件。 |
+| `步骤失败: 审查 (退出码 1)` | `run_e2e.py:35`、`:71-72` | 独立三方审查未通过（仅 `--review` 时才执行）。查看 `<workdir>/review.md` 的 `FAIL` 行定位不一致项；该报告在审查失败时仍然保留，修正后重跑即可。 |
