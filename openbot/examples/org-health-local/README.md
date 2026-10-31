@@ -16,6 +16,14 @@
 
 示例目录内运行 `python3 -m unittest test_serve -v` 可验证本机服务边界（仅标准库，不调用 Bun）：loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务，以及 `--data` 指定的数据文件；另含启动时的预览地址与路径提示、端口占用时非 0 退出。
 
+## Boss 角色：生成诊断任务书
+
+`boss/make_brief.py` 生成任务书；可用 `--fx` 写入 `口径.汇率`（正数，人民币/美元），省略时保持默认输出且不写汇率。`观察期间` 可选写入 `起始期次`、`参考期次`、`截止期次`，各值必须来自 `期次` 列表。
+
+```bash
+python3 boss/make_brief.py --out <brief.json> [--month YYYY-MM] [--fx 人民币/美元]
+```
+
 ## DA 角色：合成原始数据 → 诊断快照
 
 `da/` 是诊断流水线里的 DA 角色：按任务书（brief）的观察期间与口径，把原始 CSV 归并成 schema v4 诊断快照。
