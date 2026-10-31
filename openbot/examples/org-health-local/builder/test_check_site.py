@@ -146,6 +146,18 @@ class CheckSiteTest(unittest.TestCase):
         )
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
 
+    def test_external_resource_in_stylesheet_fails(self) -> None:
+        dist = self.make_dist()
+        (dist / "styles.css").write_text(
+            '@import url("https://fonts.googleapis.com/css?family=Open+Sans");',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("styles.css 引用了外部 http(s) 资源", result.stdout)
+        self.assertIn("站点检查失败", result.stdout)
+
     def test_missing_referenced_file_fails(self) -> None:
         dist = self.make_dist()
         (dist / "index.html").write_text(
