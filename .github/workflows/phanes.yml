@@ -6,6 +6,19 @@ on:
 permissions:
   contents: read
 jobs:
+  example-json:
+    name: Validate example JSON
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse example JSON files
+        run: |
+          while IFS= read -r -d '' file; do
+            if ! python3 -m json.tool "$file" >/dev/null; then
+              echo "Invalid JSON: $file" >&2
+              exit 1
+            fi
+          done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
   openswarm:
     name: OpenSwarm tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}

@@ -6,6 +6,8 @@
 
 若需直接预览由 Builder 产出的站点目录，无需现场打包，可使用 `python3 serve.py --root /path/to/dist`。指定 `--root` 时仅从该目录服务白名单文件（`/`、`/index.html`、`/app.bundle.js`、`/styles.css`、`/data/diagnosis.json`），不再调用 Bun 打包；`/data/diagnosis.json` 默认读取 `<root>/data/diagnosis.json`，亦可使用 `--data` 单独覆盖。
 
+页面可直接用浏览器打印为 PDF。
+
 仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
 
 示例目录内运行 `python3 -m unittest test_serve -v` 可验证本机服务边界（仅标准库，不调用 Bun）：loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务，以及 `--data` 指定的数据文件。
