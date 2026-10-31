@@ -528,12 +528,10 @@ class AbnormalRawDataTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cost.csv", result.stdout + result.stderr)
 
-    @unittest.expectedFailure
     def test_negative_heads_is_rejected(self) -> None:
         """负数折算人头应判为原始数据错误。
 
-        已知 bug：与负数成本同理，负数人头也会被原样写进快照（页面只校验数值有限，不校验符号）。
-        修复后本用例应改回普通用例。
+        折算人头不能为负数：负数人头会进入快照并影响人均成本等派生指标。
         """
         raw_dir = copy_raw(self.folder, "raw-negative-heads")
         heads = raw_dir / "heads.csv"
