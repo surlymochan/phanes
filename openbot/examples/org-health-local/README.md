@@ -63,6 +63,20 @@ Builder 会调用 Bun 打包，因此无可用预构建包时依赖 Bun。显式
 
 以下章节按角色逐个说明本示例的脚本与产物。
 
+## 自检
+
+在本目录执行以下命令，可一键运行全部单元测试，或分别运行各模块的单元测试：
+
+```bash
+python3 run_tests.py
+python3 -m unittest discover -s . -p 'test_*.py'
+python3 -m unittest discover -s boss -p 'test_*.py'
+python3 -m unittest discover -s da -p 'test_*.py'
+python3 -m unittest discover -s builder -p 'test_*.py'
+python3 -m unittest discover -s review -p 'test_*.py'
+python3 -m unittest discover -s demo -p 'test_*.py'
+```
+
 仅展示人工构造的示例数据，不包含真实组织数据。在已安装仓库依赖和 Bun 的环境中运行 `python3 serve.py`；服务启动时编译共享翻译目录，在本机访问 http://127.0.0.1:8765/。启动后终端打印可点击的预览地址与当前服务信息，例如 `预览地址: http://127.0.0.1:8765/`，并给出站点根目录、诊断数据文件和路径白名单（`--root`/`--data` 指定的路径按实际值打印）。默认中文，使用 `?lang=en` 查看英文界面；其他未翻译语言回退英文，诊断数据是用户内容，保持原文。默认端口 8765，可用 `--port` 指定；端口已被占用时打印明确错误并以非 0 退出，不会静默改用其他端口，请先停止其他示例服务。
 
 未安装 Bun 时，未指定 `--root` 的启动会在 stderr 打印「未找到 bun 命令，请先安装 bun 或使用 --root 指向已构建好的静态站点」提示并以退出码 1 结束，不打印 traceback。
