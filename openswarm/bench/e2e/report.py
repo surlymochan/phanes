@@ -111,8 +111,12 @@ def stat_phrase(stat: dict, digits=1) -> str:
     )
 
 
-def write_summary(path: Path, env: dict | None, by_arm, by_task, by_cell) -> None:
+def write_summary(path: Path, env: dict | None, by_arm, by_task, by_cell, has_runs: bool | None = None) -> None:
     lines = ["# End-to-end task completion", ""]
+    is_empty = (not has_runs) if has_runs is not None else (not by_arm)
+    if is_empty:
+        lines.append("No runs to report (empty result set).")
+        lines.append("")
     if env:
         lines.append("## Environment")
         lines.append("")
@@ -366,9 +370,11 @@ def main(argv: list[str]) -> int:
     by_arm = group(runs, lambda row: row["arm"])
     by_task = group(runs, lambda row: row["task"])
     by_cell = group(runs, lambda row: f"{row['task']}\t{row['arm']}")
-    write_summary(out_dir / "summary.md", env, by_arm, by_task, by_cell)
+    write_summary(out_dir / "summary.md", env, by_arm, by_task, by_cell, has_runs=bool(runs))
     write_csv_all(out_dir / "scores.csv", [("arm", by_arm), ("task", by_task), ("task_arm", by_cell)])
     write_svg(out_dir / "chart.svg", by_arm)
+    if not runs:
+        print("Empty result set: nothing to report")
     print(f"wrote {out_dir / 'summary.md'}")
     print(f"wrote {out_dir / 'scores.csv'}")
     print(f"wrote {out_dir / 'chart.svg'}")

@@ -115,7 +115,6 @@ class EmptyResultSetTests(unittest.TestCase):
         self.assertIn("not a file", proc.stderr)
         self.assertIn("results", proc.stderr)
 
-    @unittest.expectedFailure
     def test_empty_result_set_says_that_it_is_empty(self):
         """report.py must state that the result set was empty.
 
