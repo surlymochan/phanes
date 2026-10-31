@@ -6828,6 +6828,21 @@ class AgyChild:
     def stderr_text(self):
         return "".join(self.stderr_lines)
 
+    def reap_after_stdout_eof(self, timeout=1.0):
+        """Return the child exit status after stdout closes, without killing a live child.
+
+        A wrapper can finish its token cleanup just after its child closes the
+        inherited stdout pipe.  Give that ordinary teardown a short bounded
+        chance to reap so the failed run records the real exit code.  A still
+        live process remains unknown and is deliberately left alone.
+        """
+        if self.proc is None:
+            return None
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return self.proc.poll()
+
     def close(self):
         if self.proc is None:
             return
@@ -7360,7 +7375,14 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             if lane_headless(lane):
                 if agy_resume_steer():
                     continue
+                exit_code = child.reap_after_stdout_eof()
+                if exit_code is not None:
+                    set_status(rdir, executor_exit_code=exit_code)
                 error_class, detail = lane_failure("resident executor stdout closed")
+                if exit_code is not None:
+                    # lane_failure intentionally prefers stderr for error
+                    # classification; retain the observed process status too.
+                    detail += f" (executor exit code {exit_code})"
                 return None, usage, error_class, 1, event_file, detail
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor stdout closed"
         block = enforced_risk(msg, risk_policy, ws["path"])

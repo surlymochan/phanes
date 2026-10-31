@@ -503,6 +503,29 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "gemini-3.8-flash-medium")
         self.assertEqual(calls[0][calls[0].index("--output-format") + 1], "stream-json")
 
+    def test_agy_silent_stdout_eof_records_reaped_exit_code(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "silent-eof"
+        self.start_lane()
+        run_id = self.assign("inspect the fixture")
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["executor_exit_code"], 17)
+        self.assertEqual(result["attempts"][-1]["error_class"], "exec_error")
+        self.assertIn("executor exit code 17", result["attempts"][-1]["error_tail"])
+
+    def test_agy_silent_stdout_eof_keeps_stderr_and_exit_code(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "silent-eof-stderr"
+        self.start_lane()
+        run_id = self.assign("inspect the fixture")
+        self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        tail = result["attempts"][-1]["error_tail"]
+        self.assertIn("transient provider transport failure", tail)
+        self.assertIn("executor exit code 17", tail)
+
     def test_agy_steer_aborts_the_process_and_resumes_the_conversation(self):
         self.set_config("agy")
         self.start_lane()
