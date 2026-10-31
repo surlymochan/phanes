@@ -78,6 +78,11 @@ class PatternsTests(unittest.TestCase):
         self.assertLessEqual(len(block), xs.PATTERNS_MAX_CHARS)
         self.assertEqual(ids[0], "P-0001")
 
+    def test_selection_returns_empty_block_and_ids_for_empty_skills_directory(self):
+        block, ids = xs.select_patterns(self.policy, "fix", "codex", paths=["src/file.py"])
+        self.assertEqual(block, "")
+        self.assertEqual(ids, [])
+
     def test_preview_shows_matching_lessons_and_patterns(self):
         self.write_pattern("P-0010", "Preview pattern", card_types="[fix]", backends="[codex]")
         (self.knowledge / "lessons").mkdir()
