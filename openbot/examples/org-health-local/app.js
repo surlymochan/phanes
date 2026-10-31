@@ -34,10 +34,7 @@ function normalizeSnapshot(data) {
     stage.指标.length === 0 ||
     !stage.指标.every(
       (item) =>
-        typeof item?.分档 === "string" &&
-        item.分档.trim() &&
-        typeof item?.例证 === "string" &&
-        item.例证.trim(),
+        typeof item?.分档 === "string" && item.分档.trim() && typeof item?.例证 === "string" && item.例证.trim(),
     )
   ) {
     throw new Error(t("orgHealthDemo.badStructure"));
@@ -247,7 +244,10 @@ function renderCalibration(data) {
   if (Array.isArray(raw)) {
     items = raw;
   } else if (typeof raw === "string") {
-    items = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+    items = raw
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
   } else if (typeof raw === "object") {
     items = Object.entries(raw).map(([k, v]) => `${k}：${v}`);
   }

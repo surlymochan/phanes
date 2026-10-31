@@ -6,16 +6,7 @@
   "$comment": "指标标题与页面 expected 数组一致；series 键名是页面按名读取的锚点。",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "scope",
-    "conclusion",
-    "origin",
-    "metrics",
-    "insights",
-    "definitions",
-    "risks",
-    "recommendations"
-  ],
+  "required": ["scope", "conclusion", "origin", "metrics", "insights", "definitions", "risks", "recommendations"],
   "properties": {
     "scope": {
       "$ref": "#/$defs/scope"
@@ -164,12 +155,7 @@
         "数值": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "收入万美元每月",
-            "整体技术人力成本率",
-            "营收业务技术人力成本率",
-            "全口径技术成本率含运维设施"
-          ],
+          "required": ["收入万美元每月", "整体技术人力成本率", "营收业务技术人力成本率", "全口径技术成本率含运维设施"],
           "properties": {
             "收入万美元每月": {
               "$ref": "#/$defs/revenueSeries"
