@@ -66,7 +66,8 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "method": "item/started", "params": {
             "threadId": thread_id, "turnId": turn_id,
             "item": {"id": "fake-command", "type": "commandExecution",
-                     "command": "git push secret-value" if "LANE_TEST_RISK" in prompt else "python fake task"}}})
+                     "command": "git push secret-value" if "LANE_TEST_RISK" in prompt
+                     else "rm -rf /etc/fake-outside" if "LANE_TEST_RM_OUTSIDE" in prompt else "python fake task"}}})
         steered = ""
         aborted = False
         wait_until = time.time() + (20 if "LANE_TEST_WAIT" in prompt else 0.25)

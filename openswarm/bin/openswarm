@@ -3267,6 +3267,7 @@ PROMPT_TMPL = """You are an execution agent dispatched by a planning agent. Comp
 
 Rules:
 - Work only inside the current directory ({wd}). It is a dedicated git worktree; do NOT commit, push, or switch branches.
+- Never create, modify, move, or delete files outside {wd}. For scratch files use $TMPDIR (it lives inside the worktree and is cleaned after the run).
 - Keep changes minimal and focused on the task; match the surrounding code style.
 - Run the most relevant tests/linters if they exist and report the outcome honestly.
 - If something blocks you, stop and report status "partial" or "failed" with the reason; do not fake success.
@@ -7286,6 +7287,25 @@ def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
     return new_child, True
 
 
+PI_STREAM_EVENTS = ("message_update", "tool_execution_update")
+
+
+def pi_compact_event(msg):
+    """Drop the accumulated message snapshot pi repeats on every streaming delta.
+
+    A pi ``message_update`` carries the whole partial message (and the delta event carries it again
+    as ``partial``), so an 8-minute run wrote ~170 MB. The delta itself and every final event
+    (message_end, tool_execution_end, agent_end) are kept, so usage and reports are unaffected.
+    """
+    if not isinstance(msg, dict) or msg.get("type") not in PI_STREAM_EVENTS:
+        return msg
+    out = {k: v for k, v in msg.items() if k not in ("message", "partialResult")}
+    delta = out.get("assistantMessageEvent")
+    if isinstance(delta, dict) and "partial" in delta:
+        out["assistantMessageEvent"] = {k: v for k, v in delta.items() if k != "partial"}
+    return out
+
+
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -7617,6 +7637,35 @@ def lane_approval_response(child, msg, event_file):
     return True
 
 
+MAX_RISK_DENIALS = 3
+DENIABLE_RISKS = ("rm outside worktree",)
+
+
+def lane_risk_deniable(lane, block, spec):
+    """A risk the lane can refuse per command (and let the model continue) instead of stopping the run."""
+    return (lane["backend"] in ("pi", "codex") and block.get("risk") in DENIABLE_RISKS
+            and len(spec.get("risk_denials") or []) < MAX_RISK_DENIALS and not spec.get("abort_requested"))
+
+
+def risk_denial_prompt(block, wd):
+    return (f"The command you just issued was refused by the OpenSwarm guard ({block.get('risk')}): "
+            f"deleting paths outside the worktree {wd} is not allowed and that command was not run. "
+            "Do not retry it. Stay inside the worktree; for scratch files use $TMPDIR. "
+            "Continue the task from where you stopped.\n\n" + REPORT_INSTRUCTION)
+
+
+def lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
+    """After a turn interrupted by a risk denial ends, continue the same session; True when resumed."""
+    correction = turn.pop("risk_resume", None)
+    if not correction or budget_hit or spec.get("abort_requested") or not child.alive():
+        return False
+    turn["abort_sent"] = False
+    turn.pop("abort_pending", None)
+    lane_record_event(event_file, {"type": "risk_resume"})
+    lane_continue_turn(lane, child, correction, event_file, turn)
+    return True
+
+
 def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, attempt=1, continuation=False):
     event_file = (spec.get("_event_file") if attempt == 1 else None) or \
                  os.path.join(rdir, f"events.{attempt}.{lane['backend']}.jsonl")
@@ -7739,7 +7788,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     detail += f" (executor exit code {exit_code})"
                 return None, usage, error_class, 1, event_file, detail
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor stdout closed"
-        block = enforced_risk(msg, risk_policy, ws["path"])
+        block = None if turn.get("risk_resume") else enforced_risk(msg, risk_policy, ws["path"])
+        if block and lane_risk_deniable(lane, block, spec):
+            # Refuse only this command: interrupt the turn, then continue the same session with the reason.
+            spec.setdefault("risk_denials", []).append(block)
+            set_status(rdir, risk_denials=spec["risk_denials"])
+            lane_record_event(event_file, {"type": "risk_denied", **block})
+            turn["risk_resume"] = risk_denial_prompt(block, ws["path"])
+            lane_abort_child(lane, child, turn)
+            continue
         if block:
             spec.setdefault("risk_blocks", []).append(block)
             spec["abort_requested"] = True
@@ -7774,6 +7831,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             if method == "turn/completed":
                 t = params.get("turn") or {}
                 usage = t.get("usage") or usage
+                if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
+                    continue
                 ended = True
             elif method == "turn/failed":
                 errors.append(short(params.get("error") or params, 400))
@@ -7781,7 +7840,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             elif method == "error":
                 errors.append(short(params.get("error") or params, 400))
         elif lane["backend"] == "pi":
-            lane_record_event(event_file, msg)
+            lane_record_event(event_file, pi_compact_event(msg))
             if msg.get("type") == "message_end":
                 message = msg.get("message") or {}
                 if message.get("role") == "assistant":
@@ -7799,6 +7858,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                         text = "".join(b.get("text", "") for b in message.get("content") or []
                                        if isinstance(b, dict) and b.get("type") == "text")
                         final = extract_json(text) or final
+                if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
+                    continue
                 ended = True
         elif lane_headless(lane):
             lane_record_event(event_file, msg)
