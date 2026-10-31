@@ -131,6 +131,7 @@ class LessonsTests(unittest.TestCase):
 
     def test_paths_hint_matches_and_missing_repo_is_empty(self):
         self.write_lesson("path.yaml", "L-0010", "touch the hinted path", paths="[src/*.py]")
+        self.write_lesson("unrelated-path.yaml", "L-0016", "touch a different path", paths="[docs/*.md]")
         self.assertEqual(xs.select_lessons(self.policy, "fix", "codex", paths=["src/a.py"])[1], ["L-0010"])
         self.assertEqual(xs.select_lessons({"knowledge": {"repo": str(self.root / "absent")}}, "fix", "codex"),
                          ("", []))
