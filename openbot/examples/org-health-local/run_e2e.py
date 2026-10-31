@@ -28,7 +28,18 @@ def parse_args(argv=None):
 def run_step(name, command, stdout=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
-    result = subprocess.run(command, stdout=stdout)
+    try:
+        # Python 将缺失的脚本作为退出码报告，而不是抛出异常；先检查本地角色脚本，
+        # 这样错误能归属到具体步骤，避免只留下子进程的错误输出。
+        script = Path(command[1]) if command[0] == sys.executable and len(command) > 1 else None
+        if script is not None and not script.is_file():
+            raise FileNotFoundError(2, 'No such file or directory', str(script))
+        result = subprocess.run(command, stdout=stdout)
+    except FileNotFoundError as error:
+        elapsed = time.monotonic() - started
+        print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
+        print(f'步骤失败: {name} (文件不存在: {error.filename})', file=sys.stderr, flush=True)
+        return False
     elapsed = time.monotonic() - started
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:

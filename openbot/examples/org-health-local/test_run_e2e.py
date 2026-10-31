@@ -157,6 +157,20 @@ elif role == 'builder':
         self.assertIn('步骤失败: DA', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
 
+    def test_missing_role_script_reports_step_and_stops_pipeline(self):
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        self.scripts[1].unlink()
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: DA', result.stderr)
+        self.assertIn(str(self.scripts[1]), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual([call[0] for call in self.calls()], ['boss'])
+        self.assertNotIn('[Builder] 命令', result.stdout)
+
     def test_builder_failure_stops_pipeline_and_returns_nonzero(self):
         """Builder 失败时打印失败步骤并以非零退出，站点自检不再执行。"""
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
