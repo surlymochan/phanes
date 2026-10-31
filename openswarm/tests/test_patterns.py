@@ -83,6 +83,19 @@ class PatternsTests(unittest.TestCase):
         self.assertEqual(block, "")
         self.assertEqual(ids, [])
 
+    def test_pattern_apply_paths_normalizes_and_collapses_paths(self):
+        cases = (
+            (["README.md"], ["README.md"]),
+            (["src/file.py"], ["src/**"]),
+            (["src/one.py", "src/two.py"], ["src/**"]),
+            (["src/one.py", "tests/two.py"], []),
+            (["./src\\file.py"], ["src/**"]),
+            (["", None, "src/file.py"], ["src/**"]),
+        )
+        for paths, expected in cases:
+            with self.subTest(paths=paths):
+                self.assertEqual(xs.pattern_apply_paths(paths), expected)
+
     def test_preview_shows_matching_lessons_and_patterns(self):
         self.write_pattern("P-0010", "Preview pattern", card_types="[fix]", backends="[codex]")
         (self.knowledge / "lessons").mkdir()
