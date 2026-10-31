@@ -1071,11 +1071,14 @@ def write_snapshot(path: Path, snapshot: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     """命令行入口。返回进程退出码。"""
     parser = argparse.ArgumentParser(description="按任务书口径生成 schema v4 诊断快照。")
-    parser.add_argument("--brief", type=Path, required=True, help="任务书 JSON 路径。")
-    parser.add_argument("--raw", type=Path, required=True, help="原始数据目录（若干 CSV）。")
-    parser.add_argument("--out", type=Path, required=True, help="输出诊断快照 JSON 路径。")
+    parser.add_argument("--brief", type=Path, help="任务书 JSON 路径。")
+    parser.add_argument("--raw", type=Path, help="原始数据目录（若干 CSV）。")
+    parser.add_argument("--out", type=Path, help="输出诊断快照 JSON 路径。")
     parser.add_argument("--strict", action="store_true", help="任一指标缺少观察期次数据时失败。")
     args = parser.parse_args(argv)
+    missing_args = [name for name in ("--brief", "--raw", "--out") if getattr(args, name[2:]) is None]
+    if missing_args:
+        parser.error("缺少必需参数：" + "、".join(missing_args))
     try:
         snapshot = build_from_files(args.brief, args.raw)
     except (BriefError, RawDataError, SnapshotError) as cause:
@@ -1086,7 +1089,11 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             print("严格模式失败：观察期间存在指标缺失期次：" + "；".join(missing), file=sys.stderr)
             return EXIT_DATA
-    write_snapshot(args.out, snapshot)
+    try:
+        write_snapshot(args.out, snapshot)
+    except OSError as cause:
+        print(f"无法写出诊断快照 {args.out}：{cause}", file=sys.stderr)
+        return EXIT_DATA
     print(f"{args.out}: 已生成诊断快照")
     return EXIT_OK
 
