@@ -60,7 +60,7 @@
       "description": "期间口径，与 scope 的“观察月份”“数据截止”对齐。",
       "type": "object",
       "additionalProperties": false,
-      "required": ["观察月份", "数据截止", "期次", "说明"],
+      "required": ["观察月份", "数据截止", "起始期次", "参考期次", "截止期次", "期次", "说明"],
       "properties": {
         "观察月份": {
           "description": "观察月份，格式 YYYY-MM。",
@@ -71,6 +71,21 @@
           "description": "数据截止日期，格式 YYYY-MM-DD。",
           "type": "string",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "起始期次": {
+          "description": "观察期间起始月份，格式 YYYY-MM。",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"
+        },
+        "参考期次": {
+          "description": "H1 参考月份，格式 YYYY-MM。",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"
+        },
+        "截止期次": {
+          "description": "观察期间截止月份，格式 YYYY-MM。",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"
         },
         "期次": {
           "description": "期次锚点，键名与站点数值序列一致。",
@@ -92,12 +107,18 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "汇率",
         "整体技术人力成本",
         "整体折算人头",
         "营收业务（含共享平台）技术人力成本与折算人头",
         "收入与成本率"
       ],
       "properties": {
+        "汇率": {
+          "description": "人民币兑美元换算率。",
+          "type": "number",
+          "minimum": 0.000001
+        },
         "整体技术人力成本": {
           "$ref": "#/$defs/口径项"
         },

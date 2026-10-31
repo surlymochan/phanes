@@ -94,18 +94,21 @@ class MakeBriefTest(unittest.TestCase):
     def test_口径_covers_metric_titles(self) -> None:
         """口径与示例 metrics 的标题、顺序一一对应。"""
         titles = [metric["标题"] for metric in self.example["metrics"]]
-        self.assertEqual(list(self.brief["口径"]), titles)
-        self.assertEqual(list(self.brief["口径"]), list(make_brief.METRIC_TITLES))
+        self.assertEqual([title for title in self.brief["口径"] if title != "汇率"], titles)
+        self.assertEqual([title for title in self.brief["口径"] if title != "汇率"],
+                         list(make_brief.METRIC_TITLES))
 
     def test_口径_states_units_and_period(self) -> None:
         """每个口径都写明单位与期间定义。"""
         for title, item in self.brief["口径"].items():
+            if title == "汇率":
+                continue
             with self.subTest(title=title):
                 self.assertTrue(item["单位"].strip())
                 self.assertTrue(item["定义"].strip())
                 self.assertTrue(item["期间"].strip())
                 self.assertTrue(item["缺失处理"].strip())
-        units = {title: item["单位"] for title, item in self.brief["口径"].items()}
+        units = {title: item["单位"] for title, item in self.brief["口径"].items() if title != "汇率"}
         self.assertIn("万元/月", units["整体技术人力成本"])
         self.assertIn("万美元/月", units["收入与成本率"])
 

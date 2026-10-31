@@ -148,6 +148,7 @@ def build_definitions(keys: list[str], month: str) -> dict:
     reference = f"{month[:4]}-05H1参考"
     missing = "该期次没有同口径取数时写 null，界面显示为未提供，不以 0 或推测值替代。"
     return {
+        "汇率": 7.2,
         "整体技术人力成本": {
             "单位": "万元/月",
             "定义": "技术人力成本为当期计入的技术人力相关成本合计，不含运维与设施。",
@@ -189,6 +190,9 @@ def build_brief(goals: list[str] | None = None, month: str | None = None) -> dic
         "观察期间": {
             "观察月份": observed,
             "数据截止": month_end(observed),
+            "起始期次": f"{observed[:4]}-01",
+            "参考期次": f"{observed[:4]}-05",
+            "截止期次": observed,
             "期次": keys,
             "说明": (
                 f"观察月份 {observed}，数据截止 {month_end(observed)}；"

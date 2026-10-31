@@ -34,7 +34,15 @@ def report_hashes(report: object) -> dict[str, str]:
     """读取报告中的文件摘要，兼容 files 或顶层 sha256 两种表示。"""
     if not isinstance(report, dict):
         raise ValueError("build-report.json 必须是对象")
-    source = report.get("files", report.get("sha256"))
+    source = report.get("files")
+    if source is None and isinstance(report.get("文件清单"), list):
+        source = {
+            item.get("路径"): item.get("sha256")
+            for item in report["文件清单"]
+            if isinstance(item, dict)
+        }
+    if source is None:
+        source = report.get("sha256")
     if not isinstance(source, dict):
         raise ValueError("build-report.json 缺少 files 或 sha256 对象")
     hashes: dict[str, str] = {}
