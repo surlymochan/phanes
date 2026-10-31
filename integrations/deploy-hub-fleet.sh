@@ -39,14 +39,15 @@ gocc_runtime="${OPENSWARM_GOCC_RUNTIME:-/Users/surlymo/tools/openswarm-executor-
 gocc_repo="${OPENSWARM_GOCC_REPO:-/Users/surlymo/work/phanes-fleet-d6f3f2f2}"
 gores1_runtime="${OPENSWARM_GORES1_RUNTIME:-/root/tools/openswarm-executor-candidate}"
 gores1_repo="${OPENSWARM_GORES1_REPO:-/root/work/phanes-fleet-d6f3f2f2}"
-required=(openswarm openswarm-fleet openswarm-auto hub-openswarm-bridge fleet-result-bundle)
+required=(openswarm openswarm-fleet openswarm-auto hub-openswarm-bridge fleet-result-bundle openswarm-fleet-bundle-adapter)
 
-for file in "${required[@]}"; do
-  test -x "$source_root/openswarm/bin/$file" || { echo "missing source helper: $file" >&2; exit 1; }
-done
 git -C "$source_root" diff --quiet
 git -C "$source_root" diff --cached --quiet
+git -C "$source_root" fetch --no-tags origin main
 git -C "$source_root" cat-file -e "$sha^{commit}"
+for file in "${required[@]}"; do
+  git -C "$source_root" cat-file -e "$sha:openswarm/bin/$file" || { echo "missing selected source helper: $file" >&2; exit 1; }
+done
 test -f "$bridge_config" && test -f "$hub_plist"
 
 remote_preflight() {
@@ -85,9 +86,7 @@ if (( ! apply )); then
   exit 0
 fi
 
-git -C "$source_root" fetch --no-tags origin main
 git -C "$source_root" cat-file -e "$sha^{commit}"
-git -C "$source_root" checkout --detach "$sha"
 stage="$(mktemp -d "${TMPDIR:-/tmp}/phanes-hub-fleet.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 bundle="$stage/phanes-$sha.bundle"
@@ -102,17 +101,36 @@ git -C "$source_root" bundle verify "$bundle" >/dev/null
 git -C "$source_root" update-ref -d "$bundle_ref"
 trap 'rm -rf "$stage"' EXIT
 
+# Keep a clean, persistent source checkout for the Hub bridge.  The template
+# itself stays on its own clean branch: running a deployment must never detach
+# or overwrite the worktree which contains this script.
+hub_source="$hub_runtime/releases/$sha/phanes-source"
+prepare_hub_source() {
+  if [ -d "$hub_source/.git" ]; then
+    test "$(git -C "$hub_source" rev-parse HEAD)" = "$sha"
+    test -z "$(git -C "$hub_source" status --porcelain)"
+    return
+  fi
+  mkdir -p "$(dirname "$hub_source")"
+  source_staging="$(dirname "$hub_source")/.phanes-source-$sha-$$"
+  git clone --no-checkout "$source_root" "$source_staging"
+  git -C "$source_staging" checkout --detach "$sha"
+  mv "$source_staging" "$hub_source"
+}
+prepare_hub_source
+
 install_local_runtime() {
   mkdir -p "$hub_runtime/bin" "$hub_home"
   chmod 700 "$hub_runtime" "$hub_runtime/bin"
-  for file in "${required[@]}"; do
-    install -m 700 "$source_root/openswarm/bin/$file" "$hub_runtime/bin/$file"
-  done
+  # The command entrypoints resolve several sibling helpers (for example the
+  # Pi isolated runner) from their own directory.  Deploy the complete bin
+  # tree from the selected main revision rather than a hand-maintained subset.
+  cp -pR "$hub_source/openswarm/bin/." "$hub_runtime/bin/"
 
   # openswarm-fleet intentionally fixes OPENSWARM_HOME to hub_home, so the
   # direct-fleet inventory belongs there. The existing capacity guard remains
   # at its established path and is supplied through launchd below.
-  python3 - "$hub_home/fleet.json" "$source_root" "$gocc_runtime" "$gocc_repo" "$gores1_runtime" "$gores1_repo" <<'PY'
+  python3 - "$hub_home/fleet.json" "$hub_source" "$gocc_runtime" "$gocc_repo" "$gores1_runtime" "$gores1_repo" <<'PY'
 import json, os, pathlib, sys, tempfile
 path, local_repo, gocc_bin, gocc_repo, gores_bin, gores_repo = map(pathlib.Path, sys.argv[1:])
 payload = {"hosts": [
@@ -129,7 +147,7 @@ PY
 
   # Preserve the user's configured Hub workspace; only move its result-fetch
   # repository to the clean checkout pinned to the requested main commit.
-  python3 - "$bridge_config" "$source_root" <<'PY'
+  python3 - "$bridge_config" "$hub_source" <<'PY'
 import json, os, pathlib, sys, tempfile
 path, repo = map(pathlib.Path, sys.argv[1:])
 data = json.load(path.open())
@@ -178,14 +196,73 @@ release_root="$runtime/releases/$sha"
 if [ ! -d "$release_root/openswarm/bin" ]; then
   staging="$runtime/releases/.staging-$sha-$$"
   mkdir -p "$staging"
-  git -C "$repo" archive "$sha" openswarm/bin/openswarm openswarm/bin/openswarm-fleet \
-    openswarm/bin/openswarm-auto openswarm/bin/hub-openswarm-bridge \
-    openswarm/bin/fleet-result-bundle openswarm/bin/openswarm-fleet-bundle-adapter | tar -x -C "$staging"
-  chmod 700 "$staging/openswarm/bin"/*
+  # `openswarm` resolves sibling runner/helper scripts by location.  Archive
+  # its complete bin tree from the selected revision, preserving file modes.
+  git -C "$repo" archive "$sha" openswarm/bin | tar -x -C "$staging"
   mv "$staging" "$release_root"
 fi
 release_bin="$release_root/openswarm/bin"
-installed=0
+
+# These are stateless one-shot helpers used by the Hub transport.  Versioning
+# them here does not restart a lane or replace the ordinary openswarm wrapper,
+# and lets result retrieval work even when every lane is temporarily busy.
+atomic_install() {
+  source="$1"; destination="$2"
+  temporary="$(mktemp "${destination}.XXXXXX")"
+  install -m 700 "$source" "$temporary"
+  mv -f "$temporary" "$destination"
+}
+atomic_install "$release_bin/openswarm-fleet-bundle-adapter" "$runtime/bin/openswarm-fleet-bundle-adapter"
+atomic_install "$release_bin/fleet-result-bundle" "$runtime/bin/fleet-result-bundle"
+
+roll_service() {
+  lane="$1"
+  if [ "$(uname -s)" = Darwin ]; then
+    case "$lane" in
+      C1) label=app.openswarm.executor.codex ;; A1) label=app.openswarm.executor.agy ;;
+      A2) label=app.openswarm.executor.agy2 ;; GH1) label=app.openswarm.executor.copilot ;;
+      GH2) label=app.openswarm.executor.copilot-complex ;; *) return 2 ;;
+    esac
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    python3 - "$plist" "$release_bin/openswarm-fleet" "$lane" <<'PY'
+import os, pathlib, plistlib, sys, tempfile
+path, executable, lane = map(pathlib.Path, sys.argv[1:])
+with path.open('rb') as source: data = plistlib.load(source)
+arguments = data.get('ProgramArguments')
+if not isinstance(arguments, list) or arguments[-3:] != ['lane', 'serve', str(lane)]: raise SystemExit('unexpected launchd lane definition')
+arguments[0] = str(executable)
+fd, temp = tempfile.mkstemp(prefix='openswarm-lane.', dir=path.parent)
+with os.fdopen(fd, 'wb') as out: plistlib.dump(data, out)
+os.chmod(temp, 0o600); os.replace(temp, path)
+PY
+    domain="gui/$(id -u)"
+    launchctl bootout "$domain/$label"
+    launchctl bootstrap "$domain" "$plist"
+    launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm-fleet" >/dev/null
+  else
+    case "$lane" in
+      K1) unit=openswarm-executor-cursor.service ;; M1) unit=openswarm-executor-pi.service ;;
+      M2) unit=openswarm-executor-pi2.service ;; M3) unit=openswarm-executor-m3.service ;;
+      M4) unit=openswarm-executor-m4.service ;; *) return 2 ;;
+    esac
+    unit_path="$(systemctl show -p FragmentPath --value "$unit")"
+    python3 - "$unit_path" "$release_bin/openswarm-fleet" "$lane" <<'PY'
+import os, pathlib, re, sys, tempfile
+path, executable, lane = map(pathlib.Path, sys.argv[1:])
+text = path.read_text(); replacement = f'ExecStart={executable} lane serve {lane}'
+updated, count = re.subn(r'^ExecStart=.* lane serve ' + re.escape(str(lane)) + r'$', replacement, text, flags=re.M)
+if count != 1: raise SystemExit('unexpected systemd lane definition')
+fd, temp = tempfile.mkstemp(prefix='openswarm-lane.', dir=path.parent)
+with os.fdopen(fd, 'w') as out: out.write(updated)
+os.chmod(temp, 0o644); os.replace(temp, path)
+PY
+    systemctl daemon-reload
+    systemctl restart "$unit"
+    test "$(systemctl show -p ActiveState --value "$unit")" = active
+    systemctl show -p ExecStart --value "$unit" | grep -F "$release_bin/openswarm-fleet" >/dev/null
+  fi
+}
+rolled=0
 for lane in $lanes; do
   status="$("$runtime/bin/openswarm-fleet" lane status)"
   if python3 - "$lane" "$status" <<'PY'
@@ -210,18 +287,10 @@ PY
   # C1/K1 use older source repositories, so each lane's own common Git dir
   # receives the selected object before its worktree is detached at main.
   git -C "$wt" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
-  if [ "$installed" -eq 0 ]; then
-    # These named helpers add source-host bundle support without replacing the
-    # shared active runtime. Ordinary calls continue through the old wrapper.
-    install -m 700 "$release_bin/openswarm-fleet-bundle-adapter" "$runtime/bin/openswarm-fleet-bundle-adapter"
-    install -m 700 "$release_bin/fleet-result-bundle" "$runtime/bin/fleet-result-bundle"
-    installed=1
-  fi
   git -C "$wt" checkout --detach "$sha"
-  "$release_bin/openswarm-fleet" lane down "$lane"
-  "$release_bin/openswarm-fleet" lane up "$lane"
+  roll_service "$lane"
   after="$("$runtime/bin/openswarm-fleet" lane status)"
-  python3 - "$lane" "$after" "$release_bin/openswarm" <<'PY'
+  python3 - "$lane" "$after" "$release_bin/openswarm-fleet" <<'PY'
 import json, subprocess, sys
 lane, status, executable = sys.argv[1:]
 row = next((row for row in json.loads(status) if row.get("name") == lane), None)
@@ -231,19 +300,43 @@ command = subprocess.check_output(["ps", "-p", str(row["supervisor_pid"]), "-o",
 if executable not in command:
     raise SystemExit("new lane supervisor did not use selected release")
 PY
+  rolled=1
   echo "rolled lane: $lane"
 done
-if [ "$installed" -eq 0 ]; then echo "no idle clean lane on this host; retry later"; fi
+if [ "$rolled" -eq 0 ]; then echo "no idle clean lane on this host; retry later"; fi
 REMOTE
+}
+
+local_roll_service() {
+  local lane="$1" release_bin="$2" label plist domain
+  case "$lane" in
+    K1) label=app.openswarm.phanes.k1 ;;
+    K2) label=app.openswarm.phanes.k2 ;;
+    *) echo "no verified local launchd label for $lane" >&2; return 2 ;;
+  esac
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  python3 - "$plist" "$release_bin/openswarm" "$lane" <<'PY'
+import os, pathlib, plistlib, sys, tempfile
+path, executable, lane = map(pathlib.Path, sys.argv[1:])
+with path.open('rb') as source: data = plistlib.load(source)
+arguments = data.get('ProgramArguments')
+if not isinstance(arguments, list) or arguments[-3:] != ['lane', 'serve', str(lane)]: raise SystemExit('unexpected local launchd lane definition')
+arguments[0] = str(executable)
+fd, temp = tempfile.mkstemp(prefix='openswarm-lane.', dir=path.parent)
+with os.fdopen(fd, 'wb') as out: plistlib.dump(data, out)
+os.chmod(temp, 0o600); os.replace(temp, path)
+PY
+  domain="gui/$(id -u)"
+  launchctl bootout "$domain/$label"
+  launchctl bootstrap "$domain" "$plist"
+  launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm" >/dev/null
 }
 
 local_apply() {
   local release_root="$local_runtime/releases/$sha" release_bin="$local_runtime/releases/$sha/openswarm/bin"
   if [ ! -d "$release_bin" ]; then
-    mkdir -p "$release_root/openswarm/bin"
-    for file in "${required[@]}" openswarm-fleet-bundle-adapter; do
-      install -m 700 "$source_root/openswarm/bin/$file" "$release_bin/$file"
-    done
+    mkdir -p "$release_root"
+    git -C "$hub_source" archive "$sha" openswarm/bin | tar -x -C "$release_root"
   fi
   for lane in K1 K2; do
     local status code wt after
@@ -266,12 +359,7 @@ PY
     fi
     git -C "$wt" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
     git -C "$wt" checkout --detach "$sha"
-    OPENSWARM_HOME="$local_home" OPENSWARM_FLEET_GUARD_REQUIRED=1 \
-      OPENSWARM_FLEET_GUARD_CONFIG="$local_home/fleet-capacity.json" \
-      "$release_bin/openswarm" lane down "$lane"
-    OPENSWARM_HOME="$local_home" OPENSWARM_FLEET_GUARD_REQUIRED=1 \
-      OPENSWARM_FLEET_GUARD_CONFIG="$local_home/fleet-capacity.json" \
-      "$release_bin/openswarm" lane up "$lane"
+    local_roll_service "$lane" "$release_bin"
     after="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
     python3 - "$lane" "$after" "$release_bin/openswarm" <<'PY'
 import json, subprocess, sys
