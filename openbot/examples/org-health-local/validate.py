@@ -6,6 +6,12 @@
 
 默认校验 data/diagnosis.json。只使用标准库。校验失败时退出码非 0，
 并逐条打印出错路径，例如 /scope/schema版本。
+
+字段处理规则全部来自结构定义，不在代码里写死字段名：
+- 定义里 required 列出的字段缺省时报错（_check_object）；
+- 定义里 properties 声明的可选字段（例如 口径说明）只在数据里出现时才校验，
+  缺省不报错，出现时按定义校验类型与元素约束（_check、_check_array）；
+- 定义里 additionalProperties 为 false 时，未声明的字段按额外字段报错。
 """
 from __future__ import annotations
 
