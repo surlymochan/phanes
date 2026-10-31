@@ -1,0 +1,288 @@
+{
+  "version": 1,
+  "id": "org-diagnosis-pipeline",
+  "title": "组织诊断场景：Boss→DA→Builder 三角色流水线",
+  "issue": "phanes#54",
+  "parent_issue": "phanes#6",
+  "doc": "docs/scenario/org-diagnosis/pipeline.md",
+  "kind": "example",
+  "summary": "用 OpenSwarm 编排 Boss→DA→Builder 三阶段流水线：每阶段有任务提示、产物路径和 --verify 门禁；下一阶段的 --base 取上一阶段的提交；每阶段后做一次跨执行器交叉审查；真实组织数据只经仓库外的 --data 绝对路径进入。",
+  "prerequisites": {
+    "openswarm_cli": "openswarm（或 openswarm/bin/openswarm）",
+    "python": ">=3.9",
+    "executors": [
+      "codex"
+    ],
+    "reviewers": [
+      "pi",
+      "agy",
+      "cursor"
+    ],
+    "notes": [
+      "codex 运行的交叉审查执行器只能是 agy/pi/cursor 之一（openswarm/bin/openswarm:5487-5494）。",
+      "交叉审查要求该阶段有 openswarm/<run-id> 分支且 diff 非空（openswarm/bin/openswarm:5532-5543），所以每个阶段都必须在仓库内留下不含真实数据的提交。",
+      "openswarm 只建分支和提交，不合并也不推送；合入由人工评审后执行。"
+    ]
+  },
+  "variables": {
+    "REPO": {
+      "default": ".",
+      "description": "Phanes 仓库根目录；作为 --cwd 传入，verify 里的仓库内路径按 worktree 根解析。"
+    },
+    "WORKSPACE": {
+      "default": "",
+      "description": "仓库外工作目录：放真实数据、任务提示文件与 DA 产物。必须位于仓库之外，runner 会拒绝仓库内的取值。"
+    },
+    "BASE": {
+      "default": "HEAD",
+      "description": "流水线起始提交；第一阶段的 --base 取它，之后每阶段用上一阶段的提交覆盖。"
+    },
+    "DATA": {
+      "default": "${WORKSPACE}/data/diagnosis.raw.json",
+      "description": "真实组织原始数据（仓库外绝对路径），由数据提供方给出。"
+    },
+    "DIAGNOSIS": {
+      "default": "${WORKSPACE}/out/da/diagnosis.json",
+      "description": "DA 阶段产出的诊断 JSON（仓库外绝对路径，schema v4 结构）。"
+    },
+    "OPENSWARM": {
+      "default": "openswarm",
+      "description": "openswarm CLI；未安装时可用仓库内的 openswarm/bin/openswarm。"
+    },
+    "REVIEWER": {
+      "default": "pi",
+      "description": "交叉审查执行器，必须与阶段执行器不同族。"
+    }
+  },
+  "data_policy": {
+    "real_data": "${DATA}",
+    "diagnosis_output": "${DIAGNOSIS}",
+    "repo_fixture": "openbot/examples/org-health-local/data/diagnosis.json",
+    "rules": [
+      "真实组织数据只经仓库外的绝对路径读入（openbot/examples/org-health-local/serve.py:39-42 的 --data）。",
+      "仓库内只保留合成示例 openbot/examples/org-health-local/data/diagnosis.json。",
+      "DA 阶段的诊断 JSON 写在仓库外，不随 openswarm 分支提交。",
+      "每个阶段只把不含真实数据的说明文件提交进仓库，保证交叉审查有 diff 可看。",
+      "verify 命令里指向仓库内的路径用相对路径（相对 worktree 根），指向仓库外的路径用绝对路径：openswarm 只会把 base 仓库的绝对路径前缀改写成 worktree 路径（openswarm/bin/openswarm:4923-4926）。"
+    ],
+    "forbidden_paths": [
+      "(^|/)diagnosis[^/]*\\.json$"
+    ],
+    "allowed_paths": [
+      "openbot/examples/org-health-local/data/diagnosis.json"
+    ],
+    "guards": [
+      "git -C \"${REPO}\" diff --name-only <stage-base>..<stage-commit>",
+      "git -C \"${REPO}\" show --stat <stage-commit>"
+    ],
+    "guard_meaning": "第一条命令列出的文件里，除了合成示例 openbot/examples/org-health-local/data/diagnosis.json 之外不应出现任何 diagnosis*.json；一旦出现，说明真实数据被带进了分支，必须丢弃该分支。"
+  },
+  "stages": [
+    {
+      "id": "boss",
+      "role": "Boss",
+      "goal": "把组织健康诊断变成可执行的口径与问题清单（不含真实数据）。",
+      "base_from": null,
+      "executor": "codex",
+      "run_type": "docs",
+      "difficulty": 2,
+      "budget_minutes": 20,
+      "title": "组织诊断任务书",
+      "task_file": "${WORKSPACE}/tasks/boss.md",
+      "prompt": "# 组织诊断任务书（Boss 阶段）\n\n仓库：Phanes（本 checkout）。先读 `docs/scenario/org-diagnosis/pipeline.md` 与\n`openbot/examples/org-health-local/README.md`，再读合成示例\n`openbot/examples/org-health-local/data/diagnosis.json`。\n\n任务：把“本次组织健康诊断”写成一份可执行的任务书，产出\n`docs/scenario/org-diagnosis/out/boss-brief.json`。\n\n`boss-brief.json` 至少包含这些键：\n\n- `目标`：本次诊断要回答的问题（数组，1-5 条）；\n- `观察期间`：与 `scope[\"观察月份\"]`、`scope[\"数据截止\"]` 对齐的期间口径；\n- `口径`：每个数字的口径定义（技术人力成本、折算人头、收入、成本率），与示例 `metrics` 的标题一一对应；\n- `必答问题`：DA 必须逐条回答的问题（数组）；\n- `数据需求`：要从真实数据文件读取的字段路径与口径映射（数组）；\n- `禁止事项`：例如禁止编造数字、禁止把真实数据写进仓库、无法证实的结论必须落到 `risks`/`recommendations` 的“缺失证据”。\n\n约束：\n\n- 只写口径、问题与字段映射，不得写入任何真实组织数据或真实数字；\n- `openbot/examples/org-health-local/data/diagnosis.json` 是合成示例，只可作结构参考；\n- 完成后说明 `boss-brief.json` 的路径与各键含义。\n",
+      "artifacts": [
+        {
+          "path": "docs/scenario/org-diagnosis/out/boss-brief.json",
+          "location": "repo",
+          "committed": true,
+          "contains_real_data": false,
+          "description": "诊断任务书：目标、观察期间、口径、必答问题、数据需求、禁止事项。"
+        }
+      ],
+      "verify": "python3 -m json.tool docs/scenario/org-diagnosis/out/boss-brief.json >/dev/null",
+      "verify_status": "available",
+      "verify_note": "python3 -m json.tool 是 Python 标准库命令，当前仓库无需新增脚本。",
+      "command": [
+        "${OPENSWARM}",
+        "run",
+        "--cwd",
+        "${REPO}",
+        "--base",
+        "${BASE}",
+        "--backend",
+        "codex",
+        "--type",
+        "docs",
+        "--difficulty",
+        "2",
+        "--budget-minutes",
+        "20",
+        "--title",
+        "组织诊断任务书",
+        "--task-file",
+        "${WORKSPACE}/tasks/boss.md",
+        "--verify",
+        "python3 -m json.tool docs/scenario/org-diagnosis/out/boss-brief.json >/dev/null"
+      ]
+    },
+    {
+      "id": "da",
+      "role": "DA",
+      "goal": "按任务书口径把真实数据归并成结构化诊断 JSON，产物留在仓库外。",
+      "base_from": "boss",
+      "executor": "codex",
+      "run_type": "impl",
+      "difficulty": 4,
+      "budget_minutes": 30,
+      "title": "组织诊断数据分析",
+      "task_file": "${WORKSPACE}/tasks/da.md",
+      "prompt": "# 组织诊断分析（DA 阶段）\n\n输入：\n\n1. 上一阶段的任务书 `docs/scenario/org-diagnosis/out/boss-brief.json`（在本阶段分支里）；\n2. 真实组织原始数据：`${DATA}`（仓库外绝对路径，只读）。\n\n任务：按 `boss-brief.json` 的口径把真实数据归并成结构化诊断。\n\n- 产出 `${DIAGNOSIS}`：结构与 `openbot/examples/org-health-local/data/diagnosis.json` 一致\n  （`scope` / `metrics` / `insights` / `definitions` / `risks` / `recommendations`）；\n- 在仓库内提交 `docs/scenario/org-diagnosis/out/da-method.md`：逐条说明结论字段的数据来源路径、\n  计算口径与已知缺口，不含真实数字。\n\n约束：\n\n- 真实数据只经仓库外的绝对路径读取，诊断 JSON 必须写在仓库外；不得把真实数据或真实数字写进\n  仓库任何路径（含 `da-method.md`）；\n- 无法从数据证实的结论写进 `risks` / `recommendations` 的“缺失证据”，不要推测；\n- 数字与口径冲突时以 `boss-brief.json` 为准，并在 `da-method.md` 记录差异；\n- 完成后报告两个产物的路径。\n",
+      "artifacts": [
+        {
+          "path": "${DIAGNOSIS}",
+          "location": "external",
+          "committed": false,
+          "contains_real_data": true,
+          "description": "schema v4 诊断 JSON，结构与 openbot/examples/org-health-local/data/diagnosis.json 一致。"
+        },
+        {
+          "path": "docs/scenario/org-diagnosis/out/da-method.md",
+          "location": "repo",
+          "committed": true,
+          "contains_real_data": false,
+          "description": "字段来源与计算口径说明，不含真实数字；保证本阶段有提交可审。"
+        }
+      ],
+      "verify": "python3 openbot/examples/org-health-local/validate.py --data \"${DIAGNOSIS}\" && test -s docs/scenario/org-diagnosis/out/da-method.md",
+      "verify_status": "pending_issue",
+      "verify_note": "openbot/examples/org-health-local/validate.py 由 DA 校验器 issue 提供，当前仓库没有该文件；在它落地前本阶段的 --verify 不可执行，临时替代为 python3 -m json.tool \"${DIAGNOSIS}\" >/dev/null（只查 JSON 形状，不查 schema）。",
+      "command": [
+        "${OPENSWARM}",
+        "run",
+        "--cwd",
+        "${REPO}",
+        "--base",
+        "${BASE}",
+        "--backend",
+        "codex",
+        "--type",
+        "impl",
+        "--difficulty",
+        "4",
+        "--budget-minutes",
+        "30",
+        "--title",
+        "组织诊断数据分析",
+        "--task-file",
+        "${WORKSPACE}/tasks/da.md",
+        "--verify",
+        "python3 openbot/examples/org-health-local/validate.py --data \"${DIAGNOSIS}\" && test -s docs/scenario/org-diagnosis/out/da-method.md"
+      ]
+    },
+    {
+      "id": "builder",
+      "role": "Builder",
+      "goal": "让本机诊断站点能加载真实诊断数据，并保持外部数据入口不变。",
+      "base_from": "da",
+      "executor": "codex",
+      "run_type": "impl",
+      "difficulty": 3,
+      "budget_minutes": 25,
+      "title": "组织诊断站点接入",
+      "task_file": "${WORKSPACE}/tasks/builder.md",
+      "prompt": "# 组织诊断站点接入（Builder 阶段）\n\n输入：\n\n1. 诊断数据：`${DIAGNOSIS}`（仓库外绝对路径，schema v4 结构）；\n2. 上一阶段的口径说明 `docs/scenario/org-diagnosis/out/da-method.md`；\n3. 现有站点实现 `openbot/examples/org-health-local/`（`serve.py`、`app.js`、`index.html`）。\n\n任务：让本机组织健康诊断站点能加载并正确渲染真实诊断数据。\n\n- 保留 `serve.py --data /absolute/path/to/diagnosis.json` 这个外部数据入口，不要改成读仓库内固定路径；\n- 真实数据不得进入仓库；仓库内只保留合成示例 `openbot/examples/org-health-local/data/diagnosis.json`；\n- 需要扩展渲染或校验时，改动限于 `openbot/examples/org-health-local/` 下的文件；\n- 在 `docs/scenario/org-diagnosis/out/builder-notes.md` 记录改动点、本地验证命令与已知限制；\n- 不引入新的运行时依赖（当前只用 Python 标准库加 bun 构建前端）。\n\n完成后说明改动文件与验证方式。\n",
+      "artifacts": [
+        {
+          "path": "openbot/examples/org-health-local/",
+          "location": "repo",
+          "committed": true,
+          "contains_real_data": false,
+          "description": "站点实现（serve.py、app.js、index.html）的改动。"
+        },
+        {
+          "path": "docs/scenario/org-diagnosis/out/builder-notes.md",
+          "location": "repo",
+          "committed": true,
+          "contains_real_data": false,
+          "description": "改动点、本地验证命令与已知限制。"
+        }
+      ],
+      "verify": "python3 openbot/examples/org-health-local/test_serve.py --data \"${DIAGNOSIS}\"",
+      "verify_status": "pending_issue",
+      "verify_note": "openbot/examples/org-health-local/test_serve.py 由 Builder 测试 issue 提供，当前仓库没有该文件；在它落地前本阶段没有自动门禁，可先用仓库已有的 bun run test:org-health-demo（openbot/package.json:194）覆盖合成示例。",
+      "command": [
+        "${OPENSWARM}",
+        "run",
+        "--cwd",
+        "${REPO}",
+        "--base",
+        "${BASE}",
+        "--backend",
+        "codex",
+        "--type",
+        "impl",
+        "--difficulty",
+        "3",
+        "--budget-minutes",
+        "25",
+        "--title",
+        "组织诊断站点接入",
+        "--task-file",
+        "${WORKSPACE}/tasks/builder.md",
+        "--verify",
+        "python3 openbot/examples/org-health-local/test_serve.py --data \"${DIAGNOSIS}\""
+      ]
+    }
+  ],
+  "handoff": {
+    "rule": "下一阶段的 --base 取上一阶段 result.json 的 commit；上一阶段没有仓库内提交时，回退到它的 workspace.base（该阶段实际使用的 base 提交）。",
+    "record": "${OPENSWARM_HOME}/runs/<run-id>/result.json",
+    "fields": {
+      "commit": "阶段提交的 SHA；为空表示该阶段没有仓库内改动。",
+      "branch": "openswarm/<run-id>；评审与合并都用它。",
+      "workspace.base": "该阶段实际使用的 base 提交，用于回退。"
+    },
+    "merge_hint": "人工评审通过后执行 git -C \"${REPO}\" merge --no-ff openswarm/<run-id>。",
+    "rework": "审查不通过时用 openswarm run --rework-of <run-id> 续做同一张卡。",
+    "note": "真实数据不参与交接：它始终留在仓库外的 ${DIAGNOSIS}，靠路径传递而不是靠 git。"
+  },
+  "review": {
+    "after_each_stage": true,
+    "command": [
+      "${OPENSWARM}",
+      "review",
+      "${RUN_ID}",
+      "--by",
+      "${REVIEWER}",
+      "--json"
+    ],
+    "record": "${OPENSWARM_HOME}/runs/<run-id>/review.json",
+    "gate": "verdict=changes，或 findings 里出现 P0/P1 时不进入下一阶段；改用 openswarm run --rework-of <run-id> 返工。",
+    "constraints": [
+      "审查执行器必须与阶段执行器不同族：codex 只能由 agy/pi/cursor 审查（openswarm/bin/openswarm:5487-5494）。",
+      "审查要求分支 openswarm/<run-id> 存在且 diff 非空（openswarm/bin/openswarm:5532-5543）。",
+      "自动审查只在 --card-type 属于 feature/fix/review-fix/migration 时触发（openswarm/bin/openswarm:5905-5910），本示例不带 --card-type，所以交叉审查是显式的一步。"
+    ],
+    "optional": "openswarm compare --task-file <card> --title <t> --a codex --b pi 可以让两个执行器并行产出 DA 结论再对比。"
+  },
+  "pending": [
+    {
+      "id": "da-validator",
+      "provides": "openbot/examples/org-health-local/validate.py",
+      "used_by": "da",
+      "note": "DA 校验器 issue（与 #54 同批次的并行 issue）；落地前 DA 阶段没有 schema 级门禁。"
+    },
+    {
+      "id": "serve-test",
+      "provides": "openbot/examples/org-health-local/test_serve.py",
+      "used_by": "builder",
+      "note": "Builder 测试 issue；落地前 Builder 阶段没有自动门禁。"
+    },
+    {
+      "id": "org-health-demo-e2e",
+      "provides": "bun run test:org-health-demo",
+      "used_by": "builder",
+      "note": "仓库已有（openbot/package.json:194），需要 bun 与 Chrome，且只覆盖合成示例数据。"
+    }
+  ]
+}
