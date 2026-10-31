@@ -110,6 +110,22 @@ try {
   assert.equal(await page.locator("#stage-note").innerText(), "—");
   assert.equal(await page.locator("#stage-list").innerText(), "");
   checks.push("legacy snapshot with empty stage rejected");
+  for (const [name, mutate] of [
+    ["blank stage title", (value) => (value.指标[4].标题 = " ")],
+    ["blank stage source", (value) => (value.指标[4].来源口径 = " ")],
+    ["blank stage label", (value) => (value.指标[4].指标[0].分档 = " ")],
+    ["blank stage example", (value) => (value.指标[4].指标[0].例证 = " ")],
+  ] as const) {
+    const malformed = structuredClone(legacy);
+    mutate(malformed);
+    await writeFile(data, JSON.stringify(malformed));
+    await page.goto(`${url}/?lang=zh`);
+    await page.getByText("加载失败", { exact: true }).waitFor();
+    assert.equal(await page.locator("#stage-title").innerText(), "—");
+    assert.equal(await page.locator("#stage-note").innerText(), "—");
+    assert.equal(await page.locator("#stage-list").innerText(), "");
+    checks.push(`legacy snapshot with ${name} rejected`);
+  }
   const rejectedAfterStage = structuredClone(legacy);
   delete rejectedAfterStage.指标[3].数值["收入万美元每月"]["年末目标"];
   await writeFile(data, JSON.stringify(rejectedAfterStage));
