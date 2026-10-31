@@ -127,6 +127,8 @@ class FleetAutoTests(unittest.TestCase):
                            'import json,os,sys\n'
                            'expected=os.path.join(os.environ["HOME"],".claude","openswarm-executor-candidate")\n'
                            'if os.environ.get("OPENSWARM_HOME") != expected: raise SystemExit(9)\n'
+                           'if os.environ.get("OPENSWARM_FLEET_GUARD_CONFIG") != os.path.join(expected,"fleet-capacity.json"): raise SystemExit(10)\n'
+                           'if os.environ.get("OPENSWARM_FLEET_GUARD_REQUIRED") != "1": raise SystemExit(11)\n'
                            'if sys.argv[1:3] == ["lane","status"]:\n'
                            ' print(json.dumps([{"name":"K1","state":"idle","backend":"cursor","model":"composer"}]))\n'
                            'else: print(json.dumps([]))\n')
