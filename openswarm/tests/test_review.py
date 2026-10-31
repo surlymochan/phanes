@@ -236,6 +236,27 @@ class PeerReviewTests(unittest.TestCase):
         self.assertIn("not json", raw)
         self.assertIn("still not json", raw)
 
+    def test_empty_or_incomplete_review_response_retries_and_never_approves(self):
+        cases = (
+            ("   ", "blank response"),
+            (json.dumps({"findings": []}), "missing verdict"),
+            (json.dumps({"verdict": "approve"}), "missing findings"),
+        )
+        for response, label in cases:
+            with self.subTest(label=label):
+                completed = [
+                    subprocess.CompletedProcess([], 0, response, ""),
+                    subprocess.CompletedProcess([], 0, response, ""),
+                ]
+                with mock.patch.object(xs, "run_peer_reviewer", side_effect=completed) as run:
+                    with self.assertRaisesRegex(RuntimeError, "after repair retry"):
+                        xs.invoke_reviewer({"backend": "agy", "binary": "/fake/agy"}, "review",
+                                           str(self.repo), str(self.run_dir), {})
+                self.assertEqual(run.call_count, 2)
+                raw = (self.run_dir / "review.raw.txt").read_text(encoding="utf-8")
+                self.assertIn(response, raw)
+                self.assertFalse((self.run_dir / "review.json").exists())
+
     def test_agy_permission_denial_is_reported_without_a_paid_format_retry(self):
         output = json.dumps({"response": "", "denied_actions": [{"action": "command"}]})
         completed = subprocess.CompletedProcess([], 0, output, "agy: no output produced; command permission denied")
