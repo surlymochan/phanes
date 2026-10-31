@@ -26,6 +26,22 @@ python3 serve.py --root demo/site
 （站点产物里的 `app.bundle.js` 约 7.5 MB，不入库；预构建的浏览器包在 `demo/vendor/app.bundle.js`），
 所以第一次预览要先跑上面第一条命令重建站点。
 
+不打开浏览器也能核对页面会展示什么：`demo/make_site_summary.py` 把 demo 站点的展示内容整理成
+`demo/site-summary.md`，只用 Python 标准库，只读站点产物，不改动 `demo/site/`：
+
+```bash
+cd openbot/examples/org-health-local
+python3 demo/make_site_summary.py
+```
+
+脚本只读 `demo/site/index.html` 与 `demo/site/data/diagnosis.json`；站点还没构建时这两个文件不存在，
+脚本退出码为 3 并提示先跑上面第一条 Builder 命令，重建站点后重跑本命令即可刷新摘要。
+
+`demo/site-summary.md` 的内容边界：只汇总页面结构、口径与条目数量——指标卡片的标题、单位与各期次
+显示值、口径说明条目、洞察/建议/证据缺口/来源口径的条数，以及页面字段与快照字段的对应关系；
+数值全部来自仓库内的合成样本，不含真实组织数据。它也不替代诊断结论或审查结论：结论仍以
+`demo/diagnosis.json` 的 `conclusion` 与 `demo/review.md` 为准。
+
 重新生成整条产物链：
 
 ```bash
