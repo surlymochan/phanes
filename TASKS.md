@@ -1,0 +1,3 @@
+- [x] Check the four current Phanes path findings.
+- [x] Fix only unresolved OpenBot path behavior.
+- [x] Run narrow script checks and create a small PR.
