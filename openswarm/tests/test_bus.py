@@ -77,7 +77,21 @@ class BusTests(unittest.TestCase):
         self.restore_env()
         for key, value in self.constants.items():
             setattr(xs, key, value)
-        self.tmp.cleanup()
+        # Git 后台维护可能在 worker 退出后短暂写入临时目录，清理时重试以等待其完成。
+        tmp_path = self.tmp.name
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            for attempt in range(3):
+                if not os.path.exists(tmp_path):
+                    break
+                try:
+                    shutil.rmtree(tmp_path)
+                    break
+                except OSError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05)
 
     def restore_env(self):
         for key, value in self.old_env.items():
