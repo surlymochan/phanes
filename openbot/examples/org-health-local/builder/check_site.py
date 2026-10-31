@@ -48,9 +48,17 @@ def sha256(path: Path) -> str:
 
 
 def report_hashes(report: object) -> dict[str, str]:
-    """读取报告中的文件摘要，兼容 files 或顶层 sha256 两种表示。"""
+    """读取报告中的文件摘要，兼容 build_site.py 的 文件清单 列表、files 或顶层 sha256 两种表示。"""
     if not isinstance(report, dict):
         raise ValueError("build-report.json 必须是对象")
+    manifest = report.get("文件清单")
+    if isinstance(manifest, list):
+        hashes: dict[str, str] = {}
+        for item in manifest:
+            if not isinstance(item, dict) or not isinstance(item.get("路径"), str) or not isinstance(item.get("sha256"), str):
+                raise ValueError("文件清单 每项必须包含 路径 与 sha256 字符串")
+            hashes[item["路径"]] = item["sha256"]
+        return hashes
     source = report.get("files", report.get("sha256"))
     if not isinstance(source, dict):
         raise ValueError("build-report.json 缺少 files 或 sha256 对象")

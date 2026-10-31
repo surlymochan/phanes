@@ -79,6 +79,24 @@ class CheckSiteTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing.js 不存在", result.stdout)
 
+    def test_build_site_manifest_passes(self) -> None:
+        """build_site.py 写出的 文件清单 报告必须能被 check_site.py 接受（Builder→检查 契约）。"""
+        bundle = Path(self.tmp.name) / "app.bundle.js"
+        bundle.write_text("console.log('fixture');", encoding="utf-8")
+        dist = Path(self.tmp.name) / "built"
+        build = subprocess.run(
+            [sys.executable, str(ROOT / "builder" / "build_site.py"), "--data", str(SOURCE_DATA),
+             "--out", str(dist), "--bundle", str(bundle)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        report["文件清单"][0]["sha256"] = "0" * 64
+        (dist / "build-report.json").write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+        self.assertNotEqual(self.run_checker(dist).returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
