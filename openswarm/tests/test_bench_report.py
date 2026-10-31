@@ -97,6 +97,32 @@ class EmptyResultSetTests(unittest.TestCase):
         self.assertNotIn("csv-quoting", summary)
         self.assertEqual(len((out / "scores.csv").read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_summary_reports_total_and_failed_runs(self):
+        src = self.write_jsonl(
+            "synthetic.jsonl",
+            [
+                {
+                    "type": "run",
+                    "task": "synthetic-task",
+                    "arm": "baseline",
+                    "success": True,
+                    "wall_s": 1.0,
+                },
+                {
+                    "type": "run",
+                    "task": "synthetic-task",
+                    "arm": "baseline",
+                    "success": False,
+                    "wall_s": 1.0,
+                },
+            ],
+        )
+        out = self.root / "out"
+        self.assertEqual(self.report(src, out).returncode, 0)
+
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertRegex(summary, r"\| baseline \| 1/2 \(50\.0%\) \|")
+
     def test_missing_input_is_reported_without_a_traceback(self):
         out = self.root / "out"
         proc = self.report(self.root / "does-not-exist.jsonl", out)
