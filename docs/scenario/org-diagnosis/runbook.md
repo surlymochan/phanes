@@ -181,7 +181,30 @@ python3 serve.py --root /path/to/workdir/dist
 
 以下摘录自各脚本源码中真实的错误字符串，注明其所在文件和行号，并给出原因与修复方法：
 
-### ① 端口已被占用（`serve.py`）
+### ① 无图形界面或沙箱环境下核对站点摘要（`make_site_summary.py`）
+
+无法打开浏览器时，可在示例目录中运行以下命令，把站点实际展示的内容整理为
+`demo/site-summary.md`，快速核对指标卡片的数值、单位和口径说明：
+
+```bash
+cd openbot/examples/org-health-local
+python3 demo/make_site_summary.py
+```
+
+该脚本只使用 Python 标准库，读取 `demo/site/index.html` 与
+`demo/site/data/diagnosis.json`，不会修改站点产物。摘要还会列出页面结构、口径说明及洞察/建议等条目数量；
+它用于核对页面展示与诊断快照的对应关系，不替代 `demo/diagnosis.json` 的诊断结论或
+`demo/review.md` 的审查结论。
+
+常见错误与处理方式：
+
+- **缺少 `demo/site` 站点目录或其中的 `index.html`、`data/diagnosis.json`**：先通过 Builder 构建站点，
+  再重新运行摘要命令：
+  `python3 builder/build_site.py --data demo/diagnosis.json --out demo/site --bundle demo/vendor/app.bundle.js`。
+- **站点文件无法读取或诊断快照不是有效 JSON**：核对 Builder 是否成功完成，并检查上述两个输入文件的路径、权限和内容。
+- **快照结构与页面预期不符**：确认站点中的 `data/diagnosis.json` 与当前页面由同一次 Builder 构建产生，修正后重新构建并生成摘要。
+
+### ② 端口已被占用（`serve.py`）
 - **错误字符串**：`端口 {port} 已被占用，请先停止占用进程，或用 --port 指定其他端口`
 - **文件与行号**：
   - 抛出位置：`openbot/examples/org-health-local/serve.py:81`
@@ -199,7 +222,7 @@ python3 serve.py --root /path/to/workdir/dist
      python3 serve.py --root <workdir>/dist --port 8766
      ```
 
-### ② 未指定 bundle 且环境无 Bun 导致构建失败（`build_site.py`）
+### ③ 未指定 bundle 且环境无 Bun 导致构建失败（`build_site.py`）
 - **错误字符串**：`构建失败：{cause}`
 - **文件与行号**：
   - 抛出位置：`openbot/examples/org-health-local/builder/build_site.py:74`（`subprocess.run(bun_command(...), check=True)`）
@@ -215,7 +238,7 @@ python3 serve.py --root /path/to/workdir/dist
      cd openbot && bun install
      ```
 
-### ③ 原始数据目录不存在（`build_diagnosis.py`）
+### ④ 原始数据目录不存在（`build_diagnosis.py`）
 - **错误字符串**：`原始数据目录不存在：{raw_dir}`
 - **文件与行号**：
   - 抛出位置：`openbot/examples/org-health-local/da/build_diagnosis.py:316`（`raise RawDataError(...)`）
@@ -228,7 +251,7 @@ python3 serve.py --root /path/to/workdir/dist
      ```
   2. 运行真实数据时，确保外部目录已正确创建且路径拼写无误。
 
-### ④ 原始 CSV 数据缺失必需列（`build_diagnosis.py`）
+### ⑤ 原始 CSV 数据缺失必需列（`build_diagnosis.py`）
 - **错误字符串**：`原始数据 {path.name} 缺少必需列：{'、'.join(missing)}`
 - **文件与行号**：
   - 抛出位置：`openbot/examples/org-health-local/da/build_diagnosis.py:274`（`raise RawDataError(...)`）
@@ -241,7 +264,7 @@ python3 serve.py --root /path/to/workdir/dist
   - `forecast.csv` 必须包含：`项目`、`整体技术人力成本_万元`、`整体折算人头`、`营收业务技术人力成本_万元`、`营收业务折算人头`、`营收业务收入_万美元`、`运维与设施成本_万元`。
   - `fx.csv` 必须包含：`币种对`、`人民币每美元`。
 
-### ⑤ 构建报告结构不符合检查契约（`check_site.py`）
+### ⑥ 构建报告结构不符合检查契约（`check_site.py`）
 - **错误字符串**：`失败：无法读取 build-report.json 中的 sha256（build-report.json 缺少 files 或 sha256 对象）`
 - **文件与行号**：
   - 抛出位置：`openbot/examples/org-health-local/builder/check_site.py:56`（`raise ValueError("build-report.json 缺少 files 或 sha256 对象")`）
@@ -260,7 +283,7 @@ python3 serve.py --root /path/to/workdir/dist
   ```
   若由自定义 Builder 脚本产出，请确保生成的构建报告包含 `"files"` 映射字典。
 
-### ⑥ 独立审查未通过（`run_e2e.py --review`）
+### ⑦ 独立审查未通过（`run_e2e.py --review`）
 - **错误字符串**：`步骤失败: 审查 (退出码 1)`
 - **文件与行号**：
   - 打印位置：`openbot/examples/org-health-local/run_e2e.py:35`（`print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr)`）
