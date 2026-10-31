@@ -14,6 +14,44 @@ import _load
 xs = _load.load()
 
 
+class CompareScoreUnitTests(unittest.TestCase):
+    """Exercise compare scoring and ties with in-memory candidate records."""
+
+    @staticmethod
+    def candidate(verify_rc=0, findings=None, changed_lines=0, seconds=1.0):
+        candidate = {"verify_rc": verify_rc, "seconds": seconds,
+                     "diff": {"available": True, "changed_lines": changed_lines},
+                     "review": {"status": "reviewed", "findings": findings or []}}
+        candidate["score"] = xs.compare_candidate_score(candidate)
+        return candidate
+
+    def test_candidate_score_applies_verification_and_p0_p1_counts(self):
+        findings = ([{"severity": "P0"}] * 2 + [{"severity": "P1"}] * 3
+                     + [{"severity": "P2"}] * 9)
+        self.assertEqual(
+            xs.compare_candidate_score(self.candidate(verify_rc=1, findings=findings,
+                                                       changed_lines=17, seconds=4.5)),
+            {"verify_pass": False, "p0p1": 5, "diff_size": 17, "seconds": 4.5})
+        self.assertTrue(xs.compare_candidate_score(self.candidate(verify_rc=0))["verify_pass"])
+
+    def test_diff_size_and_seconds_are_ascending_penalties(self):
+        clean = self.candidate()
+        larger_diff = self.candidate(changed_lines=20)
+        slower = self.candidate(seconds=2.5)
+        self.assertEqual(xs.compare_order(clean, larger_diff), 1)
+        self.assertEqual(xs.compare_order(clean, slower), 1)
+        self.assertEqual(xs.compare_order(self.candidate(seconds=1.25),
+                                          self.candidate(seconds=1.5)), 1)
+
+    def test_same_score_for_different_candidates_is_a_tie(self):
+        left = self.candidate(changed_lines=8, seconds=3.25)
+        right = self.candidate(changed_lines=8, seconds=3.25)
+        left["label"], right["label"] = "A", "B"
+        left["score"], right["score"] = (xs.compare_candidate_score(left),
+                                           xs.compare_candidate_score(right))
+        self.assertIsNone(xs.choose_compare_winner(left, right))
+
+
 class CompareTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-compare-")
