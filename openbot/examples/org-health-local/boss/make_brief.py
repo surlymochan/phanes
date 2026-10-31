@@ -221,6 +221,8 @@ def period_sort_key(value: object, keys: list[str]) -> tuple[str, int]:
 def validate_brief(brief: object) -> list[str]:
     """按 brief.schema.json 校验任务书，返回错误说明列表。
 
+    除结构校验外，另查观察期间的期次：重复项、期次顺序与起止/参考期次的先后。
+
     顶层不是 JSON 对象（数组、字符串等）时只报类型错误，不去取字段，
     避免调用 brief.get() 时抛出 AttributeError。
     """
@@ -235,6 +237,15 @@ def validate_brief(brief: object) -> list[str]:
                 errors.append(f"/观察期间/{name}: 必须是期次列表中的值")
 
         if isinstance(keys, list):
+            # 重复期次会让同一期次被取两次数或被静默覆盖，必须报出。
+            try:
+                has_duplicate = len(keys) != len(set(keys))
+            except TypeError:
+                # 不可哈希的元素（非字符串）由结构校验报错，这里不重复提示。
+                has_duplicate = False
+            if has_duplicate:
+                errors.append("/观察期间/期次: 包含重复期次")
+
             dated = [
                 item[:7]
                 for item in keys

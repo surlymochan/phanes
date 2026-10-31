@@ -4,8 +4,7 @@
 覆盖：生成结果的结构与字段齐全、schema版本 为 4、口径与合成示例一致、
 禁止事项含必需条目，以及 --goal/--month 覆盖与命令行的退出码。
 
-观察期间的期次顺序、重复期次与起止倒置按当前行为断言：已支持的情形直接断言，
-已知缺口用 `unittest.expectedFailure` 标注并写明原因，不改实现。
+观察期间的期次顺序、重复期次与起止倒置按当前行为断言：已支持的情形直接断言。
 """
 from __future__ import annotations
 
@@ -414,6 +413,7 @@ class PeriodOrderTest(unittest.TestCase):
         """期次乱序与起始晚于截止场景必须报出错误。"""
         cases = {
             "期次乱序": brief_with_period(SCRAMBLED_PERIODS),
+            "重复期次": brief_with_period(DUPLICATED_PERIODS),
             "起始晚于截止": brief_with_period(
                 ORDERED_PERIODS,
                 {"起始期次": "2026-09实际", "参考期次": "2026-05H1参考", "截止期次": "2026-01实际"},
@@ -435,13 +435,11 @@ class PeriodOrderTest(unittest.TestCase):
         errors = self.errors(brief_with_period(SCRAMBLED_PERIODS))
         self.assertTrue(any("期次" in message for message in errors), "期次乱序时未报出错误")
 
-    @unittest.expectedFailure
     def test_重复期次_应报出错误(self) -> None:
         """期次锚点重复时应报出重复错误。
 
-        已知 bug：结构定义只要求期次至少 4 个（boss/brief.schema.json 的 `期次`），
-        validate_brief 也不查重复；重复锚点会让同一期次被取两次数或被静默覆盖。
-        实现补上去重校验后，删掉 expectedFailure 标记。
+        重复锚点会让同一期次被取两次数或被静默覆盖，validate_brief 报出
+        /观察期间/期次: 包含重复期次。
         """
         errors = self.errors(brief_with_period(DUPLICATED_PERIODS))
         self.assertTrue(
@@ -449,12 +447,10 @@ class PeriodOrderTest(unittest.TestCase):
             "重复期次时未报出指向重复期次的错误",
         )
 
-    @unittest.expectedFailure
     def test_命令行拒绝重复期次且不写出任务书(self) -> None:
         """生成结果含重复期次时命令行应报错，且不写出有效任务书。
 
-        已知 bug：main 当前只校验 schema 与锚点归属，重复期次仍会通过校验并写出文件。
-        实现补上重复校验后，删掉 expectedFailure 标记。
+        main 只在校验通过时写出任务书，重复期次报出错误后不写文件。
         """
         with temporary_directory() as folder:
             path = Path(folder) / "brief.json"
