@@ -394,7 +394,9 @@ PY
   ready=0
   for attempt in $(seq 1 15); do
     after="$("$runtime/bin/openswarm-fleet" lane status)"
-    if python3 - "$lane" "$after" "$release_bin/openswarm-fleet" <<'PY'
+    # openswarm-fleet is a shell wrapper which execs its sibling `openswarm`.
+    # The supervisor PID therefore correctly exposes the latter in ps output.
+    if python3 - "$lane" "$after" "$release_bin/openswarm" <<'PY'
 import json, subprocess, sys
 lane, status, executable = sys.argv[1:]
 row = next((row for row in json.loads(status) if row.get("name") == lane), None)
