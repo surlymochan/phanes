@@ -31,6 +31,30 @@ lane 残留或同名 lane（例如远端 K1）混入 4:2:2 布局；任务卡本
 fleet 配置部署前，旧 `auto` 仍由 gores1 执行，任务回执因而会显示 gores1。
 不要把这个历史执行路径表述为远端 Hub。
 
+`hub-openswarm-bridge` 在派发和取回结果时都要读取
+`~/.claude/openswarm-hub-bridge/config.json`。这是 Hub 本机派发的必需配置：
+文件缺失或字段不全时，派发在写入任何交接记录之前就失败（直连 fleet 和旧
+gateway 两条路径相同），bridge 只返回 `{"ok": false, "error": ...}`。示例只
+含占位路径，按本机实际部署替换；该文件不保存任何凭据：
+
+```json
+{
+  "workspace": "/path/to/hub-workspace",
+  "repo": "/path/to/mapped-repository"
+}
+```
+
+- `workspace`：允许派发的工作目录。bridge 只接受 `--cwd` 解析后与该字段相同
+  的目录，其他目录报 `Hub workspace has no approved repository mapping`。Hub
+  自身的工作目录不是仓库，可以与 `repo` 不同。
+- `repo`：映射到本次任务的仓库检出目录。派发前它必须是干净的 git 检出
+  （`git status --porcelain` 为空），其当前 HEAD 就是任务的基线提交；远端
+  结果也 fetch 到该仓库的 `refs/openswarm/<run-id>`，供本机审查。
+
+两个字段都写绝对路径；相对路径按进程工作目录解析，不要依赖。同一目录下的
+`dispatch.sqlite` 是 bridge 的交接日志（目录 0700、数据库 0600），不要手工
+删除或改写。
+
 若某个既有执行器 runtime 还没有 `fleet _bundle`，无需覆盖它。只在该执行器
 runtime 的 `bin/` 同级放置 `openswarm-fleet-bundle-adapter` 和
 `fleet-result-bundle`，并把 Hub 本机 `fleet.json` 中该 host 的 `openswarm`
