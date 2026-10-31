@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the synthetic Boss to DA to Builder pipeline."""
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -25,7 +26,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def run_step(name, command, stdout=None):
+def run_step(name, command, timings, stdout=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
     try:
@@ -37,10 +38,14 @@ def run_step(name, command, stdout=None):
         result = subprocess.run(command, stdout=stdout)
     except FileNotFoundError as error:
         elapsed = time.monotonic() - started
+        timings.append({'name': name, 'command': list(map(str, command)),
+                        'duration_seconds': elapsed, 'exit_code': 2})
         print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
         print(f'步骤失败: {name} (文件不存在: {error.filename})', file=sys.stderr, flush=True)
         return False
     elapsed = time.monotonic() - started
+    timings.append({'name': name, 'command': list(map(str, command)),
+                    'duration_seconds': elapsed, 'exit_code': result.returncode})
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
         print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr, flush=True)
@@ -74,6 +79,7 @@ def main(argv=None):
         print(f'使用 bundle: {bundle}', flush=True)
     workdir = args.workdir.resolve()
     workdir.mkdir(parents=True, exist_ok=True)
+    timings = []
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
     dist = workdir / 'dist'
@@ -91,16 +97,19 @@ def main(argv=None):
         ('Builder', build),
         ('检查', [sys.executable, str(args.checker), str(dist)]),
     ])
-    for name, command in commands:
-        if not run_step(name, command):
-            return 1
-    if args.review:
-        review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
-        with (workdir / REVIEW_REPORT).open('w', encoding='utf-8') as output:
-            if not run_step('审查', review, stdout=output):
+    try:
+        for name, command in commands:
+            if not run_step(name, command, timings):
                 return 1
-    print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
-    return 0
+        if args.review:
+            review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
+            with (workdir / REVIEW_REPORT).open('w', encoding='utf-8') as output:
+                if not run_step('审查', review, timings, stdout=output):
+                    return 1
+        print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
+        return 0
+    finally:
+        (workdir / 'timings.json').write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':
