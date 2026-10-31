@@ -17,9 +17,9 @@ lane 状态。路由按 backend 选择空闲 lane，而不是依赖固定 lane �
 主机或 SSH 参数。
 
 若 Hub 所在主机只能到达 `gocc`，而 `gocc` 才能到达新执行主机，额外 source 应设为
-`{"host":"govpn","ssh_alias":"openswarm-gocc-fleet-relay","via":"gocc"}`（同理
-适用于 `govpn2`）。`openswarm-gocc-fleet-relay` 是已有 Hub→gocc SSH 认证下的受限命令，
-执行 `hub-fleet-relay`；后者仅按 gocc 服务配置
+`{"host":"govpn","ssh_alias":"openswarm-pi-broker","via":"gocc"}`（同理
+适用于 `govpn2`）。现有 `openswarm-pi-broker` 的 gocc 强制命令将 `relay` 操作委派给
+`hub-fleet-relay`；后者仅按 gocc 服务配置
 `OPENSWARM_FLEET_RELAY_TARGETS` 中的固定 host/alias 映射转发 `lanes`、`assign`、
 `run_info`、`bundle`、`stop`。这不是常驻代理，也不新增凭据。部署必须先验证该 SSH
 入口实际存在，以及远端 runner 已接入同一容量协调器；relay 本身不构成全局并发限制。

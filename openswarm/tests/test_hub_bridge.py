@@ -177,7 +177,7 @@ class HubBridgeTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())['result'], {'id':'run-govpn'})
 
     def test_remote_gateway_relays_lifecycle_through_gocc(self):
-        sources = json.dumps([{'host':'govpn','ssh_alias':'openswarm-gocc-fleet-relay','via':'gocc'}])
+        sources = json.dumps([{'host':'govpn','ssh_alias':'openswarm-pi-broker','via':'gocc'}])
         for op, remote_op in (('info', 'run_info'), ('bundle', 'bundle'), ('stop', 'stop')):
             req = {'op':op, 'id':'run-govpn', 'host':'govpn'}
             seen = []
@@ -191,7 +191,7 @@ class HubBridgeTests(unittest.TestCase):
                 runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
             self.assertEqual(seen, [
                 (['/usr/bin/ssh', '-T', '-F', str(Path.home() / '.ssh/openswarm-fleet/config'),
-                  'openswarm-gocc-fleet-relay'],
+                  'openswarm-pi-broker'],
                  {'op':'relay','target':'govpn','request':{'op':remote_op,'run_id':'run-govpn'}})])
             self.assertEqual(json.loads(output.getvalue())['result'], {'id':'run-govpn'})
 

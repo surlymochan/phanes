@@ -92,7 +92,7 @@ class FleetAutoTests(unittest.TestCase):
         self.assertEqual(calls[1][1]['lane'], 'K2')
 
     def test_gocc_relay_source_envelopes_discovery_and_assignment(self):
-        source = {'host': 'govpn', 'ssh_alias': 'openswarm-gocc-fleet-relay', 'via': 'gocc'}
+        source = {'host': 'govpn', 'ssh_alias': 'openswarm-pi-broker', 'via': 'gocc'}
         calls = []
         def run(command, input=None, **_kwargs):
             calls.append((command, json.loads(input)))
@@ -103,7 +103,7 @@ class FleetAutoTests(unittest.TestCase):
             self.assertEqual(G['remote_from'](source, {'op':'lanes'}), [])
             self.assertEqual(G['remote_from'](source, {'op':'assign','lane':'K1'}),
                              {'id':'govpn-k1','state':'queued'})
-        self.assertEqual([item[0][-1] for item in calls], ['openswarm-gocc-fleet-relay'] * 2)
+        self.assertEqual([item[0][-1] for item in calls], ['openswarm-pi-broker'] * 2)
         self.assertEqual(calls[0][1], {'op':'relay','target':'govpn','request':{'op':'lanes'}})
         self.assertEqual(calls[1][1], {'op':'relay','target':'govpn',
                                        'request':{'op':'assign','lane':'K1'}})
@@ -120,6 +120,7 @@ class FleetAutoTests(unittest.TestCase):
                                                      {'host':'govpn','ssh_alias':'openswarm-govpn-gateway'}])
         for config in (
             '[{"host":"gocc","ssh_alias":"other-gateway"}]',
+            '[{"host":"gocc","ssh_alias":"openswarm-pi-broker","via":"gocc"}]',
             '[{"host":"gores1","ssh_alias":"openswarm-gores-gateway"}]',
             '[{"host":"govpn","ssh_alias":"a"},{"host":"govpn","ssh_alias":"b"}]',
         ):
@@ -128,10 +129,10 @@ class FleetAutoTests(unittest.TestCase):
                     G['remote_sources']()
 
     def test_relay_source_only_allows_gocc_as_transit(self):
-        raw = '[{"host":"govpn","ssh_alias":"openswarm-gocc-fleet-relay","via":"gocc"}]'
+        raw = '[{"host":"govpn","ssh_alias":"openswarm-pi-broker","via":"gocc"}]'
         with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': raw}):
             self.assertEqual(G['remote_sources']()[-1],
-                             {'host':'govpn','ssh_alias':'openswarm-gocc-fleet-relay','via':'gocc'})
+                             {'host':'govpn','ssh_alias':'openswarm-pi-broker','via':'gocc'})
         raw = '[{"host":"govpn","ssh_alias":"relay","via":"other"}]'
         with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': raw}):
             with self.assertRaisesRegex(RuntimeError, 'invalid automatic routing'):
