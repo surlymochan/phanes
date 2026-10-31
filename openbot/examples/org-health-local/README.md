@@ -5,3 +5,21 @@
 页面使用固定的 2026 年示例口径；实际诊断数据必须保存在仓库外，替换使用前需核对期间、指标定义和结构。使用 `python3 serve.py --data /absolute/path/to/diagnosis.json` 读取该文件，不要将真实数据复制到仓库或提交。
 
 仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
+
+## 结构定义与校验
+
+`schema/diagnosis.schema.json` 是 `data/diagnosis.json` 的结构定义（JSON Schema draft 2020-12）。字段与 `app.js` 读取的字段一致：`scope` 给出口径和 `schema版本`（固定为 4），`metrics` 按页面顺序给出四个指标，数值区分数值序列（数值或 `null`）与比率序列（数值、`null` 或字符串）。定义只覆盖当前格式；`app.js` 仍兼容的旧中文键格式不在定义内。
+
+`validate.py` 只用标准库，按该定义校验数据文件：
+
+```bash
+cd openbot/examples/org-health-local
+python3 validate.py                            # 校验 data/diagnosis.json
+python3 validate.py /absolute/path/to/diagnosis.json
+```
+
+校验失败时退出码非 0，并逐条打印出错路径，例如 `/scope/schema版本`。单元测试：
+
+```bash
+cd openbot/examples/org-health-local && python3 -m unittest test_validate -v
+```
