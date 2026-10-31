@@ -3798,6 +3798,13 @@ def recorded_executor_group_matches(record):
         return False
 
 
+def recorded_executor_identity_matches(status):
+    """Whether the live leader is still the exact executor recorded for this run."""
+    pid, identity = status.get("executor_pid"), status.get("executor_identity")
+    return bool(pid_alive(pid) and isinstance(identity, str) and identity
+                and process_identity(pid) == identity)
+
+
 def executor_stopped(rdir):
     """A failure may release capacity only after every recorded executor group has gone."""
     for record in recorded_executor_records(rdir):
@@ -3812,6 +3819,9 @@ def stop_orphaned_executor(rdir):
     pid = status.get("executor_pid")
     # Capture children before the recorded leader is terminated; some tools create new sessions.
     if pid_alive(pid):
+        if not recorded_executor_identity_matches(status):
+            set_status(rdir, fleet_reservation_error="retained after TTL: executor identity cannot be confirmed")
+            return False
         record_executor_descendants(rdir, pid)
     set_status(rdir, fleet_recovery_stop_requested=NOW())
     for record in recorded_executor_records(rdir):

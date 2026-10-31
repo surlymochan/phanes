@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -112,6 +113,7 @@ class FleetCapacityTests(unittest.TestCase):
         config.write_text(json.dumps({'command': ['/nonexistent/coordinator']}))
         old = os.environ.get('OPENSWARM_FLEET_GUARD_CONFIG')
         os.environ['OPENSWARM_FLEET_GUARD_CONFIG'] = str(config)
+        child = None
         try:
             rdir = pathlib.Path(self.temp.name, 'runs', 'blocked')
             ok = xs.reserve_provider_slot(str(rdir), 'codex', None, {'concurrency': {'total': 1}},
@@ -242,6 +244,41 @@ class FleetCapacityTests(unittest.TestCase):
     def test_leaderless_recorded_group_is_not_considered_confirmed(self):
         self.assertFalse(xs.recorded_executor_group_matches(
             {'pid': 999999999, 'pgid': os.getpgrp(), 'identity': 'stale-identity'}))
+
+    def test_reused_executor_pid_never_discovers_or_kills_replacement_children(self):
+        rdir = pathlib.Path(self.temp.name, 'runs', 'reused-executor-pid')
+        rdir.mkdir(parents=True)
+        replacement = subprocess.Popen([sys.executable, '-c',
+                                        'import subprocess,sys,time; '
+                                        'subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"], '
+                                        'start_new_session=True); time.sleep(30)'], start_new_session=True,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline, children = time.monotonic() + 3, []
+            while not children and time.monotonic() < deadline:
+                children = xs.descendants(replacement.pid)
+                time.sleep(.02)
+            self.assertTrue(children)
+            child = children[0]
+            (rdir / 'status.json').write_text(json.dumps({
+                'executor_pid': replacement.pid, 'executor_pgid': 999999999,
+                'executor_identity': 'identity-of-an-earlier-process',
+            }))
+            self.assertFalse(xs.stop_orphaned_executor(str(rdir)))
+            status = json.loads((rdir / 'status.json').read_text())
+            self.assertEqual(status['executor_descendants'] if 'executor_descendants' in status else [], [])
+            self.assertIn('identity cannot be confirmed', status['fleet_reservation_error'])
+            self.assertTrue(xs.pid_alive(replacement.pid))
+            self.assertTrue(xs.pid_alive(child))
+        finally:
+            if replacement.poll() is None:
+                os.killpg(os.getpgid(replacement.pid), signal.SIGKILL)
+                replacement.wait()
+            if child and xs.pid_alive(child):
+                try:
+                    os.killpg(os.getpgid(child), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_killed_runner_recovers_after_ttl_when_executor_is_stopped(self):
         runs = pathlib.Path(self.temp.name, 'runs')
