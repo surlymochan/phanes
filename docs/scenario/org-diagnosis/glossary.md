@@ -1,11 +1,15 @@
 # 组织诊断口径术语表 (glossary.md)
 
-Refs #6, Refs #173。
+Refs #6, Refs #173, Refs #416。
 
-本文档汇总组织诊断场景（Boss 规划 / DA 分析 / Builder 建站与审阅）中的核心口径术语、权威定义与出处。所有术语定义严格提取自以下两份标准文件，不编造定义：
+本文档汇总组织诊断场景（Boss 规划 / DA 分析 / Builder 建站与审阅）中的核心口径术语、权威定义与出处。口径类术语严格提取自以下两份标准文件，不编造定义：
 
 1. `openbot/examples/org-health-local/data/diagnosis.json` 的 `口径说明` 字段
 2. `openbot/examples/org-health-local/boss/brief.schema.json`（即 `boss/brief.schema.json`）各级字段的 `description` 声明
+
+构建与运行类术语（第 4 节）提取自示例目录的说明与实现文件：
+
+3. [`openbot/examples/org-health-local/demo/vendor/README.md`](../../../openbot/examples/org-health-local/demo/vendor/README.md) 与 `openbot/examples/org-health-local/run_e2e.py`、`openbot/examples/org-health-local/builder/build_site.py`、`openbot/examples/org-health-local/serve.py`
 
 ---
 
@@ -36,6 +40,7 @@ Refs #6, Refs #173。
 | **口径项** | 一个指标的口径：单位、定义、期间与缺失处理。 | `openbot/examples/org-health-local/boss/brief.schema.json:$defs.口径项.description` |
 | **数据需求项** | 一条数据需求：逻辑字段路径、单位、口径与对应指标。 | `openbot/examples/org-health-local/boss/brief.schema.json:$defs.数据需求.description` |
 | **对应指标** | 该字段供给的指标标题，必须是站点期望的四个标题之一。 | `openbot/examples/org-health-local/boss/brief.schema.json:$defs.数据需求.properties.对应指标.description` |
+| **预构建浏览器包 (vendor bundle)** | `app.js` 的预构建浏览器包，路径 `openbot/examples/org-health-local/demo/vendor/app.bundle.js`；供没有 Bun/Node 的环境在 Builder 棒直接复用，约 7.5 MB，只含前端代码与 i18n 文案，不含任何数据。 | `openbot/examples/org-health-local/demo/vendor/README.md:3, 10-11` |
 
 ---
 
@@ -120,3 +125,37 @@ Refs #6, Refs #173。
   - 一条数据需求：逻辑字段路径、单位、口径与对应指标。
 - **对应指标**（`brief.schema.json:$defs.数据需求.properties.对应指标.description`，第 170 行）：
   - 该字段供给的指标标题，必须是站点期望的四个标题之一（`整体技术人力成本`、`整体折算人头`、`营收业务（含共享平台）技术人力成本与折算人头`、`收入与成本率`）。
+
+---
+
+## 4. 构建与运行术语：预构建浏览器包 (vendor bundle)
+
+### 4.1 权威定义
+
+- **路径**：`openbot/examples/org-health-local/demo/vendor/app.bundle.js`（随仓库提交，来源说明见 [`openbot/examples/org-health-local/demo/vendor/README.md`](../../../openbot/examples/org-health-local/demo/vendor/README.md)）。
+- **是什么**：`app.js` 的浏览器包，即 `bun build app.js --target=browser --minify` 的产物（`openbot/examples/org-health-local/demo/vendor/README.md:3`、`:9`）。
+- **用途**：供没有 `openbot/node_modules` 的 fleet lane 与没有 Bun 的本机环境在 Builder 棒直接产出可预览的静态站点——`builder/build_site.py --bundle <file>` 把该文件整包复制为 `<dist>/app.bundle.js`，不再现场打包（`openbot/examples/org-health-local/builder/build_site.py:107-119`）。
+- **体积与内容**：约 7.5 MB，主要是 `@openbot/i18n` 的全部语言文案；`app.js` 或 i18n 文案改动后，需按 `openbot/examples/org-health-local/demo/vendor/README.md:9` 的命令重建（`openbot/examples/org-health-local/demo/vendor/README.md:10`）。
+- **数据边界**：只用于合成数据演示，**不包含任何数据**（`openbot/examples/org-health-local/demo/vendor/README.md:11`）；页面数据仍由站点目录里的 `data/diagnosis.json` 提供，真实组织数据必须在仓库外（`openbot/examples/org-health-local/builder/build_site.py:107-119`、`docs/scenario/org-diagnosis/README.md` 第 3.3 节）。
+
+### 4.2 免 Bun 运行边界
+
+| 场景 | 是否需要 Bun | 出处（文件:行号） |
+| --- | --- | --- |
+| `run_e2e.py` 未传 `--bundle`，且 `demo/vendor/app.bundle.js` 存在 | 否：自动复用预构建包 | `openbot/examples/org-health-local/run_e2e.py:53-59` |
+| `run_e2e.py --bundle <file>` | 否：把该路径透传给 Builder | `openbot/examples/org-health-local/run_e2e.py:70-71` |
+| `builder/build_site.py --bundle <file>` | 否：整包复制为 `<dist>/app.bundle.js` | `openbot/examples/org-health-local/builder/build_site.py:107-119` |
+| `builder/build_site.py` 不带 `--bundle` | 是：现场调用 `bun build` | `openbot/examples/org-health-local/builder/build_site.py:15`、`:67-75`、`:116-117` |
+| `serve.py --root <dist>` | 否：只服务该目录，不现场打包 | `openbot/examples/org-health-local/serve.py:110-115` |
+| `serve.py` 不带 `--root` | 是：现场调用 `bun build` | `openbot/examples/org-health-local/serve.py:89-92`、`:112` |
+
+- 免 Bun 只覆盖**前端打包**这一步：Boss、DA、Builder 的 Python 脚本只用标准库，与 Bun 无关（`openbot/examples/org-health-local/builder/build_site.py:16`、`openbot/examples/org-health-local/README.md:186-193`）。
+- 预构建包不是数据来源：诊断数据仍只来自 `--data` 指向的快照；bundle 路径不存在时 `build_site.py` 退出码非 0（`openbot/examples/org-health-local/builder/build_site.py:147-152`）。
+- 重建站点与预览（两条命令都不需要 Bun）：
+  ```bash
+  cd openbot/examples/org-health-local
+  python3 builder/build_site.py --data demo/diagnosis.json --out demo/site --bundle demo/vendor/app.bundle.js
+  python3 serve.py --root demo/site
+  ```
+  `demo/site/` 只提交 `build-report.json`，站点其余产物需本地重建（`openbot/examples/org-health-local/README.md:26`、`openbot/examples/org-health-local/demo/README.md:1`）。
+- 运行与排障见 [runbook.md](runbook.md) 的「步骤 3：Builder 静态站点构建」与「未指定 bundle 且环境无 Bun 导致构建失败」；主理人问答见 [faq.md](faq.md) 的 Q3。
