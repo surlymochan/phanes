@@ -83,7 +83,18 @@ try {
   assert.equal(await page.locator("#metric-grid .metric-card").count(), 6);
   assert.equal(await page.locator("#scope-month").innerText(), "2026-09");
   assert.equal(await page.locator("#stage-list > div").count(), 2);
+  assert.equal(await page.locator("#stage-title").innerText(), "Synthetic categories");
+  assert.equal(await page.locator("#stage-note").innerText(), "Synthetic only");
+  assert.equal(await page.locator("#stage-list > div").first().locator("b").innerText(), "A");
+  assert.equal(await page.locator("#stage-list > div").first().locator("p").innerText(), "Example A");
   checks.push("legacy snapshot valid");
+  const missingStage = structuredClone(legacy);
+  missingStage.指标.pop();
+  await writeFile(data, JSON.stringify(missingStage));
+  await page.goto(`${url}/?lang=zh`);
+  await page.getByText("加载失败", { exact: true }).waitFor();
+  assert.equal(await page.locator("#metric-grid").innerText(), "");
+  checks.push("legacy snapshot without stage rejected");
   const invalid = structuredClone(snapshot);
   delete invalid.metrics[3].数值["收入万美元每月"]["年末目标"];
   await writeFile(data, JSON.stringify(invalid));

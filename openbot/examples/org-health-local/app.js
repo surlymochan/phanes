@@ -23,12 +23,22 @@ const valueFor = (series, label) => series?.[label] ?? null;
 function normalizeSnapshot(data) {
   if (data?.scope) return data;
   if (!data?.范围 || !Array.isArray(data?.指标)) return data;
+  const stage = data.指标[4];
+  if (
+    !stage ||
+    typeof stage.标题 !== "string" ||
+    typeof stage.来源口径 !== "string" ||
+    !Array.isArray(stage.指标) ||
+    !stage.指标.every((item) => typeof item?.分档 === "string" && typeof item?.例证 === "string")
+  ) {
+    throw new Error(t("orgHealthDemo.badStructure"));
+  }
   return {
     scope: data.范围,
     conclusion: data.结论,
     origin: data.范围["来源"],
     metrics: data.指标.slice(0, 4),
-    stage: data.指标[4],
+    stage,
     insights: data.洞察,
     definitions: data.来源口径,
     risks: data.风险,
