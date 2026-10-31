@@ -20,6 +20,13 @@ xs = _load.load()
 FAKE_GH = Path(_load.HERE) / "fixtures" / "fake_gh.py"
 
 
+class BusTitleHelperTests(unittest.TestCase):
+    def test_short_handles_empty_overlong_and_multiline_titles(self):
+        self.assertEqual(xs.short(""), "")
+        self.assertEqual(xs.short("x" * 221), "x" * 220)
+        self.assertEqual(xs.short("first\nsecond\tthird"), "first second third")
+
+
 class BusTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-bus-")
