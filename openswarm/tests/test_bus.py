@@ -28,7 +28,7 @@ class BusTests(unittest.TestCase):
         self.data.mkdir()
         self.env_names = ("OPENSWARM_HOME", "OPENSWARM_GH_BIN", "OPENSWARM_FAKE_GH_STATE",
                           "OPENSWARM_FAKE_GH_LOGIN", "OPENSWARM_FAKE_GH_ISSUE_LOGIN",
-                          "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
+                          "OPENSWARM_FAKE_GH_NOW", "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
                           "OPENSWARM_PI_BIN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
                           "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1")
         self.old_env = {key: os.environ.get(key) for key in self.env_names}
@@ -136,6 +136,47 @@ class BusTests(unittest.TestCase):
                                   base=self.base, no_worktree=False, verify=None, verify_baseline=False,
                                   keep_worktree=False, no_fallback=False, budget_minutes=budget,
                                   detach=False, run_id=None, dry_run=False, executor=executor)
+
+    def worker_args(self, name="external-agent", budget=1, repos="org/target"):
+        return argparse.Namespace(bus="org/bus", name=name, backend="pi", model=None, budget_minutes=budget,
+                                  once=True, repos=repos, verify=None, card_type=None, paths=None, rework_of=None)
+
+    def write_fake_pi(self, name="fake-pi", sleep=0):
+        """Write an offline Pi stand-in that reports a done result, optionally after a long sleep."""
+        started = self.root / (name + ".started")
+        finished = self.root / (name + ".finished")
+        path = self.root / name
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, time\n"
+            f"open({str(started)!r}, 'w').write('started\\n')\n"
+            f"time.sleep({sleep!r})\n"
+            f"open({str(finished)!r}, 'w').write('finished\\n')\n"
+            "with open('worker.txt', 'w') as stream:\n"
+            "    stream.write('worker result\\n')\n"
+            "report = {'status':'done','summary':'worker completed','files_changed':['worker.txt'],"
+            "'tests':'fake executor','followups':[]}\n"
+            "message = {'role':'assistant','content':[{'type':'text','text':json.dumps(report)}], "
+            "'usage':{'input':2,'output':3}}\n"
+            "print(json.dumps({'type':'message_end','message':message}), flush=True)\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return path
+
+    def wait_for(self, predicate, timeout=60, message="condition"):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.02)
+        self.fail(f"timed out waiting for {message}")
+
+    def run_status(self, run_id):
+        path = Path(xs.RUNS) / run_id / "status.json"
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {}
 
     def start_planner(self, budget=1.0, task="create a file", executor=None):
         outcome = {}
@@ -452,6 +493,138 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         os.environ["OPENSWARM_FAKE_GH_ISSUE_LOGIN"] = "planner"
         self.assertFalse(xs.bus_worker_run(forged_author_issue, self.cfg, worker_args, self.policy))
         self.assertEqual(len(self.issue(forged_author_issue["number"])["comments"]), 1)
+
+    def test_two_executors_claim_the_same_card_and_only_the_earliest_allowlisted_claim_wins(self):
+        """Two executors /claim one card at the same time; only the earliest allowlisted claim is honoured."""
+        os.environ["OPENSWARM_FAKE_GH_NOW"] = "2026-01-01T00:00:00+00:00"
+        (self.data / "policy.local.json").write_text(json.dumps({"pi": {"require_isolation": False}}))
+        os.environ["OPENSWARM_PI_BIN"] = str(self.write_fake_pi("fake-pi"))
+        self.policy = xs.deep_merge(self.policy, {"bus": {"allowed_executors": ["executor-a", "executor-b"]}})
+        self.cfg = xs.bus_config(self.policy)
+        metadata = {"run_id": "claim-race", "repo": "org/target", "base": self.base,
+                    "branch_hint": "openswarm/claim-race", "budget_minutes": 1,
+                    "report_schema": xs.RESULT_SCHEMA}
+        issue = xs.bus_create_issue("org/bus", self.cfg, "claim race", "write worker.txt", metadata)
+        # An account outside the allowlist claims first; it must never win the card.
+        self.add_comment(issue["number"], "/claim intruder", login="intruder")
+        card = self.issue(issue["number"])
+        identity = threading.local()
+        outcomes = {}
+
+        def worker(name):
+            identity.login = name
+            try:
+                outcomes[name] = xs.bus_worker_run(card, self.cfg, self.worker_args(name=name), self.policy)
+            except BaseException as error:  # retain thread failures as test evidence
+                outcomes[name] = error
+
+        original = xs.gh_transport
+
+        def transport(endpoint, method="GET", payload=None, allow_not_found=False):
+            # Every request of a worker acts as that worker's GitHub account.
+            separator = "&" if "?" in endpoint else "?"
+            return original(f"{endpoint}{separator}as={getattr(identity, 'login', 'planner')}",
+                            method, payload, allow_not_found)
+
+        threads = [threading.Thread(target=worker, args=(name,), daemon=True)
+                   for name in ("executor-a", "executor-b")]
+        with mock.patch.object(xs, "gh_transport", transport):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60)
+                self.assertFalse(thread.is_alive(), "a bus worker did not finish")
+        for name, outcome in outcomes.items():
+            self.assertNotIsInstance(outcome, BaseException, f"{name}: {outcome}")
+        comments = self.issue(issue["number"])["comments"]
+        claims = [comment for comment in comments if xs.bus_claim(comment)]
+        self.assertEqual(len(claims), 3, "both executors and the intruder must have claimed the card")
+        allowed = [comment for comment in claims if comment["user"]["login"] in ("executor-a", "executor-b")]
+        self.assertEqual(len(allowed), 2)
+        # The clock is pinned, so the earliest allowlisted claim is the one with the lowest comment id.
+        winner = min(allowed, key=lambda comment: (xs.to_epoch(comment["created_at"]) or 0, int(comment["id"])))
+        self.assertEqual(int(winner["id"]), min(int(comment["id"]) for comment in allowed))
+        self.assertNotEqual(winner["user"]["login"], "intruder")
+        results = [comment for comment in comments if xs.bus_parse_result(comment["body"])]
+        self.assertEqual(len(results), 1, "only the winning claim may report a result")
+        self.assertEqual(results[0]["user"]["login"], winner["user"]["login"])
+        report = xs.bus_parse_result(results[0]["body"])
+        self.assertEqual(report["status"], "done")
+        self.assertEqual(report["branch"], "openswarm/claim-race")
+
+    def test_worker_refuses_the_card_when_the_task_digest_does_not_match(self):
+        """A card whose digest comment disagrees with the task fence is refused, never claimed."""
+        worker_args = self.worker_args()
+
+        def rewrite(number, mutate):
+            state = self.state()
+            row = next(item for item in state["repos"]["org/bus"]["issues"] if item["number"] == number)
+            mutate(row)
+            self.state_path.write_text(json.dumps(state))
+            return row
+
+        forged = {"run_id": "forged", "repo": "org/target", "base": self.base,
+                  "branch_hint": "openswarm/forged", "budget_minutes": 9,
+                  "report_schema": xs.RESULT_SCHEMA}
+        cases = {
+            "mismatch": lambda row: row["comments"][-1].update(
+                {"body": xs.bus_task_digest_comment(json.dumps(forged, indent=2))}),
+            "missing": lambda row: row.update({"comments": []}),
+            "untrusted": lambda row: row["comments"][-1].update({"user": {"login": "intruder"}}),
+        }
+        for name, mutate in cases.items():
+            os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "planner"
+            metadata = {"run_id": "digest-" + name, "repo": "org/target", "base": self.base,
+                        "branch_hint": "openswarm/digest-" + name, "budget_minutes": 1,
+                        "report_schema": xs.RESULT_SCHEMA}
+            issue = xs.bus_create_issue("org/bus", self.cfg, "digest", "write worker.txt", metadata)
+            os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+            row = rewrite(issue["number"], mutate)
+            self.assertFalse(xs.bus_worker_run(row, self.cfg, worker_args, self.policy), name)
+            saved = self.issue(issue["number"])
+            self.assertFalse(any(xs.bus_claim(comment) for comment in saved["comments"]),
+                             f"{name}: a refused card must not be claimed")
+            self.assertIn("openswarm:queued", {label["name"] for label in saved["labels"]}, name)
+
+    def test_cancelled_label_stops_the_running_worker(self):
+        """A cancelled label stops the worker: the executor is killed and no result is reported."""
+        # The worker runs `openswarm run --backend pi` as a subprocess, which needs the fake Pi binary.
+        (self.data / "policy.local.json").write_text(json.dumps({"pi": {"require_isolation": False}}))
+        os.environ["OPENSWARM_PI_BIN"] = str(self.write_fake_pi("fake-pi-slow", sleep=60))
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "planner"
+        metadata = {"run_id": "cancel-worker", "repo": "org/target", "base": self.base,
+                    "branch_hint": "openswarm/cancel-worker", "budget_minutes": 5,
+                    "report_schema": xs.RESULT_SCHEMA}
+        issue = xs.bus_create_issue("org/bus", self.cfg, "cancel", "write worker.txt", metadata)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        outcome = {}
+
+        def run():
+            try:
+                outcome["handled"] = xs.bus_worker_run(self.issue(issue["number"]), self.cfg,
+                                                       self.worker_args(budget=5), self.policy)
+            except BaseException as error:  # retain thread failures as test evidence
+                outcome["error"] = error
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: thread.join(timeout=5))
+        self.wait_for(lambda: (self.root / "fake-pi-slow.started").exists(),
+                      message="the worker executor to start")
+        self.wait_for(lambda: self.run_status("cancel-worker").get("executor_pid"),
+                      message="the worker run to record its executor")
+        self.set_labels(issue["number"], ["cancelled"], ["queued"])
+        thread.join(timeout=90)
+        self.assertFalse(thread.is_alive(), "the worker did not stop after the cancelled label")
+        self.assertNotIn("error", outcome, outcome.get("error"))
+        self.assertFalse(outcome["handled"], "a cancelled card must not be reported as handled")
+        saved = self.issue(issue["number"])
+        self.assertFalse(any(xs.bus_parse_result(comment["body"]) for comment in saved["comments"]),
+                         "a cancelled card must not carry a worker result")
+        names = {label["name"] for label in saved["labels"]}
+        self.assertIn("openswarm:cancelled", names)
+        self.assertNotIn("openswarm:done", names)
+        self.assertFalse((self.root / "fake-pi-slow.finished").exists(), "the worker executor was not stopped")
 
     def test_bus_redacts_events_results_and_gh_errors(self):
         secrets = "ghp_12345678901234567890 github_pat_12345678901234567890 sk-12345678901234567890 Bearer abcdefghijklmnop"
