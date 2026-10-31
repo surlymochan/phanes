@@ -15,7 +15,6 @@ fi
 export PATH="$HOME/.local/node-v24.14.1/bin:$HOME/tools/copilot-executor/node_modules/.bin:$HOME/tools/bun-runtime/node_modules/.bin:$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 if [ -d "$HOME/Library/Application Support/openswarm-copilot-secure" ]; then
   export COPILOT_HOME="${COPILOT_HOME:-$HOME/Library/Application Support/openswarm-copilot-secure}"
-  export OPENSWARM_COPILOT_BIN="${OPENSWARM_COPILOT_BIN:-$root/bin/copilot-gui-run}"
 fi
 if [ -d "$HOME/tools/pi-sandbox/node_modules" ]; then
   export OPENSWARM_PI_RUNTIME="${OPENSWARM_PI_RUNTIME:-$HOME/tools/pi-sandbox}"

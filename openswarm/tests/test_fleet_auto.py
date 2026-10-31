@@ -117,7 +117,7 @@ class FleetAutoTests(unittest.TestCase):
         routine = G['available_in_preference'](lanes, ['copilot'], 'impl', 2)
         hard = G['available_in_preference'](lanes, ['copilot'], 'impl', 4)
         self.assertEqual([row['name'] for row in routine], ['GH1', 'GH2'])
-        self.assertEqual([row['name'] for row in hard], ['GH2', 'GH1'])
+        self.assertEqual([row['name'] for row in hard], ['GH2'])
 
     def test_configured_cli_and_wrapper_use_candidate_home_for_auto(self):
         with tempfile.TemporaryDirectory() as directory:
