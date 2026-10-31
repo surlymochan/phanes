@@ -396,6 +396,37 @@ elif role == 'builder':
         # 失败不误报为成功：不再打印成功路径才有的预览命令
         self.assertNotIn('预览命令', result.stdout)
 
+    def test_checker_failure_keeps_upstream_artifacts_and_returns_nonzero(self):
+        """站点自检失败时整体非 0，但 Boss/DA/Builder 已写出的产物仍保留在工作目录。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, probe=(role in ('da', 'builder')), failing=(index == 3), exit_code=6)
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+        self.bundle.write_text('checker-failure-bundle', encoding='utf-8')
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        # 整体结果非 0，并报出失败步骤与检查器的退出码
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 检查', result.stderr)
+        self.assertIn('退出码 6', result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 上游步骤都已执行到自检这一步
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker'])
+        # 上游产物未被清理：任务书、诊断快照与站点仍在工作目录
+        self.assertTrue((self.workdir / 'brief.json').is_file(), 'Checker 失败后任务书被删除')
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file(), 'Checker 失败后诊断快照被删除')
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file(), 'Checker 失败后站点产物被删除')
+        # 产物内容保持原样，便于失败后核对
+        self.assertEqual(json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8')), {})
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
+        self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
+                         'checker-failure-bundle')
+        # 失败原因仍可从 timings.json 核对
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
+        self.assertEqual(timings[-1]['exit_code'], 6)
+
     def test_review_failure_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
             self.write_stub(path, role, failing=(index == 4))
