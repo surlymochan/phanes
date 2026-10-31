@@ -752,3 +752,178 @@ noscript {
     flex-direction: column;
   }
 }
+@media print {
+  /* 打印友好样式：白底黑字、展开折叠区、隐藏交互控件。屏幕显示不受影响。 */
+  :root {
+    --ink: #000;
+    --muted: #000;
+    --line: #999;
+    --paper: #fff;
+    --white: #fff;
+    --teal: #000;
+    --teal-soft: #fff;
+    --orange: #000;
+    --orange-soft: #fff;
+    --blue: #000;
+    --blue-soft: #fff;
+    --red: #000;
+    --red-soft: #fff;
+    --shadow: none;
+  }
+  @page {
+    margin: 14mm;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+  body {
+    background: #fff;
+    color: #000;
+    font-size: 12px;
+  }
+  .shell {
+    max-width: none;
+    padding: 0;
+  }
+  /* 隐藏导航与交互控件 */
+  .brand,
+  button,
+  input,
+  select,
+  textarea,
+  [role="button"] {
+    display: none !important;
+  }
+  /* 折叠区全部展开，并去掉折叠开关标记 */
+  summary {
+    list-style: none;
+    cursor: default;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary::marker {
+    content: "";
+  }
+  details > *:not(summary) {
+    display: block !important;
+  }
+  details::details-content {
+    content-visibility: visible;
+    block-size: auto;
+  }
+  .calibration-content {
+    display: flex !important;
+  }
+  /* 白底黑字：去掉底色与阴影，只留边框分隔 */
+  .scope-card,
+  .stage-card,
+  .risk-card,
+  .stage-list > div,
+  .risk-section {
+    background: #fff;
+    box-shadow: none;
+  }
+  .scope-card,
+  .stage-card,
+  .risk-card {
+    border-color: #999;
+  }
+  .hero-lead,
+  .scope-foot,
+  .metric-delta,
+  .metric-value.unavailable,
+  .calibration-content,
+  .insight-card p,
+  .definition p,
+  .stage-index,
+  .risk-card p,
+  .missing,
+  .local-pill,
+  footer {
+    color: #000;
+  }
+  .metric-value.forecast {
+    font-style: italic;
+  }
+  .local-pill {
+    border-color: #999;
+  }
+  .tag.fact,
+  .tag.inference,
+  .tag.boundary {
+    background: #fff;
+    color: #000;
+    border: 1px solid #999;
+  }
+  .priority {
+    background: #fff;
+    color: #000;
+    border: 1px solid #000;
+  }
+  .priority.P0,
+  .priority.P1,
+  .priority.P2 {
+    background: #fff;
+  }
+  .risk-mark,
+  .mini-icon {
+    background: #fff;
+    color: #000;
+    border: 1px solid #999;
+  }
+  /* 实心标记用边框或强制打印底色，避免浏览器不打印背景时丢失 */
+  .time-connector {
+    height: 0;
+    background: none;
+    border-top: 1px solid #999;
+  }
+  .time-connector.dashed {
+    border-top-style: dashed;
+  }
+  .time-dot,
+  .legend-dot,
+  .metric-card:before {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  /* 打印版面：收紧间距，标题不落在页尾 */
+  .topbar {
+    height: auto;
+    padding-bottom: 10px;
+    justify-content: flex-end;
+  }
+  .hero {
+    padding: 0 0 20px;
+  }
+  h1 {
+    font-size: 26px;
+  }
+  .section {
+    margin-bottom: 24px;
+  }
+  .metric-card,
+  .insight-card {
+    min-height: 0;
+  }
+  /* 卡片不跨页断开 */
+  .metric-card,
+  .insight-card,
+  .definition,
+  .risk-card,
+  .recommendation,
+  .scope-card,
+  .stage-card,
+  .calibration-panel,
+  .time-strip {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  h1,
+  h2,
+  h3,
+  .section-heading {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+}
