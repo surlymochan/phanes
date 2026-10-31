@@ -41,6 +41,22 @@ class WatchTests(unittest.TestCase):
                          [("msg", "finished")])
         self.assertEqual(messages.flush(), [])
 
+    def test_mixed_stream_keeps_only_valid_assistant_text_and_one_snapshot(self):
+        messages = xs.WatchMessages()
+        events = [
+            update("tool_call", toolCallId="one", title="edit"),
+            update("agent_message_chunk"),
+            {"type": "message_end", "message": "not a message"},
+            {"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": 42},
+                {"type": "text", "text": "final answer"}]}},
+        ]
+        rows = [row for event in events for row in messages.feed(event)]
+
+        self.assertEqual(rows, [("cmd", "edit"), ("msg", "final answer")])
+        self.assertEqual([text for kind, text in rows if kind == "msg"], ["final answer"])
+        self.assertEqual(messages.flush(), [])
+
     def test_cursor_one_shot_and_codex_messages(self):
         messages = xs.WatchMessages()
         for text in ("first", " second"):

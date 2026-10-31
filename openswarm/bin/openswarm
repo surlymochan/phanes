@@ -9944,9 +9944,10 @@ def summarize_event(o):
         return "tool", f"{part.get('tool')} {short(inp.get('filePath') or inp.get('path') or '', 120)}"
     if t == "message_end":
         message = o.get("message") or {}
-        if message.get("role") == "assistant":
+        if isinstance(message, dict) and message.get("role") == "assistant":
             return "msg", "".join(b.get("text", "") for b in message.get("content") or []
-                                   if isinstance(b, dict) and b.get("type") == "text")
+                                   if isinstance(b, dict) and b.get("type") == "text"
+                                   and isinstance(b.get("text"), str))
     if t == "tool_execution_start":
         args = o.get("args") or {}
         return "cmd", args.get("command") or f"{o.get('toolName', 'tool')}"
@@ -9987,8 +9988,10 @@ class WatchMessages:
         # Cursor's one-shot stream-json protocol uses assistant messages and tool_call/result events.
         if event.get("type") == "assistant":
             message = event.get("message") or {}
-            self.chunks.extend(b.get("text", "") for b in message.get("content") or []
-                               if isinstance(b, dict) and b.get("type") == "text")
+            if isinstance(message, dict):
+                self.chunks.extend(b.get("text", "") for b in message.get("content") or []
+                                   if isinstance(b, dict) and b.get("type") == "text"
+                                   and isinstance(b.get("text"), str))
             return []
         if event.get("type") == "stream_event":
             delta = (event.get("event") or {}).get("delta") or {}
