@@ -81,13 +81,15 @@ try:
         rows = db.execute('SELECT host,run_id,backend,provider,created FROM reservations ORDER BY created').fetchall()
         out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created'), row)) for row in rows]}
     elif op == 'recover':
-        # Local operator only, after independently confirming the runner and
-        # every executor descendant are stopped. Never automatically expire.
-        if host != 'gocc' or request.get('confirm') != 'all-executor-processes-stopped':
-            raise ValueError('local explicit recovery confirmation required')
+        # The owner runs the local liveness check before requesting TTL recovery.
+        # gocc retains the existing operator-recovery path for cross-host repair.
         owner, run_id = request.get('host'), request.get('run_id')
         if owner not in ('gocc', 'gores1', 'local') or not isinstance(run_id, str) or not run_id:
             raise ValueError('invalid reservation owner or run id')
+        confirmation = request.get('confirm')
+        if not ((host == 'gocc' and confirmation == 'all-executor-processes-stopped') or
+                (host == owner and confirmation == 'runner-and-executors-stopped-after-ttl')):
+            raise ValueError('confirmed executor shutdown required')
         count = db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner,run_id)).rowcount
         out = {'ok': True, 'recovered': count}
     else:

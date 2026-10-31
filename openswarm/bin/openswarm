@@ -3317,9 +3317,10 @@ def provider_concurrency_limits(policy, keys):
     return limits
 
 
-# Tokens stay in this supervisor process. Lost supervisors intentionally leave a
-# persistent reservation for manual, evidence-backed recovery: no unsafe TTL.
+# Tokens stay in this supervisor process. Recovery is only eligible after the
+# local runner and every recorded executor process have stopped.
 _FLEET_RESERVATIONS = {}
+FLEET_HOSTS = {"gocc", "gores1", "local"}
 
 
 def fleet_guard_command():
@@ -3351,6 +3352,53 @@ def fleet_guard_call(command, payload):
         raise RuntimeError(f"fleet capacity coordinator unavailable: {error}")
 
 
+def fleet_guard_host(command):
+    """The existing guard command ends with the authenticated reservation owner."""
+    if command and command[-1] in FLEET_HOSTS:
+        return command[-1]
+    return None
+
+
+def fleet_recovery_ttl_seconds(policy):
+    value = (policy.get("fleet") or {}).get("recovery_ttl_seconds", 600)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("fleet.recovery_ttl_seconds must be a positive finite number")
+    return value
+
+
+def recover_expired_fleet_slots(command, policy):
+    """Recover dead local runners only after their executor process tree is gone."""
+    owner = fleet_guard_host(command)
+    if not owner:
+        return []
+    ttl = fleet_recovery_ttl_seconds(policy)
+    now, recovered = NOW(), []
+    for path in glob.glob(os.path.join(RUNS, "*", "status.json")):
+        status = jload(path, {}) or {}
+        rdir = os.path.dirname(path)
+        run_id = status.get("id") or os.path.basename(rdir)
+        reserved_at = status.get("fleet_reserved_at")
+        if (status.get("fleet_host") != owner or status.get("state") in ("finished", "unroutable", "dry-run")
+                or not isinstance(reserved_at, (int, float)) or isinstance(reserved_at, bool)
+                or now - reserved_at < ttl or pid_alive(status.get("runner_pid"))):
+            continue
+        if not executor_stopped(rdir):
+            stop_orphaned_executor(rdir)
+        if not executor_stopped(rdir):
+            set_status(rdir, fleet_reservation_error="retained after TTL: executor process group is still live")
+            continue
+        try:
+            answer = fleet_guard_call(command, {"op": "recover", "host": owner, "run_id": run_id,
+                                                "confirm": "runner-and-executors-stopped-after-ttl"})
+        except RuntimeError as error:
+            set_status(rdir, fleet_reservation_error=str(error))
+            continue
+        if answer.get("recovered"):
+            set_status(rdir, fleet_recovered_at=now, fleet_reservation_error=None)
+            recovered.append(run_id)
+    return recovered
+
+
 def release_fleet_slot(rdir):
     item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
     if not item:
@@ -3378,6 +3426,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     os.makedirs(rdir, exist_ok=True)
     status_path = os.path.join(rdir, "status.json")
     command = fleet_guard_command()
+    if command:
+        recover_expired_fleet_slots(command, policy)
     reservation_key = os.path.realpath(rdir)
     token = uuid.uuid4().hex
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
@@ -3432,6 +3482,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
             if admitted:
                 set_status(rdir, state="running", backend=backend, provider=provider,
                            concurrency_keys=keys, fleet_reservation_error=None, queue_reason=None,
+                           **({"fleet_host": fleet_guard_host(command), "fleet_reserved_at": NOW()} if command else {}),
                            **({"lane": lane_name} if lane_name else {}))
                 if lane_name:
                     lane_write_state(lane_name, turn_state="running", concurrency_keys=keys)
@@ -3644,6 +3695,25 @@ def executor_stopped(rdir):
     """A failure may release capacity only after its executor and group are both gone."""
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
     return not pid_alive(status.get("executor_pid")) and not process_group_alive(status.get("executor_pgid"))
+
+
+def stop_orphaned_executor(rdir):
+    """Stop the recorded executor group after its runner died and recovery TTL elapsed."""
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    pgid, pid = status.get("executor_pgid"), status.get("executor_pid")
+    set_status(rdir, fleet_recovery_stop_requested=NOW())
+    if process_group_alive(pgid):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(int(pgid), sig)
+            except (OSError, TypeError, ValueError):
+                pass
+            if sig == signal.SIGTERM:
+                time.sleep(0.2)
+            if not process_group_alive(pgid):
+                break
+    elif pid_alive(pid):
+        kill_tree(pid, grace=0.2)
 
 
 ENFORCED_RISKS = ["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]
@@ -7325,14 +7395,14 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
-               executor_pid=child.pid)
+               executor_pid=child.pid, executor_pgid=getattr(child, "pgid", None))
     lane_record_event(event_file, {"type": "lane_start", "lane": lane["name"]})
     if continuation:
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
         lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn)
     if lane_headless(lane):
-        set_status(rdir, executor_pid=child.pid)
+        set_status(rdir, executor_pid=child.pid, executor_pgid=getattr(child, "pgid", None))
     while pending:
         kind, value = pending.pop(0)
         if kind == "steer":
@@ -7367,7 +7437,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     "Correction to the interrupted task: apply this update while continuing the task.\n\n"
                     + correction + "\n\n" + REPORT_INSTRUCTION,
                     model=lane["model"], effort=lane.get("effort"), conversation=turn.get("conversation_id"))
-        set_status(rdir, executor_pid=child.pid)
+        set_status(rdir, executor_pid=child.pid, executor_pgid=getattr(child, "pgid", None))
         turn["id"] = "agy-" + uuid.uuid4().hex
         return True
 

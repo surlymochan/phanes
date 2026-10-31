@@ -239,6 +239,108 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(self.call('gocc', op='recover', host='gores1', run_id='orphan',
                                    confirm='all-executor-processes-stopped')['recovered'], 1)
 
+    def test_killed_runner_recovers_after_ttl_when_executor_is_stopped(self):
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'killed-runner'
+        rdir.mkdir(parents=True)
+        token = 'b' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='killed-runner',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        runner = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            (rdir / 'status.json').write_text(json.dumps({
+                'id': 'killed-runner', 'state': 'running', 'runner_pid': runner.pid,
+                'executor_pid': None, 'executor_pgid': None, 'fleet_host': 'gocc',
+                'fleet_reserved_at': 100.0,
+            }))
+            policy = {'fleet': {'recovery_ttl_seconds': 10}}
+            env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=109.9):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), ['killed-runner'])
+            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+
+    def test_killed_runner_ttl_recovery_waits_for_executor_group(self):
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'live-descendant'
+        rdir.mkdir(parents=True)
+        token = 'c' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='live-descendant',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        runner = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        executor = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            (rdir / 'status.json').write_text(json.dumps({
+                'id': 'live-descendant', 'state': 'running', 'runner_pid': runner.pid,
+                'executor_pid': executor.pid, 'executor_pgid': os.getpgid(executor.pid), 'fleet_host': 'gocc',
+                'fleet_reserved_at': 100.0,
+            }))
+            policy = {'fleet': {'recovery_ttl_seconds': 10}}
+            env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'stop_orphaned_executor') as stop, \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+                stop.assert_called_once_with(str(rdir))
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+            executor.wait()
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), ['live-descendant'])
+            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
+
+    def test_next_admission_reaps_a_confirmed_dead_runner_after_ttl(self):
+        runs = pathlib.Path(self.temp.name, 'runs')
+        old_dir = runs / 'old-run'
+        old_dir.mkdir(parents=True)
+        token = 'd' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='old-run',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        (old_dir / 'status.json').write_text(json.dumps({
+            'id': 'old-run', 'state': 'running', 'runner_pid': 999999999,
+            'executor_pid': None, 'executor_pgid': None, 'fleet_host': 'gocc',
+            'fleet_reserved_at': 100.0,
+        }))
+        next_dir = runs / 'next-run'
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 10}}
+        env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'NOW', return_value=110.1), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']):
+            self.assertTrue(xs.reserve_provider_slot(str(next_dir), 'pi', 'minimax-cn', policy,
+                                                      keep_waiting=lambda: True))
+            self.assertTrue(xs.release_fleet_slot(str(next_dir)))
+        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
         second = dict(op='acquire', token='2' * 32, run_id='two', backend='agy', provider=None)

@@ -52,6 +52,9 @@
     "state_ttl_minutes": 10,
     "breaker_minutes": 30
   },
+  "fleet": {
+    "recovery_ttl_seconds": 600
+  },
   "routing": {
     "ocgo_first_types": [
       "mechanical",

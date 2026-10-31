@@ -705,7 +705,9 @@ class LaneTests(unittest.TestCase):
         self.start_lane()
         run_id = self.assign("LANE_TEST_EXIT_WITH_CHILD")
         try:
-            self.assertEqual(self.wait_run(run_id)["status"], "failed")
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            self.assertTrue(state.get("executor_pgid"))
             self.assertTrue(process_alive(int(child_marker.read_text())))
             reservations = self.fleet_reservations()
             self.assertEqual(len(reservations), 1)
