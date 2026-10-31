@@ -2093,13 +2093,15 @@ def routing_median(values):
 
 def routing_tokens(entry):
     tokens = entry.get("tokens")
+    if isinstance(tokens, (int, float)) and math.isfinite(tokens) and tokens >= 0:
+        return tokens
     if isinstance(tokens, dict):
         total = tokens.get("total")
         if isinstance(total, (int, float)) and math.isfinite(total) and total >= 0:
             return total
     usage = entry.get("usage")
     if isinstance(usage, dict):
-        total = usage.get("total", usage.get("total_tokens"))
+        total = usage.get("totalTokens", usage.get("total", usage.get("total_tokens")))
         if isinstance(total, (int, float)) and math.isfinite(total) and total >= 0:
             return total
         inputs = usage.get("input", usage.get("input_tokens", usage.get("prompt_tokens")))
@@ -2107,6 +2109,21 @@ def routing_tokens(entry):
         if all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
                for value in (inputs, outputs)):
             return inputs + outputs
+    attempts = entry.get("attempts")
+    if isinstance(attempts, list):
+        totals = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            total = routing_tokens(attempt)
+            if total is None:
+                meta = attempt.get("meta")
+                if isinstance(meta, dict):
+                    total = routing_tokens(meta)
+            if total is not None:
+                totals.append(total)
+        if totals:
+            return sum(totals)
     return None
 
 
