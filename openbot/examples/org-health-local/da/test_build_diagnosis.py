@@ -373,6 +373,17 @@ class AbnormalRawDataTest(unittest.TestCase):
         self.assertIn("schema v4 要求整体口径的参考期次固定为 null", result.stdout + result.stderr)
         self.assertFalse(self.out_path.exists())
 
+    def test_invalid_utf8_csv_exits_nonzero_without_snapshot(self) -> None:
+        """CSV 含非法 UTF-8 字节时报告读取错误，且不写出诊断快照。"""
+        raw_dir = copy_raw(self.folder, "raw-invalid-utf8")
+        cost = raw_dir / "cost.csv"
+        cost.write_bytes(cost.read_bytes() + b"\xff\n")
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("UnicodeDecodeError", result.stdout + result.stderr)
+        self.assertIn("utf-8", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
     @unittest.expectedFailure
     def test_negative_cost_is_rejected(self) -> None:
         """负数成本应判为原始数据错误。
