@@ -50,6 +50,7 @@ COST_FILE = "cost.csv"
 HEADS_FILE = "heads.csv"
 REVENUE_FILE = "revenue.csv"
 FORECAST_FILE = "forecast.csv"
+FX_FILE = "fx.csv"
 
 REQUIRED_COLUMNS = {
     COST_FILE: ("月份", "整体技术人力成本万元", "营收业务技术人力成本万元", "运维设施成本万元"),
@@ -145,6 +146,18 @@ def parse_periods(brief: dict) -> dict:
         reference = first_text(window, "参考期次", "参考", "reference")
         end = first_text(window, "截止期次", "截止", "end")
         as_of = first_text(window, "数据截止", "数据截止日期", "asOf")
+        if not start and isinstance(window.get("期次"), list):
+            anchors = [item.strip() for item in window["期次"] if isinstance(item, str) and item.strip()]
+            # Boss 格式按期次顺序映射：首个“实际”为起始，含“参考”为参考，观察月份对应的“实际”为截止。
+            actuals = [item for item in anchors if item.endswith(ACTUAL_SUFFIX)]
+            references = [item for item in anchors if "参考" in item]
+            observed = first_text(window, "观察月份")
+            start = actuals[0][:-len(ACTUAL_SUFFIX)] if actuals else None
+            end = next(
+                (item[:-len(ACTUAL_SUFFIX)] for item in actuals if item == f"{observed}{ACTUAL_SUFFIX}"),
+                None,
+            )
+            reference = references[0].replace(REFERENCE_SUFFIX, "").replace("参考", "") if references else None
     elif isinstance(window, str):
         months = sorted(set(MONTH_TOKEN.findall(window)))
         if len(months) == 1:
@@ -172,12 +185,17 @@ def parse_periods(brief: dict) -> dict:
     }
 
 
-def parse_calibration(brief: dict) -> tuple[float, list[str]]:
+def parse_calibration(brief: dict, raw_dir: Path) -> tuple[float, list[str]]:
     """从任务书 `口径` 解析汇率与口径说明文字。"""
     calibration = brief.get("口径")
     if not isinstance(calibration, dict):
         raise BriefError("任务书缺少 `口径` 对象")
     rate = calibration.get("汇率", calibration.get("exchange_rate"))
+    if rate is None:
+        fx_path = raw_dir / FX_FILE
+        if fx_path.is_file():
+            rows = read_table(fx_path, ("人民币每美元",))
+            rate = rows[0].get("人民币每美元") if rows else None
     if isinstance(rate, dict):
         rate = first_text(rate, "人民币每美元", "人民币兑美元", "人民币/美元")
     if isinstance(rate, str):
@@ -223,7 +241,7 @@ def parse_plan(brief: dict, raw_dir: Path) -> dict:
     if version is not None and version != SCHEMA_VERSION:
         raise BriefError(f"任务书 `schema版本` 为 {version}，与 schema v{SCHEMA_VERSION} 不一致")
     periods = parse_periods(brief)
-    rate, definitions = parse_calibration(brief)
+    rate, definitions = parse_calibration(brief, raw_dir)
     labels = {
         "start": f"{periods['start']}{ACTUAL_SUFFIX}",
         "reference": f"{periods['reference']}{REFERENCE_SUFFIX}",

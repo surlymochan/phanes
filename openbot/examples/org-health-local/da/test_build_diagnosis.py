@@ -22,6 +22,7 @@ import build_diagnosis  # noqa: E402
 import validate  # noqa: E402
 
 SCRIPT = PACKAGE_DIR / "build_diagnosis.py"
+MAKE_BRIEF = EXAMPLE_DIR / "boss" / "make_brief.py"
 SAMPLE_RAW = PACKAGE_DIR / "sample-raw"
 SCHEMA_PATH = EXAMPLE_DIR / "schema" / "diagnosis.schema.json"
 
@@ -176,6 +177,24 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertEqual(data["scope"]["观察月份"], "2026-09")
         self.assertEqual(data["scope"]["数据截止"], "2026-09-30")
 
+    def test_boss_brief_builds_valid_snapshot(self) -> None:
+        """Boss 脚本产出的正式任务书可生成通过 validate.py 的快照。"""
+        folder = self.folder / "boss-brief"
+        folder.mkdir()
+        brief_path = folder / "brief.json"
+        generated = subprocess.run(
+            [sys.executable, str(MAKE_BRIEF), "--out", str(brief_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        result = run_cli(brief_path, SAMPLE_RAW, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+        self.assertEqual(data["scope"]["观察月份"], "2026-09")
+        self.assertEqual(data["scope"]["数据截止"], "2026-09-30")
+
     def test_output_is_deterministic(self) -> None:
         """同一份任务书与原始数据得到同一份输出。"""
         self.build()
@@ -212,7 +231,10 @@ class BuildDiagnosisTest(unittest.TestCase):
         brief = json.loads(json.dumps(BRIEF))
         del brief["口径"]["汇率"]
         path = write_brief(folder, brief)
-        result = run_cli(path, SAMPLE_RAW, self.out_path)
+        raw_dir = folder / "raw"
+        shutil.copytree(SAMPLE_RAW, raw_dir)
+        (raw_dir / "fx.csv").unlink()
+        result = run_cli(path, raw_dir, self.out_path)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("汇率", result.stdout + result.stderr)
 
