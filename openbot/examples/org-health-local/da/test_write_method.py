@@ -58,6 +58,20 @@ def run_write_method(brief, diagnosis, raw_files=None, raw_dir=None):
 
 
 class WriteMethodTest(unittest.TestCase):
+    def test_preserves_missing_metric_period_as_gap(self):
+        diagnosis = {
+            "metrics": [
+                {"标题": "活跃度", "数值": {"月度": {"一月": 120, "二月": None}}}
+            ]
+        }
+
+        code, stderr, content = run_write_method(BRIEF, diagnosis)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("已知缺口：二月 为 null", content)
+        self.assertNotIn("二月 为 0", content)
+        self.assertNotIn("估算", content)
+
     def test_writes_complete_numeric_free_method(self):
         code, stderr, content = run_write_method(BRIEF, DIAGNOSIS)
 
