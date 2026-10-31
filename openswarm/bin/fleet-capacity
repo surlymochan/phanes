@@ -13,14 +13,22 @@ ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
 LIMITS = {'total': 8, 'host:gocc': 2, 'host:gores1': 2, 'host:govpn': 2,
           'host:govpn2': 2, 'host:local': 2,
           'codex': 1, 'pi': 4, 'cursor': 2, 'agy': 2, 'copilot': 1, 'minimax-cn': 4}
-if len(sys.argv) != 2 or sys.argv[1] not in ('gocc', 'gores1', 'govpn', 'govpn2', 'local'):
+LANE_PROFILES = {
+    # Gateway validation is deliberately based on lane backend, not routing
+    # priority.  The lane supervisor still checks its configured model.
+    'gocc': {'C1': 'codex', 'A1': 'agy', 'A2': 'agy', 'GH1': 'copilot', 'GH2': 'copilot'},
+    'gores1': {'M1': 'pi', 'M2': 'pi', 'M3': 'pi', 'M4': 'pi', 'K1': 'cursor'},
+    'govpn': {'K1': 'cursor'},
+    'govpn2': {'K2': 'cursor'},
+}
+if len(sys.argv) != 2 or sys.argv[1] not in (*LANE_PROFILES, 'local'):
     sys.exit('invalid authenticated host')
 host = sys.argv[1]
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
     if op in ('lanes', 'assign', 'run_info', 'bundle', 'stop'):
-        if host != 'gores1':
+        if host not in LANE_PROFILES:
             raise ValueError('remote dispatcher host required')
         command = [str(Path.home() / '.local/bin/openswarm'), 'lane']
         if op == 'lanes':
@@ -38,7 +46,7 @@ try:
             verify = request.get('verify')
             title = request.get('title')
             budget = request.get('budget_minutes')
-            if lane not in ('C1', 'A1', 'GH1', 'GH2') or not isinstance(prompt, str) or not 0 < len(prompt) <= 50000:
+            if lane not in LANE_PROFILES[host] or not isinstance(prompt, str) or not 0 < len(prompt) <= 50000:
                 raise ValueError('invalid lane or prompt')
             if not isinstance(base, str) or not base or len(base) > 100 or not all(c in '0123456789abcdef' for c in base):
                 raise ValueError('base must be a hexadecimal commit')

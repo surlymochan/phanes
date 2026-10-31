@@ -160,10 +160,16 @@ class FleetCapacityTests(unittest.TestCase):
         binary.chmod(0o755)
         self.env['HOME'] = str(root)
         self.env['FAKE_ARGS'] = str(root / 'args.json')
-        response = self.call('gores1', op='assign', lane='GH1', prompt='review', base='abcdef0',
+        response = self.call('gores1', op='assign', lane='M2', prompt='review', base='abcdef0',
                              budget_minutes=3, title='review', verify=None, read_only=True)
         self.assertTrue(response['ok'])
         self.assertIn('--read-only', json.loads((root / 'args.json').read_text()))
+
+    def test_dispatcher_rejects_a_lane_owned_by_another_host(self):
+        response = self.call('govpn', op='assign', lane='M2', prompt='wrong host', base='abcdef0',
+                             budget_minutes=3, title='wrong host', verify=None, read_only=False)
+        self.assertFalse(response['ok'])
+        self.assertIn('invalid lane', response['error'])
 
     def test_remote_completed_run_returns_git_bundle(self):
         root = pathlib.Path(self.temp.name)
