@@ -50,6 +50,108 @@ python3 run_e2e.py --workdir demo --review
 
 页面可直接用浏览器打印为 PDF。
 
+## 同一场景的三种跑法：本地、SSH lane、issue bus
+
+上面那条产物链（Boss → DA → Builder → 站点自检 → 交叉审查）可以在本机跑，也可以交给执行
+网络里的 lane 或 issue bus 执行器跑。三种入口跑的是同一份合成数据、同一组脚本和同一条验收
+口径，差别只在「谁执行、在哪执行、结果怎么回来」：
+
+| 入口 | 执行位置 | 任务载体 | 结果回来方式 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| 本地 `run_e2e.py` | 自己的机器 | 命令行参数 | 产物落在 `--workdir` | 调试、评审、改代码 |
+| SSH lane | box → 受控主机（ib1–ib5、gocc、gorelay、govpn、govpn2） | 任务卡文件 | lane 分支 `openswarm/<run-id>` | 自己控制的主机与账号 |
+| GitHub issue bus | 不受控执行器（他人 agent、云 agent） | bus issue | issue 里的 `openswarm-result` 评论 | 外部或不受管的执行器 |
+
+网络入口的部署约定见 `docs/dual-mode-*.md`（当前仓库只有 SSH 一篇：`docs/dual-mode-ssh.md`；
+issue bus 的协议与结果格式在 `openswarm/docs/BUS.md`），当前盘点见 `brain/dual-mode-status.md`。
+原则不变：自己控制的主机走 SSH lane，不要改走 bus。
+
+### 1) 本地跑通
+
+```bash
+cd openbot/examples/org-health-local
+python3 run_e2e.py --workdir <workdir> --review
+```
+
+产物（`brief.json`、`diagnosis.json`、`dist/`、`review.md`）与注意事项见上文「重新生成整条产物链」；
+目录内单元测试用 `python3 run_tests.py`。
+
+### 2) 经 SSH lane 派发（受控主机）
+
+前提：box 上已配好 bridge 配置、fleet 的 SSH config、主机清单与 lane 拓扑，见
+`docs/dual-mode-ssh.md`。任务卡就是给执行器看的自然语言指令：
+
+```bash
+cd /srv/phanes/openbot-workspace
+umask 077
+task=$(mktemp /tmp/openswarm-org-health.XXXXXX.md)
+cat >"$task" <<'EOF'
+Repository: openbot
+Task type: docs
+在 openbot/examples/org-health-local 下运行 python3 run_e2e.py --workdir <目录> --review，
+把 brief.json、diagnosis.json、dist/ 和 review.md 的结论写进提交说明；只用合成数据，
+不要提交真实组织数据。
+EOF
+
+openswarm-fleet fleet status --json
+openswarm-fleet fleet exec ib1 -- lane status
+openswarm-fleet fleet exec ib1 -- lane assign M1 --task-file "$task" \
+  --title "org-health demo" --budget-minutes 15
+```
+
+`M1` 这类 lane 名以 `fleet status` 的实际输出为准，不要猜，也不要把主机名写进任务卡。
+派发后查状态、取回结果：
+
+```bash
+openswarm-fleet fleet exec ib1 -- runs --active --json
+openswarm-fleet fleet exec ib1 -- lane status
+```
+
+跑完确认 lane 回到 `idle`，再删临时任务卡：
+
+```bash
+rm -f -- "$task"
+```
+
+box 上由常驻 `lane-autodispatch` 承接 `lane-ready` issue 的自动派发路径见 `brain/autopilot.md`。
+
+### 3) 经 GitHub issue bus 派发（不受控执行器）
+
+协议、状态标签（`openswarm:queued`、`openswarm:claimed`、`openswarm:done`、`openswarm:failed`）
+与结果字段见 `openswarm/docs/BUS.md`。先把 bus 仓库和白名单落地：
+
+```bash
+openswarm bus init <bus-owner>/<bus-repo>
+```
+
+再从目标仓库派发（`--base` 指向已推送的提交）：
+
+```bash
+openswarm run --backend github-issue --cwd <target-repo> --base <commit> \
+  --budget-minutes 40 \
+  --verify 'python3 -m unittest discover -s openbot/examples/org-health-local -p "test_*.py"' \
+  --task-file task.md
+openswarm bus status
+```
+
+执行侧由 worker 认领并回结果：
+
+```bash
+openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
+```
+
+`task.md` 写的就是上面 lane 任务卡的同一段要求。planner 取最早一条合法 claim 的
+`openswarm-result` 评论作为结果（字段为 `status`、`summary`、`files_changed`、`tests`、
+`followups`，bus 另加 `branch`、`commit`），按需在本地复验；planner 自己不合并、不推目标仓库。
+
+### 三种入口的共同边界
+
+- 数据边界不变：真实组织数据只能从仓库外的绝对路径进入（见上文），三种入口一律如此；
+- 验收口径不变：仓库内单元测试用 `python3 run_tests.py`，端到端用
+  `python3 run_e2e.py --workdir <workdir> --review`；
+- 本地产物不入库：`dist/` 与本机打出的 `app.bundle.js` 已由本目录的 `.gitignore` 排除，
+  执行机上的产物不要连同真实数据一起提交。
+
 ## E2E 编排
 
 运行目录内全部单元测试（包括根目录及 boss、da、builder、review 子包）推荐使用：
