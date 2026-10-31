@@ -459,6 +459,8 @@ On small Linux lane hosts, omit `--verify` so test suites and their dependencies
 memory and CPU. The planner can run acceptance checks on its host. `lane systemd-unit` prints a system service with
 `MemoryMax=900M`, `CPUQuota=150%`, and `Nice=10`; review and install it separately if needed.
 
+For automated queue dispatch, label issues with `lane-ready` and an optional backend pin (`backend:pi|agy|codex`) to prioritize matching lane workers.
+
 ## Fleet and batch dispatch
 
 Put named executor hosts in `$OPENSWARM_HOME/fleet.json`. Install the same openswarm version, Python 3.9+, git,
