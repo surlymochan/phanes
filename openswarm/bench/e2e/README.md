@@ -127,6 +127,8 @@ python3 -m unittest tests.test_validate_tasks -v
 
 The unit test drives `run.py` through a fake `cursor-agent` that fixes pagination and prints a `result.usage` line. It checks that hidden tests are absent while the agent runs, that tokens and the session id are recorded, that a second invocation skips the finished cell, and that the SVG is a white three-panel chart.
 
+`report.py` on an empty result set (empty jsonl, environment-only jsonl, skipped-only jsonl, missing input) is covered by `openswarm/tests/test_bench_report.py`, which the openswarm suite runs with `python3 -m unittest discover -s tests -v` from the `openswarm/` directory. The test asserts the current behaviour: the report exits 0 and writes empty tables, and it does not say that the result set was empty (that case is marked `expectedFailure`).
+
 One real smoke is in `results/e2e-2026-10-17-smoke.jsonl` (report under `results/smoke-report/`). It is baseline × `pagination-off-by-one` × 1 repeat, not the matrix. On 2026-10-17 it finished in 43.6s, exit 0, one cursor-agent call, session `14c64f47-ed34-4666-8b63-7d4f638f26e9`, hidden tests passed after the agent exited, and `result.usage` was input 12960, output 1780, cache read 90496, cache write 0. The only tracked change was the page-start index in `src/paginate.js`. Do not tune tasks from this row.
 
 ## Fairness
