@@ -458,6 +458,21 @@ class CrossCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS 站点数据一致", result.stdout)
 
+    def test_run_checks_site_check_requires_dist_and_data_paths(self) -> None:
+        """只有同时提供 --dist 与数据路径时才生成站点数据一致检查。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "dist"
+            (dist / "data").mkdir(parents=True)
+            (dist / "data" / "diagnosis.json").write_bytes(data.read_bytes())
+
+            without_dist = cross_check.run_checks(self.brief, self.diagnosis, data_path=data)
+            with_dist = cross_check.run_checks(self.brief, self.diagnosis, data_path=data, dist=dist)
+
+        self.assertNotIn("站点数据一致", [result.name for result in without_dist])
+        self.assertIn("站点数据一致", [result.name for result in with_dist])
+
     def test_dist_different_bytes_fails(self) -> None:
         """站点数据与快照字节不同时失败。"""
         with temporary_directory() as folder:
