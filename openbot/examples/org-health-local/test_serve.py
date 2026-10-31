@@ -63,6 +63,32 @@ class LocalServeBoundaryTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def request_with_type(self, path, method='GET', host=None, port=None):
+        """发起一次请求并返回 (状态码, Content-Type, body)；用于比较 GET 与 HEAD 的响应头。"""
+        connection = http.client.HTTPConnection('127.0.0.1', port or self.port, timeout=5)
+        try:
+            headers = {} if host is None else {'Host': host}
+            connection.request(method, path, headers=headers)
+            response = connection.getresponse()
+            return response.status, response.getheader('Content-Type'), response.read()
+        finally:
+            connection.close()
+
+    def raw_head_response(self, path, port=None):
+        """用裸 socket 发一次 HEAD，返回响应原始字节；用于确认响应头之后没有 body 字节。"""
+        target_port = port or self.port
+        with socket.create_connection(('127.0.0.1', target_port), timeout=5) as sock:
+            sock.sendall(
+                f'HEAD {path} HTTP/1.0\r\nHost: 127.0.0.1:{target_port}\r\nConnection: close\r\n\r\n'.encode()
+            )
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        return b''.join(chunks)
+
     def test_service_binds_loopback_only(self):
         self.assertEqual(self.server.server_address[0], '127.0.0.1')
 
@@ -78,6 +104,22 @@ class LocalServeBoundaryTests(unittest.TestCase):
         status, body = self.request('/')
         self.assertEqual(status, 200)
         self.assertEqual(body, INDEX.read_bytes())
+
+    def test_head_matches_get_status_and_content_type(self):
+        # HEAD 只回响应头：状态码与 Content-Type 与 GET 一致，body 为空。
+        for path in ('/', '/index.html', '/styles.css', '/data/diagnosis.json'):
+            with self.subTest(path=path):
+                get_status, get_type, get_body = self.request_with_type(path)
+                self.assertEqual(get_status, 200)
+                self.assertTrue(get_body)
+                head_status, head_type, head_body = self.request_with_type(path, method='HEAD')
+                self.assertEqual(head_status, get_status)
+                self.assertEqual(head_type, get_type)
+                self.assertEqual(head_body, b'')
+                # HTTP 客户端本来就不读 HEAD 的 body，所以再看原始字节：响应头之后必须没有内容。
+                raw_head, _, raw_body = self.raw_head_response(path).partition(b'\r\n\r\n')
+                self.assertIn(b'200', raw_head.split(b'\r\n', 1)[0])
+                self.assertEqual(raw_body, b'')
 
     def test_other_hosts_are_forbidden(self):
         for host in ('evil.example', f'127.0.0.1:{self.port + 1}', 'localhost'):
