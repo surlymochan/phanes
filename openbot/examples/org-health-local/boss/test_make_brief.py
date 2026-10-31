@@ -3,6 +3,8 @@
 
 覆盖：生成结果的结构与字段齐全、schema版本 为 4、口径与合成示例一致、
 禁止事项含必需条目，以及 --goal/--month 覆盖与命令行的退出码。
+另含任务书缺少必填字段（如“目标”）时的错误提示：退出码非 0、错误信息
+指出字段名且不打印 traceback。
 
 观察期间的期次顺序、重复期次与起止倒置按当前行为断言：已支持的情形直接断言，
 已知缺口用 `unittest.expectedFailure` 标注并写明原因，不改实现。
@@ -382,6 +384,72 @@ class MakeBriefTest(unittest.TestCase):
         self.assertIn(str(path), output)
         self.assertNotIn("Traceback", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
+
+
+class MissingRequiredFieldTest(unittest.TestCase):
+    """任务书缺少必填字段（如“目标”）时的错误提示。"""
+
+    def brief_without_goal(self) -> dict:
+        """返回缺“目标”的任务书：其余字段保持生成器的默认结果。"""
+        brief = make_brief.build_brief()
+        del brief["目标"]
+        return brief
+
+    def test_check_missing_goal_exits_nonzero_and_names_field(self) -> None:
+        """--check 校验缺“目标”的任务书时退出码非 0，错误信息指出字段名且无 traceback。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            path.write_text(
+                json.dumps(self.brief_without_goal(), ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("目标", output)
+        self.assertIn("缺少必需字段", output)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    @unittest.expectedFailure
+    def test_check_missing_goal_names_field_on_stderr(self) -> None:
+        """--check 缺“目标”时错误信息应写在 stderr 上。
+
+        已知缺口：main 的 --check 分支把校验错误写到 stdout
+        （boss/make_brief.py:334-336），stderr 为空；实现改为写 stderr 后，
+        删掉 expectedFailure 标记。
+        """
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            path.write_text(
+                json.dumps(self.brief_without_goal(), ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("目标", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_out_missing_goal_reports_field_on_stderr(self) -> None:
+        """生成的任务书缺“目标”时退出码为 1，stderr 指出字段名且无 traceback。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            output = StringIO()
+            with patch.object(
+                make_brief, "build_brief", return_value=self.brief_without_goal()
+            ), redirect_stderr(output):
+                code = make_brief.main(["--out", str(path)])
+        self.assertEqual(code, make_brief.EXIT_INVALID)
+        self.assertIn("目标", output.getvalue())
+        self.assertIn("缺少必需字段", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+        self.assertFalse(path.exists())
 
 
 class PeriodOrderTest(unittest.TestCase):
