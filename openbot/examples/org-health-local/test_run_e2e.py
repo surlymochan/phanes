@@ -21,6 +21,25 @@ from run_e2e import REVIEW_REPORT  # noqa: E402  (需要先让示例目录可被
 RUNNER = ROOT / 'run_e2e.py'
 REVIEWER = ROOT / 'review' / 'cross_check.py'
 
+
+class RunE2EArgumentContractTest(unittest.TestCase):
+    """命令行帮助与必填参数契约。"""
+
+    def test_help_lists_supported_options(self):
+        result = subprocess.run([sys.executable, str(RUNNER), '--help'], capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for option in ('--workdir', '--raw', '--bundle', '--boss', '--da', '--builder', '--checker',
+                       '--reviewer', '--review'):
+            self.assertIn(option, result.stdout)
+
+    def test_workdir_is_required(self):
+        result = subprocess.run([sys.executable, str(RUNNER)], capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--workdir', result.stderr)
+        self.assertIn('required', result.stderr)
+
 # 供交叉审查契约用例使用的合成任务书与诊断快照（与 review/test_cross_check.py 的夹具同构）。
 BRIEF = {
     'schema版本': 4,
