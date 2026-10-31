@@ -109,6 +109,39 @@ class LocalServeBoundaryTests(unittest.TestCase):
         self.assertIsNone(serve.LocalOnlyHandler.list_directory(recorder, '/data'))
         self.assertEqual(recorder.errors, [404])
 
+    def test_query_string_on_allowed_paths_is_served(self):
+        # 查询串不参与白名单判定：路径部分仍在 ALLOWED_PATHS 内即可照常服务。
+        cases = (
+            ('/?x=1', INDEX.read_bytes()),
+            ('/index.html?x=1', INDEX.read_bytes()),
+            ('/styles.css?x=1', (serve.ROOT / 'styles.css').read_bytes()),
+            ('/data/diagnosis.json?x=1', self.data.read_bytes()),
+        )
+        for path, expected_body in cases:
+            with self.subTest(path=path):
+                status, body = self.request(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(body, expected_body)
+
+    def test_query_string_on_unknown_paths_is_not_found(self):
+        # 白名单外的路径即使带查询串依然 404。
+        for path in ('/serve.py?x=1', '/app.js?x=1', '/README.md?x=1',
+                     '/data?x=1', '/unknown?x=1'):
+            with self.subTest(path=path):
+                status, _ = self.request(path)
+                self.assertEqual(status, 404)
+
+    def test_query_string_does_not_change_host_check(self):
+        # Host 校验先于路径判定，带查询串时结论不变：非法 Host 一律 403。
+        for path in ('/?x=1', '/data/diagnosis.json?x=1'):
+            for host in ('evil.example', f'127.0.0.1:{self.port + 1}', 'localhost'):
+                with self.subTest(path=path, host=host):
+                    status, _ = self.request(path, host)
+                    self.assertEqual(status, 403)
+        # 未知路径 + 非法 Host：Host 校验在前，仍是 403 而不是 404。
+        status, _ = self.request('/unknown?x=1', 'evil.example')
+        self.assertEqual(status, 403)
+
     def test_data_option_serves_the_given_file(self):
         status, body = self.request('/data/diagnosis.json')
         self.assertEqual(status, 200)
@@ -211,6 +244,24 @@ class DistRootServeTests(unittest.TestCase):
 
     def test_unlisted_files_are_not_found(self):
         for path in ('/build-report.json', '/secret.txt', '/app.js', '/README.md', '/data', '/data/'):
+            with self.subTest(path=path):
+                status, _ = self.request(path)
+                self.assertEqual(status, 404)
+
+    def test_dist_query_string_on_allowed_paths_is_served(self):
+        cases = (
+            ('/?x=1', self.index.read_bytes()),
+            ('/index.html?x=1', self.index.read_bytes()),
+            ('/data/diagnosis.json?x=1', self.data.read_bytes()),
+        )
+        for path, expected_body in cases:
+            with self.subTest(path=path):
+                status, body = self.request(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(body, expected_body)
+
+    def test_dist_query_string_on_unknown_paths_is_not_found(self):
+        for path in ('/build-report.json?x=1', '/secret.txt?x=1', '/app.js?x=1'):
             with self.subTest(path=path):
                 status, _ = self.request(path)
                 self.assertEqual(status, 404)
