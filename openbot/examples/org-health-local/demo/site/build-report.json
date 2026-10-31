@@ -1,0 +1,27 @@
+{
+  "输入路径": "/data/home/.claude/openswarm-executor-candidate/lanes/CX1/wt/openbot/examples/org-health-local/demo/diagnosis.json",
+  "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f",
+  "文件清单": [
+    {
+      "路径": "index.html",
+      "字节数": 6995,
+      "sha256": "7f3b210f5f6a5c8a219eeeaad7b96d382bfe9227924f63787351503cb699b976"
+    },
+    {
+      "路径": "app.bundle.js",
+      "字节数": 7552178,
+      "sha256": "a2ac5e29dbc6fe84656cbac15c4610a5414f3a788c7ab613d93676bb087aaa49"
+    },
+    {
+      "路径": "styles.css",
+      "字节数": 13928,
+      "sha256": "39a78cb4de6619ae56602a1a78bf0d9d1993d7e7acac1221f24879791fcbb74a"
+    },
+    {
+      "路径": "data/diagnosis.json",
+      "字节数": 12658,
+      "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f"
+    }
+  ],
+  "生成时间": "2026-10-31T18:43:55Z"
+}
