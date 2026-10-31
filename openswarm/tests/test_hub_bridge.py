@@ -46,6 +46,19 @@ class HubBridgeTests(unittest.TestCase):
             self.assertTrue(MOD['mapped']('run-1','info'))
             self.assertIn('Executor host: gores1',json.loads(output.getvalue())['result']['result']['summary'])
 
+    def test_submit_and_result_keep_configured_remote_executor_host(self):
+        def fake(req):
+            if req['op'] == 'submit':
+                return {'id':'run-govpn','state':'queued','host':'govpn','backend':'cursor','model':'composer-2.5[fast=false]'}
+            self.assertEqual((req['op'], req['host']), ('info', 'govpn'))
+            return {'id':'run-govpn','result':{'result':{'summary':'done'}}}
+        with mock.patch.dict(G, {'gateway':fake}), contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['run_submit'](self.args)
+            self.assertEqual(json.loads(output.getvalue())['executor_host'], 'govpn')
+            output.seek(0); output.truncate()
+            self.assertTrue(MOD['mapped']('run-govpn','info'))
+            self.assertIn('Executor host: govpn',json.loads(output.getvalue())['result']['result']['summary'])
+
     def test_finished_remote_commit_is_fetched_for_local_review(self):
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)
@@ -143,6 +156,25 @@ class HubBridgeTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
         self.assertEqual(json.loads(output.getvalue())['error'], 'no available fleet lane')
+
+    def test_remote_gateway_uses_configured_host_for_info_bundle_and_stop(self):
+        sources = json.dumps([{'host':'gocc','ssh_alias':'openswarm-pi-broker'},
+                              {'host':'govpn','ssh_alias':'openswarm-govpn-gateway'}])
+        for op, remote_op in (('info', 'run_info'), ('bundle', 'bundle'), ('stop', 'stop')):
+            req = {'op':op, 'id':'run-govpn', 'host':'govpn'}
+            seen = []
+            def run(command, input=None, **_kwargs):
+                seen.append((command, json.loads(input)))
+                return subprocess.CompletedProcess(command, 0, json.dumps({'ok':True, 'result':{'id':'run-govpn'}}), '')
+            with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(req))), \
+                    mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': sources}), \
+                    mock.patch.object(subprocess, 'run', side_effect=run), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
+            self.assertEqual(seen, [
+                (['/usr/bin/ssh', '-T', '-F', str(Path.home() / '.ssh/openswarm-fleet/config'),
+                  'openswarm-govpn-gateway'], {'op':remote_op, 'run_id':'run-govpn'})])
+            self.assertEqual(json.loads(output.getvalue())['result'], {'id':'run-govpn'})
 
     def test_no_lane_through_gateway_then_retry(self):
         fake_home = self.path / 'gateway-home'

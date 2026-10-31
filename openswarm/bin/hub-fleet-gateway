@@ -11,6 +11,39 @@ import tempfile
 home = Path.home()
 cli = str(home / '.local/bin/openswarm')
 ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'openswarm-pi-broker']
+DEFAULT_REMOTE_SOURCE = {'host': 'gocc', 'ssh_alias': 'openswarm-pi-broker'}
+
+def remote_sources():
+    """Use the same explicit gateway inventory as automatic lane routing."""
+    raw = os.environ.get('OPENSWARM_AUTO_REMOTE_SOURCES')
+    if raw is None:
+        return [DEFAULT_REMOTE_SOURCE]
+    try:
+        sources = json.loads(raw)
+    except ValueError as error:
+        raise ValueError('invalid automatic routing remote source configuration') from error
+    if not isinstance(sources, list) or not sources:
+        raise ValueError('invalid automatic routing remote source configuration')
+    out = []
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ValueError('invalid automatic routing remote source configuration')
+        host, alias = source.get('host'), source.get('ssh_alias')
+        if (not isinstance(host, str) or not isinstance(alias, str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
+            raise ValueError('invalid automatic routing remote source configuration')
+        out.append({'host': host, 'ssh_alias': alias})
+    return out
+
+def source_for_host(host):
+    for source in remote_sources():
+        if source['host'] == host:
+            return source
+    raise ValueError('invalid host')
+
+def remote_command(source):
+    return [*ssh[:-1], source['ssh_alias']]
 
 def result(cmd, payload=None, timeout=45):
     p = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
@@ -52,9 +85,10 @@ def main():
     if op in ('info','bundle','stop'):
         run_id, host = req.get('id'), req.get('host')
         if not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id): raise ValueError('invalid id')
-        if host not in ('gores1','gocc'): raise ValueError('invalid host')
-        if host == 'gocc':
-            data = result(ssh, {'op':{'info':'run_info','bundle':'bundle','stop':'stop'}[op],'run_id':run_id}, timeout=140)
+        if host != 'gores1':
+            source = source_for_host(host)
+            data = result(remote_command(source), {'op':{'info':'run_info','bundle':'bundle','stop':'stop'}[op],
+                                                    'run_id':run_id}, timeout=140)
             return data['result']
         if op == 'bundle':
             info = result([cli, 'fleet', '_run-info', run_id])
