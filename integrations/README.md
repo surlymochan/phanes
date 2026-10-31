@@ -5,6 +5,7 @@
 - `hub-openswarm-bridge`：Hub 派发、状态查询和结果取得。
 - `hub-fleet-gateway`：执行主机上的派发和结果网关。
 - `fleet-result-bundle`：将远端任务提交交回本机审查。
+- `openswarm-fleet-bundle-adapter`：为尚未内置 `_bundle` 的既有执行器补充目标主机 bundle 命令。
 
 Hub 本机持有 lane 时，不需要额外 gateway、socket 或 relay。启用已有的
 OpenSwarm fleet 清单即可：

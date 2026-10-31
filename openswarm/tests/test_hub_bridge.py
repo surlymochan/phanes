@@ -70,6 +70,7 @@ class HubBridgeTests(unittest.TestCase):
             [G['native'], 'stop', 'local-k1'],
             [G['native'], 'fleet', '_bundle', 'local-k1'],
         ])
+        self.assertEqual(command.call_args_list[2].args[2], 210)
 
     def test_remote_bundle_is_built_on_its_executor_host(self):
         command = mock.Mock(return_value={'branch': 'openswarm/gocc-a1', 'bundle': 'AA=='})

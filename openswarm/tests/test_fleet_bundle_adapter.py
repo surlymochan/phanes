@@ -9,6 +9,7 @@ import unittest
 
 
 ADAPTER = Path(__file__).resolve().parents[1] / 'bin' / 'openswarm-fleet-bundle-adapter'
+RESULT_BUNDLE = Path(__file__).resolve().parents[1] / 'bin' / 'fleet-result-bundle'
 
 
 class FleetBundleAdapterTests(unittest.TestCase):
@@ -16,16 +17,29 @@ class FleetBundleAdapterTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
+        self.repo = root / 'executor-only-repo'
+        self.repo.mkdir()
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.repo), *args], text=True).strip()
+        git('init', '-q')
+        (self.repo / 'file').write_text('before')
+        git('add', 'file')
+        git('-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base')
+        base = git('rev-parse', 'HEAD')
+        git('checkout', '-qb', 'openswarm/run-1')
+        (self.repo / 'file').write_text('after')
+        git('-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-qam', 'result')
+        commit = git('rev-parse', 'HEAD')
         self.base = root / 'old-openswarm'
         self.base.write_text('#!' + sys.executable + '\n'
                              'import json,sys\n'
                              'if sys.argv[1:3] == ["fleet", "_run-info"]:\n'
-                             ' print(json.dumps({"id":sys.argv[3],"workspace":{"repo":"/executor-only/worktree"}}))\n'
+                             ' print(' + repr(json.dumps({'id': 'run-1', 'state': 'finished', 'result': {
+                                 'branch': 'openswarm/run-1', 'commit': commit,
+                                 'workspace': {'repo': str(self.repo), 'base': base}}})) + ')\n'
                              'else: print(json.dumps({"delegated":sys.argv[1:]}))\n')
         self.base.chmod(0o755)
-        self.bundle = root / 'fleet-result-bundle'
-        self.bundle.write_text('import json,sys\nmeta=json.load(sys.stdin)\n'
-                               'print(json.dumps({"bundle":"eA==","source_repo":meta["workspace"]["repo"]}))\n')
+        self.bundle = RESULT_BUNDLE
 
     def invoke(self, *args):
         return subprocess.run([str(ADAPTER), *args], text=True, capture_output=True, timeout=15,
@@ -35,8 +49,19 @@ class FleetBundleAdapterTests(unittest.TestCase):
     def test_bundle_uses_metadata_and_helper_on_executor(self):
         result = self.invoke('fleet', '_bundle', 'run-1')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout),
-                         {'bundle': 'eA==', 'source_repo': '/executor-only/worktree'})
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload['branch'], 'openswarm/run-1')
+        self.assertTrue(payload['bundle'])
+
+    def test_nonzero_base_error_keeps_structured_stdout(self):
+        self.base.write_text('#!' + sys.executable + '\n'
+                             'import json,sys\n'
+                             'print(json.dumps({"ok":False,"error":"base runtime failed"}))\n'
+                             'raise SystemExit(7)\n')
+        self.base.chmod(0o755)
+        result = self.invoke('fleet', '_bundle', 'run-1')
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'base runtime failed'})
 
     def test_other_commands_delegate_to_existing_runtime(self):
         result = self.invoke('lane', 'status')
