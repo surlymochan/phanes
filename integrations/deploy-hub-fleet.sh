@@ -72,6 +72,35 @@ PY
 REMOTE
 }
 
+# A loaded launchd job can keep running after its on-disk plist has been
+# damaged. Refuse a rollout before bootout when the durable definition cannot
+# restore the lane by itself.
+validate_local_lane_plist() {
+  local lane="$1" label
+  label="app.openswarm.phanes.$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')"
+  python3 - "$HOME/Library/LaunchAgents/$label.plist" "$label" "$lane" <<'PY'
+import pathlib, plistlib, sys
+
+path, label, lane = map(pathlib.Path, sys.argv[1:])
+with path.open("rb") as source:
+    data = plistlib.load(source)
+if not isinstance(data, dict):
+    raise SystemExit(f"invalid local launchd plist (expected dictionary): {path}")
+if data.get("Label") != str(label):
+    raise SystemExit(f"invalid local launchd label: {path}")
+arguments = data.get("ProgramArguments")
+if not isinstance(arguments, list) or arguments[-3:] != ["lane", "serve", str(lane)]:
+    raise SystemExit(f"invalid local launchd arguments: {path}")
+env = data.get("EnvironmentVariables")
+if not isinstance(env, dict) or env.get("OPENSWARM_HOME") is None or \
+        env.get("OPENSWARM_FLEET_GUARD_CONFIG") is None or \
+        str(env.get("OPENSWARM_FLEET_GUARD_REQUIRED")) != "1":
+    raise SystemExit(f"missing required local lane environment: {path}")
+if data.get("KeepAlive") is not True or data.get("RunAtLoad") is not True:
+    raise SystemExit(f"local lane must keep alive and run at load: {path}")
+PY
+}
+
 echo "preflight: Hub=$hub_runtime; gocc=$gocc_repo; gores1=$gores1_repo"
 if (( ! local_only )); then
   remote_preflight gocc "$gocc_runtime" "$gocc_repo" 'C1,A1,A2,GH1,GH2'
@@ -79,7 +108,10 @@ if (( ! local_only )); then
 fi
 test -x "$local_runtime/bin/openswarm"
 local_status="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
-for lane in K1 K2; do test -d "$local_home/lanes/$lane/wt"; done
+for lane in K1 K2; do
+  test -d "$local_home/lanes/$lane/wt"
+  validate_local_lane_plist "$lane"
+done
 python3 - "$local_status" <<'PY'
 import json, sys
 for row in json.loads(sys.argv[1]):
