@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+# Git 只把 GIT_DIR 传给 hook，不传 GIT_WORK_TREE。linked worktree 里 GIT_DIR 指向 worktree
+# 自己的 git 目录，于是 git 把当前目录当成工作树根：脚本 cd openbot 之后，git add --
+# examples/x.json 会把文件按 openbot/examples/x.json 之外的路径再写回索引，提交里多出
+# 仓库根的 examples/x.json。清掉这两个变量后，git 按工作树正常发现仓库根，普通检出与
+# worktree 的行为一致。GIT_INDEX_FILE 保留：hook 必须操作同一个索引。
+unset GIT_DIR GIT_WORK_TREE
+
 repository_root=$(git rev-parse --show-toplevel)
 project_root="$repository_root"
 project_path=""
