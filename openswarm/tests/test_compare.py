@@ -72,6 +72,27 @@ class CompareTests(unittest.TestCase):
         self.assertIsNone(xs.choose_compare_winner(self.candidate("A", True, 1, 5, 2),
                                                    self.candidate("B", True, 1, 5, 2)))
 
+    def test_missing_review_field_uses_remaining_score_criteria(self):
+        missing = self.candidate("A", True, 0, 5, 2)
+        del missing["review"]
+        reviewed = self.candidate("B", True, 1, 5, 2)
+        for candidate, backend in ((missing, "codex"), (reviewed, "agy")):
+            candidate["backend"] = backend
+            candidate["diff"].update(files=1, insertions=3, deletions=2, paths=["x.py"])
+            candidate["score"] = xs.compare_candidate_score(candidate)
+
+        # A missing review is not the same as a clean review: with all other
+        # evidence tied, compare reports an explainable tie instead of raising.
+        self.assertIsNone(xs.choose_compare_winner(missing, reviewed))
+        self.assertIn("no winner", " ".join(xs.compare_diff_notes(missing, reviewed, None)))
+
+        # The remaining criteria still apply when the review criterion is unavailable.
+        missing["diff"]["changed_lines"] = 4
+        missing["score"] = xs.compare_candidate_score(missing)
+        winner = xs.choose_compare_winner(missing, reviewed)
+        self.assertEqual(winner["label"], "A")
+        self.assertIn("Winner: A", " ".join(xs.compare_diff_notes(missing, reviewed, winner)))
+
     def test_tied_run_ledger_entries_are_marked_tie(self):
         candidates = [{"run_id": "run-a", "backend": "codex", "result": {"status": "done"}},
                       {"run_id": "run-b", "backend": "agy", "result": {"status": "done"}}]
