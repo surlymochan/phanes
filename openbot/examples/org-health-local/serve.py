@@ -109,7 +109,13 @@ def main(argv=None):
         return 1
     if args.root is None:
         os.chdir(ROOT)
-        build_bundle()
+        try:
+            build_bundle()
+        except FileNotFoundError:
+            # 未安装 bun：给出可执行提示并以非 0 退出，不抛 traceback。
+            print('错误: 未找到 bun 命令，请先安装 bun 或使用 --root 指向已构建好的静态站点',
+                  file=sys.stderr, flush=True)
+            return 1
         root_path = ROOT
     else:
         root_path = args.root

@@ -472,5 +472,48 @@ class PortInUseTests(unittest.TestCase):
         mock_create.assert_not_called()
 
 
+class MissingBunTests(unittest.TestCase):
+    """未安装 bun 时：打印友好提示并以退出码 1 结束，不出现 traceback。"""
+
+    def run_main(self, argv):
+        """运行 main 并捕获输出，返回 (退出码, stdout, stderr)。"""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serve.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_missing_bun_exits_with_hint(self):
+        # build_bundle 找不到 bun 命令时抛 FileNotFoundError；main 必须捕获并给出提示。
+        with patch.object(serve, 'build_bundle',
+                          side_effect=FileNotFoundError(2, 'No such file or directory', 'bun')), \
+             patch('os.chdir'), \
+             patch.object(serve, 'create_server') as mock_create:
+            code, out, err = self.run_main(['--port', '0'])
+        self.assertEqual(code, 1)
+        self.assertIn('未找到 bun 命令', err)
+        self.assertIn('--root', err)
+        self.assertNotIn('Traceback', err)
+        self.assertNotIn('Traceback', out)
+        self.assertNotIn('预览地址', out)
+        mock_create.assert_not_called()
+
+    def test_cli_without_bun_exits_with_hint(self):
+        # 端到端：PATH 指向空目录，命令行找不到 bun，退出码 1 且 stderr 只有提示没有 traceback。
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        empty_path = Path(tmp.name)
+        env = {'PATH': str(empty_path), 'HOME': str(empty_path)}
+        result = subprocess.run(
+            [sys.executable, str(serve.ROOT / 'serve.py'), '--port', '0'],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('未找到 bun 命令', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertNotIn('预览地址', result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()
