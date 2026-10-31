@@ -183,7 +183,8 @@ fields `ownBrowserSession` and `browserProfileId` (`agent_json`) select it:
 | Only this agent | `persist:openbot-browser-agent-<key>`. The key is the first 32 hex characters of the SHA-256 of the agent id. |
 | Named profile | `persist:openbot-browser-profile-<id>`. The id is 32 random hex characters. |
 
-Named profiles are rows of the `browser_profiles` table (migration 45). Many agents can use one
+Named profiles are rows of the `browser_profiles` table (fork migration 46; see
+[Database migrations](database-migrations.md#what-the-fork-appends)). Many agents can use one
 profile, so they share its sign-ins; a profile has no owner agent, and the tab rules below do not
 change. The name is a label only and never becomes a path or a partition, so a rename keeps the
 data. An agent with `browserProfileId` also has `ownBrowserSession: true`. After a downgrade, an
@@ -256,7 +257,8 @@ own screen. `browser-view-gateway.ts` answers that with a session and a websocke
 streams the tab through CDP, and the gateway sends each frame as bytes and dispatches the pointer and
 key input that comes back, in fractions of the last frame, through the same access checks. Frames stay
 outside the per-tab operation queue, so watching never delays a tool call. `browser-view-client.ts` is
-the client half, and it reuses the Remote Desktop websocket tunnel rather than adding a WebRTC channel.
+the client half, and it reuses the Remote Desktop websocket tunnel, which rides the `desktop`
+DataChannel, rather than adding a WebRTC channel of its own.
 The `browser-view` capability says whether a host has both.
 
 The mobile app (iOS and Android) draws the pointer itself, so it needs the page's cursor. A host with

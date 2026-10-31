@@ -49,8 +49,9 @@ adding a module or moving ownership between workspaces.
 
 ## Effect
 
-- Use Effect 4.0.0 for migrated server and desktop domain services, schemas, typed errors,
-  asynchronous workflows, and external I/O. Keep the Bun catalog and lockfile aligned.
+- Use the catalog-pinned `effect` 4.x package for migrated server and desktop domain services,
+  schemas, typed errors, asynchronous workflows, and external I/O. Keep the Bun catalog and
+  lockfile aligned.
 - Read the installed Effect source and documentation. Do not use v3 compatibility aliases.
 - Prefer named `Effect.fn`, `Effect.gen`, `Context.Service`, explicit layers, and `Schema.TaggedError`.
 - Derive validated domain types from schemas. Decode untrusted values at their boundary;
