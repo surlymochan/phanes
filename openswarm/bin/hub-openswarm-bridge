@@ -71,6 +71,9 @@ def local_command(command, payload=None, timeout=100):
         if isinstance(data, dict) and data.get('error') in (
                 'no available fleet lane', 'available lanes changed or rejected the task'):
             raise NoAvailableLane(data['error'])
+        if isinstance(data, dict) and isinstance(data.get('error'), str) and \
+                data['error'].startswith('fleet lane discovery unavailable:'):
+            raise RuntimeError(data['error'])
         raise RuntimeError('local fleet command rejected request')
     return data
 
@@ -185,7 +188,9 @@ def run_submit(args):
         db.close()
         raise RuntimeError('no available fleet lane; retry when an executor is idle') from error
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
-        reason = str(error) if str(error) in gateway_errors else 'gateway unavailable or response lost'
+        reason = (str(error) if str(error) in gateway_errors
+                  or str(error).startswith('fleet lane discovery unavailable:')
+                  else 'gateway unavailable or response lost')
         raise RuntimeError(f'handoff {request_id} unresolved ({reason}); inspect the remote run before reconciliation') from error
     run_id, host = reply.get('id'), reply.get('host')
     if (not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id)

@@ -130,13 +130,19 @@ def discovered_lanes():
         if local_allowed is None or row.get('backend') in local_allowed
     ]
     if hosts:
+        unavailable = []
         for host in hosts:
             try:
                 allowed = filters.get(host)
                 rows.extend({**row, '_origin': 'fleet', '_fleet_host': host} for row in fleet_lanes(host)
                             if allowed is None or row.get('backend') in allowed)
             except (RuntimeError, OSError, subprocess.SubprocessError):
-                pass
+                unavailable.append(host)
+        # A partial outage may still leave a usable host, but silently turning
+        # a total fleet-discovery outage into "no available lane" hides the
+        # operational distinction from the Hub handoff journal.
+        if len(unavailable) == len(hosts):
+            raise RuntimeError('fleet lane discovery unavailable: ' + ','.join(unavailable))
         return rows
     try:
         rows.extend({**row, '_origin': 'remote'} for row in remote({'op':'lanes'}))

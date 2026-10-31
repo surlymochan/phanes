@@ -125,6 +125,31 @@ class FleetAutoTests(unittest.TestCase):
         self.assertEqual([(row['name'], row['_origin']) for row in rows], [('A1', 'fleet')])
         local.assert_not_called()
 
+    def test_total_remote_discovery_outage_is_not_reported_as_no_lane(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {'fleet_lanes': mock.Mock(side_effect=OSError('unreachable'))}):
+            with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable: gores1,gocc'):
+                G['discovered_lanes']()
+
+    def test_partial_remote_discovery_outage_keeps_other_host_available(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        def lanes(host):
+            if host == 'gores1':
+                raise OSError('unreachable')
+            return [{'name':'A1','state':'idle','backend':'agy','model':'gemini'}]
+        with mock.patch.dict(os.environ, environment), mock.patch.dict(G, {'fleet_lanes': lanes}):
+            rows = G['discovered_lanes']()
+        self.assertEqual([row['name'] for row in rows], ['A1'])
+
     def test_copilot_prefers_sonnet_for_hard_and_haiku_for_routine_work(self):
         lanes = [
             {'name': 'GH1', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-haiku-5.5'},

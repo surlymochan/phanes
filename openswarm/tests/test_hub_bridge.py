@@ -136,6 +136,13 @@ class HubBridgeTests(unittest.TestCase):
             self.assertEqual(MOD['local_gateway'](payload)['id'], 'run-1')
         self.assertEqual(command.call_args.kwargs['timeout'], 140)
 
+    def test_local_command_preserves_total_fleet_discovery_outage(self):
+        response = subprocess.CompletedProcess([], 1,
+            json.dumps({'ok': False, 'error': 'fleet lane discovery unavailable: gores1,gocc'}), '')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable: gores1,gocc'):
+                MOD['local_command'](['auto'])
+
     def test_local_command_classifies_changed_lane_error_as_unavailable(self):
         response = mock.Mock(returncode=0, stdout=json.dumps(
             {'ok': False, 'error': 'available lanes changed or rejected the task'}))
