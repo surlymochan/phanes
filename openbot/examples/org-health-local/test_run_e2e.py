@@ -274,6 +274,24 @@ elif role == 'builder':
         self.assertEqual([call[0] for call in self.calls()], ['boss'])
         self.assertNotIn('[Builder] 命令', result.stdout)
 
+    def test_missing_raw_stops_at_da_before_build_check_and_review(self):
+        """raw 目录缺失时 Boss 产出任务书，DA 失败并阻断后续步骤。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role, probe=(role == 'da'))
+        missing_raw = self.root / 'missing-raw'
+        command = self.command() + ['--raw', str(missing_raw), '--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('步骤失败: DA', result.stderr)
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+        for step in ('Builder', '检查', '审查'):
+            self.assertNotIn(f'[{step}] 命令', result.stdout)
+        self.assertFalse((self.workdir / 'diagnosis.json').exists())
+        self.assertFalse((self.workdir / 'dist').exists())
+
     def test_builder_failure_stops_pipeline_and_returns_nonzero(self):
         """Builder 失败时打印失败步骤并以非零退出，站点自检不再执行。"""
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
