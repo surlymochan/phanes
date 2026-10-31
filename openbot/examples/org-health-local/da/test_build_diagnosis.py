@@ -543,6 +543,47 @@ class AbnormalRawDataTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("heads.csv", result.stdout + result.stderr)
 
+    def test_negative_revenue_is_rejected(self) -> None:
+        """负数收入应判为原始数据错误。
+
+        收入不能为负数：负数收入会让成本率失去意义（成本 ÷ 负收入得到负的成本率）。
+        """
+        raw_dir = copy_raw(self.folder, "raw-negative-revenue")
+        revenue = raw_dir / "revenue.csv"
+        write_csv_lines(
+            revenue,
+            [line.replace("2026-01,11.2", "2026-01,-11.2") for line in csv_lines(revenue)],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("revenue.csv", result.stderr)
+        self.assertIn("非负数", result.stderr)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_negative_forecast_revenue_is_rejected(self) -> None:
+        """forecast.csv 的年末测算收入为负时应判为原始数据错误。
+
+        年末测算与年末目标的收入同样不能为负数，否则年末成本率没有意义。
+        """
+        raw_dir = copy_raw(self.folder, "raw-negative-forecast-revenue")
+        forecast = raw_dir / "forecast.csv"
+        write_csv_lines(
+            forecast,
+            [
+                line.replace("年末测算,13.4,10.7,13.4,10.7,,14.8", "年末测算,13.4,10.7,13.4,10.7,,-14.8")
+                for line in csv_lines(forecast)
+            ],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forecast.csv", result.stderr)
+        self.assertIn("非负数", result.stderr)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
     def test_duplicate_month_row_exits_nonzero(self) -> None:
         """同一月份重复行时报错退出。"""
         raw_dir = copy_raw(self.folder, "raw-duplicate-month")
