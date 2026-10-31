@@ -11,6 +11,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "openswarm"
+FLEET_CAPACITY = ROOT / "bin" / "fleet-capacity"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 
@@ -118,6 +119,18 @@ class LaneTests(unittest.TestCase):
             return json.loads((self.data / "lanes" / self.lane_name / "state.json").read_text())
         except (OSError, ValueError):
             return {}
+
+    def enable_fleet_guard(self):
+        capacity_dir = self.root / "fleet-capacity"
+        guard = self.root / "fleet-guard.json"
+        guard.write_text(json.dumps({"command": [str(FLEET_CAPACITY), "gocc"]}))
+        self.env["OPENSWARM_FLEET_GUARD_CONFIG"] = str(guard)
+        self.env["OPENSWARM_FLEET_CAPACITY_DIR"] = str(capacity_dir)
+
+    def fleet_reservations(self):
+        result = subprocess.run([str(FLEET_CAPACITY), "gocc"], input=json.dumps({"op": "status"}),
+                                text=True, capture_output=True, check=True, env=self.env)
+        return json.loads(result.stdout)["reservations"]
 
     def test_assign_commits_and_writes_normal_result(self):
         self.set_config("pi")
@@ -649,6 +662,27 @@ class LaneTests(unittest.TestCase):
                                    if (s := self.lane_state()) else None,
                                    timeout=8, description="Cursor ACP child restart")
         self.assertTrue(restarted["child_pid"])
+
+    def test_crashed_lane_child_releases_shared_fleet_slot(self):
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_CRASH")
+        state = self.wait_run(run_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(self.fleet_reservations(), [])
+
+    def test_live_lane_turn_keeps_shared_fleet_slot(self):
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_WAIT retain the running slot")
+        self.wait_running(run_id)
+        reservations = self.fleet_reservations()
+        self.assertEqual(len(reservations), 1)
+        self.assertEqual(reservations[0]["run_id"], run_id)
+        self.cli("lane", "abort", self.lane_name)
+        self.wait_run(run_id)
 
     def test_steer_reaches_active_codex_turn(self):
         self.start_lane()
