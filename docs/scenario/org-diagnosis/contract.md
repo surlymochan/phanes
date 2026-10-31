@@ -74,8 +74,8 @@ python3 boss/make_brief.py --out <brief.json> [--goal 文本 ...] [--month YYYY-
 | 字段 | 类型 | 必填 | 谁写 | 谁读 |
 | --- | --- | --- | --- | --- |
 | `目标` | 字符串数组（1-5 条） | 是 | Boss | DA 写进快照 `口径说明`（`da/build_diagnosis.py:868`） |
-| `观察期间` | 对象：`观察月份`/`数据截止`/`期次`/`说明` | 是 | Boss | Reviewer 核期间（`review/cross_check.py:179-198`）；DA **读不到期次锚点**（见第 8 节缺口 1） |
-| `口径` | 对象：四个指标标题 → `{单位,定义,期间,缺失处理}` | 是 | Boss | DA 取汇率失败时只能拿文本说明（`da/build_diagnosis.py:175-197`）；Reviewer 不校验口径内容 |
+| `观察期间` | 对象：`观察月份`/`数据截止`/`期次`/`说明` | 是 | Boss | Reviewer 核期间（`review/cross_check.py:179-198`）；DA 解析 Boss 格式 `期次` 锚点（`da/build_diagnosis.py:141-186`） |
+| `口径` | 对象：四个指标标题 → `{单位,定义,期间,缺失处理}` | 是 | Boss | DA 读取显式汇率，缺失时从原始目录 `fx.csv` 读取（`da/build_diagnosis.py:189-207`）；Reviewer 不校验口径内容 |
 | `必答问题` | 字符串数组 | 是 | Boss | DA 逐条生成洞察（`da/build_diagnosis.py:649-652`）；Reviewer 逐条核对是否被引用（`review/cross_check.py:365-378`） |
 | `数据需求` | 对象数组：`字段路径`/`单位`/`口径`/`对应指标` | 是 | Boss | DA 按实际来源映射原始列名（脚本不读此字段，只作为交付要求） |
 | `禁止事项` | 字符串数组（≥2 条） | 是 | Boss | DA 写进快照 `definitions` 末尾（`da/build_diagnosis.py:710-711`） |
@@ -109,10 +109,9 @@ python3 da/build_diagnosis.py --brief <brief.json> --raw <dir> --out <diagnosis.
 
   合成样本见 `openbot/examples/org-health-local/da/sample-raw/`。
 
-- **任务书必须额外提供的两个键**（`brief.schema.json` 里没有，见第 8 节缺口 1）：
-  - `观察期间.起始期次` / `观察期间.参考期次` / `观察期间.截止期次`：`YYYY-MM`，
-    缺任一即报错（`da/build_diagnosis.py:139-173`，其中 `:159`、`:161` 抛错）；
-  - `口径.汇率`：正数（人民币/美元），缺任一即报错（`da/build_diagnosis.py:175-197`，其中 `:189` 抛错）。
+- **期次与汇率**：DA 可直接消费 Boss 格式的 `观察期间.期次`，按首个实际、首个参考及
+  `观察月份`对应的实际期次解析为锚点（`da/build_diagnosis.py:141-186`）；若任务书未提供
+  `口径.汇率`，则从原始目录的 `fx.csv`（列 `人民币每美元`）读取（`:189-207`）。
 
 ### 3.3 输出
 
@@ -223,9 +222,8 @@ python3 builder/check_site.py <dist>
   3. `index.html`、`styles.css` 不含外部 `http(s)` 引用（`:81-89`）；
   4. `build-report.json` 里每个产物的 sha256 与磁盘一致（`:91-104`）。
 - 退出码：`0` 全部通过（`builder/check_site.py:119`）；`1` 有失败项（`builder/check_site.py:117`）。
-- **注意**：第 4 项期望的摘要结构（`files` 或 `sha256` 为「文件名 → sha256」对象，
-  `builder/check_site.py:33-48`）与 `build_site.py` 实际写出的结构不同，
-  自检对本脚本自己的产物报失败（见第 8 节缺口 2）。
+- **注意**：第 4 项兼容 `build_site.py` 写出的 `文件清单` 数组，也兼容旧的 `files` 或
+  `sha256`「文件名 → sha256」对象（`builder/check_site.py:50-72`）。
 
 ### 4.3 预览：`serve.py`
 
@@ -293,7 +291,8 @@ python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir
 
 步骤与退出码：Boss → DA → Builder → 自检，任一步非 0 即停并返回 `1`
 （`run_e2e.py:24-34`、`:43-55`）；成功时打印预览命令 `python3 serve.py --root <dist>`（`run_e2e.py:56`）。
-**该脚本不含 Reviewer 步骤，也不产出 `da-method.md`**（见第 8 节缺口 4）。
+传入 `--review` 后还会运行 Reviewer 并写出 `review.md`（`run_e2e.py:23-24`、`:79-83`）；默认不运行 Reviewer，
+也不产出 `da-method.md`。
 
 ### 6.2 OpenSwarm 编排：`openswarm run` / `openswarm review`
 
@@ -327,7 +326,7 @@ python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir
 | 字段 | 谁写 | 谁读 | 读它做什么 |
 | --- | --- | --- | --- |
 | `目标` | Boss（`boss/make_brief.py:181-204`） | DA | 写进快照 `口径说明` 首行（`da/build_diagnosis.py:868`） |
-| `观察期间` | Boss（`boss/make_brief.py:113-143`） | DA、Reviewer | DA 取期次锚点（读不到，见缺口 1）；Reviewer 核 `scope`（`review/cross_check.py:200-224`） |
+| `观察期间` | Boss（`boss/make_brief.py:113-143`） | DA、Reviewer | DA 解析 Boss 格式期次锚点（`da/build_diagnosis.py:141-186`）；Reviewer 核 `scope`（`review/cross_check.py:200-224`） |
 | `口径` | Boss（`boss/make_brief.py:145-179`） | DA | 取汇率与口径文字（`da/build_diagnosis.py:175-197`） |
 | `必答问题` | Boss（`boss/make_brief.py:54-62`） | DA、Reviewer | DA 逐条生成洞察（`da/build_diagnosis.py:649-652`）；Reviewer 核引用覆盖 |
 | `数据需求` | Boss（`boss/make_brief.py:64-101`） | DA（人工映射） | 把真实数据源字段映射到四个指标 |
@@ -360,17 +359,15 @@ python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir
 
 ## 8. 已知契约缺口
 
-以下每条都在当前 main 上本地复现过（命令见第 9 节）。issue 编号按本 issue 的说明给出；
+以下仍成立的缺口都在当前 main 上本地复现过（命令见第 9 节）；第 1、2、4 条已由当前代码修复，
+其行为也在第 9 节记录。issue 编号按本 issue 的说明给出；
 离线环境无法读取 GitHub issue 正文，**编号与缺口的对应以本文的代码证据为准**，
 若与 issue 标题不一致，以 issue 为准并修订本文。
 
 | # | 缺口 | 证据 | 影响 | 对应 issue |
 | --- | --- | --- | --- | --- |
-| 1 | **Boss 任务书与 DA 脚本字段不互通**：`brief.schema.json` 把 `观察期间` 固定为 `观察月份`/`数据截止`/`期次`/`说明`（`boss/brief.schema.json:59-89`，`additionalProperties: false`），`口径` 只允许四个指标标题（`boss/brief.schema.json:90-114`）；而 DA 要求 `观察期间.起始期次`/`参考期次`/`截止期次`（`da/build_diagnosis.py:139-173`）与 `口径.汇率`（`da/build_diagnosis.py:175-197`） | Boss 产物直接喂 DA 即报「任务书 `观察期间` 缺少起始期次或截止期次」；补齐期次后报「任务书 `口径.汇率` 缺失或不是正数，无法计算成本率」。`openbot/examples/org-health-local/demo/boss-notes.md:34-35` 已记录同样两点 | DA 阶段无法直接消费 Boss 产物；`run_e2e.py` 在 DA 步失败退出 1 | #105 |
-| 2 | **Builder 产物与自检的 `build-report.json` 结构不一致**：`build_site.py` 写 `输入路径`/`sha256`（字符串）/`文件清单`（数组）（`builder/build_site.py:83-105`）；`check_site.py` 要求 `files` 或 `sha256` 是「文件名 → sha256」对象（`builder/check_site.py:33-48`） | 用 `build_site.py` 的产物跑 `check_site.py` 报「失败：无法读取 build-report.json 中的 sha256（build-report.json 缺少 files 或 sha256 对象）」，退出码 1 | Builder 阶段自检永远不过；单测未覆盖（`builder/test_check_site.py:20-34` 自造 `files` 格式夹具） | #127 |
 | 3 | **DA 口径说明脚本把口径文字里的数字误判为泄漏**：`write_method.py` 会把任务书 `口径` 原文写进「统一口径」段（`da/write_method.py:20-31`、`:96-140`），再拿快照里的数值做泄漏比对（`da/write_method.py:163-181`） | 对 Boss 自己产出的任务书（含 `demo/brief.json`）执行即报「生成文档包含诊断数值：0、2026」，退出码 1，不产出 `da-method.md` | 编排里 DA 阶段的仓库内产物无法生成 | 本 issue #142 记录，尚未单独立项 |
-| 4 | **`run_e2e.py` 不含 Reviewer 与 `da-method.md`**：脚本只有 Boss/DA/Builder/自检四步（`run_e2e.py:43-51`） | 跑完不会产出 `da-method.md`，也不会做三方一致性核对 | 仓库内一键流程与编排 spec 的产物清单不一致 | 本 issue #142 记录，尚未单独立项 |
-| 5 | **编排 spec 的 `--verify` 命令与实际 CLI 不符**：spec 里 DA 阶段用 `validate.py --data <path>`（`openswarm/examples/org-diagnosis-pipeline.json` 的 `stages[1].verify`），Builder 阶段用 `test_serve.py --data <path>`；`validate.py` 只接受位置参数与 `--schema`/`--json`（`validate.py:295-314`），`test_serve.py` 是 unittest 模块、无 `--data` | 两条命令都被 argparse 拒绝，退出码 2；`docs/scenario/org-diagnosis/review-checklist.md:31` 也写了同样的 `--data` 用法 | 编排的 DA/Builder 门禁不可执行 | 本 issue #142 记录，尚未单独立项 |
+| 5 | **编排 spec 的 `--verify` 命令与实际 CLI 不符**：spec 里 DA 阶段仍用 `validate.py --data <path>`（`openswarm/examples/org-diagnosis-pipeline.json` 的 `stages[1].verify`），Builder 阶段用 `test_serve.py --data <path>`；当前 `validate.py` 接受位置参数与 `--schema`/`--json`（`validate.py:300-320`），`test_serve.py` 是 unittest 模块、无 `--data` | 直接执行 `validate.py <path>` 退出码 0；spec 中的 `validate.py --data <path>` 与 `test_serve.py --data <path>` 仍被拒绝，退出码 2 | 编排 spec 的 DA/Builder 门禁不可执行 | 本 issue #142 记录，尚未单独立项 |
 | 6 | **期次键名与观察月份写死在结构定义和页面上**：schema 的期次键是 `2026-01实际`/`2026-05H1参考`/`2026-09实际`/`年末测算`/`年末目标`（`schema/diagnosis.schema.json:184-228`），页面要求 `scope.观察月份 === "2026-09"`（`app.js:73-82`、`:110`） | `--month 2026-06` 生成的任务书即使补齐 DA 所需字段，DA 也以「生成的快照未通过结构校验」退出 1（缺 `2026-09实际`） | 除 2026-09 外的观察月份不可用 | 本 issue #142 记录，尚未单立项 |
 | 7 | **文档漂移**：`pipeline.md` 与编排 spec 仍写「`validate.py` / `test_serve.py` 当前仓库还没有这个文件」（`docs/scenario/org-diagnosis/pipeline.md:80-84`、`:104-105`；`openswarm/examples/org-diagnosis-pipeline.json` 的 `pending`），`review-checklist.md` 写「`cross_check.py` 当前不在仓库中」（`docs/scenario/org-diagnosis/review-checklist.md:51`） | 这三个文件现在都在仓库里 | 读者按文档判断会走错 | 本 issue #142 记录，尚未单独立项 |
 
@@ -383,56 +380,53 @@ python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir
 # 1. Boss 产物：成功（退出码 0）
 python3 boss/make_brief.py --out "$W/brief.json"
 
-# 2. DA 直接消费 Boss 产物：失败（退出码 1）→ 缺口 1
+# 2. DA 直接消费 Boss 产物：成功（退出码 0；Boss 期次格式与 fx.csv 均被消费）
 python3 da/build_diagnosis.py --brief "$W/brief.json" --raw da/sample-raw --out "$W/diagnosis.json"
 
-# 3. Builder 构建 + 自检：构建 0，自检 1 → 缺口 2
+# 3. Builder 构建 + 自检：构建 0，自检 0（文件清单数组兼容）
 python3 builder/build_site.py --data "$W/diagnosis.json" --out "$W/dist" --bundle "$W/app.bundle.js"
 python3 builder/check_site.py "$W/dist"
 
 # 4. DA 口径说明：对 Boss 任务书失败（退出码 1）→ 缺口 3
 python3 da/write_method.py --brief "$W/brief.json" --data "$W/diagnosis.json" --out "$W/da-method.md"
 
-# 5. Reviewer 三方核对（补齐缺口 1 的字段后）：10 项全 PASS（退出码 0）
+# 5. Reviewer 三方核对：10 项全 PASS（退出码 0）
 python3 review/cross_check.py --brief "$W/brief.json" --data "$W/diagnosis.json" --dist "$W/dist"
 
-# 6. 编排 spec 的 verify 命令：均被 argparse 拒绝（退出码 2）→ 缺口 5
+# 6. validate.py 当前使用位置参数；编排 spec 的旧命令与 test_serve 命令仍失败 → 缺口 5
+python3 validate.py "$W/diagnosis.json"
 python3 validate.py --data "$W/diagnosis.json"
 python3 test_serve.py --data "$W/diagnosis.json"
 
-# 7. 仓库内一键流程：在 DA 步失败（退出码 1）→ 缺口 1
-python3 run_e2e.py --workdir "$W/e2e" --bundle "$W/app.bundle.js"
+# 7. 仓库内一键流程：Boss → DA → Builder → 自检 → Reviewer，成功（退出码 0）
+python3 run_e2e.py --workdir "$W/e2e" --bundle "$W/app.bundle.js" --review
 ```
 
-本地实测结果（Python 3.13，只用标准库）：
+本地实测结果（Python 3.12.3，只用标准库）：
 
 | 命令 | 退出码 | 关键输出 |
 | --- | --- | --- |
 | `boss/make_brief.py --out …` | 0 | 已写出任务书 |
-| `da/build_diagnosis.py`（Boss 产物） | 1 | 任务书 `观察期间` 缺少起始期次或截止期次 |
-| `da/build_diagnosis.py`（补齐期次） | 1 | 任务书 `口径.汇率` 缺失或不是正数，无法计算成本率 |
-| `da/build_diagnosis.py`（补齐期次+汇率） | 0 | 已生成诊断快照，`validate.py` 通过 |
+| `da/build_diagnosis.py`（Boss 产物 + `fx.csv`） | 0 | 已生成诊断快照，`观察期间.期次` 与 `fx.csv` 汇率均被消费 |
 | `da/build_diagnosis.py --month 2026-06` | 1 | 生成的快照未通过结构校验（缺 `2026-09实际`） |
 | `da/write_method.py`（Boss 任务书） | 1 | 生成文档包含诊断数值：0、2026 |
 | `builder/build_site.py`（合法快照） | 0 | 已生成站点，5 个产物 |
 | `builder/build_site.py`（`schema版本=3`） | 1 | 校验失败，且不生成 `dist` |
-| `builder/check_site.py`（build_site 产物） | 1 | 无法读取 build-report.json 中的 sha256 |
-| `review/cross_check.py`（补齐字段后） | 0 | 10 项检查全部通过 |
+| `builder/check_site.py`（build_site 产物） | 0 | 站点检查通过，文件清单 sha256 全部一致 |
+| `review/cross_check.py` | 0 | 10 项检查全部通过 |
+| `validate.py …` | 0 | 校验通过（位置参数） |
 | `validate.py --data …` / `test_serve.py --data …` | 2 | unrecognized arguments: --data |
-| `run_e2e.py --workdir …` | 1 | 步骤失败: DA (退出码 1) |
+| `run_e2e.py --workdir … --review` | 0 | 审查完成并写出 `review.md` |
 
-仓库现有单测（CI 口径见 `.github/workflows/phanes.yml:77-87`）在本次改动后全部通过：
+仓库现有单测（CI 口径见 `.github/workflows/phanes.yml:77-87`）的验收命令为：
 `boss/test_make_brief.py`、`da/test_build_diagnosis.py`、`da/test_write_method.py`、
 `builder/test_build_site.py`、`builder/test_check_site.py`、`review/test_cross_check.py`、
 `test_serve.py`、`test_validate.py`、`test_run_e2e.py`。这些单测都自造夹具，
-**不覆盖角色之间的交接**（缺口 1、2 因此在 CI 里看不到）。
+**不覆盖角色之间的完整交接**。本机沙箱运行时 `test_serve.py` 的回环 socket 被环境策略拒绝；
+宿主验收需按上面的命令重新执行。
 
 ## 10. 未决事项
 
-- 缺口 1 的修法有两种：放宽 `boss/brief.schema.json` 允许 `观察期间.起始期次`/`参考期次`/`截止期次`
-  与 `口径.汇率`，或在 DA 侧做字段映射。本文档只记录契约现状，不定修法。
-- 缺口 2 的修法同理：统一 `build-report.json` 的字段名与结构，或让 `check_site.py` 兼容
-  `文件清单` 数组。
 - 缺口 6 涉及结构定义与页面硬编码，改动面覆盖 `schema/diagnosis.schema.json`、`app.js` 与
   `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts`，需要单独评估。
 - `write_method.py` 的泄漏自检规则（哪些数字算「诊断数值」）目前按字符串匹配判定，
