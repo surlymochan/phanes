@@ -8,6 +8,14 @@
   "additionalProperties": false,
   "required": ["scope", "conclusion", "origin", "metrics", "insights", "definitions", "risks", "recommendations"],
   "properties": {
+    "口径说明": {
+      "description": "可选：数据口径说明面板（期间、单位、年末测算与 H1 参考、null 含义），见 #55。",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "scope": {
       "$ref": "#/$defs/scope"
     },
