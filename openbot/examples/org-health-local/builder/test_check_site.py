@@ -1,7 +1,10 @@
 """check_site.py 的静态站点验收测试。"""
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -9,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +44,9 @@ class CheckSiteTest(unittest.TestCase):
             report["files"][relative] = {"sha256": ""}
         for name in report["files"]:
             report["files"][name] = {"sha256": hashlib.sha256((dist / name).read_bytes()).hexdigest()}
+        (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    def write_report(self, dist: Path, report: object) -> None:
         (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
 
     def setUp(self) -> None:
@@ -107,6 +114,60 @@ class CheckSiteTest(unittest.TestCase):
         report["files"]["styles.css"]["sha256"] = "0" * 64
         (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
+
+    def test_top_level_sha256_report_passes(self) -> None:
+        dist = self.make_dist()
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        self.write_report(dist, {"sha256": {
+            name: entry["sha256"] for name, entry in report["files"].items()
+        }})
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("站点检查通过", result.stdout)
+
+    def test_files_with_direct_hash_strings_passes(self) -> None:
+        dist = self.make_dist()
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        self.write_report(dist, {"files": {
+            name: entry["sha256"] for name, entry in report["files"].items()
+        }})
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("站点检查通过", result.stdout)
+
+    def test_manifest_item_missing_path_or_hash_fails(self) -> None:
+        dist = self.make_dist()
+        for item in ({"sha256": "0" * 64}, {"路径": "styles.css"}):
+            with self.subTest(item=item):
+                self.write_report(dist, {"文件清单": [item]})
+                result = self.run_checker(dist)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("无法读取 build-report.json 中的 sha256", result.stdout)
+
+    def test_files_with_non_string_key_or_value_fails(self) -> None:
+        dist = self.make_dist()
+        self.write_report(dist, {"files": {"styles.css": 12345}})
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("无法读取 build-report.json 中的 sha256", result.stdout)
+
+        spec = importlib.util.spec_from_file_location("check_site_under_test", CHECKER)
+        assert spec is not None and spec.loader is not None
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        output = io.StringIO()
+        with mock.patch.object(checker.json, "loads", return_value={"files": {1: "0" * 64}}):
+            with contextlib.redirect_stdout(output):
+                returncode = checker.main([str(dist)])
+        self.assertNotEqual(returncode, 0)
+        self.assertIn("无法读取 build-report.json 中的 sha256", output.getvalue())
+
+    def test_report_without_hash_object_fails(self) -> None:
+        dist = self.make_dist()
+        self.write_report(dist, {})
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build-report.json 缺少 files 或 sha256 对象", result.stdout)
 
     def test_truncated_build_report_json_fails(self) -> None:
         """截断的 JSON 报告必须让检查失败，失败信息能定位到 build-report.json。"""
