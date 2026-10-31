@@ -309,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         default=SCHEMA_PATH,
         help="结构定义文件。默认 schema/diagnosis.schema.json。",
     )
+    parser.add_argument("--json", action="store_true", help="以 JSON 格式输出校验结果。")
     args = parser.parse_args(argv)
     paths = args.paths or [DATA_PATH]
     try:
@@ -318,21 +319,34 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     failed = 0
     unreadable = 0
+    json_errors: list[dict[str, str]] = []
+    schema_version = None
     for path in paths:
         try:
             data = load_data(path)
         except ValueError as cause:
-            print(str(cause), file=sys.stderr)
+            if args.json:
+                json_errors.append({"path": str(path), "message": str(cause)})
+            else:
+                print(str(cause), file=sys.stderr)
             unreadable += 1
             continue
         errors = validator.errors(data)
+        if isinstance(data, dict) and isinstance(data.get("scope"), dict):
+            schema_version = data["scope"].get("schema版本", schema_version)
         if errors:
             failed += 1
-            print(f"{path}: 校验失败（{len(errors)} 处问题）")
-            for message in errors:
-                print(f"  {message}")
+            if args.json:
+                json_errors.extend({"path": f"{path}{message.split(':', 1)[0]}", "message": message} for message in errors)
+            else:
+                print(f"{path}: 校验失败（{len(errors)} 处问题）")
+                for message in errors:
+                    print(f"  {message}")
         else:
-            print(f"{path}: 校验通过")
+            if not args.json:
+                print(f"{path}: 校验通过")
+    if args.json:
+        print(json.dumps({"ok": not unreadable and not failed, "errors": json_errors, "schema_version": schema_version}, ensure_ascii=False))
     if unreadable:
         return EXIT_USAGE
     if failed:

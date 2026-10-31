@@ -150,6 +150,35 @@ class ValidateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_command_line_json_accepts_example(self) -> None:
+        """JSON 输出包含通过状态及 schema 版本。"""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "validate.py"), "--json", str(EXAMPLE_PATH)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output, {"ok": True, "errors": [], "schema_version": 4})
+
+    def test_command_line_json_reports_failure(self) -> None:
+        """JSON 输出失败状态与字段路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = 3
+        with temporary_directory() as folder:
+            path = Path(folder) / "broken.json"
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--json", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 1)
+        output = json.loads(result.stdout)
+        self.assertFalse(output["ok"])
+        self.assertTrue(any("/scope/schema版本" in error["path"] for error in output["errors"]))
+        self.assertEqual(output["schema_version"], 3)
+
     def test_command_line_reports_failure(self) -> None:
         """命令行校验失败数据时退出码非 0，并打印出错路径。"""
         broken = copy.deepcopy(self.data)

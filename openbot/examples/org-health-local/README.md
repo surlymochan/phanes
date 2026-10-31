@@ -35,6 +35,7 @@ python3 validate.py <diagnosis.json>
 cd openbot/examples/org-health-local
 python3 validate.py                            # 校验 data/diagnosis.json
 python3 validate.py /absolute/path/to/diagnosis.json
+python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结果
 ```
 
 校验失败时退出码非 0，并逐条打印出错路径，例如 `/scope/schema版本`。单元测试：
