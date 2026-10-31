@@ -3555,7 +3555,7 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
         # a wrapper may have spawned a child and then exited normally.  Keep
         # the shared slot while the dedicated executor process group exists.
         normal_child_exit = (rc >= 0 and rc not in (124, 133, 134)
-                             and not executor_process_group_alive(rdir))
+                             and executor_stopped(rdir))
         if normal_child_exit or error_class in (None, "rate_limit", "risk_blocked") or (
                 backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
                                                    or (meta or {}).get("finished_reason"))):
@@ -3640,8 +3640,10 @@ def process_group_alive(pgid):
         return False
 
 
-def executor_process_group_alive(rdir):
-    return process_group_alive((jload(os.path.join(rdir, "status.json"), {}) or {}).get("executor_pgid"))
+def executor_stopped(rdir):
+    """A failure may release capacity only after its executor and group are both gone."""
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    return not pid_alive(status.get("executor_pid")) and not process_group_alive(status.get("executor_pgid"))
 
 
 ENFORCED_RISKS = ["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]

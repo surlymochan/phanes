@@ -317,6 +317,36 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(attempts[0]['error_class'], 'exec_error')
         self.assertEqual(self.call('gocc', op='status')['reservations'], [])
 
+    def test_normal_failure_retains_slot_while_executor_pid_is_live(self):
+        """A missing group ID is not proof that the executor has stopped."""
+        rdir = os.path.join(self.temp.name, 'runs', 'live-executor')
+        os.makedirs(rdir)
+        child = None
+
+        def fake(_decision, _state, _prompt, _wd, run_dir, _timeout, _events):
+            nonlocal child
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            xs.set_status(run_dir, executor_pid=child.pid)
+            return 17, None, {'usage': {}}, 'executor failed'
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 17)
+            self.assertTrue(child and xs.pid_alive(child.pid))
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        finally:
+            if child and child.poll() is None:
+                child.kill()
+                child.wait()
+            self.assertTrue(xs.release_fleet_slot(rdir))
+
     def test_signal_terminated_one_shot_retains_reservation(self):
         """A killed parent can leave an executor descendant alive; do not free its slot."""
         rdir = os.path.join(self.temp.name, 'runs', 'signal-terminated')
