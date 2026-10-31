@@ -26,6 +26,18 @@ class BusTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.data = self.root / "planner"
         self.data.mkdir()
+        self.env_names = ("OPENSWARM_HOME", "OPENSWARM_GH_BIN", "OPENSWARM_FAKE_GH_STATE",
+                          "OPENSWARM_FAKE_GH_LOGIN", "OPENSWARM_FAKE_GH_ISSUE_LOGIN",
+                          "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
+                          "OPENSWARM_PI_BIN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                          "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1")
+        self.old_env = {key: os.environ.get(key) for key in self.env_names}
+        # Git's detached auto-maintenance can write into these temporary bare
+        # repositories after a worker's clone or push exits.  Install this
+        # fixture-only override before creating any of the repositories.
+        os.environ.update({"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto",
+                           "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "gc.auto",
+                           "GIT_CONFIG_VALUE_1": "0"})
         self.state_path = self.root / "github.json"
         self.state_path.write_text(json.dumps({"repos": {"org/bus": {"labels": [], "issues": [], "files": {}}}}))
         self.bare = self.root / "target.git"
@@ -42,22 +54,10 @@ class BusTests(unittest.TestCase):
         self.git(self.repo, "branch", "-M", "main")
         self.git(self.repo, "remote", "add", "origin", str(self.bare))
         self.git(self.repo, "push", "-q", "origin", "main")
-        self.env_names = ("OPENSWARM_HOME", "OPENSWARM_GH_BIN", "OPENSWARM_FAKE_GH_STATE",
-                          "OPENSWARM_FAKE_GH_LOGIN", "OPENSWARM_FAKE_GH_ISSUE_LOGIN",
-                          "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
-                          "OPENSWARM_PI_BIN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
-                          "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1")
-        self.old_env = {key: os.environ.get(key) for key in self.env_names}
         os.environ.update({"OPENSWARM_HOME": str(self.data), "OPENSWARM_GH_BIN": str(FAKE_GH),
                            "OPENSWARM_FAKE_GH_STATE": str(self.state_path), "OPENSWARM_FAKE_GH_LOGIN": "planner",
                            "OPENSWARM_FAKE_GH_ISSUE_LOGIN": "planner",
                            "OPENSWARM_BUS_TARGET_URL": str(self.bare), "OPENSWARM_STATE_FILE": _load.FIXTURE_STATE})
-        # Git's detached auto-maintenance can write into these temporary bare
-        # repositories after a worker's clone or push exits.  Keep the fixture
-        # deterministic so TemporaryDirectory cleanup cannot race that writer.
-        os.environ.update({"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto",
-                           "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "gc.auto",
-                           "GIT_CONFIG_VALUE_1": "0"})
         FAKE_GH.chmod(FAKE_GH.stat().st_mode | stat.S_IEXEC)
         self.constants = {key: getattr(xs, key) for key in ("DATA", "RUNS", "LEDGER", "WORKTREES", "BREAKERS")}
         xs.DATA = str(self.data)
