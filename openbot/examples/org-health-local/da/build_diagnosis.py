@@ -394,6 +394,24 @@ def growth(start: float | None, end: float | None) -> float | None:
     return (end / start - 1) * 100
 
 
+def change_text(start: float | None, end: float | None, unit: str) -> str:
+    """期初到期末的增减金额与增减百分比文本；缺任一端时写明缺数据。"""
+    if start is None or end is None:
+        return "增减金额与百分比未提供（期初或期末缺同口径数据）"
+    diff = end - start
+    if diff > 0:
+        direction = "增加"
+    elif diff < 0:
+        direction = "减少"
+    else:
+        direction = "持平"
+    pct = growth(start, end)
+    if pct is None:
+        return f"{direction} {fmt_number(abs(diff))} {unit}（百分比未提供：期初为 0）"
+    ratio = "增幅" if pct > 0 else ("降幅" if pct < 0 else "变动")
+    return f"{direction} {fmt_number(abs(diff))} {unit}（{ratio} {abs(pct):.1f}%）"
+
+
 def build_facts(plan: dict, raw: dict) -> dict:
     """按任务书期间取出各指标数值并算好成本率。"""
     periods = plan["periods"]
@@ -734,7 +752,7 @@ def build_insights(plan: dict, facts: dict, raw: dict) -> list[dict]:
 
 
 def answer_question(question: str, facts: dict) -> tuple[str, str]:
-    """按关键词把任务书问题对应到已算出的证据；没有对应口径时标为边界。"""
+    """按关键词把任务书问题对应到已算出的证据；成本增减问题补出增减金额与百分比；没有对应口径时标为边界。"""
     cost = facts["overall_cost"]
     heads = facts["overall_heads"]
     revops_cost = facts["revops_cost"]
@@ -755,11 +773,13 @@ def answer_question(question: str, facts: dict) -> tuple[str, str]:
             f"营收业务折算人头 {fmt_number(revops_heads['start'])} → {fmt_number(revops_heads['end'])}。",
         )
     if "成本" in question:
-        return (
-            "事实",
+        content = (
             f"整体技术人力成本 {fmt_number(cost['start'])} → {fmt_number(cost['end'])} 万元/月；"
-            f"营收业务技术人力成本 {fmt_number(revops_cost['start'])} → {fmt_number(revops_cost['end'])} 万元/月。",
+            f"营收业务技术人力成本 {fmt_number(revops_cost['start'])} → {fmt_number(revops_cost['end'])} 万元/月"
         )
+        if "增减" in question:
+            content += f"。整体技术人力成本相对期初{change_text(cost['start'], cost['end'], '万元/月')}"
+        return ("事实", content + "。")
     if "收入" in question:
         return (
             "事实",

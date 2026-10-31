@@ -300,6 +300,40 @@ class BuildDiagnosisTest(unittest.TestCase):
                 self.assertTrue(recommendation[field].strip())
         self.assertTrue(any("缺口" in risk["标题"] for risk in data["risks"]))
 
+    def test_cost_change_question_answers_amount_and_percentage(self) -> None:
+        """成本增减问题除期初期末绝对值外，还给出增减金额与增减百分比。"""
+        brief = json.loads(json.dumps(BRIEF))
+        brief["必答问题"] = ["观察期间内整体技术人力成本是多少？相对期初实际增减多少（金额与百分比）？"]
+        folder = self.folder / "change-question"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = write_brief(folder, brief)
+        result = run_cli(path, SAMPLE_RAW, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+
+        answers = {item["标题"]: item["内容"] for item in data["insights"]}
+        content = answers[brief["必答问题"][0]]
+        # 期初 10.4 → 期末 12.4 万元/月：增加 2.0 万元/月，增幅 19.2%。
+        self.assertIn("整体技术人力成本 10.4 → 12.4 万元/月", content)
+        self.assertIn("增加 2.0 万元/月", content)
+        self.assertIn("增幅 19.2%", content)
+
+    def test_change_text_covers_decrease_and_missing_data(self) -> None:
+        """增减文本覆盖减少与缺数据情形。"""
+        self.assertEqual(
+            build_diagnosis.change_text(12.4, 10.4, "万元/月"),
+            "减少 2.0 万元/月（降幅 16.1%）",
+        )
+        self.assertEqual(
+            build_diagnosis.change_text(None, 12.4, "万元/月"),
+            "增减金额与百分比未提供（期初或期末缺同口径数据）",
+        )
+        self.assertEqual(
+            build_diagnosis.change_text(0.0, 12.4, "万元/月"),
+            "增加 12.4 万元/月（百分比未提供：期初为 0）",
+        )
+
     def test_calibration_text_is_kept(self) -> None:
         """任务书口径与禁止事项写进来源口径说明。"""
         data = self.build()
