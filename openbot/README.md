@@ -496,9 +496,11 @@ Electron main
 SolidJS renderer
 
 Cloudflare Workers
-└── TanStack Start + Solid 2 account API
-    ├── D1 accounts, email challenges, hashed sessions, and team tunnels
-    └── R2 account avatars
+├── TanStack Start + Solid 2 account API
+│   ├── D1 accounts, email challenges, hashed sessions, and team tunnels
+│   └── R2 account avatars
+└── site-router Worker
+    └── published sites from private R2 storage
 ```
 
 - `src/main` owns the Electron lifecycle, window security, local protocol, and IPC registration.
@@ -508,7 +510,7 @@ Cloudflare Workers
 - `apps/auth-api` contains the TanStack Start account API, one-time email codes, rate limits, and D1 migrations. It also serves the public site: the landing page, `/news`, `/guides`, and the plugin pages at `/plugins` and `/plugins/<slug>`.
 - `apps/status` contains the public status page at `status.openbot.run`, the script that the `status-page` workflow runs to check the services, and the script that sends the [status webhooks](docs/status-webhooks.md) of the team. GitHub hosts it, so it stays up when Cloudflare does not.
 - `packages/contracts` contains process-boundary contracts, shared limits, and pure validation.
-- `packages/i18n` contains the interface text in English, French, Japanese, Brazilian Portuguese and Turkish for desktop, web and mobile. See [docs/i18n.md](docs/i18n.md) to add text or a language.
+- `packages/i18n` contains the interface text in 13 languages for desktop, web and mobile. See [docs/i18n.md](docs/i18n.md) to add text or a language.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for dependency direction, state ownership, and
 rules for new modules.
@@ -565,7 +567,7 @@ provider session identifiers stay private and are used only to resume provider r
 
 The Electron renderer is never exposed as a public website. It communicates with local CLI processes
 over stdio. When the owner publishes OpenBot, its authenticated Team API stays on localhost. WebRTC
-protocol v3 carries RPC, events, and binary files to desktop and mobile clients. Expo Go hosts the
+protocol v8 carries RPC, events, and binary files to desktop and mobile clients. Expo Go hosts the
 mobile `RTCPeerConnection` in a hidden Expo DOM component, so mobile uses the same encrypted transport
 without a custom native development build. The account flow connects to
 the configured HTTPS Cloudflare API. The client stores only an encrypted OpenBot session token. One-time codes expire after
