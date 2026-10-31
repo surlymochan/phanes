@@ -30,6 +30,15 @@ class CheckSiteTest(unittest.TestCase):
         )
         return folder
 
+    def refresh_report(self, dist: Path, *extra: str) -> None:
+        """重算 build-report.json 中已登记文件的 sha256，并把 extra 追加登记。"""
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        for relative in extra:
+            report["files"][relative] = {"sha256": ""}
+        for name in report["files"]:
+            report["files"][name] = {"sha256": hashlib.sha256((dist / name).read_bytes()).hexdigest()}
+        (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -85,6 +94,41 @@ class CheckSiteTest(unittest.TestCase):
         result = self.run_checker(dist)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing.js 不存在", result.stdout)
+
+    def test_local_reference_with_query_and_encoded_name_passes(self) -> None:
+        """带查询串与 URL 编码文件名的本地引用必须落到真实文件（check_site.py:114-128）。"""
+        dist = self.make_dist()
+        (dist / "app bundle.js").write_text("console.log('encoded');", encoding="utf-8")
+        (dist / "组织.js").write_text("console.log('cjk');", encoding="utf-8")
+        (dist / "index.html").write_text(
+            '<link rel="stylesheet" href="./styles.css?v=20240101">\n'
+            '<script src="./app%20bundle.js?v=1"></script>\n'
+            '<script src="./%E7%BB%84%E7%BB%87.js?v=2"></script>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist, "app bundle.js", "组织.js")
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("通过：index.html 引用的本地文件 ./styles.css 存在", result.stdout)
+        self.assertIn("通过：index.html 引用的本地文件 ./app%20bundle.js 存在", result.stdout)
+        self.assertIn("通过：index.html 引用的本地文件 ./%E7%BB%84%E7%BB%87.js 存在", result.stdout)
+        self.assertNotIn("未在 build-report 中登记", result.stdout)
+        self.assertIn("站点检查通过", result.stdout)
+
+    def test_missing_local_reference_with_query_fails(self) -> None:
+        """带查询串/编码名的缺失引用仍必须失败（check_site.py:125-126）。"""
+        dist = self.make_dist()
+        (dist / "index.html").write_text(
+            '<script src="./missing.js?v=1"></script>\n'
+            '<script src="./missing%20bundle.js?v=2"></script>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.js 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js 不存在", result.stdout)
+        self.assertIn("站点检查失败：2 项", result.stdout)
 
     def test_build_site_manifest_passes(self) -> None:
         """build_site.py 写出的 文件清单 报告必须能被 check_site.py 接受（Builder→检查 契约）。"""
