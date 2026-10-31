@@ -3,9 +3,11 @@ import concurrent.futures
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -107,6 +109,7 @@ class FleetCapacityTests(unittest.TestCase):
         config.write_text(json.dumps({'command': ['/nonexistent/coordinator']}))
         old = os.environ.get('OPENSWARM_FLEET_GUARD_CONFIG')
         os.environ['OPENSWARM_FLEET_GUARD_CONFIG'] = str(config)
+        child = None
         try:
             rdir = pathlib.Path(self.temp.name, 'runs', 'blocked')
             ok = xs.reserve_provider_slot(str(rdir), 'codex', None, {'concurrency': {'total': 1}},
@@ -234,6 +237,150 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(self.call('gocc', op='recover', host='gores1', run_id='orphan',
                                    confirm='all-executor-processes-stopped')['recovered'], 1)
 
+    def test_leaderless_recorded_group_is_not_considered_confirmed(self):
+        self.assertFalse(xs.recorded_executor_group_matches(
+            {'pid': 999999999, 'pgid': os.getpgrp(), 'identity': 'stale-identity'}))
+
+    def test_reused_executor_pid_never_discovers_or_kills_replacement_children(self):
+        rdir = pathlib.Path(self.temp.name, 'runs', 'reused-executor-pid')
+        rdir.mkdir(parents=True)
+        replacement = subprocess.Popen([sys.executable, '-c',
+                                        'import subprocess,sys,time; '
+                                        'subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"], '
+                                        'start_new_session=True); time.sleep(30)'], start_new_session=True,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline, children = time.monotonic() + 3, []
+            while not children and time.monotonic() < deadline:
+                children = xs.descendants(replacement.pid)
+                time.sleep(.02)
+            self.assertTrue(children)
+            child = children[0]
+            (rdir / 'status.json').write_text(json.dumps({
+                'executor_pid': replacement.pid, 'executor_pgid': 999999999,
+                'executor_identity': 'identity-of-an-earlier-process',
+            }))
+            self.assertFalse(xs.stop_orphaned_executor(str(rdir)))
+            status = json.loads((rdir / 'status.json').read_text())
+            self.assertEqual(status['executor_descendants'] if 'executor_descendants' in status else [], [])
+            self.assertIn('identity cannot be confirmed', status['fleet_reservation_error'])
+            self.assertTrue(xs.pid_alive(replacement.pid))
+            self.assertTrue(xs.pid_alive(child))
+        finally:
+            if replacement.poll() is None:
+                os.killpg(os.getpgid(replacement.pid), signal.SIGKILL)
+                replacement.wait()
+            if child and xs.pid_alive(child):
+                try:
+                    os.killpg(os.getpgid(child), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_killed_runner_recovers_after_ttl_when_executor_is_stopped(self):
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'killed-runner'
+        rdir.mkdir(parents=True)
+        token = 'b' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='killed-runner',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        runner = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            (rdir / 'status.json').write_text(json.dumps({
+                'id': 'killed-runner', 'state': 'running', 'runner_pid': runner.pid,
+                'executor_pid': None, 'executor_pgid': None, 'fleet_host': 'gocc',
+                'fleet_reserved_at': 100.0,
+            }))
+            policy = {'fleet': {'recovery_ttl_seconds': 10}}
+            env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=109.9):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), ['killed-runner'])
+            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+
+    def test_killed_runner_ttl_recovery_waits_for_executor_group(self):
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'live-descendant'
+        rdir.mkdir(parents=True)
+        token = 'c' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='live-descendant',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        runner = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        executor = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            (rdir / 'status.json').write_text(json.dumps({
+                'id': 'live-descendant', 'state': 'running', 'runner_pid': runner.pid,
+                'executor_pid': executor.pid, 'executor_pgid': os.getpgid(executor.pid), 'fleet_host': 'gocc',
+                'executor_identity': xs.process_identity(executor.pid),
+                'fleet_reserved_at': 100.0,
+            }))
+            policy = {'fleet': {'recovery_ttl_seconds': 10}}
+            env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'stop_orphaned_executor') as stop, \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+                stop.assert_called_once_with(str(rdir))
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                # Termination alone is not enough: a still-unreaped process group retains its slot.
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), [])
+            self.assertIsNotNone(executor.poll())
+            executor.wait()
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=110.1):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), ['live-descendant'])
+            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
+
+    def test_next_admission_reaps_a_confirmed_dead_runner_after_ttl(self):
+        runs = pathlib.Path(self.temp.name, 'runs')
+        old_dir = runs / 'old-run'
+        old_dir.mkdir(parents=True)
+        token = 'd' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='old-run',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        (old_dir / 'status.json').write_text(json.dumps({
+            'id': 'old-run', 'state': 'running', 'runner_pid': 999999999,
+            'executor_pid': None, 'executor_pgid': None, 'fleet_host': 'gocc',
+            'fleet_reserved_at': 100.0,
+        }))
+        next_dir = runs / 'next-run'
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 10}}
+        env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'NOW', return_value=110.1), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']):
+            self.assertTrue(xs.reserve_provider_slot(str(next_dir), 'pi', 'minimax-cn', policy,
+                                                      keep_waiting=lambda: True))
+            self.assertTrue(xs.release_fleet_slot(str(next_dir)))
+        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
         second = dict(op='acquire', token='2' * 32, run_id='two', backend='agy', provider=None)
@@ -299,6 +446,206 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(error, 'exec_error')
         self.assertIsNone(final)
         self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
+    def test_normal_executor_startup_failure_releases_one_shot_reservation(self):
+        """A reaped non-zero executor must not strand a fleet slot."""
+        rdir = os.path.join(self.temp.name, 'runs', 'startup-failure')
+        os.makedirs(rdir)
+        fake = mock.Mock(return_value=(1, None, {'usage': {}}, 'isolated Pi dependencies unavailable'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake}):
+            attempts, final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        self.assertEqual(error, 'exec_error')
+        self.assertIsNone(final)
+        self.assertEqual(attempts[0]['error_class'], 'exec_error')
+        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
+    def test_normal_failure_retains_slot_while_executor_pid_is_live(self):
+        """A missing group ID is not proof that the executor has stopped."""
+        rdir = os.path.join(self.temp.name, 'runs', 'live-executor')
+        os.makedirs(rdir)
+        child = None
+
+        def fake(_decision, _state, _prompt, _wd, run_dir, _timeout, _events):
+            nonlocal child
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            xs.set_status(run_dir, executor_pid=child.pid)
+            return 17, None, {'usage': {}}, 'executor failed'
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 17)
+            self.assertTrue(child and xs.pid_alive(child.pid))
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        finally:
+            if child and child.poll() is None:
+                child.kill()
+                child.wait()
+            self.assertTrue(xs.release_fleet_slot(rdir))
+
+    def test_signal_terminated_one_shot_retains_reservation(self):
+        """A killed parent can leave an executor descendant alive; do not free its slot."""
+        rdir = os.path.join(self.temp.name, 'runs', 'signal-terminated')
+        os.makedirs(rdir)
+        fake = mock.Mock(return_value=(-9, None, {'usage': {}}, 'executor killed'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake}):
+            attempts, final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        self.assertEqual(error, 'exec_error')
+        self.assertIsNone(final)
+        self.assertEqual(attempts[0]['rc'], -9)
+        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        self.assertTrue(xs.release_fleet_slot(rdir))
+
+    def test_normally_exited_one_shot_parent_with_child_retains_reservation(self):
+        """A non-zero parent exit must not release while its process group lives."""
+        rdir = os.path.join(self.temp.name, 'runs', 'normal-exit-with-child')
+        os.makedirs(rdir)
+        runner = pathlib.Path(self.temp.name, 'spawn-child.py')
+        runner.write_text('import subprocess, sys, time\nsubprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])\nsys.exit(17)\n')
+
+        def fake_executor(_decision, _state, _prompt, wd, _rdir, timeout, events):
+            return xs.run_proc([sys.executable, str(runner)], wd, {}, timeout, events), None, {}, 'executor exited'
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': fake_executor}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash', 'effort': None}, {}, 'task',
+                self.temp.name, rdir, xs.NOW() + 30, xs.load_policy())
+        self.assertEqual(error, 'exec_error')
+        self.assertEqual(attempts[0]['rc'], 17)
+        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        pgid = json.loads(pathlib.Path(rdir, 'status.json').read_text())['executor_pgid']
+        os.killpg(pgid, signal.SIGKILL)
+        self.assertTrue(xs.release_fleet_slot(rdir))
+
+    def test_detached_descendant_retains_then_ttl_reaper_stops_recorded_group(self):
+        """A descendant which creates its own session remains in the execution boundary."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'detached-descendant'
+        rdir.mkdir(parents=True)
+        script = pathlib.Path(self.temp.name, 'detached-child.py')
+        marker = pathlib.Path(self.temp.name, 'detached-child.pid')
+        script.write_text(
+            'import os, subprocess, sys, time\n'
+            'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],start_new_session=True)\n'
+            f'open({str(marker)!r},"w").write(str(child.pid))\n'
+            'time.sleep(.4)\n'
+            'sys.exit(17)\n')
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 0.1}}
+
+        def executor(_decision, _state, _prompt, wd, _rdir, timeout, events):
+            return xs.run_proc([sys.executable, str(script)], wd, {}, timeout, events), None, {}, 'executor exited'
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': executor}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash'}, {}, 'task', self.temp.name,
+                str(rdir), xs.NOW() + 30, policy)
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 17)
+            child = int(marker.read_text())
+            self.assertTrue(xs.pid_alive(child))
+            status = json.loads((rdir / 'status.json').read_text())
+            self.assertTrue(status['executor_descendants'])
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            status['runner_pid'] = 999999999
+            status['fleet_host'], status['fleet_reserved_at'] = 'gocc', 0.0
+            (rdir / 'status.json').write_text(json.dumps(status))
+            with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), mock.patch.object(xs, 'NOW', return_value=1.0):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), ['detached-descendant'])
+            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        finally:
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_hermes_one_shot_parent_with_child_retains_reservation(self):
+        """Hermes must publish its LaneChild group before one-shot release checks."""
+        rdir = pathlib.Path(self.temp.name, 'runs', 'hermes-normal-exit-with-child')
+        rdir.mkdir(parents=True)
+        marker = pathlib.Path(self.temp.name, 'hermes-child.pid')
+        fixture = HERE / 'fixtures' / 'fake_cursor_acp.py'
+        fixture.chmod(0o755)
+        policy = {'concurrency': {'total': 8},
+                  'hermes': {'binary': str(fixture), 'provider': 'minimax-cn'}}
+        env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name,
+               'FAKE_CURSOR_CHILD_PID': str(marker), 'FAKE_CHILD_DEVNULL': '1'}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.object(xs, 'load_policy', return_value=policy), \
+             mock.patch.object(xs, 'minimax_key_from_pi', return_value=None), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': xs.exec_hermes}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'composer-2.5', 'provider': 'minimax-cn'}, {},
+                'LANE_TEST_EXIT_WITH_CHILD', self.temp.name, str(rdir), xs.NOW() + 30, policy)
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 1)
+            self.assertTrue(marker.exists(), attempts)
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            pgid = json.loads((rdir / 'status.json').read_text())['executor_pgid']
+            os.killpg(pgid, signal.SIGKILL)
+            self.assertTrue(xs.release_fleet_slot(str(rdir)))
+        finally:
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_hermes_init_exit_with_child_retains_reservation(self):
+        """Record Hermes' group before an ACP initialization failure can raise."""
+        rdir = pathlib.Path(self.temp.name, 'runs', 'hermes-init-exit-with-child')
+        rdir.mkdir(parents=True)
+        marker = pathlib.Path(self.temp.name, 'hermes-init-child.pid')
+        fixture = HERE / 'fixtures' / 'fake_hermes_early_exit.py'
+        fixture.chmod(0o755)
+        policy = {'concurrency': {'total': 8},
+                  'hermes': {'binary': str(fixture), 'provider': 'minimax-cn'}}
+        env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name,
+               'FAKE_CURSOR_CHILD_PID': str(marker)}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.object(xs, 'load_policy', return_value=policy), \
+             mock.patch.object(xs, 'minimax_key_from_pi', return_value=None), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': xs.exec_hermes}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'composer-2.5', 'provider': 'minimax-cn'}, {},
+                'task', self.temp.name, str(rdir), xs.NOW() + 30, policy)
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 1)
+            self.assertTrue(marker.exists(), attempts)
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            pgid = json.loads((rdir / 'status.json').read_text())['executor_pgid']
+            os.killpg(pgid, signal.SIGKILL)
+            self.assertTrue(xs.release_fleet_slot(str(rdir)))
+        finally:
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 if __name__ == '__main__':
     unittest.main()

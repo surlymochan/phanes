@@ -3,6 +3,7 @@
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -79,6 +80,39 @@ while True:
         prompt = "".join(block.get("text", "") for block in params.get("prompt", [])
                         if isinstance(block, dict) and block.get("type") == "text")
         if "LANE_TEST_CRASH" in prompt:
+            os._exit(17)
+        if "LANE_TEST_SIGNAL_WITH_CHILD" in prompt:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                     **({"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                                         "stderr": subprocess.DEVNULL}
+                                        if os.environ.get("FAKE_CHILD_DEVNULL") else {}))
+            marker = os.environ.get("FAKE_CURSOR_CHILD_PID")
+            if marker:
+                with open(marker, "w") as stream:
+                    stream.write(str(child.pid))
+            os.kill(os.getpid(), signal.SIGKILL)
+        if "LANE_TEST_EXIT_WITH_CHILD" in prompt:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                     **({"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                                         "stderr": subprocess.DEVNULL}
+                                        if os.environ.get("FAKE_CHILD_DEVNULL") else {}))
+            marker = os.environ.get("FAKE_CURSOR_CHILD_PID")
+            if marker:
+                with open(marker, "w") as stream:
+                    stream.write(str(child.pid))
+            os._exit(17)
+        if "LANE_TEST_EXIT_WITH_DETACHED_CHILD" in prompt:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                     start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            marker = os.environ.get("FAKE_CURSOR_CHILD_PID")
+            if marker:
+                with open(marker, "w") as stream:
+                    stream.write(str(child.pid))
+            # Keep the ACP parent observable long enough for the lane to record this
+            # detached group before the ordinary non-zero parent exit.
+            time.sleep(.4)
             os._exit(17)
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,
               "update": {"sessionUpdate": "plan", "entries": [{"content": "Apply the requested change"}]}}})

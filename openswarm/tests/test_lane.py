@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "openswarm"
+FLEET_CAPACITY = ROOT / "bin" / "fleet-capacity"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 
@@ -118,6 +120,118 @@ class LaneTests(unittest.TestCase):
             return json.loads((self.data / "lanes" / self.lane_name / "state.json").read_text())
         except (OSError, ValueError):
             return {}
+
+    def enable_fleet_guard(self):
+        capacity_dir = self.root / "fleet-capacity"
+        guard = self.root / "fleet-guard.json"
+        guard.write_text(json.dumps({"command": [str(FLEET_CAPACITY), "gocc"]}))
+        self.env["OPENSWARM_FLEET_GUARD_CONFIG"] = str(guard)
+        self.env["OPENSWARM_FLEET_CAPACITY_DIR"] = str(capacity_dir)
+
+    def fleet_reservations(self):
+        result = self.fleet_call({"op": "status"})
+        return json.loads(result.stdout)["reservations"]
+
+    def fleet_call(self, payload):
+        return subprocess.run([str(FLEET_CAPACITY), "gocc"], input=json.dumps(payload),
+                                text=True, capture_output=True, check=True, env=self.env)
+
+    @staticmethod
+    def process_identity(pid):
+        try:
+            with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+            if len(fields) > 19:
+                return f"linux-start:{fields[19]}"
+        except (OSError, ValueError, IndexError):
+            pass
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], text=True,
+                                capture_output=True, check=False)
+        return f"ps-lstart:{result.stdout.strip()}" if result.returncode == 0 and result.stdout.strip() else None
+
+    def test_lane_supervisor_recovers_killed_runner_after_ttl_without_new_admission(self):
+        self.enable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
+            "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
+        self.start_lane()
+        run_id, token = "killed-runner", "a" * 32
+        answer = json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
+                                             "backend": "pi", "provider": "minimax-cn"}).stdout)
+        self.assertTrue(answer["admitted"])
+        runner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        executor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            rdir = self.data / "runs" / run_id
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({
+                "id": run_id, "state": "running", "runner_pid": runner.pid,
+                "executor_pid": executor.pid, "executor_pgid": os.getpgid(executor.pid),
+                "executor_identity": self.process_identity(executor.pid),
+                "fleet_host": "gocc", "fleet_reserved_at": time.time() - 1,
+            }))
+            # No later assignment/reserve occurs: the existing lane polling loop must stop only this
+            # recorded group and perform recovery after the group is gone.
+            self.wait_for(lambda: (s if (s := self.run_state(run_id)).get("fleet_recovery_stop_requested") else None),
+                          timeout=5, description="resident lane to stop the recorded executor group")
+            # The recovery marker records that SIGTERM/SIGKILL was requested.  On macOS the
+            # runner can publish that marker just before the child scheduler observes its
+            # SIGTERM/SIGKILL shutdown sequence,
+            # so an immediate poll is a race rather than evidence that recovery failed.  Wait
+            # for, and assert, the actual forced exit: this must still happen before capacity
+            # can be released below.
+            self.wait_for(lambda: executor.poll() is not None, timeout=5,
+                          description="recorded executor to exit after TTL recovery")
+            self.assertIn(executor.returncode, (-signal.SIGTERM, -signal.SIGKILL))
+            executor.wait()
+            self.wait_for(lambda: not self.fleet_reservations(), timeout=5,
+                          description="resident lane to recover a dead runner")
+            status = self.run_state(run_id)
+            self.assertIn("fleet_recovered_at", status)
+            self.assertIsNone(status.get("fleet_reservation_error"))
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
+
+    def test_lane_supervisor_never_kills_unconfirmed_executor_group(self):
+        self.enable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
+            "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
+        self.start_lane()
+        run_id, token = "unknown-group", "b" * 32
+        self.assertTrue(json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
+                                                    "backend": "pi", "provider": "minimax-cn"}).stdout)["admitted"])
+        runner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        executor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.kill(runner.pid, signal.SIGKILL)
+            runner.wait()
+            rdir = self.data / "runs" / run_id
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({
+                "id": run_id, "state": "running", "runner_pid": runner.pid,
+                "executor_pid": executor.pid, "executor_pgid": os.getpgid(executor.pid),
+                "executor_identity": "not-this-process", "fleet_host": "gocc", "fleet_reserved_at": time.time() - 1,
+            }))
+            retained = self.wait_for(lambda: (s if "identity cannot be confirmed" in
+                                               str((s := self.run_state(run_id)).get("fleet_reservation_error")) else None),
+                                     timeout=5, description="unconfirmed executor group to be retained")
+            self.assertEqual(len(self.fleet_reservations()), 1)
+            self.assertIsNone(executor.poll(), retained)
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait()
+            if executor.poll() is None:
+                os.killpg(os.getpgid(executor.pid), signal.SIGKILL)
+                executor.wait()
 
     def test_assign_commits_and_writes_normal_result(self):
         self.set_config("pi")
@@ -649,6 +763,122 @@ class LaneTests(unittest.TestCase):
                                    if (s := self.lane_state()) else None,
                                    timeout=8, description="Cursor ACP child restart")
         self.assertTrue(restarted["child_pid"])
+
+    def test_crashed_lane_child_releases_shared_fleet_slot(self):
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_CRASH")
+        state = self.wait_run(run_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(self.fleet_reservations(), [])
+
+    def test_signal_terminated_lane_child_retains_shared_fleet_slot(self):
+        """Do not reuse a lane slot while a SIGKILLed parent's child is still alive."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "signal-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_SIGNAL_WITH_CHILD")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            child_pid = int(child_marker.read_text())
+            self.assertTrue(process_alive(child_pid))
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_normally_exited_lane_parent_with_child_retains_shared_fleet_slot(self):
+        """A normal wrapper exit must not release a slot held by its child."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "normal-exit-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_CHILD")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            self.assertTrue(state.get("executor_pgid"))
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_normally_exited_lane_parent_with_detached_child_retains_shared_fleet_slot(self):
+        """A recorded child session keeps the lane slot after an ordinary parent exit."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "normal-exit-detached-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_DETACHED_CHILD")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            self.assertTrue(state.get("executor_descendants"), state)
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_headless_cursor_parent_with_child_retains_shared_fleet_slot(self):
+        """Headless Cursor must record its group before testing an ordinary exit."""
+        self.set_config("cursor", model="composer-2.5[fast=false]")
+        config_path = self.data / "lanes.json"
+        config = json.loads(config_path.read_text())
+        config["lanes"][0].update({"mode": "headless",
+                                   "binary": str(FIXTURES / "fake_cursor_headless.py")})
+        config_path.write_text(json.dumps(config))
+        self.enable_fleet_guard()
+        child_marker = self.root / "headless-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_CHILD")
+        try:
+            self.assertEqual(self.wait_run(run_id)["status"], "failed")
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_live_lane_turn_keeps_shared_fleet_slot(self):
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_WAIT retain the running slot")
+        self.wait_running(run_id)
+        reservations = self.fleet_reservations()
+        self.assertEqual(len(reservations), 1)
+        self.assertEqual(reservations[0]["run_id"], run_id)
+        self.cli("lane", "abort", self.lane_name)
+        self.wait_run(run_id)
 
     def test_steer_reaches_active_codex_turn(self):
         self.start_lane()
