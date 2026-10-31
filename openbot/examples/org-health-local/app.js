@@ -75,7 +75,9 @@ function render(data) {
     data.scope?.["观察月份"] !== "2026-09" ||
     !data.scope?.["数据截止"] ||
     expected.some((title, i) => data.metrics?.[i]?.["标题"] !== title) ||
-    !["insights", "definitions", "risks", "recommendations"].every((key) => Array.isArray(data[key]))
+    !["insights", "definitions", "risks", "recommendations"].every(
+      (key) => data[key] == null || Array.isArray(data[key]),
+    )
   ) {
     throw new Error(t("orgHealthDemo.badStructure"));
   }
@@ -190,44 +192,62 @@ function render(data) {
       { format: asPercent, forecastLabel: t("orgHealthDemo.forecastRevenue"), warn: true },
     ),
   ].join("");
-  $("#insight-grid").innerHTML = data.insights
-    .map((item) => {
-      const type = String(item["类型"] ?? "");
-      const tagClass = type.includes("推断")
-        ? "inference"
-        : type.includes("边界")
-          ? "boundary"
-          : type.includes("事实")
-            ? "fact"
-            : "inference";
-      const label = type.includes("推断")
-        ? t("orgHealthDemo.inference")
-        : type.includes("边界")
-          ? t("orgHealthDemo.boundary")
-          : type.includes("事实")
-            ? t("orgHealthDemo.fact")
-            : t("orgHealthDemo.unknown");
-      return `<article class="insight-card"><span class="tag ${tagClass}">${label}</span><h3>${safe(item["标题"])}</h3><p>${safe(item["内容"])}</p></article>`;
-    })
-    .join("");
-  $("#definitions-grid").innerHTML = data.definitions
-    .map(
-      (text, index) =>
-        `<div class="definition"><span class="definition-no">${String(index + 1).padStart(2, "0")}</span><p>${safe(text)}</p></div>`,
-    )
-    .join("");
-  $("#risk-grid").innerHTML = data.risks
-    .map(
-      (item) =>
-        `<article class="risk-card"><h3><span class="risk-mark">!</span>${safe(item["标题"])}</h3><p>${safe(item["内容"])}</p><span class="missing">${t("orgHealthDemo.missingEvidence")}</span></article>`,
-    )
-    .join("");
-  $("#recommendations").innerHTML = data.recommendations
-    .map(
-      (item) =>
-        `<article class="recommendation"><div><span class="priority ${safe(item["优先级"])}">${safe(item["优先级"])}</span></div><div><h3>${safe(item["标题"])}</h3><span class="rec-label">${t("orgHealthDemo.recommendation")}</span></div><div><span class="rec-label">${t("orgHealthDemo.basis")}</span><p>${safe(item["依据"])} ${safe(item["缺失证据"])}</p></div><div><span class="rec-label">${t("orgHealthDemo.verify")}</span><p>${safe(item["验证方式"])}</p></div></article>`,
-    )
-    .join("");
+  const emptyState = () => `<div class="empty-state">${t("orgHealthDemo.noData")}</div>`;
+  const isEmpty = (list) => !Array.isArray(list) || list.length === 0;
+
+  // 1. 洞察区块 (insights)
+  $("#insight-grid").innerHTML = isEmpty(data.insights)
+    ? emptyState()
+    : data.insights
+        .map((item) => {
+          const type = String(item["类型"] ?? "");
+          const tagClass = type.includes("推断")
+            ? "inference"
+            : type.includes("边界")
+              ? "boundary"
+              : type.includes("事实")
+                ? "fact"
+                : "inference";
+          const label = type.includes("推断")
+            ? t("orgHealthDemo.inference")
+            : type.includes("边界")
+              ? t("orgHealthDemo.boundary")
+              : type.includes("事实")
+                ? t("orgHealthDemo.fact")
+                : t("orgHealthDemo.unknown");
+          return `<article class="insight-card"><span class="tag ${tagClass}">${label}</span><h3>${safe(item["标题"])}</h3><p>${safe(item["内容"])}</p></article>`;
+        })
+        .join("");
+
+  // 2. 来源口径区块 (definitions)
+  $("#definitions-grid").innerHTML = isEmpty(data.definitions)
+    ? emptyState()
+    : data.definitions
+        .map(
+          (text, index) =>
+            `<div class="definition"><span class="definition-no">${String(index + 1).padStart(2, "0")}</span><p>${safe(text)}</p></div>`,
+        )
+        .join("");
+
+  // 3. 风险区块 (risks)
+  $("#risk-grid").innerHTML = isEmpty(data.risks)
+    ? emptyState()
+    : data.risks
+        .map(
+          (item) =>
+            `<article class="risk-card"><h3><span class="risk-mark">!</span>${safe(item["标题"])}</h3><p>${safe(item["内容"])}</p><span class="missing">${t("orgHealthDemo.missingEvidence")}</span></article>`,
+        )
+        .join("");
+
+  // 4. 建议区块 (recommendations)
+  $("#recommendations").innerHTML = isEmpty(data.recommendations)
+    ? emptyState()
+    : data.recommendations
+        .map(
+          (item) =>
+            `<article class="recommendation"><div><span class="priority ${safe(item["优先级"])}">${safe(item["优先级"])}</span></div><div><h3>${safe(item["标题"])}</h3><span class="rec-label">${t("orgHealthDemo.recommendation")}</span></div><div><span class="rec-label">${t("orgHealthDemo.basis")}</span><p>${safe(item["依据"])} ${safe(item["缺失证据"])}</p></div><div><span class="rec-label">${t("orgHealthDemo.verify")}</span><p>${safe(item["验证方式"])}</p></div></article>`,
+        )
+        .join("");
   renderCalibration(data);
 }
 function renderCalibration(data) {
