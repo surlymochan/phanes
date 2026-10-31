@@ -8,6 +8,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "write_method.py"
+sys.path.insert(0, str(HERE))
+import write_method
 
 BRIEF = {
     "目标": "检查趋势",
@@ -141,6 +143,80 @@ class WriteMethodTest(unittest.TestCase):
 
         self.assertEqual(code, 0, stderr)
         self.assertIn("- `cost.csv`：8 行数据（不含表头）", content)
+
+    def test_missing_brief_file_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            missing_brief = temp / "missing_brief.json"
+            data_path = temp / "diagnosis.json"
+            out_path = temp / "method.md"
+            data_path.write_text(json.dumps(DIAGNOSIS, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--brief",
+                    str(missing_brief),
+                    "--data",
+                    str(data_path),
+                    "--out",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(missing_brief.name, result.stderr)
+            self.assertNotIn("Traceback", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out_path.exists())
+
+    def test_corrupted_data_file_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            brief_path = temp / "brief.json"
+            corrupted_data = temp / "corrupted_diagnosis.json"
+            out_path = temp / "method.md"
+            brief_path.write_text(json.dumps(BRIEF, ensure_ascii=False), encoding="utf-8")
+            corrupted_data.write_text("{broken json", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--brief",
+                    str(brief_path),
+                    "--data",
+                    str(corrupted_data),
+                    "--out",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(corrupted_data.name, result.stderr)
+            self.assertNotIn("Traceback", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out_path.exists())
+
+    def test_load_json_missing_file_raises_method_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "nonexistent.json"
+            with self.assertRaises(write_method.MethodError) as ctx:
+                write_method.load_json(missing)
+            self.assertIn(str(missing), str(ctx.exception))
+
+    def test_load_json_corrupted_json_raises_method_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corrupted = Path(temp_dir) / "corrupted.json"
+            corrupted.write_text("invalid json content", encoding="utf-8")
+            with self.assertRaises(write_method.MethodError) as ctx:
+                write_method.load_json(corrupted)
+            self.assertIn(str(corrupted), str(ctx.exception))
 
 
 if __name__ == "__main__":
