@@ -465,6 +465,20 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(brief, data)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
+    def test_command_line_empty_questions_fails_with_report_summary(self) -> None:
+        """任务书必答问题为空时命令行失败并在报告汇总中计数。"""
+        self.brief["必答问题"] = []
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            report = base / "report.md"
+            result = run_script(brief, data, out=report)
+            content = report.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 必答问题覆盖", result.stdout)
+        self.assertIn("**汇总：共 4 项检查，3 项通过，1 项失败。**", content)
+
     def test_command_line_exit_code_is_two_on_unreadable_input(self) -> None:
         """输入不可读或不是 JSON 对象时退出码为 2。"""
         with temporary_directory() as folder:
