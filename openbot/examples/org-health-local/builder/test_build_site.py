@@ -354,6 +354,17 @@ class BuildSiteTest(unittest.TestCase):
         self.assertIn("不是合法 JSON", output)
         self.assertFalse(out_dir.exists(), "诊断 JSON 损坏时不应生成 dist 或留下半成品")
 
+    def test_command_line_missing_diagnosis_json_fails_with_readable_stderr(self) -> None:
+        """缺少 data/diagnosis.json 时命令行非零退出，stderr 包含可读错误和路径。"""
+        missing = self.root / "data" / "diagnosis.json"
+        out_dir = self.root / "dist_from_missing_diagnosis"
+        result = self.run_cli(data=missing, out=out_dir, bundle=self.bundle)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("数据文件不存在", result.stderr)
+        self.assertIn(str(missing), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(out_dir.exists(), "诊断 JSON 缺失时不应生成 dist 或留下半成品")
+
 
 if __name__ == "__main__":
     unittest.main()
