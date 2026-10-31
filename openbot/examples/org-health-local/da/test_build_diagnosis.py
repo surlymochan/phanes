@@ -469,6 +469,70 @@ class BuildDiagnosisTest(unittest.TestCase):
             [metric["标题"] for metric in self.build()["metrics"]],
         )
 
+    def test_answer_question_revops_cost_and_heads_share(self) -> None:
+        """必答问题涉及营收业务与占比/比例时，回答包含成本与人头数值及明确的成本占比与人头占比数字。"""
+        brief = json.loads(json.dumps(BRIEF))
+        question = "营收业务（含共享平台）的技术人力成本与折算人头分别是多少？占整体口径的比例是多少？"
+        brief["必答问题"] = [question]
+        folder = self.folder / "revops-shares"
+        folder.mkdir(parents=True, exist_ok=True)
+        brief_path = write_brief(folder, brief)
+        out_path = folder / "diagnosis.json"
+        result = run_cli(brief_path, SAMPLE_RAW, out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+
+        target_insights = [item for item in data["insights"] if item["标题"] == question]
+        self.assertEqual(len(target_insights), 1)
+        insight = target_insights[0]
+        self.assertEqual(insight["类型"], "事实")
+        content = insight["内容"]
+
+        # 验证包含营收业务成本数值、人头数值
+        self.assertIn("8.3 → 9.9 万元/月", content)
+        self.assertIn("8.3 → 9.9", content)
+        # 验证明确包含成本占比与人头占比数字
+        self.assertIn("成本占比 79.8%", content)
+        self.assertIn("人头占比 79.8%", content)
+
+    def test_answer_question_revops_shares_calculation_direct(self) -> None:
+        """直接调用 answer_question 验证占比计算准确性及关键词命中（占比与比例）。"""
+        facts = {
+            "overall_cost": {"start": 10.0, "end": 20.0},
+            "overall_heads": {"start": 40.0, "end": 80.0},
+            "revops_cost": {"start": 4.0, "end": 5.0},
+            "revops_heads": {"start": 10.0, "end": 24.0},
+            "income": {"start": 10.0, "end": 20.0, "forecast": 25.0, "target": 30.0},
+            "ratios": {"overall": {}, "revops": {}, "full": {}},
+        }
+        # 5.0 / 20.0 = 25.0%
+        # 24.0 / 80.0 = 30.0%
+        for q in (
+            "营收业务（含共享平台）的技术人力成本与折算人头分别是多少？占整体口径的比例是多少？",
+            "营收业务折算人头与成本占比是多少？",
+        ):
+            kind, content = build_diagnosis.answer_question(q, facts)
+            self.assertEqual(kind, "事实")
+            self.assertIn("4.0 → 5.0 万元/月", content)
+            self.assertIn("10.0 → 24.0", content)
+            self.assertIn("成本占比 25.0%", content)
+            self.assertIn("人头占比 30.0%", content)
+
+        # 边界情况：分母为 0 或 None 时写“未提供”
+        zero_facts = {
+            "overall_cost": {"start": 10.0, "end": 0.0},
+            "overall_heads": {"start": 40.0, "end": None},
+            "revops_cost": {"start": 4.0, "end": 5.0},
+            "revops_heads": {"start": 10.0, "end": 24.0},
+            "income": {"start": 10.0, "end": 20.0, "forecast": 25.0, "target": 30.0},
+            "ratios": {"overall": {}, "revops": {}, "full": {}},
+        }
+        kind, content = build_diagnosis.answer_question("营收业务成本与人头占比", zero_facts)
+        self.assertEqual(kind, "事实")
+        self.assertIn("成本占比 未提供", content)
+        self.assertIn("人头占比 未提供", content)
+
 
 class AbnormalRawDataTest(unittest.TestCase):
     """异常原始数据：缺期次、负数、重复行、CSV 多余列与重复列名。"""
