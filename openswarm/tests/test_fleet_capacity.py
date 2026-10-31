@@ -155,15 +155,19 @@ class FleetCapacityTests(unittest.TestCase):
         binary = root / '.local/bin/openswarm'
         binary.parent.mkdir(parents=True)
         binary.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
-                          'open(os.environ["FAKE_ARGS"],"w").write(json.dumps(sys.argv))\n'
+                          'open(os.environ["FAKE_ARGS"],"w").write(json.dumps({'
+                          '"argv":sys.argv,"runtime":os.environ.get("OPENSWARM_HOME")}))\n'
                           'print(json.dumps({"ok":True,"id":"test"}))\n')
         binary.chmod(0o755)
         self.env['HOME'] = str(root)
         self.env['FAKE_ARGS'] = str(root / 'args.json')
+        self.env['OPENSWARM_EXECUTOR_HOME'] = str(root / 'formal-runtime')
         response = self.call('gores1', op='assign', lane='M2', prompt='review', base='abcdef0',
                              budget_minutes=3, title='review', verify=None, read_only=True)
         self.assertTrue(response['ok'])
-        self.assertIn('--read-only', json.loads((root / 'args.json').read_text()))
+        captured = json.loads((root / 'args.json').read_text())
+        self.assertIn('--read-only', captured['argv'])
+        self.assertEqual(captured['runtime'], str(root / 'formal-runtime'))
 
     def test_dispatcher_rejects_a_lane_owned_by_another_host(self):
         response = self.call('govpn', op='assign', lane='M2', prompt='wrong host', base='abcdef0',

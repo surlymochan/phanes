@@ -21,6 +21,11 @@ LANE_PROFILES = {
     'govpn': {'K1': 'cursor'},
     'govpn2': {'K2': 'cursor'},
 }
+# The forced gateway command uses this explicit runtime rather than inheriting
+# an interactive shell's OPENSWARM_HOME.  A host service may override it with
+# OPENSWARM_EXECUTOR_HOME when its formal runtime lives elsewhere.
+RUNTIME_HOME = os.environ.get('OPENSWARM_EXECUTOR_HOME',
+                              str(Path.home() / '.claude/openswarm-executor-candidate'))
 if len(sys.argv) != 2 or sys.argv[1] not in (*LANE_PROFILES, 'local'):
     sys.exit('invalid authenticated host')
 host = sys.argv[1]
@@ -63,7 +68,8 @@ try:
                 command += ['--verify', verify]
             if request.get('read_only') is True:
                 command.append('--read-only')
-        process = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        executor_env = dict(os.environ, OPENSWARM_HOME=RUNTIME_HOME)
+        process = subprocess.run(command, capture_output=True, text=True, timeout=30, env=executor_env)
         try:
             result = json.loads(process.stdout)
         except ValueError:
