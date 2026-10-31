@@ -139,6 +139,38 @@ elif role == 'builder':
         self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
                          'console.log("custom-bundle");')
 
+    def test_paths_with_spaces_are_forwarded_and_artifacts_are_preserved(self):
+        """工作目录、raw 与脚本路径含空格时仍完整透传并保留产物。"""
+        self.workdir = self.root / 'work dir' / 'output'
+        self.raw = self.root / 'raw data'
+        self.raw.mkdir()
+        script_dir = self.root / 'script dir'
+        script_dir.mkdir()
+        self.scripts = [script_dir / f'{name} script.py'
+                        for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
+        self.bundle = self.root / 'bundle dir' / 'fake bundle.js'
+        self.bundle.parent.mkdir()
+        self.bundle.write_text('space path bundle', encoding='utf-8')
+
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role, probe=True)
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = dict(self.calls())
+        self.assertEqual(calls['boss'], ['--out', str(self.workdir / 'brief.json')])
+        self.assertEqual(calls['da'], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
+                                       '--out', str(self.workdir / 'diagnosis.json')])
+        self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'),
+                                            '--out', str(self.workdir / 'dist'), '--bundle', str(self.bundle)])
+        self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
+        self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
+                         'space path bundle')
+
     def test_uses_demo_bundle_by_default(self):
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
             self.write_stub(path, role)
