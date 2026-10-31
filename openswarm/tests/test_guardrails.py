@@ -280,3 +280,22 @@ class GuardrailsTests(unittest.TestCase):
         self.assertEqual(report["totals"]["runs"], 0)
         self.assertEqual(report["slowest_runs"], [])
         self.assertIn("No runs", xs.daily_report_html(report))
+
+
+class PromptRuleTests(unittest.TestCase):
+    def test_executor_prompt_forbids_touching_files_outside_the_worktree(self):
+        prompt = xs.PROMPT_TMPL.format(wd="/w/tree", task="t")
+        self.assertIn("Never create, modify, move, or delete files outside /w/tree", prompt)
+        self.assertIn("$TMPDIR", prompt)
+
+    def test_only_rm_outside_worktree_is_deniable_per_command(self):
+        lane = {"backend": "pi"}
+        self.assertTrue(xs.lane_risk_deniable(lane, {"risk": "rm outside worktree"}, {}))
+        self.assertFalse(xs.lane_risk_deniable(lane, {"risk": "push"}, {}))
+        self.assertFalse(xs.lane_risk_deniable({"backend": "cursor"}, {"risk": "rm outside worktree"}, {}))
+        full = {"risk_denials": [{}] * xs.MAX_RISK_DENIALS}
+        self.assertFalse(xs.lane_risk_deniable(lane, {"risk": "rm outside worktree"}, full))
+
+
+if __name__ == "__main__":
+    unittest.main()
