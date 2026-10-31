@@ -65,6 +65,8 @@ openswarm bus-worker --bus surlymochan/phanes-bus --name surlymochan-phanes-smok
   --backend codex --once
 ```
 
+`bus-worker --once` 适合冒烟、手动补跑或临时消费一项任务：领取并处理当前可见任务后即退出，便于明确控制执行窗口。需要持续接收任务的 worker 则应运行常驻 loop（省略 `--once`），由它按 `poll_seconds` 周期轮询 bus；适合长期在线的受控主机，但应配合进程托管与日志监控。
+
 检查 bus 状态并观察结果：
 
 ```sh
