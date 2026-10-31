@@ -27,9 +27,18 @@ function normalizeSnapshot(data) {
   if (
     !stage ||
     typeof stage.标题 !== "string" ||
+    !stage.标题.trim() ||
     typeof stage.来源口径 !== "string" ||
+    !stage.来源口径.trim() ||
     !Array.isArray(stage.指标) ||
-    !stage.指标.every((item) => typeof item?.分档 === "string" && typeof item?.例证 === "string")
+    stage.指标.length === 0 ||
+    !stage.指标.every(
+      (item) =>
+        typeof item?.分档 === "string" &&
+        item.分档.trim() &&
+        typeof item?.例证 === "string" &&
+        item.例证.trim(),
+    )
   ) {
     throw new Error(t("orgHealthDemo.badStructure"));
   }
