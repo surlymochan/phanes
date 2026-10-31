@@ -21,6 +21,8 @@
       "!!dist",
       "!!storybook-static",
       "!!**/dist",
+      "!!examples/org-health-local/demo/vendor",
+      "!!examples/org-health-local/demo/site",
       "!!**/.wrangler",
       "!!apps/mobile/.expo",
       "!!apps/mobile/android",
