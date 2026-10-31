@@ -39,6 +39,56 @@ class PatternsTests(unittest.TestCase):
             setattr(xs, key, value)
         self.tmp.cleanup()
 
+    def test_parse_pattern_requires_yaml_front_matter(self):
+        with self.assertRaisesRegex(ValueError, "^pattern must start with YAML front matter$"):
+            xs.parse_pattern_markdown("id: P-0001\n")
+
+    def test_parse_pattern_requires_closed_front_matter(self):
+        with self.assertRaisesRegex(ValueError, "^pattern front matter is not closed$"):
+            xs.parse_pattern_markdown("---\nid: P-0001\n")
+
+    def test_parse_pattern_rejects_tabs(self):
+        text = "---\nid: P-0001\n\ttitle: Tabbed\n---\nBody\n"
+        with self.assertRaisesRegex(ValueError, "line 3: tabs are not supported"):
+            xs.parse_pattern_markdown(text)
+
+    def test_parse_pattern_rejects_duplicate_top_level_keys(self):
+        text = "---\nid: P-0001\nid: P-0002\n---\nBody\n"
+        with self.assertRaisesRegex(ValueError, "line 3: duplicate key 'id'"):
+            xs.parse_pattern_markdown(text)
+
+    def test_parse_pattern_rejects_unsupported_applies_to_key(self):
+        text = "---\napplies_to:\n  audience: [developers]\n---\nBody\n"
+        with self.assertRaisesRegex(ValueError, "line 3: unsupported applies_to key 'audience'"):
+            xs.parse_pattern_markdown(text)
+
+    def test_parse_pattern_extracts_metadata_and_body(self):
+        text = (
+            "---\n"
+            "id: P-0042\n"
+            "title: \"Use the parser\"\n"
+            "applies_to:\n"
+            "  card_types: [fix, feature]\n"
+            "  paths: [openswarm/**]\n"
+            "  backends: [codex]\n"
+            "source: \"PR #459\"\n"
+            "status: active\n"
+            "---\n"
+            "# Pattern\n\nValidate the input.\n"
+        )
+        self.assertEqual(xs.parse_pattern_markdown(text), {
+            "id": "P-0042",
+            "title": "Use the parser",
+            "applies_to": {
+                "card_types": ["fix", "feature"],
+                "paths": ["openswarm/**"],
+                "backends": ["codex"],
+            },
+            "source": "PR #459",
+            "status": "active",
+            "body": "# Pattern\n\nValidate the input.",
+        })
+
     def write_pattern(self, pattern_id, title, body="When to use: common change.\nPattern:\n- Validate input.\n- Test boundary cases.\nExample: [PR](https://example.invalid/pr/1)",
                       card_types="[]", paths="[]", backends="[]", status="active"):
         path = self.skills / f"{pattern_id}.md"
