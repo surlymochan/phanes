@@ -35,3 +35,7 @@ cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/b
 ```bash
 python3 tools/lane-autodispatch/test_can_take.py
 ```
+
+## Box boot
+
+See [`docs/ctl-boot.md`](../docs/ctl-boot.md) — `start-control-plane` after reboot; no systemd.

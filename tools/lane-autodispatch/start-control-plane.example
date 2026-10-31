@@ -1,0 +1,21 @@
+#!/bin/bash
+# Start box control-plane loops (no systemd/cron on this box). Idempotent-ish: skips if already running.
+# Usage: ~/phanes-ctl/bin/start-control-plane
+set -e
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+start_one() {
+  local name="$1" cmd="$2"
+  if pgrep -f "$cmd" >/dev/null; then
+    echo "already: $name"
+  else
+    echo "start: $name"
+    setsid nohup bash -c "$cmd" >/dev/null 2>&1 &
+  fi
+}
+start_one ib-refresh-loop   "$HOME/phanes-ctl/bin/ctl-loop"
+start_one lane-autodispatch "$HOME/phanes-ctl/bin/lane-autodispatch"
+start_one lane-merge        "$HOME/phanes-ctl/bin/lane-merge"
+start_one bus-worker-loop   "$HOME/phanes-ctl/bin/bus-worker-loop"
+echo "status:"
+~/phanes-ctl/bin/lane-autodispatch-status 2>/dev/null | head -5 || true
+pgrep -af 'lane-autodispatch|bus-worker-loop|lane-merge|ctl-loop' | head -20 || true
