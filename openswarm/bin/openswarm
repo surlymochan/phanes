@@ -3341,9 +3341,9 @@ def fleet_guard_command():
         raise RuntimeError(f"fleet capacity configuration invalid: {error}")
 
 
-def fleet_guard_call(command, payload):
+def fleet_guard_call(command, payload, timeout=15):
     try:
-        result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=15)
+        result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=timeout)
         answer = json.loads(result.stdout)
         if result.returncode != 0 or not answer.get("ok"):
             raise ValueError(answer.get("error") or "coordinator rejected request")
@@ -3374,22 +3374,27 @@ def fleet_recovery_poll_seconds(policy):
     return value
 
 
-def recover_expired_fleet_slots(command, policy):
+def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeout=15):
     """Recover dead local runners only after their executor process tree is gone."""
     owner = fleet_guard_host(command)
     if not owner:
         return []
     ttl = fleet_recovery_ttl_seconds(policy)
-    now, recovered = NOW(), []
+    now, recovered, candidates = NOW(), [], []
     for path in glob.glob(os.path.join(RUNS, "*", "status.json")):
         status = jload(path, {}) or {}
         rdir = os.path.dirname(path)
         run_id = status.get("id") or os.path.basename(rdir)
         reserved_at = status.get("fleet_reserved_at")
         if (status.get("fleet_host") != owner or status.get("state") in ("finished", "unroutable", "dry-run")
+                or status.get("fleet_recovered_at")
                 or not isinstance(reserved_at, (int, float)) or isinstance(reserved_at, bool)
                 or now - reserved_at < ttl or pid_alive(status.get("runner_pid"))):
             continue
+        checked = status.get("fleet_recovery_checked_at", reserved_at)
+        candidates.append((checked if isinstance(checked, (int, float)) else reserved_at, path, status, rdir, run_id))
+    for _, path, status, rdir, run_id in sorted(candidates, key=lambda row: row[0])[:max_candidates]:
+        set_status(rdir, fleet_recovery_checked_at=now)
         if not executor_stopped(rdir):
             stop_orphaned_executor(rdir)
         if not executor_stopped(rdir):
@@ -3399,7 +3404,7 @@ def recover_expired_fleet_slots(command, policy):
             continue
         try:
             answer = fleet_guard_call(command, {"op": "recover", "host": owner, "run_id": run_id,
-                                                "confirm": "runner-and-executors-stopped-after-ttl"})
+                                                "confirm": "runner-and-executors-stopped-after-ttl"}, timeout=call_timeout)
         except RuntimeError as error:
             set_status(rdir, fleet_reservation_error=str(error))
             continue
@@ -3413,7 +3418,8 @@ def lane_recover_expired_fleet_slots(lane, policy):
     """Use the resident lane supervisor as the local TTL reaper; never start another service."""
     try:
         command = fleet_guard_command()
-        recovered = recover_expired_fleet_slots(command, policy) if command else []
+        # Bound one candidate below lane_call's 8s timeout.  Later loop ticks handle any remaining records.
+        recovered = recover_expired_fleet_slots(command, policy, max_candidates=1, call_timeout=2) if command else []
         lane_write_state(lane["name"], fleet_recovery_error=None,
                          fleet_recovery_checked_at=NOW(), fleet_recovered_runs=recovered)
         return recovered
@@ -3451,13 +3457,17 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     os.makedirs(rdir, exist_ok=True)
     status_path = os.path.join(rdir, "status.json")
     command = fleet_guard_command()
-    if command:
-        recover_expired_fleet_slots(command, policy)
     reservation_key = os.path.realpath(rdir)
     token = uuid.uuid4().hex
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
+    next_recovery = NOW()
     while True:
+        # The first attempt can precede the TTL; retry recovery while queued so it is not stranded
+        # waiting for another unrelated admission.  One short candidate keeps control responsiveness.
+        if command and NOW() >= next_recovery:
+            recover_expired_fleet_slots(command, policy, max_candidates=1, call_timeout=2)
+            next_recovery = NOW() + 1
         with open(lock_path, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             active = {}
@@ -3746,16 +3756,42 @@ def executor_status_fields(pid, pgid=None):
     return {"executor_pid": pid, "executor_pgid": pgid, "executor_identity": process_identity(pid)}
 
 
-def recorded_executor_group_matches(rdir):
-    """Only signal a group which is provably the group persisted for this run."""
+def executor_descendants_fields(pid):
+    """Persist the known child process groups while their parent is still observable."""
+    records = []
+    for child in descendants(pid) if pid_alive(pid) else []:
+        try:
+            pgid = os.getpgid(child)
+        except OSError:
+            pgid = None
+        identity = process_identity(child)
+        if identity:
+            records.append({"pid": child, "pgid": pgid, "identity": identity})
+    return records
+
+
+def record_executor_descendants(rdir, pid):
+    known = jload(os.path.join(rdir, "status.json"), {}) or {}
+    old = known.get("executor_descendants") if isinstance(known.get("executor_descendants"), list) else []
+    merged = {(row.get("pid"), row.get("identity")): row for row in old if isinstance(row, dict)}
+    for row in executor_descendants_fields(pid):
+        merged[(row["pid"], row["identity"])] = row
+    set_status(rdir, executor_descendants=list(merged.values()))
+
+
+def recorded_executor_records(rdir):
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
-    pid, pgid, identity = status.get("executor_pid"), status.get("executor_pgid"), status.get("executor_identity")
-    if not process_group_alive(pgid) or not isinstance(identity, str) or not identity:
+    records = [{"pid": status.get("executor_pid"), "pgid": status.get("executor_pgid"),
+                "identity": status.get("executor_identity")}]
+    records.extend(row for row in status.get("executor_descendants", []) if isinstance(row, dict))
+    return [row for row in records if row.get("pgid") or row.get("pid")]
+
+
+def recorded_executor_group_matches(record):
+    """Require a currently alive, identity-matched member before signaling its recorded group."""
+    pid, pgid, identity = record.get("pid"), record.get("pgid"), record.get("identity")
+    if not process_group_alive(pgid) or not isinstance(identity, str) or not identity or not pid_alive(pid):
         return False
-    if not pid_alive(pid):
-        # A group id cannot be reused while the original group still has a member. Its persisted
-        # birth identity proves this was the group's original leader when it was recorded.
-        return True
     try:
         return os.getpgid(int(pid)) == int(pgid) and process_identity(pid) == identity
     except (OSError, TypeError, ValueError):
@@ -3763,35 +3799,29 @@ def recorded_executor_group_matches(rdir):
 
 
 def executor_stopped(rdir):
-    """A failure may release capacity only after its executor and group are both gone."""
-    status = jload(os.path.join(rdir, "status.json"), {}) or {}
-    return not pid_alive(status.get("executor_pid")) and not process_group_alive(status.get("executor_pgid"))
+    """A failure may release capacity only after every recorded executor group has gone."""
+    for record in recorded_executor_records(rdir):
+        if pid_alive(record.get("pid")) or process_group_alive(record.get("pgid")):
+            return False
+    return True
 
 
 def stop_orphaned_executor(rdir):
-    """Stop the recorded executor group after its runner died and recovery TTL elapsed."""
+    """Stop every confirmed recorded executor group after its runner died and recovery TTL elapsed."""
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
-    pgid, pid = status.get("executor_pgid"), status.get("executor_pid")
+    pid = status.get("executor_pid")
+    # Capture children before the recorded leader is terminated; some tools create new sessions.
+    if pid_alive(pid):
+        record_executor_descendants(rdir, pid)
     set_status(rdir, fleet_recovery_stop_requested=NOW())
-    if process_group_alive(pgid):
-        if not recorded_executor_group_matches(rdir):
+    for record in recorded_executor_records(rdir):
+        if not process_group_alive(record.get("pgid")):
+            continue
+        if not recorded_executor_group_matches(record):
             set_status(rdir, fleet_reservation_error="retained after TTL: executor identity cannot be confirmed")
             return False
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(int(pgid), sig)
-            except (OSError, TypeError, ValueError):
-                pass
-            if sig == signal.SIGTERM:
-                time.sleep(0.2)
-            if not process_group_alive(pgid):
-                break
-    elif pid_alive(pid):
-        if status.get("executor_identity") and process_identity(pid) == status.get("executor_identity"):
-            kill_tree(pid, grace=0.2)
-        else:
-            set_status(rdir, fleet_reservation_error="retained after TTL: executor identity cannot be confirmed")
-            return False
+        # kill_tree re-discovers descendants and signals each dedicated group, not just this leader's pgid.
+        kill_tree(record["pid"], grace=0.2)
     return executor_stopped(rdir)
 
 
@@ -4126,6 +4156,8 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
         offset, pending = 0, ""
         io_streak = 0
         while True:
+            if pid_alive(p.pid):
+                record_executor_descendants(rdir, p.pid)
             done = p.poll() is not None
             with open(out_path, errors="replace") as events:
                 events.seek(offset)
@@ -5527,9 +5559,11 @@ def redact_review_raw(value):
                   r'[A-Za-z0-9._:-]+(["\']?)', r'\1[REDACTED]\2', text)
 
 
-def run_peer_reviewer(command, repo, timeout):
+def run_peer_reviewer(command, repo, timeout, on_started=None):
     process = subprocess.Popen(command, cwd=repo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+    if on_started:
+        on_started(process)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
@@ -5593,7 +5627,10 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
                 command = review_command(reviewer, active_prompt, repo, scratch_dir, policy)
                 try:
                     safe_release = False
-                    completed = run_peer_reviewer(command, repo, timeout)
+                    completed = run_peer_reviewer(
+                        command, repo, timeout,
+                        on_started=lambda process: set_status(
+                            slot_dir, **executor_status_fields(process.pid)))
                     safe_release = True
                 except subprocess.TimeoutExpired as error:
                     safe_release = True
@@ -7538,6 +7575,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         lane_abort_child(lane, child, turn)
         abort_deadline = NOW() + 30
     while not ended:
+        if child.pid and pid_alive(child.pid):
+            record_executor_descendants(rdir, child.pid)
         lane_control_messages(server, lane, spec, child, turn, pending)
         now = NOW()
         if not budget_hit and now >= deadline:

@@ -82,6 +82,28 @@ class PeerReviewTests(unittest.TestCase):
                                     text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(status.stdout)['reservations'], [])
 
+    def test_peer_reviewer_persists_executor_identity_before_waiting(self):
+        observed = {}
+
+        def reviewer(command, repo, timeout, on_started=None):
+            process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+            try:
+                on_started(process)
+                slot = next(self.runs.glob('review-slot-*/status.json'))
+                observed.update(json.loads(slot.read_text()))
+            finally:
+                process.kill()
+                process.wait()
+            return subprocess.CompletedProcess(command, 0, json.dumps({'findings': [], 'verdict': 'approve'}), '')
+
+        with mock.patch.object(xs, 'review_command', return_value=['reviewer']), \
+             mock.patch.object(xs, 'run_peer_reviewer', side_effect=reviewer):
+            result = xs.invoke_reviewer({'backend': 'agy'}, 'review', str(self.repo), str(self.run_dir), {})
+        self.assertEqual(result['verdict'], 'approve')
+        self.assertIsInstance(observed.get('executor_pid'), int)
+        self.assertTrue(observed.get('executor_identity'))
+        self.assertIsInstance(observed.get('executor_pgid'), int)
+
     def test_perform_review_stores_findings_and_peer_ledger_fields(self):
         findings = [{"severity": "P1", "path": "module.py", "line": 1,
                      "title": "Value is not preserved", "body": "The changed value breaks the contract."}]

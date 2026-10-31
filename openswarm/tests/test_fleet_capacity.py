@@ -239,6 +239,10 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(self.call('gocc', op='recover', host='gores1', run_id='orphan',
                                    confirm='all-executor-processes-stopped')['recovered'], 1)
 
+    def test_leaderless_recorded_group_is_not_considered_confirmed(self):
+        self.assertFalse(xs.recorded_executor_group_matches(
+            {'pid': 999999999, 'pgid': os.getpgrp(), 'identity': 'stale-identity'}))
+
     def test_killed_runner_recovers_after_ttl_when_executor_is_stopped(self):
         runs = pathlib.Path(self.temp.name, 'runs')
         rdir = runs / 'killed-runner'
@@ -491,6 +495,52 @@ class FleetCapacityTests(unittest.TestCase):
         pgid = json.loads(pathlib.Path(rdir, 'status.json').read_text())['executor_pgid']
         os.killpg(pgid, signal.SIGKILL)
         self.assertTrue(xs.release_fleet_slot(rdir))
+
+    def test_detached_descendant_retains_then_ttl_reaper_stops_recorded_group(self):
+        """A descendant which creates its own session remains in the execution boundary."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'detached-descendant'
+        rdir.mkdir(parents=True)
+        script = pathlib.Path(self.temp.name, 'detached-child.py')
+        marker = pathlib.Path(self.temp.name, 'detached-child.pid')
+        script.write_text(
+            'import os, subprocess, sys, time\n'
+            'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],start_new_session=True)\n'
+            f'open({str(marker)!r},"w").write(str(child.pid))\n'
+            'time.sleep(.4)\n'
+            'sys.exit(17)\n')
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 0.1}}
+
+        def executor(_decision, _state, _prompt, wd, _rdir, timeout, events):
+            return xs.run_proc([sys.executable, str(script)], wd, {}, timeout, events), None, {}, 'executor exited'
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': executor}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'MiniMax-M3.1-Flash'}, {}, 'task', self.temp.name,
+                str(rdir), xs.NOW() + 30, policy)
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 17)
+            child = int(marker.read_text())
+            self.assertTrue(xs.pid_alive(child))
+            status = json.loads((rdir / 'status.json').read_text())
+            self.assertTrue(status['executor_descendants'])
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            status['runner_pid'] = 999999999
+            status['fleet_host'], status['fleet_reserved_at'] = 'gocc', 0.0
+            (rdir / 'status.json').write_text(json.dumps(status))
+            with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), mock.patch.object(xs, 'NOW', return_value=1.0):
+                self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'], policy), ['detached-descendant'])
+            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        finally:
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_hermes_one_shot_parent_with_child_retains_reservation(self):
         """Hermes must publish its LaneChild group before one-shot release checks."""
