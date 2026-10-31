@@ -737,6 +737,25 @@ def answer_question(question: str, facts: dict) -> tuple[str, str]:
     revops_heads = facts["revops_heads"]
     income = facts["income"]
     ratios = facts["ratios"]
+    if "营收业务" in question and ("占比" in question or "比例" in question):
+        cost_ratio = (
+            revops_cost["end"] / cost["end"]
+            if cost["end"] not in (None, 0) and revops_cost["end"] is not None
+            else None
+        )
+        heads_ratio = (
+            revops_heads["end"] / heads["end"]
+            if heads["end"] not in (None, 0) and revops_heads["end"] is not None
+            else None
+        )
+        cost_ratio_str = f"{cost_ratio * 100:.1f}%" if cost_ratio is not None else "未提供"
+        heads_ratio_str = f"{heads_ratio * 100:.1f}%" if heads_ratio is not None else "未提供"
+        return (
+            "事实",
+            f"营收业务技术人力成本 {fmt_number(revops_cost['start'])} → {fmt_number(revops_cost['end'])} 万元/月；"
+            f"营收业务折算人头 {fmt_number(revops_heads['start'])} → {fmt_number(revops_heads['end'])}；"
+            f"成本占比 {cost_ratio_str}，人头占比 {heads_ratio_str}。",
+        )
     if "率" in question:
         return (
             "事实",
