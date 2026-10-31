@@ -46,6 +46,27 @@ python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结
 cd openbot/examples/org-health-local && python3 -m unittest test_validate -v
 ```
 
+## Review 角色：独立交叉审查
+
+`review/` 是独立交叉审查角色：核对任务书（brief）、诊断快照（diagnosis）与站点产物（dist）三方一致性，逐条输出 PASS/FAIL，任一 FAIL 时退出码非 0。
+
+```bash
+cd openbot/examples/org-health-local
+python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>]
+```
+
+- 期间一致：任务书 `观察期间`（对象、字符串或数组）里的期次必须覆盖 `scope.观察月份`；显式的 `截止期次`/`数据截止` 必须与 `scope` 相同。
+- 版本一致：任务书 `schema版本` 与 `scope.schema版本` 相同且为 4。
+- 必答问题覆盖：任务书 `必答问题` 每条都要在快照的 `insights`/`recommendations` 里被引用一次；命中 id、原文或提取出的关键词任一即算被引用（关键词规则见脚本文档字符串）。
+- 站点数据一致：给出 `--dist` 时 `dist/data/diagnosis.json` 与 `--data` 字节相同，并打印 sha256 前 12 位。
+- 隐私边界：快照的字段名（含嵌套）不含个人/薪酬/编制粒度黑名单词条；黑名单写在脚本里。
+
+单元测试只用测试内构造的最小样本，不依赖其他角色的脚本：
+
+```bash
+cd openbot/examples/org-health-local && python3 -m unittest review.test_cross_check -v
+```
+
 ## 构建静态站点
 
 `builder/build_site.py` 把诊断快照构建成可预览的静态目录：先用 `validate.py` 校验数据，
