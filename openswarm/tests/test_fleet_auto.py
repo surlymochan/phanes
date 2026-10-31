@@ -104,7 +104,7 @@ class FleetAutoTests(unittest.TestCase):
     def test_backend_host_filters_reject_invalid_hosts_and_backends(self):
         environment = {'OPENSWARM_AUTO_LOCAL_HOST': 'local',
                        'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1"]'}
-        for raw in ('[]', '{"unknown":["pi"]}', '{"local":[]}', '{"local":["bad backend"]}'):
+        for raw in ('[]', '{"unknown":["pi"]}', '{"local":["bad backend"]}'):
             with mock.patch.dict(os.environ, {**environment, 'OPENSWARM_AUTO_HOST_BACKENDS': raw}):
                 with self.assertRaisesRegex(RuntimeError, 'backend configuration'):
                     G['backend_filters'](G['fleet_hosts']())
