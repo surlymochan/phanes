@@ -2,6 +2,9 @@
 
 用 `da/sample-raw/` 下的合成原始数据加一个内嵌的最小任务书生成快照，
 再用 `validate.py` 的校验函数断言零错误；缺列时命令行退出码非 0。
+
+异常原始数据（缺期次、负数、重复行、CSV 多余列）按当前行为断言：已支持的情形断言
+退出码与错误信息，已知 bug 用 `unittest.expectedFailure` 标注并写明原因，不改实现。
 """
 import json
 import os
@@ -79,6 +82,23 @@ def write_brief(folder: Path, brief: dict) -> Path:
     path = folder / "brief.json"
     path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def copy_raw(folder: Path, name: str) -> Path:
+    """把合成原始数据复制到临时目录，返回副本目录路径。"""
+    target = folder / name
+    shutil.copytree(SAMPLE_RAW, target)
+    return target
+
+
+def csv_lines(path: Path) -> list[str]:
+    """读出 CSV 的文本行。"""
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def write_csv_lines(path: Path, lines: list[str]) -> None:
+    """写回 CSV 的文本行。"""
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class BuildDiagnosisTest(unittest.TestCase):
@@ -288,6 +308,169 @@ class BuildDiagnosisTest(unittest.TestCase):
             [metric["标题"] for metric in snapshot["metrics"]],
             [metric["标题"] for metric in self.build()["metrics"]],
         )
+
+
+class AbnormalRawDataTest(unittest.TestCase):
+    """异常原始数据：缺期次、负数、重复行与 CSV 多余列。"""
+
+    def setUp(self) -> None:
+        self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.temporary = temporary_directory()
+        self.folder = Path(self.temporary.name)
+        self.brief_path = write_brief(self.folder, BRIEF)
+        self.out_path = self.folder / "diagnosis.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def build_bytes(self, raw_dir: Path, out_path: Path) -> bytes:
+        """用给定原始数据目录生成快照，返回输出字节。"""
+        result = run_cli(self.brief_path, raw_dir, out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return out_path.read_bytes()
+
+    def build_data(self, raw_dir: Path) -> dict:
+        """用给定原始数据目录生成快照并返回内容，同时断言结构零错误。"""
+        data = json.loads(self.build_bytes(raw_dir, self.out_path).decode("utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+        return data
+
+    def test_missing_period_row_becomes_null(self) -> None:
+        """某期次整行缺失时该期次写 null，不填估算值。"""
+        raw_dir = copy_raw(self.folder, "raw-missing-period")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, [line for line in csv_lines(cost) if not line.startswith("2026-01,")])
+        data = self.build_data(raw_dir)
+        overall_cost = data["metrics"][0]["数值"]
+        self.assertIsNone(overall_cost["2026-01实际"])
+        self.assertEqual(overall_cost["2026-09实际"], 12.4)
+        self.assertIn("整体技术人力成本 缺 2026-01、2026-05 数据，按 null 处理", data["口径说明"])
+        titles = [item["标题"] for item in data["insights"]]
+        self.assertIn("成本与收入增速关系暂不可判", titles)
+        self.assertIn("成本结构暂不可判", titles)
+
+    def test_empty_cell_becomes_null(self) -> None:
+        """单元格留空表示该期次缺数据，只影响该列，其余列照常取数。"""
+        raw_dir = copy_raw(self.folder, "raw-empty-cell")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(
+            cost,
+            [line.replace("2026-01,10.4,8.3,2.1", "2026-01,10.4,,2.1") for line in csv_lines(cost)],
+        )
+        data = self.build_data(raw_dir)
+        revops_cost = data["metrics"][2]["数值"]["成本"]
+        self.assertIsNone(revops_cost["2026-01实际"])
+        self.assertEqual(revops_cost["2026-09实际"], 9.9)
+        self.assertIn("营收业务技术人力成本 缺 2026-01、2026-05 数据，按 null 处理", data["口径说明"])
+
+    def test_reference_period_with_overall_cost_exits_nonzero(self) -> None:
+        """参考期次出现同口径整体成本时退出码非 0（schema v4 要求参考期次固定为 null）。"""
+        raw_dir = copy_raw(self.folder, "raw-reference-overall")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, csv_lines(cost) + ["2026-05,11.2,9.0,2.3"])
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("schema v4 要求整体口径的参考期次固定为 null", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    @unittest.expectedFailure
+    def test_negative_cost_is_rejected(self) -> None:
+        """负数成本应判为原始数据错误。
+
+        已知 bug：当前实现只校验数值是否有限，不校验符号（da/build_diagnosis.py:283-295）。
+        -10.4 会被原样写进快照，并生成负的成本率（约-12.9%）与负的成本占比（-79.8%），
+        与“成本率=成本÷同期收入折人民币”的口径矛盾。修复后本用例应改回普通用例。
+        """
+        raw_dir = copy_raw(self.folder, "raw-negative-cost")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(
+            cost,
+            [line.replace("2026-01,10.4,8.3,2.1", "2026-01,-10.4,8.3,2.1") for line in csv_lines(cost)],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cost.csv", result.stdout + result.stderr)
+
+    @unittest.expectedFailure
+    def test_negative_heads_is_rejected(self) -> None:
+        """负数折算人头应判为原始数据错误。
+
+        已知 bug：与负数成本同理，负数人头也会被原样写进快照（页面只校验数值有限，不校验符号）。
+        修复后本用例应改回普通用例。
+        """
+        raw_dir = copy_raw(self.folder, "raw-negative-heads")
+        heads = raw_dir / "heads.csv"
+        write_csv_lines(
+            heads,
+            [line.replace("2026-01,10.4,8.3", "2026-01,-10.4,8.3") for line in csv_lines(heads)],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("heads.csv", result.stdout + result.stderr)
+
+    def test_duplicate_month_row_exits_nonzero(self) -> None:
+        """同一月份重复行时报错退出。"""
+        raw_dir = copy_raw(self.folder, "raw-duplicate-month")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, csv_lines(cost) + ["2026-01,10.4,8.3,2.1"])
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv 中 月份 2026-01 重复", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_duplicate_period_row_exits_nonzero(self) -> None:
+        """forecast.csv 同一期次重复行时报错退出。"""
+        raw_dir = copy_raw(self.folder, "raw-duplicate-period")
+        forecast = raw_dir / "forecast.csv"
+        write_csv_lines(forecast, csv_lines(forecast) + ["年末测算,13.4,10.7,13.4,10.7,,14.8"])
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 forecast.csv 中 期次 年末测算 重复", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_row_with_extra_field_exits_nonzero(self) -> None:
+        """数据行的字段数多于表头时报错退出。"""
+        raw_dir = copy_raw(self.folder, "raw-extra-field")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(
+            cost,
+            [line.replace("2026-01,10.4,8.3,2.1", "2026-01,10.4,8.3,2.1,备注") for line in csv_lines(cost)],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv 第 2 行的字段数多于表头", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_extra_column_in_header_is_ignored(self) -> None:
+        """表头多出一列时被忽略，输出与不含多余列时一致。"""
+        plain = copy_raw(self.folder, "raw-plain")
+        extra = copy_raw(self.folder, "raw-extra-column")
+        cost = extra / "cost.csv"
+        lines = csv_lines(cost)
+        lines[0] = lines[0] + ",备注"
+        lines[1] = lines[1] + ",合成备注"
+        write_csv_lines(cost, lines)
+        first = self.build_bytes(plain, self.folder / "plain.json")
+        second = self.build_bytes(extra, self.folder / "extra.json")
+        self.assertEqual(first, second)
+
+    @unittest.expectedFailure
+    def test_duplicated_column_name_is_rejected(self) -> None:
+        """表头出现重复列名时应报错。
+
+        已知 bug：csv.DictReader 对重复列名只保留最后一次出现（da/build_diagnosis.py:264-281）。
+        cost.csv 表头里出现两个“整体技术人力成本万元”时，10.4 被静默丢弃、99.9 被当成
+        整体技术人力成本，属于静默取错数。修复后本用例应改回普通用例。
+        """
+        raw_dir = copy_raw(self.folder, "raw-duplicated-column")
+        cost = raw_dir / "cost.csv"
+        lines = csv_lines(cost)
+        lines[0] = "月份,整体技术人力成本万元,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元"
+        lines[1] = "2026-01,10.4,99.9,8.3,2.1"
+        write_csv_lines(cost, lines)
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cost.csv", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
