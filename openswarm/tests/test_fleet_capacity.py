@@ -238,10 +238,14 @@ class FleetCapacityTests(unittest.TestCase):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
         second = dict(op='acquire', token='2' * 32, run_id='two', backend='agy', provider=None)
         third = dict(op='acquire', token='3' * 32, run_id='three', backend='copilot', provider=None)
+        fourth = dict(op='acquire', token='4' * 32, run_id='four', backend='cursor', provider=None)
+        fifth = dict(op='acquire', token='5' * 32, run_id='five', backend='agy', provider=None)
         self.assertTrue(self.call('gocc', **first)['admitted'])
         self.assertTrue(self.call('gocc', **second)['admitted'])
-        self.assertEqual(self.call('gocc', **third)['blocked'], ['host:gocc'])
-        self.assertTrue(self.call('gores1', **third)['admitted'])
+        self.assertTrue(self.call('gocc', **third)['admitted'])
+        self.assertTrue(self.call('gocc', **fourth)['admitted'])
+        self.assertEqual(self.call('gocc', **fifth)['blocked'], ['host:gocc'])
+        self.assertTrue(self.call('gores1', **fifth)['admitted'])
 
     def test_local_host_shares_backend_limit_and_cannot_recover(self):
         local = dict(op='acquire', token='1' * 32, run_id='local-turn', backend='codex', provider=None)
