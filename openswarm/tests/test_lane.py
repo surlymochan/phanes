@@ -819,6 +819,29 @@ class LaneTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_normally_exited_lane_parent_with_detached_child_retains_shared_fleet_slot(self):
+        """A recorded child session keeps the lane slot after an ordinary parent exit."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "normal-exit-detached-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_DETACHED_CHILD")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            self.assertTrue(state.get("executor_descendants"), state)
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_headless_cursor_parent_with_child_retains_shared_fleet_slot(self):
         """Headless Cursor must record its group before testing an ordinary exit."""
         self.set_config("cursor", model="composer-2.5[fast=false]")
