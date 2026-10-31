@@ -136,6 +136,28 @@ class LessonsTests(unittest.TestCase):
         self.assertEqual(xs.select_lessons({"knowledge": {"repo": str(self.root / "absent")}}, "fix", "codex"),
                          ("", []))
 
+    def test_lesson_top_level_paths_normalizes_prefixes_and_changed_file_shapes(self):
+        self.assertEqual(
+            xs.lesson_top_level_paths({
+                "files_changed": ["./src\\widgets\\button.py", "./docs/guide.md"],
+            }),
+            ["docs", "src"],
+        )
+        self.assertEqual(
+            xs.lesson_top_level_paths({"area": ["./tests\\unit\\test_lessons.py"]}),
+            ["tests"],
+        )
+        self.assertEqual(
+            xs.lesson_top_level_paths({"files_changed": "./README.md"}),
+            ["README.md"],
+        )
+
+    def test_lesson_paths_overlap_handles_empty_sets_and_wildcard_roots(self):
+        self.assertTrue(xs.lesson_paths_overlap([], []))
+        self.assertFalse(xs.lesson_paths_overlap(["docs/**"], []))
+        self.assertTrue(xs.lesson_paths_overlap(["docs/**"], ["docs/guide.md"]))
+        self.assertFalse(xs.lesson_paths_overlap(["docs/**"], ["src/main.py"]))
+
     def test_bad_yaml_is_warned_and_skipped(self):
         self.write_lesson("good.yaml", "L-0011", "valid")
         (self.lessons / "bad.yaml").write_text(
