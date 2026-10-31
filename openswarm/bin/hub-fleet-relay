@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Restricted gocc relay for Hub routes to outbound-only executor hosts.
 
-The entry process accepts only a logical target configured in
-OPENSWARM_FLEET_RELAY_TARGETS.  It does not accept an SSH alias, shell command,
-or arbitrary host in a task request.  This is transport glue only: capacity
+The entry process accepts only a logical target configured in its fixed service
+configuration file.  It does not accept an SSH alias, shell command, or
+arbitrary host in a task request.  This is transport glue only: capacity
 admission remains the coordinator/runner contract.
 """
 import json
@@ -13,19 +13,20 @@ import re
 import subprocess
 import sys
 
-home = Path.home()
-ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config')]
 OPS = {'lanes', 'assign', 'run_info', 'bundle', 'stop'}
+DEFAULT_CONFIG = Path('/etc/openswarm-fleet-relay.json')
 
 
-def targets():
-    raw = os.environ.get('OPENSWARM_FLEET_RELAY_TARGETS')
-    if raw is None:
-        raise ValueError('fleet relay target configuration is missing')
+def relay_config():
+    """Load service-owned target and SSH settings (never task-owned input)."""
+    path = Path(os.environ.get('OPENSWARM_FLEET_RELAY_CONFIG', DEFAULT_CONFIG)).expanduser()
     try:
-        rows = json.loads(raw)
-    except ValueError as error:
+        config = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
         raise ValueError('invalid fleet relay target configuration') from error
+    if not isinstance(config, dict):
+        raise ValueError('invalid fleet relay target configuration')
+    rows = config.get('targets')
     if not isinstance(rows, list) or not rows:
         raise ValueError('invalid fleet relay target configuration')
     out = {}
@@ -39,7 +40,10 @@ def targets():
                 or host in ('gocc', 'gores1') or host in out):
             raise ValueError('invalid fleet relay target configuration')
         out[host] = alias
-    return out
+    ssh_config = config.get('ssh_config')
+    if ssh_config is not None and (not isinstance(ssh_config, str) or not ssh_config):
+        raise ValueError('invalid fleet relay target configuration')
+    return out, ssh_config
 
 
 def main():
@@ -47,10 +51,15 @@ def main():
     if not isinstance(request, dict) or request.get('op') != 'relay':
         raise ValueError('invalid relay operation')
     host, payload = request.get('target'), request.get('request')
-    aliases = targets()
+    aliases, ssh_config = relay_config()
     if host not in aliases or not isinstance(payload, dict) or payload.get('op') not in OPS:
         raise ValueError('invalid relay request')
-    process = subprocess.run([*ssh, aliases[host]], input=json.dumps(payload), capture_output=True,
+    command = ['/usr/bin/ssh', '-T']
+    # gocc's default SSH config is the normal transport.  Service config may
+    # select a dedicated existing config without exposing that choice to tasks.
+    if ssh_config:
+        command += ['-F', str(Path(ssh_config).expanduser())]
+    process = subprocess.run([*command, aliases[host]], input=json.dumps(payload), capture_output=True,
                              text=True, timeout=140)
     try:
         reply = json.loads(process.stdout)
