@@ -169,6 +169,24 @@ cd openbot/examples/org-health-local && python3 run_tests.py
 
 服务边界测试覆盖 loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务、`--data` 指定的数据文件、启动提示和端口占用处理；全部单元测试均由 `python3 run_tests.py` 运行。
 
+### 无 Bun 的单角色本机复现
+
+只验证 Builder → 检查器链路时，不需要安装 Bun 或启动浏览器。下面的命令只使用 Python
+标准库创建临时目录和假的 bundle；输入是仓库内的合成示例数据，构建产物留在临时目录：
+
+```bash
+cd openbot/examples/org-health-local
+tmp_dir="$(python3 -c 'import tempfile; print(tempfile.mkdtemp(prefix="org-health-local-"))')"
+python3 -c "from pathlib import Path; Path('$tmp_dir/fake.bundle.js').write_text('/* fake bundle */\\nconsole.log(\"fake\");\\n', encoding='utf-8')"
+python3 builder/build_site.py --data data/diagnosis.json --out "$tmp_dir/dist" --bundle "$tmp_dir/fake.bundle.js"
+python3 builder/check_site.py "$tmp_dir/dist"
+```
+
+这会复现 `builder/test_build_site.py` 使用的标准库、`TMPDIR` 临时目录和假 bundle 条件，
+但不等同于浏览器 e2e：它不打包真实前端资源、不启动 `serve.py`，也不检查浏览器中的语言、
+请求边界或页面行为。真实诊断数据仍必须保存在仓库外；需要检查真实文件时直接把
+`--data` 指向仓库外的绝对路径，不要复制进本目录。
+
 ## Boss 角色：生成诊断任务书
 
 `boss/make_brief.py` 生成任务书；可用 `--fx` 写入 `口径.汇率`（正数，人民币/美元），省略时保持默认输出且不写汇率。`观察期间` 可选写入 `起始期次`、`参考期次`、`截止期次`，各值必须来自 `期次` 列表。
