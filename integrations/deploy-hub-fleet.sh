@@ -197,7 +197,9 @@ PY
 
 remote_apply() {
   local host="$1" runtime="$2" repo="$3" lanes="$4" remote_bundle="/tmp/phanes-$sha.bundle"
-  scp -q "$bundle" "$host:$remote_bundle"
+  if ! ssh -T -o BatchMode=yes -o ConnectTimeout=8 "$host" "git -C '$repo' cat-file -e '$sha^{commit}'"; then
+    scp -q "$bundle" "$host:$remote_bundle"
+  fi
   ssh -T -o BatchMode=yes -o ConnectTimeout=8 "$host" bash -s -- "$runtime" "$repo" "$remote_bundle" "$sha" "$bundle_ref" "$lanes" "$backup_id" <<'REMOTE'
 set -euo pipefail
 runtime="$1"; repo="$2"; bundle="$3"; sha="$4"; bundle_ref="$5"; lanes="${6//,/ }"; backup_id="$7"
@@ -220,7 +222,9 @@ else
   done
 fi
 echo "remote rollback configuration: $backup_root"
-git -C "$repo" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
+if ! git -C "$repo" cat-file -e "$sha^{commit}"; then
+  git -C "$repo" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
+fi
 git -C "$repo" cat-file -e "$sha^{commit}"
 
 release_root="$runtime/releases/$sha"
@@ -275,6 +279,7 @@ PY
     launchctl bootout "$domain/$label"
     launchctl bootstrap "$domain" "$plist"
     launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm-fleet" >/dev/null
+    launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
   else
     case "$lane" in
       K1) unit=openswarm-executor-cursor.service ;; M1) unit=openswarm-executor-pi.service ;;
@@ -325,17 +330,22 @@ PY
   git -C "$wt" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
   git -C "$wt" checkout --detach "$sha"
   roll_service "$lane"
-  after="$("$runtime/bin/openswarm-fleet" lane status)"
-  python3 - "$lane" "$after" "$release_bin/openswarm-fleet" <<'PY'
+  ready=0
+  for attempt in $(seq 1 15); do
+    after="$("$runtime/bin/openswarm-fleet" lane status)"
+    if python3 - "$lane" "$after" "$release_bin/openswarm-fleet" <<'PY'
 import json, subprocess, sys
 lane, status, executable = sys.argv[1:]
 row = next((row for row in json.loads(status) if row.get("name") == lane), None)
 if not row or row.get("state") != "idle" or not isinstance(row.get("supervisor_pid"), int):
-    raise SystemExit("new lane supervisor is not idle")
+    raise SystemExit(1)
 command = subprocess.check_output(["ps", "-p", str(row["supervisor_pid"]), "-o", "command="], text=True)
-if executable not in command:
-    raise SystemExit("new lane supervisor did not use selected release")
+if executable not in command: raise SystemExit(1)
 PY
+    then ready=1; break; fi
+    sleep 1
+  done
+  test "$ready" -eq 1 || { echo "new lane supervisor did not become ready: $lane" >&2; exit 1; }
   rolled=1
   echo "rolled lane: $lane"
 done
@@ -366,6 +376,7 @@ PY
   launchctl bootout "$domain/$label"
   launchctl bootstrap "$domain" "$plist"
   launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm" >/dev/null
+  launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
 }
 
 local_apply() {
@@ -397,17 +408,22 @@ PY
     git -C "$wt" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/$sha"
     git -C "$wt" checkout --detach "$sha"
     local_roll_service "$lane" "$release_bin"
-    after="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
-    python3 - "$lane" "$after" "$release_bin/openswarm" <<'PY'
+    ready=0
+    for attempt in $(seq 1 15); do
+      after="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
+      if python3 - "$lane" "$after" "$release_bin/openswarm" <<'PY'
 import json, subprocess, sys
 lane, status, executable = sys.argv[1:]
 row = next((row for row in json.loads(status) if row.get("name") == lane), None)
 if not row or row.get("state") != "idle" or not isinstance(row.get("supervisor_pid"), int):
-    raise SystemExit("new local supervisor is not idle")
+    raise SystemExit(1)
 command = subprocess.check_output(["ps", "-p", str(row["supervisor_pid"]), "-o", "command="], text=True)
-if executable not in command:
-    raise SystemExit("new local supervisor did not use selected release")
+if executable not in command: raise SystemExit(1)
 PY
+      then ready=1; break; fi
+      sleep 1
+    done
+    test "$ready" -eq 1 || { echo "new local supervisor did not become ready: $lane" >&2; return 1; }
     echo "rolled local lane: $lane"
   done
 }
