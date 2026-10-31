@@ -20,6 +20,40 @@ const fmt = (value, digits = 2) =>
         maximumFractionDigits: digits,
       });
 const valueFor = (series, label) => series?.[label] ?? null;
+function normalizeSnapshot(data) {
+  if (data?.scope) return data;
+  if (!data?.范围 || !Array.isArray(data?.指标)) return data;
+  const stage = data.指标[4];
+  if (
+    !stage ||
+    typeof stage.标题 !== "string" ||
+    !stage.标题.trim() ||
+    typeof stage.来源口径 !== "string" ||
+    !stage.来源口径.trim() ||
+    !Array.isArray(stage.指标) ||
+    stage.指标.length === 0 ||
+    !stage.指标.every(
+      (item) =>
+        typeof item?.分档 === "string" &&
+        item.分档.trim() &&
+        typeof item?.例证 === "string" &&
+        item.例证.trim(),
+    )
+  ) {
+    throw new Error(t("orgHealthDemo.badStructure"));
+  }
+  return {
+    scope: data.范围,
+    conclusion: data.结论,
+    origin: data.范围["来源"],
+    metrics: data.指标.slice(0, 4),
+    stage,
+    insights: data.洞察,
+    definitions: data.来源口径,
+    risks: data.风险,
+    recommendations: data.建议,
+  };
+}
 function metricCard(title, unit, series, delta, options = {}) {
   const points = [
     ["2026-01实际", t("orgHealthDemo.actual01"), "actual"],
@@ -54,6 +88,16 @@ function render(data) {
   $("#scope-date").textContent = scope["数据截止"];
   $("#scope-source").textContent = `${scope["来源"]} · schema v${scope["schema版本"]}`;
   $("#footer-source").textContent = t("orgHealthDemo.sourceLine", { origin: data.origin });
+  if (Array.isArray(data.stage?.指标)) {
+    $("#stage-title").textContent = data.stage["标题"];
+    $("#stage-note").textContent = data.stage["来源口径"];
+    $("#stage-list").innerHTML = data.stage.指标
+      .map(
+        (item, index) =>
+          `<div><span class="stage-index">${String.fromCharCode(65 + index)}</span><b>${safe(item["分档"])}</b><p>${safe(item["例证"])}</p></div>`,
+      )
+      .join("");
+  }
   const m = data.metrics;
   const overallCost = m[0].数值;
   const overallHeads = m[1].数值;
@@ -192,14 +236,16 @@ fetch("./data/diagnosis.json", { cache: "no-store" })
     if (!response.ok) throw new Error(t("orgHealthDemo.localLoadFailed"));
     return response.json();
   })
+  .then(normalizeSnapshot)
   .then(render)
   .catch((error) => {
     ["metric-grid", "insight-grid", "definitions-grid", "risk-grid", "recommendations"].forEach((id) => {
       document.getElementById(id).replaceChildren();
     });
-    ["scope-month", "scope-date", "scope-source", "footer-source"].forEach((id) => {
+    ["scope-month", "scope-date", "scope-source", "footer-source", "stage-title", "stage-note"].forEach((id) => {
       document.getElementById(id).textContent = "—";
     });
+    $("#stage-list").replaceChildren();
     $("#asof-short").textContent = t("orgHealthDemo.loadFailed");
     $("#conclusion").textContent = error.message || t("orgHealthDemo.genericError");
   });
