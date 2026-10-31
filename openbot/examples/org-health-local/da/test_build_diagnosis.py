@@ -596,6 +596,22 @@ class MinimalRawInputErrorTest(unittest.TestCase):
                 self.assertIn("整体技术人力成本万元", message)
                 self.assertFalse(self.out_path.exists())
 
+    def test_required_column_name_of_whitespace_exits_nonzero(self) -> None:
+        """必需列名仅含空白字符时退出码非 0，并指出文件与具体列名。"""
+        whitespace_header = (
+            "月份,   ,营收业务技术人力成本万元,运维设施成本万元\n"
+            "2026-01,10.4,8.3,2.1\n"
+        )
+        raw_dir = self.write_minimal_raw(
+            "raw-whitespace-column-name", {"cost.csv": whitespace_header}
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("cost.csv", message)
+        self.assertIn("整体技术人力成本万元", message)
+        self.assertFalse(self.out_path.exists())
+
     def test_duplicate_column_name_exits_nonzero(self) -> None:
         """CSV 出现重复列名时退出码非 0，并指出文件与重复的列名。"""
         duplicated = (
