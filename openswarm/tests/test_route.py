@@ -129,6 +129,10 @@ class RoutingScenarios(unittest.TestCase):
                                    "skipped": lambda s: s.get("codex") == "no working codex binary"},
                    OPT_IN_POLICY)
 
+    def test_21_unknown_and_empty_outcomes_use_stable_labels(self):
+        self.assertEqual(xs.outcome_label({"accepted": "unknown"}), "unknown")
+        self.assertEqual(xs.outcome_label({"accepted": False, "status": ""}), "fail/unknown")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
