@@ -7,27 +7,33 @@
 - `fleet-result-bundle`：将远端任务提交交回本机审查。
 - `openswarm-fleet-bundle-adapter`：为尚未内置 `_bundle` 的既有执行器补充目标主机 bundle 命令。
 
-Hub 本机持有 lane 时，不需要额外 gateway、socket 或 relay。启用已有的
+控制面在 box，不依赖用户 Mac。Hub 接入执行网络时，不需要额外 gateway、socket 或 relay。启用已有的
 OpenSwarm fleet 清单即可：
 
 ```text
 OPENSWARM_HUB_LOCAL_ROUTER=1
 OPENSWARM_AUTO_LOCAL_HOST=local
-OPENSWARM_AUTO_FLEET_HOSTS=["gores1","gocc"]
+OPENSWARM_AUTO_FLEET_HOSTS=["ib1","ib2","ib3","ib4","gocc","gorelay","ib5","govpn2"]
 OPENSWARM_AUTO_CLI=/absolute/path/to/openswarm-fleet
-OPENSWARM_AUTO_HOST_BACKENDS={"local":[],"gores1":["pi"],"gocc":["agy","copilot"]}
+OPENSWARM_AUTO_HOST_BACKENDS={"local":[],"ib1":["pi"],"ib2":["pi"],"ib3":["pi"],"ib4":["pi"],"gocc":["agy"],"gorelay":["agy"],"ib5":["codex"],"govpn2":["codex"]}
 ```
 
 `OPENSWARM_AUTO_HOST_BACKENDS` 是管理员部署时设置的主机后端白名单。它避免旧
-lane 残留或同名 lane（例如远端 K1）混入 4:2:2 布局；任务卡本身不能指定主机。
-`local` 不参与这个 4:2:2 方案；gores1 的 M1–M4 与 gocc 的 A1/A2、GH1/GH2
-每次派发都会经
+lane 残留或同名 lane 混入当前 4pi+2agy+4codex 布局；任务卡本身不能指定主机。当前真实拓扑摘要如下：
+
+- pi×4 on ib1–4
+- agy×2 on gocc + gorelay（同账号额度需留意）
+- codex×4 on ib5×2 + govpn2×2（+可选 govpn CX5）
+- 控制面在 box，不依赖用户 Mac
+- 禁止默认 Copilot（白名单中不启用 copilot）
+
+`local` 不参与这个 4pi+2agy+4codex 方案；各远端主机（ib1–4、gocc、gorelay、ib5、govpn2）的 lane 每次派发都会经
 `fleet exec ... lane status` 重新发现；派发、状态查询、停止和结果 bundle
 同样使用已配置 fleet 的直接 SSH 传输。lane supervisor 的共享 guard 仍是最终
 准入点。手工任务卡不能指定 host 或 SSH 参数。未列入这个配置的历史回执继续走
 旧 gateway，避免丢失既有结果查询能力。
 
-当前正式拓扑中，Hub 是本机运行的 OpenBot.app 与本机 bridge；在这项直连
+当前正式拓扑中，控制面在 box，不依赖用户 Mac；在这项直连
 fleet 配置部署前，旧 `auto` 仍由 gores1 执行，任务回执因而会显示 gores1。
 不要把这个历史执行路径表述为远端 Hub。
 
