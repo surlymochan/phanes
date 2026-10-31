@@ -60,7 +60,7 @@ providers for both routers (Codex subscription, OpenCode Go, DeepSeek). Costs ar
 | Review tasks sent to a different model family | 54.8% | **71.4%** | 0% |
 | Codex 5h window used per trace pass (computed) | **0.48** | 0.85 | 1.78 |
 | Metered spend, all scenarios (computed) | **$0.00** | $1.54 | $0.00 |
-| Routing decision latency, in-process median | **0.008 ms** | 0.026 ms | – |
+| Routing decision latency, in-process median | **0.008 ms** | 0.029 ms | – |
 | Providers / model ids known to the router | 3 backends / 27 | **26 / 36** | – |
 
 openswarm reads quota windows before it routes, so it never spends an attempt on an exhausted plan. By design, OmO
@@ -111,8 +111,8 @@ Routing decisions use live quota data, not guesses.
 - **Host-side verification.** `--verify '<cmd>'` runs your test command on the committed worktree.
   - Its exit code overrides the executor's self-report.
   - `--verify-baseline` ignores failures that already exist on the base commit.
-- **Automatic fallback.** One-shot Pi, Codex and Cursor runs retry visible 429s in the same session; other fallback-eligible rate limits and model-at-capacity errors can move to another backend.
-- **Rate-limit recovery and provider caps.** Resident lanes retry visible provider 429s in the same session using `rate_limit.backoff_seconds` (default `[30, 60, 120, 240]`) and `rate_limit.max_retries` (default `4`). `concurrency` accepts provider/backend caps plus `total`; defaults are `{"codex": 4, "minimax-cn": 6, "total": 10}`. Excess local turns queue across lanes and runs.
+- **Automatic fallback.** One-shot Codex and Cursor runs retry visible 429s in the same session; one-shot Pi does the same only when its session can be resumed (the isolated launcher cannot resume one, so it does not retry). Other fallback-eligible rate limits and model-at-capacity errors can move to another backend.
+- **Rate-limit recovery and provider caps.** Resident lanes retry visible provider 429s in the same session using `rate_limit.backoff_seconds` (default `[30, 60, 120, 240]`) and `rate_limit.max_retries` (default `4`). `concurrency` accepts provider/backend caps plus `total`; defaults are `{"codex": 4, "minimax-cn": 6, "agy": 2, "total": 10}`. Excess local turns queue across lanes and runs.
 - **Risk alerts.** `openswarm watch` streams progress and flags dangerous executor commands (push, `rm -rf ..`, secret prints, `sudo`, publish). It also reports stalls and heartbeats.
 - **Planner-friendly.**
   - `SKILL.md` teaches Claude Code the whole loop.
@@ -164,7 +164,7 @@ openswarm stop <id>                  # kill the executor; partial work is still 
 
 Pi messages appear once at `message_end`; Cursor chunks are merged until a prompt turn ends or a tool call starts.
 Codex events keep their existing behavior. `--quiet` keeps only `DONE`, `EXITED`, `RISK`, `STALL`, `ERROR`,
-`BUDGET`, `ATTEMPT`, and `HEARTBEAT`. Heartbeats include elapsed time, command count, the worktree's git diff
+`BUDGET`, `ATTEMPT`, `RATELIMIT`, and `HEARTBEAT`. Heartbeats include elapsed time, command count, the worktree's git diff
 summary (including lane worktrees), and the last completed message truncated to 200 characters. The watch window
 still expires with `--quiet`; re-arm with `--from-end` if needed.
 
@@ -602,7 +602,9 @@ The full rules are in [`SKILL.md`](SKILL.md#7-routing-rules-what-route-does). Ev
           codex exec          opencode run         opencode run
          (Codex plan)       (OpenCode Go plan)    (DeepSeek API)
 
-Cursor CLI is a fourth executor, opt-in only (`--backend cursor`).
+Cursor CLI, Antigravity (`--backend agy`, alias `gemini`), Pi (`--backend pi`), Copilot (`--backend copilot`)
+and Hermes (`--backend hermes`) are opt-in executors too; none of them joins the automatic routing order
+unless you add it to `routing.default_order`.
 ```
 
 | Path | What |
@@ -698,7 +700,7 @@ The forced command pins the authenticated owner; OpenSwarm also records the fina
 not infer ownership from an SSH alias or expose the fleet-control key/socket to
 an executor sandbox.
 
-`risk.enforce` defaults to `["push", "publish", "secret print", "rm outside worktree", "sudo"]`.
+`risk.enforce` defaults to `["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]`.
 The runner stops one-shot executors or aborts lane turns on matching command events,
 without requiring `watch`. Results include `status: stopped`, `error_class: risk_blocked`
 and `risk_blocks` with redacted commands. An empty list disables enforcement.

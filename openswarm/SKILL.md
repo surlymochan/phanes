@@ -182,7 +182,7 @@ Check `openswarm budget status --json` before dispatch; policy `budget` sets dai
 per-backend and per-run minute caps. An exit 3 / `budget_exceeded_daily` means defer
 or reduce the task budget. Timezone is `budget.timezone` (local by default).
 `risk.enforce` stops matching executor commands automatically (default: push, publish,
-secret print, rm outside worktree, sudo). Review redacted `risk_blocks` for stopped runs;
+secret print, rm outside worktree, sudo, computer use). Review redacted `risk_blocks` for stopped runs;
 post-execution command events cannot prevent initial side effects.
 
 A finished run gives you `status`, `result` (`summary`, `files_changed`, `tests`, `followups`), `branch` (`openswarm/<id>`), `commit`, `diffstat`, `patch`, and `attempts` (backend, model, effort, seconds, error class, quota before and after).

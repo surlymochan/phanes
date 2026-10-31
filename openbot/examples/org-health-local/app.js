@@ -34,10 +34,7 @@ function normalizeSnapshot(data) {
     stage.指标.length === 0 ||
     !stage.指标.every(
       (item) =>
-        typeof item?.分档 === "string" &&
-        item.分档.trim() &&
-        typeof item?.例证 === "string" &&
-        item.例证.trim(),
+        typeof item?.分档 === "string" && item.分档.trim() && typeof item?.例证 === "string" && item.例证.trim(),
     )
   ) {
     throw new Error(t("orgHealthDemo.badStructure"));
@@ -52,6 +49,7 @@ function normalizeSnapshot(data) {
     definitions: data.来源口径,
     risks: data.风险,
     recommendations: data.建议,
+    口径说明: data.口径说明 ?? data.calibration,
   };
 }
 function metricCard(title, unit, series, delta, options = {}) {
@@ -230,6 +228,51 @@ function render(data) {
         `<article class="recommendation"><div><span class="priority ${safe(item["优先级"])}">${safe(item["优先级"])}</span></div><div><h3>${safe(item["标题"])}</h3><span class="rec-label">${t("orgHealthDemo.recommendation")}</span></div><div><span class="rec-label">${t("orgHealthDemo.basis")}</span><p>${safe(item["依据"])} ${safe(item["缺失证据"])}</p></div><div><span class="rec-label">${t("orgHealthDemo.verify")}</span><p>${safe(item["验证方式"])}</p></div></article>`,
     )
     .join("");
+  renderCalibration(data);
+}
+function renderCalibration(data) {
+  const panel = $("#calibration-panel");
+  const content = $("#calibration-content");
+  if (!panel || !content) return;
+  const raw = data?.["口径说明"] ?? data?.scope?.["口径说明"] ?? data?.calibration ?? data?.metricNotes;
+  if (!raw) {
+    panel.hidden = true;
+    content.replaceChildren();
+    return;
+  }
+  let items = [];
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === "string") {
+    items = raw
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } else if (typeof raw === "object") {
+    items = Object.entries(raw).map(([k, v]) => `${k}：${v}`);
+  }
+  if (items.length === 0) {
+    panel.hidden = true;
+    content.replaceChildren();
+    return;
+  }
+  panel.hidden = false;
+  content.innerHTML = items
+    .map((item) => {
+      if (typeof item === "string") {
+        return `<p>${safe(item)}</p>`;
+      }
+      if (item && typeof item === "object") {
+        const title = item["标题"] ?? item.title ?? item.name ?? "";
+        const desc = item["内容"] ?? item["说明"] ?? item.content ?? item.description ?? "";
+        if (title && desc) {
+          return `<p><strong>${safe(title)}：</strong>${safe(desc)}</p>`;
+        }
+        return `<p>${safe(desc || title || JSON.stringify(item))}</p>`;
+      }
+      return `<p>${safe(String(item))}</p>`;
+    })
+    .join("");
 }
 fetch("./data/diagnosis.json", { cache: "no-store" })
   .then((response) => {
@@ -242,6 +285,11 @@ fetch("./data/diagnosis.json", { cache: "no-store" })
     ["metric-grid", "insight-grid", "definitions-grid", "risk-grid", "recommendations"].forEach((id) => {
       document.getElementById(id).replaceChildren();
     });
+    const panel = $("#calibration-panel");
+    if (panel) {
+      panel.hidden = true;
+      $("#calibration-content")?.replaceChildren();
+    }
     ["scope-month", "scope-date", "scope-source", "footer-source", "stage-title", "stage-note"].forEach((id) => {
       document.getElementById(id).textContent = "—";
     });
