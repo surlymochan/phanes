@@ -129,6 +129,7 @@ https.request = (_options, callback) => {
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             marker = pathlib.Path(root, 'started')
+            release = pathlib.Path(root, 'release')
             preload = pathlib.Path(root, 'fake.cjs')
             preload.write_text('''
 const https = require('node:https');
@@ -138,16 +139,20 @@ const {PassThrough} = require('node:stream');
 https.request = (_options, callback) => {
   const req = new EventEmitter(); req.destroy = () => {};
   req.end = () => {
-    const count = Number(fs.existsSync(process.env.STARTED) ? fs.readFileSync(process.env.STARTED, 'utf8') : 0) + 1;
-    fs.writeFileSync(process.env.STARTED, String(count));
+    fs.appendFileSync(process.env.STARTED, '1\\n');
     const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {}; upstream.complete = true;
-    callback(upstream); setTimeout(() => upstream.end('ok-' + count), 300);
+    callback(upstream);
+    const finish = () => {
+      if (fs.existsSync(process.env.RELEASE)) upstream.end('ok');
+      else setTimeout(finish, 5);
+    };
+    finish();
   };
   return req;
 };
 ''')
             path = os.path.join(root, 'broker.sock')
-            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), STARTED=str(marker))
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), STARTED=str(marker), RELEASE=str(release))
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
                                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             try:
@@ -164,13 +169,14 @@ https.request = (_options, callback) => {
                     client.close()
                 workers = [threading.Thread(target=request) for _ in range(4)]
                 for worker in workers: worker.start()
-                while (not marker.exists() or marker.read_text() != '4') and time.monotonic() < deadline:
+                while (not marker.exists() or len(marker.read_text().splitlines()) != 4) and time.monotonic() < deadline:
                     time.sleep(0.01)
-                self.assertEqual(marker.read_text(), '4')
+                self.assertEqual(len(marker.read_text().splitlines()), 4)
                 saturated = UnixHTTP(path)
                 saturated.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
                 self.assertEqual(saturated.getresponse().status, 503)
                 saturated.close()
+                release.touch()
                 for worker in workers: worker.join(timeout=5)
                 self.assertTrue(all(not worker.is_alive() for worker in workers))
                 self.assertEqual(sorted(status for status, _body in replies), [200, 200, 200, 200])
