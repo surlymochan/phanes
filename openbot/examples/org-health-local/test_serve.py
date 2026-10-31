@@ -69,13 +69,10 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 self.assertEqual(body, INDEX.read_bytes())
 
     def test_root_path_serves_the_index_page(self):
+        # SimpleHTTPRequestHandler 在所有 Python 3 版本里都会用目录下的 index.html 回应 "/"。
         status, body = self.request('/')
-        # Python 3.12 起目录请求会用 index.html 回应，更早版本由 list_directory 直接 404。
-        if getattr(serve.SimpleHTTPRequestHandler, 'index_pages', None):
-            self.assertEqual(status, 200)
-            self.assertEqual(body, INDEX.read_bytes())
-        else:
-            self.assertEqual(status, 404)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, INDEX.read_bytes())
 
     def test_other_hosts_are_forbidden(self):
         for host in ('evil.example', f'127.0.0.1:{self.port + 1}', 'localhost'):
