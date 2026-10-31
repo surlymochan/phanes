@@ -37,7 +37,7 @@ def remote_sources():
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
             raise ValueError('invalid automatic routing remote source configuration')
         if host == 'gocc':
-            if alias != DEFAULT_REMOTE_SOURCE['ssh_alias']:
+            if alias != DEFAULT_REMOTE_SOURCE['ssh_alias'] or via is not None:
                 raise ValueError('conflicting automatic routing remote source configuration')
             continue
         if via not in (None, 'gocc'):
