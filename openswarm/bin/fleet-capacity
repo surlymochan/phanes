@@ -10,63 +10,25 @@ import sys
 import time
 
 ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
-LIMITS = {'total': 8, 'host:gocc': 2, 'host:gores1': 2, 'host:govpn': 2,
-          'host:govpn2': 2, 'host:local': 2,
+LIMITS = {'total': 8, 'host:gocc': 2, 'host:gores1': 2, 'host:local': 2,
           'codex': 1, 'pi': 4, 'cursor': 2, 'agy': 2, 'copilot': 1, 'minimax-cn': 4}
-LANE_PROFILES = {
-    # Gateway validation is deliberately based on lane backend, not routing
-    # priority.  The lane supervisor still checks its configured model.
-    'gocc': {'C1': 'codex', 'A1': 'agy', 'A2': 'agy', 'GH1': 'copilot', 'GH2': 'copilot'},
-    'gores1': {'M1': 'pi', 'M2': 'pi', 'M3': 'pi', 'M4': 'pi', 'K1': 'cursor'},
-    'govpn': {'K1': 'cursor'},
-    'govpn2': {'K2': 'cursor'},
-}
-# Only these authenticated SSH callers may dispatch to a gateway target.  The
-# target comes from the service environment, never from a task payload.
-DISPATCH_CALLERS = {
-    'gocc': {'gores1'},
-    'govpn': {'gocc'},
-    'govpn2': {'gocc'},
-}
-# The forced gateway command uses this explicit runtime rather than inheriting
-# an interactive shell's OPENSWARM_HOME.  A host service may override it with
-# OPENSWARM_EXECUTOR_HOME when its formal runtime lives elsewhere.
-RUNTIME_HOME = os.environ.get('OPENSWARM_EXECUTOR_HOME',
-                              str(Path.home() / '.claude/openswarm-executor-candidate'))
-EXECUTOR_BIN = os.environ.get('OPENSWARM_EXECUTOR_BIN',
-                               str(Path.home() / 'tools/openswarm-executor-candidate/bin/openswarm-fleet'))
-# The forced SSH command identifies the authenticated caller.  Reservations
-# belong to that caller, while lane commands run on this configured target.
-EXECUTOR_HOST = os.environ.get('OPENSWARM_EXECUTOR_HOST', 'gocc')
-if len(sys.argv) != 2 or sys.argv[1] not in (*LANE_PROFILES, 'local'):
+if len(sys.argv) != 2 or sys.argv[1] not in ('gocc', 'gores1', 'local'):
     sys.exit('invalid authenticated host')
-if EXECUTOR_HOST not in LANE_PROFILES:
-    sys.exit('invalid configured executor host')
-caller_host = sys.argv[1]
+host = sys.argv[1]
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
-    if op == 'relay':
-        # Relay is available only on the existing gores1 -> gocc broker path.
-        # hub-fleet-relay itself validates the configured gocc -> remote target.
-        if caller_host != 'gores1' or EXECUTOR_HOST != 'gocc':
-            raise ValueError('authenticated caller is not allowed to relay')
-        relay = Path(__file__).with_name('hub-fleet-relay')
-        process = subprocess.run([sys.executable, str(relay)], input=json.dumps(request),
-                                 text=True, capture_output=True, timeout=150)
-        sys.stdout.write(process.stdout)
-        sys.exit(process.returncode)
     if op in ('lanes', 'assign', 'run_info', 'bundle', 'stop'):
-        if caller_host not in DISPATCH_CALLERS.get(EXECUTOR_HOST, set()):
-            raise ValueError('authenticated caller is not allowed for executor target')
-        command = [EXECUTOR_BIN, 'lane']
+        if host != 'gores1':
+            raise ValueError('remote dispatcher host required')
+        command = [str(Path.home() / '.local/bin/openswarm'), 'lane']
         if op == 'lanes':
             command += ['status']
         elif op in ('run_info', 'bundle', 'stop'):
             run_id = request.get('run_id')
             if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id):
                 raise ValueError('invalid run id')
-            command = [EXECUTOR_BIN]
+            command = [str(Path.home() / '.local/bin/openswarm')]
             command += ['fleet', '_run-info', run_id] if op in ('run_info', 'bundle') else ['stop', run_id]
         else:
             lane = request.get('lane')
@@ -75,7 +37,7 @@ try:
             verify = request.get('verify')
             title = request.get('title')
             budget = request.get('budget_minutes')
-            if lane not in LANE_PROFILES[EXECUTOR_HOST] or not isinstance(prompt, str) or not 0 < len(prompt) <= 50000:
+            if lane not in ('C1', 'A1', 'GH1', 'GH2') or not isinstance(prompt, str) or not 0 < len(prompt) <= 50000:
                 raise ValueError('invalid lane or prompt')
             if not isinstance(base, str) or not base or len(base) > 100 or not all(c in '0123456789abcdef' for c in base):
                 raise ValueError('base must be a hexadecimal commit')
@@ -92,8 +54,7 @@ try:
                 command += ['--verify', verify]
             if request.get('read_only') is True:
                 command.append('--read-only')
-        executor_env = dict(os.environ, OPENSWARM_HOME=RUNTIME_HOME)
-        process = subprocess.run(command, capture_output=True, text=True, timeout=30, env=executor_env)
+        process = subprocess.run(command, capture_output=True, text=True, timeout=30)
         try:
             result = json.loads(process.stdout)
         except ValueError:
@@ -122,10 +83,10 @@ try:
     elif op == 'recover':
         # Local operator only, after independently confirming the runner and
         # every executor descendant are stopped. Never automatically expire.
-        if caller_host != 'gocc' or request.get('confirm') != 'all-executor-processes-stopped':
+        if host != 'gocc' or request.get('confirm') != 'all-executor-processes-stopped':
             raise ValueError('local explicit recovery confirmation required')
         owner, run_id = request.get('host'), request.get('run_id')
-        if owner not in ('gocc', 'gores1', 'govpn', 'govpn2', 'local') or not isinstance(run_id, str) or not run_id:
+        if owner not in ('gocc', 'gores1', 'local') or not isinstance(run_id, str) or not run_id:
             raise ValueError('invalid reservation owner or run id')
         count = db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner,run_id)).rowcount
         out = {'ok': True, 'recovered': count}
@@ -137,21 +98,21 @@ try:
             raise ValueError('invalid run id')
         old = db.execute('SELECT host,run_id,backend,provider FROM reservations WHERE token=?', (token,)).fetchone()
         if op == 'release':
-            if old and (old[0] != caller_host or old[1] != run_id):
+            if old and (old[0] != host or old[1] != run_id):
                 raise ValueError('reservation owner mismatch')
-            db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=?', (token,caller_host,run_id))
+            db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=?', (token,host,run_id))
             out = {'ok': True, 'released': bool(old)}
         else:
             backend, provider = request.get('backend'), request.get('provider')
             if backend not in ALLOWED or provider not in (None, 'minimax-cn'):
                 raise ValueError('invalid backend/provider')
             if old:
-                if old != (caller_host,run_id,backend,provider):
+                if old != (host,run_id,backend,provider):
                     raise ValueError('reservation token conflict')
                 out = {'ok': True, 'admitted': True, 'existing': True}
             else:
                 rows = db.execute('SELECT host,backend,provider FROM reservations').fetchall()
-                keys = {'total', 'host:' + caller_host, backend} | ({provider} if provider else set())
+                keys = {'total', 'host:' + host, backend} | ({provider} if provider else set())
                 counts = {key: 0 for key in keys}
                 for h,b,p in rows:
                     active = {'total','host:' + h,b} | ({p} if p else set())
@@ -160,7 +121,7 @@ try:
                 if blocked:
                     out = {'ok': True, 'admitted': False, 'blocked': blocked}
                 else:
-                    db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)', (token,caller_host,run_id,backend,provider,time.time()))
+                    db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)', (token,host,run_id,backend,provider,time.time()))
                     out = {'ok': True, 'admitted': True}
     db.execute('COMMIT')
     print(json.dumps(out, separators=(',',':')))
