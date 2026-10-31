@@ -17,7 +17,10 @@ first = os.read(0, 1)
 if first == b'{':
     request = first + sys.stdin.buffer.read()
     capacity = pathlib.Path(__file__).with_name('fleet-capacity')
-    process = subprocess.run([str(capacity), 'gocc'], input=request,
+    # This forced-command key belongs to gores1.  The coordinator itself runs
+    # on gocc, but ownership must remain gores1 for its four-slot cap and for
+    # an exact later release.
+    process = subprocess.run([str(capacity), 'gores1'], input=request,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     sys.stdout.buffer.write(process.stdout)
     sys.exit(process.returncode)
