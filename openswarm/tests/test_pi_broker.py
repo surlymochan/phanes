@@ -105,7 +105,7 @@ https.request = (_options, callback) => {
                 response = client.getresponse()
                 busy_client = UnixHTTP(path)
                 busy_client.request('POST', '/other', '{}')
-                # Capacity is now two. An otherwise invalid request must not
+                # Capacity is now four. An otherwise invalid request must not
                 # pretend the single active slot made the broker unavailable.
                 self.assertEqual(busy_client.getresponse().status, 403)
                 busy_client.close()
@@ -124,7 +124,7 @@ https.request = (_options, callback) => {
                 proc.wait(timeout=5)
                 proc.stderr.close()
 
-    def test_two_requests_stream_concurrently_and_release_independently(self):
+    def test_four_requests_stream_concurrently_and_release_independently(self):
         with tempfile.TemporaryDirectory() as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
@@ -162,18 +162,18 @@ https.request = (_options, callback) => {
                     response = client.getresponse()
                     replies.append((response.status, response.read()))
                     client.close()
-                first, second = threading.Thread(target=request), threading.Thread(target=request)
-                first.start(); second.start()
-                while (not marker.exists() or marker.read_text() != '2') and time.monotonic() < deadline:
+                workers = [threading.Thread(target=request) for _ in range(4)]
+                for worker in workers: worker.start()
+                while (not marker.exists() or marker.read_text() != '4') and time.monotonic() < deadline:
                     time.sleep(0.01)
-                self.assertEqual(marker.read_text(), '2')
+                self.assertEqual(marker.read_text(), '4')
                 saturated = UnixHTTP(path)
                 saturated.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
                 self.assertEqual(saturated.getresponse().status, 503)
                 saturated.close()
-                first.join(timeout=5); second.join(timeout=5)
-                self.assertFalse(first.is_alive()); self.assertFalse(second.is_alive())
-                self.assertEqual(sorted(status for status, _body in replies), [200, 200])
+                for worker in workers: worker.join(timeout=5)
+                self.assertTrue(all(not worker.is_alive() for worker in workers))
+                self.assertEqual(sorted(status for status, _body in replies), [200, 200, 200, 200])
                 client = UnixHTTP(path)
                 client.request('POST', '/other', '{}')
                 self.assertEqual(client.getresponse().status, 403)
@@ -227,11 +227,14 @@ https.request = (_options, callback) => {
                     response = client.getresponse()
                     replies.append((response.status, response.read()))
                     client.close()
-                early, late = threading.Thread(target=request), threading.Thread(target=request)
-                early.start(); late.start()
-                early.join(timeout=5); late.join(timeout=5)
-                self.assertFalse(early.is_alive()); self.assertFalse(late.is_alive())
-                self.assertEqual(sorted(status for status, _body in replies), [200, 200])
+                workers = [threading.Thread(target=request) for _ in range(4)]
+                for worker in workers: worker.start()
+                for worker in workers: worker.join(timeout=5)
+                self.assertTrue(all(not worker.is_alive() for worker in workers))
+                # The 64-request rotation budget accepts only two of these
+                # four boundary uploads; neither accepted stream is cut off
+                # when the first one finishes.
+                self.assertEqual(sorted(status for status, _body in replies), [200, 200, 503, 503])
                 # Once both terminal responses have drained the supervised broker may rotate.
                 while proc.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.02)

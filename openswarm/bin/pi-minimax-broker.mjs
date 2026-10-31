@@ -16,9 +16,10 @@ try { key = await AuthStorage.create().getApiKey('minimax-cn'); }
 catch { throw new Error('MiniMax credential unavailable'); }
 if (typeof key !== 'string' || !key || /[\r\n]/.test(key)) throw new Error('MiniMax credential unavailable');
 const maxBytes = 8 * 1024 * 1024;
-// Two resident Pi lanes share this broker. Track every in-flight request so
-// one completion cannot admit a third while another request is still streaming.
-const maxInFlight = 2, maxAccepted = 64;
+// Four resident Pi lanes share this broker. Track every in-flight request so
+// one completion cannot admit a fifth while peers are still streaming. The
+// fleet coordinator remains responsible for the cross-host/global limit.
+const maxInFlight = 4, maxAccepted = 64;
 let inFlight = 0, accepted = 0, rotating = false;
 
 function rotateWhenDrained() {
@@ -55,6 +56,12 @@ const server = createServer((req, res) => {
     try { parsed = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { release(); return fail(400, 'invalid JSON'); }
     if (size !== length || !parsed || parsed.model !== model || !Array.isArray(parsed.messages)) {
       release(); return fail(403, 'model or request refused');
+    }
+    // A request reserves an in-flight slot before its body is validated. Check
+    // the rotation budget again here so several simultaneously uploaded bodies
+    // cannot all cross the budget boundary after their initial admission.
+    if (accepted >= maxAccepted) {
+      release(); return fail(503, 'broker temporarily unavailable');
     }
     accepted += 1;
     if (accepted >= maxAccepted) rotating = true;
