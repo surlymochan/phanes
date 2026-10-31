@@ -10,7 +10,7 @@ import sys
 import time
 
 ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
-LIMITS = {'total': 8, 'host:gocc': 2, 'host:gores1': 2, 'host:local': 2,
+LIMITS = {'total': 8, 'host:gocc': 2, 'host:gores1': 4, 'host:local': 2,
           'codex': 1, 'pi': 4, 'cursor': 2, 'agy': 2, 'copilot': 1, 'minimax-cn': 4}
 if len(sys.argv) != 2 or sys.argv[1] not in ('gocc', 'gores1', 'local'):
     sys.exit('invalid authenticated host')
