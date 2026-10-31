@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     if bundle_path is not None and not bundle_path.is_file():
         print(
-            f"bundle 文件不存在：{bundle_path}；请先生成 demo/vendor/app.bundle.js，或指定有效的 --bundle 文件。",
+            f"bundle 文件不存在或不是有效文件：{bundle_path}；请先生成 demo/vendor/app.bundle.js，或指定有效的 --bundle 文件。",
             file=sys.stderr,
         )
         return EXIT_INVALID
