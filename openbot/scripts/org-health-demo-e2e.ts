@@ -174,6 +174,22 @@ try {
   await page.getByText("加载失败", { exact: true }).waitFor();
   await assertLegacyDataCleared();
   checks.push("rejected legacy evidence cleared");
+  const missingOptional = structuredClone(snapshot);
+  delete missingOptional.insights;
+  missingOptional.definitions = [];
+  delete missingOptional.risks;
+  missingOptional.recommendations = [];
+  await writeFile(data, JSON.stringify(missingOptional));
+  for (const [language, emptyText] of [
+    ["zh", "本期无数据"],
+    ["en", "No data for this period"],
+  ] as const) {
+    await page.goto(`${url}/?lang=${language}`);
+    await page.getByText(emptyText, { exact: true }).first().waitFor();
+    assert.equal(await page.getByText("15", { exact: true }).count(), 1);
+    assert.equal(await page.getByText(emptyText, { exact: true }).count(), 4);
+    checks.push(`${language} snapshot with optional blocks missing or empty`);
+  }
   const invalid = structuredClone(snapshot);
   delete invalid.metrics[3].数值["收入万美元每月"]["年末目标"];
   await writeFile(data, JSON.stringify(invalid));

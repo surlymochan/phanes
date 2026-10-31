@@ -55,6 +55,7 @@ export const messages = defineMessages("orgHealthDemo", {
   "orgHealthDemo.footer": "Aggregate organization health diagnosis",
   "orgHealthDemo.footerLoading": "Local static data · no external requests",
   "orgHealthDemo.notProvided": "Not provided",
+  "orgHealthDemo.noData": "No data for this period",
   "orgHealthDemo.actual01": "January actual",
   "orgHealthDemo.reference05": "May H1 reference",
   "orgHealthDemo.actual09": "September actual",

@@ -50,6 +50,7 @@ export const messages = {
   "orgHealthDemo.footer": "组织健康聚合诊断",
   "orgHealthDemo.footerLoading": "本机静态数据 · 不发送网络请求",
   "orgHealthDemo.notProvided": "未提供",
+  "orgHealthDemo.noData": "本期无数据",
   "orgHealthDemo.actual01": "01 实际",
   "orgHealthDemo.reference05": "05 H1 参考",
   "orgHealthDemo.actual09": "09 实际",
