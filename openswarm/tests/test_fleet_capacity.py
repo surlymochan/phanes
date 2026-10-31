@@ -26,13 +26,15 @@ class FleetCapacityTests(unittest.TestCase):
                            capture_output=True, env=self.env, timeout=15)
         return json.loads(p.stdout)
 
-    def test_atomic_limit_and_idempotent_recovery(self):
+    def test_atomic_minimax_limit_and_idempotent_recovery(self):
         def attempt(i):
             return self.call('gocc' if i % 2 else 'gores1', op='acquire',
                              token=f'{i:032x}', run_id=f'run-{i}', backend='pi', provider='minimax-cn')
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             answers = list(pool.map(attempt, range(8)))
-        self.assertEqual(sum(bool(a.get('admitted')) for a in answers), 1)
+        # Four MiniMax turns may be admitted globally, subject to each host's
+        # independent cap of two.
+        self.assertEqual(sum(bool(a.get('admitted')) for a in answers), 4)
         winner = next(i for i, a in enumerate(answers) if a.get('admitted'))
         host = 'gocc' if winner % 2 else 'gores1'
         token = f'{winner:032x}'
@@ -40,9 +42,32 @@ class FleetCapacityTests(unittest.TestCase):
                                   backend='pi', provider='minimax-cn')['existing'])
         self.assertFalse(self.call('gores1' if host == 'gocc' else 'gocc', op='release',
                                    token=token, run_id=f'run-{winner}')['ok'])
-        self.assertEqual(len(self.call(host, op='status')['reservations']), 1)
-        self.assertTrue(self.call(host, op='release', token=token, run_id=f'run-{winner}')['released'])
+        self.assertEqual(len(self.call(host, op='status')['reservations']), 4)
+        for i, answer in enumerate(answers):
+            if not answer.get('admitted'):
+                continue
+            owner = 'gocc' if i % 2 else 'gores1'
+            self.assertTrue(self.call(owner, op='release', token=f'{i:032x}', run_id=f'run-{i}')['released'])
         self.assertEqual(self.call(host, op='status')['reservations'], [])
+
+    def test_agy_and_cursor_caps_match_requested_422_allocation(self):
+        def acquire(backend, number):
+            host = 'gocc' if number % 2 else 'gores1'
+            return self.call(host, op='acquire', token=f'{number:032x}',
+                             run_id=f'{backend}-{number}', backend=backend, provider=None)
+
+        # Test each backend cap separately. Existing per-host caps deliberately
+        # remain at two, so a live eight-turn allocation also needs four hosts.
+        agy = [acquire('agy', number) for number in range(1, 5)]
+        self.assertEqual(sum(bool(answer.get('admitted')) for answer in agy), 2)
+        for number, answer in enumerate(agy, 1):
+            if answer.get('admitted'):
+                host = 'gocc' if number % 2 else 'gores1'
+                self.assertTrue(self.call(host, op='release', token=f'{number:032x}',
+                                          run_id=f'agy-{number}')['released'])
+
+        cursor = [acquire('cursor', number) for number in range(11, 14)]
+        self.assertEqual(sum(bool(answer.get('admitted')) for answer in cursor), 2)
 
     def test_disconnected_coordinator_fails_closed(self):
         config = pathlib.Path(self.temp.name, 'guard.json')
