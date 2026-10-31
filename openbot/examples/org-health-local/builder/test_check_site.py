@@ -86,13 +86,23 @@ class CheckSiteTest(unittest.TestCase):
         (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
 
-    def test_corrupted_build_report_json_fails(self) -> None:
-        """损坏的 JSON 报告必须让检查失败，失败信息能定位到 build-report.json。"""
+    def test_truncated_build_report_json_fails(self) -> None:
+        """截断的 JSON 报告必须让检查失败，失败信息能定位到 build-report.json。"""
         dist = self.make_dist()
         (dist / "build-report.json").write_text("{not json", encoding="utf-8")
         result = self.run_checker(dist)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("build-report.json", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_array_build_report_json_fails(self) -> None:
+        """顶层为数组的 JSON 报告必须因结构错误而失败。"""
+        dist = self.make_dist()
+        (dist / "build-report.json").write_text("[]", encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build-report.json", result.stdout)
+        self.assertIn("必须是对象", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_non_string_hash_value_fails(self) -> None:
