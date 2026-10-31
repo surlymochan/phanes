@@ -48,6 +48,7 @@ git -C "$source_root" cat-file -e "$sha^{commit}"
 for file in "${required[@]}"; do
   git -C "$source_root" cat-file -e "$sha:openswarm/bin/$file" || { echo "missing selected source helper: $file" >&2; exit 1; }
 done
+git -C "$source_root" cat-file -e "$sha:openswarm/policy.json" || { echo "missing selected policy" >&2; exit 1; }
 test -f "$bridge_config" && test -f "$hub_plist"
 
 remote_preflight() {
@@ -134,9 +135,9 @@ install_local_runtime() {
   mkdir -p "$hub_runtime/bin" "$hub_home"
   chmod 700 "$hub_runtime" "$hub_runtime/bin"
   # The command entrypoints resolve several sibling helpers (for example the
-  # Pi isolated runner) from their own directory.  Deploy the complete bin
-  # tree from the selected main revision rather than a hand-maintained subset.
-  cp -pR "$hub_source/openswarm/bin/." "$hub_runtime/bin/"
+  # The helpers resolve siblings, policy.json, and selected docs from their
+  # runtime root. Deploy the complete OpenSwarm tree from selected main.
+  cp -pR "$hub_source/openswarm/." "$hub_runtime/"
 
   # openswarm-fleet intentionally fixes OPENSWARM_HOME to hub_home, so the
   # direct-fleet inventory belongs there. The existing capacity guard remains
@@ -223,15 +224,20 @@ git -C "$repo" fetch --no-tags "$bundle" "${bundle_ref}:refs/openswarm/releases/
 git -C "$repo" cat-file -e "$sha^{commit}"
 
 release_root="$runtime/releases/$sha"
-if [ ! -d "$release_root/openswarm/bin" ]; then
-  staging="$runtime/releases/.staging-$sha-$$"
-  mkdir -p "$staging"
-  # `openswarm` resolves sibling runner/helper scripts by location.  Archive
-  # its complete bin tree from the selected revision, preserving file modes.
-  git -C "$repo" archive "$sha" openswarm/bin | tar -x -C "$staging"
-  mv "$staging" "$release_root"
+if [ ! -f "$release_root/openswarm/policy.json" ]; then
+  # `openswarm` resolves sibling runner/helper scripts and policy.json from
+  # its own tree. Archive the complete directory, not only its bin subtree.
+  if [ -d "$release_root" ]; then
+    git -C "$repo" archive "$sha" openswarm | tar -x -C "$release_root"
+  else
+    staging="$runtime/releases/.staging-$sha-$$"
+    mkdir -p "$staging"
+    git -C "$repo" archive "$sha" openswarm | tar -x -C "$staging"
+    mv "$staging" "$release_root"
+  fi
 fi
 release_bin="$release_root/openswarm/bin"
+"$release_bin/openswarm-fleet" lane status >/dev/null
 
 # These are stateless one-shot helpers used by the Hub transport.  Versioning
 # them here does not restart a lane or replace the ordinary openswarm wrapper,
@@ -364,10 +370,11 @@ PY
 
 local_apply() {
   local release_root="$local_runtime/releases/$sha" release_bin="$local_runtime/releases/$sha/openswarm/bin"
-  if [ ! -d "$release_bin" ]; then
+  if [ ! -f "$release_root/openswarm/policy.json" ]; then
     mkdir -p "$release_root"
-    git -C "$hub_source" archive "$sha" openswarm/bin | tar -x -C "$release_root"
+    git -C "$hub_source" archive "$sha" openswarm | tar -x -C "$release_root"
   fi
+  OPENSWARM_HOME="$local_home" "$release_bin/openswarm" lane status >/dev/null
   for lane in K1 K2; do
     local status code wt after
     status="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
