@@ -143,6 +143,22 @@ class BuildSiteTest(unittest.TestCase):
         self.assertNotEqual(self.build(data=path, bundle=self.bundle), build_site.EXIT_OK)
         self.assertFalse(self.out.exists(), "坏数据时不应生成 dist")
 
+    def test_static_copy_error_returns_build_exit_and_cleans_new_output(self) -> None:
+        """复制静态文件失败时返回构建错误并清理新建的半成品目录。"""
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        stderr = StringIO()
+        with unittest.mock.patch.object(
+            build_site, "copy_static_files", side_effect=OSError("Simulated disk error")
+        ), redirect_stderr(stderr):
+            code = self.build(bundle=self.bundle)
+
+        self.assertEqual(code, build_site.EXIT_BUILD)
+        self.assertIn("构建失败", stderr.getvalue())
+        self.assertIn("Simulated disk error", stderr.getvalue())
+        self.assertFalse(self.out.exists(), "新建输出目录中的半成品应被清理")
+
     def test_missing_data_file_fails(self) -> None:
         """数据文件不存在时退出码非 0，且不生成 dist。"""
         self.assertNotEqual(self.build(data=self.root / "nope.json", bundle=self.bundle), build_site.EXIT_OK)
