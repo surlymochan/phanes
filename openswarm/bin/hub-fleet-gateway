@@ -31,7 +31,7 @@ def remote_sources():
     for source in sources:
         if not isinstance(source, dict):
             raise ValueError('invalid automatic routing remote source configuration')
-        host, alias = source.get('host'), source.get('ssh_alias')
+        host, alias, via = source.get('host'), source.get('ssh_alias'), source.get('via')
         if (not isinstance(host, str) or not isinstance(alias, str)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
@@ -40,10 +40,15 @@ def remote_sources():
             if alias != DEFAULT_REMOTE_SOURCE['ssh_alias']:
                 raise ValueError('conflicting automatic routing remote source configuration')
             continue
+        if via not in (None, 'gocc'):
+            raise ValueError('invalid automatic routing remote source configuration')
         if host == 'gores1' or host in seen:
             raise ValueError('conflicting automatic routing remote source configuration')
         seen.add(host)
-        out.append({'host': host, 'ssh_alias': alias})
+        item = {'host': host, 'ssh_alias': alias}
+        if via:
+            item['via'] = via
+        out.append(item)
     return out
 
 def source_for_host(host):
@@ -54,6 +59,12 @@ def source_for_host(host):
 
 def remote_command(source):
     return [*ssh[:-1], source['ssh_alias']]
+
+def remote_payload(source, payload):
+    """Envelope a remote lifecycle call when the configured path relays via gocc."""
+    if source.get('via') == 'gocc':
+        return {'op': 'relay', 'target': source['host'], 'request': payload}
+    return payload
 
 def result(cmd, payload=None, timeout=45):
     p = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
@@ -97,8 +108,8 @@ def main():
         if not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id): raise ValueError('invalid id')
         if host != 'gores1':
             source = source_for_host(host)
-            data = result(remote_command(source), {'op':{'info':'run_info','bundle':'bundle','stop':'stop'}[op],
-                                                    'run_id':run_id}, timeout=140)
+            payload = {'op':{'info':'run_info','bundle':'bundle','stop':'stop'}[op], 'run_id':run_id}
+            data = result(remote_command(source), remote_payload(source, payload), timeout=140)
             return data['result']
         if op == 'bundle':
             info = result([cli, 'fleet', '_run-info', run_id])

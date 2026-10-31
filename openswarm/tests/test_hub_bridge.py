@@ -176,6 +176,25 @@ class HubBridgeTests(unittest.TestCase):
                   'openswarm-govpn-gateway'], {'op':remote_op, 'run_id':'run-govpn'})])
             self.assertEqual(json.loads(output.getvalue())['result'], {'id':'run-govpn'})
 
+    def test_remote_gateway_relays_lifecycle_through_gocc(self):
+        sources = json.dumps([{'host':'govpn','ssh_alias':'openswarm-gocc-fleet-relay','via':'gocc'}])
+        for op, remote_op in (('info', 'run_info'), ('bundle', 'bundle'), ('stop', 'stop')):
+            req = {'op':op, 'id':'run-govpn', 'host':'govpn'}
+            seen = []
+            def run(command, input=None, **_kwargs):
+                seen.append((command, json.loads(input)))
+                return subprocess.CompletedProcess(command, 0, json.dumps({'ok':True, 'result':{'id':'run-govpn'}}), '')
+            with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(req))), \
+                    mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': sources}), \
+                    mock.patch.object(subprocess, 'run', side_effect=run), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
+            self.assertEqual(seen, [
+                (['/usr/bin/ssh', '-T', '-F', str(Path.home() / '.ssh/openswarm-fleet/config'),
+                  'openswarm-gocc-fleet-relay'],
+                 {'op':'relay','target':'govpn','request':{'op':remote_op,'run_id':'run-govpn'}})])
+            self.assertEqual(json.loads(output.getvalue())['result'], {'id':'run-govpn'})
+
     def test_extra_hosts_do_not_break_legacy_gocc_result_lookup(self):
         req = {'op':'info', 'id':'legacy-gocc-run', 'host':'gocc'}
         sources = json.dumps([{'host':'govpn','ssh_alias':'openswarm-govpn-gateway'}])

@@ -40,7 +40,7 @@ def remote_sources():
     for source in sources:
         if not isinstance(source, dict):
             raise RuntimeError('invalid automatic routing remote source configuration')
-        host, alias = source.get('host'), source.get('ssh_alias')
+        host, alias, via = source.get('host'), source.get('ssh_alias'), source.get('via')
         if (not isinstance(host, str) or not isinstance(alias, str)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
@@ -49,15 +49,25 @@ def remote_sources():
             if alias != DEFAULT_REMOTE_SOURCE['ssh_alias']:
                 raise RuntimeError('conflicting automatic routing remote source configuration')
             continue
+        if via not in (None, 'gocc'):
+            raise RuntimeError('invalid automatic routing remote source configuration')
         if host == 'gores1' or host in seen:
             raise RuntimeError('conflicting automatic routing remote source configuration')
         seen.add(host)
-        validated.append({'host': host, 'ssh_alias': alias})
+        item = {'host': host, 'ssh_alias': alias}
+        if via:
+            item['via'] = via
+        validated.append(item)
     return validated
 
 def remote_from(source, payload):
     command = [*ssh[:-1], source['ssh_alias']]
-    p = subprocess.run(command, input=json.dumps(payload), capture_output=True, text=True, timeout=35)
+    # A relay source is deliberately addressed through the existing Hub-side
+    # transport.  The outer process never receives an arbitrary SSH alias:
+    # the relay maps this logical target to its own fixed target inventory.
+    request = ({'op': 'relay', 'target': source['host'], 'request': payload}
+               if source.get('via') == 'gocc' else payload)
+    p = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True, timeout=35)
     try: result = json.loads(p.stdout)
     except ValueError: raise RuntimeError('gocc dispatch gateway unavailable')
     if p.returncode or not result.get('ok'):

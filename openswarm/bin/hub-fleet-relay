@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Restricted gocc relay for Hub routes to outbound-only executor hosts.
+
+The entry process accepts only a logical target configured in
+OPENSWARM_FLEET_RELAY_TARGETS.  It does not accept an SSH alias, shell command,
+or arbitrary host in a task request.  This is transport glue only: capacity
+admission remains the coordinator/runner contract.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+home = Path.home()
+ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config')]
+OPS = {'lanes', 'assign', 'run_info', 'bundle', 'stop'}
+
+
+def targets():
+    raw = os.environ.get('OPENSWARM_FLEET_RELAY_TARGETS')
+    if raw is None:
+        raise ValueError('fleet relay target configuration is missing')
+    try:
+        rows = json.loads(raw)
+    except ValueError as error:
+        raise ValueError('invalid fleet relay target configuration') from error
+    if not isinstance(rows, list) or not rows:
+        raise ValueError('invalid fleet relay target configuration')
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('invalid fleet relay target configuration')
+        host, alias = row.get('host'), row.get('ssh_alias')
+        if (not isinstance(host, str) or not isinstance(alias, str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)
+                or host in ('gocc', 'gores1') or host in out):
+            raise ValueError('invalid fleet relay target configuration')
+        out[host] = alias
+    return out
+
+
+def main():
+    request = json.load(sys.stdin)
+    if not isinstance(request, dict) or request.get('op') != 'relay':
+        raise ValueError('invalid relay operation')
+    host, payload = request.get('target'), request.get('request')
+    aliases = targets()
+    if host not in aliases or not isinstance(payload, dict) or payload.get('op') not in OPS:
+        raise ValueError('invalid relay request')
+    process = subprocess.run([*ssh, aliases[host]], input=json.dumps(payload), capture_output=True,
+                             text=True, timeout=140)
+    try:
+        reply = json.loads(process.stdout)
+    except ValueError as error:
+        raise ValueError('relay target returned invalid JSON') from error
+    if not isinstance(reply, dict):
+        raise ValueError('relay target returned invalid JSON')
+    print(json.dumps(reply, separators=(',', ':')))
+    return process.returncode
+
+
+try:
+    sys.exit(main())
+except (ValueError, OSError, subprocess.SubprocessError) as error:
+    print(json.dumps({'ok': False, 'error': str(error)[:300]}, separators=(',', ':')))
+    sys.exit(1)
