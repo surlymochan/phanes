@@ -194,6 +194,7 @@ https.request = (_options, callback) => {
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
             marker = pathlib.Path(root, 'started')
+            release = pathlib.Path(root, 'release')
             preload = pathlib.Path(root, 'fake.cjs')
             preload.write_text('''
 const https = require('node:https'); const fs = require('node:fs');
@@ -204,12 +205,18 @@ https.request = (_options, callback) => {
     const count = Number(fs.existsSync(process.env.STARTED) ? fs.readFileSync(process.env.STARTED, 'utf8') : 0) + 1;
     fs.writeFileSync(process.env.STARTED, String(count));
     const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {}; upstream.complete = true;
-    callback(upstream); setTimeout(() => upstream.end('ok-' + count), 500);
+    callback(upstream);
+    upstream.write('started-');
+    const finish = () => {
+      if (fs.existsSync(process.env.RELEASE)) upstream.end('ok-' + count);
+      else setTimeout(finish, 5);
+    };
+    finish();
   }; return req;
 };
 ''')
             path = os.path.join(root, 'broker.sock')
-            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), STARTED=str(marker))
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), STARTED=str(marker), RELEASE=str(release))
             proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
                                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             active, replacement = [], None
@@ -243,6 +250,7 @@ https.request = (_options, callback) => {
                 self.assertEqual(blocked.getresponse().status, 503); blocked.close()
                 self.assertTrue(all(b'200' in client.recv(4096) for client in active[1:]))
                 self.assertIn(b'200', replacement.recv(4096))
+                release.touch()
                 for client in active[1:]: client.close()
                 replacement.close()
             finally:
