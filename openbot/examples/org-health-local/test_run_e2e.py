@@ -16,10 +16,11 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 
-from run_e2e import REVIEW_REPORT  # noqa: E402  (需要先让示例目录可被导入)
+from run_e2e import REVIEW_REPORT, source_commit  # noqa: E402  (需要先让示例目录可被导入)
 
 RUNNER = ROOT / 'run_e2e.py'
 REVIEWER = ROOT / 'review' / 'cross_check.py'
+SOURCE_COMMIT = source_commit()
 
 
 class RunE2EArgumentContractTest(unittest.TestCase):
@@ -39,6 +40,11 @@ class RunE2EArgumentContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('--workdir', result.stderr)
         self.assertIn('required', result.stderr)
+
+    def test_source_commit_returns_current_commit_in_repository(self):
+        self.assertEqual(source_commit(), subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], text=True
+        ).strip())
 
 # 供交叉审查契约用例使用的合成任务书与诊断快照（与 review/test_cross_check.py 的夹具同构）。
 BRIEF = {
@@ -126,6 +132,7 @@ elif role == 'builder':
         self.assertEqual(calls[1][1], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
                                        '--out', str(self.workdir / 'diagnosis.json')])
         self.assertEqual(calls[2][1], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                                       '--source-commit', SOURCE_COMMIT,
                                        '--bundle', str(self.bundle)])
         self.assertEqual(calls[3][1], [str(self.workdir / 'dist')])
         self.assertTrue((self.workdir / 'brief.json').is_file())
@@ -163,6 +170,7 @@ elif role == 'builder':
                                        '--out', str(expected_workdir / 'diagnosis.json')])
         self.assertEqual(calls[2][1], ['--data', str(expected_workdir / 'diagnosis.json'),
                                        '--out', str(expected_workdir / 'dist'),
+                                       '--source-commit', SOURCE_COMMIT,
                                        '--bundle', str(self.bundle)])
         self.assertEqual(calls[3][1], [str(expected_workdir / 'dist')])
         self.assertTrue((expected_workdir / 'brief.json').is_file())
@@ -183,6 +191,7 @@ elif role == 'builder':
         self.assertEqual(calls['da'], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
                                        '--out', str(self.workdir / 'diagnosis.json')])
         self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                                            '--source-commit', SOURCE_COMMIT,
                                             '--bundle', str(self.bundle)])
         self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
         # 自定义路径生效，不回退到默认 sample-raw 与 demo bundle
@@ -221,7 +230,8 @@ elif role == 'builder':
         self.assertEqual(calls['da'], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
                                        '--out', str(self.workdir / 'diagnosis.json')])
         self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'),
-                                            '--out', str(self.workdir / 'dist'), '--bundle', str(self.bundle)])
+                                            '--out', str(self.workdir / 'dist'), '--source-commit', SOURCE_COMMIT,
+                                            '--bundle', str(self.bundle)])
         self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
         self.assertTrue((self.workdir / 'brief.json').is_file())
         diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
@@ -237,6 +247,7 @@ elif role == 'builder':
         self.assertEqual(result.returncode, 0, result.stderr)
         builder_call = self.calls()[2][1]
         self.assertEqual(builder_call[-2:], ['--bundle', str(ROOT / 'demo' / 'vendor' / 'app.bundle.js')])
+        self.assertEqual(builder_call[-4:-2], ['--source-commit', SOURCE_COMMIT])
         self.assertIn(str(ROOT / 'demo' / 'vendor' / 'app.bundle.js'), result.stdout)
 
     def test_boss_failure_stops_pipeline_and_returns_nonzero(self):
