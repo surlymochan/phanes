@@ -1,29 +1,12 @@
 #!/usr/bin/env python3
-"""Relay Pi HTTP, or a guarded capacity JSON request, over restricted SSH stdio."""
+"""Relay only Pi inference bytes over restricted SSH stdio."""
 import os
 import pathlib
 import select
 import socket
-import subprocess
-import sys
 
 path = pathlib.Path.home() / 'Library' / 'Caches' / 'openswarm-pi-broker' / 'broker.sock'
 first = os.read(0, 1)
-
-# The existing forced-command endpoint already reaches this executable.  Fleet
-# guards use one JSON request per connection, while Pi clients always begin an
-# HTTP request.  Keeping the protocols distinct preserves the Pi byte stream
-# and avoids adding a listener, credential, or SSH entry point.
-if first == b'{':
-    request = first + sys.stdin.buffer.read()
-    capacity = pathlib.Path(__file__).with_name('fleet-capacity')
-    # This forced-command key belongs to gores1.  The coordinator itself runs
-    # on gocc, but ownership must remain gores1 for its four-slot cap and for
-    # an exact later release.
-    process = subprocess.run([str(capacity), 'gores1'], input=request,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    sys.stdout.buffer.write(process.stdout)
-    sys.exit(process.returncode)
 
 sock = socket.socket(socket.AF_UNIX)
 sock.connect(str(path))
