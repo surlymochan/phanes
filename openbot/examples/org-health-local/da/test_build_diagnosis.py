@@ -188,6 +188,36 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertEqual(income["2026-05H1参考"], 12.4)
         self.assertEqual(income["年末目标"], 15.2)
 
+    def test_missing_forecast_row_is_null_and_reported(self) -> None:
+        """forecast.csv 缺少年末测算行时四个指标均写 null，并保留年末目标收入。"""
+        raw_dir = copy_raw(self.folder, "raw-without-forecast")
+        forecast = raw_dir / "forecast.csv"
+        write_csv_lines(
+            forecast,
+            [line for line in csv_lines(forecast) if not line.startswith("年末测算,")],
+        )
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["scope"]["观察月份"], "2026-09")
+        self.assertEqual(data["scope"]["数据截止"], "2026-09-30")
+        self.assertEqual(data["scope"]["schema版本"], 4)
+        forecast_values = [
+            data["metrics"][0]["数值"]["年末测算"],
+            data["metrics"][1]["数值"]["年末测算"],
+            data["metrics"][2]["数值"]["成本"]["年末测算"],
+            data["metrics"][2]["数值"]["折算人头"]["年末测算"],
+            data["metrics"][3]["数值"]["收入万美元每月"]["年末测算"],
+            data["metrics"][3]["数值"]["整体技术人力成本率"]["年末测算"],
+            data["metrics"][3]["数值"]["营收业务技术人力成本率"]["年末测算"],
+            data["metrics"][3]["数值"]["全口径技术成本率含运维设施"]["整体年末测算"],
+        ]
+        self.assertTrue(all(value is None for value in forecast_values))
+        self.assertEqual(data["metrics"][3]["数值"]["收入万美元每月"]["年末目标"], 15.2)
+        self.assertTrue(any("全口径年末测算缺口" in risk["标题"] for risk in data["risks"]))
+
     def test_missing_observation_period_is_explained_in_scope_notes(self) -> None:
         """观察期间内原始指标缺期次时追加确定性的 null 口径说明。"""
         raw_dir = self.folder / "raw-with-gap"
