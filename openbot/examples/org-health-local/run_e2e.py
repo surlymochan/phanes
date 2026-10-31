@@ -34,6 +34,20 @@ def run_step(name, command):
     return True
 
 
+def source_commit():
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
 def main(argv=None):
     args = parse_args(argv)
     workdir = args.workdir.resolve()
@@ -48,6 +62,9 @@ def main(argv=None):
     build = [sys.executable, str(args.builder), '--data', str(diagnosis), '--out', str(dist)]
     if args.bundle:
         build.extend(['--bundle', str(args.bundle)])
+    commit = source_commit()
+    if commit:
+        build.extend(['--source-commit', commit])
     commands.extend([
         ('Builder', build),
         ('检查', [sys.executable, str(args.checker), str(dist)]),

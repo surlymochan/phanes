@@ -48,11 +48,18 @@ class BuildSiteTest(unittest.TestCase):
         self.bundle = self.root / "fake.bundle.js"
         self.bundle.write_text(FAKE_BUNDLE, encoding="utf-8")
 
-    def build(self, data: Path = EXAMPLE_PATH, bundle: Path | None = None) -> int:
+    def build(
+        self,
+        data: Path = EXAMPLE_PATH,
+        bundle: Path | None = None,
+        source_commit: str | None = None,
+    ) -> int:
         """调用 build_site.main，返回退出码。"""
         argv = ["--data", str(data), "--out", str(self.out)]
         if bundle is not None:
             argv += ["--bundle", str(bundle)]
+        if source_commit is not None:
+            argv += ["--source-commit", source_commit]
         return build_site.main(argv)
 
     def test_build_writes_all_files(self) -> None:
@@ -76,6 +83,7 @@ class BuildSiteTest(unittest.TestCase):
         report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["输入路径"], str(EXAMPLE_PATH.resolve()))
         self.assertEqual(report["sha256"], sha256_of(EXAMPLE_PATH))
+        self.assertNotIn("来源提交", report)
         self.assertRegex(report["生成时间"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         listed = {entry["路径"]: entry for entry in report["文件清单"]}
         self.assertEqual(
@@ -86,6 +94,12 @@ class BuildSiteTest(unittest.TestCase):
                 target = self.out / relative
                 self.assertEqual(entry["sha256"], sha256_of(target))
                 self.assertEqual(entry["字节数"], target.stat().st_size)
+
+    def test_report_records_source_commit_when_provided(self) -> None:
+        """传入来源提交时，构建报告记录该提交。"""
+        self.assertEqual(self.build(bundle=self.bundle, source_commit="abc123"), build_site.EXIT_OK)
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["来源提交"], "abc123")
 
     def test_invalid_data_fails_and_writes_nothing(self) -> None:
         """数据不合格时退出码非 0，且不生成 dist。"""

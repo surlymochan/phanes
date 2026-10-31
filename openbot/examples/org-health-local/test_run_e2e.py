@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import run_e2e
+
 ROOT = Path(__file__).resolve().parent
 RUNNER = ROOT / 'run_e2e.py'
 
@@ -61,7 +63,7 @@ elif role == 'builder':
         self.assertEqual(calls[1][1], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
                                        '--out', str(self.workdir / 'diagnosis.json')])
         self.assertEqual(calls[2][1], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
-                                       '--bundle', str(self.bundle)])
+                                       '--bundle', str(self.bundle), '--source-commit', run_e2e.source_commit()])
         self.assertEqual(calls[3][1], [str(self.workdir / 'dist')])
         self.assertEqual(calls[4][1], ['--brief', str(self.workdir / 'brief.json'), '--data',
                                        str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')])
@@ -69,6 +71,14 @@ elif role == 'builder':
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
+
+    def test_skips_source_commit_outside_git_repository(self):
+        with unittest.mock.patch.object(
+            run_e2e.subprocess,
+            'run',
+            side_effect=subprocess.CalledProcessError(128, ['git', 'rev-parse', 'HEAD']),
+        ):
+            self.assertIsNone(run_e2e.source_commit())
 
     def test_failure_stops_pipeline_and_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
