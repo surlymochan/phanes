@@ -3,6 +3,7 @@
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -80,6 +81,13 @@ while True:
                         if isinstance(block, dict) and block.get("type") == "text")
         if "LANE_TEST_CRASH" in prompt:
             os._exit(17)
+        if "LANE_TEST_SIGNAL_WITH_CHILD" in prompt:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            marker = os.environ.get("FAKE_CURSOR_CHILD_PID")
+            if marker:
+                with open(marker, "w") as stream:
+                    stream.write(str(child.pid))
+            os.kill(os.getpid(), signal.SIGKILL)
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,
               "update": {"sessionUpdate": "plan", "entries": [{"content": "Apply the requested change"}]}}})
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,

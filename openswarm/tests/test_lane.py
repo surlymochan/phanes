@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -671,6 +672,29 @@ class LaneTests(unittest.TestCase):
         state = self.wait_run(run_id)
         self.assertEqual(state["status"], "failed")
         self.assertEqual(self.fleet_reservations(), [])
+
+    def test_signal_terminated_lane_child_retains_shared_fleet_slot(self):
+        """Do not reuse a lane slot while a SIGKILLed parent's child is still alive."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "signal-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_SIGNAL_WITH_CHILD")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            child_pid = int(child_marker.read_text())
+            self.assertTrue(process_alive(child_pid))
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_live_lane_turn_keeps_shared_fleet_slot(self):
         self.set_config("cursor")
