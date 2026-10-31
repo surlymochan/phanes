@@ -44,6 +44,7 @@ SUPPORTED_KEYWORDS = frozenset(
         "const",
         "description",
         "enum",
+        "exclusiveMaximum",
         "exclusiveMinimum",
         "items",
         "maxItems",
@@ -195,6 +196,9 @@ class Validator:
         if "maximum" in schema and isinstance(instance, (int, float)) and not isinstance(instance, bool):
             if instance > schema["maximum"]:
                 errors.append(f"{pointer(path)}: 数值大于允许的最大值 {schema['maximum']}")
+        if "exclusiveMaximum" in schema and isinstance(instance, (int, float)) and not isinstance(instance, bool):
+            if instance >= schema["exclusiveMaximum"]:
+                errors.append(f"{pointer(path)}: 数值必须小于 {schema['exclusiveMaximum']}")
         if isinstance(instance, dict):
             self._check_object(instance, schema, path, errors)
         if isinstance(instance, list):
