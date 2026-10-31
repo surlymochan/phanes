@@ -1,0 +1,15 @@
+{
+  "packages/logging/src/redaction.test.ts": 0.08,
+  "scripts/anti-slop-rules.test.ts": 1.44,
+  "scripts/ui-foundation-check.test.ts": 0.02,
+  "src/backend/browser-diagnostics.test.ts": 0,
+  "src/backend/openbot-database-schema-parity.test.ts": 0.16,
+  "src/backend/openbot-database.test.ts": 1.81,
+  "src/backend/stderr-diagnostics.test.ts": 0,
+  "src/main/content-security-policy.test.ts": 0,
+  "src/main/ipc-channel-coverage.test.ts": 0.01,
+  "src/main/ipc/define-ipc-group.test.ts": 0,
+  "src/main/renderer-permissions.test.ts": 0,
+  "src/main/trusted-ipc.test.ts": 0,
+  "src/preload/provider-runtime.test.ts": 0
+}

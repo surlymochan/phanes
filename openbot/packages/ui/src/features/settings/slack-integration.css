@@ -1,0 +1,97 @@
+/* Marketplace > Apps > Slack, Discord and Telegram: the channel pages (ChannelParts.tsx). */
+
+.channel-stack {
+  display: grid;
+  gap: var(--openbot-space-0-5);
+  justify-items: start;
+}
+
+/* ------------------------------------------------ connect dialog */
+
+.channel-checklist {
+  display: grid;
+  gap: var(--openbot-space-2);
+  margin: 0;
+  padding: var(--openbot-space-3) var(--openbot-space-4);
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-bg-surface);
+  list-style: none;
+  font-size: var(--openbot-text-sm);
+}
+
+.channel-checklist li {
+  display: flex;
+  gap: var(--openbot-space-2);
+  align-items: center;
+}
+
+.channel-checklist li[data-state="done"] {
+  color: var(--openbot-text-secondary);
+}
+
+.channel-checklist li[data-state="done"] svg {
+  color: var(--openbot-success);
+}
+
+.channel-checklist-dot {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-pill);
+}
+
+.channel-waiting {
+  display: flex;
+  gap: var(--openbot-space-2);
+  align-items: center;
+  justify-content: center;
+}
+
+.channel-orchestrator-card {
+  display: flex;
+  gap: var(--openbot-space-3);
+  align-items: center;
+  padding: var(--openbot-space-3);
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-bg-surface);
+}
+
+.channel-orchestrator-model {
+  display: grid;
+  gap: var(--openbot-space-1);
+}
+
+/* ------------------------------------------------ Discord roles dialog */
+
+.discord-roles {
+  display: grid;
+  max-height: 40vh;
+  margin: 0;
+  padding: var(--openbot-space-1);
+  overflow-y: auto;
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-bg-surface);
+  list-style: none;
+}
+
+.discord-role-row {
+  display: flex;
+  gap: var(--openbot-space-2);
+  align-items: center;
+  padding: var(--openbot-space-1) var(--openbot-space-2);
+  border-radius: var(--openbot-radius-sm);
+  cursor: pointer;
+}
+
+.discord-role-row:hover {
+  background: var(--openbot-bg-control-hover);
+}
+
+.discord-role-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

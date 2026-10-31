@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "verbatimModuleSyntax": true
+  },
+  "include": [
+    "electron.vite.config.ts",
+    "vitest.config.ts",
+    "knip.config.ts",
+    "scripts/**/*.ts",
+    "tools/vitest/**/*.ts",
+    "src/backend/**/*.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "packages/contracts/src/**/*.ts",
+    "packages/logging/src/**/*.ts"
+  ]
+}

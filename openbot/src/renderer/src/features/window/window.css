@@ -1,0 +1,697 @@
+/* The desktop window: the page rail at the left, and the frame as the card of the page that the rail
+ * selects. The rail shares the darker surface of the frame edge, so the rail and the top row show as
+ * one L around the card. */
+.app-window {
+  /* The frame is darker than the card, so the card comes forward. */
+  --window-frame: var(--openbot-bg-frame);
+  /* The thin frame at the right and the bottom of the card */
+  --window-edge: var(--openbot-space-1);
+  --window-hairline-height: var(--openbot-icon-lg);
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  background: var(--window-frame);
+}
+
+/* A hidden rail stays out of the grid. The frame keeps the last column, which then takes the whole
+ * window. */
+.app-window > .window-rail[hidden] {
+  display: none;
+}
+
+.app-window > .app-frame {
+  grid-column: -2;
+}
+
+/* The frame below the edge layout keeps its own shape, so the rail would only take width. */
+@media (max-width: 720px) {
+  .app-window > .window-rail {
+    display: none;
+  }
+}
+
+/* A window with no macOS window buttons starts the server menu at the left edge of the search field
+ * and the rows below it, at all widths. The web frame has the macOS class but no buttons. The
+ * selector must out-rank the macOS rule below, which also matches the web frame. */
+.app-window
+  > :is(.web-app-frame, .app-frame:not(.app-frame-platform-darwin)):not(.app-frame-with-server-rail)
+  > .sidebar:not(.sidebar-compact)
+  .sidebar-topbar {
+  padding-left: var(--openbot-space-3);
+}
+
+@media (min-width: 721px) {
+  /* The top row holds a short line at the end of the sidebar. */
+  .app-window > .app-frame-edge > .sidebar:not(.sidebar-compact) .sidebar-topbar {
+    position: relative;
+  }
+
+  /* The rail holds the window buttons, so the server menu needs only the part of them that is past
+   * the rail. */
+  .app-window
+    > .app-frame-platform-darwin:not(.app-frame-with-server-rail)
+    > .sidebar:not(.sidebar-compact)
+    .sidebar-topbar {
+    padding-left: var(--openbot-space-6);
+  }
+
+  /* One card holds the sidebar, the chat and the side panel, below the top row. The frame draws the
+   * card, and the panes have no background of their own, so the card's line and its four rounded
+   * corners show. The padding keeps the panes inside the card's line. */
+  .app-window > .app-frame-edge {
+    position: relative;
+    isolation: isolate;
+    padding: 0 calc(var(--window-edge) + 1px) calc(var(--window-edge) + 1px) 0;
+    background: var(--window-frame);
+  }
+
+  .app-window > .app-frame-edge::before {
+    position: absolute;
+    z-index: -1;
+    inset: calc(var(--left-header-height) - 1px) var(--window-edge) var(--window-edge) 0;
+    border: 1px solid var(--openbot-border);
+    border-radius: var(--openbot-radius-card);
+    background: var(--openbot-bg-canvas);
+    content: "";
+    pointer-events: none;
+  }
+
+  .app-window > .app-frame-edge.app-frame-with-server-rail::before {
+    left: var(--server-rail-width);
+  }
+
+  .app-window > .app-frame-edge > .server-rail {
+    background: var(--window-frame);
+  }
+
+  .app-window > .app-frame-edge > .sidebar,
+  .app-window > .app-frame-edge :is(.conversation-panel, .direct-conversation, .diagram-view),
+  .app-window > .app-frame-edge :is(.settings-panel, .browser-panel) {
+    background: transparent;
+  }
+
+  .app-window > .app-frame-edge :is(.conversation-panel, .direct-conversation)::before {
+    content: none;
+  }
+
+  /* The line between the agent list and the chat starts at the card's top line. In the top row, a short
+   * line sits above it. */
+  .app-window > .app-frame-edge > .sidebar::before {
+    inset: var(--left-header-height) 0 0 auto;
+    width: 1px;
+    border: 0;
+    border-radius: 0;
+    background: var(--openbot-border);
+  }
+
+  .app-window > .app-frame-edge > .sidebar:not(.sidebar-compact) .sidebar-topbar::after,
+  .app-window
+    > .app-frame-edge
+    :is(.settings-panel, .browser-panel)
+    > :is(.settings-panel-header, .file-preview-header, .browser-preview-header)::before {
+    position: absolute;
+    top: 50%;
+    width: 1px;
+    height: var(--window-hairline-height);
+    translate: 0 -50%;
+    background: var(--openbot-border-strong);
+    content: "";
+    pointer-events: none;
+  }
+
+  .app-window > .app-frame-edge > .sidebar:not(.sidebar-compact) .sidebar-topbar::after {
+    right: 0;
+  }
+
+  /* A side panel is the right part of the card. Its line to the chat starts at the card's top line. */
+  .app-window > .app-frame-edge :is(.settings-panel, .browser-panel) {
+    border-left: 0;
+  }
+
+  .app-window > .app-frame-edge :is(.settings-panel, .browser-panel)::before {
+    inset: calc(var(--left-header-height) - 1px) auto 0 0;
+    width: 1px;
+    border: 0;
+    border-radius: 0;
+    background: var(--openbot-border);
+  }
+
+  .app-window
+    > .app-frame-edge
+    :is(.settings-panel, .browser-panel)
+    > :is(.settings-panel-header, .file-preview-header, .browser-preview-header) {
+    position: relative;
+  }
+
+  .app-window
+    > .app-frame-edge
+    :is(.settings-panel, .browser-panel)
+    > :is(.settings-panel-header, .file-preview-header, .browser-preview-header)::before {
+    left: 0;
+  }
+
+  /* In the side panel, the tab row is in the top row and a pane starts under it, so the pane's line to
+   * the chat starts at the pane's top, and its own header has no short line. */
+  .app-window > .app-frame-edge .side-panel-docked > :is(.settings-panel, .browser-panel)::before {
+    top: 0;
+  }
+
+  .app-window
+    > .app-frame-edge
+    .side-panel-docked
+    > :is(.settings-panel, .browser-panel)
+    > :is(.settings-panel-header, .file-preview-header, .browser-preview-header)::before {
+    content: none;
+  }
+
+  /* A maximized pane covers the hidden chat. A chat preview frame keeps its own visibility, so the
+   * pane paints the card under it. */
+  .app-window > .app-frame-edge .side-panel-maximized > :is(.settings-panel, .browser-panel) {
+    border-bottom-right-radius: calc(var(--openbot-radius-card) - 1px);
+    background: var(--openbot-bg-canvas);
+  }
+
+  /* The routine canvas fills the card, so its board follows the card's rounded corner. */
+  .app-window > .app-frame-edge .diagram-view-body {
+    border-top: 0;
+    border-right: 0;
+    border-radius: 0 0 calc(var(--openbot-radius-card) - 1px) 0;
+  }
+
+  /* The top row controls are flat: one height and one radius, with no line. A control fills on hover,
+   * and an open control keeps a stronger fill. */
+  .app-window > .app-frame-edge .conversation-header-actions {
+    gap: var(--openbot-space-2);
+  }
+
+  .app-window > .app-frame-edge .conversation-header :is(.provider-model-trigger, .header-panel-toggle) {
+    height: var(--openbot-control-sm);
+    border-color: transparent;
+    border-radius: var(--openbot-radius-md);
+    background: transparent;
+    box-shadow: none;
+    color: var(--openbot-text-secondary);
+  }
+
+  .app-window > .app-frame-edge .conversation-header .header-panel-toggle {
+    width: var(--openbot-control-sm);
+    min-width: var(--openbot-control-sm);
+    padding: 0;
+    color: var(--openbot-text-muted);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .app-window > .app-frame-edge .conversation-header :is(.provider-model-trigger, .header-panel-toggle):hover {
+      border-color: transparent;
+      background: var(--openbot-bg-control-hover);
+      color: var(--openbot-text-primary);
+    }
+  }
+
+  .app-window
+    > .app-frame-edge
+    .conversation-header
+    :is(.provider-model-trigger, .header-panel-toggle):is([aria-expanded="true"], [data-expanded]):not(
+      .computer-button-agent-active,
+      .side-panel-toggle
+    ) {
+    border-color: transparent;
+    background: var(--openbot-bg-control-active);
+    color: var(--openbot-text-primary);
+  }
+
+  /* A short line between the model and the side panel button */
+  .app-window > .app-frame-edge .conversation-header-actions > .side-panel-toggle {
+    position: relative;
+    margin-left: calc(var(--openbot-space-2) + 1px);
+    overflow: visible;
+  }
+
+  .app-window > .app-frame-edge .conversation-header-actions > .side-panel-toggle::before {
+    position: absolute;
+    top: 50%;
+    left: calc(-1 * var(--openbot-space-2) - 1px);
+    width: 1px;
+    height: var(--window-hairline-height);
+    translate: 0 -50%;
+    background: var(--openbot-border-strong);
+    content: "";
+    pointer-events: none;
+  }
+
+  /* The usage and schedule pages sit in the card, as the chat does. Their title and controls go in the
+   * top row, as the chat header does, and the rest of the page goes in the card below it. The card
+   * draws the surface, the line and the rounded corner, so the page has no background of its own. */
+  .app-frame-edge > .window-page > :is(.agent-usage, .schedule-pane) {
+    background: transparent;
+  }
+
+  .app-window > .app-frame-edge > .window-page .agent-usage-header,
+  .app-window > .app-frame-edge > .window-page .routine-planner-title {
+    flex: none;
+    height: var(--left-header-height);
+    flex-wrap: nowrap;
+    padding: 0 var(--openbot-space-3);
+    border-bottom: 0;
+    -webkit-app-region: drag;
+  }
+
+  .app-window
+    > .app-frame-edge
+    > .window-page
+    :is(.agent-usage-header, .routine-planner-title)
+    > :is(.agent-usage-identity, .agent-usage-controls, .routine-planner-identity, p) {
+    flex-wrap: nowrap;
+    gap: var(--openbot-space-2);
+    -webkit-app-region: no-drag;
+  }
+
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-identity, .routine-planner-identity) .ui-icon-button {
+    margin-left: 0;
+  }
+
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-identity, .routine-planner-title) h2 {
+    gap: var(--openbot-space-2);
+    font-size: var(--openbot-text-md);
+    font-weight: var(--openbot-weight-medium);
+    white-space: nowrap;
+    color: var(--openbot-text-primary);
+  }
+
+  /* In a narrow window, the title gets shorter and the controls keep their size. */
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-identity, .routine-planner-identity) {
+    overflow: hidden;
+  }
+
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-controls, .routine-planner-title > p) {
+    flex: none;
+  }
+
+  /* Flat controls, as in the chat header. */
+  .app-window
+    > .app-frame-edge
+    > .window-page
+    :is(.agent-usage-header, .routine-planner-title)
+    :is(.ui-select-trigger, .ui-icon-button) {
+    height: var(--openbot-control-sm);
+    border-color: transparent;
+    border-radius: var(--openbot-radius-md);
+    background: transparent;
+    box-shadow: none;
+    color: var(--openbot-text-secondary);
+  }
+
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-header, .routine-planner-title) .ui-icon-button {
+    width: var(--openbot-control-sm);
+  }
+
+  @media (hover: hover) {
+    .app-window
+      > .app-frame-edge
+      > .window-page
+      :is(.agent-usage-header, .routine-planner-title)
+      :is(.ui-select-trigger, .ui-icon-button):hover {
+      background: var(--openbot-bg-control-hover);
+      color: var(--openbot-text-primary);
+    }
+  }
+
+  /* The schedule header holds the title in the top row; the week below it scrolls in the card. */
+  .app-window > .app-frame-edge > .window-page > .schedule-pane {
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .app-window > .app-frame-edge > .window-page .routine-planner {
+    height: 100%;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .app-window > .app-frame-edge > .window-page .routine-planner-header {
+    gap: 0;
+  }
+
+  .app-window > .app-frame-edge > .window-page .routine-planner-toolbar {
+    padding: var(--openbot-space-4) var(--openbot-space-6) 0;
+  }
+
+  .app-window > .app-frame-edge > .window-page .routine-planner-body {
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--openbot-space-4) var(--openbot-space-6) var(--openbot-space-6);
+  }
+
+  /* The empty month fills the card and clips at its bottom edge, so the pitch stays in the middle of
+   * what the user sees. A pitch taller than the card scrolls. */
+  .app-window > .app-frame-edge > .window-page .routine-planner-empty {
+    min-height: 0;
+    overflow-y: auto;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .app-window > .app-frame-edge > .window-page :is(.routine-planner-empty-board, .routine-planner-empty-board > *) {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-window > .app-frame-edge > .window-page .routine-planner-empty-board {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  /* A narrow card puts the runs below the pitch, so both rows keep their height and scroll. */
+  @container (max-width: 920px) {
+    .app-window > .app-frame-edge > .window-page .routine-planner-empty {
+      grid-template-rows: none;
+    }
+  }
+
+  /* The settings, schedule, usage and Marketplace pages cover the sidebar, so the week has room for
+   * seven days. The server menu stays in the top row, so the user can select the server that the page
+   * shows. The "settings" kind is both settings pages; the "titled" kind is schedule, usage and Marketplace. */
+  /* Out of the grid flow: a grid cell would push the sidebar to a second row. The grid area of an
+   * absolute item is its containing block, so the item spans the whole grid. */
+  .app-frame-edge:not([data-window-page-kind="agents"]) > .window-page {
+    position: absolute;
+    grid-row: 1 / -1;
+    grid-column: 1 / -1;
+    inset: 0 0 0 1px;
+  }
+
+  /* The settings page starts below the top row. The schedule, usage and Marketplace titles go in the
+   * top row, after the server menu, and the rest of the top row lets clicks through to that menu. The
+   * rail is the way back, so these titles have no Back button and no server name. */
+  .app-frame-edge[data-window-page-kind="settings"] > .window-page {
+    top: var(--left-header-height);
+  }
+
+  .app-frame-edge[data-window-page-kind="titled"] > .window-page {
+    pointer-events: none;
+  }
+
+  .app-frame-edge.app-frame-with-server-rail:not([data-window-page-kind="agents"]) > .window-page {
+    left: calc(var(--server-rail-width) + 1px);
+  }
+
+  .app-frame-edge:not([data-window-page-kind="agents"]) > .sidebar > :not(.sidebar-topbar),
+  .app-frame-edge:not([data-window-page-kind="agents"]) > .left-panel-resizer {
+    visibility: hidden;
+  }
+
+  /* New agent and New section add to the agent list, so the button shows only on the agents page. */
+  .app-frame-edge:not([data-window-page-kind="agents"]) > .sidebar .sidebar-new-button {
+    display: none;
+  }
+
+  /* The page spans the sidebar, so the line at the end of the sidebar does not show. */
+  .app-frame-edge[data-window-page-kind="titled"] > .sidebar::before {
+    display: none;
+  }
+
+  .app-window
+    > .app-frame-edge[data-window-page-kind="titled"]
+    > .window-page
+    :is(.agent-usage-header, .routine-planner-title, .skills-marketplace-topbar) {
+    margin-left: var(--left-panel-width);
+  }
+
+  .app-frame-edge[data-window-page-kind="titled"]
+    > .window-page
+    :is(
+      .agent-usage-header,
+      .routine-planner-title,
+      .agent-usage-body,
+      .routine-planner-toolbar,
+      .routine-planner-body,
+      .routine-planner-empty,
+      .routine-planner-error,
+      .marketplace-heading,
+      .marketplace-nav,
+      .skills-marketplace-body
+    ) {
+    pointer-events: auto;
+  }
+
+  /* The Marketplace page: the path of a page goes in the top row, as the usage title does. The side panel and the
+   * list are below it. */
+  .app-window > .app-frame-edge > .window-page > .skills-marketplace-page {
+    grid-template-rows: var(--left-header-height) minmax(0, 1fr);
+  }
+
+  .app-window > .app-frame-edge > .window-page .skills-marketplace-topbar {
+    min-height: 0;
+    padding: 0 var(--openbot-space-3);
+    border-bottom: 0;
+    -webkit-app-region: drag;
+  }
+
+  .app-window > .app-frame-edge > .window-page .marketplace-heading {
+    flex: 0 1 auto;
+    -webkit-app-region: no-drag;
+  }
+
+  .app-window > .app-frame-edge > .window-page .skills-marketplace-topbar .marketplace-title {
+    font-size: var(--openbot-text-md);
+    font-weight: var(--openbot-weight-medium);
+    white-space: nowrap;
+  }
+
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-identity, .routine-planner-identity) > .ui-icon-button,
+  .app-window > .app-frame-edge > .window-page :is(.agent-usage-identity, .routine-planner-identity) > h2 > span {
+    display: none;
+  }
+
+  .app-frame-edge > .window-page :is(.agent-usage-identity, .routine-planner-identity) h2:focus {
+    outline: none;
+  }
+}
+
+/* The settings page: the nav at the width of the sidebar. */
+.settings-page {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-columns: max(var(--left-panel-width, 280px), 220px) minmax(0, 1fr);
+}
+
+.settings-page-nav {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--openbot-space-1);
+  overflow: hidden;
+  border-right: 1px solid var(--openbot-border);
+  padding: var(--openbot-space-4) var(--openbot-space-3) 0;
+}
+
+/* The title and the search stay at the top. The list below them scrolls. */
+.settings-page-sections,
+.settings-page-results {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding-bottom: var(--openbot-space-3);
+}
+
+.settings-page-title {
+  margin: 0 0 var(--openbot-space-3);
+  padding: 0 var(--openbot-space-2);
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-lg);
+  font-weight: var(--openbot-weight-semibold);
+  line-height: var(--openbot-leading-lg);
+}
+
+/* The heading takes the focus when the page opens, only so a screen reader reads it. */
+.settings-page-title:focus {
+  outline: none;
+}
+
+/* A capsule search field */
+.settings-page-search {
+  flex: none;
+  border-radius: var(--openbot-radius-pill);
+  padding: 0 var(--openbot-space-3);
+}
+
+.settings-page-search > svg {
+  flex: none;
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+.settings-page-search input {
+  height: 100%;
+  padding: 0;
+}
+
+.settings-page-sections[hidden] {
+  display: none;
+}
+
+/* The text that shows when no setting matches the search */
+.settings-page-empty {
+  margin: var(--openbot-space-4) 0 var(--openbot-space-1);
+  padding: 0 var(--openbot-space-2);
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+}
+
+/* The server mark and name, as the server menu shows them */
+.settings-page-server {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.settings-page-server .server-menu-mark {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+}
+
+.settings-page-nav-group .settings-modal-nav-item {
+  padding-inline: var(--openbot-space-3);
+}
+
+.settings-page-nav-group .settings-modal-nav-item[data-selected] {
+  background: var(--openbot-bg-control-hover);
+  color: var(--openbot-text-primary);
+  font-weight: var(--openbot-weight-medium);
+}
+
+/* A search result: the section with its icon, and below it the matching row title */
+.settings-page-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--openbot-space-0-5);
+  margin: var(--openbot-space-2) 0 0;
+  padding-inline: 0;
+  list-style: none;
+}
+
+.settings-page-result {
+  display: flex;
+  width: 100%;
+  height: auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--openbot-space-0-5);
+  border: 0;
+  border-radius: var(--openbot-radius-md);
+  background: transparent;
+  padding: var(--openbot-space-1-5) var(--openbot-space-2);
+  color: var(--openbot-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings-page-result:hover {
+    background: var(--openbot-bg-control-hover);
+  }
+}
+
+.settings-page-result:focus-visible {
+  outline: 0;
+  box-shadow: var(--openbot-focus-ring);
+}
+
+.settings-page-result-section {
+  display: flex;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+}
+
+.settings-page-result-section svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+.settings-page-result-title {
+  overflow: hidden;
+  padding-left: calc(var(--openbot-icon-sm) + var(--openbot-space-2));
+  font-size: var(--openbot-text-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page-content {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The panel of the settings window, as a page: it fills the content column and has no dialog frame. */
+.settings-page-content > .settings-modal.settings-modal-page {
+  width: 100%;
+  height: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: none;
+  will-change: auto;
+}
+
+.settings-page-content > .settings-modal-page > .settings-modal-main {
+  background: transparent;
+}
+
+.settings-page-content > .settings-modal-page :is(.settings-modal-header, .settings-modal-content) {
+  width: 100%;
+  max-width: 784px;
+  margin-inline: auto;
+}
+
+/* The row that a search result opened */
+.settings-page-content [data-search-match] {
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-control-active);
+}
+
+/* A narrow window stacks the page: the heading and the sections above the panel. */
+@media (max-width: 720px) {
+  .settings-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings-page-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--openbot-border);
+    padding: var(--openbot-space-3) var(--openbot-space-3) 0;
+  }
+
+  .settings-page-title {
+    margin-bottom: var(--openbot-space-2);
+  }
+
+  .settings-page-sections,
+  .settings-page-results {
+    max-height: 40dvh;
+    padding-bottom: var(--openbot-space-2);
+  }
+}
+
+/* A window that shows one chat has no sidebar and no resizer, so the chat takes the whole
+ * frame. Its header starts after the macOS window buttons. */
+.app-window > .app-frame.app-frame-chat-window {
+  grid-template-columns: 0 0 minmax(0, 1fr);
+}
+
+.app-frame-chat-window > .left-panel-resizer {
+  display: none;
+}
+
+.app-frame-chat-window.app-frame-platform-darwin .conversation-header {
+  padding-left: 76px;
+}

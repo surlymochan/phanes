@@ -1,0 +1,11 @@
+# The app of instance %i asks for an update with an empty file in update-requests.
+# `openbot-instance start` enables this unit for each instance.
+[Unit]
+Description=Update requests of OpenBot instance %i
+
+[Path]
+PathExists=/srv/openbot/%i/update-requests/update-stage
+PathExists=/srv/openbot/%i/update-requests/update-install
+
+[Install]
+WantedBy=paths.target

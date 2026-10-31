@@ -1,0 +1,63 @@
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
+import type { ChannelMemory } from "@openbot/contracts/ipc";
+import { sourceText } from "@openbot/i18n/source";
+import { MemoryStore, type MemoryTables } from "./memory-store";
+import type { OpenBotDatabase } from "./openbot-database";
+
+const CHANNEL_MEMORY_TABLES: MemoryTables = {
+  table: "projection_channel_memories",
+  ownerColumn: "channel_id",
+  ownerKey: "channelId",
+  aggregateType: "channel-memory",
+  limit: () => INPUT_LIMITS.channelMemories,
+  limitMessage: (limit) => sourceText("error.backend.channelMemoryLimit", { limit }),
+};
+
+/** The channel twin of `AgentMemoryStore`: the same `MemoryStore`, with a channel for an owner. */
+export class ChannelMemoryStore extends MemoryStore {
+  constructor(database: OpenBotDatabase) {
+    super(database, CHANNEL_MEMORY_TABLES);
+  }
+
+  override list(channelId: string): ChannelMemory[] {
+    return super.list(channelId).map((memory) => ({ ...memory, channelId }));
+  }
+
+  override get(channelId: string, memoryId: string): ChannelMemory | null {
+    const memory = super.get(channelId, memoryId);
+    return memory && { ...memory, channelId };
+  }
+
+  override createManual(channelId: string, text: string): ChannelMemory {
+    return { ...super.createManual(channelId, text), channelId };
+  }
+
+  override updateManual(channelId: string, memoryId: string, text: string): ChannelMemory {
+    return { ...super.updateManual(channelId, memoryId, text), channelId };
+  }
+
+  /**
+   * A channel tool writes at call time, so there is no `expectedUpdatedAt` race to guard. `commandId`
+   * is the call's own receipt key: a retried tool call reads it and saves nothing more.
+   */
+  saveFromTool(channelId: string, text: string, sourceTurnId: string, commandId: string): ChannelMemory {
+    const memory = this.saveAutomaticEntry(channelId, { text, sourceTurnId, commandId });
+    if (!memory) throw new Error(sourceText("error.backend.memoryGone"));
+    return { ...memory, channelId };
+  }
+
+  /**
+   * `channel_forget_memory` names the text, not an id: the model never sees a memory id. An exact,
+   * case-sensitive match wins first: `MemoryStore#save` does not merge entries that differ only by
+   * case, so two such entries can coexist, and forgetting one must not delete the other instead.
+   * Only when no exact match exists does this fall back to a case-insensitive match, since a model
+   * or user retypes the fact from memory rather than copying it verbatim.
+   */
+  deleteByText(channelId: string, text: string): boolean {
+    const target = text.trim();
+    const entries = this.list(channelId);
+    const exact = entries.find((entry) => entry.text === target);
+    const memory = exact ?? entries.find((entry) => entry.text.toLowerCase() === target.toLowerCase());
+    return memory ? this.delete(channelId, memory.id) : false;
+  }
+}

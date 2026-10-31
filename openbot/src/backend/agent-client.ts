@@ -1,0 +1,166 @@
+import type { AgentProviderId, AgentSessionSettingsSnapshot, AgentSessionSettingValue } from "@openbot/contracts/ipc";
+import { sourceText } from "@openbot/i18n/source";
+import type { Effect } from "effect";
+import type { AppServerNotification, AppServerRequest, RequestId, ResponseDecoder, RpcError } from "./protocol";
+import type { ProviderClientOperationError } from "./provider-client-effects";
+import type { ReadProviderHistory } from "./provider-history";
+
+export type AgentProvider = AgentProviderId;
+
+/** Where a diagnostic came from. See `AgentClient.on("diagnostic")`. */
+export interface DiagnosticOrigin {
+  readonly duringStop: boolean;
+}
+
+export interface AgentClient {
+  readonly provider: AgentProvider;
+  /**
+   * Explicit completion contract; missing capability means unsupported. `handoff`: the provider
+   * cannot compact on request, so OpenBot replaces the session with one that starts from the history
+   * handoff.
+   */
+  readonly contextCompaction?: "events" | "request" | "native" | "handoff" | "unsupported";
+  readonly running: boolean;
+  readonly readHistory?: ReadProviderHistory;
+  /** False when stopping this client would lose a live provider session with no recovery path. */
+  readonly canReleaseProcess?: () => boolean;
+  start(): void;
+  stop(): Effect.Effect<void, ProviderClientOperationError>;
+  /**
+   * Closes the provider-side state of one thread and leaves the client running for the others.
+   *
+   * A refresh after an MCP change starts a replacement session for the same public thread. Without
+   * this call the previous session stays open inside the client, and the MCP servers it spawned stay
+   * alive with it, so each further change adds another set of processes - including the servers the
+   * user turned off. Optional, because a client that keeps no per-thread state has nothing to close.
+   */
+  releaseThread?(externalThreadId: string): Effect.Effect<void, ProviderClientOperationError>;
+  /**
+   * Hides a thread that a replacement session took over from the provider's own thread list, and
+   * keeps its history readable. Optional, because only a provider that shows its threads to the user
+   * in another app has a list to keep clean.
+   */
+  archiveThread?(externalThreadId: string): Effect.Effect<void, ProviderClientOperationError>;
+  /**
+   * Closes each thread that has no turn and can open again from its session, to free its processes
+   * and MCP servers when the machine is low on memory. Optional, because a client that runs all its
+   * threads in one process frees nothing this way.
+   */
+  releaseIdleThreads?(): Effect.Effect<void, ProviderClientOperationError>;
+  /** Effective provider options. Saved overrides belong to the agent store. */
+  readSessionSettings?(
+    externalThreadId: string,
+  ): Effect.Effect<AgentSessionSettingsSnapshot, ProviderClientOperationError>;
+  setSessionSetting?(
+    externalThreadId: string,
+    configId: string,
+    value: AgentSessionSettingValue,
+  ): Effect.Effect<AgentSessionSettingsSnapshot, ProviderClientOperationError>;
+  /**
+   * Sends `prompt` in a session that no thread owns and returns the answer text, or null when the
+   * agent gives none. Only the custom agents have it: the user saves the prompt, such as `/usage`.
+   * `model` names the agent for the router of the provider `acp`.
+   */
+  readUsageText?(model: string, prompt: string): Effect.Effect<string | null, ProviderClientOperationError>;
+  request<T>(
+    method: string,
+    params: unknown,
+    decoder: ResponseDecoder<T>,
+    timeoutMs?: number,
+  ): Effect.Effect<T, ProviderClientOperationError>;
+  /** Cancels a compaction that has not yet been sent to its provider. */
+  cancelPendingCompaction?(externalThreadId: string): boolean | undefined;
+  notify(method: string, params?: unknown): void;
+  respond(id: RequestId, result: unknown): void;
+  respondError(id: RequestId, error: RpcError): void;
+  on(event: "notification", listener: (notification: AppServerNotification) => void): this;
+  on(event: "request", listener: (request: AppServerRequest) => void): this;
+  /**
+   * `origin.duringStop` marks a stderr line of a process that `stop()` ended while it still ran: the
+   * shutdown that OpenBot started, not an error for the user. A line with no `origin` is reported.
+   */
+  on(event: "diagnostic", listener: (message: string, origin?: DiagnosticOrigin) => void): this;
+  once(event: "exit", listener: (error: Error) => void): this;
+  /** Removes listeners when an owning operation completes or is interrupted. */
+  off(event: "notification", listener: (notification: AppServerNotification) => void): this;
+  off(event: "request", listener: (request: AppServerRequest) => void): this;
+  off(event: "exit", listener: (error: Error) => void): this;
+}
+
+/**
+ * A provider request that got no answer in time. The provider can still have received it, so a
+ * caller that must not repeat the work tests for this class, not for the message text.
+ */
+export class RequestTimeoutError extends Error {
+  constructor(
+    readonly providerName: string,
+    readonly method: string,
+  ) {
+    super(`${providerName} request timed out: ${method}`);
+  }
+}
+
+/**
+ * The provider started a turn of its own, such as after a background task ended, before this turn
+ * could start. Nothing ran, so the caller queues the message again for when that turn ends.
+ */
+export class ProviderTurnActiveError extends Error {
+  constructor(readonly providerName: string) {
+    super(`${providerName} is in a turn that it started itself.`);
+  }
+}
+
+/**
+ * Claude cannot resume this session ID, because another provider made it. Nothing ran, so
+ * `isMissingProviderSessionError` reads it as a missing session and the caller opens a new one.
+ */
+export class MissingClaudeSessionError extends Error {
+  constructor(threadId: string) {
+    super(`Claude session not found: ${threadId}`);
+    this.name = "MissingClaudeSessionError";
+  }
+}
+
+/**
+ * The Pi session file that the thread names is not on this computer: it was moved or deleted. Nothing
+ * ran, so `isMissingProviderSessionError` reads it as a missing session and the caller opens a new one.
+ */
+export class MissingPiSessionError extends Error {
+  constructor() {
+    super(sourceText("error.provider.piSessionMissing"));
+    this.name = "MissingPiSessionError";
+  }
+}
+
+/** What of the CLI's last stderr line a status message carries. The full line is in the log. */
+const EXIT_DETAIL_LIMIT = 300;
+
+/**
+ * The provider CLI ended while OpenBot waited for an answer. The message names how it ended.
+ *
+ * The last line the CLI wrote to stderr is usually the only cause a user can act on: a config the
+ * CLI refuses, a CPU it cannot run on, a file it cannot open. It stays private, out of the message
+ * and out of anything that logs or serializes the error, because only `redactText` has read it and
+ * the line can quote an MCP secret that only the provider runtime knows. It leaves through
+ * `withDetail`, which takes that redaction.
+ */
+export class AgentProcessExitError extends Error {
+  readonly #detail: string | null;
+
+  constructor(message: string, detail: string | null = null, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AgentProcessExitError";
+    this.#detail = detail;
+  }
+
+  /**
+   * The same error with the stderr line in its message, redacted and then shortened. The order
+   * matters: a redactor matches a whole value, and a value the shortening cut is no longer one.
+   */
+  withDetail(redact: (text: string) => string): AgentProcessExitError {
+    if (!this.#detail) return this;
+    return new AgentProcessExitError(`${this.message} ${redact(this.#detail).slice(0, EXIT_DETAIL_LIMIT)}`, null, {
+      cause: this.cause,
+    });
+  }
+}

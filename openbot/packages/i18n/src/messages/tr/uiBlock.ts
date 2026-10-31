@@ -1,0 +1,30 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/uiBlock";
+
+export const messages = {
+  "uiBlock.status.pending": "Yanıtınız gerekiyor",
+  "uiBlock.status.answered": "Yanıtlandı",
+  "uiBlock.status.expired": "Süresi doldu",
+  "uiBlock.status.closed": "Kapatıldı",
+  "uiBlock.outcome.expired": "Zamanında yanıt verilmedi",
+  "uiBlock.outcome.closed": "Yanıt verilmeden kapatıldı",
+  "uiBlock.confirm.holdHint": "Onaylamak için düğmeyi basılı tutun veya ikinci adımda onaylamak için düğmeye basın",
+  "uiBlock.confirm.prompt": "Onayla: {action}?",
+  "uiBlock.confirm.accept": "Onayla",
+  "uiBlock.confirm.previewLabel": "Önizleme",
+  "uiBlock.choice.submit": "Gönder",
+  "uiBlock.choice.shortcutHint": "Seçmek için {first} ile {last} arasında tuşlara basın",
+  "uiBlock.choice.selectedCount": { one: "{count} seçildi", other: "{count} seçildi" },
+  "uiBlock.choice.noneSelected": "Hiçbir şey seçilmedi",
+  "uiBlock.quick.label": "Hızlı yanıtlar",
+  "uiBlock.quick.textLabel": "Kendi yanıtınız",
+  "uiBlock.quick.textPlaceholder": "Ya da kendi yanıtınızı yazın",
+  "uiBlock.quick.send": "Gönder",
+  "uiBlock.form.submit": "Gönder",
+  "uiBlock.form.required": "Bu alan zorunludur",
+  "uiBlock.form.choose": "Bir seçenek seçin",
+  "uiBlock.form.notSet": "Ayarlanmadı",
+  "uiBlock.form.invalid": "Bazı yanıtlar doğru değil. Kontrol edip tekrar deneyin.",
+  "uiBlock.skip": "Atla",
+  "uiBlock.error.answerFailed": "Yanıtınız gönderilemedi. Tekrar deneyin.",
+} as const satisfies PartialTranslation<typeof source>;

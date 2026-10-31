@@ -1,0 +1,1922 @@
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
+import type {
+  AgentApproval,
+  AgentEvent,
+  AgentRuntimeApproval,
+  AgentStatus,
+  AttachmentSummary,
+  BrowserControlState,
+  BrowserTab,
+  BrowserTakeoverRequest,
+  ClientAgentModelOption,
+  ClientAgentSummary,
+  ConversationMessage,
+  ConversationPage,
+  HiddenAgent,
+  HostedServerIssue,
+  HostedServerSleep,
+  HostedServerStart,
+  QueueSnapshot,
+  RespondToApprovalInput,
+  RespondToPromptInput,
+  SidebarLayoutAction,
+  SidebarLayoutSnapshot,
+  TeamPresenceSnapshot,
+  TeamRealtimeEvent,
+} from "@openbot/contracts/ipc";
+import { canAdministerServer } from "@openbot/contracts/ipc";
+import { AGENT_HIDDEN_CAPABILITY } from "@openbot/contracts/team-protocol/current";
+import { FOCUS_USE_CAPABILITY } from "@openbot/contracts/team-protocol/focus-use-v1";
+import { cleanAgentMessageText } from "@openbot/team-client/agent-message-text";
+import { createFocusUsePing } from "@openbot/team-client/focus-use";
+import { WAKE_RECONNECT_DELAY_MS } from "@openbot/team-client/hosted-server-wake";
+import type { RemoteTeamHost } from "@openbot/team-client/remote-directory";
+import {
+  createRemoteConnectionRecovery,
+  isSafeConnectionError,
+  type RemoteRecoveryStatus,
+} from "@openbot/team-client/remote-recovery";
+import { reconcilePendingRequests } from "@openbot/team-client/runtime-attention";
+import { duplicateSection as duplicateSectionWith } from "@openbot/ui/features/sidebar/duplicate-section";
+import { currentText } from "@openbot/ui/text";
+import { errorReference, type UserErrorDetails } from "@openbot/user-errors";
+import { createEffect, createMemo, createSignal, createStore, onSettled } from "solid-js";
+import { toAgentProfile } from "../../app-message-projection";
+import { mergeConversationPage, missingReplyOriginals } from "../conversation/conversation-merge";
+import { appendTurnStepLine, type TurnStepLines } from "../conversation/turn-step-lines";
+import { followsServerUpdate } from "../servers/server-update-flow";
+import { createSidebarPreferences } from "../sidebar/sidebar-preferences";
+import { defaultSidebarLayout } from "../sidebar/sidebar-sections";
+import { createHostRestartToasts, type HostRestartView } from "../updates/host-restart-toast";
+import type { WebHostNotice } from "./web-host-connections";
+import { createWebHostLifecycle } from "./web-host-lifecycle";
+import type { WebHostState } from "./web-host-lock";
+import {
+  createWebWorkspaceRuntime,
+  WebHostConnectionError,
+  WebHostIncompatibleError,
+  type WebRuntimeEvents,
+  type WebWorkspaceRuntime,
+} from "./web-runtime";
+import { orderWebHosts, readWebServerOrder, writeWebServerOrder } from "./web-server-order";
+import { readWebServerSelection, writeWebServerSelection } from "./web-server-selection";
+
+interface WebConversation {
+  page: ConversationPage | null;
+  /** The originals that a host page says are deleted, by id. */
+  missingReferences?: Record<string, true>;
+  draft: string;
+  attachments: AttachmentSummary[];
+  loading: boolean;
+  error?: string | null;
+  /** The older pages were released; the next latest read takes the host's page and cursor. */
+  trimmed?: boolean;
+}
+
+/** The messages that a conversation keeps when it is not open, as on the desktop. */
+const LATEST_PAGE_SIZE = 50;
+
+/**
+ * Releases the older pages of a conversation that is not open. Only the open conversation gets new
+ * messages, so the next latest read replaces the kept messages with the host page, and the older pages
+ * load again from the host's cursor, with no gap.
+ */
+function trimToLatestPage(conversation: WebConversation): void {
+  const page = conversation.page;
+  if (!page) return;
+  conversation.trimmed = true;
+  if (page.messages.length <= LATEST_PAGE_SIZE) return;
+  const kept = page.messages.slice(-LATEST_PAGE_SIZE);
+  const removedById = new Map(page.messages.slice(0, -LATEST_PAGE_SIZE).map((message) => [message.id, message]));
+  // A kept reply keeps the quote of an original that the trim removes, as a page from the host gives it.
+  const references: Record<string, ConversationMessage> = {};
+  for (const message of kept) {
+    const originalId = message.replyToMessageId;
+    const original = originalId ? (removedById.get(originalId) ?? page.references[originalId]) : undefined;
+    if (originalId && original) references[originalId] = original;
+  }
+  page.messages = kept;
+  page.references = references;
+  page.pageInfo = { ...page.pageInfo, hasOlder: true };
+}
+
+interface WebWorkspaceState {
+  hosts: RemoteTeamHost[];
+  host: RemoteTeamHost | null;
+  agents: ClientAgentSummary[];
+  /** The host answered an agent list. Until then, an empty `agents` does not mean the host has none. */
+  agentsLoaded: boolean;
+  selectedId: string | null;
+  conversations: Record<string, WebConversation>;
+  /** The queues read from the host, by agent. Each agent's queue is read on connect and on each change. */
+  queues: Record<string, QueueSnapshot>;
+  approvals: Array<AgentApproval | AgentRuntimeApproval>;
+  prompts: Array<Extract<AgentEvent, { type: "prompt" }>>;
+  /** The latest progress detail of each agent's running turn. */
+  progress: Record<string, { turnId: string; detail: string }>;
+  takeovers: BrowserTakeoverRequest[];
+  browserTabs: BrowserTab[];
+  activeBrowserTabId: string | null;
+  browserControlState: BrowserControlState;
+  /** Who is on the connected host. Null until the host answers. */
+  presence: TeamPresenceSnapshot | null;
+  capabilities: string[];
+  status: "connecting" | "online" | "offline";
+  /**
+   * The opened host is a hosted server that the account service stopped for no use (`sleeping`), or that
+   * starts after the user's input (`waking`). Cleared when it is online again.
+   */
+  hostedSleep: HostedServerSleep | null;
+  hostedIssue: HostedServerIssue | null;
+  /** The step of a hosted start, while `hostedSleep` is `waking`. */
+  hostedStart: HostedServerStart | null;
+  /** The last connection failure, with its code. Shown while the workspace reconnects. */
+  connectionError: UserErrorDetails | null;
+  /** Signal holds the connection because the host is not online. */
+  hostOffline: boolean;
+  recovery: RemoteRecoveryStatus | null;
+  workspaceLoaded: boolean;
+  panelsFailed: boolean;
+  panelsLoading: boolean;
+  agentStatus: AgentStatus | null;
+  models: ClientAgentModelOption[];
+  /** The opened host said it restarts into an update (`host-update-v1`). Cleared when it is online again. */
+  hostRestart: { state: "waiting" | "restarting"; version: string | null } | null;
+  /** The state of each host that this tab has not opened, from its status connection. */
+  hostStates: Record<string, WebHostState>;
+  /** The last connection found that the host speaks no protocol this build speaks. */
+  incompatibility: {
+    hostId: string;
+    code: WebHostIncompatibleError["code"];
+    message: string;
+    hostAppVersion: string;
+    hostProtocol: { minimum: number; maximum: number };
+  } | null;
+  hostsLoaded: boolean;
+  hostsLoading: boolean;
+  hostsError: UserErrorDetails | null;
+  revocationRevision: number;
+  error: UserErrorDetails | null;
+  busy: boolean;
+  uploading: boolean;
+  hiddenIds: string[];
+  /** The team member this connection signs in as, once the host has answered. */
+  memberId: string | null;
+  duplicatingAgentIds: string[];
+  sidebarLayout: SidebarLayoutSnapshot;
+  /** The agents that a user hid on the host (`agent-hidden-v1`). Not the same as `hiddenIds`. */
+  userHiddenAgents: HiddenAgent[];
+}
+
+export type WebRuntimeFactory = (
+  accountId: string,
+  events: WebRuntimeEvents,
+  accountFetch: typeof fetch,
+) => WebWorkspaceRuntime;
+
+export type WebWorkspace = ReturnType<typeof createWebWorkspace>;
+
+export function createWebWorkspace(
+  props: {
+    accountId: string;
+    accountFetch: typeof fetch;
+    onSessionCheck: () => Promise<void>;
+    /** Read when the workspace closes: true when its account session has ended. */
+    accountSessionEnded?: () => boolean;
+    createRuntime?: WebRuntimeFactory | undefined;
+  },
+  hooks: {
+    /** A new agent status of the connected host, such as the end of a provider sign-in. */
+    onStatus?: (status: AgentStatus) => void;
+  } = {},
+) {
+  const [state, setState] = createStore<WebWorkspaceState>({
+    hosts: [],
+    host: null,
+    agents: [],
+    agentsLoaded: false,
+    selectedId: null,
+    conversations: {},
+    queues: {},
+    approvals: [],
+    prompts: [],
+    progress: {},
+    takeovers: [],
+    browserTabs: [],
+    activeBrowserTabId: null,
+    browserControlState: { sessions: [] },
+    presence: null,
+    capabilities: [],
+    status: "offline",
+    hostedSleep: null,
+    hostedIssue: null,
+    hostedStart: null,
+    connectionError: null,
+    hostOffline: false,
+    recovery: null,
+    workspaceLoaded: false,
+    panelsFailed: false,
+    panelsLoading: false,
+    agentStatus: null,
+    models: [],
+    hostRestart: null,
+    hostStates: {},
+    incompatibility: null,
+    hostsLoaded: false,
+    hostsLoading: false,
+    hostsError: null,
+    revocationRevision: 0,
+    error: null,
+    busy: false,
+    uploading: false,
+    hiddenIds: [],
+    memberId: null,
+    duplicatingAgentIds: [],
+    sidebarLayout: defaultSidebarLayout(),
+    userHiddenAgents: [],
+  });
+  // Every progress line of the newest turns, by turn, for the steps under the activity line.
+  const [stepLines, setStepLines] = createSignal<TurnStepLines>({});
+  let generation = 0;
+  let selectedId: string | null = null;
+  let hostId: string | null = null;
+  let disposed = false;
+  let running = false;
+  let pendingReload = false;
+  let reloadPromise: Promise<void> | null = null;
+  let hostsRefreshPromise: Promise<void> | null = null;
+  /**
+   * The hosts this account left. The leave revokes this session and takes the host out of the list;
+   * neither is an error. An id stays until a list without its host arrives.
+   */
+  const leftHostIds = new Set<string>();
+  let acceptedInvite: { inviteUrl: string; host: RemoteTeamHost } | null = null;
+  /** Set when a revoked session connects again by itself; cleared when the host is online. */
+  let revokedReconnect = false;
+  /** When the last full read of the open host ended. The events keep the state current after it. */
+  let syncedAt = 0;
+  /** The queue read in flight by agent. An event during a read asks for one more read. */
+  const queueLoads = new Map<string, { generation: number; again: boolean }>();
+  /** Counts queue snapshots from events by agent. A read that started before a newer snapshot is dropped. */
+  const queueRevisions = new Map<string, number>();
+  const readWrites = new Map<string, Promise<void>>();
+  /** The conversation reads in flight by agent, and the deltas that wait for them to finish. */
+  const conversationReads = new Map<string, number>();
+  const heldDeltas = new Map<string, Array<Extract<AgentEvent, { type: "conversation-delta" }>>>();
+  const hostEventListeners = new Set<(event: AgentEvent | TeamRealtimeEvent) => void>();
+  let connectionPromise: { hostId: string; opened: boolean; promise: Promise<void> } | null = null;
+  let recoveryBlocked = false;
+  let recovery = makeRecovery();
+  function makeRecovery() {
+    return createRemoteConnectionRecovery(
+      async () => {
+        const host = state.host;
+        if (!host || document.hidden) return;
+        await attemptConnection(host);
+        if (state.status !== "online") throw new Error(currentText().t("webClient.notice.connecting"));
+      },
+      noteConnectionFailure,
+      (status) => {
+        if (!disposed)
+          setState((draft) => {
+            draft.recovery = status;
+          });
+      },
+      // A hosted server that starts comes online soon, so the next attempt does not wait for the backoff.
+      () => (state.hostedSleep === "waking" ? WAKE_RECONNECT_DELAY_MS : null),
+    );
+  }
+  /**
+   * Keeps a failed attempt that nothing else recorded. `connectWorkspace` and the connection updates
+   * record their own failures; an error without a code adds nothing to them.
+   */
+  function noteConnectionFailure(error: unknown) {
+    if (disposed || state.connectionError || !errorReference(error)) return;
+    const text = currentText();
+    setState((draft) => {
+      draft.connectionError = text.errorDetails(
+        error,
+        text.t("server.connection.reconnecting", { name: draft.host?.name ?? "" }),
+      );
+    });
+  }
+  function recover() {
+    if (disposed || !hostId || recoveryBlocked) return;
+    recovery.offline();
+    recovery.setActive(!document.hidden);
+  }
+  const hostLifecycle = createWebHostLifecycle({
+    accountFetch: props.accountFetch,
+    hostId: () => hostId,
+    disposed: () => disposed,
+    status: () => state.status,
+    hostedSleep: () => state.hostedSleep,
+    setHostedSleep,
+    setIssue: (issue) =>
+      setState((draft) => {
+        draft.hostedIssue = issue;
+      }),
+    setStart: (start) =>
+      setState((draft) => {
+        draft.hostedStart = start;
+      }),
+    suspend: () => {
+      recoveryBlocked = true;
+      recovery.suspend();
+    },
+    recover: () => {
+      recoveryBlocked = false;
+      recovery.refresh();
+      recover();
+    },
+  });
+  const hostNoticeListeners = new Set<(hostId: string, event: WebHostNotice, agents: ClientAgentSummary[]) => void>();
+  const runtime = (props.createRuntime ?? createWebWorkspaceRuntime)(
+    props.accountId,
+    {
+      accountChanged: props.onSessionCheck,
+      accessDenied(id, error) {
+        if (!disposed && id === hostId) blockAccess(error);
+      },
+      hostNotice(id, event, agents) {
+        if (disposed) return;
+        for (const listener of hostNoticeListeners) listener(id, event, agents);
+      },
+      hostState(id, hostState) {
+        if (!disposed)
+          setState((draft) => {
+            draft.hostStates[id] = hostState;
+          });
+      },
+      hostSessionRevoked: () => void retryHosts(),
+      connection(update) {
+        if (disposed || update.hostId !== hostId) return;
+        if (recoveryBlocked && update.state === "offline" && !update.code) return;
+        // A host that announced a restart comes back by itself; a wake is only for a stopped server.
+        // Signal holds a `hostOffline` attempt, so it can wake a sleeping server but needs no retry.
+        const unavailable =
+          (update.state === "offline" || update.hostOffline === true) && !update.code && !state.hostRestart;
+        setState((draft) => {
+          if (update.state !== "online") draft.status = update.state;
+          if (update.state !== "online") syncedAt = 0;
+          // A `connecting` update without `hostOffline`, such as a `rate_limited` reply, does not end the hold.
+          if (update.hostOffline) draft.hostOffline = true;
+          else if (update.state !== "connecting") draft.hostOffline = false;
+          const text = currentText();
+          const reference = update.reference ?? null;
+          // An update without a reason keeps the last failure on screen. A working connection clears it.
+          if (update.state === "online") draft.connectionError = null;
+          else if (update.message || reference) {
+            const reconnecting = text.t("server.connection.reconnecting", { name: draft.host?.name ?? "" });
+            draft.connectionError = {
+              // Browser and peer text, such as a WebRTC exception, is not for the user.
+              message:
+                update.message && isSafeConnectionError(update.message)
+                  ? text.errorMessage(update.message, reconnecting)
+                  : reconnecting,
+              reference,
+            };
+          }
+          // The lifecycle shows the message of an unavailable host only when the host does not sleep or wake.
+          // The text of a refusal or a broken frame is not for the user; its code says which it was.
+          if (update.code)
+            draft.connectionError = {
+              message: text.t(
+                update.code === "session_revoked"
+                  ? "webClient.error.accessEnded"
+                  : "server.compatibility.unsafeDataDescription",
+              ),
+              reference,
+            };
+          if (update.state !== "online") {
+            draft.approvals = [];
+            draft.prompts = [];
+            draft.progress = {};
+            draft.takeovers = [];
+            draft.browserControlState = { sessions: [] };
+            draft.duplicatingAgentIds = [];
+          }
+        });
+        if (update.state === "offline") generation += 1;
+        if (update.code) {
+          hostLifecycle.endSleep();
+          recoveryBlocked = true;
+          recovery.suspend();
+        }
+        if (update.code === "session_revoked") {
+          clearRevokedWorkspace();
+          const revokedHostId = hostId;
+          const revokedGeneration = generation;
+          const revokedConnection = connectionPromise?.promise;
+          void props
+            .onSessionCheck()
+            .then(() => refreshHosts())
+            .then(async () => {
+              await revokedConnection?.catch(() => undefined);
+              // A member or role change anywhere on the host revokes every session, this one
+              // too. The directory still lists the host, so this account can connect again.
+              // Try once: a second revocation before the host is online waits for Reconnect.
+              // The directory copy has the new role; `state.host` keeps the role of the last connect.
+              const host = state.hosts.find((listed) => listed.hostId === revokedHostId);
+              if (disposed || revokedReconnect || hostId !== revokedHostId || generation !== revokedGeneration || !host)
+                return;
+              revokedReconnect = true;
+              return connect({ ...host });
+            })
+            .catch(report);
+          return;
+        }
+        if (unavailable) {
+          const current = generation;
+          void hostLifecycle.hostUnavailable(update.hostId, connectionPromise?.opened ?? false).then((retry) => {
+            if (retry && !update.hostOffline && !disposed && current === generation) recover();
+          });
+        } else if (state.hostRestart && update.state === "offline") recover();
+        if (update.state === "online" && update.resync && !connectionPromise) recover();
+      },
+      event(id, event) {
+        if (disposed || id !== hostId) return;
+        for (const listener of hostEventListeners) listener(event);
+        if (event.type === "team-presence")
+          setState((draft) => {
+            draft.presence = event.snapshot;
+          });
+        if (event.type === "host-restart")
+          setState((draft) => {
+            draft.hostRestart = event.state === "none" ? null : { state: event.state, version: event.version };
+          });
+        if (event.type === "status") hooks.onStatus?.(event.status);
+        if (event.type === "runtime-snapshot") {
+          const { attentionComplete } = event.snapshot;
+          setState((draft) => {
+            draft.approvals = reconcilePendingRequests(
+              draft.approvals,
+              event.snapshot.pendingApprovals,
+              attentionComplete,
+            );
+            draft.prompts = reconcilePendingRequests(
+              draft.prompts,
+              event.snapshot.pendingPrompts.map((prompt) => ({ ...prompt, type: "prompt" as const })),
+              attentionComplete,
+            );
+            draft.takeovers = reconcilePendingRequests(
+              draft.takeovers,
+              event.snapshot.pendingBrowserTakeovers,
+              attentionComplete,
+            );
+          });
+        } else if (event.type === "prompt") {
+          setState((draft) => {
+            draft.prompts = [...draft.prompts.filter((item) => item.requestId !== event.requestId), event];
+          });
+        } else if (event.type === "approval") {
+          setState((draft) => {
+            draft.approvals = [
+              ...draft.approvals.filter((item) => item.requestId !== event.approval.requestId),
+              event.approval,
+            ];
+          });
+        } else if (event.type === "agent-input-resolved") {
+          setState((draft) => {
+            draft.approvals = draft.approvals.filter((item) => String(item.requestId) !== String(event.requestId));
+            draft.prompts = draft.prompts.filter((item) => String(item.requestId) !== String(event.requestId));
+          });
+        } else if (event.type === "turn-progress") {
+          setState((draft) => {
+            draft.progress[event.agentId] = { turnId: event.turnId, detail: cleanAgentMessageText(event.detail) };
+          });
+          setStepLines((current) => appendTurnStepLine(current, event.turnId, cleanAgentMessageText(event.detail)));
+        } else if (event.type === "turn-started") {
+          setState((draft) => {
+            delete draft.progress[event.agentId];
+          });
+        } else if (event.type === "conversation-delta") {
+          applyDelta(event);
+        } else if (event.type === "turn-completed") {
+          setState((draft) => {
+            if (draft.progress[event.agentId]?.turnId === event.turnId) delete draft.progress[event.agentId];
+            draft.prompts = draft.prompts.filter(
+              (item) =>
+                item.agentId !== event.agentId || item.threadId !== event.threadId || item.turnId !== event.turnId,
+            );
+            draft.approvals = draft.approvals.filter(
+              (item) =>
+                item.agentId !== event.agentId || item.threadId !== event.threadId || item.turnId !== event.turnId,
+            );
+          });
+        }
+        if (event.type === "browser-takeover-requested")
+          setState((draft) => {
+            draft.takeovers = [
+              ...draft.takeovers.filter((item) => item.requestId !== event.request.requestId),
+              event.request,
+            ];
+          });
+        if (event.type === "browser-takeover-resolved")
+          setState((draft) => {
+            draft.takeovers = draft.takeovers.filter((item) => String(item.requestId) !== String(event.requestId));
+          });
+        // The frozen tab event has no field for a person's control or the history state;
+        // `browser-user-control-changed` and `browser-page-state-changed` send them, and a tab keeps
+        // its values until the next list.
+        if (event.type === "browser-changed")
+          setState((draft) => {
+            const previous = new Map(draft.browserTabs.map((tab) => [tab.id, tab]));
+            draft.browserTabs = event.tabs.map((tab) => {
+              const kept = previous.get(tab.id);
+              return {
+                ...tab,
+                ...(kept?.userControl ? { userControl: true as const } : {}),
+                ...(kept?.canGoBack === undefined ? {} : { canGoBack: kept.canGoBack }),
+                ...(kept?.canGoForward === undefined ? {} : { canGoForward: kept.canGoForward }),
+              };
+            });
+            draft.activeBrowserTabId = event.activeTabId;
+          });
+        if (event.type === "browser-page-state-changed")
+          setState((draft) => {
+            const states = new Map(event.tabs.map(({ tabId, ...state }) => [tabId, state]));
+            draft.browserTabs = draft.browserTabs.map(({ canGoBack: _back, canGoForward: _forward, ...tab }) => ({
+              ...tab,
+              ...states.get(tab.id),
+            }));
+          });
+        if (event.type === "browser-user-control-changed")
+          setState((draft) => {
+            const held = new Set(event.tabIds);
+            draft.browserTabs = draft.browserTabs.map(({ userControl: _, ...tab }) =>
+              held.has(tab.id) ? { ...tab, userControl: true } : tab,
+            );
+          });
+        if (event.type === "browser-control-changed")
+          setState((draft) => {
+            draft.browserControlState = event.state;
+          });
+        if (event.type === "agents-changed") {
+          reconcileAgents(event.agents);
+          for (const agent of event.agents) if (!state.queues[agent.id]) loadQueue(agent.id);
+        }
+        if (event.type === "queue-changed") {
+          const { snapshot } = event;
+          queueRevisions.set(snapshot.agentId, (queueRevisions.get(snapshot.agentId) ?? 0) + 1);
+          setState((draft) => {
+            draft.queues[snapshot.agentId] = snapshot;
+          });
+        }
+        if (event.type === "queue-invalidated" && state.agents.some((agent) => agent.id === event.agentId))
+          loadQueue(event.agentId);
+        if (event.type === "sidebar-layout-changed")
+          setState((draft) => {
+            if (event.layout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = event.layout;
+          });
+        if (event.type === "hidden-agents-changed")
+          setState((draft) => {
+            draft.userHiddenAgents = event.agents;
+          });
+        // A read loads only the open conversation, so the events of other agents do not start one.
+        const changed = changedConversation(event);
+        if (changed !== undefined && changed === selectedId) void refresh();
+      },
+    },
+    props.accountFetch,
+  );
+  const preferences = createSidebarPreferences({
+    scope: () => (state.host ? `${props.accountId}:${state.host.hostId}` : ""),
+  });
+  // The other tabs show the opened host with the state this tab has for it.
+  createEffect(
+    () => ({ id: state.host?.hostId, status: state.status }),
+    ({ id, status }) => {
+      if (id) runtime.hosts?.reportSelected(id, status);
+    },
+  );
+  // A hosted server keeps running while this tab is visible and has focus (`focus-use-v1`).
+  const [duplicatingSectionIds, setDuplicatingSectionIds] = createSignal<ReadonlySet<string>>(new Set());
+  const [pageFocused, setPageFocused] = createSignal(!document.hidden && document.hasFocus());
+  const focusUse = createFocusUsePing(() => void runtime.focusUse().catch(() => undefined));
+  createEffect(
+    () =>
+      pageFocused() && state.status === "online" && state.capabilities.includes(FOCUS_USE_CAPABILITY)
+        ? (state.host?.hostId ?? null)
+        : null,
+    (id) => focusUse.setTarget(id),
+  );
+  const [serverOrder, setServerOrder] = createSignal(readWebServerOrder(props.accountId));
+  const orderedHosts = createMemo(() => orderWebHosts(state.hosts, serverOrder()));
+  // The host sends an `openbot-avatar:` URL, which only the desktop app can open. The image comes
+  // through the host connection; until then, the agent keeps the host URL and its generated avatar.
+  const [avatars, setAvatars] = createSignal<ReadonlyMap<string, { source: string; url: string }>>(new Map());
+  const avatarLoads = new Set<string>();
+  // The images share the host connection and its file slots with the user's downloads, so only a few
+  // load at the same time.
+  const avatarQueue: { hostId: string; id: string; source: string }[] = [];
+  let avatarReads = 0;
+  let avatarHost: string | null = null;
+  function loadAvatars() {
+    while (avatarReads < 2) {
+      const next = avatarQueue.shift();
+      if (!next) return;
+      const { hostId, id, source } = next;
+      avatarReads += 1;
+      void runtime
+        .agentAvatar(id, source)
+        .then(
+          (url) => {
+            if (avatarHost === hostId) setAvatars((current) => new Map(current).set(id, { source, url }));
+          },
+          // A failed image keeps the generated avatar, and the next agent list tries it again.
+          () => {
+            if (avatarHost === hostId) avatarLoads.delete(`${id} ${source}`);
+          },
+        )
+        .finally(() => {
+          avatarReads -= 1;
+          loadAvatars();
+        });
+    }
+  }
+  createEffect(
+    () => ({
+      hostId: state.host?.hostId ?? null,
+      sources: state.agents.flatMap((agent) =>
+        agent.avatarUrl?.startsWith("openbot-avatar:") ? [{ id: agent.id, source: agent.avatarUrl }] : [],
+      ),
+    }),
+    ({ hostId, sources }) => {
+      if (hostId !== avatarHost) {
+        avatarHost = hostId;
+        avatarLoads.clear();
+        avatarQueue.length = 0;
+        setAvatars(new Map());
+      }
+      if (!hostId) return;
+      for (const { id, source } of sources) {
+        const key = `${id} ${source}`;
+        if (avatarLoads.has(key)) continue;
+        avatarLoads.add(key);
+        avatarQueue.push({ hostId, id, source });
+      }
+      loadAvatars();
+    },
+  );
+  const shownAgents = createMemo(() =>
+    state.agents.map((agent) => {
+      const avatar = avatars().get(agent.id);
+      return avatar && avatar.source === agent.avatarUrl ? { ...agent, avatarUrl: avatar.url } : agent;
+    }),
+  );
+  const profiles = createMemo(() => shownAgents().map(toAgentProfile));
+  const selected = createMemo(() => profiles().find((agent) => agent.id === state.selectedId));
+  const conversation = createMemo(() => (state.selectedId ? state.conversations[state.selectedId] : undefined));
+
+  function report(error: unknown) {
+    if (!disposed)
+      setState((draft) => {
+        draft.error = currentText().errorDetails(error, currentText().t("webClient.error.requestFailed"));
+      });
+  }
+  async function run(action: () => Promise<void>) {
+    if (running) return;
+    running = true;
+    const current = generation;
+    setState((draft) => {
+      draft.busy = true;
+      draft.error = null;
+    });
+    try {
+      await action();
+    } catch (error) {
+      if (current === generation) report(error);
+    } finally {
+      running = false;
+      if (!disposed)
+        setState((draft) => {
+          draft.busy = false;
+        });
+    }
+  }
+  async function readSidebarLayout(
+    capabilities: readonly string[],
+    agentIds: readonly string[] = [],
+  ): Promise<SidebarLayoutSnapshot> {
+    const read = runtime.getSidebarLayout;
+    if (!capabilities.includes("sidebar-layout") || !read)
+      return { ...defaultSidebarLayout(), agentOrder: [...agentIds] };
+    return read();
+  }
+  /** A host without `agent-hidden-v1` has no hidden agents. */
+  async function readUserHiddenAgents(capabilities: readonly string[]): Promise<HiddenAgent[]> {
+    const read = runtime.listHiddenAgents;
+    if (!capabilities.includes(AGENT_HIDDEN_CAPABILITY) || !read) return [];
+    return (await read()).agents;
+  }
+  function reconcileAgents(agents: ClientAgentSummary[]): void {
+    const ids = new Set(agents.map((agent) => agent.id));
+    const nextSelected = selectedId && ids.has(selectedId) ? selectedId : null;
+    selectedId = nextSelected;
+    setState((draft) => {
+      const removed = draft.agents.filter((agent) => !ids.has(agent.id)).map((agent) => agent.id);
+      draft.agents = agents;
+      draft.agentsLoaded = true;
+      draft.hiddenIds = draft.hiddenIds.filter((id) => ids.has(id));
+      draft.duplicatingAgentIds = draft.duplicatingAgentIds.filter((id) => ids.has(id));
+      for (const id of removed) {
+        delete draft.conversations[id];
+        delete draft.queues[id];
+        delete draft.progress[id];
+      }
+      if (nextSelected === null) draft.selectedId = null;
+      // The layout also orders channels, so only the agents that left may be dropped from it.
+      const gone = new Set(removed);
+      draft.sidebarLayout = {
+        ...draft.sidebarLayout,
+        agentOrder: draft.sidebarLayout.agentOrder.filter((id) => !gone.has(id)),
+        agentAssignments: Object.fromEntries(
+          Object.entries(draft.sidebarLayout.agentAssignments).filter(([id]) => !gone.has(id)),
+        ),
+      };
+    });
+  }
+  function refreshHosts(): Promise<void> {
+    if (hostsRefreshPromise) return hostsRefreshPromise;
+    const refreshGeneration = generation;
+    const refreshHostId = hostId;
+    const promise = (async () => {
+      if (disposed) return;
+      setState((draft) => {
+        draft.hostsLoading = true;
+        draft.hostsError = null;
+      });
+      try {
+        const hosts = await runtime.listHosts();
+        if (disposed) return;
+        const activeGeneration = refreshGeneration === generation && refreshHostId === hostId;
+        if (!activeGeneration) return;
+        if (refreshHostId && !hosts.some((host) => host.hostId === refreshHostId)) {
+          generation += 1;
+          hostId = null;
+          recovery.dispose();
+          recovery = makeRecovery();
+          hostLifecycle.endSleep();
+          selectedId = null;
+          setState((draft) => {
+            draft.host = null;
+            draft.workspaceLoaded = false;
+            draft.memberId = null;
+            draft.selectedId = null;
+            draft.agents = [];
+            draft.agentsLoaded = false;
+            draft.conversations = {};
+            draft.queues = {};
+            draft.approvals = [];
+            draft.prompts = [];
+            draft.progress = {};
+            setStepLines({});
+            draft.takeovers = [];
+            draft.browserTabs = [];
+            draft.activeBrowserTabId = null;
+            draft.browserControlState = { sessions: [] };
+            draft.sidebarLayout = defaultSidebarLayout();
+            draft.userHiddenAgents = [];
+            draft.duplicatingAgentIds = [];
+            draft.capabilities = [];
+            draft.status = "offline";
+            draft.error = leftHostIds.has(refreshHostId)
+              ? null
+              : { message: currentText().t("webClient.error.accessEnded"), reference: null };
+          });
+          // First, so the host that left does not get a status connection when it stops being open.
+          runtime.hosts?.setHosts(hosts);
+          await runtime.disconnect().catch(() => undefined);
+        }
+        const connected = hosts.find((host) => host.hostId === hostId);
+        setState((draft) => {
+          // The connected host is a copy from `connect`. An admin can rename it while connected.
+          if (connected && draft.host?.hostId === connected.hostId) {
+            draft.host.name = connected.name;
+            draft.host.logoKey = connected.logoKey;
+          }
+          draft.hosts = hosts;
+          draft.hostsLoaded = true;
+          draft.hostsError = null;
+        });
+        for (const left of leftHostIds) if (!hosts.some((host) => host.hostId === left)) leftHostIds.delete(left);
+        if (!hostId) {
+          const savedHostId = readWebServerSelection(props.accountId);
+          const initialHost =
+            hosts.find((host) => host.hostId === savedHostId) ?? orderWebHosts(hosts, serverOrder())[0];
+          if (initialHost) await connect(initialHost);
+        }
+        // After the opened host, so it takes its Signal connection before the status connections.
+        if (!disposed) runtime.hosts?.setHosts(hosts);
+      } catch (error) {
+        if (!disposed) {
+          const failure = currentText().errorDetails(error, currentText().t("webClient.error.hostsFailed"));
+          setState((draft) => {
+            draft.hostsError = failure;
+          });
+        }
+        throw error;
+      } finally {
+        if (!disposed)
+          setState((draft) => {
+            draft.hostsLoading = false;
+          });
+      }
+    })();
+    hostsRefreshPromise = promise;
+    void promise.then(
+      () => {
+        if (hostsRefreshPromise === promise) hostsRefreshPromise = null;
+      },
+      () => {
+        if (hostsRefreshPromise === promise) hostsRefreshPromise = null;
+      },
+    );
+    return promise;
+  }
+  /**
+   * Leaves a joined host. The host leaves the list as it does when access ends, but without an error.
+   * Resolves when the membership is gone. The list read follows it, so a failed read or the connect
+   * to the next host is not a failed leave.
+   */
+  async function leaveHost(host: RemoteTeamHost): Promise<void> {
+    await departHost(host, () => runtime.leaveHost(host.hostId, host.membershipId));
+  }
+  async function removeOwnedHost(host: RemoteTeamHost): Promise<void> {
+    const remove = runtime.removeOwnedHost;
+    if (!remove) throw new Error(currentText().t("server.settings.actionFailed"));
+    await departHost(host, () => remove(host.hostId));
+  }
+  async function departHost(host: RemoteTeamHost, operation: () => Promise<void>): Promise<void> {
+    // Before the request: the host revokes this session before the request answers.
+    leftHostIds.add(host.hostId);
+    try {
+      await operation();
+    } catch (error) {
+      leftHostIds.delete(host.hostId);
+      throw error;
+    }
+    // A read that started before the leave can still list the host, so this read starts after it.
+    void (hostsRefreshPromise ?? Promise.resolve()).catch(() => undefined).then(retryHosts);
+  }
+  function retryHosts(): Promise<void> {
+    return refreshHosts().catch(() => undefined);
+  }
+  function setHostedSleep(hostedSleep: HostedServerSleep | null): void {
+    if (state.hostedSleep !== hostedSleep)
+      setState((draft) => {
+        draft.hostedSleep = hostedSleep;
+      });
+  }
+  function clearRevokedWorkspace(): void {
+    // A revoked session must not leave private conversations visible while the directory
+    // decides whether this membership still exists. Keep the host shell for a possible
+    // authorized reconnect, but invalidate every private read and pending action now.
+    generation += 1;
+    selectedId = null;
+    setState((draft) => {
+      draft.revocationRevision += 1;
+      draft.workspaceLoaded = false;
+      draft.agents = [];
+      draft.agentsLoaded = false;
+      draft.conversations = {};
+      draft.queues = {};
+      draft.selectedId = null;
+      draft.approvals = [];
+      draft.prompts = [];
+      draft.progress = {};
+      setStepLines({});
+      draft.takeovers = [];
+      draft.browserTabs = [];
+      draft.activeBrowserTabId = null;
+      draft.browserControlState = { sessions: [] };
+      draft.sidebarLayout = defaultSidebarLayout();
+      draft.userHiddenAgents = [];
+      draft.capabilities = [];
+      draft.presence = null;
+      draft.duplicatingAgentIds = [];
+    });
+  }
+  function blockAccess(error: unknown): boolean {
+    if (
+      !(error instanceof WebHostConnectionError) ||
+      (error.code !== "authentication_required" && error.code !== "access_ended")
+    )
+      return false;
+    clearRevokedWorkspace();
+    hostLifecycle.endSleep();
+    recoveryBlocked = true;
+    recovery.suspend();
+    const failure = { message: error.message, reference: errorReference(error) };
+    setState((draft) => {
+      draft.status = "offline";
+      draft.connectionError = failure;
+    });
+    return true;
+  }
+  async function reconnect(): Promise<void> {
+    const host = state.hosts.find((listed) => listed.hostId === hostId) ?? state.host;
+    if (!host || connectionPromise) return;
+    if (state.hostedSleep === "sleeping" || state.hostedIssue) await hostLifecycle.retry();
+    else {
+      await props.onSessionCheck();
+      recoveryBlocked = false;
+      await connect(host);
+    }
+  }
+  async function joinInvite(inviteUrl: string): Promise<void> {
+    const normalizedInviteUrl = inviteUrl.trim();
+    if (!normalizedInviteUrl) throw new Error(currentText().t("webClient.error.enterInvitation"));
+    const cached = acceptedInvite?.inviteUrl === normalizedInviteUrl ? acceptedInvite : null;
+    const host = cached?.host ?? (await runtime.acceptInvite(normalizedInviteUrl));
+    acceptedInvite = { inviteUrl: normalizedInviteUrl, host };
+    const hadHostSelection = hostId !== null;
+    await refreshHosts();
+    if (state.host?.hostId !== host.hostId || (state.status !== "online" && hadHostSelection)) await connect(host);
+    if (state.status !== "online" || state.host?.hostId !== host.hostId)
+      throw new Error(currentText().t("webClient.error.invitationOffline"));
+    acceptedInvite = null;
+  }
+  async function connect(host: RemoteTeamHost) {
+    recoveryBlocked = false;
+    recovery.dispose();
+    recovery = makeRecovery();
+    if (!connectionPromise || connectionPromise.hostId !== host.hostId) hostLifecycle.endSleep();
+    try {
+      await attemptConnection(host, true);
+    } catch (error) {
+      if (!disposed && hostId === host.hostId) noteConnectionFailure(error);
+      if (!disposed && hostId === host.hostId && state.recovery?.phase !== "suspended") recover();
+    }
+  }
+  function attemptConnection(host: RemoteTeamHost, opened = false): Promise<void> {
+    if (connectionPromise?.hostId === host.hostId) return connectionPromise.promise;
+    const promise = connectWorkspace(host, opened).finally(() => {
+      if (connectionPromise?.promise === promise) connectionPromise = null;
+    });
+    connectionPromise = { hostId: host.hostId, opened, promise };
+    return promise;
+  }
+  async function connectWorkspace(host: RemoteTeamHost, opened: boolean) {
+    const current = ++generation;
+    const sameHost = hostId === host.hostId;
+    // A hosted server that sleeps or wakes keeps the workspace visible, so each retry keeps its agents and the selection.
+    const keepWorkspace = sameHost && state.workspaceLoaded;
+    const previousSelected = sameHost ? selectedId : null;
+    hostId = host.hostId;
+    writeWebServerSelection(props.accountId, host.hostId);
+    if (!keepWorkspace) selectedId = null;
+    if (!sameHost) hostLifecycle.endSleep();
+    setState((draft) => {
+      draft.host = host;
+      draft.recovery = null;
+      // A retry keeps the last failure on screen until it ends.
+      if (!sameHost) draft.connectionError = null;
+      if (!sameHost) draft.hostOffline = false;
+      if (!sameHost) {
+        draft.workspaceLoaded = false;
+        draft.agentStatus = null;
+        draft.models = [];
+      }
+      draft.status = "connecting";
+      draft.hostRestart = null;
+      draft.memberId = sameHost ? draft.memberId : null;
+      if (!keepWorkspace) {
+        draft.agents = [];
+        draft.agentsLoaded = false;
+        draft.selectedId = null;
+      }
+      if (!sameHost) {
+        draft.conversations = {};
+        draft.queues = {};
+        draft.hiddenIds = [];
+      }
+      draft.approvals = [];
+      draft.prompts = [];
+      draft.takeovers = [];
+      draft.browserControlState = { sessions: [] };
+      if (!keepWorkspace) {
+        draft.progress = {};
+        draft.browserTabs = [];
+        draft.activeBrowserTabId = null;
+        draft.sidebarLayout = defaultSidebarLayout();
+        draft.userHiddenAgents = [];
+        draft.duplicatingAgentIds = [];
+        draft.capabilities = [];
+        draft.presence = null;
+      }
+      draft.error = null;
+      draft.incompatibility = null;
+    });
+    try {
+      const capabilities = await runtime.connect(host);
+      const [agents, agentStatus, models] = await Promise.all([
+        runtime.listAgents(),
+        runtime.status(),
+        runtime.models(),
+      ]);
+      if (disposed || current !== generation) return;
+      revokedReconnect = false;
+      hostLifecycle.endSleep();
+      // Signal can bring a held attempt online after the lifecycle suspended recovery for a sleeping
+      // or ended server, for example when another device wakes it.
+      const unblocked = recoveryBlocked;
+      if (unblocked) {
+        recoveryBlocked = false;
+        recovery.dispose();
+        recovery = makeRecovery();
+      }
+      setState((draft) => {
+        if (unblocked) draft.recovery = null;
+        draft.capabilities = capabilities;
+        draft.agents = agents;
+        draft.agentsLoaded = true;
+        draft.workspaceLoaded = true;
+        draft.agentStatus = agentStatus;
+        draft.models = models;
+        draft.connectionError = null;
+        draft.status = "online";
+      });
+      syncedAt = Date.now();
+      void loadPanels(
+        capabilities,
+        agents.map((agent) => agent.id),
+      );
+      preferences.reconcileActiveServerPins(agents.map((agent) => agent.id));
+      for (const agent of agents) loadQueue(agent.id);
+      void runtime
+        .currentMemberId?.()
+        .then((memberId) => {
+          if (!disposed && current === generation)
+            setState((draft) => {
+              draft.memberId = memberId;
+            });
+        })
+        .catch(() => undefined);
+      // Presence only names people. A host that does not answer leaves the list empty.
+      void runtime.admin?.team.getPresence().then(
+        (presence) => {
+          if (!disposed && current === generation && !state.presence)
+            setState((draft) => {
+              draft.presence = presence;
+            });
+        },
+        () => undefined,
+      );
+      const first = agents.find((agent) => agent.id === previousSelected) ?? agents[0];
+      if (first) await select(first.id);
+    } catch (error) {
+      if (disposed || current !== generation) return;
+      setState((draft) => {
+        draft.status = "offline";
+        // The workspace shows an incompatible host in full, so it is not also reported as an error.
+        if (error instanceof WebHostIncompatibleError)
+          draft.incompatibility = {
+            hostId: host.hostId,
+            code: error.code,
+            message: error.message,
+            hostAppVersion: error.hostAppVersion,
+            hostProtocol: { ...error.hostProtocol },
+          };
+      });
+      if (blockAccess(error)) throw error;
+      if (error instanceof WebHostIncompatibleError || error instanceof WebHostConnectionError) {
+        hostLifecycle.endSleep();
+        recoveryBlocked = true;
+        recovery.suspend();
+        const failure = { message: error.message, reference: errorReference(error) };
+        setState((draft) => {
+          draft.connectionError = failure;
+        });
+      } else {
+        const text = currentText();
+        const failure = text.errorDetails(error, text.t("server.connection.reconnecting", { name: host.name }));
+        setState((draft) => {
+          draft.connectionError = failure;
+        });
+        await hostLifecycle.hostUnavailable(host.hostId, opened);
+      }
+      throw error;
+    }
+  }
+  async function loadPanels(capabilities = state.capabilities, agentIds = state.agents.map((agent) => agent.id)) {
+    const current = generation;
+    const isCurrent = () => !disposed && current === generation;
+    setState((draft) => {
+      draft.panelsFailed = false;
+      draft.panelsLoading = true;
+    });
+    const failed = () => {
+      if (isCurrent())
+        setState((draft) => {
+          draft.panelsFailed = true;
+        });
+    };
+    await Promise.all([
+      (capabilities.includes("browser-control") ? runtime.browserTabs() : Promise.resolve([]))
+        .then((browserTabs) => {
+          if (!isCurrent()) return;
+          setState((draft) => {
+            draft.browserTabs = browserTabs;
+            draft.activeBrowserTabId = browserTabs.some((tab) => tab.id === draft.activeBrowserTabId)
+              ? draft.activeBrowserTabId
+              : (browserTabs[0]?.id ?? null);
+          });
+        })
+        .catch(failed),
+      readSidebarLayout(capabilities, agentIds)
+        .then((layout) => {
+          if (isCurrent())
+            setState((draft) => {
+              if (layout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = layout;
+            });
+        })
+        .catch(failed),
+      readUserHiddenAgents(capabilities)
+        .then((agents) => {
+          if (isCurrent())
+            setState((draft) => {
+              draft.userHiddenAgents = agents;
+            });
+        })
+        .catch(failed),
+    ]);
+    if (isCurrent())
+      setState((draft) => {
+        draft.panelsLoading = false;
+      });
+  }
+
+  async function load(id: string, older = false) {
+    const current = generation;
+    const previous = state.conversations[id];
+    // The cursor of a trimmed conversation is after a gap until a latest read gives the host's cursor.
+    // When that read failed, the next older load reads the latest page again.
+    if (older && previous?.trimmed) {
+      if (!conversationReads.has(id)) await load(id);
+      return;
+    }
+    const before = older ? (previous?.page?.pageInfo.olderCursor ?? undefined) : undefined;
+    if (older && !before) return;
+    conversationReads.set(id, (conversationReads.get(id) ?? 0) + 1);
+    try {
+      const page = await runtime.conversation(id, before);
+      if (disposed || current !== generation) return;
+      if (page.agentId !== id) throw new Error(currentText().t("webClient.error.otherConversation"));
+      setState((draft) => {
+        const item = draft.conversations[id];
+        if (!item) return;
+        const old = item.page?.threadId === page.threadId ? item.page : null;
+        if (old && page.revision < old.revision) return;
+        // A trim or a latest read during this older read moved the cursor, so this page is not next.
+        if (older && (item.trimmed || old?.pageInfo.olderCursor !== before)) return;
+        // A trimmed conversation can be behind the host by more than one page, so its kept messages go.
+        const merge = older ? "older" : old && !item.trimmed ? "latest" : "replace";
+        const resolvedRequests = new Set(
+          page.messages.flatMap((message) =>
+            message.questionPrompt?.resolution ? [String(message.questionPrompt.requestId)] : [],
+          ),
+        );
+        draft.prompts = draft.prompts.filter(
+          (prompt) =>
+            prompt.agentId !== id ||
+            prompt.threadId !== page.threadId ||
+            !resolvedRequests.has(String(prompt.requestId)),
+        );
+        item.page = {
+          ...page,
+          messages: mergeConversationPage(old?.messages ?? [], page.messages, merge),
+          references: merge === "replace" ? page.references : { ...old?.references, ...page.references },
+          pageInfo: merge === "latest" ? (old?.pageInfo ?? page.pageInfo) : page.pageInfo,
+          // An older page has the thread's current revision but not its newest messages. The loaded
+          // newest messages keep their revision, so a delta held during this read still applies.
+          revision: older && old ? old.revision : page.revision,
+        };
+        item.missingReferences = {
+          ...(merge === "replace" ? {} : item.missingReferences),
+          ...missingReplyOriginals(page),
+        };
+        // A conversation that closed during this read stays trimmed: it gets no new messages until it opens.
+        if (!older && draft.selectedId === id) item.trimmed = false;
+        item.loading = false;
+        item.error = null;
+      });
+    } catch (error) {
+      if (!disposed && current === generation && !blockAccess(error))
+        setState((draft) => {
+          const item = draft.conversations[id];
+          if (item) {
+            item.loading = false;
+            item.error = currentText().t("webClient.error.requestFailed");
+          }
+        });
+      throw error;
+    } finally {
+      const reads = (conversationReads.get(id) ?? 1) - 1;
+      if (reads > 0) conversationReads.set(id, reads);
+      else {
+        conversationReads.delete(id);
+        const held = heldDeltas.get(id) ?? [];
+        heldDeltas.delete(id);
+        for (const event of held) applyDelta(event);
+      }
+    }
+  }
+  /**
+   * Appends streamed text to the selected conversation without a read. A delta that arrives during
+   * a read waits for it: the page read may already hold the text, and its revision tells which
+   * deltas are newer. A delta for another thread asks for a read.
+   */
+  function applyDelta(event: Extract<AgentEvent, { type: "conversation-delta" }>) {
+    if (disposed || event.agentId !== selectedId) return;
+    if (conversationReads.has(event.agentId)) {
+      const held = heldDeltas.get(event.agentId);
+      if (held) held.push(event);
+      else heldDeltas.set(event.agentId, [event]);
+      return;
+    }
+    let otherThread = false;
+    // The checks read the draft: a page that a read just wrote is not visible outside it until a flush.
+    setState((draft) => {
+      const value = draft.conversations[event.agentId]?.page;
+      if (!value) return;
+      if (value.threadId !== event.threadId) {
+        otherThread = true;
+        return;
+      }
+      if (event.revision <= value.revision) return;
+      // The streamed message is at the end of the page.
+      const message = value.messages.findLast((item) => item.id === event.messageId);
+      if (message) {
+        message.text += event.delta;
+        message.status = "streaming";
+      } else
+        value.messages.push({
+          id: event.messageId,
+          turnId: event.turnId,
+          author: "assistant",
+          source: "assistant",
+          text: event.delta,
+          createdAt: event.createdAt,
+          status: "streaming",
+        });
+      value.revision = event.revision;
+      value.activeTurnId = event.turnId;
+    });
+    if (otherThread) void refresh();
+  }
+  // Coalesce event bursts per agent, as `refresh` does for the conversation.
+  function loadQueue(id: string): void {
+    const running = queueLoads.get(id);
+    if (running?.generation === generation) {
+      running.again = true;
+      return;
+    }
+    const load = { generation, again: true };
+    queueLoads.set(id, load);
+    void (async () => {
+      try {
+        while (load.again && !disposed && load.generation === generation) {
+          load.again = false;
+          const revision = queueRevisions.get(id) ?? 0;
+          const queue = await runtime.queue(id);
+          if (disposed || load.generation !== generation || (queueRevisions.get(id) ?? 0) !== revision) continue;
+          setState((draft) => {
+            draft.queues[id] = queue;
+          });
+        }
+      } catch (error) {
+        if (load.generation === generation) report(error);
+      } finally {
+        if (queueLoads.get(id) === load) queueLoads.delete(id);
+      }
+    })();
+  }
+  /** Sends one queue change for the selected agent. The host then sends the new queue as an event. */
+  function changeQueue(change: (agentId: string) => Promise<void>) {
+    const id = selectedId;
+    const current = generation;
+    if (!id || state.status !== "online") return;
+    void change(id).catch((error) => {
+      if (current === generation) report(error);
+    });
+  }
+  async function select(id: string) {
+    const current = generation;
+    selectedId = id;
+    setState((draft) => {
+      const previous = draft.selectedId;
+      if (previous && previous !== id) {
+        const closed = draft.conversations[previous];
+        if (closed) trimToLatestPage(closed);
+      }
+      draft.selectedId = id;
+      draft.conversations[id] ??= {
+        page: null,
+        draft: "",
+        attachments: [],
+        loading: true,
+      };
+      draft.conversations[id].loading = true;
+      draft.conversations[id].error = null;
+    });
+    try {
+      await load(id);
+    } catch (error) {
+      if (disposed || current !== generation) return;
+      report(error);
+    }
+  }
+  async function resync() {
+    const current = generation;
+    try {
+      // A hide on another device can land while this tab is offline, and the event is then lost.
+      const [{ agents, sidebarLayout }, userHiddenAgents] = await Promise.all([
+        // The layout read needs the agent ids.
+        runtime.listAgents().then(async (agents) => ({
+          agents,
+          sidebarLayout: await readSidebarLayout(
+            state.capabilities,
+            agents.map((agent) => agent.id),
+          ),
+        })),
+        readUserHiddenAgents(state.capabilities),
+      ]);
+      if (disposed || current !== generation) return;
+      syncedAt = Date.now();
+      reconcileAgents(agents);
+      setState((draft) => {
+        if (sidebarLayout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = sidebarLayout;
+        draft.userHiddenAgents = userHiddenAgents;
+      });
+      for (const agent of agents) loadQueue(agent.id);
+      if (!selectedId && agents[0]) await select(agents[0].id);
+      await refresh();
+    } catch (error) {
+      if (current === generation) report(error);
+    }
+  }
+  // Coalesce event bursts; an event during a read schedules one further authoritative read.
+  async function refresh() {
+    pendingReload = true;
+    if (reloadPromise) return reloadPromise;
+    reloadPromise = (async () => {
+      while (pendingReload && !disposed) {
+        pendingReload = false;
+        const id = selectedId;
+        if (id) {
+          const current = generation;
+          try {
+            await load(id);
+          } catch (error) {
+            if (current === generation) report(error);
+          }
+        }
+      }
+    })();
+    try {
+      await reloadPromise;
+    } finally {
+      reloadPromise = null;
+    }
+  }
+  /**
+   * Sends one message to an agent of the open host. The chat shows it as pending and the answer says
+   * whether it arrived; a failure is never resent here. `clientMessageId` lets the host drop a retry.
+   */
+  async function send(
+    id: string,
+    text: string,
+    attachmentDraftIds: string[],
+    replyToMessageId: string | null = null,
+    clientMessageId?: string,
+  ): Promise<{ messageId: string } | { error: string }> {
+    const { t, errorMessage } = currentText();
+    if (state.status !== "online") return { error: t("chat.errorStatus.send") };
+    if (text.length > INPUT_LIMITS.messageText) return { error: t("webClient.error.messageTooLong") };
+    const current = generation;
+    let messageId: string;
+    try {
+      messageId = await runtime.send(id, text, attachmentDraftIds, replyToMessageId, clientMessageId);
+    } catch (error) {
+      return { error: errorMessage(error, t("webClient.error.deliveryUnconfirmed")) };
+    }
+    // The next pending send of the chat waits for this answer, so the history reload runs beside it.
+    if (current === generation && !disposed)
+      refresh().catch((error: unknown) => {
+        if (current === generation) report(error);
+      });
+    return { messageId };
+  }
+  /** Marks the selected agent's messages read through the newest loaded one. Writes for one agent run in order. */
+  function markRead() {
+    const id = selectedId;
+    if (!id || state.status !== "online") return Promise.resolve();
+    const current = generation;
+    const write = (readWrites.get(id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        const page = state.conversations[id]?.page;
+        if (!page || disposed || current !== generation) return;
+        const readState = await runtime.markRead(id, page.messages.at(-1)?.id ?? null);
+        if (disposed || current !== generation) return;
+        setState((draft) => {
+          const value = draft.conversations[id]?.page;
+          if (value?.threadId === page.threadId) value.readState = readState;
+        });
+      });
+    readWrites.set(id, write);
+    return write;
+  }
+  /** Marks every agent with unread messages read through its newest one, loaded or not. */
+  async function markAllRead() {
+    if (state.status !== "online") return;
+    const current = generation;
+    const reads = await runtime.conversationReads();
+    if (disposed || current !== generation) return;
+    const unread = Object.entries(reads)
+      .filter(([, read]) => read.unreadCount > 0)
+      .map(([id]) => id);
+    const writes = unread.map((id) => {
+      const write = (readWrites.get(id) ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(async () => {
+          if (disposed || current !== generation) return;
+          const page = await runtime.conversation(id);
+          const latestMessageId = page.messages.at(-1)?.id;
+          if (!latestMessageId || disposed || current !== generation) return;
+          const readState = await runtime.markRead(id, latestMessageId);
+          if (disposed || current !== generation) return;
+          setState((draft) => {
+            const value = draft.conversations[id]?.page;
+            if (value?.threadId === page.threadId) value.readState = readState;
+          });
+        });
+      readWrites.set(id, write);
+      return write;
+    });
+    await Promise.all(writes);
+  }
+  /** The connected host and its connection, as the restart notices and the update dialog read them. */
+  const hostViews = (): HostRestartView[] =>
+    state.host
+      ? [
+          {
+            id: state.host.hostId,
+            name: state.host.name,
+            online: state.status === "online",
+            restart: state.hostRestart?.state ?? null,
+            version: state.hostRestart?.version ?? null,
+          },
+        ]
+      : [];
+  // The update dialog explains the restart of the update that it follows.
+  createHostRestartToasts(() => hostViews().filter((host) => !followsServerUpdate(host.id)));
+  onSettled(() => {
+    void refreshHosts().catch(report);
+    const pageFocus = () => setPageFocused(!document.hidden && document.hasFocus());
+    const focus = () => {
+      pageFocus();
+      runtime.hosts?.refresh();
+      void props
+        .onSessionCheck()
+        .then(() => refreshHosts())
+        .then(() => {
+          // While the host stays online, its events keep the workspace current. A focus soon after a
+          // full read, such as a switch between windows, does not read the host again.
+          if (state.status === "online") return Date.now() - syncedAt < FOCUS_RESYNC_MS ? undefined : resync();
+          if (state.recovery?.phase !== "suspended") recover();
+        })
+        .catch(report);
+    };
+    const visibility = () => {
+      pageFocus();
+      if (document.hidden) {
+        hostLifecycle.cancelPending();
+        if (hostId && state.status !== "online") generation += 1;
+        recovery.setActive(false);
+      } else {
+        hostLifecycle.resume();
+        if (state.status !== "online" && state.recovery?.phase !== "suspended") recover();
+      }
+    };
+    const network = () => {
+      if (!document.hidden) recovery.networkRestored();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("online", network);
+    window.addEventListener("focus", focus);
+    window.addEventListener("blur", pageFocus);
+    return () => {
+      disposed = true;
+      generation += 1;
+      recovery.dispose();
+      hostLifecycle.dispose();
+      focusUse.dispose();
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("online", network);
+      acceptedInvite = null;
+      window.removeEventListener("focus", focus);
+      window.removeEventListener("blur", pageFocus);
+      void runtime.dispose({ sessionsEnded: props.accountSessionEnded?.() ?? false }).catch(() => undefined);
+    };
+  });
+  return {
+    state,
+    stepLines,
+    hostViews,
+    shownAgents,
+    profiles,
+    retryPanels: loadPanels,
+    selected,
+    conversation,
+    runtime,
+    preferences,
+    orderedHosts,
+    duplicatingSectionIds,
+    reorderHosts(hostIds: string[]) {
+      setServerOrder(hostIds);
+      writeWebServerOrder(props.accountId, hostIds);
+    },
+    /** Every event of the connected host. Returns the unsubscribe function. */
+    onHostEvent(listener: (event: AgentEvent | TeamRealtimeEvent) => void) {
+      hostEventListeners.add(listener);
+      return () => {
+        hostEventListeners.delete(listener);
+      };
+    },
+    /** The events of the hosts this tab has not opened that a notification can show. Returns the unsubscribe function. */
+    onHostNotice(listener: (hostId: string, event: WebHostNotice, agents: ClientAgentSummary[]) => void) {
+      hostNoticeListeners.add(listener);
+      return () => {
+        hostNoticeListeners.delete(listener);
+      };
+    },
+    run,
+    refreshHosts,
+    leaveHost,
+    removeOwnedHost,
+    retryHosts,
+    reconnect,
+    joinInvite,
+    connect,
+    select,
+    refresh,
+    send,
+    cancelQueued: (deliveryId: string) => changeQueue((agentId) => runtime.cancelQueued({ agentId, deliveryId })),
+    steerQueued(deliveryId: string) {
+      const expectedTurnId = conversation()?.page?.activeTurnId;
+      if (expectedTurnId) changeQueue((agentId) => runtime.steerQueued({ agentId, deliveryId, expectedTurnId }));
+    },
+    reorderQueue: (deliveryIds: string[]) => changeQueue((agentId) => runtime.reorderQueue({ agentId, deliveryIds })),
+    async updateQueued(
+      deliveryId: string,
+      text: string,
+      keepAttachmentIds: string[],
+      attachmentDraftIds: string[],
+      target?: { agentId: string; serverId: string },
+    ): Promise<boolean> {
+      const agentId = target?.agentId ?? selectedId;
+      if (!agentId) return false;
+      // The edit belongs to the host that queued the message. This client talks only to the connected one.
+      if (target && target.serverId !== hostId) {
+        report(new Error(currentText().t("webClient.error.hostChanged")));
+        return false;
+      }
+      const current = generation;
+      try {
+        await runtime.updateQueued({ agentId, deliveryId, text, keepAttachmentIds, attachmentDraftIds });
+        return true;
+      } catch (error) {
+        if (current === generation) report(error);
+        return false;
+      }
+    },
+    markRead,
+    markAllRead,
+    async mutateSidebarLayout(action: SidebarLayoutAction) {
+      if (state.status !== "online" || !state.capabilities.includes("sidebar-layout")) {
+        throw new Error(currentText().t("webClient.error.sidebarLayout"));
+      }
+      const mutate = runtime.mutateSidebarLayout;
+      if (!mutate) throw new Error(currentText().t("webClient.error.sidebarLayout"));
+      const current = generation;
+      const layout = await mutate(action);
+      if (disposed || current !== generation) return;
+      setState((draft) => {
+        if (layout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = layout;
+      });
+    },
+    async duplicateAgent(agentId: string): Promise<void> {
+      if (state.status !== "online" || !state.capabilities.includes("agent-duplication")) return;
+      if (!state.agents.some((agent) => agent.id === agentId)) return;
+      if (state.duplicatingAgentIds.includes(agentId)) return;
+      const current = generation;
+      setState((draft) => {
+        draft.duplicatingAgentIds = [...draft.duplicatingAgentIds, agentId];
+        draft.error = null;
+      });
+      try {
+        const result = await runtime.duplicateAgent(agentId);
+        if (disposed || current !== generation) return;
+        setState((draft) => {
+          draft.agents = [result.agent, ...draft.agents.filter((agent) => agent.id !== result.agent.id)];
+          if (result.layout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = result.layout;
+        });
+        await select(result.agent.id);
+      } catch (error) {
+        if (current === generation) report(error);
+        throw error;
+      } finally {
+        if (current === generation && !disposed)
+          setState((draft) => {
+            draft.duplicatingAgentIds = draft.duplicatingAgentIds.filter((id) => id !== agentId);
+          });
+      }
+    },
+    /** Copies a custom section and each of its agents. The selection stays where it is. */
+    async duplicateSection(sectionId: string): Promise<void> {
+      if (
+        state.status !== "online" ||
+        !state.capabilities.includes("agent-duplication") ||
+        !state.capabilities.includes("sidebar-layout")
+      ) {
+        return;
+      }
+      const mutate = runtime.mutateSidebarLayout;
+      if (!mutate || duplicatingSectionIds().has(sectionId)) return;
+      const current = generation;
+      const isCurrent = () => !disposed && current === generation;
+      const acceptLayout = (layout: SidebarLayoutSnapshot) =>
+        setState((draft) => {
+          if (layout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = layout;
+        });
+      setDuplicatingSectionIds((ids) => new Set(ids).add(sectionId));
+      try {
+        const hidden = new Set(state.userHiddenAgents.map((entry) => entry.agentId));
+        await duplicateSectionWith(
+          {
+            layout: state.sidebarLayout,
+            agentIds: state.agents.filter((agent) => !hidden.has(agent.id)).map((agent) => agent.id),
+            // The agent's own Duplicate item waits too: the host refuses a second copy of one agent.
+            duplicateAgent: async (agentId) => {
+              if (!isCurrent()) return null;
+              setState((draft) => {
+                draft.duplicatingAgentIds = [...draft.duplicatingAgentIds, agentId];
+              });
+              try {
+                const result = await runtime.duplicateAgent(agentId);
+                if (!isCurrent()) return null;
+                setState((draft) => {
+                  draft.agents = [result.agent, ...draft.agents.filter((agent) => agent.id !== result.agent.id)];
+                });
+                acceptLayout(result.layout);
+                return { agentId: result.agent.id, layout: result.layout };
+              } finally {
+                if (isCurrent())
+                  setState((draft) => {
+                    draft.duplicatingAgentIds = draft.duplicatingAgentIds.filter((id) => id !== agentId);
+                  });
+              }
+            },
+            mutateLayout: async (action) => {
+              if (!isCurrent()) return null;
+              const layout = await mutate(action);
+              if (!isCurrent()) return null;
+              acceptLayout(layout);
+              return layout;
+            },
+          },
+          sectionId,
+        );
+      } catch (error) {
+        if (current === generation) report(error);
+        throw error;
+      } finally {
+        setDuplicatingSectionIds((ids) => {
+          const next = new Set(ids);
+          next.delete(sectionId);
+          return next;
+        });
+      }
+    },
+    /**
+     * Hides or restores an agent. The sidebar moves the agent at once, and the host's answer then
+     * replaces the hidden list. If the host refuses, only this agent goes back and the error is thrown.
+     * Returns false when nothing was sent.
+     */
+    async setAgentHidden(agentId: string, hidden: boolean): Promise<boolean> {
+      const write = runtime.setAgentHidden;
+      if (state.status !== "online" || !state.capabilities.includes(AGENT_HIDDEN_CAPABILITY) || !write) return false;
+      if (!state.agents.some((agent) => agent.id === agentId)) return false;
+      if (state.userHiddenAgents.some((entry) => entry.agentId === agentId) === hidden) return false;
+      const current = generation;
+      const previous = state.userHiddenAgents.find((entry) => entry.agentId === agentId);
+      const apply = (entry: HiddenAgent | undefined) =>
+        setState((draft) => {
+          const others = draft.userHiddenAgents.filter((candidate) => candidate.agentId !== agentId);
+          draft.userHiddenAgents = entry ? [...others, entry] : others;
+        });
+      apply(hidden ? { agentId, hiddenAt: new Date().toISOString() } : undefined);
+      try {
+        const snapshot = await write({ agentId, hidden });
+        if (disposed || current !== generation) return true;
+        setState((draft) => {
+          draft.userHiddenAgents = snapshot.agents;
+        });
+        return true;
+      } catch (error) {
+        if (!disposed && current === generation) apply(previous);
+        throw error;
+      }
+    },
+    async deleteAgent(agentId: string): Promise<void> {
+      if (state.status !== "online") throw new Error(currentText().t("webClient.error.deleteOffline"));
+      if (state.host && !canAdministerServer(state.host.role))
+        throw new Error(currentText().t("error.team.membersCannotDeleteAgents"));
+      if (!state.agents.some((agent) => agent.id === agentId)) return;
+      const current = generation;
+      const wasSelected = selectedId === agentId;
+      try {
+        await runtime.deleteAgent(agentId);
+        preferences.removePinnedSidebarItemEverywhere({ kind: "agent", id: agentId });
+        if (disposed || current !== generation) return;
+        const agents = await runtime.listAgents();
+        const sidebarLayout = await readSidebarLayout(
+          state.capabilities,
+          agents.map((agent) => agent.id),
+        );
+        if (disposed || current !== generation) return;
+        reconcileAgents(agents);
+        setState((draft) => {
+          if (sidebarLayout.revision >= draft.sidebarLayout.revision) draft.sidebarLayout = sidebarLayout;
+        });
+        if (wasSelected && selectedId === null && agents[0]) await select(agents[0].id);
+      } catch (error) {
+        if (current === generation) report(error);
+        throw error;
+      }
+    },
+    async answer(input: RespondToPromptInput) {
+      const current = generation;
+      await runtime.answer(input);
+      if (disposed || current !== generation) return;
+      setState((draft) => {
+        draft.prompts = draft.prompts.filter((item) => String(item.requestId) !== String(input.requestId));
+      });
+      await refresh();
+    },
+    async respondToBrowserTakeover(decision: "complete" | "cancel") {
+      const current = generation;
+      const threadId = state.agents.find((agent) => agent.id === selectedId)?.threadId;
+      const request = state.takeovers.find((item) => item.agentId === selectedId && item.threadId === threadId);
+      if (!request) return false;
+      try {
+        await runtime.respondToTakeover({ requestId: request.requestId, decision });
+        if (disposed || current !== generation) return false;
+        setState((draft) => {
+          draft.takeovers = draft.takeovers.filter((item) => String(item.requestId) !== String(request.requestId));
+        });
+        return true;
+      } catch (error) {
+        if (current === generation) report(error);
+        return false;
+      }
+    },
+    activateBrowserTab(tabId: string) {
+      if (state.browserTabs.some((tab) => tab.id === tabId))
+        setState((draft) => {
+          draft.activeBrowserTabId = tabId;
+        });
+    },
+    /**
+     * Loads older pages until the message is loaded. It does not go through `run`: another action
+     * would make `run` skip the load, and a jump would then report a message that exists as missing.
+     */
+    async openSearchMessage(messageId: string) {
+      const id = selectedId;
+      const current = generation;
+      if (!id) return;
+      try {
+        while (!state.conversations[id]?.page?.messages.some((message) => message.id === messageId)) {
+          const page = state.conversations[id]?.page;
+          if (!page?.pageInfo.hasOlder || !page.pageInfo.olderCursor) break;
+          const cursor = page.pageInfo.olderCursor;
+          await load(id, true);
+          if (disposed || current !== generation || selectedId !== id) return;
+          if (state.conversations[id]?.page?.pageInfo.olderCursor === cursor) break;
+        }
+      } catch (error) {
+        if (current === generation) report(error);
+      }
+    },
+    async approve(input: RespondToApprovalInput) {
+      const current = generation;
+      await runtime.approve(input);
+      if (disposed || current !== generation) return;
+      setState((draft) => {
+        draft.approvals = draft.approvals.filter((item) => item.requestId !== input.requestId);
+      });
+      await refresh();
+    },
+    older: () => {
+      const id = selectedId;
+      return id ? run(() => load(id, true)) : Promise.resolve();
+    },
+    setDraft(text: string) {
+      const id = selectedId;
+      if (id)
+        setState((draft) => {
+          const conversation = draft.conversations[id];
+          if (conversation) conversation.draft = text;
+        });
+    },
+    async upload(file: File) {
+      const id = selectedId;
+      if (!id) return;
+      if ((state.conversations[id]?.attachments.length ?? 0) >= INPUT_LIMITS.attachments) {
+        report(new Error(currentText().t("webClient.error.attachmentLimit", { limit: INPUT_LIMITS.attachments })));
+        return;
+      }
+      const current = generation;
+      await run(async () => {
+        setState((draft) => {
+          draft.uploading = true;
+        });
+        try {
+          const attachment = await runtime.upload(file);
+          if (current !== generation || disposed) return;
+          // The agent was removed during the upload, so the host must not keep the file.
+          if (!state.conversations[id]) {
+            await runtime.discard(attachment.id);
+            return;
+          }
+          setState((draft) => {
+            draft.conversations[id]?.attachments.push(attachment);
+          });
+        } finally {
+          if (!disposed)
+            setState((draft) => {
+              draft.uploading = false;
+            });
+        }
+      });
+    },
+    cancelUpload: () => runtime.cancelUpload().catch(report),
+    toggleHidden(id: string) {
+      setState((draft) => {
+        draft.hiddenIds = draft.hiddenIds.includes(id)
+          ? draft.hiddenIds.filter((value) => value !== id)
+          : [...draft.hiddenIds, id];
+      });
+    },
+    toggleNotifications: () =>
+      run(async () => {
+        const agent = state.agents.find((value) => value.id === selectedId);
+        if (!agent) return;
+        const current = generation;
+        await runtime.updateAgent({ agentId: agent.id, notifications: !agent.notifications });
+        const agents = await runtime.listAgents();
+        if (!disposed && current === generation)
+          setState((draft) => {
+            draft.agents = agents;
+          });
+      }),
+    async discard(attachmentId: string) {
+      const id = selectedId;
+      const current = generation;
+      if (!id) return;
+      await run(async () => {
+        await runtime.discard(attachmentId);
+        if (current === generation && !disposed)
+          setState((draft) => {
+            const conversation = draft.conversations[id];
+            if (conversation)
+              conversation.attachments = conversation.attachments.filter((item) => item.id !== attachmentId);
+          });
+      });
+    },
+  };
+}
+
+/** A focus within this time after a full read of an online host does not read it again. */
+const FOCUS_RESYNC_MS = 30_000;
+
+/** The agent whose conversation an event changes, for the events that can change it. */
+function changedConversation(event: AgentEvent | TeamRealtimeEvent): string | undefined {
+  switch (event.type) {
+    case "conversation":
+      return event.snapshot.agentId;
+    case "conversation-page":
+      return event.page.agentId;
+    case "conversation-invalidated":
+    case "turn-started":
+    case "turn-completed":
+    case "prompt":
+    case "agent-input-resolved":
+      return event.agentId;
+    default:
+      return undefined;
+  }
+}

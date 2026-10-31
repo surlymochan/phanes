@@ -1,0 +1,451 @@
+import { INPUT_LIMITS } from "./input-limits";
+import { type AvatarHue, isAvatarHue } from "./ipc-agent-identity";
+import type { AgentApprovalKind, AgentApprovalPermissions } from "./ipc-approvals";
+import { isBoolean, isDynamicRecord, isNumber, isString } from "./runtime-values";
+
+export interface DynamicIslandPreference {
+  enabled: boolean;
+  hapticsEnabled: boolean;
+  idleVisible: boolean;
+  additionalDisplaysEnabled: boolean;
+  /** The compact island width, as a percent of its default width. The physical notch never shrinks. */
+  widthPercent: number;
+  /** The compact island height, as a percent of its default height. It never gets lower than a notch. */
+  heightPercent: number;
+  /**
+   * The user's choice for each server, by server id: false hides the server's items from the island.
+   * A server with no choice uses `newServersVisible`. The choice is local to this computer.
+   */
+  serverVisibility: Record<string, boolean>;
+  /** Whether a server with no choice of its own, such as a server the user adds later, shows its items. */
+  newServersVisible: boolean;
+}
+
+/** The most server choices that a preference can hold. A user has far fewer servers. */
+export const DYNAMIC_ISLAND_SERVER_CHOICES_LIMIT = 256;
+
+/** Limits keep the island large enough to find and to click, whatever the stored value says. */
+export const DYNAMIC_ISLAND_SIZE_LIMITS = {
+  widthPercent: { min: 20, max: 130, step: 5 },
+  heightPercent: { min: 75, max: 125, step: 5 },
+} as const;
+
+/**
+ * The largest unread or remaining count that a presentation can carry. A sender clamps to it: a
+ * larger count is not valid, so main rejects the whole presentation.
+ */
+export const DYNAMIC_ISLAND_MAX_COUNT = 10_000;
+
+/** The compact height where a display has no notch to match. */
+export const DYNAMIC_ISLAND_DEFAULT_COMPACT_HEIGHT = 32;
+
+/**
+ * Returns the compact island height in display points. The main process sizes the window from it
+ * and the renderer draws with it, so the island and its hit area stay the same size. A notch is
+ * hardware: the island can grow below it but never gets shorter than it.
+ */
+export function dynamicIslandCompactHeight(notchHeight: number | undefined, heightPercent: number): number {
+  const scaled = Math.round(((notchHeight ?? DYNAMIC_ISLAND_DEFAULT_COMPACT_HEIGHT) * heightPercent) / 100);
+  return notchHeight === undefined ? scaled : Math.max(notchHeight, scaled);
+}
+
+export type SetDynamicIslandPreferenceInput = DynamicIslandPreference;
+
+export const DEFAULT_DYNAMIC_ISLAND_PREFERENCE = {
+  enabled: true,
+  hapticsEnabled: true,
+  idleVisible: true,
+  additionalDisplaysEnabled: true,
+  widthPercent: 100,
+  heightPercent: 100,
+  serverVisibility: {},
+  newServersVisible: true,
+} as const satisfies DynamicIslandPreference;
+
+/** Returns whether the island shows the items of a server. A muted server is hidden separately. */
+export function isDynamicIslandServerVisible(
+  preference: Pick<DynamicIslandPreference, "serverVisibility" | "newServersVisible">,
+  serverId: string,
+): boolean {
+  return Object.hasOwn(preference.serverVisibility, serverId)
+    ? preference.serverVisibility[serverId] === true
+    : preference.newServersVisible;
+}
+
+export interface DynamicIslandAgentIdentity {
+  id: string;
+  name: string;
+  avatarSeed: string;
+  avatarHue: AvatarHue | null;
+  avatarUrl: string | null;
+}
+
+export interface DynamicIslandWorkingItem {
+  agent: DynamicIslandAgentIdentity;
+  task: string;
+  /** The turn that Stop interrupts. It is null while a queued delivery runs before its turn starts. */
+  turnId: string | null;
+}
+
+export interface DynamicIslandMessageItem {
+  agent: DynamicIslandAgentIdentity;
+  messageId: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface DynamicIslandQuestionItem {
+  id: string;
+  header: string;
+  question: string;
+  isSecret: boolean;
+  options: Array<{ label: string; description: string }> | null;
+}
+
+export interface DynamicIslandPromptItem {
+  requestId: string | number;
+  agent: DynamicIslandAgentIdentity;
+  title: string;
+  detail: string | null;
+  questions: DynamicIslandQuestionItem[];
+}
+
+export interface DynamicIslandApprovalItem {
+  requestId: string | number;
+  agent: DynamicIslandAgentIdentity;
+  title: string;
+  detail: string | null;
+  truncated: boolean;
+  approval: {
+    kind: AgentApprovalKind;
+    command: string | null;
+    cwd: string | null;
+    reason: string | null;
+    grantRoot: string | null;
+    permissions: AgentApprovalPermissions | null;
+  };
+}
+
+export interface DynamicIslandTakeoverItem {
+  requestId: string | number;
+  agent: DynamicIslandAgentIdentity;
+  title: string;
+  detail: string | null;
+}
+
+export interface DynamicIslandFailureItem {
+  turnId: string;
+  agent: DynamicIslandAgentIdentity;
+  title: string;
+  detail: string | null;
+}
+
+interface DynamicIslandPresentationBase {
+  serverId: string;
+}
+
+export type DynamicIslandPresentation =
+  | (DynamicIslandPresentationBase & { mode: "idle" })
+  | (DynamicIslandPresentationBase & { mode: "working"; working: DynamicIslandWorkingItem[] })
+  | (DynamicIslandPresentationBase & { mode: "message"; unreadCount: number; message: DynamicIslandMessageItem })
+  | (DynamicIslandPresentationBase & {
+      mode: "question";
+      item: DynamicIslandPromptItem;
+      remainingCount: number;
+    })
+  | (DynamicIslandPresentationBase & {
+      mode: "approval";
+      item: DynamicIslandApprovalItem;
+      remainingCount: number;
+    })
+  | (DynamicIslandPresentationBase & { mode: "takeover"; item: DynamicIslandTakeoverItem })
+  | (DynamicIslandPresentationBase & { mode: "failed"; item: DynamicIslandFailureItem });
+
+export type DynamicIslandAction =
+  | { type: "open-app" }
+  | { type: "open-agent"; serverId: string; agentId: string }
+  | { type: "open-message"; serverId: string; agentId: string; messageId: string }
+  /**
+   * A short reply typed on the island. The main window stays where it is. A retry of the same draft
+   * keeps its `clientMessageId`, so the agent gets the message once.
+   */
+  | { type: "send-message"; serverId: string; agentId: string; text: string; clientMessageId: string }
+  | { type: "stop-agent"; serverId: string; agentId: string; turnId: string }
+  | { type: "open-failure"; serverId: string; agentId: string; turnId: string }
+  | { type: "dismiss-failure"; serverId: string; agentId: string; turnId: string }
+  | { type: "review-attention"; serverId: string; agentId: string; requestId: string | number }
+  | {
+      type: "answer-prompt";
+      serverId: string;
+      agentId: string;
+      requestId: string | number;
+      answers: Record<string, string[]>;
+    }
+  | {
+      type: "respond-approval";
+      serverId: string;
+      agentId: string;
+      requestId: string | number;
+      decision: "accept" | "decline";
+    };
+
+export interface SetDynamicIslandInteractiveInput {
+  interactive: boolean;
+  /** The island needs key input for a text field. Main makes the panel key without activating the app. */
+  keyboard?: boolean;
+}
+
+export interface DynamicIslandNotchSize {
+  width: number;
+  height: number;
+}
+
+export type DynamicIslandGeometry = DynamicIslandNotchSize | null;
+
+export const IDLE_DYNAMIC_ISLAND_PRESENTATION: DynamicIslandPresentation = { serverId: "local", mode: "idle" };
+
+export function isDynamicIslandPreference(value: unknown): value is DynamicIslandPreference {
+  return (
+    isDynamicRecord(value) &&
+    isBoolean(value.enabled) &&
+    isBoolean(value.hapticsEnabled) &&
+    isBoolean(value.idleVisible) &&
+    isBoolean(value.additionalDisplaysEnabled) &&
+    isDynamicIslandSizePercent(value.widthPercent, DYNAMIC_ISLAND_SIZE_LIMITS.widthPercent) &&
+    isDynamicIslandSizePercent(value.heightPercent, DYNAMIC_ISLAND_SIZE_LIMITS.heightPercent) &&
+    isDynamicIslandServerVisibility(value.serverVisibility) &&
+    isBoolean(value.newServersVisible)
+  );
+}
+
+export function isDynamicIslandServerVisibility(value: unknown): value is Record<string, boolean> {
+  if (!isDynamicRecord(value)) return false;
+  const entries = Object.entries(value);
+  return (
+    entries.length <= DYNAMIC_ISLAND_SERVER_CHOICES_LIMIT &&
+    entries.every(
+      ([serverId, visible]) => serverId.length > 0 && serverId.length <= INPUT_LIMITS.identifier && isBoolean(visible),
+    )
+  );
+}
+
+export function isDynamicIslandSizePercent(
+  value: unknown,
+  limits: { min: number; max: number; step: number },
+): value is number {
+  return (
+    isNumber(value) &&
+    Number.isInteger(value) &&
+    value >= limits.min &&
+    value <= limits.max &&
+    (value - limits.min) % limits.step === 0
+  );
+}
+
+export function isDynamicIslandInteractive(value: unknown): value is SetDynamicIslandInteractiveInput {
+  return (
+    isDynamicRecord(value) &&
+    isBoolean(value.interactive) &&
+    (value.keyboard === undefined || isBoolean(value.keyboard))
+  );
+}
+
+export function isDynamicIslandNotchSize(value: unknown): value is DynamicIslandNotchSize {
+  return isDynamicRecord(value) && isPositiveFiniteNumber(value.width) && isPositiveFiniteNumber(value.height);
+}
+
+export function isDynamicIslandPresentation(value: unknown): value is DynamicIslandPresentation {
+  if (!isDynamicRecord(value) || !isShortString(value.serverId, 160)) return false;
+  if (value.mode === "idle") return true;
+  if (value.mode === "working") {
+    return Array.isArray(value.working) && value.working.length <= 3 && value.working.every(isWorkingItem);
+  }
+  if (value.mode === "message") return isSafeCount(value.unreadCount) && isMessageItem(value.message);
+  if (value.mode === "question") return isPromptItem(value.item) && isSafeCount(value.remainingCount);
+  if (value.mode === "approval") return isApprovalItem(value.item) && isSafeCount(value.remainingCount);
+  if (value.mode === "takeover") return isTakeoverItem(value.item);
+  if (value.mode === "failed") return isFailureItem(value.item);
+  return false;
+}
+
+export function isDynamicIslandAction(value: unknown): value is DynamicIslandAction {
+  if (!isDynamicRecord(value) || !isString(value.type)) return false;
+  if (value.type === "open-app") return true;
+  if (!isShortString(value.serverId, 160) || !isShortString(value.agentId, 160)) return false;
+  if (value.type === "open-agent") return true;
+  if (value.type === "open-message") return isShortString(value.messageId, 160);
+  if (value.type === "send-message") {
+    return (
+      isShortString(value.text, INPUT_LIMITS.directMessageText) &&
+      value.text.trim().length > 0 &&
+      isShortString(value.clientMessageId, INPUT_LIMITS.identifier)
+    );
+  }
+  if (value.type === "stop-agent" || value.type === "open-failure" || value.type === "dismiss-failure") {
+    return isShortString(value.turnId, 160);
+  }
+  if (value.type === "review-attention") {
+    return isDynamicIslandRequestId(value.requestId);
+  }
+  if (value.type === "respond-approval") {
+    return isDynamicIslandRequestId(value.requestId) && (value.decision === "accept" || value.decision === "decline");
+  }
+  return (
+    value.type === "answer-prompt" && isDynamicIslandRequestId(value.requestId) && isDynamicIslandAnswers(value.answers)
+  );
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return isNumber(value) && Number.isFinite(value) && value > 0;
+}
+
+function isSafeCount(value: unknown): value is number {
+  return isNumber(value) && Number.isInteger(value) && value >= 0 && value <= DYNAMIC_ISLAND_MAX_COUNT;
+}
+
+function isShortString(value: unknown, length: number): value is string {
+  return isString(value) && value.length > 0 && value.length <= length;
+}
+
+function isNullableShortString(value: unknown, length: number): value is string | null {
+  return value === null || isShortString(value, length);
+}
+
+function isAgentIdentity(value: unknown): value is DynamicIslandAgentIdentity {
+  return (
+    isDynamicRecord(value) &&
+    isShortString(value.id, 160) &&
+    isShortString(value.name, 120) &&
+    isShortString(value.avatarSeed, 160) &&
+    (value.avatarHue === null || isAvatarHue(value.avatarHue)) &&
+    (value.avatarUrl === null || isShortString(value.avatarUrl, 2_048))
+  );
+}
+
+function isWorkingItem(value: unknown): value is DynamicIslandWorkingItem {
+  return (
+    isDynamicRecord(value) &&
+    isAgentIdentity(value.agent) &&
+    isShortString(value.task, 240) &&
+    isNullableShortString(value.turnId, 160)
+  );
+}
+
+function isMessageItem(value: unknown): value is DynamicIslandMessageItem {
+  return (
+    isDynamicRecord(value) &&
+    isAgentIdentity(value.agent) &&
+    isShortString(value.messageId, 160) &&
+    isShortString(value.text, 600) &&
+    isShortString(value.createdAt, 80)
+  );
+}
+
+function isPromptItem(value: unknown): value is DynamicIslandPromptItem {
+  return (
+    isDynamicRecord(value) &&
+    isDynamicIslandRequestId(value.requestId) &&
+    isAgentIdentity(value.agent) &&
+    isShortString(value.title, 180) &&
+    isNullableShortString(value.detail, 600) &&
+    Array.isArray(value.questions) &&
+    value.questions.length <= INPUT_LIMITS.promptQuestions &&
+    value.questions.every(isQuestionItem)
+  );
+}
+
+function isApprovalItem(value: unknown): value is DynamicIslandApprovalItem {
+  return (
+    isDynamicRecord(value) &&
+    isDynamicIslandRequestId(value.requestId) &&
+    isAgentIdentity(value.agent) &&
+    isShortString(value.title, 180) &&
+    isNullableShortString(value.detail, 600) &&
+    isBoolean(value.truncated) &&
+    isApproval(value.approval)
+  );
+}
+
+function isTakeoverItem(value: unknown): value is DynamicIslandTakeoverItem {
+  return (
+    isDynamicRecord(value) &&
+    isDynamicIslandRequestId(value.requestId) &&
+    isAgentIdentity(value.agent) &&
+    isShortString(value.title, 180) &&
+    isNullableShortString(value.detail, 600)
+  );
+}
+
+function isFailureItem(value: unknown): value is DynamicIslandFailureItem {
+  return (
+    isDynamicRecord(value) &&
+    isShortString(value.turnId, 160) &&
+    isAgentIdentity(value.agent) &&
+    isShortString(value.title, 180) &&
+    isNullableShortString(value.detail, 600)
+  );
+}
+
+function isQuestionItem(value: unknown): value is DynamicIslandQuestionItem {
+  return (
+    isDynamicRecord(value) &&
+    isShortString(value.id, INPUT_LIMITS.identifier) &&
+    isShortString(value.header, INPUT_LIMITS.promptHeader) &&
+    isShortString(value.question, INPUT_LIMITS.promptQuestion) &&
+    isBoolean(value.isSecret) &&
+    (value.options === null ||
+      (Array.isArray(value.options) &&
+        value.options.length <= INPUT_LIMITS.promptOptions &&
+        value.options.every(
+          (option) =>
+            isDynamicRecord(option) &&
+            isShortString(option.label, INPUT_LIMITS.promptOptionLabel) &&
+            isShortString(option.description, INPUT_LIMITS.promptOptionDescription),
+        )))
+  );
+}
+
+function isApproval(value: unknown): value is DynamicIslandApprovalItem["approval"] {
+  if (!isDynamicRecord(value)) return false;
+  if (value.kind !== "command" && value.kind !== "file-change" && value.kind !== "permissions") return false;
+  if (
+    !isNullableShortString(value.command, 600) ||
+    !isNullableShortString(value.cwd, 600) ||
+    !isNullableShortString(value.reason, 600) ||
+    !isNullableShortString(value.grantRoot, 600)
+  ) {
+    return false;
+  }
+  if (value.permissions === null) return true;
+  if (!isDynamicRecord(value.permissions) || !isDynamicRecord(value.permissions.fileSystem)) return false;
+  return (
+    isBoolean(value.permissions.network) &&
+    isShortStringList(value.permissions.fileSystem.read) &&
+    isShortStringList(value.permissions.fileSystem.write)
+  );
+}
+
+function isDynamicIslandRequestId(value: unknown): value is string | number {
+  return isShortString(value, 160) || (isNumber(value) && Number.isSafeInteger(value));
+}
+
+function isShortStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 3 && value.every((item) => isShortString(item, 600));
+}
+
+function isDynamicIslandAnswers(value: unknown): value is Record<string, string[]> {
+  if (!isDynamicRecord(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length === 0 || entries.length > INPUT_LIMITS.promptQuestions) return false;
+  let totalLength = 0;
+  for (const [questionId, answers] of entries) {
+    if (!isShortString(questionId, INPUT_LIMITS.identifier) || !Array.isArray(answers) || answers.length !== 1) {
+      return false;
+    }
+    // An answer is an option label or the text that the user typed in the island reply field.
+    const [answer] = answers;
+    if (!isShortString(answer, INPUT_LIMITS.directMessageText)) return false;
+    totalLength += answer.length;
+  }
+  return totalLength <= INPUT_LIMITS.promptAnswersTotalText;
+}

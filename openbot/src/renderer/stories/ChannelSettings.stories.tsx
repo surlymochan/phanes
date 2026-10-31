@@ -1,0 +1,170 @@
+import { Button, buttonVariants, Input, ItemActions, ItemGroup, Plus, Textarea } from "@openbot/ui";
+import {
+  SettingsField,
+  SettingsLinkGroup,
+  SettingsLinkRow,
+  SettingsPanel,
+  SettingsPanelContent,
+  SettingsPanelHeader,
+} from "@openbot/ui/components/SettingsPanel";
+import { ChannelMemberRow } from "@openbot/ui/features/channels/ChannelMemberRow";
+import { onCleanup } from "solid-js";
+import { fn } from "storybook/test";
+import type { Meta, StoryObj } from "storybook-solidjs-vite";
+import { saveSettingsPanelWidth } from "../src/components/settings-panel-width";
+import AgentSettingsPanel from "../src/features/conversation/AgentSettingsPanel";
+import { STORY_AGENT, STORY_AGENT_STATUS, STORY_AGENTS, STORY_MODELS, storyRuntimeSettings } from "./fixtures";
+import { createMockOpenBot } from "./mock-openbot";
+
+/*
+ * The channel panel and the agent panel open in the same slot, so this file draws them together:
+ * a mismatch in header height, divider, field rhythm or link row is only visible side by side.
+ *
+ * The channel body is written out here rather than mounted from `ChannelEditor`, because that
+ * component reads the channels context, which needs the account, server and agent contexts and a
+ * channel-aware `window.openbot` behind it. What is under test here is the shared panel, and the
+ * body below uses the same components the editor does.
+ */
+
+const members = STORY_AGENTS.slice(0, 4);
+
+function ChannelPanelBody() {
+  return (
+    <SettingsPanelContent>
+      <div class="channel-editor">
+        <SettingsField label="Name">
+          <Input aria-label="Channel name" value="Project Falcon" onValueChange={fn()} />
+        </SettingsField>
+        <SettingsField label="Title">
+          <Input aria-label="Channel title" placeholder="Describe what this channel does" onValueChange={fn()} />
+        </SettingsField>
+        <SettingsField label="Instructions">
+          <Textarea
+            rows="4"
+            aria-label="Channel instructions"
+            placeholder="What will this channel work on?"
+            onValueChange={fn()}
+          />
+        </SettingsField>
+        <SettingsLinkGroup>
+          <SettingsLinkRow label="Memories" value="0 saved" onClick={fn()} />
+          <SettingsLinkRow label="Routines" value="0 configured" onClick={fn()} />
+        </SettingsLinkGroup>
+        <section class="channel-members" aria-label="Members">
+          <h3 class="channel-members-title">Members</h3>
+          <ItemGroup class="channel-member-list">
+            {members.map((agent) => (
+              <ChannelMemberRow
+                agent={agent}
+                fallbackName={agent.name}
+                actions={
+                  <ItemActions>
+                    <Button size="xs" variant="destructive" class="channel-member-remove">
+                      Remove
+                    </Button>
+                  </ItemActions>
+                }
+              />
+            ))}
+            <button type="button" class={buttonVariants({ variant: "ghost", class: "channel-member-add" })}>
+              <Plus aria-hidden="true" />
+              Add member
+            </button>
+          </ItemGroup>
+        </section>
+      </div>
+    </SettingsPanelContent>
+  );
+}
+
+function ChannelPanelStory(props: { title: string; body: () => ReturnType<typeof ChannelPanelBody> }) {
+  return (
+    <main class="conversation-panel agent-memories-story-stage" style="--settings-panel-width: 296px">
+      <SettingsPanel
+        onResizeEnd={saveSettingsPanelWidth}
+        id="channel-side-panel"
+        label="Channel panel"
+        width={296}
+        maxWidth={640}
+        onResize={fn()}
+      >
+        <SettingsPanelHeader title={props.title} onClose={fn()} closeLabel="Close channel panel" />
+        {props.body()}
+      </SettingsPanel>
+    </main>
+  );
+}
+
+/** The agent panel beside it, so the two headers and the two field stacks can be compared. */
+function AgentPanelStory() {
+  const previousApi = window.openbot;
+  const mock = createMockOpenBot({});
+  window.openbot = mock.api;
+  onCleanup(() => {
+    mock.dispose();
+    window.openbot = previousApi;
+  });
+  return (
+    <main class="conversation-panel agent-memories-story-stage" style="--settings-panel-width: 296px">
+      <AgentSettingsPanel
+        onOpenUsage={fn()}
+        agent={STORY_AGENT}
+        runtimeSettings={storyRuntimeSettings(STORY_AGENT)}
+        agentStatus={STORY_AGENT_STATUS}
+        modelOptions={STORY_MODELS}
+        working={false}
+        maxWidth={() => 640}
+        onClose={fn()}
+        onWidthChange={fn()}
+        onUpdateAgent={async () => {}}
+        onUpdateRuntimeSettings={async () => true}
+        onSetAgentAvatar={async () => {}}
+      />
+    </main>
+  );
+}
+
+const meta = {
+  title: "Settings/Channel Settings",
+  component: SettingsPanel,
+  parameters: { layout: "fullscreen", a11y: { test: "error" } },
+} satisfies Meta<typeof SettingsPanel>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const ChannelSettings: Story = {
+  render: () => <ChannelPanelStory title="Channel settings" body={() => <ChannelPanelBody />} />,
+};
+
+export const ChannelSettingsWithoutMembers: Story = {
+  render: () => (
+    <ChannelPanelStory
+      title="Channel settings"
+      body={() => (
+        <SettingsPanelContent>
+          <div class="channel-editor">
+            <SettingsField label="Name">
+              <Input aria-label="Channel name" value="Project Falcon" onValueChange={fn()} />
+            </SettingsField>
+            <section class="channel-members" aria-label="Members">
+              <h3 class="channel-members-title">Members</h3>
+              <ItemGroup class="channel-member-list">
+                <button type="button" class={buttonVariants({ variant: "ghost", class: "channel-member-add" })}>
+                  <Plus aria-hidden="true" />
+                  Add member
+                </button>
+              </ItemGroup>
+              <p class="channel-members-note">A channel needs one member before it can route work.</p>
+            </section>
+          </div>
+        </SettingsPanelContent>
+      )}
+    />
+  ),
+};
+
+/** The panel this one has to match. Compare the header, the divider and the field rhythm. */
+export const AgentSettingsForComparison: Story = {
+  render: () => <AgentPanelStory />,
+};

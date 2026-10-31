@@ -1,0 +1,309 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isDynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
+import { createOpenBotLogger, toLogValue } from "@openbot/logging";
+import { buildProductionCatalog } from "./build-production-catalog";
+
+const logger = createOpenBotLogger("publish-production-catalog");
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const authApiRoot = join(projectRoot, "apps", "auth-api");
+const executableSuffix = process.platform === "win32" ? ".exe" : "";
+const wrangler = join(projectRoot, "node_modules", ".bin", `wrangler${executableSuffix}`);
+const productionApiUrl = "https://api.openbot.run";
+const productionDatabase = "openbot-auth";
+const productionBucket = "openbot-skills";
+const owner = {
+  id: "openbot-production-catalog",
+  identityKey: "openbot-production-catalog",
+  email: "catalog@openbot.run",
+  name: "OpenBot",
+  avatarUrl: "https://openbot.run/icon-192x192.png",
+} as const;
+
+interface PublishedSkill {
+  featured: boolean;
+  id: string;
+  versionId: string;
+  icon: string;
+  slug: string;
+  name: string;
+  description: string;
+  category: string;
+  version: number;
+  bundle: string;
+  bundleSha256: string;
+  files: string[];
+}
+
+interface PublishedAgent {
+  featured: boolean;
+  category: string;
+  id: string;
+  versionId: string;
+  name: string;
+  title: string;
+  description: string;
+  avatarSeed: string;
+  avatarHue: number;
+  version: number;
+  skills: unknown[];
+  routines: unknown[];
+}
+
+export interface Publication {
+  catalogVersion: string;
+  skills: PublishedSkill[];
+  agents: PublishedAgent[];
+}
+
+export function createPublicationSql(publication: Publication, publishedAt: number): string {
+  const statements = [
+    "PRAGMA foreign_keys = ON;",
+    `INSERT INTO users(id, identity_key, email, name, avatar_url, created_at, updated_at) VALUES (${sql(owner.id)}, ${sql(owner.identityKey)}, ${sql(owner.email)}, ${sql(owner.name)}, ${sql(owner.avatarUrl)}, ${publishedAt}, ${publishedAt}) ON CONFLICT(id) DO UPDATE SET identity_key = excluded.identity_key, email = excluded.email, name = excluded.name, avatar_url = excluded.avatar_url, updated_at = excluded.updated_at;`,
+  ];
+
+  for (const skill of publication.skills) {
+    const bundleKey = remoteBundleKey(skill);
+    statements.push(
+      `INSERT INTO marketplace_skills(id, slug, owner_user_id, approved_version_id, installs, featured, show_creator_avatar, created_at, updated_at) VALUES (${sql(skill.id)}, ${sql(skill.slug)}, ${sql(owner.id)}, NULL, 0, ${skill.featured ? 1 : 0}, 1, ${publishedAt}, ${publishedAt}) ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, owner_user_id = excluded.owner_user_id, show_creator_avatar = excluded.show_creator_avatar, updated_at = excluded.updated_at;`,
+      `INSERT INTO marketplace_skill_versions(id, skill_id, version, name, description, category, status, rejection_note, bundle_key, bundle_sha256, files_json, icon_key, created_at, reviewed_at) VALUES (${sql(skill.versionId)}, ${sql(skill.id)}, ${skill.version}, ${sql(skill.name)}, ${sql(skill.description)}, ${sql(skill.category)}, 'approved', NULL, ${sql(bundleKey)}, ${sql(skill.bundleSha256)}, ${sql(JSON.stringify(skill.files))}, ${sql(remoteIconKey(skill))}, ${publishedAt}, ${publishedAt}) ON CONFLICT(id) DO NOTHING;`,
+      /* The version row is immutable except for its artwork, which a release before the catalog
+         carried icons left empty. Only that column is repaired here. */
+      `UPDATE marketplace_skill_versions SET icon_key = ${sql(remoteIconKey(skill))} WHERE id = ${sql(skill.versionId)};`,
+      `UPDATE marketplace_skills SET approved_version_id = ${sql(skill.versionId)}, updated_at = ${publishedAt} WHERE id = ${sql(skill.id)} AND NOT EXISTS (SELECT 1 FROM marketplace_skill_versions current WHERE current.id = marketplace_skills.approved_version_id AND current.version > ${skill.version});`,
+    );
+  }
+
+  for (const agent of publication.agents) {
+    statements.push(
+      `INSERT INTO marketplace_agents(id, owner_user_id, approved_version_id, installs, featured, show_creator_avatar, created_at, updated_at) VALUES (${sql(agent.id)}, ${sql(owner.id)}, NULL, 0, ${agent.featured ? 1 : 0}, 1, ${publishedAt}, ${publishedAt}) ON CONFLICT(id) DO UPDATE SET owner_user_id = excluded.owner_user_id, show_creator_avatar = excluded.show_creator_avatar, updated_at = excluded.updated_at;`,
+      `INSERT INTO marketplace_agent_versions(id, agent_id, version, name, title, description, avatar_seed, avatar_hue, avatar_key, skills_json, routines_json, category, status, rejection_note, created_at, reviewed_at) VALUES (${sql(agent.versionId)}, ${sql(agent.id)}, ${agent.version}, ${sql(agent.name)}, ${sql(agent.title)}, ${sql(agent.description)}, ${sql(agent.avatarSeed)}, ${agent.avatarHue}, NULL, ${sql(JSON.stringify(agent.skills))}, ${sql(JSON.stringify(agent.routines))}, ${sql(agent.category)}, 'approved', NULL, ${publishedAt}, ${publishedAt}) ON CONFLICT(id) DO NOTHING;`,
+      `UPDATE marketplace_agents SET approved_version_id = ${sql(agent.versionId)}, updated_at = ${publishedAt} WHERE id = ${sql(agent.id)} AND NOT EXISTS (SELECT 1 FROM marketplace_agent_versions current WHERE current.id = marketplace_agents.approved_version_id AND current.version > ${agent.version});`,
+    );
+  }
+
+  return `${statements.join("\n")}\n`;
+}
+
+export async function publishProductionCatalog(
+  apply: boolean,
+  target: "local" | "production" = "production",
+): Promise<void> {
+  const mode = target === "local" ? "--local" : "--remote";
+  const bucket = target === "local" ? "openbot-skills-test" : productionBucket;
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "openbot-production-publish-"));
+  try {
+    const artifactRoot = join(temporaryRoot, "artifacts");
+    await buildProductionCatalog(artifactRoot);
+    const publication = await readPublication(artifactRoot);
+    if (!apply) {
+      process.stdout.write(
+        `Dry run: ${publication.skills.length} skills and ${publication.agents.length} agents from ${publication.catalogVersion} are ready for ${target} under owner ${owner.name}.\n`,
+      );
+      process.stdout.write(
+        `No resources were changed. Add ${target === "local" ? "--local --apply" : "--apply --confirm-production"} to publish.\n`,
+      );
+      return;
+    }
+
+    if (target === "production") {
+      const token = process.env.SKILLS_ADMIN_TOKEN;
+      if (!token) throw new Error("SKILLS_ADMIN_TOKEN is required for production publication.");
+      await verifyProductionAdmin(token);
+    }
+
+    for (const skill of publication.skills) {
+      await run(wrangler, [
+        "r2",
+        "object",
+        "put",
+        `${bucket}/${remoteBundleKey(skill)}`,
+        mode,
+        "--file",
+        join(artifactRoot, skill.bundle),
+        "--content-type",
+        "application/zip",
+        "--force",
+      ]);
+      await run(wrangler, [
+        "r2",
+        "object",
+        "put",
+        `${bucket}/${remoteIconKey(skill)}`,
+        mode,
+        "--file",
+        join(artifactRoot, skill.icon),
+        "--content-type",
+        "image/svg+xml",
+        "--force",
+      ]);
+    }
+
+    const sqlPath = join(temporaryRoot, "publish.sql");
+    await writeFile(sqlPath, createPublicationSql(publication, Date.now()));
+    await run(wrangler, ["d1", "execute", productionDatabase, mode, "--file", sqlPath, "--yes"]);
+    process.stdout.write(
+      `Published ${publication.skills.length} skills and ${publication.agents.length} agents to ${target} under owner ${owner.name}.\n`,
+    );
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+async function verifyProductionAdmin(token: string): Promise<void> {
+  const response = await fetch(new URL("/v1/skills/admin/submissions", productionApiUrl), {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Production admin verification failed with HTTP ${response.status}.`);
+  }
+}
+
+async function readPublication(root: string): Promise<Publication> {
+  const [catalogText, agentText] = await Promise.all([
+    readFile(join(root, "catalog.json"), "utf8"),
+    readFile(join(root, "agents.json"), "utf8"),
+  ]);
+  const catalogValue = JSON.parse(catalogText);
+  const agentValue = JSON.parse(agentText);
+  if (!isDynamicRecord(catalogValue) || !isString(catalogValue.catalogVersion) || !Array.isArray(catalogValue.skills)) {
+    throw new Error("Generated production skill catalog is invalid.");
+  }
+  if (
+    !isDynamicRecord(agentValue) ||
+    agentValue.catalogVersion !== catalogValue.catalogVersion ||
+    !Array.isArray(agentValue.agents)
+  ) {
+    throw new Error("Generated production agent catalog is invalid.");
+  }
+  return {
+    catalogVersion: catalogValue.catalogVersion,
+    skills: catalogValue.skills.map(parseSkill),
+    agents: agentValue.agents.map(parseAgent),
+  };
+}
+
+function parseSkill(value: unknown): PublishedSkill {
+  if (
+    !isDynamicRecord(value) ||
+    typeof value.featured !== "boolean" ||
+    !isString(value.id) ||
+    !isString(value.versionId) ||
+    !isString(value.slug) ||
+    !isString(value.name) ||
+    !isString(value.description) ||
+    !isString(value.category) ||
+    !isNumber(value.version) ||
+    !isString(value.bundle) ||
+    !isString(value.icon) ||
+    !isString(value.bundleSha256) ||
+    !Array.isArray(value.files) ||
+    !value.files.every(isString)
+  ) {
+    throw new Error("Generated production catalog contains an invalid skill.");
+  }
+  return {
+    featured: value.featured,
+    id: value.id,
+    versionId: value.versionId,
+    slug: value.slug,
+    name: value.name,
+    description: value.description,
+    category: value.category,
+    version: value.version,
+    bundle: value.bundle,
+    icon: value.icon,
+    bundleSha256: value.bundleSha256,
+    files: value.files,
+  };
+}
+
+function parseAgent(value: unknown): PublishedAgent {
+  if (
+    !isDynamicRecord(value) ||
+    typeof value.featured !== "boolean" ||
+    !isString(value.id) ||
+    !isString(value.versionId) ||
+    !isString(value.name) ||
+    !isString(value.title) ||
+    !isString(value.category) ||
+    !isString(value.description) ||
+    !isString(value.avatarSeed) ||
+    !isNumber(value.avatarHue) ||
+    !isNumber(value.version) ||
+    !Array.isArray(value.skills) ||
+    !Array.isArray(value.routines)
+  ) {
+    throw new Error("Generated production catalog contains an invalid agent.");
+  }
+  return {
+    featured: value.featured,
+    id: value.id,
+    versionId: value.versionId,
+    name: value.name,
+    title: value.title,
+    category: value.category,
+    description: value.description,
+    avatarSeed: value.avatarSeed,
+    avatarHue: value.avatarHue,
+    version: value.version,
+    skills: value.skills,
+    routines: value.routines,
+  };
+}
+
+function remoteBundleKey(skill: PublishedSkill): string {
+  return `skills/${skill.id}/versions/${skill.versionId}.zip`;
+}
+
+/* The key a submission through the app would use, so the icon endpoint serves a catalog Skill the
+   same way it serves a community one. */
+function remoteIconKey(skill: PublishedSkill): string {
+  return `skills/${skill.id}/versions/${skill.versionId}.icon`;
+}
+
+function sql(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function run(command: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn(command, args, { cwd: authApiRoot, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolvePromise();
+      else
+        reject(
+          new Error(`${command} failed${signal ? ` with signal ${signal}` : ` with exit code ${code ?? "unknown"}`}.`),
+        );
+    });
+  });
+}
+
+export function parsePublicationArguments(args: string[]): { apply: boolean; target: "local" | "production" } {
+  if (args.length === 0) return { apply: false, target: "production" };
+  if (args.length === 1 && args[0] === "--local") return { apply: false, target: "local" };
+  if (args.length === 2 && args.includes("--local") && args.includes("--apply"))
+    return { apply: true, target: "local" };
+  if (args.length === 2 && args.includes("--apply") && args.includes("--confirm-production"))
+    return { apply: true, target: "production" };
+  throw new Error("Use --local --apply for dev, or both --apply and --confirm-production for production.");
+}
+
+if (import.meta.main) {
+  if (process.argv.includes("--help")) {
+    process.stdout.write(
+      "Usage: bun run marketplace:publish:production -- [--local] [--apply] [--confirm-production]\nLocal seed: bun run marketplace:seed:local\nProduction requires --apply --confirm-production and SKILLS_ADMIN_TOKEN. No flags performs an offline dry run.\n",
+    );
+    process.exit(0);
+  }
+  const options = parsePublicationArguments(process.argv.slice(2));
+  publishProductionCatalog(options.apply, options.target).catch((error) => {
+    logger.error("Production catalog publication failed.", toLogValue(error));
+    process.exitCode = 1;
+  });
+}

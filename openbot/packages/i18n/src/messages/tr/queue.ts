@@ -1,0 +1,50 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/queue";
+
+export const messages = {
+  "queue.label": "Mesaj kuyruğu",
+  "queue.moved": "Kuyruktaki mesaj {total} içinden {position}. konuma taşındı.",
+  "queue.attachment": "Ek",
+  "queue.hold.named": "Bekliyor - {name} {channel} kanalında çalışıyor",
+  "queue.hold.unnamed": "Bekliyor - bu ajan {channel} kanalında çalışıyor",
+  "queue.item.label": "Kuyruktaki mesaj {position}: {preview}",
+  "queue.item.labelEditing": "Kuyruktaki mesaj {position}, düzenleniyor: {preview}",
+  "queue.item.editing": "Düzenleniyor",
+  "queue.item.steerLabel": "Kuyruktaki mesajı yönlendir {position}",
+  "queue.item.steerTooltip": "Mesajı yönlendir",
+  "queue.item.steering": "Yönlendiriliyor",
+  "queue.item.steer": "Yönlendir",
+  "queue.item.notSteered": "Yönlendirilmedi",
+  "queue.item.steerFallback.providerUnsupported":
+    "Bu sağlayıcı çalışan bir turu yönlendiremez, bu yüzden mesaj kuyrukta bekler.",
+  "queue.item.steerFallback.steerFailed": "Yönlendirme başarısız oldu, bu yüzden mesaj kuyrukta bekler.",
+  "queue.item.runAsTask": "Yeni mesaj dizisinde çalıştır",
+  "queue.item.runAsTaskLabel": "Kuyruktaki {position} numaralı mesajı yeni bir mesaj dizisinde çalıştır",
+  "queue.item.deleteLabel": "Kuyruktaki mesajı sil {position}",
+  "queue.item.deleteTooltip": "Mesajı sil",
+  "queue.item.editLabel": "Kuyruktaki mesajı düzenle {position}",
+  "queue.item.editTooltip": "Mesajı düzenle",
+  "queue.deleteHeld.title": "Kuyruktaki mesaj silinsin mi?",
+  "queue.deleteHeld.body": "Başka bir cihaz bu mesajı düzenliyor. Ajan bu mesajı almayacak.",
+  "queue.deleteHeld.keep": "Koru",
+  "queue.waiting.status": { one: "{count} mesaj bekliyor", other: "{count} mesaj bekliyor" },
+  "queue.paused.status": {
+    one: "Duraklatıldı · {count} mesaj saklandı",
+    other: "Duraklatıldı · {count} mesaj saklandı",
+  },
+  "queue.pause": "Duraklat",
+  "queue.pause.tooltip":
+    "Sürdürülene kadar kuyruktaki hiçbir mesajı başlatma. Mevcut iş devam eder ve hiçbir şey kaybolmaz.",
+  "queue.resume": "Sürdür",
+  "queue.resume.tooltip": "Kuyruktaki mesajları sırayla yeniden başlat",
+  "queue.clearAll.label": "Kuyruktaki tüm mesajları sil",
+  "queue.clearAll.tooltip": "Kuyruktaki tüm mesajları sil",
+  "queue.clearAll.title": {
+    one: "Kuyruktaki {count} mesaj silinsin mi?",
+    other: "Kuyruktaki {count} mesaj silinsin mi?",
+  },
+  "queue.clearAll.body": "Ajan bu mesajları almayacak. Mevcut iş devam eder.",
+  "queue.clearAll.confirm": "Tümünü sil",
+  "queue.item.runNowLabel": "Mevcut işi durdur ve kuyruktaki {position}. mesajı şimdi çalıştır",
+  "queue.item.runNowTooltip": "Şimdi çalıştır: mevcut işi durdur ve bu mesajı sıradaki başlat",
+} as const satisfies PartialTranslation<typeof source>;

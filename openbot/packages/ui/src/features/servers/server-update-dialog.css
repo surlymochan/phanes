@@ -1,0 +1,15 @@
+.server-update-dialog-body {
+  display: grid;
+  gap: var(--openbot-space-3);
+}
+
+.server-update-step-progress {
+  margin-top: var(--openbot-space-1-5);
+}
+
+.server-update-step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--openbot-space-2);
+  margin-top: var(--openbot-space-2);
+}

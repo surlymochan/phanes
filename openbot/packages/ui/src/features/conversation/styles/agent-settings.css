@@ -1,0 +1,1448 @@
+.agent-settings-avatar-picker {
+  position: relative;
+  z-index: 30;
+  display: grid;
+  width: 62px;
+  height: 62px;
+  margin: var(--openbot-space-2) auto var(--openbot-space-4);
+  place-items: center;
+}
+
+.agent-settings-avatar {
+  position: relative;
+  display: grid;
+  width: 62px;
+  height: 62px;
+  margin: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--openbot-radius-pill);
+  background: transparent;
+}
+
+.agent-settings-avatar .agent-avatar {
+  --agent-avatar-optical-offset: calc(62px * -0.14);
+  width: 62px;
+  height: 62px;
+}
+
+.agent-settings-avatar .agent-avatar > svg {
+  width: 128%;
+  height: 128%;
+}
+
+.agent-settings-avatar:hover {
+  filter: brightness(1.08);
+}
+
+/* The pencil badge of the mobile edit screen: it shows that the face opens an editor. */
+.agent-settings-avatar-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 3px solid var(--openbot-bg-canvas);
+  border-radius: var(--openbot-radius-pill);
+  background: var(--openbot-bg-control);
+  color: var(--openbot-text-primary);
+}
+
+.agent-settings-avatar-badge-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.agent-routines-overlay {
+  position: absolute;
+  z-index: 2;
+  top: 39px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow-y: auto;
+  background: var(--openbot-bg-canvas);
+}
+
+.agent-routines-settings {
+  min-height: 100%;
+  padding: 12px 15px 28px;
+}
+
+.agent-routines-list,
+.agent-routine-run-list {
+  display: grid;
+}
+
+.agent-routines-list {
+  gap: 0;
+}
+
+.agent-routine-list-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+}
+
+.agent-routine-row {
+  display: grid;
+  width: 100%;
+  min-height: 48px;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--openbot-radius-md);
+  background: transparent;
+  padding: 5px 7px;
+  text-align: left;
+  transition:
+    border-color var(--openbot-duration-hover) ease,
+    background-color var(--openbot-duration-hover) ease;
+}
+
+.agent-routine-row:focus-visible {
+  border-color: var(--openbot-border-strong);
+  background: var(--openbot-hover);
+}
+
+.agent-routine-row > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.agent-routine-row strong,
+.agent-routine-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-routine-row strong {
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: 500;
+}
+
+.agent-routine-row small,
+.agent-routines-empty {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+}
+
+.agent-routine-action-buttons svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-routine-status-icon-active,
+.agent-routine-status-icon-paused {
+  display: grid;
+  place-items: center;
+}
+
+.agent-routine-status-icon-active {
+  color: var(--openbot-success);
+}
+
+.agent-routine-status-icon-paused {
+  color: var(--openbot-text-muted);
+}
+
+.agent-routine-status-icon-active > svg,
+.agent-routine-status-icon-paused > svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .agent-routine-row:hover {
+    border-color: var(--openbot-border);
+    background: var(--openbot-hover);
+  }
+}
+
+.agent-routine-editor-actions {
+  display: grid;
+  gap: 11px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--openbot-border);
+  padding-bottom: 16px;
+}
+
+.agent-routine-active-toggle,
+.agent-routine-action-buttons,
+.agent-routine-run-row {
+  display: flex;
+  align-items: center;
+}
+
+.agent-routine-active-toggle {
+  justify-content: space-between;
+}
+
+.agent-routine-active-toggle > span {
+  display: grid;
+  gap: 2px;
+}
+
+.agent-routine-active-toggle strong {
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+}
+
+.agent-routine-active-toggle small {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+}
+
+.agent-routine-action-buttons {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.agent-routine-action-buttons button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-control);
+  padding: 7px 9px;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+}
+
+.agent-routine-action-buttons button:hover:not(:disabled) {
+  background: var(--openbot-bg-control-hover);
+  color: var(--openbot-text-primary);
+}
+
+.agent-routine-when,
+.agent-routine-history {
+  margin-top: 24px;
+}
+
+.agent-routine-history {
+  border-top: 1px solid var(--openbot-border);
+  padding-top: 20px;
+}
+
+.agent-routine-run-list {
+  margin-top: 10px;
+}
+
+.agent-routine-run-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 9px;
+  border-bottom: 1px solid var(--openbot-border);
+  padding: 9px 2px;
+}
+
+.agent-routines-overlay {
+  top: 0;
+  overflow: hidden;
+}
+
+.agent-routines-settings {
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+.agent-routines-header {
+  width: 100%;
+}
+
+.agent-routines-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--openbot-space-0-5);
+}
+
+.agent-routines-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 15px 28px;
+  scrollbar-width: none;
+}
+
+.agent-routines-body::-webkit-scrollbar {
+  display: none;
+}
+
+.agent-routine-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.agent-routine-editor > .settings-field {
+  margin-bottom: 0;
+}
+
+.agent-routine-editor-actions {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.agent-routine-active-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-sm);
+}
+
+/* The shared field puts the label first and fills the row. Here the switch comes first, beside its state word. */
+.ui-switch-field.agent-routine-active-toggle {
+  width: auto;
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+}
+
+.agent-routine-active-toggle .ui-switch-label {
+  font-size: var(--openbot-text-sm);
+  font-weight: inherit;
+}
+
+.agent-routine-action-buttons {
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.agent-routine-action-buttons button {
+  min-height: 32px;
+  border-radius: var(--openbot-radius-md);
+  padding-inline: 11px;
+  font-size: var(--openbot-text-sm);
+}
+
+.agent-routine-action-buttons .ui-button-variant-destructive {
+  border-color: transparent;
+  background: var(--openbot-danger-soft);
+  color: var(--openbot-danger);
+}
+
+.agent-routine-action-buttons .ui-button-variant-default {
+  border-color: transparent;
+  background: var(--openbot-surface-light);
+  color: var(--openbot-text-on-light);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .agent-routine-action-buttons .ui-button-variant-destructive:hover:not(:disabled):not([data-disabled]) {
+    background: var(--openbot-danger-soft-hover);
+    color: var(--openbot-danger);
+  }
+
+  .agent-routine-action-buttons .ui-button-variant-default:hover:not(:disabled):not([data-disabled]) {
+    background: color-mix(in srgb, var(--openbot-surface-light) 82%, transparent);
+    color: var(--openbot-text-on-light);
+  }
+}
+
+.agent-routine-instruction-field textarea {
+  height: 158px;
+  min-height: 158px;
+  max-height: 158px;
+  overflow-y: auto;
+  resize: none;
+}
+
+.agent-routine-history {
+  margin-top: 2px;
+}
+
+.agent-routine-when {
+  margin-top: 0;
+}
+
+/* What a field misses, under its control, where the field limit goes. */
+.agent-routine-field-error {
+  margin: var(--openbot-space-1-5) 0 0 var(--openbot-space-2);
+}
+
+/* Schedule or webhook: two equal choices above the trigger. */
+.agent-routine-trigger-kind {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--openbot-space-1);
+  margin: 0 0 var(--openbot-space-2);
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-md);
+  padding: var(--openbot-space-0-5);
+}
+
+.agent-routine-trigger-kind-icon {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+/* The schedule and history are fields, so their headings match the field labels. */
+.agent-routine-when h3,
+.agent-routine-history h3 {
+  margin: 0 0 var(--openbot-space-1-5) var(--openbot-space-2);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-md);
+  font-weight: inherit;
+  line-height: var(--openbot-leading-md);
+}
+
+/* A pointer and value row in the webhook filters. A JSON Pointer is longer than its value. */
+.agent-routine-event-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) auto;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.agent-routine-history {
+  border: 0;
+  padding-top: 0;
+}
+
+.agent-routine-run-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  margin-top: 0;
+}
+
+.agent-routine-run-row {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-radius: var(--openbot-radius-sm);
+  padding: 5px var(--openbot-space-2);
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-sm);
+  text-align: left;
+}
+
+.ui-button.agent-routine-run-link {
+  cursor: pointer;
+}
+
+/* The time, then a muted note: an ignored webhook request, skipped runs, a late start, or why a run failed. */
+.agent-routine-run-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 0 var(--openbot-space-2);
+  white-space: nowrap;
+}
+
+.agent-routine-run-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--openbot-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-routine-history-error {
+  margin-bottom: var(--openbot-space-2);
+}
+
+/* A run whose answer went to a messaging place: the run row, then where the answer went. */
+.agent-routine-run-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.agent-routine-delivery-row {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 var(--openbot-space-2) 5px;
+  font-size: var(--openbot-text-sm);
+}
+
+/* The reason is why the answer is missing from the place, so it wraps rather than cuts off. */
+.agent-routine-delivery-note {
+  min-width: 0;
+  color: var(--openbot-text-muted);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.agent-routine-delivery-failed,
+.agent-routine-delivery-uncertain {
+  color: var(--openbot-warning);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ui-button.agent-routine-run-link:hover:not(:disabled) {
+    background: var(--openbot-bg-control-hover);
+  }
+}
+
+.agent-routine-run-icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  color: var(--openbot-text-muted);
+}
+
+.agent-routine-run-icon > svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.agent-routine-run-icon-succeeded {
+  color: var(--openbot-success);
+}
+
+.agent-routine-run-icon-failed {
+  color: var(--openbot-danger);
+}
+
+.agent-routine-run-icon-needs-attention {
+  color: var(--openbot-warning);
+}
+
+.agent-routine-run-icon-running,
+.agent-routine-run-icon-queued,
+.agent-routine-run-icon-interrupted,
+.agent-routine-run-icon-cancelled {
+  color: var(--openbot-text-muted);
+}
+
+/* The overlay fades out with the modal, which is not one of its children. */
+.agent-memories-overlay[data-closed] {
+  animation: agent-dialog-overlay-out var(--openbot-duration-dialog) ease;
+}
+
+.agent-memories-modal {
+  position: fixed;
+  z-index: calc(var(--openbot-layer-dialog) + 1);
+  top: 50%;
+  left: 50%;
+  width: min(560px, calc(100vw - 48px));
+  height: min(456px, calc(100dvh - 48px));
+  min-height: 320px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  outline: 0;
+  background: var(--openbot-bg-control);
+  color: var(--openbot-text-primary);
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+}
+
+.agent-memories-header {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openbot-space-3);
+  border-bottom: 1px solid var(--openbot-border);
+  padding: var(--openbot-space-2) var(--openbot-space-2) var(--openbot-space-2) var(--openbot-space-3);
+}
+
+.agent-memories-heading {
+  min-width: 0;
+}
+
+.agent-skills-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openbot-space-1);
+}
+
+.agent-skills-parent {
+  min-width: 0;
+  height: auto;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--openbot-text-muted);
+  padding: 0;
+  font-size: var(--openbot-text-lg);
+  font-weight: var(--openbot-weight-semibold);
+  line-height: var(--openbot-leading-lg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-skills-crumb {
+  flex: 0 0 auto;
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  color: var(--openbot-text-muted);
+}
+
+.agent-skills-heading h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-memories-heading h2 {
+  margin: 0;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-lg);
+  font-weight: var(--openbot-weight-semibold);
+  line-height: var(--openbot-leading-lg);
+}
+
+.agent-memories-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--openbot-space-1);
+}
+
+.agent-memories-header-actions svg,
+.agent-memory-delete-button svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+.agent-memories-add-button {
+  color: var(--openbot-text-secondary);
+}
+
+.agent-memories-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--openbot-space-2);
+}
+
+.agent-memory-composer {
+  display: grid;
+  gap: var(--openbot-space-2);
+  margin: 0 0 var(--openbot-space-3);
+  padding: var(--openbot-space-1) var(--openbot-space-1) 0;
+}
+
+.agent-memory-input {
+  min-height: 64px;
+  resize: none;
+  border-color: var(--openbot-border);
+  background: transparent;
+}
+
+.agent-memory-input:focus-visible {
+  border-color: var(--openbot-border-strong);
+  outline: 0;
+  box-shadow: none;
+}
+
+.agent-memory-composer-actions,
+.agent-memory-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--openbot-space-1);
+}
+
+.agent-memory-inclusion-actions {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--openbot-space-1);
+}
+
+.agent-memory-list {
+  min-height: 0;
+  display: grid;
+  grid-auto-rows: max-content;
+  flex: 1;
+  align-content: start;
+  gap: var(--openbot-space-0-5);
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  scrollbar-width: none;
+}
+
+.agent-memory-row {
+  min-height: 50px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) calc(var(--openbot-control-md) + var(--openbot-space-2));
+  align-items: stretch;
+  border-radius: var(--openbot-radius-md);
+  overflow: hidden;
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .agent-memory-row:hover {
+    background: var(--openbot-bg-control-hover);
+  }
+}
+
+.agent-memory-row:has(.agent-memory-row-main:focus-visible) {
+  background: var(--openbot-bg-control-active);
+}
+
+.agent-memory-row-main {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  align-content: center;
+  justify-content: stretch;
+  justify-items: start;
+  gap: var(--openbot-space-1);
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  padding: var(--openbot-space-2) var(--openbot-space-3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.agent-memory-row-main:focus-visible {
+  box-shadow: none;
+}
+
+.agent-memory-row .agent-memory-row-main:hover {
+  background: transparent;
+}
+
+.agent-memory-text {
+  display: block;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  line-height: var(--openbot-leading-md);
+  white-space: pre-wrap;
+}
+
+.agent-memory-meta {
+  display: block;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.agent-memory-delete-button {
+  align-self: center;
+  align-items: center;
+  justify-self: center;
+  color: var(--openbot-text-muted);
+}
+
+.agent-memory-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--openbot-space-2);
+  background: transparent;
+  padding: var(--openbot-space-1) var(--openbot-space-1) var(--openbot-space-2);
+}
+
+.agent-memory-row:has(.agent-memory-editor),
+.agent-memory-row:has(.agent-memory-editor):hover {
+  background: transparent;
+}
+
+.agent-memory-state,
+.agent-memory-limit,
+.agent-memory-error {
+  margin: var(--openbot-space-1);
+  border-radius: var(--openbot-radius-md);
+  padding: var(--openbot-space-3);
+  font-size: var(--openbot-text-sm);
+}
+
+.agent-memory-state {
+  min-height: 160px;
+  display: grid;
+  place-items: center;
+  color: var(--openbot-text-muted);
+  text-align: center;
+}
+
+.agent-memory-limit {
+  background: var(--openbot-bg-surface);
+  color: var(--openbot-text-secondary);
+}
+
+.agent-memory-error {
+  background: var(--openbot-danger-soft);
+  color: var(--openbot-danger);
+}
+
+/*
+ * The dialog before its first memory: a faint copy of the list above the pitch. The newest sample
+ * writes itself in handwriting; when the next one comes, it becomes a typed row and steps back.
+ */
+.agent-memories-empty {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.agent-memories-empty-list {
+  min-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  mask-image: linear-gradient(var(--openbot-text-primary) 45%, var(--openbot-transparent));
+  transition:
+    opacity 700ms var(--openbot-ease-out),
+    filter 700ms var(--openbot-ease-out);
+}
+
+.agent-memories-empty-list[data-clearing] {
+  opacity: 0;
+  filter: blur(3px);
+}
+
+/* A new row opens from no height, so the rows under it move down. */
+.agent-memories-empty-item {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: agent-memories-empty-open 520ms var(--openbot-ease-out) both;
+  transition: opacity 640ms var(--openbot-ease-out);
+}
+
+.agent-memories-empty-item > *,
+.agent-memories-empty-fold > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@keyframes agent-memories-empty-open {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+.agent-memories-empty-item[data-age="1"] {
+  opacity: 0.6;
+}
+
+.agent-memories-empty-item[data-age="2"] {
+  opacity: 0.4;
+}
+
+.agent-memories-empty-item[data-age="3"] {
+  opacity: 0.25;
+}
+
+/* The sample rows keep the real row styles, with no fixed height. */
+.agent-memories-empty-row {
+  min-height: 0;
+}
+
+.agent-memories-empty-row .agent-memory-row-main {
+  height: auto;
+}
+
+/* The two texts of a row: the handwriting folds away and the typed text opens when the ink is dry. */
+.agent-memories-empty-fold {
+  display: grid;
+  transition:
+    grid-template-rows 640ms var(--openbot-ease-out),
+    opacity 640ms var(--openbot-ease-out);
+}
+
+.agent-memories-empty-fold-hand {
+  grid-template-rows: 1fr;
+}
+
+.agent-memories-empty-fold-typed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.agent-memories-empty-item[data-dry] .agent-memories-empty-fold-hand {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.agent-memories-empty-item[data-dry] .agent-memories-empty-fold-typed {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+/* Handwriting. The app has no hand font, so it uses the one of the system. */
+.agent-memories-hand {
+  color: var(--openbot-accent-text);
+  font-family: "Bradley Hand", "Noteworthy", "Segoe Print", cursive;
+  font-weight: var(--openbot-weight-semibold);
+}
+
+.agent-memories-empty-hand {
+  display: grid;
+  padding-block: var(--openbot-space-0-5);
+  font-size: var(--openbot-text-xl);
+  line-height: 1.3;
+  transform: rotate(-0.6deg);
+  transform-origin: left top;
+}
+
+/* Each line writes itself from left to right, at the speed of its length. */
+.agent-memories-empty-line {
+  white-space: nowrap;
+  clip-path: inset(-0.4em calc(100% + 0.2em) -0.4em -0.2em);
+  animation: agent-memories-empty-write var(--agent-memories-empty-length) linear var(--agent-memories-empty-delay)
+    forwards;
+}
+
+@keyframes agent-memories-empty-write {
+  to {
+    clip-path: inset(-0.4em -0.2em -0.4em -0.2em);
+  }
+}
+
+.agent-memories-empty-meta {
+  opacity: 0;
+  animation: agent-memories-empty-show 360ms var(--openbot-ease-out) var(--agent-memories-empty-delay) forwards;
+}
+
+@keyframes agent-memories-empty-show {
+  to {
+    opacity: 1;
+  }
+}
+
+.agent-memories-empty-pitch {
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: var(--openbot-space-3);
+  padding: var(--openbot-space-3) var(--openbot-space-4);
+  text-align: center;
+}
+
+.agent-memories-empty-title {
+  display: grid;
+  margin: 0;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-3xl);
+  font-weight: var(--openbot-weight-semibold);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.agent-memories-empty-title > .agent-memories-empty-lead {
+  color: var(--openbot-text-muted);
+}
+
+/* The one handwritten word of the title. It writes itself once. */
+/* Inline, not inline-block: a reader then hears "remember." with no space before the full stop. */
+.agent-memories-empty-word {
+  line-height: 1;
+  clip-path: inset(-0.4em calc(100% + 0.2em) -0.4em -0.2em);
+  animation: agent-memories-empty-write 640ms linear 400ms forwards;
+}
+
+.agent-memories-empty-lines {
+  display: grid;
+  margin: 0;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-lg);
+  line-height: var(--openbot-leading-lg);
+}
+
+.agent-memories-empty-action {
+  margin-top: var(--openbot-space-1);
+}
+
+/* Less motion: one still frame with the full list. */
+.agent-memories-empty[data-still]
+:is(
+  .agent-memories-empty-item,
+  .agent-memories-empty-fold,
+  .agent-memories-empty-line,
+  .agent-memories-empty-meta,
+  .agent-memories-empty-word
+) {
+  animation: none;
+  transition: none;
+  clip-path: none;
+}
+
+.agent-memories-empty[data-still]
+  :is(.agent-memories-empty-line, .agent-memories-empty-meta, .agent-memories-empty-word) {
+  opacity: 1;
+}
+
+.shared-table-list {
+  min-height: 0;
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: var(--openbot-space-0-5);
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  scrollbar-width: none;
+}
+
+.shared-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--openbot-space-2);
+  border-radius: var(--openbot-radius-md);
+  padding: var(--openbot-space-2) var(--openbot-space-3);
+}
+
+.shared-table-main {
+  min-width: 0;
+  display: grid;
+  gap: var(--openbot-space-1);
+}
+
+.shared-table-name {
+  display: block;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-semibold);
+  line-height: var(--openbot-leading-md);
+}
+
+.shared-table-confirm {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--openbot-space-2);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-surface);
+  padding: var(--openbot-space-3);
+}
+
+.shared-table-confirm p {
+  margin: 0;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+.shared-table-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--openbot-space-1);
+}
+
+.agent-memories-footer {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  padding: var(--openbot-space-2) var(--openbot-space-3) var(--openbot-space-3);
+}
+
+.agent-skill-empty {
+  min-height: 160px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--openbot-space-3);
+}
+
+.agent-skill-empty .agent-memory-state {
+  min-height: 0;
+  padding: 0;
+}
+
+.agent-skill-rows {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+}
+
+.agent-skill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  min-height: 56px;
+  padding: var(--openbot-space-1) var(--openbot-space-2);
+  border-radius: var(--openbot-radius-lg);
+}
+
+.agent-skill-open {
+  min-width: 0;
+  height: auto;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  justify-content: stretch;
+  justify-items: stretch;
+  align-items: center;
+  gap: var(--openbot-space-3);
+  padding: var(--openbot-space-1);
+  color: inherit;
+  text-align: left;
+}
+
+.agent-skill-open:hover {
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .agent-skill-row:hover {
+    background: var(--openbot-bg-control-hover);
+  }
+}
+
+.agent-skill-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-bg-control);
+  color: var(--openbot-accent-text);
+}
+
+.agent-skill-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.agent-skill-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.agent-skill-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-skill-title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--openbot-space-2);
+}
+
+.agent-skill-title strong {
+  overflow: hidden;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-medium);
+  line-height: var(--openbot-leading-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-skill-row:has(.agent-skill-update) {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
+.ui-button.agent-skill-update {
+  border-radius: var(--openbot-radius-pill);
+  background: var(--openbot-accent-soft);
+  color: var(--openbot-accent-text);
+  font-size: var(--openbot-text-sm);
+}
+
+.ui-button.agent-skill-update:hover:not(:disabled):not([data-disabled]),
+.ui-button.agent-skill-update:focus-visible {
+  background: color-mix(in srgb, var(--openbot-accent-soft), var(--openbot-accent) 12%);
+  color: var(--openbot-accent-text);
+}
+
+.agent-skill-copy small {
+  overflow: hidden;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-skill-row-disabled .agent-skill-title strong {
+  color: var(--openbot-text-muted);
+}
+
+.agent-skill-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-control-active);
+  color: var(--openbot-text-secondary);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.agent-skill-more svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+.agent-skill-row:hover .agent-skill-more,
+.agent-skill-row:focus-within .agent-skill-more,
+.agent-skill-row:has([aria-expanded="true"]) .agent-skill-more {
+  opacity: 1;
+}
+
+.agent-skill-menu {
+  z-index: calc(var(--openbot-layer-dialog) + var(--openbot-layer-popover) + 1);
+}
+
+.agent-skills-modal .ui-switch[data-checked] {
+  background: var(--openbot-accent);
+}
+
+.agent-skills-modal .ui-switch-thumb[data-checked] {
+  background: var(--openbot-text-primary);
+}
+
+.agent-local-library,
+.agent-skill-detail {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--openbot-space-4);
+  overflow: auto;
+  padding: var(--openbot-space-3);
+  scrollbar-width: none;
+}
+
+.agent-local-library::-webkit-scrollbar,
+.agent-skill-detail::-webkit-scrollbar {
+  display: none;
+}
+
+.agent-memories-modal[data-expanded] {
+  animation: agent-dialog-content-in var(--openbot-duration-dialog) ease;
+}
+
+.agent-memories-modal[data-closed] {
+  animation: agent-dialog-content-out var(--openbot-duration-dialog) ease;
+}
+
+@keyframes agent-dialog-overlay-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes agent-dialog-content-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.95);
+  }
+}
+
+@keyframes agent-dialog-content-out {
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.95);
+  }
+}
+
+@media (max-width: 520px) {
+  .agent-memories-modal {
+    width: calc(100vw - 24px);
+    height: calc(100dvh - 24px);
+  }
+
+  .agent-memories-header {
+    padding-left: var(--openbot-space-3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-memories-overlay,
+  .agent-memories-modal {
+    animation: none;
+  }
+}
+
+/* The root list and each page behind it: one column of cards with an even gap. */
+.agent-settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--openbot-space-4);
+}
+
+.agent-settings-page > .settings-field {
+  margin: 0;
+}
+
+/* A switch row inside an inset group: as tall as a link row, the switch on the right. */
+.agent-settings-switch-row {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openbot-space-2);
+  padding: 0 var(--openbot-space-3);
+}
+
+.agent-settings-switch-row > .settings-link-label {
+  flex: 1 1 auto;
+}
+
+.agent-settings-runtime-rows .provider-model-trigger-field,
+.agent-settings-runtime-rows .agent-settings-runtime-row {
+  width: 100%;
+  height: auto;
+  min-height: 40px;
+  gap: var(--openbot-space-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 var(--openbot-space-3);
+  box-shadow: none;
+  font-size: var(--openbot-text-md);
+}
+
+.agent-settings-runtime-rows .provider-model-trigger-field:hover:not(:disabled),
+.agent-settings-runtime-rows .provider-model-trigger-field[aria-expanded="true"],
+.agent-settings-runtime-rows .agent-settings-runtime-row[data-expanded] {
+  background: var(--openbot-hover);
+}
+
+.agent-settings-runtime-rows .provider-model-trigger-field:focus-visible,
+.agent-settings-runtime-rows .ui-select .agent-settings-runtime-row:focus-visible {
+  outline: 0;
+  background: var(--openbot-hover);
+  box-shadow: inset 0 0 0 1px var(--openbot-border-focus);
+}
+
+.agent-settings-runtime-rows .provider-model-trigger-field .provider-model-field-label,
+.agent-settings-runtime-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: var(--openbot-weight-medium);
+  line-height: 18px;
+  text-align: left;
+}
+
+.agent-settings-runtime-rows .provider-model-trigger-field .provider-model-trigger-name,
+.agent-settings-runtime-row .ui-select-value {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-regular);
+}
+
+.agent-settings-runtime-row .ui-select-trigger-icon {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .agent-settings-runtime-rows .provider-model-trigger-field:hover .provider-model-trigger-name,
+  .agent-settings-runtime-row:hover .ui-select-value {
+    color: var(--openbot-text-secondary);
+  }
+}
+
+.agent-settings-runtime-rows .provider-model-popover {
+  width: var(--kb-popper-anchor-width);
+  min-width: 0;
+}
+
+.agent-settings-runtime-path {
+  display: grid;
+  gap: 2px;
+  padding: 11px var(--openbot-space-3);
+}
+
+.agent-settings-runtime-path > span:last-child {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: 17px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.agent-settings-runtime-note {
+  margin: 0;
+  padding-inline: var(--openbot-space-1);
+  text-wrap: pretty;
+}
+
+.agent-settings-save-error {
+  margin: 0 var(--openbot-space-1);
+  color: var(--openbot-danger);
+  font-size: var(--openbot-text-sm);
+  line-height: 16px;
+}
+
+.agent-settings-notifications {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-border);
+  padding: 13px 12px;
+}
+
+.agent-settings-notifications > div {
+  min-width: 0;
+}
+
+.agent-settings-notifications strong,
+.agent-settings-notifications span {
+  display: block;
+}
+
+.agent-settings-notifications strong {
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-md);
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.agent-settings-notifications div > span {
+  max-width: 194px;
+  margin-top: 2px;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  line-height: 15px;
+}

@@ -1,0 +1,152 @@
+import type { PartialTranslation } from "../../../message";
+import type { messages as source } from "../../en/error/agent";
+
+export const messages = {
+  "error.agent.historyUnavailable":
+    "O histórico está indisponível para esta solicitação. Leia o histórico recente novamente ou use channel_history para trabalho em canais.",
+  "error.agent.toolRequestInvalid":
+    "Argumentos de descoberta de ferramentas inválidos. Use o esquema declarado e um nome de ferramenta qualificado original.",
+  "error.agent.approvalWhileDeleting": "Não é possível conceder aprovação enquanto o agente está sendo excluído.",
+  "error.agent.accessLocalOnly": "O acesso do agente só pode ser alterado no computador que executa o agente.",
+  "error.agent.duplicateCleanupFailed": "A duplicação do agente falhou e não foi possível remover a cópia incompleta.",
+  "error.agent.commitEffectsFailed": "A transação foi confirmada, mas os efeitos salvos falharam.",
+  "error.agent.settingsLocalOnly":
+    "As configurações do agente só podem ser alteradas no computador que executa o agente.",
+  "error.agent.skillsLocalOnly": "As habilidades só podem ser alteradas no computador que executa o agente.",
+  "error.agent.addLocalOnly": "Os agentes só podem ser adicionados no computador que os executa.",
+  "error.agent.joinedServerUpdate": "Um agente de um servidor ao qual você se conectou não pode ser atualizado daqui.",
+  "error.agent.searchQueryRequired": "É necessário informar um termo de busca.",
+  "error.agent.messageTooLong": "A mensagem é muito longa.",
+  "error.agent.messageOrAttachmentRequired": "É necessário incluir uma mensagem ou um anexo.",
+  "error.agent.promptAnswersTooLong": "As respostas às perguntas são muito longas.",
+  "error.agent.gone": "Este agente não existe mais.",
+  "error.agent.profileGenerationBusy": "A geração de perfil já está em andamento. Tente novamente em instantes.",
+  "error.agent.initialMessageRequired": "É necessário informar uma mensagem inicial.",
+  "error.agent.initialMessageTooLong": "A mensagem inicial é muito longa.",
+  "error.agent.setupCleanupFailed": "A configuração do agente falhou e não foi possível remover o agente incompleto.",
+  "error.agent.modelUnavailable": "O modelo selecionado para o agente está indisponível.",
+  "error.agent.modelProviderNotConnected":
+    'O modelo selecionado para o agente, "{model}", está indisponível: {provider} não está conectado.',
+  "error.agent.modelListEmpty":
+    'O modelo selecionado para o agente, "{model}", está indisponível: {provider} não listou nenhum modelo. Último erro: {detail}',
+  "error.agent.modelListEmptyNoError":
+    'O modelo selecionado para o agente, "{model}", está indisponível: {provider} não listou nenhum modelo.',
+  "error.agent.modelNotInProviderList":
+    'O modelo selecionado para o agente, "{model}", está indisponível: {provider} não o lista.',
+  "error.agent.modelProviderMismatch": "O modelo selecionado não pertence a esse provedor.",
+  "error.agent.modelNotListed": 'O modelo "{model}" não está disponível. Modelos disponíveis: {models}.',
+  "error.agent.providerNotListed":
+    "Nenhum modelo de {provider} está disponível agora. Chame list_models para ver os modelos disponíveis.",
+  "error.agent.reasoningEffortUnsupported":
+    'O modelo "{model}" não oferece suporte ao esforço de raciocínio "{effort}". Esforços disponíveis: {efforts}.',
+  "error.agent.noStartingModelInSettings":
+    "{provider} não tem nenhum modelo disponível, e nenhum outro provedor conectado tem um. Entre em um provedor ou altere o provedor padrão em Configurações do servidor → Provedores.",
+  "error.agent.noStartingModel":
+    "{provider} não tem nenhum modelo disponível, e nenhum outro provedor conectado tem um. Entre em um provedor ou altere o provedor padrão em Provedores e permissões.",
+  "error.agent.waitBeforeProviderChange": "Aguarde o turno ativo e a fila terminarem antes de trocar de provedor.",
+  "error.agent.waitForTasksBeforeProviderChange":
+    "Há tarefas deste agente em execução. Aguarde que terminem ou pare-as antes de trocar de provedor.",
+  "error.agent.waitBeforeClearContext": "Aguarde o turno ativo e a fila terminarem antes de iniciar um novo chat.",
+  "error.agent.waitBeforeCompactContext": "Aguarde o turno ativo e a fila terminarem antes de compactar o contexto.",
+  "error.agent.compactContextUnavailable": "Este agente não pode compactar o contexto agora.",
+  "error.agent.unknown": "Agente desconhecido: {id}",
+  "error.agent.onlyUserWidensSettings":
+    "Somente o usuário pode conceder Acesso completo a um agente ou ativar Uso do computador. Peça ao usuário para alterar isso nas configurações do agente.",
+  "error.agent.queuedMessageCreateFailed": "Não foi possível criar a mensagem na fila.",
+  "error.agent.messageUnavailable": "A mensagem não está mais disponível.",
+  "error.agent.hostLimit": "Um computador anfitrião pode ter até {limit} agentes.",
+  "error.agent.changedWhileDuplicating": "O agente mudou durante a duplicação. Tente novamente.",
+  "error.agent.duplicatedAgentGone": "O agente duplicado não existe mais.",
+  "error.agent.stateCorrupt":
+    "O estado dos agentes está corrompido ou é de uma versão mais recente do OpenBot; ele não será sobrescrito.",
+  "error.agent.oldRoleField":
+    "Os perfis de agente salvos usam o campo de função antigo; atualize os dados antes de iniciar o OpenBot.",
+  "error.agent.duplicateIds": "O estado dos agentes contém IDs de agente duplicados; ele não será sobrescrito.",
+  "error.agent.copyNameFailed": "O OpenBot não conseguiu criar um nome exclusivo para a cópia do agente.",
+  "error.agent.endpointRemoved": "O endpoint usado por este agente foi removido. Escolha outro modelo para ele.",
+  "error.agent.turnStalled":
+    "{provider} parou de responder, então o OpenBot encerrou este turno. Envie a mensagem novamente ou escolha outro modelo.",
+  "error.agent.selectedGone": "O agente selecionado não existe mais.",
+  "error.agent.profileEndpointsChanged": "Os endpoints personalizados mudaram durante a geração. Tente novamente.",
+  "error.agent.profileInvalid": "O provedor retornou um perfil inválido. Tente reformular seu pedido.",
+  "error.agent.profileSectionUnavailable":
+    "A seção gerada está indisponível. Tente novamente ou escolha uma seção manualmente.",
+  "error.agent.profileTimedOut": "O tempo para gerar o perfil esgotou. Tente novamente.",
+  "error.agent.profileDisconnected": "O provedor se desconectou durante a geração do perfil.",
+  "error.agent.profileToolUse": "O provedor tentou usar uma ferramenta. Tente reformular seu pedido.",
+  "error.agent.profileFailed": "O provedor não conseguiu gerar um perfil. Tente novamente.",
+  "error.agent.profileTooLarge": "O perfil gerado é muito grande. Tente um pedido mais curto.",
+  "error.agent.profileNotStarted": "O provedor não conseguiu iniciar a geração do perfil.",
+  "error.agent.deletionBusy": "A exclusão do agente já está em andamento.",
+  "error.agent.stopBeforeDelete": "Interrompa o agente e cancele as mensagens na fila antes de excluí-lo.",
+  "error.agent.deleteIncomplete":
+    "Não foi possível remover todos os dados do agente. Tente excluir o agente novamente.",
+  "error.agent.duplicationBusy": "Este agente já está sendo duplicado.",
+  "error.agent.waitBeforeDuplicate": "Aguarde o agente terminar e esvaziar a fila antes de duplicá-lo.",
+  "error.agent.saveOtherAgent": "Este registro salvo pertence a outro agente.",
+  "error.agent.savedGone": "O agente salvo não existe mais.",
+  "error.agent.storedProfileUnreadable":
+    'Um perfil de agente salvo tem um valor "{field}" ilegível; atualize os dados antes de iniciar o OpenBot.',
+  "error.agent.storedProfileUnreadableId":
+    'O perfil de agente salvo {id} tem um valor "{field}" ilegível; atualize os dados antes de iniciar o OpenBot.',
+  "error.agent.queueEditRejected": "Edição da fila rejeitada: {reason}",
+  "error.agent.computerUseLocalOnly": "Uso do computador só pode ser alterado no computador que executa o agente.",
+  "error.agent.automationLocalOnly": "Scripts locais só podem ser permitidos no computador que executa o agente.",
+  "error.agent.newChatLocalOnly": "Só o computador que executa o agente pode permitir que ele inicie novos chats.",
+  "error.agent.quickAcknowledgementLocalOnly": "Só o computador que executa o agente pode alterar esta configuração.",
+  "error.agent.sideQuestionBusy": "Há perguntas à parte demais em andamento. Tente novamente em instantes.",
+  "error.agent.sideQuestionFailed": "O agente não conseguiu responder à pergunta à parte. Tente novamente.",
+  "error.agent.busyMessageModeLocalOnly":
+    "O que as mensagens fazem enquanto o agente trabalha só pode ser definido no computador que executa o agente.",
+  "error.agent.backupModelsLocalOnly":
+    "Os modelos de reserva só podem ser definidos no computador que executa o agente.",
+  "error.agent.taskLimitLocalOnly": "O limite de tarefas só pode ser definido no computador que executa o agente.",
+  "error.agent.localScriptsOff": "Este agente não permite scripts locais.",
+  "error.agent.localScriptsRateLimited":
+    "Scripts locais enviaram {limit} mensagens ou pedidos de rotina a este agente na última hora. Tente de novo mais tarde.",
+  "error.agent.automationOff": "Este agente não permite que scripts locais executem suas rotinas.",
+  "error.agent.automationPayloadTooLong": "O payload tem mais de {limit} caracteres.",
+  "error.agent.automationRateLimited":
+    "Scripts locais executaram as rotinas deste agente {limit} vezes na última hora. Tente de novo mais tarde.",
+  "error.agent.workspaceOnlyMacOnly":
+    "Para este provedor, o acesso Somente o espaço de trabalho existe apenas no macOS. Escolha Acesso completo nas configurações do agente.",
+  "error.agent.lowMemory":
+    "Este servidor está com pouca memória. Sua mensagem aguarda na fila e começa quando houver memória livre. Um plano maior oferece mais memória ao servidor.",
+  "error.agent.lowMemoryServer":
+    "Este servidor está com pouca memória. Sua mensagem aguarda na fila e começa quando houver memória livre.",
+  "error.agent.workspaceOnlyToolMissing":
+    "O acesso Somente o espaço de trabalho exige {tool}, que o OpenBot não encontrou. Instale a ferramenta ou escolha Acesso completo nas configurações do agente.",
+  "error.agent.screenCaptureOff":
+    "A captura de tela está desativada para este agente. O usuário pode ativar o Uso do computador nas configurações do agente.",
+  "error.agent.screenCaptureUnavailable": "A captura de tela não está disponível neste computador.",
+  "error.agent.screenCaptureShared":
+    "A captura de tela não funciona em uma conversa do Slack, Discord ou Telegram, porque outras pessoas recebem os arquivos dela.",
+  "error.agent.screenCaptureDeclined": "O usuário não permitiu esta captura de tela. Nada foi capturado.",
+  "error.agent.screenCaptureWindowMissing":
+    "Essa janela não está aberta agora. Chame list_capture_sources para obter os ids atuais das janelas.",
+  "error.agent.screenCaptureDisplayMissing":
+    "Esse monitor não está conectado agora. Chame list_capture_sources para obter os ids atuais dos monitores.",
+  "error.agent.screenCaptureRegionOutside":
+    "A região não está dentro de um único monitor. Use pontos da área de trabalho dentro dos limites de um monitor de list_capture_sources.",
+  "error.agent.screenCapturePermissionMissing":
+    "O OpenBot não tem a permissão de Gravação de Tela. Peça ao usuário para abrir Ajustes do Sistema > Privacidade e Segurança > Gravação de Tela e Áudio do Sistema, ativar o OpenBot e depois sair e abrir o OpenBot de novo.",
+  "error.agent.screenCaptureEmptyWindows":
+    "O Windows retornou uma imagem vazia. Peça ao usuário para desbloquear o computador e fechar o conteúdo protegido. Uma política da organização também pode impedir a captura de tela.",
+  "error.agent.screenCaptureFailed": "A captura de tela falhou. Tente de novo.",
+  "error.agent.duplicationOtherSource": "Esta operação de duplicação do agente pertence a outro agente de origem.",
+  "error.agent.duplicationNotPending": "Esta duplicação do agente não está pendente.",
+  "error.agent.duplicationUnavailable": "Esta operação de duplicação do agente não está disponível.",
+  "error.agent.emojiInvalid": "Emoji inválido.",
+  "error.agent.avatarTooLarge":
+    "O avatar excede 512 KB. Reduza ou comprima uma cópia com as ferramentas disponíveis e tente de novo com o caminho dela.",
+  "error.agent.avatarType": "Escolha uma imagem de avatar PNG, JPEG ou WebP válida.",
+  "error.agent.avatarUnreadable":
+    "O OpenBot não conseguiu abrir o arquivo do avatar. Use o caminho de uma imagem local que já existe.",
+  "error.agent.avatarNotRegularFile": "O caminho do avatar deve apontar para um arquivo regular.",
+  "error.agent.nameRequired": "O nome do agente é obrigatório.",
+  "error.agent.nameTooLong": "O nome do agente é longo demais.",
+  "error.agent.descriptionTooLong": "A descrição do agente é longa demais.",
+  "error.agent.titleTooLong": "O título do agente é longo demais.",
+  "error.agent.usageNotSaved": "Não foi possível salvar os dados de uso.",
+  "error.agent.providerChangeNotAtomic": "Trocar de provedor exige escolher o provedor e o modelo de uma vez.",
+} as const satisfies PartialTranslation<typeof source>;

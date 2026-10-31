@@ -1,0 +1,238 @@
+{
+  "expo": {
+    "name": "OpenBot",
+    "slug": "openbot",
+    "platforms": ["ios", "android"],
+    "version": "1.4.2",
+    "orientation": "portrait",
+    "icon": "./assets/icons/app-icon.png",
+    "scheme": "openbot",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "run.openbot.mobile",
+      "associatedDomains": ["applinks:openbot.run"],
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Allow OpenBot to connect to your desktop during local development.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "icon": "./assets/icons/app-icon.icon"
+    },
+    "android": {
+      "package": "run.openbot.mobile",
+      "icon": "./assets/icons/app-icon.png",
+      "predictiveBackGestureEnabled": false,
+      "permissions": ["android.permission.CAMERA"],
+      "blockedPermissions": [
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+      ]
+    },
+    "plugins": [
+      "./plugins/with-rocketsim",
+      "./plugins/with-workspace-bundle-inputs",
+      "expo-router",
+      "expo-video",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#CDADEC",
+          "image": "./assets/splash/eyes.png",
+          "imageWidth": 240,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#756183",
+            "image": "./assets/splash/eyes.png"
+          },
+          "android": {
+            "imageWidth": 188
+          }
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow OpenBot to use your camera to scan QR codes.",
+          "microphonePermission": "Allow OpenBot to use the microphone to dictate messages.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow OpenBot to access the photos you choose to share.",
+          "cameraPermission": "Allow OpenBot to use your camera to add photos.",
+          "microphonePermission": "Allow OpenBot to use the microphone to dictate messages."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow OpenBot to access the photos you choose to share.",
+          "savePhotosPermission": "Allow OpenBot to save images and videos you download from a chat to your photo library.",
+          "granularPermissions": ["photo"]
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icons/notification-icon.png",
+          "color": "#6960F1"
+        }
+      ],
+      [
+        "./plugins/with-notification-sounds",
+        {
+          "sounds": [
+            "./assets/sounds/openbot-task.wav",
+            "./assets/sounds/openbot-warm.wav",
+            "./assets/sounds/openbot-mech.wav",
+            "./assets/sounds/openbot-bubble.wav",
+            "./assets/sounds/openbot-press.wav"
+          ]
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow OpenBot to use Face ID to unlock the app."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true,
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
+          }
+        }
+      ],
+      [
+        "./plugins/with-share-target",
+        {
+          "ios": {
+            "enabled": true,
+            "appGroupId": "group.run.openbot.mobile",
+            "extensionBundleIdentifier": "run.openbot.mobile.ShareExtension",
+            "activationRule": {
+              "supportsText": true,
+              "supportsWebUrlWithMaxCount": 1,
+              "supportsImageWithMaxCount": 10,
+              "supportsFileWithMaxCount": 10
+            }
+          },
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": ["text/*", "image/*", "application/*"],
+            "multipleShareMimeTypes": ["*/*"]
+          }
+        }
+      ],
+      [
+        "expo-font",
+        {
+          "ios": {
+            "fonts": [
+              "./assets/fonts/inter/Inter-Regular.ttf",
+              "./assets/fonts/inter/Inter-Italic.ttf",
+              "./assets/fonts/inter/Inter-Medium.ttf",
+              "./assets/fonts/inter/Inter-SemiBold.ttf",
+              "./assets/fonts/inter/Inter-Bold.ttf",
+              "./assets/fonts/inter/Inter-BoldItalic.ttf",
+              "./assets/fonts/inter/Inter-ExtraBold.ttf",
+              "katex/dist/fonts/KaTeX_AMS-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Caligraphic-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Fraktur-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Main-Bold.ttf",
+              "katex/dist/fonts/KaTeX_Main-Italic.ttf",
+              "katex/dist/fonts/KaTeX_Main-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Math-BoldItalic.ttf",
+              "katex/dist/fonts/KaTeX_Math-Italic.ttf",
+              "katex/dist/fonts/KaTeX_SansSerif-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Size1-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Size2-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Typewriter-Regular.ttf"
+            ]
+          },
+          "android": {
+            "fonts": [
+              {
+                "fontFamily": "Inter",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/inter/Inter-Regular.ttf", "weight": 400 },
+                  { "path": "./assets/fonts/inter/Inter-Italic.ttf", "weight": 400, "style": "italic" },
+                  { "path": "./assets/fonts/inter/Inter-Medium.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/inter/Inter-SemiBold.ttf", "weight": 600 },
+                  { "path": "./assets/fonts/inter/Inter-Bold.ttf", "weight": 700 },
+                  { "path": "./assets/fonts/inter/Inter-BoldItalic.ttf", "weight": 700, "style": "italic" },
+                  { "path": "./assets/fonts/inter/Inter-ExtraBold.ttf", "weight": 800 }
+                ]
+              },
+              "katex/dist/fonts/KaTeX_AMS-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Caligraphic-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Fraktur-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Main-Bold.ttf",
+              "katex/dist/fonts/KaTeX_Main-Italic.ttf",
+              "katex/dist/fonts/KaTeX_Main-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Math-BoldItalic.ttf",
+              "katex/dist/fonts/KaTeX_Math-Italic.ttf",
+              "katex/dist/fonts/KaTeX_SansSerif-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Size1-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Size2-Regular.ttf",
+              "katex/dist/fonts/KaTeX_Typewriter-Regular.ttf"
+            ]
+          }
+        }
+      ],
+      "expo-image",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow OpenBot to use the microphone to dictate messages.",
+          "speechRecognitionPermission": "Allow OpenBot to turn your speech into message text."
+        }
+      ],
+      [
+        "expo-widgets",
+        {
+          "bundleIdentifier": "run.openbot.mobile.ExpoWidgetsTarget",
+          "groupIdentifier": "group.run.openbot.mobile",
+          "enablePushNotifications": true,
+          "frequentUpdates": true
+        }
+      ],
+      [
+        "./plugins/with-notification-service",
+        {
+          "targetName": "OpenBotNotificationService",
+          "bundleIdentifier": "run.openbot.mobile.NotificationService",
+          "groupIdentifier": "group.run.openbot.mobile"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "eeec730f-c8f4-42c0-a750-64df8af14940"
+      }
+    },
+    "owner": "openbot",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/eeec730f-c8f4-42c0-a750-64df8af14940"
+    }
+  }
+}

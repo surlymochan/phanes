@@ -1,0 +1,1025 @@
+import { ATTACHMENT_LIMITS, INPUT_LIMITS } from "@openbot/contracts/input-limits";
+import {
+  type AcknowledgeFailedTurnInput,
+  type AgentIpcRequest,
+  type AgentMemorySelectionChange,
+  type AgentTaskInput,
+  agentThreadTitle,
+  type CancelAgentWaitInput,
+  type CancelMessageLinkInput,
+  type CancelQueuedMessageInput,
+  type ChooseAttachmentsInput,
+  type ContinueAgentPauseInput,
+  type CreateAgentInput,
+  type CreateAgentMemoryInput,
+  type CreateChannelMemoryInput,
+  type CreateChannelRoutineInput,
+  type CreateRoutineInput,
+  type DeleteAgentMemoryInput,
+  type DeleteChannelMemoryInput,
+  type DeleteChannelRoutineInput,
+  type DeleteRoutineInput,
+  type DownloadAttachmentsInput,
+  type EditQueuedMessageInput,
+  type FileAction,
+  type ImportAttachmentsInput,
+  type InterruptTurnInput,
+  isAgentAccess,
+  isAgentBackupModels,
+  isAgentModel,
+  isAgentProvider,
+  isAgentTaskLimit,
+  isAvatarHue,
+  isAvatarSeed,
+  isBusyMessageMode,
+  isFilePreviewPageUrl,
+  isMessageReaction,
+  isProviderAccountId,
+  isReasoningEffort,
+  isRoutineSchedule,
+  type ListChannelRoutineRunsInput,
+  type ListRoutineRunsInput,
+  type MarkConversationReadInput,
+  type OpenAttachmentInput,
+  type OpenMessageLinkInput,
+  type OpenSharedFileInput,
+  type OpenWorkspaceFileInput,
+  type PasteMessageLinkInput,
+  type PreviewSharedFileInput,
+  type PreviewWorkspaceFileInput,
+  type ReadConversationPageInput,
+  type RenameAgentTaskInput,
+  type ReorderQueueInput,
+  type RespondToApprovalInput,
+  type RespondToBrowserTakeoverInput,
+  type RespondToPromptInput,
+  ROUTINE_LIMIT_POLICIES,
+  ROUTINE_MISSED_POLICIES,
+  type RoutineCalendarInput,
+  type RoutineLimitPolicy,
+  type RoutineMissedPolicy,
+  type RunQueuedMessageAsTaskInput,
+  type RunQueuedMessageNowInput,
+  type SearchConversationFilesInput,
+  type SearchConversationMessagesInput,
+  type SendMessageInput,
+  type SetAgentAvatarInput,
+  type SetAgentMemoryInclusionInput,
+  type SetMessageReactionInput,
+  type SetQueuePausedInput,
+  type SidebarLayoutAction,
+  type StartAgentTaskInput,
+  type SteerQueuedMessageInput,
+  type TestChannelRoutineInput,
+  type TestRoutineInput,
+  type UpdateAgentInput,
+  type UpdateAgentMemoryInput,
+  type UpdateChannelMemoryInput,
+  type UpdateChannelRoutineInput,
+  type UpdateQueuedMessageInput,
+  type UpdateRoutineInput,
+} from "@openbot/contracts/ipc";
+import { isBoolean, isNumber, isOneOf, isString } from "@openbot/contracts/runtime-values";
+import { decodeQueueEditRequest } from "@openbot/contracts/team-protocol/queue-edit-v1";
+import { sourceText } from "@openbot/i18n/source";
+import type { PayloadDecoder } from "../trusted-ipc";
+import { parseAvatarImage } from "./avatar-inputs";
+import { isObject, requireString } from "./validation";
+
+function parseAgentRequest(value: unknown): AgentIpcRequest {
+  if (!isObject(value)) throw new Error("Invalid agent request.");
+  return {
+    serverId: requireString(value.serverId, "serverId"),
+    payload: value.payload,
+  };
+}
+
+/** Checks the server scope first, then decodes the payload inside it. */
+export function agentRequest<Payload>(decode: PayloadDecoder<Payload>): PayloadDecoder<AgentIpcRequest<Payload>> {
+  return (value) => {
+    const scoped = parseAgentRequest(value);
+    return { serverId: scoped.serverId, payload: decode(scoped.payload) };
+  };
+}
+
+/** Checks the server scope of a request that carries nothing else. The preload sends `null`. */
+export function agentScope(value: unknown): AgentIpcRequest<null> {
+  return { serverId: parseAgentRequest(value).serverId, payload: null };
+}
+
+export function parseAgentId(value: unknown): string {
+  return requireString(value, "agentId", INPUT_LIMITS.identifier);
+}
+
+export function parseChannelId(value: unknown): string {
+  return requireString(value, "channelId", INPUT_LIMITS.identifier);
+}
+
+export function parseAttachmentId(value: unknown): string {
+  return requireString(value, "attachmentId", INPUT_LIMITS.identifier);
+}
+
+export function parseFilePreviewPageUrl(value: unknown): string {
+  if (!isFilePreviewPageUrl(value)) throw new Error("Invalid file preview page URL.");
+  return value;
+}
+
+export function parseOptionalAgentId(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return parseAgentId(value);
+}
+
+export function parseSidebarLayoutAction(value: unknown): SidebarLayoutAction {
+  if (!isObject(value) || !isString(value.type)) throw new Error("Invalid sidebar layout action.");
+  switch (value.type) {
+    case "create":
+      return {
+        type: "create",
+        name: requireString(value.name, "name", INPUT_LIMITS.sidebarSectionName),
+        ...(value.agentId === undefined
+          ? {}
+          : { agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier) }),
+      };
+    case "rename":
+      return {
+        type: "rename",
+        sectionId: requireString(value.sectionId, "sectionId", INPUT_LIMITS.identifier),
+        name: requireString(value.name, "name", INPUT_LIMITS.sidebarSectionName),
+      };
+    case "delete":
+      return {
+        type: "delete",
+        sectionId: requireString(value.sectionId, "sectionId", INPUT_LIMITS.identifier),
+      };
+    case "move": {
+      const direction = value.direction;
+      if (direction !== "up" && direction !== "down") throw new Error("Invalid section move direction.");
+      const steps = value.steps;
+      if (
+        steps !== undefined &&
+        (!isNumber(steps) || !Number.isInteger(steps) || steps < 1 || steps > INPUT_LIMITS.sidebarSections + 2)
+      ) {
+        throw new Error("Invalid section move distance.");
+      }
+      return {
+        type: "move",
+        sectionId: requireString(value.sectionId, "sectionId", INPUT_LIMITS.identifier),
+        direction,
+        ...(steps === undefined ? {} : { steps }),
+      };
+    }
+    case "assign": {
+      const sectionId = value.sectionId;
+      if (sectionId !== null && !isString(sectionId)) throw new Error("Invalid section assignment.");
+      return {
+        type: "assign",
+        agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+        sectionId,
+      };
+    }
+    case "move-agent": {
+      const sectionId = value.sectionId;
+      const beforeAgentId = value.beforeAgentId;
+      if (sectionId !== null && !isString(sectionId)) throw new Error("Invalid section assignment.");
+      if (beforeAgentId !== null && !isString(beforeAgentId)) throw new Error("Invalid agent order target.");
+      return {
+        type: "move-agent",
+        agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+        sectionId,
+        beforeAgentId:
+          beforeAgentId === null ? null : requireString(beforeAgentId, "beforeAgentId", INPUT_LIMITS.identifier),
+      };
+    }
+    default:
+      throw new Error("Unknown sidebar layout action.");
+  }
+}
+
+export function parseCreateAgent(value: unknown): CreateAgentInput {
+  if (!isObject(value)) throw new Error("Invalid agent creation request.");
+  const avatarHue = value.avatarHue;
+  if (!isAvatarSeed(value.avatarSeed)) throw new Error("Invalid avatar seed.");
+  if (avatarHue !== null && !isAvatarHue(avatarHue)) throw new Error("Invalid avatar hue.");
+  const result: CreateAgentInput = {
+    name: requireString(value.name, "name", INPUT_LIMITS.agentName),
+    description: requireString(value.description, "description", INPUT_LIMITS.agentDescription),
+    avatarSeed: value.avatarSeed,
+    avatarHue,
+    initialMessage: requireString(value.initialMessage, "initialMessage", INPUT_LIMITS.messageText),
+  };
+  if (value.provider !== undefined) {
+    if (!isAgentProvider(value.provider)) throw new Error("Invalid agent provider.");
+    result.provider = value.provider;
+  }
+  if (value.model !== undefined) {
+    if (!isAgentModel(value.model)) throw new Error("Invalid agent model.");
+    result.model = value.model;
+  }
+  if (value.reasoningEffort !== undefined) {
+    if (!isReasoningEffort(value.reasoningEffort)) throw new Error("Invalid reasoning effort.");
+    result.reasoningEffort = value.reasoningEffort;
+  }
+  return result;
+}
+
+export function parseCreateAgentMemory(value: unknown): CreateAgentMemoryInput {
+  if (!isObject(value)) throw new Error("Invalid memory creation request.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    text: requireString(value.text, "text", INPUT_LIMITS.agentMemoryText),
+  };
+}
+
+export function parseUpdateAgentMemory(value: unknown): UpdateAgentMemoryInput {
+  if (!isObject(value)) throw new Error("Invalid memory update request.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    memoryId: requireString(value.memoryId, "memoryId", INPUT_LIMITS.identifier),
+    text: requireString(value.text, "text", INPUT_LIMITS.agentMemoryText),
+  };
+}
+
+export function parseDeleteAgentMemory(value: unknown): DeleteAgentMemoryInput {
+  if (!isObject(value)) throw new Error("Invalid memory deletion request.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    memoryId: requireString(value.memoryId, "memoryId", INPUT_LIMITS.identifier),
+  };
+}
+
+export function parseCreateRoutine(value: unknown): CreateRoutineInput {
+  if (!isObject(value)) throw new Error("Invalid routine creation request.");
+  if (!isBoolean(value.active)) throw new Error("active must be a boolean.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    name: requireString(value.name, "name", INPUT_LIMITS.routineName),
+    instruction: requireString(value.instruction, "instruction", INPUT_LIMITS.routineInstruction),
+    active: value.active,
+    timezone: requireString(value.timezone, "timezone", 128),
+    schedule: parseRoutineSchedule(value.schedule),
+    ...optionalLimitPolicy(value.limitPolicy),
+    ...optionalMissedPolicy(value.missedPolicy),
+  };
+}
+
+export function parseUpdateRoutine(value: unknown): UpdateRoutineInput {
+  if (!isObject(value)) throw new Error("Invalid routine update request.");
+  const parsed: UpdateRoutineInput = {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    routineId: requireString(value.routineId, "routineId", INPUT_LIMITS.identifier),
+  };
+  if (value.name !== undefined) parsed.name = requireString(value.name, "name", INPUT_LIMITS.routineName);
+  if (value.instruction !== undefined) {
+    parsed.instruction = requireString(value.instruction, "instruction", INPUT_LIMITS.routineInstruction);
+  }
+  if (value.active !== undefined) {
+    if (!isBoolean(value.active)) throw new Error("active must be a boolean.");
+    parsed.active = value.active;
+  }
+  if (value.schedule !== undefined) parsed.schedule = parseRoutineSchedule(value.schedule);
+  Object.assign(parsed, optionalLimitPolicy(value.limitPolicy), optionalMissedPolicy(value.missedPolicy));
+  if (Object.keys(parsed).length === 2) throw new Error("A routine update is required.");
+  return parsed;
+}
+
+function optionalLimitPolicy(value: unknown): { limitPolicy?: RoutineLimitPolicy } {
+  if (value === undefined) return {};
+  if (!isOneOf(ROUTINE_LIMIT_POLICIES, value)) throw new Error("Invalid routine limit policy.");
+  return { limitPolicy: value };
+}
+
+function optionalMissedPolicy(value: unknown): { missedPolicy?: RoutineMissedPolicy } {
+  if (value === undefined) return {};
+  if (!isOneOf(ROUTINE_MISSED_POLICIES, value)) throw new Error("Invalid routine missed-run policy.");
+  return { missedPolicy: value };
+}
+
+export function parseDeleteRoutine(value: unknown): DeleteRoutineInput {
+  if (!isObject(value)) throw new Error("Invalid routine deletion request.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    routineId: requireString(value.routineId, "routineId", INPUT_LIMITS.identifier),
+  };
+}
+
+export function parseTestRoutine(value: unknown): TestRoutineInput {
+  return parseDeleteRoutine(value);
+}
+
+/** The range is a whole number of instants the host reads in one pass, so its length is limited. */
+export function parseRoutineCalendar(value: unknown): RoutineCalendarInput {
+  if (!isObject(value)) throw new Error("Invalid routine calendar request.");
+  const from = new Date(requireString(value.from, "from"));
+  const to = new Date(requireString(value.to, "to"));
+  const length = to.getTime() - from.getTime();
+  if (Number.isNaN(length) || length <= 0 || length > INPUT_LIMITS.routineCalendarDays * 86_400_000) {
+    throw new Error("Invalid routine calendar range.");
+  }
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
+export function parseListRoutineRuns(value: unknown): ListRoutineRunsInput {
+  const input = parseDeleteRoutine(value);
+  if (!isObject(value)) throw new Error("Invalid routine history request.");
+  const limit = value.limit ?? 50;
+  if (!isNumber(limit) || !Number.isInteger(limit) || limit < 1 || limit > INPUT_LIMITS.routineRunsPage) {
+    throw new Error("Invalid routine history limit.");
+  }
+  return { ...input, limit };
+}
+
+function parseRoutineSchedule(value: unknown): CreateRoutineInput["schedule"] {
+  if (!isRoutineSchedule(value)) throw new Error("Invalid routine schedule.");
+  return structuredClone(value);
+}
+
+/**
+ * The channel twins of the agent parsers above. They read `channelId` where the agent ones read
+ * `agentId` and reuse every other limit, because a channel memory and a channel routine hold the
+ * same fields as an agent one.
+ */
+export function parseCreateChannelMemory(value: unknown): CreateChannelMemoryInput {
+  if (!isObject(value)) throw new Error("Invalid memory creation request.");
+  return {
+    channelId: requireString(value.channelId, "channelId", INPUT_LIMITS.identifier),
+    text: requireString(value.text, "text", INPUT_LIMITS.agentMemoryText),
+  };
+}
+
+export function parseUpdateChannelMemory(value: unknown): UpdateChannelMemoryInput {
+  if (!isObject(value)) throw new Error("Invalid memory update request.");
+  return {
+    channelId: requireString(value.channelId, "channelId", INPUT_LIMITS.identifier),
+    memoryId: requireString(value.memoryId, "memoryId", INPUT_LIMITS.identifier),
+    text: requireString(value.text, "text", INPUT_LIMITS.agentMemoryText),
+  };
+}
+
+export function parseDeleteChannelMemory(value: unknown): DeleteChannelMemoryInput {
+  if (!isObject(value)) throw new Error("Invalid memory deletion request.");
+  return {
+    channelId: requireString(value.channelId, "channelId", INPUT_LIMITS.identifier),
+    memoryId: requireString(value.memoryId, "memoryId", INPUT_LIMITS.identifier),
+  };
+}
+
+export function parseCreateChannelRoutine(value: unknown): CreateChannelRoutineInput {
+  if (!isObject(value)) throw new Error("Invalid routine creation request.");
+  if (!isBoolean(value.active)) throw new Error("active must be a boolean.");
+  return {
+    channelId: requireString(value.channelId, "channelId", INPUT_LIMITS.identifier),
+    name: requireString(value.name, "name", INPUT_LIMITS.routineName),
+    instruction: requireString(value.instruction, "instruction", INPUT_LIMITS.routineInstruction),
+    active: value.active,
+    timezone: requireString(value.timezone, "timezone", 128),
+    schedule: parseRoutineSchedule(value.schedule),
+    ...optionalLimitPolicy(value.limitPolicy),
+    ...optionalMissedPolicy(value.missedPolicy),
+  };
+}
+
+export function parseUpdateChannelRoutine(value: unknown): UpdateChannelRoutineInput {
+  if (!isObject(value)) throw new Error("Invalid routine update request.");
+  const parsed: UpdateChannelRoutineInput = {
+    channelId: requireString(value.channelId, "channelId", INPUT_LIMITS.identifier),
+    routineId: requireString(value.routineId, "routineId", INPUT_LIMITS.identifier),
+  };
+  if (value.name !== undefined) parsed.name = requireString(value.name, "name", INPUT_LIMITS.routineName);
+  if (value.instruction !== undefined) {
+    parsed.instruction = requireString(value.instruction, "instruction", INPUT_LIMITS.routineInstruction);
+  }
+  if (value.active !== undefined) {
+    if (!isBoolean(value.active)) throw new Error("active must be a boolean.");
+    parsed.active = value.active;
+  }
+  if (value.schedule !== undefined) parsed.schedule = parseRoutineSchedule(value.schedule);
+  Object.assign(parsed, optionalLimitPolicy(value.limitPolicy), optionalMissedPolicy(value.missedPolicy));
+  if (Object.keys(parsed).length === 2) throw new Error("A routine update is required.");
+  return parsed;
+}
+
+export function parseDeleteChannelRoutine(value: unknown): DeleteChannelRoutineInput {
+  if (!isObject(value)) throw new Error("Invalid routine deletion request.");
+  return {
+    channelId: requireString(value.channelId, "channelId", INPUT_LIMITS.identifier),
+    routineId: requireString(value.routineId, "routineId", INPUT_LIMITS.identifier),
+  };
+}
+
+export function parseTestChannelRoutine(value: unknown): TestChannelRoutineInput {
+  return parseDeleteChannelRoutine(value);
+}
+
+export function parseListChannelRoutineRuns(value: unknown): ListChannelRoutineRunsInput {
+  const input = parseDeleteChannelRoutine(value);
+  if (!isObject(value)) throw new Error("Invalid routine history request.");
+  const limit = value.limit ?? 50;
+  if (!isNumber(limit) || !Number.isInteger(limit) || limit < 1 || limit > INPUT_LIMITS.routineRunsPage) {
+    throw new Error("Invalid routine history limit.");
+  }
+  return { ...input, limit };
+}
+
+export function parseReadConversationPage(value: unknown): ReadConversationPageInput {
+  if (!isObject(value)) throw new Error("Invalid conversation page request.");
+  const agentId = requireString(value.agentId, "agentId", INPUT_LIMITS.identifier);
+  const anchor = parsePageAnchor(value.anchor);
+  return {
+    agentId,
+    ...(anchor === undefined ? {} : { anchor }),
+    limit: parsePageLimit(value.limit),
+  };
+}
+
+export function parseOpenMessageLink(value: unknown): OpenMessageLinkInput {
+  if (!isObject(value)) throw new Error("Invalid message link request.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    url: requireString(value.url, "URL", INPUT_LIMITS.browserUrl),
+  };
+}
+
+export function parsePasteMessageLink(value: unknown): PasteMessageLinkInput {
+  if (!isObject(value)) throw new Error("Invalid message link request.");
+  return {
+    url: requireString(value.url, "URL", INPUT_LIMITS.browserUrl),
+    address: requireString(value.address, "Address", INPUT_LIMITS.signInRelayAddress),
+  };
+}
+
+export function parseCancelMessageLink(value: unknown): CancelMessageLinkInput {
+  if (!isObject(value)) throw new Error("Invalid message link request.");
+  return { url: requireString(value.url, "URL", INPUT_LIMITS.browserUrl) };
+}
+
+export function parseSearchConversationMessages(value: unknown): SearchConversationMessagesInput {
+  if (!isObject(value)) throw new Error("Invalid conversation search request.");
+  const query = requireString(value.query, "query", INPUT_LIMITS.messageText);
+  if (!query.trim()) throw new Error(sourceText("error.agent.searchQueryRequired"));
+  const limit = parsePageLimit(value.limit ?? 100);
+  return {
+    query,
+    ...(value.agentId === undefined
+      ? {}
+      : { agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier) }),
+    ...(value.cursor === undefined ? {} : { cursor: requireString(value.cursor, "cursor", 2048) }),
+    limit,
+    ...(value.includeSideThreads === true ? { includeSideThreads: true } : {}),
+  };
+}
+
+/** An empty query is allowed: it lists the newest files. */
+export function parseSearchConversationFiles(value: unknown): SearchConversationFilesInput {
+  if (!isObject(value) || !isString(value.query)) throw new Error("Invalid conversation file search request.");
+  if (value.query.length > INPUT_LIMITS.attachmentName) throw new Error("query is too long.");
+  return {
+    query: value.query,
+    ...(value.cursor === undefined ? {} : { cursor: requireString(value.cursor, "cursor", 2048) }),
+    limit: parsePageLimit(value.limit),
+  };
+}
+
+function parsePageAnchor(value: unknown): ReadConversationPageInput["anchor"] {
+  if (value === undefined) return { type: "latest" };
+  if (!isObject(value) || !isString(value.type)) throw new Error("Invalid conversation page anchor.");
+  if (value.type === "latest") return { type: "latest" };
+  if (value.type === "before") return { type: "before", cursor: requireString(value.cursor, "cursor", 2048) };
+  if (value.type === "around") {
+    return { type: "around", messageId: requireString(value.messageId, "messageId", INPUT_LIMITS.identifier) };
+  }
+  throw new Error("Invalid conversation page anchor.");
+}
+
+function parsePageLimit(value: unknown): number {
+  if (value === undefined) return 50;
+  if (!isNumber(value) || !Number.isInteger(value) || value < 1 || value > 100) {
+    throw new Error("The conversation page limit must be between 1 and 100.");
+  }
+  return value;
+}
+
+export function parseSendMessage(value: unknown): SendMessageInput {
+  if (!isObject(value)) throw new Error("Invalid send message request.");
+  const attachmentDraftIds = value.attachmentDraftIds ?? [];
+  if (
+    !Array.isArray(attachmentDraftIds) ||
+    attachmentDraftIds.length > INPUT_LIMITS.attachments ||
+    !attachmentDraftIds.every((item) => isString(item) && item.length <= INPUT_LIMITS.identifier)
+  ) {
+    throw new Error("Invalid attachment drafts.");
+  }
+  if (!isString(value.text)) throw new Error("text is required.");
+  if (value.text.length > INPUT_LIMITS.messageText) throw new Error(sourceText("error.agent.messageTooLong"));
+  if (!value.text.trim() && attachmentDraftIds.length === 0) {
+    throw new Error(sourceText("error.agent.messageOrAttachmentRequired"));
+  }
+  const replyToMessageId = value.replyToMessageId ?? null;
+  if (replyToMessageId !== null && (!isString(replyToMessageId) || replyToMessageId.length > INPUT_LIMITS.identifier)) {
+    throw new Error("Invalid reply target.");
+  }
+  const clientMessageId = value.clientMessageId;
+  if (
+    clientMessageId !== undefined &&
+    (!isString(clientMessageId) || !clientMessageId || clientMessageId.length > INPUT_LIMITS.identifier)
+  ) {
+    throw new Error("Invalid client message id.");
+  }
+  const taskId = value.taskId;
+  if (taskId !== undefined && (!isString(taskId) || !taskId || taskId.length > INPUT_LIMITS.identifier)) {
+    throw new Error("Invalid task id.");
+  }
+  if (value.interrupt !== undefined && typeof value.interrupt !== "boolean") throw new Error("Invalid interrupt flag.");
+  const voiceRecordingDraftId = value.voiceRecordingDraftId;
+  if (
+    voiceRecordingDraftId !== undefined &&
+    (!isString(voiceRecordingDraftId) ||
+      !voiceRecordingDraftId ||
+      voiceRecordingDraftId.length > INPUT_LIMITS.identifier ||
+      attachmentDraftIds.includes(voiceRecordingDraftId))
+  ) {
+    throw new Error("Invalid voice recording draft.");
+  }
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    text: value.text,
+    attachmentDraftIds,
+    replyToMessageId: replyToMessageId?.trim() || null,
+    ...(clientMessageId === undefined ? {} : { clientMessageId }),
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(value.interrupt === true ? { interrupt: true } : {}),
+    ...(voiceRecordingDraftId === undefined ? {} : { voiceRecordingDraftId }),
+  };
+}
+
+export function parseContinueAgentPause(value: unknown): ContinueAgentPauseInput {
+  if (!isObject(value)) throw new Error("Invalid continue request.");
+  return { agentId: requireString(value.agentId, "agentId"), messageId: requireString(value.messageId, "messageId") };
+}
+
+export function parseSetQueuePaused(value: unknown): SetQueuePausedInput {
+  if (!isObject(value) || typeof value.paused !== "boolean") throw new Error("Invalid queue pause request.");
+  return { agentId: requireString(value.agentId, "agentId"), paused: value.paused };
+}
+
+export function parseRunQueuedMessageNow(value: unknown): RunQueuedMessageNowInput {
+  if (!isObject(value)) throw new Error("Invalid run queued message request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    deliveryId: requireString(value.deliveryId, "deliveryId"),
+  };
+}
+
+export function parseStartAgentTask(value: unknown): StartAgentTaskInput {
+  const { agentId, text, attachmentDraftIds, clientMessageId } = parseSendMessage(value);
+  return {
+    agentId,
+    text,
+    ...(attachmentDraftIds ? { attachmentDraftIds } : {}),
+    ...(clientMessageId ? { clientMessageId } : {}),
+  };
+}
+
+export function parseRunQueuedMessageAsTask(value: unknown): RunQueuedMessageAsTaskInput {
+  if (!isObject(value)) throw new Error("Invalid task request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    deliveryId: requireString(value.deliveryId, "deliveryId"),
+  };
+}
+
+export function parseAgentTask(value: unknown): AgentTaskInput {
+  if (!isObject(value)) throw new Error("Invalid task request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    taskId: requireString(value.taskId, "taskId"),
+  };
+}
+
+export function parseRenameAgentTask(value: unknown): RenameAgentTaskInput {
+  const task = parseAgentTask(value);
+  if (!isObject(value)) throw new Error("Invalid task request.");
+  const title = agentThreadTitle(value.title);
+  if (title === null) throw new Error("Invalid title.");
+  return { ...task, title };
+}
+
+export function parseMessageReaction(value: unknown): SetMessageReactionInput {
+  if (!isObject(value)) throw new Error("Invalid message reaction request.");
+  const emoji = value.emoji;
+  if (emoji !== null && !isMessageReaction(emoji)) {
+    throw new Error("Invalid message reaction.");
+  }
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    messageId: requireString(value.messageId, "messageId"),
+    emoji,
+  };
+}
+
+export function parseMarkConversationRead(value: unknown): MarkConversationReadInput {
+  if (!isObject(value)) throw new Error("Invalid conversation read request.");
+  const throughMessageId = value.throughMessageId;
+  if (throughMessageId !== null && !isString(throughMessageId)) {
+    throw new Error("Invalid conversation read boundary.");
+  }
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    throughMessageId:
+      throughMessageId === null ? null : requireString(throughMessageId, "throughMessageId", INPUT_LIMITS.identifier),
+  };
+}
+
+export function parseUpdateAgent(value: unknown): UpdateAgentInput {
+  if (!isObject(value)) throw new Error("Invalid agent update request.");
+  if (value.role !== undefined) throw new Error("Invalid role.");
+  const result: UpdateAgentInput = { agentId: requireString(value.agentId, "agentId") };
+  const limits = {
+    name: INPUT_LIMITS.agentName,
+    title: INPUT_LIMITS.agentTitle,
+    description: INPUT_LIMITS.agentDescription,
+  } as const;
+  for (const field of ["name", "title", "description"] as const) {
+    if (value[field] !== undefined && !isString(value[field])) {
+      throw new Error(`Invalid ${field}.`);
+    }
+    if (isString(value[field])) {
+      if (value[field].length > limits[field]) throw new Error(`${field} is too long.`);
+      result[field] = value[field];
+    }
+  }
+  if (value.notifications !== undefined) {
+    if (!isBoolean(value.notifications)) throw new Error("Invalid notifications value.");
+    result.notifications = value.notifications;
+  }
+  if (value.provider !== undefined) {
+    if (!isAgentProvider(value.provider)) {
+      throw new Error("Invalid agent provider.");
+    }
+    result.provider = value.provider;
+  }
+  if (value.model !== undefined) {
+    if (!isAgentModel(value.model)) throw new Error("Invalid agent model.");
+    result.model = value.model;
+  }
+  if (value.reasoningEffort !== undefined) {
+    if (!isReasoningEffort(value.reasoningEffort)) throw new Error("Invalid reasoning effort.");
+    result.reasoningEffort = value.reasoningEffort;
+  }
+  if (value.access !== undefined) {
+    if (!isAgentAccess(value.access)) throw new Error("Invalid agent access.");
+    result.access = value.access;
+  }
+  if (value.computerUse !== undefined) {
+    if (!isBoolean(value.computerUse)) throw new Error("Invalid Computer Use value.");
+    result.computerUse = value.computerUse;
+  }
+  // `null` returns the agent to the account default.
+  if (value.allowAutomation !== undefined) {
+    if (value.allowAutomation !== null && !isBoolean(value.allowAutomation))
+      throw new Error("Invalid automation value.");
+    result.allowAutomation = value.allowAutomation;
+  }
+  if (value.allowNewChat !== undefined) {
+    if (value.allowNewChat !== null && !isBoolean(value.allowNewChat)) throw new Error("Invalid new chat value.");
+    result.allowNewChat = value.allowNewChat;
+  }
+  if (value.quickAcknowledgement !== undefined) {
+    if (value.quickAcknowledgement !== null && !isBoolean(value.quickAcknowledgement))
+      throw new Error("Invalid quick acknowledgement value.");
+    result.quickAcknowledgement = value.quickAcknowledgement;
+  }
+  if (value.fastMode !== undefined) {
+    if (!isBoolean(value.fastMode)) throw new Error("Invalid fast mode value.");
+    result.fastMode = value.fastMode;
+  }
+  if (value.providerAccountId !== undefined) {
+    if (value.providerAccountId !== null && !isProviderAccountId(value.providerAccountId))
+      throw new Error("Invalid provider account.");
+    result.providerAccountId = value.providerAccountId;
+  }
+  if (value.busyMessageMode !== undefined) {
+    if (value.busyMessageMode !== null && !isBusyMessageMode(value.busyMessageMode)) {
+      throw new Error("Invalid busy message mode.");
+    }
+    result.busyMessageMode = value.busyMessageMode;
+  }
+  if (value.taskLimit !== undefined) {
+    if (value.taskLimit !== null && !isAgentTaskLimit(value.taskLimit)) throw new Error("Invalid task limit.");
+    result.taskLimit = value.taskLimit;
+  }
+  if (value.backupModels !== undefined) {
+    if (value.backupModels !== null && !isAgentBackupModels(value.backupModels))
+      throw new Error("Invalid backup models.");
+    result.backupModels = value.backupModels && {
+      automatic: value.backupModels.automatic,
+      order: value.backupModels.order.map(({ provider, model, providerAccountId }) => ({
+        provider,
+        model,
+        ...(providerAccountId === undefined ? {} : { providerAccountId }),
+      })),
+    };
+  }
+  if (value.leaveUsageLimit !== undefined) {
+    if (!isBoolean(value.leaveUsageLimit)) throw new Error("Invalid usage limit switch.");
+    result.leaveUsageLimit = value.leaveUsageLimit;
+  }
+  if (value.avatarSeed !== undefined) {
+    if (!isAvatarSeed(value.avatarSeed)) throw new Error("Invalid avatar seed.");
+    result.avatarSeed = value.avatarSeed;
+  }
+  if (value.avatarHue !== undefined) {
+    if (value.avatarHue !== null && !isAvatarHue(value.avatarHue)) {
+      throw new Error("Invalid avatar hue.");
+    }
+    result.avatarHue = value.avatarHue;
+  }
+  return result;
+}
+
+export function parseSetAgentAvatar(value: unknown): SetAgentAvatarInput {
+  if (!isObject(value)) throw new Error("Invalid agent avatar request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    image: parseAvatarImage(value.image),
+  };
+}
+
+export function parseImportAttachments(value: unknown): ImportAttachmentsInput {
+  if (!isObject(value) || !Array.isArray(value.paths) || !Array.isArray(value.data)) {
+    throw new Error("Invalid attachment import.");
+  }
+  if (value.paths.length + value.data.length > INPUT_LIMITS.attachments) {
+    throw new Error(sourceText("error.attachment.tooMany", { limit: INPUT_LIMITS.attachments }));
+  }
+  if (!value.paths.every((path) => isString(path) && path.length > 0 && path.length <= INPUT_LIMITS.path)) {
+    throw new Error("Invalid attachment path.");
+  }
+  const data = value.data.map((item) => {
+    if (
+      !isObject(item) ||
+      !isString(item.name) ||
+      item.name.length > INPUT_LIMITS.attachmentName ||
+      !isString(item.mimeType) ||
+      item.mimeType.length > INPUT_LIMITS.mimeType ||
+      !(item.bytes instanceof Uint8Array)
+    ) {
+      throw new Error("Invalid attachment data.");
+    }
+    return { name: item.name, mimeType: item.mimeType, bytes: item.bytes };
+  });
+  return { paths: value.paths, data };
+}
+
+/** A renderer can provide file bytes, but it cannot ask main to read a disk path. */
+export function parseAttachmentData(value: unknown): ImportAttachmentsInput["data"] {
+  if (!Array.isArray(value)) throw new Error("Invalid attachment data.");
+  return parseImportAttachments({ paths: [], data: value }).data;
+}
+
+export function parseChooseAttachments(value: unknown): ChooseAttachmentsInput {
+  if (!isObject(value) || (value.filter !== "all" && value.filter !== "images")) {
+    throw new Error("Invalid attachment picker filter.");
+  }
+  return { filter: value.filter };
+}
+
+export function parseDownloadAttachments(value: unknown): DownloadAttachmentsInput {
+  if (
+    !isObject(value) ||
+    !Array.isArray(value.attachments) ||
+    value.attachments.length < 3 ||
+    value.attachments.length > INPUT_LIMITS.attachments
+  ) {
+    throw new Error("Invalid attachment list.");
+  }
+  const attachments = value.attachments.map((item) => {
+    if (!isObject(item)) throw new Error("Invalid attachment.");
+    return {
+      id: requireString(item.id, "attachmentId"),
+      name: requireString(item.name, "attachment name", INPUT_LIMITS.attachmentName),
+    };
+  });
+  if (new Set(attachments.map((item) => item.id)).size !== attachments.length)
+    throw new Error("Duplicate attachments.");
+  return { attachments };
+}
+
+export function parseOpenAttachment(value: unknown): OpenAttachmentInput {
+  if (!isObject(value) || (value.action !== "open" && value.action !== "reveal" && value.action !== "download")) {
+    throw new Error("Invalid attachment action.");
+  }
+  return {
+    attachmentId: requireString(value.attachmentId, "attachmentId"),
+    action: value.action,
+  };
+}
+
+const FILE_ACTIONS: readonly FileAction[] = ["open", "reveal", "download"];
+
+function parseFileAction(value: unknown): FileAction {
+  if (value === undefined) return "open";
+  if (!isOneOf(FILE_ACTIONS, value)) throw new Error("Invalid file action.");
+  return value;
+}
+
+export function parseOpenSharedFile(value: unknown): OpenSharedFileInput {
+  if (!isObject(value)) throw new Error("Invalid shared file request.");
+  return { path: requireString(value.path, "path", INPUT_LIMITS.path), action: parseFileAction(value.action) };
+}
+
+export function parseOpenWorkspaceFile(value: unknown): OpenWorkspaceFileInput {
+  if (!isObject(value)) throw new Error("Invalid workspace file request.");
+  return {
+    agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier),
+    path: requireString(value.path, "path", INPUT_LIMITS.path),
+    action: parseFileAction(value.action),
+  };
+}
+
+export function parsePreviewSharedFile(value: unknown): PreviewSharedFileInput {
+  if (!isObject(value)) throw new Error("Invalid shared file request.");
+  return { ...parseOpenSharedFile(value), ...optionalPreviewByteLimit(value.maxBytes) };
+}
+
+export function parsePreviewWorkspaceFile(value: unknown): PreviewWorkspaceFileInput {
+  if (!isObject(value)) throw new Error("Invalid workspace file request.");
+  return { ...parseOpenWorkspaceFile(value), ...optionalPreviewByteLimit(value.maxBytes) };
+}
+
+function optionalPreviewByteLimit(value: unknown): { maxBytes?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > ATTACHMENT_LIMITS.fileBytes)
+    throw new Error("Invalid preview size limit.");
+  return { maxBytes: value };
+}
+
+export function parseCancelQueuedMessage(value: unknown): CancelQueuedMessageInput {
+  if (!isObject(value)) throw new Error("Invalid queue cancellation request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    deliveryId: requireString(value.deliveryId, "deliveryId"),
+  };
+}
+
+export function parseCancelAgentWait(value: unknown): CancelAgentWaitInput {
+  if (!isObject(value)) throw new Error("Invalid wait cancellation request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    waitId: requireString(value.waitId, "waitId"),
+  };
+}
+
+export function parseAcknowledgeFailedTurn(value: unknown): AcknowledgeFailedTurnInput {
+  if (!isObject(value)) throw new Error("Invalid failed turn acknowledgement.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    turnId: requireString(value.turnId, "turnId"),
+  };
+}
+
+export function parseSteerQueuedMessage(value: unknown): SteerQueuedMessageInput {
+  if (!isObject(value)) throw new Error("Invalid queued steer request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    deliveryId: requireString(value.deliveryId, "deliveryId"),
+    expectedTurnId: requireString(value.expectedTurnId, "expectedTurnId"),
+  };
+}
+
+export function parseUpdateQueuedMessage(value: unknown): UpdateQueuedMessageInput {
+  if (!isObject(value) || !isString(value.text)) {
+    throw new Error("Invalid queued message update request.");
+  }
+  if (value.text.length > INPUT_LIMITS.messageText) throw new Error(sourceText("error.agent.messageTooLong"));
+  const keepAttachmentIds = parseIdentifierList(value.keepAttachmentIds, "attachment ids");
+  const attachmentDraftIds = parseIdentifierList(value.attachmentDraftIds, "attachment drafts");
+  if (!value.text.trim() && keepAttachmentIds.length === 0 && attachmentDraftIds.length === 0) {
+    throw new Error(sourceText("error.agent.messageOrAttachmentRequired"));
+  }
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    deliveryId: requireString(value.deliveryId, "deliveryId"),
+    text: value.text,
+    keepAttachmentIds,
+    attachmentDraftIds,
+  };
+}
+
+export function parseReorderQueue(value: unknown): ReorderQueueInput {
+  if (!isObject(value)) throw new Error("Invalid queue reorder request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    deliveryIds: parseIdentifierList(value.deliveryIds, "delivery ids"),
+  };
+}
+
+function parseIdentifierList(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > INPUT_LIMITS.messageRecipients ||
+    !value.every((item) => isString(item) && item.length <= INPUT_LIMITS.identifier)
+  ) {
+    throw new Error(`Invalid ${label}.`);
+  }
+  if (new Set(value).size !== value.length) throw new Error(`Duplicate ${label}.`);
+  return value;
+}
+
+export function parseInterrupt(value: unknown): InterruptTurnInput {
+  if (!isObject(value)) throw new Error("Invalid interrupt request.");
+  return {
+    agentId: requireString(value.agentId, "agentId"),
+    turnId: requireString(value.turnId, "turnId"),
+  };
+}
+
+export function parsePromptResponse(value: unknown): RespondToPromptInput {
+  if (!isObject(value) || (!isString(value.requestId) && !isNumber(value.requestId))) {
+    throw new Error("Invalid prompt response.");
+  }
+  if (
+    (isString(value.requestId) && (value.requestId.length === 0 || value.requestId.length > INPUT_LIMITS.identifier)) ||
+    (isNumber(value.requestId) && !Number.isSafeInteger(value.requestId))
+  ) {
+    throw new Error("Invalid prompt response.");
+  }
+  if (!isObject(value.answers)) throw new Error("Prompt answers are required.");
+  const entries = Object.entries(value.answers);
+  if (entries.length > INPUT_LIMITS.promptQuestions) throw new Error("Too many prompt answers.");
+  const answers: Record<string, string[]> = {};
+  let totalTextLength = 0;
+  for (const [key, answer] of entries) {
+    if (
+      key.length > INPUT_LIMITS.identifier ||
+      !Array.isArray(answer) ||
+      answer.length > INPUT_LIMITS.promptAnswersPerQuestion ||
+      !answer.every((item) => isString(item) && item.length <= INPUT_LIMITS.promptAnswerText)
+    ) {
+      throw new Error("Invalid prompt answer.");
+    }
+    totalTextLength += answer.reduce((length, item) => length + item.length, 0);
+    if (totalTextLength > INPUT_LIMITS.promptAnswersTotalText) {
+      throw new Error(sourceText("error.agent.promptAnswersTooLong"));
+    }
+    answers[key] = answer;
+  }
+  return { requestId: value.requestId, answers };
+}
+
+export function parseApprovalResponse(value: unknown): RespondToApprovalInput {
+  if (!isObject(value) || (!isString(value.requestId) && !isNumber(value.requestId))) {
+    throw new Error("Invalid approval response.");
+  }
+  if (
+    (isString(value.requestId) && (value.requestId.length === 0 || value.requestId.length > INPUT_LIMITS.identifier)) ||
+    (isNumber(value.requestId) && !Number.isSafeInteger(value.requestId))
+  ) {
+    throw new Error("Invalid approval response.");
+  }
+  if (value.decision !== "accept" && value.decision !== "decline") {
+    throw new Error("Invalid approval decision.");
+  }
+  return { requestId: value.requestId, decision: value.decision };
+}
+
+export function parseBrowserTakeoverResponse(value: unknown): RespondToBrowserTakeoverInput {
+  if (!isObject(value) || (!isString(value.requestId) && !isNumber(value.requestId))) {
+    throw new Error("Invalid browser takeover response.");
+  }
+  if (
+    (isString(value.requestId) && (value.requestId.length === 0 || value.requestId.length > INPUT_LIMITS.identifier)) ||
+    (isNumber(value.requestId) && !Number.isSafeInteger(value.requestId)) ||
+    (value.decision !== "complete" && value.decision !== "cancel")
+  ) {
+    throw new Error("Invalid browser takeover response.");
+  }
+  return { requestId: value.requestId, decision: value.decision };
+}
+
+export function parseQueueEdit(value: unknown): EditQueuedMessageInput {
+  if (!isObject(value)) throw new Error("Invalid queue edit request.");
+  return { agentId: parseAgentId(value.agentId), ...decodeQueueEditRequest(value) };
+}
+
+export function parseSetAgentMemoryInclusion(value: unknown): SetAgentMemoryInclusionInput {
+  if (!isObject(value) || !Array.isArray(value.changes) || value.changes.length === 0 || value.changes.length > 25)
+    throw new Error("Invalid memory inclusion request.");
+  const changes = value.changes.map((change): AgentMemorySelectionChange => {
+    if (
+      !isObject(change) ||
+      (change.inclusion !== "essential" && change.inclusion !== "searchable" && change.inclusion !== "automatic") ||
+      typeof change.expectedRevision !== "number" ||
+      !Number.isSafeInteger(change.expectedRevision) ||
+      change.expectedRevision < 0
+    )
+      throw new Error("Invalid memory inclusion change.");
+    return {
+      memoryId: requireString(change.memoryId, "memoryId", INPUT_LIMITS.identifier),
+      inclusion: change.inclusion,
+      expectedRevision: change.expectedRevision,
+    };
+  });
+  if (new Set(changes.map((change) => change.memoryId)).size !== changes.length)
+    throw new Error("Duplicate memory inclusion change.");
+  return { agentId: requireString(value.agentId, "agentId", INPUT_LIMITS.identifier), changes };
+}

@@ -1,0 +1,62 @@
+import { isString } from "@openbot/contracts/runtime-values";
+import { createFileRoute } from "@tanstack/solid-router";
+import { Effect } from "effect";
+import { runApiResponse } from "../../../server/effect-runtime";
+import { readMultipartFormData } from "../../../server/json-body";
+import {
+  apiError,
+  enforceMarketplaceMutationRateLimit,
+  json,
+  marketplaceErrorResponse,
+  requestAgentTemplates,
+  requestUser,
+} from "../../../server/request-auth";
+
+const TEMPLATE_BODY_LIMIT = 8 * 1024 * 1024;
+
+export const Route = createFileRoute("/v1/agent-templates/")({
+  server: {
+    handlers: {
+      POST: ({ request }) =>
+        runApiResponse(
+          Effect.gen(function* () {
+            const user = yield* requestUser(request);
+            if (!user) return apiError(401, "unauthorized", "Sign in is required.");
+            yield* enforceMarketplaceMutationRateLimit("upload", user.id);
+            const form = yield* readMultipartFormData(request, TEMPLATE_BODY_LIMIT);
+            const snapshotText = form.get("snapshot");
+            const avatar = form.get("avatar");
+            const card = form.get("card");
+            if (!isString(snapshotText)) return apiError(400, "invalid_template", "An agent template is required.");
+            if (avatar !== null && !(avatar instanceof File))
+              return apiError(400, "invalid_avatar", "The avatar is invalid.");
+            if (card !== null && !(card instanceof File))
+              return apiError(400, "invalid_card", "The share card must be a 1200×630 PNG.");
+            let snapshot: unknown;
+            try {
+              snapshot = JSON.parse(snapshotText);
+            } catch {
+              return apiError(400, "invalid_template", "Invalid agent template.");
+            }
+            return json(
+              yield* requestAgentTemplates().publish({
+                user,
+                sourceAgentId: form.get("sourceAgentId"),
+                snapshot,
+                avatar:
+                  avatar instanceof File
+                    ? {
+                        bytes: new Uint8Array(yield* Effect.promise(() => avatar.arrayBuffer())),
+                        mimeType: avatar.type,
+                      }
+                    : null,
+                card: card instanceof File ? new Uint8Array(yield* Effect.promise(() => card.arrayBuffer())) : null,
+              }),
+              201,
+            );
+          }),
+          marketplaceErrorResponse,
+        ),
+    },
+  },
+});

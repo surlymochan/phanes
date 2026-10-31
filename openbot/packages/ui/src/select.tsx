@@ -1,0 +1,118 @@
+import type { PolymorphicProps } from "@kobalte/core/polymorphic";
+import * as SelectPrimitive from "@kobalte/core/select";
+import type { ComponentProps, JSX, ValidComponent } from "@solidjs/web";
+import Check from "lucide-solid/icons/check";
+import ChevronsUpDown from "lucide-solid/icons/chevrons-up-down";
+import { children, omit, Show } from "solid-js";
+import { createPressedPopupCue, cx } from "./utils";
+
+export type SelectProps<Option, OptGroup = never, T extends ValidComponent = "div"> = PolymorphicProps<
+  T,
+  SelectPrimitive.SelectRootProps<Option, OptGroup, T>
+> &
+  Pick<ComponentProps<T>, "class" | "children">;
+
+export function Select<Option, OptGroup = never, T extends ValidComponent = "div">(
+  props: SelectProps<Option, OptGroup, T>,
+): JSX.Element {
+  const others = omit(props, "class");
+  return (
+    <SelectPrimitive.Root<Option, OptGroup, T>
+      {...others}
+      class={cx("ui-select", props.class)}
+      gutter={props.gutter ?? 4}
+      placement={props.placement ?? "bottom"}
+      sameWidth={props.sameWidth ?? true}
+    />
+  );
+}
+
+export type SelectTriggerProps = PolymorphicProps<"button", SelectPrimitive.SelectTriggerProps<"button">> &
+  Pick<ComponentProps<"button">, "class" | "children"> & {
+    size?: "sm" | "md" | undefined;
+  };
+
+export function SelectTrigger(rawProps: SelectTriggerProps): JSX.Element {
+  const others = omit(rawProps, "class", "children", "size");
+  const press = createPressedPopupCue();
+  return (
+    <SelectPrimitive.Trigger
+      class={cx("ui-select-trigger", rawProps.class)}
+      data-size={rawProps.size ?? "md"}
+      data-slot="select-trigger"
+      data-cuelume-open={press.cue()}
+      data-cuelume-emphasis="subtle"
+      {...others}
+      ref={[rawProps.ref, press.ref]}
+    >
+      {rawProps.children}
+      <SelectPrimitive.Icon class="ui-select-trigger-icon">
+        <ChevronsUpDown aria-hidden="true" />
+      </SelectPrimitive.Icon>
+    </SelectPrimitive.Trigger>
+  );
+}
+
+export type SelectValueProps<Option> = PolymorphicProps<"span", SelectPrimitive.SelectValueProps<Option, "span">> &
+  Pick<ComponentProps<"span">, "class">;
+
+export function SelectValue<Option>(props: SelectValueProps<Option>): JSX.Element {
+  const others = omit(props, "class");
+  return (
+    <SelectPrimitive.Value<Option, "span">
+      class={cx("ui-select-value", props.class)}
+      data-slot="select-value"
+      {...others}
+    />
+  );
+}
+
+export type SelectContentProps = PolymorphicProps<"div", SelectPrimitive.SelectContentProps<"div">> &
+  Pick<ComponentProps<"div">, "class"> & {
+    mount?: Element | undefined;
+    /** Under the options and outside the listbox, such as a form that adds an option. */
+    footer?: JSX.Element;
+  };
+
+export function SelectContent(props: SelectContentProps): JSX.Element {
+  const others = omit(props, "class", "mount", "footer");
+  const footer = children(() => props.footer);
+  let contentElement: HTMLElement | undefined;
+  return (
+    <SelectPrimitive.Portal mount={props.mount ?? document.body}>
+      <SelectPrimitive.Content
+        ref={(element) => {
+          contentElement = element;
+        }}
+        class={cx("ui-select-content", props.class)}
+        data-slot="select-content"
+        {...others}
+      >
+        <SelectPrimitive.Listbox class="ui-select-listbox" scrollRef={() => contentElement} />
+        <Show when={footer.toArray().length > 0}>
+          <div class="ui-select-footer">{footer()}</div>
+        </Show>
+      </SelectPrimitive.Content>
+    </SelectPrimitive.Portal>
+  );
+}
+
+export type SelectItemProps = PolymorphicProps<"li", SelectPrimitive.SelectItemProps<"li">> &
+  Pick<ComponentProps<"li">, "class" | "children">;
+
+export function SelectItem(props: SelectItemProps): JSX.Element {
+  const others = omit(props, "class", "children");
+  return (
+    <SelectPrimitive.Item
+      class={cx("ui-select-item", props.class)}
+      data-slot="select-item"
+      data-cuelume-select=""
+      {...others}
+    >
+      <SelectPrimitive.ItemLabel class="ui-select-item-label">{props.children}</SelectPrimitive.ItemLabel>
+      <SelectPrimitive.ItemIndicator class="ui-select-item-indicator">
+        <Check aria-hidden="true" />
+      </SelectPrimitive.ItemIndicator>
+    </SelectPrimitive.Item>
+  );
+}

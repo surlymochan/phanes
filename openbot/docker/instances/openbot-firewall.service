@@ -1,0 +1,14 @@
+# Applies the firewall of the OpenBot instances before Docker starts their containers.
+# `openbot-instance setup` installs it. See docs/docker.md#several-instances-on-one-host.
+[Unit]
+Description=Firewall of the OpenBot Docker instances
+After=ufw.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/openbot-docker/instances/openbot-firewall
+
+[Install]
+WantedBy=multi-user.target docker.service

@@ -1,0 +1,50 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/queue";
+
+export const messages = {
+  "queue.label": "File d’attente des messages",
+  "queue.moved": "Message en attente déplacé en position {position} sur {total}.",
+  "queue.attachment": "Pièce jointe",
+  "queue.hold.named": "En attente – {name} travaille dans {channel}",
+  "queue.hold.unnamed": "En attente – cet agent travaille dans {channel}",
+  "queue.item.label": "Message en attente {position} : {preview}",
+  "queue.item.labelEditing": "Message en attente {position}, en cours de modification : {preview}",
+  "queue.item.editing": "Modification",
+  "queue.item.steerLabel": "Orienter le message en attente {position}",
+  "queue.item.steerTooltip": "Orienter le message",
+  "queue.item.steering": "Orientation",
+  "queue.item.steer": "Orienter",
+  "queue.item.notSteered": "Non orienté",
+  "queue.item.steerFallback.providerUnsupported":
+    "Ce fournisseur ne peut pas orienter un tour en cours : le message attend dans la file.",
+  "queue.item.steerFallback.steerFailed": "L’orientation a échoué : le message attend dans la file.",
+  "queue.item.runAsTask": "Exécuter dans un nouveau fil",
+  "queue.item.runAsTaskLabel": "Exécuter le message en attente {position} dans un nouveau fil",
+  "queue.item.deleteLabel": "Supprimer le message en attente {position}",
+  "queue.item.deleteTooltip": "Supprimer le message",
+  "queue.item.editLabel": "Modifier le message en attente {position}",
+  "queue.item.editTooltip": "Modifier le message",
+  "queue.deleteHeld.title": "Supprimer le message en attente ?",
+  "queue.deleteHeld.body": "Un autre appareil modifie ce message. L’agent ne le recevra pas.",
+  "queue.deleteHeld.keep": "Conserver",
+  "queue.waiting.status": { one: "{count} message attend", other: "{count} messages attendent" },
+  "queue.paused.status": {
+    one: "En pause · {count} message conservé",
+    other: "En pause · {count} messages conservés",
+  },
+  "queue.pause": "Mettre en pause",
+  "queue.pause.tooltip":
+    "Ne lancez aucun message en attente avant de reprendre. Le travail en cours continue et rien n’est perdu.",
+  "queue.resume": "Reprendre",
+  "queue.resume.tooltip": "Relancez les messages en attente, dans l’ordre",
+  "queue.clearAll.label": "Supprimer tous les messages en attente",
+  "queue.clearAll.tooltip": "Supprimer tous les messages en attente",
+  "queue.clearAll.title": {
+    one: "Supprimer {count} message en attente ?",
+    other: "Supprimer {count} messages en attente ?",
+  },
+  "queue.clearAll.body": "L’agent ne les recevra pas. Le travail en cours continue.",
+  "queue.clearAll.confirm": "Tout supprimer",
+  "queue.item.runNowLabel": "Arrêter le travail en cours et exécuter maintenant le message en attente {position}",
+  "queue.item.runNowTooltip": "Exécuter maintenant : arrêter le travail en cours et lancer ce message ensuite",
+} as const satisfies PartialTranslation<typeof source>;

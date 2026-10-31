@@ -1,0 +1,109 @@
+import type { RoutineSchedule } from "@openbot/contracts/ipc";
+import type { AppMessages } from "@openbot/i18n";
+import { currentText, type TextValue } from "../../text";
+
+export { routineTimeMinutes } from "@openbot/team-client/routine-schedule-draft";
+
+export interface RoutineSelectOption {
+  value: string;
+  label: string;
+}
+
+/** The translator and formats a routine label needs. It defaults to the app's interface language. */
+export type RoutineText = Pick<TextValue, "t" | "format">;
+
+const INTERVAL_SUMMARY = {
+  minutes: "routine.summary.intervalMinutes",
+  hours: "routine.summary.intervalHours",
+  days: "routine.summary.intervalDays",
+} as const satisfies Record<Extract<RoutineSchedule, { kind: "interval" }>["unit"], keyof AppMessages>;
+
+/** A date on the weekday `day` (0 is Sunday), for a weekday name in the interface language. */
+function weekdayDate(day: number): Date {
+  // January 7, 2024 is a Sunday.
+  return new Date(2024, 0, 7 + (((day % 7) + 7) % 7));
+}
+
+/** "Sunday", "Sun" or "S". */
+export function routineWeekdayText(
+  day: number,
+  width: "long" | "short" | "narrow",
+  text: RoutineText = currentText(),
+): string {
+  return text.format.date(weekdayDate(day), { weekday: width });
+}
+
+export function routineScheduleSummary(
+  schedule: RoutineSchedule,
+  sentence = false,
+  text: RoutineText = currentText(),
+): string {
+  const { t } = text;
+  switch (schedule.kind) {
+    case "once": {
+      const [year = 0, month = 1, day = 1] = schedule.date.split("-").map(Number);
+      // UTC noon, so that no zone moves the saved date to another day.
+      const date = text.format.date(Date.UTC(year, month - 1, day, 12), {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "UTC",
+      });
+      return t("routine.draftSummary.once", { date, time: formatRoutineClock(schedule.time, text) });
+    }
+    case "hourly":
+      return t("routine.summary.hourly", { minute: String(schedule.minute).padStart(2, "0") });
+    case "daily": {
+      const time = formatRoutineClock(schedule.time, text);
+      return sentence ? t("routine.summary.dailySentence", { time }) : t("routine.summary.daily", { time });
+    }
+    case "weekdays": {
+      const time = formatRoutineClock(schedule.time, text);
+      return sentence ? t("routine.summary.weekdaysSentence", { time }) : t("routine.summary.weekdays", { time });
+    }
+    case "weekly": {
+      const params = {
+        weekday: routineWeekdayText(schedule.weekday, "long", text),
+        time: formatRoutineClock(schedule.time, text),
+      };
+      return sentence ? t("routine.summary.weeklySentence", params) : t("routine.summary.weekly", params);
+    }
+    case "monthly": {
+      const params = { day: schedule.day, time: formatRoutineClock(schedule.time, text) };
+      return sentence ? t("routine.summary.monthlySentence", params) : t("routine.summary.monthly", params);
+    }
+    case "interval":
+      return t(INTERVAL_SUMMARY[schedule.unit], { amount: schedule.amount });
+    case "advanced":
+      return t("routine.summary.advanced");
+    case "custom":
+      return t("routine.summary.cron", { expression: schedule.expression });
+  }
+}
+
+/** "9:00 AM", or "09:00" where the date locale writes a 24-hour clock. */
+export function formatRoutineClock(value: string, text: RoutineText = currentText()): string {
+  const [hourText = "0", minuteText = "0"] = value.split(":");
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  if (!text.format.hour12) return routineClock24Text(hour, minute, text);
+  return routineClockText(`${hour % 12 || 12}:${String(minute).padStart(2, "0")}`, hour >= 12, text);
+}
+
+/** A wall-clock time on a 24-hour clock, with the separator of the date locale: "16:00", "16.00". */
+function routineClock24Text(hour: number, minute: number, text: RoutineText): string {
+  // UTC, so that no clock change of the local zone moves the time.
+  return text.format.date(Date.UTC(2024, 0, 1, hour, minute), {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "UTC",
+  });
+}
+
+/** `time` ("9" or "9:30") with its half of the day. */
+export function routineClockText(time: string, pm: boolean, text: RoutineText = currentText()): string {
+  const meridiem = pm ? text.t("routine.clock.pm") : text.t("routine.clock.am");
+  return text.t("routine.clock.withMeridiem", { time, meridiem });
+}

@@ -1,0 +1,91 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/webClient";
+
+export const messages = {
+  "webClient.loading": "OpenBot wird geladen…",
+  "webClient.loadingLine.wake": "Agenten werden geweckt…",
+  "webClient.loadingLine.coffee": "Kaffee für die Agenten wird eingeschenkt…",
+  "webClient.loadingLine.tokens": "Tokens werden an den Fingern abgezählt…",
+  "webClient.loadingLine.prompts": "Prompts werden entwirrt…",
+  "webClient.loadingLine.sleepy": "Der schläfrige Agent wird nett gebeten…",
+  "webClient.loadingLine.almost": "Fast geschafft. Wahrscheinlich.",
+  "webClient.login.failed": "Anmeldung fehlgeschlagen.",
+  "webClient.login.requestFailed": "Die Kontoanfrage ist fehlgeschlagen.",
+  "webClient.login.sessionFailed": "Diese Sitzung konnte nicht geprüft werden.",
+  "webClient.login.wait": "Warte, bevor du einen weiteren Code anforderst.",
+  "webClient.login.accountInvalid": "Die Kontoantwort ist ungültig.",
+  "webClient.login.responseInvalid": "Die Anmeldeantwort ist ungültig.",
+  "webClient.pane.navigation": "Arbeitsbereich-Navigation",
+  "webClient.pane.chat": "Chat",
+  "webClient.pane.routines": "Routinen",
+  "webClient.pane.workspace": "Arbeitsbereich",
+  "webClient.notice.connecting": "Verbindung mit deinem Server wird hergestellt",
+  "webClient.notice.findingHosts": "Deine Server werden gesucht",
+  "webClient.notice.hostsFailed": "Deine Server konnten nicht geladen werden",
+  "webClient.notice.connectComputer": "Verbinde einen Server",
+  "webClient.connect.description":
+    "Starte OpenBot auf deinem Computer, um über diesen Browser mit deinen Agenten zu chatten. Du kannst auch mit einer Einladung einem Server beitreten.",
+  "webClient.connect.descriptionHosted":
+    "Erstelle einen gehosteten Server, um über diesen Browser mit deinen Agenten zu chatten. Du kannst OpenBot auch auf deinem Computer starten oder mit einer Einladung einem Server beitreten.",
+  "webClient.connect.stepInstall": "Installiere und öffne OpenBot auf deinem Computer.",
+  "webClient.connect.stepSignIn": "Melde dich mit deiner E-Mail-Adresse an.",
+  "webClient.connect.stepRemote": "Aktiviere den Fernzugriff.",
+  "webClient.notice.download": "OpenBot herunterladen",
+  "webClient.notice.createServer": "Gehosteten Server erstellen",
+  "webClient.notice.join": "Mit Einladung beitreten",
+  "webClient.notice.refreshHosts": "Server aktualisieren",
+  "webClient.agent.modelsFailed": "Die Modelle des Servers konnten nicht geladen werden.",
+  "webClient.agent.refreshFailed":
+    "Der Agent wurde erstellt, aber der Arbeitsbereich konnte nicht aktualisiert werden. Lade ihn neu, bevor du es erneut versuchst.",
+  "webClient.agent.unconfirmed":
+    "Das Ergebnis ist nicht bestätigt. Schließe dieses Formular und prüfe den Server, bevor du es erneut versuchst.",
+  "webClient.error.usageOffline": "Verbinde dich mit deinem Server, um die Nutzung anzuzeigen.",
+  "webClient.error.desktopOnly": "Diese Aktion ist in der Desktop-App verfügbar.",
+  "webClient.settings.preferences.title": "Einstellungen",
+  "webClient.settings.preferences.description": "Wähle die Sprache und Töne von OpenBot in diesem Browser.",
+  "webClient.error.checkConversation": "Prüfe die Unterhaltung, bevor du erneut sendest.",
+  "webClient.error.hostReported": "Der Server hat einen Fehler gemeldet. Prüfe die Unterhaltung und den Serverstatus.",
+  "webClient.error.requestFailed": "Die Anfrage ist fehlgeschlagen.",
+  "webClient.error.accessEnded": "Der Zugriff auf diesen Server ist beendet.",
+  "webClient.error.hostsFailed": "Deine Server konnten nicht geladen werden.",
+  "webClient.error.enterInvitation": "Gib einen Einladungslink ein.",
+  "webClient.error.invitationOffline":
+    "Die Einladung wurde angenommen, aber der Server ist offline. Versuche es erneut.",
+  "webClient.error.otherConversation": "Der Server hat eine andere Unterhaltung zurückgegeben.",
+  "webClient.error.messageTooLong": "Die Nachricht ist zu lang.",
+  "webClient.error.deliveryUnconfirmed":
+    "Die Zustellung der Nachricht ist nicht bestätigt. Aktualisiere und prüfe die Unterhaltung, bevor du erneut sendest.",
+  "webClient.error.sidebarLayout": "Dieser Server unterstützt keine Änderungen am Seitenleistenlayout.",
+  "webClient.error.deleteOffline": "Verbinde dich mit deinem Server, bevor du einen Agenten löschst.",
+  "webClient.error.attachmentLimit": "Eine Nachricht kann bis zu {limit} Anhänge enthalten.",
+  "webClient.error.linkBlocked": "Dieser Link kann nicht geöffnet werden.",
+  "webClient.error.fileTransfer": "Die Dateiübertragung ist fehlgeschlagen.",
+  "webClient.error.noLocks":
+    "Dieser Browser kann die Serververbindung nicht schützen. Verwende einen aktuellen Desktop-Browser.",
+  "webClient.error.otherTab":
+    "Dieser Server ist in einem anderen Tab geöffnet. Schließe diese Verbindung, bevor du es erneut versuchst.",
+  "webClient.error.connectionClosed": "Die Browserverbindung ist geschlossen.",
+  "webClient.error.hostChanged": "Der ausgewählte Server hat sich geändert.",
+  "webClient.error.requestIncomplete":
+    "Der Server konnte diese Anfrage nicht abschließen. Aktualisiere, bevor du es erneut versuchst.",
+  "webClient.error.viewEnded": "Die Browseransicht wurde beendet.",
+  "webClient.error.viewChanged": "Die Browseransicht hat sich geändert.",
+  "webClient.error.connectionChanging": "Die Serververbindung ändert sich.",
+  "webClient.error.identityChanged": "Die Identität des Servers hat sich geändert. Verbindung abgelehnt.",
+  "webClient.error.connectionUnavailable": "Die Serververbindung ist nicht verfügbar.",
+  "webClient.error.incompatible":
+    "Dieser Server ist nicht mit OpenBot Web kompatibel. Aktualisiere den Server und lade diese Seite neu.",
+  "webClient.error.sendUnconfirmed":
+    "Die Zustellung der Nachricht ist nicht bestätigt. Aktualisiere, bevor du sie erneut sendest.",
+  "webClient.error.fileType": "Aktualisiere den Server, um diesen Dateityp anzuhängen.",
+  "webClient.error.uploadCancelled": "Das Hochladen des Anhangs wurde abgebrochen.",
+  "webClient.error.duplication": "Dieser Server unterstützt das Duplizieren von Agenten nicht.",
+  "webClient.error.connectServerFirst": "Verbinde dich zuerst mit diesem Server.",
+  "webClient.error.agentInstallNotAllowed":
+    "Nur Eigentümer oder Administratoren können hier einen Agenten hinzufügen. Der Server muss eine aktuelle OpenBot-Version ausführen.",
+  "webClient.error.linkDesktopOnly": "Dieser Link öffnet sich nur in der Desktop-App.",
+  "webClient.error.saveEndpointOffline": "Verbinde dich mit deinem Server, um einen Endpunkt zu speichern.",
+  "webClient.error.removeEndpointOffline": "Verbinde dich mit deinem Server, um einen Endpunkt zu entfernen.",
+  "webClient.error.hostNotConnected": "Der Server ist nicht verbunden.",
+  "webClient.error.memberNotFound": "Das Mitglied existiert nicht.",
+} as const satisfies PartialTranslation<typeof source>;

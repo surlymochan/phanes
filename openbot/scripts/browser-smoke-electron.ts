@@ -1,0 +1,3865 @@
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { BrowserBounds } from "@openbot/contracts/ipc";
+import { type DynamicRecord, isDynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
+import { Effect } from "effect";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  type DownloadItem,
+  type Event as ElectronEvent,
+  type WebContents,
+  type WebContentsConsoleMessageEventParams,
+  webContents,
+} from "electron";
+import { BrowserUploads } from "../src/backend/agent/browser-uploads";
+import { attachmentCall } from "../src/backend/attachment-effects";
+import { BrowserHost } from "../src/backend/browser-host";
+import { runCauseEffect } from "../src/backend/effect-boundary";
+import { type DynamicToolResult, getString } from "../src/backend/protocol";
+import { runSecretHandoffScenario } from "./browser-secret-smoke";
+import { waitForPresentedFrame } from "./browser-smoke-frames";
+
+let cachedPageVersion = 1;
+let slowDocumentVersion = 0;
+// `/slow-document?action` stays open until the smoke releases it, so the navigation that the timed
+// click starts is still pending when the click reaches its deadline.
+let actionNavigationRequests = 0;
+let releaseActionNavigation = (): void => {};
+const actionNavigationReleased = new Promise<void>((resolve) => {
+  releaseActionNavigation = resolve;
+});
+let browserToolCall = 0;
+// The user agent each `/headers` hit carried, keyed by `?source=`. A subframe request that
+// bypasses the session identity shows up here under its own source with the raw build string.
+const recordedIdentityAgents: Record<string, string> = {};
+
+interface PersistenceSnapshot {
+  ready: true;
+  cookie: string;
+  localStorage: string | null;
+  indexedDb: string | null;
+}
+
+const server = createServer((request, response) => {
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  if (url.pathname === "/popup-parent") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<style>
+      html { overflow-y: scroll; }
+      body { min-height: 120vh; }
+      ::-webkit-scrollbar { width: 16px; }
+      </style><h1>Sign in</h1>
+      <button onclick="window.auth = window.open('/popup-login', 'auth')"><span style="display:block">Sign in with account</span></button>
+      <button onclick="window.auth = window.open('', 'auth'); auth.location.href='/popup-login'">Blank popup</button>
+      <button onclick="window.open('http://localhost:' + location.port + '/popup-login', 'cross-auth')">Cross-origin sign-in</button>
+      <iframe title="Embedded sign-in" src="http://localhost:${request.headers.host?.split(":").at(-1)}/popup-launcher"></iframe>
+      <a href="/popup-login" target="_blank">Independent tab</a>
+      <form action="/popup-post" method="POST" target="_blank"><input name="state" value="local-state"><button>Post sign-in</button></form>
+      <p id="result">Signed out</p><script>
+      document.cookie='popup_session=shared; Path=/';
+      addEventListener('resize', () => {
+        const expected = window.callbackViewport;
+        if (expected) {
+          window.callbackExpired = true;
+        }
+      });
+      addEventListener('message', event => {
+        if (event.origin === location.origin && event.data === 'signed-in') document.querySelector('#result').textContent = window.callbackExpired ? 'Sign-in expired after resize' : 'Signed in';
+      });
+      </script>`);
+    return;
+  }
+  if (url.pathname === "/popup-launcher") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<button onclick="window.open('/popup-login', 'frame-auth')"><span style="display:block">Iframe sign-in</span></button>
+      <div style="position:relative;width:max-content">
+        <button onclick="window.open('/popup-login', 'blocked-auth')"><span>Blocked frame sign-in</span></button>
+        <div style="position:absolute;inset:0">Covering layer</div>
+      </div>`);
+    return;
+  }
+  if (url.pathname === "/popup-login") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(
+      `<h1>Choose account</h1><button onclick="location.href='http://127.0.0.1:' + location.port + '/popup-callback'"><span style="display:block">Use test account</span></button>`,
+    );
+    return;
+  }
+  if (url.pathname === "/popup-callback") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<script>opener.parent.postMessage('signed-in', location.origin); window.close();</script>`);
+    return;
+  }
+  if (url.pathname === "/popup-post") {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(
+        `<h1>${request.method === "POST" && body === "state=local-state" ? "Post received" : "Post lost"}</h1>`,
+      );
+    });
+    return;
+  }
+  if (url.pathname === "/cached") {
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    });
+    response.end(`<main>version:${cachedPageVersion}</main>`);
+    return;
+  }
+  if (url.pathname === "/download") {
+    response.writeHead(200, {
+      "content-type": "text/plain",
+      "content-disposition": 'attachment; filename="openbot-smoke.txt"',
+    });
+    response.end("local download");
+    return;
+  }
+  if (url.pathname === "/settle") {
+    response.setHeader("content-type", "text/plain; charset=utf-8");
+    setTimeout(() => response.end("settled"), 100);
+    return;
+  }
+  if (url.pathname === "/cookie") {
+    if (url.searchParams.has("set")) response.setHeader("set-cookie", "openbot=shared; Path=/");
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<main>cookie:${request.headers.cookie ?? "none"}</main><span data-load-environment></span><script>
+      document.querySelector('[data-load-environment]').textContent = 'load-environment:' + innerWidth + ':' + (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') + ':' + (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' : 'motion');
+    </script>`);
+    return;
+  }
+  if (url.pathname === "/headers") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    recordedIdentityAgents[url.searchParams.get("source") ?? "document"] = String(request.headers["user-agent"] ?? "");
+    const requestHeaders = JSON.stringify(request.headers).replaceAll("<", "\\u003c");
+    response.end(`<main></main><script>
+      document.querySelector("main").textContent = JSON.stringify({
+        requestHeaders: ${requestHeaders},
+        navigatorUserAgent: navigator.userAgent,
+        navigatorBrands: navigator.userAgentData?.brands ?? [],
+        navigatorPlatform: navigator.userAgentData?.platform,
+        navigatorMobile: navigator.userAgentData?.mobile,
+        navigatorWebdriver: navigator.webdriver,
+      });
+    </script>`);
+    return;
+  }
+  if (url.pathname === "/abort") {
+    response.destroy();
+    return;
+  }
+  if (url.pathname === "/identity-frame") {
+    // The frame and the worker below are cross-origin to this host on purpose: same-origin
+    // subresources already inherit the session identity, while out-of-process frames and
+    // service workers can fall back to the raw build string instead.
+    const host = request.headers.host ?? "127.0.0.1";
+    const sibling = host.startsWith("127.0.0.1")
+      ? host.replace("127.0.0.1", "localhost")
+      : host.replace("localhost", "127.0.0.1");
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(
+      `<main>identity frame host</main><iframe title="Identity frame" src="http://${sibling}/headers?source=iframe"></iframe>
+<script>navigator.serviceWorker?.register("/sw-identity.js").catch(() => undefined);</script>`,
+    );
+    return;
+  }
+  if (url.pathname === "/sw-identity.js") {
+    response.setHeader("content-type", "application/javascript; charset=utf-8");
+    response.end(`self.addEventListener("install", (event) => {
+  event.waitUntil(fetch("/headers?source=worker").then(() => self.skipWaiting()).catch(() => undefined));
+});`);
+    return;
+  }
+  if (url.pathname === "/headers-report") {
+    response.setHeader("content-type", "application/json; charset=utf-8");
+    response.end(JSON.stringify(recordedIdentityAgents));
+    return;
+  }
+  if (url.pathname === "/clipboard-frame") {
+    // An editor in a frame of another origin, which keeps the text of the last paste event.
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<textarea style="position:fixed;inset:0;width:100%;height:100%"></textarea>
+      <script>document.querySelector('textarea').addEventListener('paste', event => {
+        window.__pasteEvent = event.clipboardData.getData('text/plain');
+      });</script>`);
+    return;
+  }
+  if (url.pathname === "/frame") {
+    const frameActionLabel = url.searchParams.get("action_label") ?? "Frame action";
+    const frameFileLabel = url.searchParams.get("file_label") ?? "Frame files";
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(
+      `<button aria-label="${frameActionLabel}" onclick="const trusted=event.isTrusted;fetch('/settle').then(()=>{this.textContent='Frame settled:5:'+trusted})">${frameActionLabel}</button>
+       <button aria-label="Schedule frame navigation" onclick="setTimeout(() => location.href='/frame-next', 1000)">Schedule frame navigation</button>
+       <input aria-label="Frame field" oninput="document.querySelector('output').textContent='Frame input:' + this.value + ':' + event.isTrusted" onkeydown="if (event.key === 'Enter') document.querySelector('output').textContent += '|Frame key:' + event.isTrusted" />
+       <input type="file" aria-label="${frameFileLabel}" />
+       <output>Frame ready</output>`,
+    );
+    return;
+  }
+  if (url.pathname === "/frame-next") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(
+      `<button aria-label="Replacement frame action">Replacement frame action</button><input type="file" aria-label="Frame files" />`,
+    );
+    return;
+  }
+  if (url.pathname === "/same-frame") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(
+      `<button aria-label="Same-origin action" onclick="document.querySelector('output').textContent='Same-origin:' + event.isTrusted">Same-origin action</button>
+       <label>Mode <select aria-label="Same-origin mode" oninput="this.dataset.inputTrusted=String(event.isTrusted)" onchange="this.dataset.changeTrusted=String(event.isTrusted)"><option value="a">Alpha</option><option value="b">Beta</option></select></label>
+       <label>Collision <select aria-label="Same-origin collision"><option value="first">target</option><option value="target">Second</option><option value="third">Second</option></select></label>
+       <label>Tags <select multiple size="3" aria-label="Same-origin tags" oninput="this.dataset.inputTrusted=String(event.isTrusted)" onchange="this.dataset.changeTrusted=String(event.isTrusted)"><option value="a">Alpha</option><option value="b">Beta</option><option value="c">Gamma</option></select></label>
+       <label><input type="radio" name="same-choice" aria-label="Same-origin primary choice" checked />Primary</label>
+       <input aria-label="Same-origin field" value="a" />
+       <output>Same-origin ready</output>`,
+    );
+    return;
+  }
+  if (url.pathname === "/frame-files") {
+    const label = url.searchParams.get("file_label") ?? "Nested files";
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<input type="file" aria-label="${label}" /><output>${label} ready</output>`);
+    return;
+  }
+  // Its own page rather than more markup on `/v2`: that page's height and width are asserted against
+  // a 220x560 panel, and a block form plus a default-sized iframe put a scrollbar in it.
+  // A canvas application: the grid is painted, so it has no element to focus, no value to set, and
+  // nothing for a semantic target to find. It reads keystrokes from the page the way a spreadsheet
+  // does -- characters build the pending cell, Tab commits it and moves a column right, Enter
+  // commits it and moves a row down.
+  if (url.pathname === "/grid") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><body style="margin:0">
+      <canvas id="grid" width="400" height="200"></canvas>
+      <input aria-label="Grid filter" />
+      <output id="grid-state">{}</output>
+      <script>
+        const cells = {};
+        const canvas = document.getElementById('grid');
+        const state = document.getElementById('grid-state');
+        let row = 0;
+        let column = 0;
+        let pending = '';
+        const commit = () => {
+          if (pending) cells[String.fromCharCode(65 + column) + (row + 1)] = pending;
+          pending = '';
+          state.textContent = JSON.stringify(cells);
+        };
+        canvas.addEventListener('mousedown', (event) => {
+          const bounds = canvas.getBoundingClientRect();
+          commit();
+          column = Math.floor((event.clientX - bounds.left) / 100);
+          row = Math.floor((event.clientY - bounds.top) / 40);
+        });
+        window.addEventListener('keydown', (event) => {
+          if (event.key !== 'Tab' && event.key !== 'Enter') return;
+          event.preventDefault();
+          commit();
+          if (event.key === 'Tab') column += 1;
+          else {
+            row += 1;
+            column = 0;
+          }
+        });
+        window.addEventListener('keypress', (event) => {
+          if (event.key.length === 1) pending += event.key;
+        });
+      </script>`);
+    return;
+  }
+  if (url.pathname === "/keys") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html>
+      <form onsubmit="event.preventDefault();document.querySelector('output').textContent='form-submit:' + event.isTrusted"><input aria-label="Query" /><button type="submit" aria-label="Search">Search</button></form>
+      <textarea aria-label="Body" onkeypress="document.querySelector('#keypress-log').textContent='keypress:' + event.key + ':' + event.shiftKey"></textarea>
+      <output id="keypress-log">no keypress</output>
+      <div id="shadow-host"></div>
+      <iframe title="Trigger frame" src="/frame-files?file_label=Trigger+files"></iframe>
+      <output>ready</output>
+      <script>
+        document.querySelector('#shadow-host').attachShadow({ mode: 'open' }).innerHTML =
+          '<iframe title="Shadow frame" src="/frame-files?file_label=Shadow+frame+files"></iframe>';
+      </script>`);
+    return;
+  }
+  // A frame that answers nothing, in its own process, so the parent stays responsive while the
+  // snapshot's walk of this frame never returns. The host has to be a site of its own rather than the
+  // `localhost` the other cross-origin fixtures use: same site means the same renderer, and wedging
+  // it would take the `/v2` page's own frame down with it for the rest of the run. It waits to be told
+  // to spin, because the one target the legacy `act` path accepts is a ref, and a ref only exists for
+  // an element some snapshot saw -- so the frame has to answer a snapshot first. Both messages go out
+  // before the loop is entered from a task, so the test waits on an announcement rather than a clock.
+  if (url.pathname === "/spinning-frame") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><body>
+      <button type="button">Blocked frame button</button>
+      <script>
+        addEventListener('message', (event) => {
+          if (event.data !== 'spin') return;
+          parent.postMessage('spinning', '*');
+          setTimeout(() => { while (true) {} }, 0);
+        });
+        parent.postMessage('frame-ready', '*');
+      </script>`);
+    return;
+  }
+  if (url.pathname === "/blocking-frame") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html>
+      <output>blocking frame ready</output>
+      <script>
+        addEventListener('message', (event) => {
+          if (event.data === 'frame-ready') document.querySelector('output').textContent = 'frame ready';
+          if (event.data === 'spinning') document.querySelector('output').textContent = 'frame spinning';
+        });
+      </script>`);
+    return;
+  }
+  if (url.pathname === "/diagnostic-error") {
+    response.writeHead(503, { "content-type": "text/plain" });
+    response.end("expected diagnostic failure");
+    return;
+  }
+  if (url.pathname === "/console-script") {
+    response.setHeader("content-type", "text/javascript; charset=utf-8");
+    response.end("console.error('external diagnostic marker');");
+    return;
+  }
+  if (url.pathname === "/slow-document") {
+    slowDocumentVersion += 1;
+    const version = slowDocumentVersion;
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.write("<!doctype html><main>loading</main>");
+    const finish = () => response.end(`<script>document.querySelector('main').textContent='ready:${version}'</script>`);
+    if (url.search === "?action") {
+      actionNavigationRequests += 1;
+      void actionNavigationReleased.then(finish);
+    } else setTimeout(finish, 250);
+    return;
+  }
+  // The page starts a second main-frame navigation while the first load is still open, as a sign-in
+  // or consent redirect does. `loadURL` then rejects inside Electron's `did-start-navigation` event.
+  // The slow image keeps the first load open until the redirect starts.
+  if (url.pathname === "/redirect-start") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(
+      `<!doctype html><script>setTimeout(() => location.replace('/redirect-end${url.search}'), 0)</script><img src="/redirect-image">`,
+    );
+    return;
+  }
+  if (url.pathname === "/redirect-image") {
+    setTimeout(() => response.end(), 300);
+    return;
+  }
+  if (url.pathname === "/redirect-end") {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    if (url.search === "?slow") {
+      response.write("<!doctype html><main>loading</main>");
+      setTimeout(() => response.end("<script>document.querySelector('main').textContent='redirected'</script>"), 200);
+    } else response.end("<!doctype html><main>redirected</main>");
+    return;
+  }
+  if (url.pathname === "/v2") {
+    const port = request.socket.localPort;
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(`<!doctype html>
+      <label>Mode <select aria-label="Mode" oninput="this.dataset.inputTrusted=String(event.isTrusted)" onchange="this.dataset.changeTrusted=String(event.isTrusted)"><option value="a">Alpha</option><option value="b">Beta</option><option value="">Any mode</option></select></label>
+      <label><input type="checkbox" aria-label="Agree" />Agree</label>
+      <label><input type="radio" name="choice" aria-label="Primary choice" checked />Primary</label>
+      <label><input type="radio" name="choice" aria-label="Secondary choice" />Secondary</label>
+      <div contenteditable="true" role="textbox" aria-label="Notes" onkeydown="if (event.key === 'Enter') document.querySelector('output').textContent='notes-submit:' + event.isTrusted"></div>
+      <input type="number" aria-label="Quantity" value="12" />
+      <button aria-label="Duplicate">One</button><button aria-label="Duplicate">Two</button>
+      <button aria-label="Accessible override" onclick="document.querySelector('output').textContent='visible-text:' + event.isTrusted">Unique action text</button>
+      <span style="position:relative;display:inline-block"><button aria-label="Covered">Covered</button><span style="position:absolute;inset:0;z-index:2" aria-hidden="true"></span></span>
+      <span style="position:relative;display:inline-block"><button style="width:200px" aria-label="Partially covered" onclick="document.querySelector('output').textContent='partial:' + event.isTrusted">Partially covered</button><span style="position:absolute;left:70px;right:70px;top:0;bottom:0;z-index:2" aria-hidden="true"></span></span>
+      <style>.pseudo-option{position:relative;display:inline-block;width:160px;height:28px}.pseudo-option input{position:absolute;left:8px;top:6px;margin:0}.pseudo-option::after{content:'';position:absolute;inset:0}</style>
+      <label class="pseudo-option"><input type="radio" name="pay" aria-label="Pay by card" />Card</label>
+      <span class="pseudo-option"><input type="radio" name="pay" aria-label="Pay by transfer" /></span>
+      <span hidden data-hidden-wait>hidden wait sentinel</span>
+      <button aria-label="SPA" onclick="setTimeout(() => { history.pushState({}, '', '/v2#done'); document.querySelector('output').textContent='SPA done'; }, 20)">SPA</button>
+      <button draggable="true" aria-label="Drag source">Drag source</button><button aria-label="Drop target" ondragover="event.preventDefault()" ondrop="event.preventDefault();document.querySelector('output').textContent='drag:' + event.isTrusted">Drop target</button>
+      <input type="file" aria-label="Files" onchange="document.querySelector('output').textContent=this.files[0]?.name || ''" />
+      <canvas width="40" height="20" style="display:block;width:80px;height:40px" onclick="document.querySelector('output').textContent='canvas:' + event.isTrusted"></canvas>
+      <iframe title="Same origin frame" src="/same-frame"></iframe>
+      <iframe title="Cross origin frame" src="http://localhost:${port}/frame?frame_token=frame-secret"></iframe>
+      <div id="shadow"></div><output>ready</output>
+      <script src="/console-script?console_token=console-secret"></script>
+      <script>
+        const root = document.querySelector('#shadow').attachShadow({ mode: 'open' });
+        root.innerHTML = '<button aria-label="Shadow action">Shadow action</button>';
+        root.querySelector('button').onclick = event => { const trusted = event.isTrusted; fetch('/settle').then(() => { root.querySelector('button').textContent = 'Shadow settled:5:' + trusted; }); };
+        document.addEventListener('keydown', event => { if (event.ctrlKey && event.key.toLowerCase() === 'k') document.querySelector('output').textContent = 'shortcut:' + event.isTrusted; });
+        console.error('v2 diagnostic marker'); fetch('/diagnostic-error?access_token=diagnostic-secret').catch(() => {});
+      </script>`);
+    return;
+  }
+
+  response.setHeader("content-type", "text/html; charset=utf-8");
+  response.end(`<!doctype html>
+    <input aria-label="Task" oninput="this.dataset.trusted = String(event.isTrusted); document.querySelector('output').textContent = 'typed:' + this.value + '|input:' + event.isTrusted" />
+    <button aria-label="Save" onclick="document.querySelector('output').textContent = document.querySelector('input').value + '|input:' + document.querySelector('input').dataset.trusted + '|click:' + event.isTrusted">Save</button>
+    <a href="/child" target="_blank">Child</a>
+    <a href="/download" download>Download</a>
+    <output>empty</output>
+    <script>
+      window.smokePointerEvents = [];
+      for (const type of ['pointerdown', 'pointerup', 'click']) {
+        document.addEventListener(type, event => {
+          window.smokePointerEvents.push({ type, target: event.target.tagName, x: event.clientX, y: event.clientY, trusted: event.isTrusted });
+        }, true);
+      }
+    </script>`);
+});
+
+const SCENARIOS = [
+  "identity",
+  "background",
+  "focus",
+  "controls",
+  "tool-boundary",
+  "evaluation",
+  "wait-deadlines",
+  "live-view",
+  "secret-handoff",
+  "popups",
+  "redirect-navigation",
+];
+
+void main().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  app.exit(1);
+});
+
+async function main(): Promise<void> {
+  const scenario = process.argv.find((argument) => argument.startsWith("--scenario="))?.slice("--scenario=".length);
+  if (scenario !== undefined && !SCENARIOS.includes(scenario)) {
+    throw new Error(`Unknown browser smoke scenario: ${scenario}. Use ${SCENARIOS.join(", ")}.`);
+  }
+  const googleLive = process.argv.includes("--google-live");
+  const xLive = process.argv.includes("--x-live");
+  const whatsappLive = process.argv.includes("--whatsapp-live");
+  const canvaLive = process.argv.includes("--canva-live");
+  const framerLive = process.argv.includes("--framer-live");
+  const amazonLive = process.argv.includes("--amazon-live");
+  const configuredRoot = argumentValue("--smoke-root=");
+  const persistencePhase = argumentValue("--persistence-phase=");
+  const persistenceOrigin = argumentValue("--persistence-origin=");
+  const temporaryRoot = configuredRoot ?? (await mkdtemp(join(tmpdir(), "openbot-browser-smoke-")));
+  const userDataPath = join(temporaryRoot, "user-data");
+  await mkdir(userDataPath, { recursive: true });
+  app.setName("OpenBot");
+  app.setPath("userData", userDataPath);
+  app.setPath("sessionData", userDataPath);
+  // A backstop for a phase that hangs, not a performance budget -- and it has to stay clear of the
+  // phases that wait on a product timeout on purpose, such as the bounded blocked-frame wait and the
+  // frozen-renderer environment race below.
+  const hardTimeout = setTimeout(() => {
+    process.stderr.write("BrowserHost smoke test timed out.\n");
+    app.exit(1);
+  }, 120_000);
+
+  try {
+    if (persistencePhase) {
+      if (!persistenceOrigin) throw new Error("A persistence origin is required.");
+      await runPersistencePhase(temporaryRoot, persistenceOrigin, persistencePhase);
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || isString(address)) throw new Error("Local server did not start.");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    await app.whenReady();
+    process.stdout.write("BrowserHost: Electron ready.\n");
+    const window = new BrowserWindow({ show: false, opacity: 0 });
+    window.show();
+    app.focus({ steal: true });
+    window.focus();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const downloadsRoot = join(temporaryRoot, "downloads");
+    const statePath = join(temporaryRoot, "browser-tabs.json");
+    const browser = new BrowserHost(window, downloadsRoot, statePath, {
+      recordingDurationMs: 500,
+      recordingMaxConcurrent: 1,
+      recordingMaxAggregateBytes: 100 * 1024 * 1024,
+    });
+    if (!scenario || scenario === "background") await runBackgroundScenario(browser, origin);
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 800, height: 600 } }));
+    if (scenario) {
+      try {
+        if (scenario === "background") {
+          // The scenario runs before the browser panel is first shown.
+        } else if (scenario === "focus") {
+          await runFocusScenario(browser, origin);
+        } else if (scenario === "identity") {
+          await runIdentityScenario(browser, origin);
+          if (googleLive) await runGoogleLiveProbe(browser);
+          if (xLive) await runXLiveProbe(browser);
+          if (whatsappLive) await runWhatsAppLiveProbe(browser);
+          if (canvaLive) await runCanvaLiveProbe(browser);
+          if (framerLive) await runFramerLiveProbe(browser, { x: 0, y: 0, width: 800, height: 600 });
+          if (amazonLive) await runAmazonLiveProbe(browser);
+        } else if (scenario === "popups") {
+          await runPopupScenario(browser, origin);
+        } else if (scenario === "secret-handoff") {
+          await runSecretHandoffScenario(browser, origin);
+        } else if (scenario === "tool-boundary") {
+          await runToolBoundaryScenario(browser, origin);
+        } else if (scenario === "redirect-navigation") {
+          await runRedirectNavigationScenario(browser, origin);
+        } else {
+          const { tab, contents } = await openTabWithContents(browser, `${origin}/v2`, "smoke-thread", "smoke-bot");
+          try {
+            if (scenario === "controls") {
+              await runControlActions(browser, tab.id, contents);
+              await runDragAction(browser, tab.id, contents);
+              await runDoubleClickScenario(browser, origin);
+              await runKeyboardScenario(browser, origin, temporaryRoot);
+              await runCanvasGridScenario(browser, origin);
+            } else if (scenario === "wait-deadlines") {
+              await runWaitDeadlines(browser, tab.id, contents);
+            } else if (scenario === "live-view") {
+              await runLiveViewScenario(browser, tab.id, contents);
+            } else {
+              await runEvaluationScenario(browser, tab.id, contents);
+            }
+          } finally {
+            await runCauseEffect(browser.close(tab.id));
+          }
+        }
+        process.stdout.write(`BrowserHost: ${scenario} scenario passed.\n`);
+      } finally {
+        await runCauseEffect(browser.destroy());
+        window.destroy();
+      }
+      return;
+    }
+    const documentChangedTabs: string[] = [];
+    const retainedDocumentChanges: Array<{ tabId: string; documentIds: ReadonlySet<string> }> = [];
+    browser.onDocumentChanged((tabId, documentIds) => {
+      documentChangedTabs.push(tabId);
+      retainedDocumentChanges.push({ tabId, documentIds });
+    });
+    let changedEventCount = 0;
+    browser.onChanged(() => {
+      changedEventCount += 1;
+    });
+
+    const controlPhases: string[] = [];
+    const controlledTabIds: Array<string | null> = [];
+    const observedControlActions: string[] = [];
+    browser.onControlChanged((state) => {
+      observedControlActions.push(...state.sessions.map((session) => session.action));
+      const session = state.sessions.find((item) => item.turnId === "browser-smoke-turn");
+      if (session) {
+        controlPhases.push(`${session.action}:${session.phase}`);
+        controlledTabIds.push(session.tabId);
+      } else if (controlPhases.length > 0) controlPhases.push("ended");
+    });
+
+    const openingTab = runCauseEffect(browser.open(origin, "smoke-thread", "smoke-bot", true));
+    window.webContents.focus();
+    const tab = await openingTab;
+    await waitFor(
+      async () => webContents.getFocusedWebContents()?.getURL() === `${origin}/`,
+      "the focused local tab to open",
+    );
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 760, height: 560 } }));
+    const resizedFillViewport = browser.listTabs().find((candidate) => candidate.id === tab.id)?.environment?.viewport;
+    if (resizedFillViewport?.width !== 760 || resizedFillViewport?.height !== 560) {
+      throw new Error("Browser fill-mode status did not use the current panel bounds.");
+    }
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 800, height: 600 } }));
+    const localContents = webContents.getFocusedWebContents();
+    if (!localContents) throw new Error("The local tab lost focus.");
+    await waitForPresentedFrame(localContents);
+    process.stdout.write("BrowserHost: local tab opened.\n");
+    const first = await runCauseEffect(browser.snapshot(tab.id));
+    const input = first.elements.find((element) => element.name === "Task");
+    const save = first.elements.find((element) => element.name === "Save");
+    if (!input || !save) throw new Error(`Snapshot did not expose local controls: ${JSON.stringify(first)}`);
+
+    const typed = await runCauseEffect(
+      browser.act(tab.id, first.revision, {
+        type: "type",
+        ref: input.ref,
+        text: "runs locally",
+      }),
+    );
+    if (!typed.text.includes("runs locally|input:true")) {
+      throw new Error(`Browser input was not native: ${typed.text}`);
+    }
+    const pageContents = webContents.getAllWebContents().find((contents) => contents.getURL() === `${origin}/`);
+    if (!pageContents) throw new Error("The local tab's web contents were not available.");
+    await waitForMouseInput(browser, tab.id, pageContents);
+    process.stdout.write("BrowserHost: snapshot and actions passed.\n");
+
+    await runDoubleClickScenario(browser, origin);
+    await runRedirectNavigationScenario(browser, origin);
+    const v2Tab = await runCauseEffect(browser.open(`${origin}/v2`, "smoke-thread", "smoke-bot"));
+    const v2Contents = webContents
+      .getAllWebContents()
+      .find((contents) => !contents.isDestroyed() && contents.getURL().startsWith(`${origin}/v2`));
+    if (!v2Contents) throw new Error("V2 web contents were not available.");
+    const unmutedTabs: string[] = [];
+    if (!v2Contents.isAudioMuted()) unmutedTabs.push("new tab");
+    const v2SnapshotResult = await callBrowserTool(browser, "snapshot", { tabId: v2Tab.id, image: "auto" });
+    const v2Snapshot = toolTextPayload(v2SnapshotResult);
+    if (!v2SnapshotResult.success || !isDynamicRecord(v2Snapshot) || !Array.isArray(v2Snapshot.elements)) {
+      throw new Error("V2 snapshot failed.");
+    }
+    if (String(v2Snapshot.text).includes("hidden wait sentinel")) {
+      throw new Error("V2 snapshot included hidden DOM text.");
+    }
+    const hiddenTextWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      text: "hidden wait sentinel",
+      timeoutMs: 200,
+    });
+    if (hiddenTextWait.success || !toolError(hiddenTextWait).includes("timed out")) {
+      throw new Error("V2 text wait matched hidden DOM text.");
+    }
+    if (!v2SnapshotResult.contentItems.some((item) => item.type === "inputImage")) {
+      throw new Error("Adaptive snapshot did not include an image for canvas/iframe content.");
+    }
+    const v2Elements = v2Snapshot.elements.filter(isDynamicRecord);
+    if (!v2Elements.some((element) => element.name === "Shadow action")) {
+      throw new Error("V2 snapshot did not pierce shadow DOM.");
+    }
+    if (!v2Elements.some((element) => element.name === "Frame action")) {
+      throw new Error("V2 snapshot did not include a cross-origin iframe control.");
+    }
+    if (!v2Elements.some((element) => element.name === "Same-origin action")) {
+      throw new Error("V2 snapshot did not include a same-origin iframe control.");
+    }
+    const sameOriginClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Same-origin action", exact: true },
+    });
+    if (!sameOriginClick.success || !String(toolTextPayload(sameOriginClick)?.text).includes("Same-origin:true")) {
+      throw new Error(`V2 same-origin iframe click failed: ${toolError(sameOriginClick)}`);
+    }
+    const sameOriginSelect = await callBrowserTool(browser, "select_option", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "combobox", name: "Same-origin mode", exact: true },
+      values: ["b"],
+    });
+    const sameOriginSelection = await v2Contents.executeJavaScript(
+      `(() => { const select = document.querySelector('iframe[title="Same origin frame"]').contentDocument.querySelector('[aria-label="Same-origin mode"]'); return { value: select.value, inputTrusted: select.dataset.inputTrusted, changeTrusted: select.dataset.changeTrusted }; })()`,
+      true,
+    );
+    if (
+      !sameOriginSelect.success ||
+      !isDynamicRecord(sameOriginSelection) ||
+      sameOriginSelection.value !== "b" ||
+      sameOriginSelection.inputTrusted !== "true" ||
+      sameOriginSelection.changeTrusted !== "true"
+    ) {
+      throw new Error(`V2 same-origin iframe select failed: ${toolError(sameOriginSelect)}`);
+    }
+    const sameOriginCollisionSelect = await callBrowserTool(browser, "select_option", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "combobox", name: "Same-origin collision", exact: true },
+      values: ["target"],
+    });
+    const sameOriginCollisionSelection = await v2Contents.executeJavaScript(
+      `document.querySelector('iframe[title="Same origin frame"]').contentDocument.querySelector('[aria-label="Same-origin collision"]').value`,
+      true,
+    );
+    if (!sameOriginCollisionSelect.success || sameOriginCollisionSelection !== "target") {
+      throw new Error(`V2 select did not prefer an exact value match: ${toolError(sameOriginCollisionSelect)}`);
+    }
+    const ambiguousOption = await callBrowserTool(browser, "select_option", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "combobox", name: "Same-origin collision", exact: true },
+      values: ["Second"],
+    });
+    if (ambiguousOption.success || !toolError(ambiguousOption).includes("ambiguous")) {
+      throw new Error("V2 select accepted an ambiguous option label.");
+    }
+    const laterDuplicateLabel = await callBrowserTool(browser, "select_option", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "combobox", name: "Same-origin collision", exact: true },
+      values: ["third"],
+    });
+    const laterDuplicateSelection = await v2Contents.executeJavaScript(
+      `(() => { const select = document.querySelector('iframe[title="Same origin frame"]').contentDocument.querySelector('[aria-label="Same-origin collision"]'); return { value: select.value, labels: Array.from(select.options, option => option.label), text: Array.from(select.options, option => option.text) }; })()`,
+      true,
+    );
+    if (
+      !laterDuplicateLabel.success ||
+      !isDynamicRecord(laterDuplicateSelection) ||
+      laterDuplicateSelection.value !== "third" ||
+      !Array.isArray(laterDuplicateSelection.labels) ||
+      laterDuplicateSelection.labels.join(",") !== "target,Second,Second" ||
+      !Array.isArray(laterDuplicateSelection.text) ||
+      laterDuplicateSelection.text.join(",") !== "target,Second,Second"
+    ) {
+      throw new Error(`V2 select could not choose a later duplicate label: ${toolError(laterDuplicateLabel)}`);
+    }
+    const sameOriginMultiSelect = await callBrowserTool(browser, "select_option", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "listbox", name: "Same-origin tags", exact: true },
+      values: ["b", "c"],
+    });
+    const sameOriginMultiSelection = await v2Contents.executeJavaScript(
+      `(() => { const select = document.querySelector('iframe[title="Same origin frame"]').contentDocument.querySelector('[aria-label="Same-origin tags"]'); return { values: Array.from(select.selectedOptions, option => option.value), inputTrusted: select.dataset.inputTrusted, changeTrusted: select.dataset.changeTrusted }; })()`,
+      true,
+    );
+    if (
+      !sameOriginMultiSelect.success ||
+      !isDynamicRecord(sameOriginMultiSelection) ||
+      !Array.isArray(sameOriginMultiSelection.values) ||
+      sameOriginMultiSelection.values.join(",") !== "b,c" ||
+      sameOriginMultiSelection.inputTrusted !== "true" ||
+      sameOriginMultiSelection.changeTrusted !== "true"
+    ) {
+      throw new Error(`V2 same-origin iframe multi-select failed: ${toolError(sameOriginMultiSelect)}`);
+    }
+    const outOfOrderMultiSelect = await callBrowserTool(browser, "select_option", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "listbox", name: "Same-origin tags", exact: true },
+      values: ["c", "a"],
+    });
+    const outOfOrderMultiSelection = await v2Contents.executeJavaScript(
+      `Array.from(document.querySelector('iframe[title="Same origin frame"]').contentDocument.querySelector('[aria-label="Same-origin tags"]').selectedOptions, option => option.value)`,
+      true,
+    );
+    if (
+      !outOfOrderMultiSelect.success ||
+      !Array.isArray(outOfOrderMultiSelection) ||
+      outOfOrderMultiSelection.join(",") !== "a,c"
+    ) {
+      throw new Error(`V2 multi-select depended on request order: ${toolError(outOfOrderMultiSelect)}`);
+    }
+    const sameOriginRadio = await callBrowserTool(browser, "set_checked", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "radio", name: "Same-origin primary choice", exact: true },
+      checked: false,
+    });
+    if (sameOriginRadio.success || !toolError(sameOriginRadio).includes("cannot be cleared directly")) {
+      throw new Error("V2 same-origin iframe radio used the wrong DOM realm.");
+    }
+    const sameOriginTyped = await callBrowserTool(browser, "type", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "textbox", name: "Same-origin field", exact: true },
+      text: "b",
+      mode: "append",
+    });
+    const sameOriginValue = await v2Contents.executeJavaScript(
+      `document.querySelector('iframe[title="Same origin frame"]').contentDocument.querySelector('input[aria-label="Same-origin field"]').value`,
+      true,
+    );
+    if (!sameOriginTyped.success || sameOriginValue !== "ab") {
+      throw new Error(`V2 same-origin iframe typing failed: ${toolError(sameOriginTyped)}`);
+    }
+    await v2Contents.executeJavaScript(`document.querySelector('iframe[title="Same origin frame"]').remove()`, true);
+    await v2Contents.executeJavaScript(
+      `(() => {
+        const container = document.createElement('div');
+        container.dataset.rejectedCandidateNoise = '';
+        container.innerHTML = Array.from({ length: 250 }, () => '<input type="color" aria-label="Unsupported color input" />').join('') +
+          '<button aria-label="Action after rejected candidates">Action after rejected candidates</button>';
+        document.body.appendChild(container);
+      })()`,
+      true,
+    );
+    const rejectedCandidateSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    if (!rejectedCandidateSnapshot.elements.some((element) => element.name === "Action after rejected candidates")) {
+      throw new Error("V2 rejected candidates consumed the actionable-element limit.");
+    }
+    await v2Contents.executeJavaScript(`document.querySelector('[data-rejected-candidate-noise]').remove()`, true);
+    const shadowClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Shadow action", exact: true },
+      timeoutMs: 30_000,
+    });
+    if (!shadowClick.success || !String(toolTextPayload(shadowClick)?.text).includes("Shadow settled:5:true")) {
+      throw new Error(`V2 shadow DOM settling failed: ${toolError(shadowClick)}`);
+    }
+    const frameClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Frame action", exact: true },
+      timeoutMs: 30_000,
+    });
+    const frameClickSnapshot = toolTextPayload(frameClick);
+    if (!frameClick.success || !String(frameClickSnapshot?.text).includes("Frame settled:5:true")) {
+      throw new Error(`V2 cross-origin iframe click failed: ${toolError(frameClick)}`);
+    }
+    await v2Contents.executeJavaScript(
+      `(async () => {
+        const container = document.createElement('div');
+        container.dataset.manyOopifs = '';
+        document.body.append(container);
+        for (let index = 0; index < 12; index++) {
+          const frame = document.createElement('iframe');
+          const label = index === 11 ? 'Frame action' : 'OOPIF noise ' + index;
+          const fileLabel = index === 11 ? 'Late OOPIF files' : 'OOPIF files ' + index;
+          frame.src = 'http://localhost:${address.port}/frame?action_label=' + encodeURIComponent(label) + '&file_label=' + encodeURIComponent(fileLabel);
+          container.append(frame);
+          await new Promise(loaded => { frame.onload = loaded; });
+        }
+        return true;
+      })()`,
+      true,
+    );
+    const manyFrameAmbiguity = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Frame action", exact: true },
+      timeoutMs: 30_000,
+    });
+    if (manyFrameAmbiguity.success || !toolError(manyFrameAmbiguity).includes("Candidates:")) {
+      throw new Error("V2 semantic locator inferred uniqueness after truncating attached OOPIF targets.");
+    }
+    const manyFrameCssAmbiguity = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "css", selector: '[aria-label="Frame action"]' },
+      timeoutMs: 30_000,
+    });
+    if (manyFrameCssAmbiguity.success || !toolError(manyFrameCssAmbiguity).includes("CSS selector is ambiguous")) {
+      throw new Error("V2 CSS locator inferred uniqueness after truncating attached OOPIF targets.");
+    }
+    const lateFrameUploadPath = join(temporaryRoot, "late-oopif-upload.txt");
+    await writeFile(lateFrameUploadPath, "late OOPIF upload fixture");
+    let lateFrameDocumentId = "";
+    const lateFrameUpload = await callBrowserTool(
+      browser,
+      "upload_files",
+      {
+        tabId: v2Tab.id,
+        target: { kind: "role", role: "button", name: "Late OOPIF files", exact: true },
+        paths: [lateFrameUploadPath],
+      },
+      { onUploadAssigned: (_inputId, documentId) => (lateFrameDocumentId = documentId) },
+    );
+    if (!lateFrameUpload.success || !lateFrameDocumentId) {
+      throw new Error(`V2 late OOPIF upload failed: ${toolError(lateFrameUpload)}`);
+    }
+    const retainedChangesBeforeNavigation = retainedDocumentChanges.length;
+    await v2Contents.executeJavaScript(
+      `(() => {
+        const frame = document.querySelector('[data-many-oopifs] iframe');
+        frame.src = 'http://localhost:${address.port}/frame?action_label=Navigated+OOPIF';
+        return true;
+      })()`,
+      true,
+    );
+    await waitFor(
+      async () =>
+        retainedDocumentChanges
+          .slice(retainedChangesBeforeNavigation)
+          .some((change) => change.tabId === v2Tab.id && change.documentIds.has(lateFrameDocumentId)),
+      "the late frame document change",
+    );
+    await v2Contents.executeJavaScript("document.querySelector('[data-many-oopifs]').remove(); true", true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const frameTextWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      text: "Frame settled:5:true",
+      timeoutMs: 2_000,
+    });
+    if (!frameTextWait.success) throw new Error(`V2 iframe text wait failed: ${toolError(frameTextWait)}`);
+    const legacyFrameSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    const legacyFrameField = legacyFrameSnapshot.elements.find((element) => element.name === "Frame field");
+    if (!legacyFrameField) throw new Error("V2 legacy iframe submit target was not available.");
+    const legacyFrameSubmitted = await runCauseEffect(
+      browser.act(v2Tab.id, legacyFrameSnapshot.revision, {
+        type: "type",
+        ref: legacyFrameField.ref,
+        text: "legacy iframe input",
+        submit: true,
+      }),
+    );
+    if (!legacyFrameSubmitted.text.includes("Frame key:true")) {
+      throw new Error("V2 legacy iframe submit used the wrong CDP session.");
+    }
+    const frameTyped = await callBrowserTool(browser, "type", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "textbox", name: "Frame field", exact: true },
+      text: "iframe input",
+      submit: true,
+    });
+    if (
+      !frameTyped.success ||
+      !String(toolTextPayload(frameTyped)?.text).includes("Frame input:iframe input:true|Frame key:true")
+    ) {
+      throw new Error(`V2 iframe text input used the wrong CDP session: ${toolError(frameTyped)}`);
+    }
+    const frameTypedActions = toolTextPayload(frameTyped)?.actions;
+    if (
+      !Array.isArray(frameTypedActions) ||
+      !frameTypedActions.some(
+        (entry) => isDynamicRecord(entry) && entry.action === "type" && entry.outcome === "success",
+      )
+    ) {
+      throw new Error("V2 action snapshot omitted the action that produced it.");
+    }
+    const framePressed = await callBrowserTool(browser, "press", {
+      tabId: v2Tab.id,
+      target: { kind: "css", selector: 'input[aria-label="Frame field"]' },
+      key: "Enter",
+    });
+    if (!framePressed.success || !String(toolTextPayload(framePressed)?.text).includes("Frame key:true")) {
+      throw new Error(`V2 iframe key input used the wrong CDP session: ${toolError(framePressed)}`);
+    }
+    const documentChangesBeforeFrameNavigation = documentChangedTabs.length;
+    const scheduledFrameNavigation = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Schedule frame navigation", exact: true },
+    });
+    const scheduledFrameSnapshot = toolTextPayload(scheduledFrameNavigation);
+    const scheduledFrameElements = Array.isArray(scheduledFrameSnapshot?.elements)
+      ? scheduledFrameSnapshot.elements.filter(isDynamicRecord)
+      : [];
+    const staleFrameTarget = scheduledFrameElements.find((element) => element.name === "Frame action");
+    const staleFrameRevision = scheduledFrameSnapshot?.revision;
+    if (!scheduledFrameNavigation.success || !staleFrameTarget || !isNumber(staleFrameRevision)) {
+      throw new Error(`V2 iframe navigation setup failed: ${toolError(scheduledFrameNavigation)}`);
+    }
+    await waitFor(
+      async () => documentChangedTabs.slice(documentChangesBeforeFrameNavigation).includes(v2Tab.id),
+      "the frame navigation document change",
+    );
+    const staleFrameClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "ref", ref: String(staleFrameTarget.ref), revision: staleFrameRevision },
+    });
+    if (staleFrameClick.success || !toolError(staleFrameClick).includes("Stale browser reference")) {
+      throw new Error("V2 iframe navigation did not invalidate revision-bound references.");
+    }
+    const semanticChangeSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    const semanticChangeTarget = semanticChangeSnapshot.elements.find((element) => element.name === "SPA");
+    if (!semanticChangeTarget) throw new Error("V2 semantic-change stale-reference fixture was not available.");
+    await v2Contents.executeJavaScript(
+      `document.querySelector('[aria-label="SPA"]').setAttribute('aria-label', 'Delete'); true`,
+      true,
+    );
+    const semanticChangeClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "ref", ref: semanticChangeTarget.ref, revision: semanticChangeSnapshot.revision },
+    });
+    if (semanticChangeClick.success || !toolError(semanticChangeClick).includes("target changed")) {
+      throw new Error("V2 revision-bound ref accepted a target whose semantics changed after the snapshot.");
+    }
+    let legacySemanticChangeRejected = false;
+    try {
+      await runCauseEffect(
+        browser.act(v2Tab.id, semanticChangeSnapshot.revision, {
+          type: "click",
+          ref: semanticChangeTarget.ref,
+        }),
+      );
+    } catch (error) {
+      legacySemanticChangeRejected = String(error).includes("target changed");
+    }
+    if (!legacySemanticChangeRejected) {
+      throw new Error("V2 legacy act accepted a target whose semantics changed after the snapshot.");
+    }
+    await v2Contents.executeJavaScript(
+      `document.querySelector('[aria-label="Delete"]').setAttribute('aria-label', 'SPA'); true`,
+      true,
+    );
+    await runCauseEffect(browser.snapshot(v2Tab.id));
+    const noDomRefs = await v2Contents.executeJavaScript("document.querySelector('[data-openbot-ref]') === null", true);
+    if (noDomRefs !== true) throw new Error("V2 snapshot mutated the page DOM.");
+    await runControlActions(browser, v2Tab.id, v2Contents);
+    await runKeyboardScenario(browser, origin, temporaryRoot);
+    await runCanvasGridScenario(browser, origin);
+    // A snapshot walks every frame, and Electron's `sendCommand` has no timeout of its own, so a frame
+    // whose process is spinning never answers the walk. The timeout must return an error to the caller
+    // and cancel the command, or the promise the tab's queue was told to wait on stays pending and
+    // nothing on this tab ever runs again -- which is what the close below proves.
+    const blockedTab = await runCauseEffect(browser.open(`${origin}/blocking-frame`, "smoke-thread", "smoke-bot"));
+    const blockedContents = webContents
+      .getAllWebContents()
+      .find((contents) => !contents.isDestroyed() && contents.getURL().startsWith(`${origin}/blocking-frame`));
+    if (!blockedContents) throw new Error("Blocking frame fixture web contents were not available.");
+    await blockedContents.executeJavaScript(
+      `(() => {
+        const frame = document.createElement('iframe');
+        frame.title = 'Blocked frame';
+        frame.src = 'http://spin.localhost:${address.port}/spinning-frame';
+        document.body.appendChild(frame);
+        return true;
+      })()`,
+      true,
+    );
+    await waitFor(
+      async () =>
+        (await blockedContents.executeJavaScript("document.querySelector('output').textContent", true)) ===
+        "frame ready",
+      "the blocking frame to report ready",
+    );
+    // Wedge the frame: from here on it answers nothing, so the bounded wait
+    // below must give up on it and the close after that must not hang behind
+    // the cancelled command.
+    await blockedContents.executeJavaScript(
+      `(() => {
+        document.querySelector('iframe').contentWindow.postMessage('spin', '*');
+        return true;
+      })()`,
+      true,
+    );
+    await waitFor(
+      async () =>
+        (await blockedContents.executeJavaScript("document.querySelector('output').textContent", true)) ===
+        "frame spinning",
+      "the blocking frame to start spinning",
+    );
+    // One bounded wait proves a frame that answers nothing is given up on. The
+    // close after it proves the timeout cancelled the command instead of
+    // leaving the tab queue waiting on one it never cancelled.
+    const blockedSnapshotWait = await callBrowserTool(browser, "wait_for", {
+      tabId: blockedTab.id,
+      url: "/blocking-frame",
+      timeoutMs: 700,
+    });
+    if (blockedSnapshotWait.success || !toolError(blockedSnapshotWait).includes("timed out")) {
+      throw new Error(`V2 snapshot did not bound a frame that never answers: ${toolError(blockedSnapshotWait)}`);
+    }
+    const blockedTabClosed = await Promise.race([
+      runCauseEffect(browser.close(blockedTab.id)).then(() => "closed"),
+      new Promise((resolve) => setTimeout(() => resolve("blocked"), 5_000)),
+    ]);
+    if (blockedTabClosed !== "closed") {
+      throw new Error("V2 snapshot timeout left the tab queue waiting on a CDP command it never cancelled.");
+    }
+    // Environment commands reach the main renderer before the snapshot starts. Use a separate site
+    // so stopping that renderer does not stop the other fixture tabs.
+    const frozenOrigin = `http://environment.localhost:${address.port}`;
+    const frozenTab = await runCauseEffect(browser.open(`${frozenOrigin}/spinning-frame`, "smoke-thread", "smoke-bot"));
+    const frozenContents = webContents
+      .getAllWebContents()
+      .find((contents) => !contents.isDestroyed() && contents.getURL().startsWith(frozenOrigin));
+    if (!frozenContents) throw new Error("Environment timeout fixture web contents were not available.");
+    // Wait for this exact message. An unpackaged Electron also logs its security warning to the
+    // console after the page load, so the first message can arrive before the loop starts. The
+    // environment change then succeeds and only the snapshot after it meets the stopped renderer.
+    const rendererStopped = new Promise<void>((resolve) => {
+      const onConsoleMessage = (details: ElectronEvent<WebContentsConsoleMessageEventParams>): void => {
+        if (details.message !== "environment renderer stopped") return;
+        frozenContents.off("console-message", onConsoleMessage);
+        resolve();
+      };
+      frozenContents.on("console-message", onConsoleMessage);
+    });
+    void frozenContents
+      .executeJavaScript("console.info('environment renderer stopped'); while (true) {}", true)
+      .catch(() => undefined);
+    await rendererStopped;
+    const frozenEnvironment = await Promise.race([
+      callBrowserTool(browser, "set_environment", { tabId: frozenTab.id, colorScheme: "dark" }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 20_000)),
+    ]);
+    if (
+      !frozenEnvironment ||
+      frozenEnvironment.success ||
+      !toolError(frozenEnvironment).includes("Browser environment change timed out.")
+    ) {
+      throw new Error(
+        `V2 environment change did not bound an unresponsive renderer: ${JSON.stringify(frozenEnvironment)}`,
+      );
+    }
+    const frozenClosed = await Promise.race([
+      runCauseEffect(browser.close(frozenTab.id)).then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+    ]);
+    if (!frozenClosed) throw new Error("V2 environment timeout left the tab queue blocked.");
+    // `submit: true` reached through a snapshot ref is the case that used to fail: typing changes a
+    // contenteditable's visible text, so re-resolving the same ref to press Enter fingerprinted the
+    // element against its pre-typing text and threw instead of submitting.
+    const notesSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    const notesRef = notesSnapshot.elements.find((element) => element.name === "Notes")?.ref;
+    if (!notesRef) throw new Error("V2 snapshot did not expose the contenteditable notes field.");
+    const submittedContentEditable = await callBrowserTool(browser, "type", {
+      tabId: v2Tab.id,
+      target: { kind: "ref", ref: notesRef, revision: notesSnapshot.revision },
+      text: "submitted text",
+      mode: "replace",
+      submit: true,
+    });
+    const submittedValue = await v2Contents.executeJavaScript("document.querySelector('output').textContent", true);
+    if (!submittedContentEditable.success || submittedValue !== "notes-submit:true") {
+      throw new Error(
+        `V2 type did not submit through the node it typed into: ${toolError(submittedContentEditable)} (${submittedValue})`,
+      );
+    }
+    const appendedNumber = await callBrowserTool(browser, "type", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "spinbutton", name: "Quantity", exact: true },
+      text: "3",
+      mode: "append",
+    });
+    const numberValue = await v2Contents.executeJavaScript(
+      "document.querySelector('[aria-label=\"Quantity\"]').value",
+      true,
+    );
+    if (!appendedNumber.success || numberValue !== "123") {
+      throw new Error(`V2 number append did not use a trusted end-key fallback: ${toolError(appendedNumber)}`);
+    }
+    const shortcut = await callBrowserTool(browser, "press", { tabId: v2Tab.id, key: "Control+k" });
+    if (!shortcut.success) throw new Error(`V2 keyboard shortcut failed: ${toolError(shortcut)}`);
+    const shortcutValue = await v2Contents.executeJavaScript("document.querySelector('output').textContent", true);
+    if (shortcutValue !== "shortcut:true") {
+      throw new Error("V2 keyboard shortcut was not a trusted page event.");
+    }
+    const pointPress = await callBrowserTool(browser, "press", {
+      tabId: v2Tab.id,
+      target: { kind: "point", x: 1, y: 1 },
+      key: "Enter",
+    });
+    if (pointPress.success || !toolError(pointPress).includes("element target")) {
+      throw new Error("V2 press silently accepted a point target.");
+    }
+    await v2Contents.executeJavaScript("document.querySelector('output').textContent = ''", true);
+    const invalidShortcut = await callBrowserTool(browser, "press", { tabId: v2Tab.id, key: "Control+💥" });
+    if (invalidShortcut.success || !toolError(invalidShortcut).includes("Unsupported browser key")) {
+      throw new Error("V2 invalid shortcut did not return a validation error.");
+    }
+    const plainKey = await callBrowserTool(browser, "press", { tabId: v2Tab.id, key: "k" });
+    if (!plainKey.success) throw new Error(`V2 plain key failed after an invalid shortcut: ${toolError(plainKey)}`);
+    const outputAfterInvalidShortcut = await v2Contents.executeJavaScript(
+      "document.querySelector('output').textContent",
+      true,
+    );
+    if (outputAfterInvalidShortcut === "shortcut:true") {
+      throw new Error("V2 invalid shortcut left Control pressed.");
+    }
+    await v2Contents.executeJavaScript(
+      "document.body.appendChild(Object.assign(document.createElement('button'), { ariaLabel: 'Expired click', onclick: () => { document.querySelector('output').textContent = 'expired-click-ran'; } })); document.querySelector('output').textContent = 'expired-click-idle'; true",
+      true,
+    );
+    const expiredClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Expired click", exact: true },
+      timeoutMs: 0,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const expiredClickOutput = await v2Contents.executeJavaScript("document.querySelector('output').textContent", true);
+    if (
+      expiredClick.success ||
+      !toolError(expiredClick).includes("timed out") ||
+      expiredClickOutput !== "expired-click-idle"
+    ) {
+      throw new Error("V2 timed-out click continued and dispatched input after reporting failure.");
+    }
+    const ambiguous = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Duplicate", exact: true },
+    });
+    if (ambiguous.success || !toolError(ambiguous).includes("Candidates:")) {
+      throw new Error("V2 semantic locator did not reject an ambiguous target.");
+    }
+    await v2Contents.executeJavaScript(
+      `(() => {
+        const container = document.createElement('div');
+        container.dataset.semanticScanLimit = '';
+        const first = document.createElement('button');
+        first.setAttribute('aria-label', 'Bounded semantic duplicate');
+        container.append(first);
+        container.append(...Array.from({ length: 450 }, (_, index) => {
+          const button = document.createElement('button');
+          button.setAttribute('aria-label', 'Unrelated semantic control ' + index);
+          return button;
+        }));
+        const second = document.createElement('button');
+        second.setAttribute('aria-label', 'Bounded semantic duplicate');
+        container.append(second);
+        document.body.append(container);
+      })()`,
+      true,
+    );
+    const boundedSemantic = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Bounded semantic duplicate", exact: true },
+    });
+    if (boundedSemantic.success || !toolError(boundedSemantic).includes("Candidates:")) {
+      throw new Error("V2 semantic locator inferred uniqueness from a truncated snapshot candidate set.");
+    }
+    await v2Contents.executeJavaScript("document.querySelector('[data-semantic-scan-limit]').remove(); true", true);
+    const visibleTextTarget = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "text", text: "Unique action text", exact: true },
+    });
+    if (!visibleTextTarget.success || !String(toolTextPayload(visibleTextTarget)?.text).includes("visible-text:true")) {
+      throw new Error(
+        `V2 visible-text locator ignored text overridden by an accessible name: ${toolError(visibleTextTarget)}`,
+      );
+    }
+    const ambiguousCss = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "css", selector: 'button[aria-label="Duplicate"]' },
+    });
+    if (ambiguousCss.success || !toolError(ambiguousCss).includes("CSS selector is ambiguous")) {
+      throw new Error("V2 CSS locator did not reject an ambiguous target.");
+    }
+    const covered = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Covered", exact: true },
+    });
+    if (covered.success || !toolError(covered).includes("covered by")) {
+      throw new Error("V2 hit testing did not identify a covering page layer.");
+    }
+    const coveredHover = await callBrowserTool(browser, "hover", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Covered", exact: true },
+    });
+    if (coveredHover.success || !toolError(coveredHover).includes("covered by")) {
+      throw new Error("V2 hover reported success for a covered target.");
+    }
+    const coveredDrag = await callBrowserTool(browser, "drag", {
+      tabId: v2Tab.id,
+      source: { kind: "role", role: "button", name: "Drag source", exact: true },
+      target: { kind: "role", role: "button", name: "Covered", exact: true },
+    });
+    if (coveredDrag.success || !toolError(coveredDrag).includes("covered by")) {
+      throw new Error("V2 drag reported success for a covered destination.");
+    }
+    const partiallyCovered = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Partially covered", exact: true },
+    });
+    if (!partiallyCovered.success || !String(toolTextPayload(partiallyCovered)?.text).includes("partial:true")) {
+      throw new Error(`V2 hit testing did not use a visible target point: ${toolError(partiallyCovered)}`);
+    }
+    await v2Contents.executeJavaScript(
+      "document.body.appendChild(Object.assign(document.createElement('button'), { ariaLabel: 'Fresh target', textContent: 'Fresh target', onclick: event => { document.querySelector('output').textContent = 'fresh:' + event.isTrusted; } })); true",
+      true,
+    );
+    const freshTarget = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Fresh target", exact: true },
+    });
+    if (!freshTarget.success || !String(toolTextPayload(freshTarget)?.text).includes("fresh:true")) {
+      throw new Error(`V2 semantic target did not refresh before the action: ${toolError(freshTarget)}`);
+    }
+    const point = await v2Contents.executeJavaScript(
+      "(() => { const r = document.querySelector('canvas').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+      true,
+    );
+    if (!isDynamicRecord(point)) throw new Error("V2 canvas coordinates were not serializable.");
+    const canvasClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "point", x: point.x, y: point.y },
+    });
+    if (!canvasClick.success) throw new Error(`V2 coordinate click failed: ${toolError(canvasClick)}`);
+    const canvasValue = await v2Contents.executeJavaScript("document.querySelector('output').textContent", true);
+    if (canvasValue !== "canvas:true") {
+      throw new Error("V2 canvas coordinate click was not trusted.");
+    }
+    const offViewportClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "point", x: 10_000, y: 10_000 },
+    });
+    if (offViewportClick.success || !toolError(offViewportClick).includes("outside the current viewport")) {
+      throw new Error("V2 click accepted an off-viewport point target.");
+    }
+    await runDragAction(browser, v2Tab.id, v2Contents);
+    const spaClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "SPA", exact: true },
+    });
+    if (!spaClick.success) throw new Error(`V2 SPA click failed: ${toolError(spaClick)}`);
+    const spaWait = await callBrowserTool(browser, "wait_for", { tabId: v2Tab.id, text: "SPA done", timeoutMs: 2_000 });
+    if (!spaWait.success) throw new Error(`V2 event wait failed: ${toolError(spaWait)}`);
+    await v2Contents.executeJavaScript(
+      "setTimeout(() => { const button = document.createElement('button'); button.setAttribute('aria-label', 'Late action'); document.body.append(button); }, 100); true",
+      true,
+    );
+    const semanticWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Late action", exact: true },
+      timeoutMs: 2_000,
+    });
+    if (!semanticWait.success) throw new Error(`V2 semantic wait failed: ${toolError(semanticWait)}`);
+    await v2Contents.executeJavaScript(
+      "document.body.appendChild(Object.assign(document.createElement('h2'), { ariaLabel: 'Ready heading' })); true",
+      true,
+    );
+    const nonActionableRoleWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "heading", name: "Ready heading", exact: true },
+      timeoutMs: 2_000,
+    });
+    if (!nonActionableRoleWait.success) {
+      throw new Error(`V2 non-actionable ARIA role wait failed: ${toolError(nonActionableRoleWait)}`);
+    }
+    const nonActionableRoleClick = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "heading", name: "Ready heading", exact: true },
+    });
+    if (nonActionableRoleClick.success || !toolError(nonActionableRoleClick).includes("No element matches")) {
+      throw new Error("V2 action targeting accepted a non-actionable ARIA role.");
+    }
+    const refWaitSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    const removedRefTarget = refWaitSnapshot.elements.find((element) => element.name === "Late action");
+    if (!removedRefTarget) throw new Error("V2 removed-ref wait fixture was not available.");
+    await v2Contents.executeJavaScript(`document.querySelector('[aria-label="Late action"]').remove()`, true);
+    const removedRefWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      target: { kind: "ref", ref: removedRefTarget.ref, revision: refWaitSnapshot.revision },
+      timeoutMs: 100,
+    });
+    if (removedRefWait.success || !toolError(removedRefWait).includes("timed out")) {
+      throw new Error("V2 ref wait matched an element after it was removed.");
+    }
+    // Deadline enforcement stays covered by `--scenario=wait-deadlines`. It does
+    // not run in the default flow: its millisecond dispatch budgets fail on a
+    // loaded software-rendered runner for timing reasons, not product ones.
+    await v2Contents.executeJavaScript(
+      "globalThis.__openbotSlowNoise = setInterval(() => document.body.toggleAttribute('data-slow-noise'), 10); setTimeout(() => { clearInterval(globalThis.__openbotSlowNoise); delete globalThis.__openbotSlowNoise; }, 1200); true",
+      true,
+    );
+    const patientQuietWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      state: "dom-quiet",
+      timeoutMs: 2_500,
+    });
+    if (!patientQuietWait.success) {
+      throw new Error(`V2 DOM-quiet wait ignored the requested timeout: ${toolError(patientQuietWait)}`);
+    }
+    await v2Contents.executeJavaScript(
+      "globalThis.__openbotTransient = document.body.appendChild(Object.assign(document.createElement('span'), { textContent: 'transient quiet condition' })); setTimeout(() => { globalThis.__openbotTransient.remove(); delete globalThis.__openbotTransient; }, 100); true",
+      true,
+    );
+    const invalidatedQuietWait = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      text: "transient quiet condition",
+      state: "dom-quiet",
+      timeoutMs: 800,
+    });
+    if (invalidatedQuietWait.success || !toolError(invalidatedQuietWait).includes("timed out")) {
+      throw new Error(
+        `V2 DOM-quiet wait did not recheck its matched text condition: ${toolError(invalidatedQuietWait)}`,
+      );
+    }
+    await runEvaluationScenario(browser, v2Tab.id, v2Contents);
+    await runLiveViewScenario(browser, v2Tab.id, v2Contents);
+    const timedOut = await callBrowserTool(browser, "wait_for", {
+      tabId: v2Tab.id,
+      text: "never appears",
+      timeoutMs: 10,
+    });
+    if (timedOut.success || !toolError(timedOut).includes("timed out")) {
+      throw new Error("V2 wait_for did not return a bounded timeout error.");
+    }
+    const uploadPath = join(temporaryRoot, "v2-upload.txt");
+    await writeFile(uploadPath, "upload fixture");
+    const uploaded = await callBrowserTool(browser, "upload_files", {
+      tabId: v2Tab.id,
+      target: { kind: "role", role: "button", name: "Files", exact: true },
+      paths: [uploadPath],
+    });
+    if (!uploaded.success) throw new Error(`V2 upload failed: ${toolError(uploaded)}`);
+    const frameUploadInputIds: string[] = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const frameUpload = await callBrowserTool(
+        browser,
+        "upload_files",
+        {
+          tabId: v2Tab.id,
+          target: { kind: "css", selector: 'input[aria-label="Frame files"]' },
+          paths: [uploadPath],
+        },
+        { onUploadAssigned: (inputId) => frameUploadInputIds.push(inputId) },
+      );
+      if (!frameUpload.success) throw new Error(`V2 frame upload failed: ${toolError(frameUpload)}`);
+    }
+    if (frameUploadInputIds.length !== 2 || frameUploadInputIds[0] !== frameUploadInputIds[1]) {
+      throw new Error("V2 frame upload input identity changed between CDP sessions.");
+    }
+    await runStagedUploadScenario(browser, v2Tab.id, uploadPath, join(temporaryRoot, "missing-upload.txt"));
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 220, height: 560 } }));
+    const narrowFillEnvironment = await callBrowserTool(browser, "set_environment", {
+      tabId: v2Tab.id,
+      preset: "fill",
+    });
+    const narrowFillSnapshot = toolTextPayload(narrowFillEnvironment);
+    // The snapshot reports usable page space, excluding reserved scrollbar gutters.
+    const narrowFillViewport = await v2Contents.executeJavaScript(
+      "({ width: innerWidth, height: innerHeight, contentWidth: document.documentElement.getBoundingClientRect().width, contentHeight: document.documentElement.clientHeight })",
+      true,
+    );
+    if (
+      !narrowFillEnvironment.success ||
+      !isDynamicRecord(narrowFillViewport) ||
+      narrowFillViewport.width !== 220 ||
+      narrowFillViewport.height !== 560 ||
+      !isDynamicRecord(narrowFillSnapshot?.viewport) ||
+      narrowFillSnapshot.viewport.mode !== "fill" ||
+      narrowFillSnapshot.viewport.width !== narrowFillViewport.contentWidth ||
+      narrowFillSnapshot.viewport.height !== narrowFillViewport.contentHeight
+    ) {
+      throw new Error(
+        `V2 fill environment rejected a supported narrow panel: ${JSON.stringify({ reported: narrowFillSnapshot?.viewport, measured: narrowFillViewport })}`,
+      );
+    }
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 800, height: 600 } }));
+    const environment = await callBrowserTool(browser, "set_environment", {
+      tabId: v2Tab.id,
+      preset: "mobile",
+      colorScheme: "dark",
+      reducedMotion: true,
+    });
+    const environmentSnapshot = toolTextPayload(environment);
+    const persistentEnvironment = await v2Contents.executeJavaScript(
+      "({ width: innerWidth, contentWidth: document.documentElement.getBoundingClientRect().width, dark: matchMedia('(prefers-color-scheme: dark)').matches, reduced: matchMedia('(prefers-reduced-motion: reduce)').matches })",
+      true,
+    );
+    if (
+      !environment.success ||
+      !isDynamicRecord(persistentEnvironment) ||
+      !isDynamicRecord(environmentSnapshot?.viewport) ||
+      environmentSnapshot.viewport.width !== persistentEnvironment.contentWidth
+    ) {
+      throw new Error(`V2 environment emulation failed: ${toolError(environment)}`);
+    }
+    if (
+      persistentEnvironment.width !== 390 ||
+      persistentEnvironment.dark !== true ||
+      persistentEnvironment.reduced !== true
+    ) {
+      throw new Error("V2 environment emulation did not persist between CDP operations.");
+    }
+    if (!Array.isArray(environmentSnapshot.diagnostics) || environmentSnapshot.diagnostics.length === 0) {
+      throw new Error("V2 snapshot omitted diagnostics.");
+    }
+    const serializedEnvironmentSnapshot = JSON.stringify(environmentSnapshot);
+    if (
+      serializedEnvironmentSnapshot.includes("diagnostic-secret") ||
+      serializedEnvironmentSnapshot.includes("console-secret") ||
+      serializedEnvironmentSnapshot.includes("frame-secret")
+    ) {
+      throw new Error("V2 snapshot metadata exposed URL credentials.");
+    }
+    const changesBeforeDiagnosticError = changedEventCount;
+    const errorsBeforeDiagnosticError =
+      browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.diagnosticErrorCount ?? 0;
+    await v2Contents.executeJavaScript("fetch('/diagnostic-error?ui_token=ui-secret'); true", true);
+    await waitFor(async () => {
+      const currentErrors =
+        browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.diagnosticErrorCount ?? 0;
+      return changedEventCount > changesBeforeDiagnosticError && currentErrors > errorsBeforeDiagnosticError;
+    }, "the diagnostic error count to change");
+    const oversizedEnvironment = await callBrowserTool(browser, "set_environment", {
+      tabId: v2Tab.id,
+      preset: "custom",
+      width: 16_384,
+      height: 16_384,
+      deviceScaleFactor: 4,
+    });
+    if (oversizedEnvironment.success || !toolError(oversizedEnvironment).includes("physical viewport")) {
+      throw new Error("V2 environment accepted an unsafe physical pixel area.");
+    }
+    const panelBounds = { x: 0, y: 0, width: 1200, height: 800 };
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: panelBounds }));
+    const restoredFill = await callBrowserTool(browser, "set_environment", { tabId: v2Tab.id, preset: "fill" });
+    const restoredFillSnapshot = toolTextPayload(restoredFill);
+    if (
+      !restoredFill.success ||
+      !isDynamicRecord(restoredFillSnapshot?.viewport) ||
+      restoredFillSnapshot.viewport.mode !== "fill" ||
+      restoredFillSnapshot.viewport.deviceScaleFactor !== 1
+    ) {
+      throw new Error(`V2 mobile-to-fill reset retained the custom scale: ${JSON.stringify(restoredFill)}`);
+    }
+    const preTakeoverSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    const preTakeoverTarget = preTakeoverSnapshot.elements.find((element) => element.name === "SPA");
+    if (!preTakeoverTarget) throw new Error("V2 takeover stale-reference fixture was not available.");
+    await runCauseEffect(browser.beginTakeover(v2Tab.id));
+    await v2Contents.executeJavaScript("console.error('takeover-console-secret'); true", true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    browser.endTakeover(v2Tab.id);
+    const postTakeoverOldRef = await callBrowserTool(browser, "click", {
+      tabId: v2Tab.id,
+      target: { kind: "ref", ref: preTakeoverTarget.ref, revision: preTakeoverSnapshot.revision },
+    });
+    if (postTakeoverOldRef.success || !toolError(postTakeoverOldRef).includes("Stale browser reference")) {
+      throw new Error("V2 takeover left a pre-takeover browser reference valid.");
+    }
+    const postTakeoverSnapshot = await runCauseEffect(browser.snapshot(v2Tab.id));
+    if (JSON.stringify(postTakeoverSnapshot.diagnostics).includes("takeover-console-secret")) {
+      throw new Error("V2 takeover exposed console messages captured while the user had control.");
+    }
+    const racingRecordingStart = callBrowserTool(browser, "recording_start", { tabId: v2Tab.id });
+    const racingRecordingStop = callBrowserTool(browser, "recording_stop", { tabId: v2Tab.id });
+    const [racingStarted, racingStopped] = await Promise.all([racingRecordingStart, racingRecordingStop]);
+    if (
+      !racingStarted.success ||
+      toolError(racingStopped).includes("not being recorded") ||
+      browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.recording !== false
+    ) {
+      throw new Error(
+        `V2 parallel recording stop did not wait for recording start: start=${toolError(racingStarted)} stop=${toolError(racingStopped)} recording=${browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.recording}`,
+      );
+    }
+    const recordingStarted = await callBrowserTool(browser, "recording_start", { tabId: v2Tab.id });
+    if (
+      !recordingStarted.success ||
+      browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.recording !== true
+    ) {
+      throw new Error(`V2 recording did not start: ${toolError(recordingStarted)}`);
+    }
+    const concurrentRecording = await callBrowserTool(browser, "recording_start", { tabId: tab.id });
+    if (concurrentRecording.success || !toolError(concurrentRecording).includes("At most 1")) {
+      throw new Error("V2 recorder did not enforce its concurrent recording limit.");
+    }
+    // `recordingDurationMs: 500` stops this recording on its own. Wait for the stop the recorder
+    // reports rather than for a duration that outlives it: the recorder publishes the state change
+    // before it registers the artifact, and `recording_start` awaits that finalization either way.
+    await waitFor(
+      async () => browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.recording === false,
+      "the recording duration limit to stop the recording",
+    );
+    const prematureRecordingRestart = await callBrowserTool(browser, "recording_start", { tabId: v2Tab.id });
+    if (prematureRecordingRestart.success || !toolError(prematureRecordingRestart).includes("recording_stop")) {
+      throw new Error("V2 recording restart replaced an unclaimed completed artifact.");
+    }
+    const aggregateRecording = await callBrowserTool(browser, "recording_start", { tabId: tab.id });
+    if (aggregateRecording.success || !toolError(aggregateRecording).includes("in total")) {
+      throw new Error("V2 recorder did not reserve its aggregate byte budget.");
+    }
+    const recordingStopped = await callBrowserTool(browser, "recording_stop", { tabId: v2Tab.id });
+    const recordingPayload = toolTextPayload(recordingStopped);
+    const artifact = isDynamicRecord(recordingPayload?.artifact) ? recordingPayload.artifact : undefined;
+    const recordingPath = artifact ? getString(artifact, "path") : undefined;
+    if (!recordingStopped.success || !recordingPath) {
+      throw new Error(`V2 recording did not stop: ${toolError(recordingStopped)}`);
+    }
+    const recordingBytes = await readFile(recordingPath);
+    if (recordingBytes.length === 0 || recordingBytes.subarray(0, 4).toString("hex") !== "1a45dfa3") {
+      throw new Error("V2 recorder did not produce a valid WebM EBML header.");
+    }
+    if (browser.listTabs().find((candidate) => candidate.id === v2Tab.id)?.recording !== false) {
+      throw new Error("V2 recording state was not cleaned up.");
+    }
+    const { tab: actionNavigationTab, contents: actionNavigationContents } = await openTabWithContents(
+      browser,
+      origin,
+      "smoke-thread",
+      "smoke-bot",
+    );
+    await actionNavigationContents.executeJavaScript(
+      `(() => { const button = document.createElement('button'); button.setAttribute('aria-label', 'Slow action navigation'); button.onclick = () => { location.href = ${JSON.stringify(`${origin}/slow-document?action`)}; }; document.body.append(button); return true; })()`,
+      true,
+    );
+    // The tab was just opened, so it may have no presented frame yet, and Chromium would drop the click.
+    await waitForPresentedFrame(actionNavigationContents);
+    try {
+      // The server holds the navigation open until the release below, so the click reaches its
+      // deadline while the navigation is pending. The limit only has to fit the dispatch: 100 ms
+      // did not always fit the highlight and the dispatch on a loaded runner.
+      const timedActionNavigation = await callBrowserTool(browser, "click", {
+        tabId: actionNavigationTab.id,
+        target: { kind: "role", role: "button", name: "Slow action navigation", exact: true },
+        timeoutMs: 5_000,
+      });
+      const timedActionPayload = toolTextPayload(timedActionNavigation);
+      if (
+        !timedActionNavigation.success ||
+        !Array.isArray(timedActionPayload?.actions) ||
+        !timedActionPayload.actions.some(
+          (entry) => isDynamicRecord(entry) && String(entry.detail).includes("Action completed"),
+        )
+      ) {
+        throw new Error(
+          `V2 action-triggered navigation did not accurately report a dispatched timed action: ${timedActionNavigation.success ? JSON.stringify(timedActionPayload?.actions) : toolError(timedActionNavigation)}`,
+        );
+      }
+      if (actionNavigationRequests === 0) {
+        throw new Error("V2 timed action reported a dispatch, but the server received no navigation request.");
+      }
+      const snapshotAfterTimedAction = await callBrowserTool(browser, "snapshot", { tabId: actionNavigationTab.id });
+      if (
+        !snapshotAfterTimedAction.success ||
+        browser.listTabs().find((candidate) => candidate.id === actionNavigationTab.id)?.loading === true
+      ) {
+        throw new Error("V2 action-triggered navigation escaped tab serialization.");
+      }
+    } finally {
+      releaseActionNavigation();
+    }
+    await runCauseEffect(browser.close(actionNavigationTab.id));
+    const { tab: waitTab, contents: waitContents } = await openTabWithContents(
+      browser,
+      origin,
+      "smoke-thread",
+      "smoke-bot",
+    );
+    const beforeNavigation = await runCauseEffect(browser.snapshot(waitTab.id));
+    const staleNavigationTarget = beforeNavigation.elements.find((element) => element.name === "Save");
+    if (!staleNavigationTarget) throw new Error("V2 stale-reference test did not find its source target.");
+    await waitContents.executeJavaScript(
+      `location.href = ${JSON.stringify(`${origin}/slow-document?domcontentloaded`)}; true`,
+      true,
+    );
+    const readinessStartedAt = Date.now();
+    const domContentLoaded = await callBrowserTool(browser, "wait_for", {
+      tabId: waitTab.id,
+      state: "domcontentloaded",
+      timeoutMs: 2_000,
+    });
+    if (!domContentLoaded.success || Date.now() - readinessStartedAt < 150) {
+      throw new Error(
+        `V2 DOMContentLoaded wait returned before the document was ready: ${toolError(domContentLoaded)}`,
+      );
+    }
+    const readyState = await waitContents.executeJavaScript("document.readyState", true);
+    if (!["interactive", "complete"].includes(String(readyState))) {
+      throw new Error("V2 page did not reach a ready state after navigation.");
+    }
+    const staleNavigationClick = await callBrowserTool(browser, "click", {
+      tabId: waitTab.id,
+      target: { kind: "ref", ref: staleNavigationTarget.ref, revision: beforeNavigation.revision },
+    });
+    if (staleNavigationClick.success || !toolError(staleNavigationClick).includes("Stale browser reference")) {
+      throw new Error("V2 navigation did not invalidate revision-bound references.");
+    }
+    const timedNavigation = await callBrowserTool(browser, "navigate", {
+      tabId: waitTab.id,
+      url: `${origin}/slow-document?serialized`,
+      timeoutMs: 10,
+    });
+    if (timedNavigation.success || !toolError(timedNavigation).includes("timed out")) {
+      throw new Error("V2 slow navigation did not return its bounded timeout error.");
+    }
+    const queuedSnapshotStartedAt = Date.now();
+    const queuedSnapshot = await callBrowserTool(browser, "snapshot", { tabId: waitTab.id });
+    if (
+      !queuedSnapshot.success ||
+      Date.now() - queuedSnapshotStartedAt > 1_000 ||
+      browser.listTabs().find((candidate) => candidate.id === waitTab.id)?.loading === true
+    ) {
+      throw new Error("V2 timed-out navigation did not stop before the tab queue resumed.");
+    }
+    const beforeReloadText = String(toolTextPayload(queuedSnapshot)?.text);
+    const reloadStartedAt = Date.now();
+    const reloaded = await callBrowserTool(browser, "navigate", {
+      tabId: waitTab.id,
+      direction: "reload",
+      timeoutMs: 2_000,
+    });
+    const reloadedText = String(toolTextPayload(reloaded)?.text);
+    if (!reloaded.success || reloadedText === beforeReloadText || Date.now() - reloadStartedAt < 150) {
+      throw new Error(`V2 reload snapshot did not wait for the new document: ${toolError(reloaded)}`);
+    }
+    if (!waitContents.isAudioMuted()) unmutedTabs.push("tab after navigation and reload");
+    const { tab: boundedTab, contents: boundedContents } = await openTabWithContents(
+      browser,
+      origin,
+      "smoke-thread",
+      "smoke-bot",
+    );
+    await boundedContents.executeJavaScript(
+      "document.body.replaceChildren(Object.assign(document.createElement('textarea'), { ariaLabel: 'Large value', value: 'x'.repeat(5_000) }), ...Array.from({ length: 200 }, (_, index) => Object.assign(document.createElement('div'), { role: 'presentation', tabIndex: 0, textContent: 'Decoration ' + index })), ...Array.from({ length: 200 }, (_, index) => Object.assign(document.createElement('button'), { hidden: true, textContent: 'Hidden ' + index })), Object.assign(document.createElement('div'), { role: 'switch', ariaLabel: 'Bounded switch', textContent: 'Switch' }), ...Array.from({ length: 250 }, (_, index) => Object.assign(document.createElement('button'), { textContent: 'Bounded ' + index }))); true",
+      true,
+    );
+    const boundedSnapshot = await runCauseEffect(browser.snapshot(boundedTab.id));
+    if (boundedSnapshot.elements.length !== 200) {
+      throw new Error(`V2 snapshot did not enforce its global element cap: ${boundedSnapshot.elements.length}`);
+    }
+    if (!boundedSnapshot.elements.some((element) => element.role === "switch" && element.name === "Bounded switch")) {
+      throw new Error("V2 snapshot candidate cap hid an actionable ARIA role.");
+    }
+    const largeValue = boundedSnapshot.elements.find((element) => element.name === "Large value")?.value;
+    if (!largeValue || largeValue.length > 2_000 || Buffer.byteLength(JSON.stringify(boundedSnapshot)) > 128 * 1024) {
+      throw new Error("V2 snapshot did not enforce its value and aggregate serialization limits.");
+    }
+    if (!boundedSnapshot.truncated) throw new Error("V2 snapshot did not report its element cap.");
+    await boundedContents.executeJavaScript(
+      "document.body.replaceChildren(...Array.from({ length: 400 }, (_, index) => Object.assign(document.createElement('p'), { textContent: 'Background ' + index + ' ' + 'filler '.repeat(20) })), Object.assign(document.createElement('div'), { role: 'dialog', textContent: 'Dialog sentinel', style: 'position:fixed;top:0;left:0' })); true",
+      true,
+    );
+    const longTextSnapshot = await runCauseEffect(browser.snapshot(boundedTab.id));
+    if (
+      !longTextSnapshot.truncated ||
+      longTextSnapshot.text.length > 20_000 ||
+      !longTextSnapshot.text.includes("Dialog sentinel")
+    ) {
+      throw new Error("V2 snapshot did not bound its text or put viewport text first.");
+    }
+    // A preview behind an agent operation gets the last frame at once instead of waiting for it.
+    const firstPreview = await runCauseEffect(browser.capturePreview(boundedTab.id));
+    let heldEvaluationSettled = false;
+    const heldEvaluation = callBrowserTool(browser, "evaluate", {
+      tabId: boundedTab.id,
+      expression:
+        "new Promise(resolve => { window.releaseHeldEvaluation = resolve; document.body.dataset.held = 'true'; })",
+    }).finally(() => {
+      heldEvaluationSettled = true;
+    });
+    await waitFor(
+      async () => (await boundedContents.executeJavaScript("document.body.dataset.held === 'true'")) === true,
+      "the held evaluation to start",
+    );
+    const busyPreview = await runCauseEffect(browser.capturePreview(boundedTab.id));
+    if (heldEvaluationSettled || busyPreview.dataUrl !== firstPreview.dataUrl) {
+      throw new Error("A preview waited behind an agent operation instead of returning the last frame.");
+    }
+    await boundedContents.executeJavaScript("window.releaseHeldEvaluation(true); true");
+    if (!(await heldEvaluation).success) throw new Error("The held evaluation failed.");
+    await runCauseEffect(browser.close(boundedTab.id));
+    await runFocusScenario(browser, origin);
+    process.stdout.write("BrowserHost: V2 semantics, adaptive image, iframe, upload, waits, and emulation passed.\n");
+
+    await runIdentityScenario(browser, origin);
+    if (googleLive) await runGoogleLiveProbe(browser);
+    if (xLive) await runXLiveProbe(browser);
+    if (whatsappLive) await runWhatsAppLiveProbe(browser);
+    if (canvaLive) await runCanvaLiveProbe(browser);
+    if (framerLive) await runFramerLiveProbe(browser, panelBounds);
+    await expectFailure(() => runCauseEffect(browser.act(tab.id, first.revision, { type: "click", ref: save.ref })));
+
+    const current = await runCauseEffect(browser.snapshot(tab.id));
+    const child = current.elements.find((element) => element.name === "Child");
+    if (!child) throw new Error("Child-tab control is missing.");
+    await runCauseEffect(browser.act(tab.id, current.revision, { type: "click", ref: child.ref }));
+    await waitForValue(() =>
+      browser.listTabs().find((candidate) => candidate.id !== tab.id && candidate.url.includes("/child")),
+    );
+    const childTab = browser
+      .listTabs()
+      .find((candidate) => candidate.id !== tab.id && candidate.url.includes("/child"));
+    if (childTab?.ownerThreadId !== "smoke-thread" || childTab.ownerAgentId !== "smoke-bot") {
+      throw new Error("A target=_blank tab did not preserve agent ownership.");
+    }
+    process.stdout.write("BrowserHost: child-tab ownership passed.\n");
+    const childContents = await waitForValue(() =>
+      webContents.getAllWebContents().find((contents) => !contents.isDestroyed() && contents.getURL() === childTab.url),
+    );
+    if (!childContents.isAudioMuted()) unmutedTabs.push("child tab");
+
+    const screenshot = await runCauseEffect(browser.screenshot(tab.id));
+    if (!screenshot.startsWith("data:image/png;base64,")) throw new Error("Screenshot failed.");
+    process.stdout.write("BrowserHost: screenshot passed.\n");
+
+    await runCauseEffect(browser.open(`${origin}/cookie?set=1`, "smoke-thread"));
+    const cookieTab = await runCauseEffect(browser.open(`${origin}/cookie`, "other-thread"));
+    const cookieSnapshot = await runCauseEffect(browser.snapshot(cookieTab.id));
+    if (!cookieSnapshot.text.includes("openbot=shared")) throw new Error("Cookies were not shared.");
+    process.stdout.write("BrowserHost: shared cookies passed.\n");
+
+    const firstCachedTab = await runCauseEffect(browser.open(`${origin}/cached`, "smoke-thread"));
+    const firstCachedSnapshot = await runCauseEffect(browser.snapshot(firstCachedTab.id));
+    if (!firstCachedSnapshot.text.includes("version:1")) {
+      throw new Error("Initial cached page did not load.");
+    }
+    cachedPageVersion = 2;
+    const revalidatedTab = await runCauseEffect(browser.open(`${origin}/cached`, "smoke-thread"));
+    const revalidatedSnapshot = await runCauseEffect(browser.snapshot(revalidatedTab.id));
+    if (!revalidatedSnapshot.text.includes("version:2")) {
+      throw new Error("A new top-level navigation reused stale cached content.");
+    }
+    process.stdout.write("BrowserHost: top-level cache revalidation passed.\n");
+
+    await expectFailure(() => runCauseEffect(browser.open("file:///etc/passwd")));
+    const tabCountBeforeAbort = browser.listTabs().length;
+    await expectFailure(() => runCauseEffect(browser.open(`${origin}/abort`)));
+    if (browser.listTabs().length !== tabCountBeforeAbort) {
+      throw new Error("A failed navigation leaked a browser tab.");
+    }
+
+    const { tab: downloadPage, contents: downloadContents } = await openTabWithContents(
+      browser,
+      origin,
+      "smoke-thread",
+    );
+    // The tab was just opened, so it may have no presented frame yet, and Chromium would drop the click.
+    await waitForPresentedFrame(downloadContents);
+    const downloadSnapshot = await runCauseEffect(browser.snapshot(downloadPage.id));
+    const download = downloadSnapshot.elements.find((element) => element.name === "Download");
+    if (!download) throw new Error("Download link is missing.");
+    const firstDownload = nextDownloadDone(downloadContents, "the first browser download");
+    await runCauseEffect(
+      browser.act(downloadPage.id, downloadSnapshot.revision, {
+        type: "click",
+        ref: download.ref,
+      }),
+    );
+    await expectDownloadedFile(await firstDownload, join(downloadsRoot, "openbot-smoke.txt"), "first");
+    const nextDownloadSnapshot = await runCauseEffect(browser.snapshot(downloadPage.id));
+    const nextDownload = nextDownloadSnapshot.elements.find((element) => element.name === "Download");
+    if (!nextDownload) throw new Error("Download link disappeared.");
+    const secondDownload = nextDownloadDone(downloadContents, "the second browser download");
+    await runCauseEffect(
+      browser.act(downloadPage.id, nextDownloadSnapshot.revision, {
+        type: "click",
+        ref: nextDownload.ref,
+      }),
+    );
+    await expectDownloadedFile(await secondDownload, join(downloadsRoot, "openbot-smoke (2).txt"), "second");
+    process.stdout.write("BrowserHost: download passed.\n");
+
+    const toolResult = await runCauseEffect(
+      browser.handleDynamicTool({
+        threadId: "smoke-thread",
+        turnId: "browser-smoke-turn",
+        callId: "browser-smoke-call",
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "open",
+        arguments: { url: `${origin}/cookie` },
+      }),
+    );
+    if (!toolResult.success) throw new Error("Dynamic browser tool failed.");
+    await runToolBoundaryScenario(browser, origin);
+    await runPopupScenario(browser, origin);
+    await runSecretHandoffScenario(browser, origin);
+    if (!controlPhases.includes("open:acting") || !controlPhases.includes("open:waiting")) {
+      throw new Error(`Browser control lifecycle was not reported: ${controlPhases.join(", ")}`);
+    }
+    if (!observedControlActions.includes("reload")) {
+      throw new Error("Browser control reported reload navigation as the wrong legacy action.");
+    }
+    if (!controlledTabIds.some(Boolean)) {
+      throw new Error("Opening a page did not bind browser control to the new tab.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, BrowserHost.CONTROL_IDLE_GRACE_MS + 100));
+    if (browser.getControlState().sessions.length !== 0 || !controlPhases.includes("ended")) {
+      throw new Error("Browser control indicator did not clear after the idle grace period.");
+    }
+    process.stdout.write("BrowserHost: agent control lifecycle passed.\n");
+
+    const persistedTab = await runCauseEffect(browser.open(`${origin}/cookie`, "smoke-thread", "smoke-bot"));
+    const persistedEnvironment = await callBrowserTool(browser, "set_environment", {
+      tabId: persistedTab.id,
+      preset: "mobile",
+      colorScheme: "dark",
+      reducedMotion: true,
+    });
+    if (!persistedEnvironment.success) {
+      throw new Error(`Persisted environment setup failed: ${toolError(persistedEnvironment)}`);
+    }
+    await runCauseEffect(browser.activate(persistedTab.id));
+    const browserDestruction = runCauseEffect(browser.destroy());
+    if (browser.listTabs().length !== 0) {
+      throw new Error("BrowserHost kept views active while shutdown persistence was pending.");
+    }
+    await browserDestruction;
+    await runCauseEffect(browser.open(`${origin}/cookie`, "late-thread"))
+      .then(() => {
+        throw new Error("BrowserHost accepted a new tab after shutdown started.");
+      })
+      .catch((error) => {
+        if (!String(error).includes("shutting down")) throw error;
+      });
+    const restoredWindow = new BrowserWindow({ show: false });
+    window.destroy();
+    const restoredBrowser = new BrowserHost(restoredWindow, downloadsRoot, statePath);
+    const existingContentsIds = new Set(webContents.getAllWebContents().map((contents) => contents.id));
+    await runCauseEffect(restoredBrowser.restore());
+    const restoredContents = webContents
+      .getAllWebContents()
+      .filter((contents) => !existingContentsIds.has(contents.id));
+    for (const contents of restoredContents) {
+      if (!contents.isAudioMuted()) unmutedTabs.push(`restored tab ${contents.id}`);
+    }
+    const restoredTabs = restoredBrowser.listTabs();
+    const restoredTab = restoredTabs.find((candidate) => candidate.id === persistedTab.id);
+    if (
+      restoredTab?.ownerThreadId !== "smoke-thread" ||
+      restoredTab?.ownerAgentId !== "smoke-bot" ||
+      restoredBrowser.activeTabId !== persistedTab.id
+    ) {
+      throw new Error("Browser tabs did not survive a BrowserHost restart.");
+    }
+    const restoredEnvironmentSnapshot = await runCauseEffect(restoredBrowser.snapshot(persistedTab.id));
+    if (!restoredEnvironmentSnapshot.text.includes("load-environment:390:dark:reduce")) {
+      throw new Error("Restored browser environment was not applied before navigation.");
+    }
+    process.stdout.write("BrowserHost: persisted tabs passed.\n");
+    if (unmutedTabs.length > 0) {
+      throw new Error(`Browser tabs were not muted: ${unmutedTabs.join(", ")}`);
+    }
+    process.stdout.write("BrowserHost: new, navigated, child, and restored tabs stayed muted.\n");
+    await runCauseEffect(restoredBrowser.destroy());
+    const persistedState = JSON.parse(await readFile(statePath, "utf8"));
+    if (!isDynamicRecord(persistedState)) throw new Error("Persisted browser state is invalid.");
+    if (persistedState.version !== 2) throw new Error("Browser state was not persisted as version 2.");
+    const persistedTabs = Array.isArray(persistedState.tabs) ? persistedState.tabs.filter(isDynamicRecord) : [];
+    if (
+      getString(
+        persistedTabs.find((candidate) => getString(candidate, "id") === persistedTab.id),
+        "url",
+      ) !== `${origin}/cookie`
+    ) {
+      throw new Error("An immediate shutdown lost a restored tab URL.");
+    }
+    const legacyTabId = "legacy-v1-tab";
+    await writeFile(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        activeTabId: legacyTabId,
+        tabs: [
+          {
+            id: legacyTabId,
+            url: `${origin}/cookie`,
+            ownerThreadId: "legacy-thread",
+            ownerBotId: "legacy-bot",
+          },
+        ],
+      })}\n`,
+    );
+    const legacyWindow = new BrowserWindow({ show: false });
+    const legacyBrowser = new BrowserHost(legacyWindow, downloadsRoot, statePath);
+    await runCauseEffect(legacyBrowser.restore());
+    const legacyTab = legacyBrowser.listTabs().find((candidate) => candidate.id === legacyTabId);
+    if (legacyTab?.environment?.viewport.mode !== "fill" || legacyTab.environment.colorScheme !== "system") {
+      throw new Error("Browser state v1 did not migrate to the default V2 environment.");
+    }
+    await runCauseEffect(legacyBrowser.destroy());
+    legacyWindow.destroy();
+    restoredWindow.destroy();
+    process.stdout.write("BrowserHost smoke test passed.\n");
+  } finally {
+    clearTimeout(hardTimeout);
+    if (server.listening) server.close();
+    if (!configuredRoot) await rm(temporaryRoot, { recursive: true, force: true });
+    app.quit();
+  }
+}
+
+async function runFocusScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const focusSentinel = new BrowserWindow({
+    show: false,
+    opacity: 0,
+    width: 64,
+    height: 64,
+  });
+  await focusSentinel.loadURL("data:text/html,<input autofocus>");
+  focusSentinel.show();
+  focusSentinel.focus();
+  focusSentinel.webContents.focus();
+  await waitFor(async () => webContents.getFocusedWebContents() === focusSentinel.webContents, "focus sentinel focus");
+  let focusLosses = 0;
+  focusSentinel.webContents.on("blur", () => {
+    focusLosses += 1;
+  });
+  const backgroundTab = await runCauseEffect(browser.open(origin, "smoke-thread", "smoke-bot"));
+  if (webContents.getFocusedWebContents() !== focusSentinel.webContents) {
+    throw new Error("A background browser open stole focus from an unrelated application renderer.");
+  }
+  const backgroundSnapshot = await runCauseEffect(browser.snapshot(backgroundTab.id));
+  if (webContents.getFocusedWebContents() !== focusSentinel.webContents) {
+    throw new Error("A background CDP operation stole focus from an unrelated application renderer.");
+  }
+  const backgroundSave = backgroundSnapshot.elements.find((element) => element.name === "Save");
+  if (!backgroundSave) throw new Error("The background focus fixture did not expose its action.");
+  const backgroundAction = await callBrowserTool(browser, "click", {
+    tabId: backgroundTab.id,
+    target: {
+      kind: "ref",
+      ref: backgroundSave.ref,
+      revision: backgroundSnapshot.revision,
+    },
+  });
+  if (!backgroundAction.success || webContents.getFocusedWebContents() !== focusSentinel.webContents) {
+    throw new Error("A background browser action did not restore focus to the unrelated application renderer.");
+  }
+  // An agent click opens a popup, and the popup closes itself after sign-in. The visible panel
+  // shows both changes; neither may take focus from the person typing.
+  const opener = await runCauseEffect(browser.open(`${origin}/popup-parent`, "smoke-thread", "smoke-bot"));
+  const popupClick = await callBrowserTool(browser, "click", {
+    tabId: opener.id,
+    target: { kind: "role", role: "button", name: "Blank popup", exact: true },
+  });
+  if (!popupClick.success) throw new Error(`The focus popup click failed: ${toolError(popupClick)}`);
+  const popup = await waitForValue(() => browser.listTabs().find((tab) => tab.openerTabId === opener.id));
+  await waitFor(async () => browser.activeTabId === popup.id, "focus popup activation");
+  const popupKeptFocus = webContents.getFocusedWebContents() === focusSentinel.webContents;
+  await waitFor(
+    async () =>
+      webContents.getAllWebContents().some((item) => item.getURL().endsWith("/popup-login") && !item.isLoading()),
+    "focus popup load",
+  );
+  // The page closes during the navigation that the click starts, so the click can report an aborted load.
+  await callBrowserTool(browser, "click", {
+    tabId: popup.id,
+    target: { kind: "role", role: "button", name: "Use test account", exact: true },
+  });
+  await waitFor(
+    async () => !browser.listTabs().some((tab) => tab.id === popup.id) && browser.activeTabId === opener.id,
+    "focus popup return to opener",
+  );
+  const closeKeptFocus = webContents.getFocusedWebContents() === focusSentinel.webContents;
+  await runCauseEffect(browser.close(opener.id));
+  await mkdir(".openbot-build", { recursive: true });
+  await writeFile(
+    ".openbot-build/browser-focus-report.json",
+    JSON.stringify({ focusLosses, success: backgroundAction.success, popupKeptFocus, closeKeptFocus }, null, 2),
+  );
+  if (!popupKeptFocus)
+    throw new Error("A popup from an agent click stole focus from an unrelated application renderer.");
+  if (!closeKeptFocus)
+    throw new Error("A popup that closed itself stole focus from an unrelated application renderer.");
+  if (focusLosses !== 0) throw new Error(`Background browser actions interrupted typing ${focusLosses} times.`);
+  await runCauseEffect(browser.close(backgroundTab.id));
+  focusSentinel.destroy();
+}
+
+/**
+ * A page that redirects while it loads made `loadURL` reject inside Electron's `did-start-navigation`
+ * event, and the tab then called `webContents.stop()` before that event returned. Chromium stops the
+ * process when a navigation is cancelled while it starts. The process must survive and end on the
+ * redirected page.
+ */
+async function runRedirectNavigationScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const tab = await runCauseEffect(browser.open(origin, "smoke-thread", "smoke-bot"));
+  const outcomes: { via: string; url: string; success: boolean; error?: string }[] = [];
+  try {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      for (const url of [`${origin}/redirect-start`, `${origin}/redirect-start?slow`]) {
+        const result = await callBrowserTool(browser, "navigate", { tabId: tab.id, url, timeoutMs: 5_000 });
+        outcomes.push({
+          via: "tool",
+          url,
+          success: result.success,
+          ...(result.success ? {} : { error: toolError(result) }),
+        });
+        const exit = await Effect.runPromiseExit(browser.loadUrl(tab.id, url));
+        outcomes.push({
+          via: "loadUrl",
+          url,
+          success: exit._tag === "Success",
+          ...(exit._tag === "Success" ? {} : { error: String(exit.cause) }),
+        });
+      }
+    }
+    await waitFor(
+      async () =>
+        browser
+          .listTabs()
+          .find((candidate) => candidate.id === tab.id)
+          ?.url.includes("/redirect-end") === true,
+      "redirected tab URL",
+    );
+  } finally {
+    await runCauseEffect(browser.close(tab.id));
+  }
+  await mkdir(".openbot-build", { recursive: true });
+  await writeFile(
+    ".openbot-build/browser-redirect-navigation-report.json",
+    JSON.stringify({ processAlive: true, attempts: outcomes.length, outcomes }, null, 2),
+  );
+  process.stdout.write(`BrowserHost: ${outcomes.length} redirecting navigations kept the process alive.\n`);
+}
+
+async function runBackgroundScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const tab = await runCauseEffect(browser.open(origin, "smoke-thread", "smoke-bot"));
+  const other = await runCauseEffect(browser.open(`${origin}/child`, "other-thread", "other-agent"));
+  const failures: string[] = [];
+  try {
+    // Neither page has been displayed. A different agent now owns the active tab.
+    // Only keyboard input is asserted here, and neither a capture nor a click:
+    // a hidden view has no compositor surface under xvfb, so `capturePage`
+    // reports UnknownVizError and a mouse event is hit-tested by the browser
+    // process against surface data this view does not have. Typing takes
+    // neither path, because `DOM.focus` and `Input.insertText` are routed
+    // straight to the renderer, so it is the half of native input a background
+    // tab can prove. Captures and clicks on displayed tabs are proven in the
+    // main flow.
+    try {
+      const first = await runCauseEffect(browser.snapshot(tab.id));
+      const input = first.elements.find((element) => element.name === "Task");
+      if (!input) throw new Error("Background page did not expose Task.");
+      const typed = await runCauseEffect(
+        browser.act(tab.id, first.revision, { type: "type", ref: input.ref, text: "background" }),
+      );
+      if (!typed.text.includes("typed:background|input:true"))
+        throw new Error(`Background input was not native: ${typed.text}`);
+    } catch (error) {
+      failures.push(`input: ${String(error)}`);
+    }
+    if (failures.length) throw new Error(`Background browser failed: ${failures.join("; ")}`);
+  } finally {
+    await runCauseEffect(browser.close(tab.id));
+    await runCauseEffect(browser.close(other.id));
+  }
+}
+
+async function runWaitDeadlines(browser: BrowserHost, tabId: string, v2Contents: WebContents): Promise<void> {
+  // A timeout returns before its CDP commands finish unwinding. A queued snapshot waits for
+  // that cleanup, so the next measurement covers its own deadline rather than the prior queue.
+  await runCauseEffect(browser.snapshot(tabId));
+  await v2Contents.executeJavaScript(
+    "(() => { const container = Object.assign(document.createElement('div'), { innerHTML: Array.from({ length: 200 }, (_, index) => '<button aria-label=\"Bulk ' + index + '\">Bulk ' + index + '</button>').join('') }); container.dataset.bulkTargets = ''; document.body.appendChild(container); return true; })()",
+    true,
+  );
+  const semanticWaitStarted = Date.now();
+  const boundedSemanticWait = await callBrowserTool(browser, "wait_for", {
+    tabId: tabId,
+    target: { kind: "role", role: "button", name: "Missing bulk target", exact: true },
+    timeoutMs: 5,
+  });
+  if (
+    boundedSemanticWait.success ||
+    !toolError(boundedSemanticWait).includes("timed out") ||
+    Date.now() - semanticWaitStarted > 1_000
+  ) {
+    throw new Error("V2 semantic wait did not enforce its collection deadline.");
+  }
+  const boundedWaitSnapshot = await callBrowserTool(browser, "wait_for", {
+    tabId: tabId,
+    url: "/v2",
+    timeoutMs: 5,
+  });
+  if (boundedWaitSnapshot.success || !toolError(boundedWaitSnapshot).includes("timed out")) {
+    throw new Error("V2 wait snapshot did not share the condition deadline.");
+  }
+  await v2Contents.executeJavaScript("document.querySelector('[data-bulk-targets]').remove(); true", true);
+  await runCauseEffect(browser.snapshot(tabId));
+  const boundedActionPoint = await v2Contents.executeJavaScript(
+    `(() => {
+      const bounds = document.querySelector('[aria-label="SPA"]').getBoundingClientRect();
+      return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+    })()`,
+    true,
+  );
+  if (!isDynamicRecord(boundedActionPoint) || !isNumber(boundedActionPoint.x) || !isNumber(boundedActionPoint.y)) {
+    throw new Error("V2 bounded action point fixture was not available.");
+  }
+  await v2Contents.executeJavaScript(
+    "globalThis.__openbotNoise = setInterval(() => document.querySelector('output').toggleAttribute('data-noise'), 10); true",
+    true,
+  );
+  const actionTimeoutStarted = Date.now();
+  const boundedAction = await callBrowserTool(browser, "click", {
+    tabId: tabId,
+    target: { kind: "point", x: boundedActionPoint.x, y: boundedActionPoint.y },
+    timeoutMs: 250,
+  });
+  const boundedActionPayload = toolTextPayload(boundedAction);
+  if (
+    !boundedAction.success ||
+    !Array.isArray(boundedActionPayload?.actions) ||
+    !boundedActionPayload.actions.some(
+      (entry) => isDynamicRecord(entry) && String(entry.detail).includes("Action completed"),
+    ) ||
+    Date.now() - actionTimeoutStarted > 1_000
+  ) {
+    throw new Error("V2 dispatched action did not report success when settling exceeded its deadline.");
+  }
+  const quietWait = await callBrowserTool(browser, "wait_for", {
+    tabId: tabId,
+    state: "dom-quiet",
+    timeoutMs: 200,
+  });
+  if (quietWait.success || !toolError(quietWait).includes("timed out")) {
+    throw new Error("V2 DOM-quiet wait suppressed its timeout.");
+  }
+  await v2Contents.executeJavaScript(
+    "clearInterval(globalThis.__openbotNoise); delete globalThis.__openbotNoise; true",
+    true,
+  );
+}
+
+/**
+ * The live view a remote member watches: frames that keep coming, a rate that stays bounded, input
+ * that reaches the page, and a stream that ends when the member stops watching.
+ *
+ * The first check is the one that a unit test cannot make. A page may hold only a few frames the
+ * viewer has not acknowledged, so an acknowledgement that never arrives stops the stream after a
+ * handful of frames and looks like a frozen page. Only a real page and a real debugger session show
+ * that, and a released version already failed exactly this way.
+ */
+async function runLiveViewScenario(browser: BrowserHost, tabId: string, contents: WebContents): Promise<void> {
+  await contents.executeJavaScript(
+    `(() => {
+    document.getElementById('live-view-probe')?.remove();
+    const probe = document.createElement('div');
+    probe.id = 'live-view-probe';
+    probe.style.cssText = 'position:fixed;left:10px;top:10px;width:120px;height:120px;background:#c33;z-index:2147483647';
+    const button = document.createElement('button');
+    button.id = 'live-view-button';
+    button.textContent = 'Live view target';
+    button.style.cssText = 'position:fixed;left:10px;top:150px;width:200px;height:60px;z-index:2147483647';
+    button.addEventListener('click', event => { if (event.isTrusted) button.dataset.pressed = 'true'; });
+    document.body.append(probe, button);
+    // A page that keeps drawing: the frames have to keep coming for as long as it does.
+    const paint = () => {
+      probe.style.opacity = String(0.4 + (Date.now() % 1000) / 2000);
+      window.__liveViewProbe = requestAnimationFrame(paint);
+    };
+    paint();
+  })()`,
+    true,
+  );
+  const frames: Array<{ sequence: number; at: number }> = [];
+  const stopView = await runCauseEffect(
+    browser.startView(tabId, (frame) => {
+      if (frame.image.byteLength === 0) throw new Error("A live view frame carried no image.");
+      frames.push({ sequence: frame.sequence, at: Date.now() });
+    }),
+  );
+  try {
+    // Chromium lets a page hold only a few unacknowledged frames, so passing this count proves the
+    // acknowledgements are landing rather than the stream having stopped after its first burst.
+    const enough = 15;
+    const deadline = Date.now() + 20_000;
+    while (frames.length < enough && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (frames.length < enough) {
+      throw new Error(`The live view stopped after ${frames.length} frames instead of continuing past ${enough}.`);
+    }
+    const first = frames[0];
+    const last = frames.at(-1);
+    if (!first || !last) throw new Error("The live view sent no frames.");
+    const elapsedSeconds = (last.at - first.at) / 1000;
+    const rate = elapsedSeconds > 0 ? (frames.length - 1) / elapsedSeconds : Number.POSITIVE_INFINITY;
+    // The host paces the stream at about thirty frames a second. A page that draws faster than that
+    // must not raise what the link and the watching computer have to carry.
+    if (rate > 45) throw new Error(`The live view sent ${rate.toFixed(1)} frames a second, above the paced rate.`);
+    const sequences = frames.map((frame) => frame.sequence);
+    if (sequences.some((value, index) => index > 0 && value <= (sequences[index - 1] ?? Number.NEGATIVE_INFINITY))) {
+      throw new Error("Live view frames did not arrive in order.");
+    }
+
+    // Input from the watching member reaches the page, at the page's own pixels.
+    const centre = "document.getElementById('live-view-button').getBoundingClientRect()";
+    const x = await contents.executeJavaScript(`(r => r.left + r.width / 2)(${centre})`, true);
+    const y = await contents.executeJavaScript(`(r => r.top + r.height / 2)(${centre})`, true);
+    if (!isNumber(x) || !isNumber(y)) throw new Error("The live view target did not report a position.");
+    for (const action of ["move", "down", "up"] as const) {
+      await runCauseEffect(
+        browser.dispatchViewInput(tabId, {
+          type: "pointer",
+          action,
+          x,
+          y,
+          button: "left",
+          clickCount: action === "move" ? 0 : 1,
+          deltaX: 0,
+          deltaY: 0,
+          modifiers: 0,
+        }),
+      );
+    }
+    const pressedDeadline = Date.now() + 5_000;
+    let pressed = false;
+    while (!pressed && Date.now() < pressedDeadline) {
+      pressed = await contents.executeJavaScript(
+        "document.getElementById('live-view-button').dataset.pressed === 'true'",
+        true,
+      );
+      if (!pressed) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!pressed) throw new Error("A live view click did not reach the page.");
+    await runLiveViewClipboard(browser, tabId, contents);
+  } finally {
+    await Effect.runPromise(stopView());
+  }
+  // The page still draws. Nothing more may arrive once the member stops watching.
+  const afterStop = frames.length;
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (frames.length !== afterStop) {
+    throw new Error(`The live view sent ${frames.length - afterStop} frames after it was stopped.`);
+  }
+  await contents.executeJavaScript(
+    `(() => {
+    cancelAnimationFrame(window.__liveViewProbe);
+    document.getElementById('live-view-probe')?.remove();
+    document.getElementById('live-view-button')?.remove();
+  })()`,
+    true,
+  );
+}
+
+/**
+ * A member's paste, select-all, copy and cut in a live view. The text goes in as one insertion and
+ * the selection comes back as text, and the host's own clipboard is neither read nor replaced. The
+ * results go to `.openbot-build/browser-live-view-clipboard.json`.
+ */
+async function runLiveViewClipboard(browser: BrowserHost, tabId: string, contents: WebContents): Promise<void> {
+  const pasted = "pasted by the member\nsecond line";
+  const field = (id: string, type: string) =>
+    contents.executeJavaScript(
+      `(() => {
+      document.getElementById('${id}')?.remove();
+      const field = document.createElement('${type === "textarea" ? "textarea" : "input"}');
+      field.id = '${id}';
+      ${type === "password" ? "field.type = 'password'; field.value = 'host secret';" : ""}
+      field.style.cssText = 'position:fixed;left:10px;top:230px;width:300px;height:60px;z-index:2147483647';
+      document.body.append(field);
+      field.focus();
+      field.select();
+    })()`,
+      true,
+    );
+  const value = (id: string) => contents.executeJavaScript(`document.getElementById('${id}').value`, true);
+
+  await field("live-view-text", "textarea");
+  // The member's Ctrl+V and Cmd+V still reach the page as keys, and must not paste the host's clipboard.
+  for (const modifiers of [2, 4]) {
+    for (const action of ["down", "up"] as const) {
+      await runCauseEffect(
+        browser.dispatchViewInput(tabId, { type: "key", action, key: "v", code: "KeyV", text: "", modifiers }),
+      );
+    }
+  }
+  const afterPasteKeys = await value("live-view-text");
+  if (afterPasteKeys !== "") throw new Error("A live view Ctrl+V or Cmd+V pasted the host clipboard.");
+  await contents.executeJavaScript(
+    `document.getElementById('live-view-text').addEventListener('paste', event => {
+      window.__liveViewPasteEvent = event.clipboardData.getData('text/plain');
+    }, { once: true })`,
+    true,
+  );
+  await runCauseEffect(browser.dispatchViewInput(tabId, { type: "paste", text: pasted }));
+  const pasteEvent = await contents.executeJavaScript("window.__liveViewPasteEvent", true);
+  if (pasteEvent !== pasted) throw new Error("A live view paste fired no paste event with the text.");
+  const afterPaste = await value("live-view-text");
+  if (afterPaste !== pasted) throw new Error(`A live view paste left ${JSON.stringify(afterPaste)} in the field.`);
+  // Cmd+A from a Mac client selects all on any host, because the host names the command.
+  await contents.executeJavaScript(
+    "(field => field.setSelectionRange(field.value.length, field.value.length))(document.getElementById('live-view-text'))",
+    true,
+  );
+  for (const action of ["down", "up"] as const) {
+    await runCauseEffect(
+      browser.dispatchViewInput(tabId, { type: "key", action, key: "a", code: "KeyA", text: "", modifiers: 4 }),
+    );
+  }
+  const copied = await runCauseEffect(browser.copyViewSelection(tabId, 100_000));
+  if (copied !== pasted) throw new Error(`A live view copy after select-all returned ${JSON.stringify(copied)}.`);
+  const tooLarge = await runCauseEffect(browser.copyViewSelection(tabId, pasted.length - 1));
+  if (tooLarge !== null) throw new Error("A live view copy sent a selection longer than its limit.");
+  // The second half of a cut deletes only the text the member has on their clipboard.
+  await runCauseEffect(browser.dispatchViewInput(tabId, { type: "cut", text: "other text" }));
+  const afterStaleCut = await value("live-view-text");
+  if (afterStaleCut !== pasted) throw new Error("A live view cut deleted a selection that had changed.");
+  await runCauseEffect(browser.dispatchViewInput(tabId, { type: "cut", text: pasted }));
+  const afterCut = await value("live-view-text");
+  if (afterCut !== "") throw new Error("A live view cut did not delete the selected text.");
+
+  // A field in a frame of the page's own origin gets the paste event and gives its selection.
+  await contents.executeJavaScript(
+    `new Promise(resolve => {
+      document.getElementById('live-view-frame')?.remove();
+      const frame = document.createElement('iframe');
+      frame.id = 'live-view-frame';
+      frame.style.cssText = 'position:fixed;left:10px;top:300px;width:300px;height:80px;z-index:2147483647';
+      frame.srcdoc = '<textarea></textarea>';
+      frame.onload = () => {
+        const inner = frame.contentDocument.querySelector('textarea');
+        inner.addEventListener('paste', event => { window.__liveViewFramePaste = event.clipboardData.getData('text/plain'); });
+        inner.focus();
+        resolve();
+      };
+      document.body.append(frame);
+    })`,
+    true,
+  );
+  await runCauseEffect(browser.dispatchViewInput(tabId, { type: "paste", text: "in a frame" }));
+  const framePasteEvent = await contents.executeJavaScript("window.__liveViewFramePaste", true);
+  await contents.executeJavaScript(
+    "document.getElementById('live-view-frame').contentDocument.querySelector('textarea').select()",
+    true,
+  );
+  const fromFrame = await runCauseEffect(browser.copyViewSelection(tabId, 100_000));
+  if (framePasteEvent !== "in a frame" || fromFrame !== "in a frame") {
+    throw new Error("A live view paste or copy missed a field in a frame of the same origin.");
+  }
+
+  // A field in a frame of another origin, which runs in its own process: the page's world cannot
+  // reach it, so the host follows the focus through CDP. The member clicks into it, as a user does.
+  await contents.executeJavaScript(
+    `new Promise(resolve => {
+      document.getElementById('live-view-frame')?.remove();
+      const frame = document.createElement('iframe');
+      frame.id = 'live-view-frame';
+      frame.style.cssText = 'position:fixed;left:10px;top:300px;width:300px;height:80px;border:0;z-index:2147483647';
+      frame.src = 'http://localhost:' + location.port + '/clipboard-frame';
+      frame.onload = () => resolve();
+      document.body.append(frame);
+    })`,
+    true,
+  );
+  const crossOriginFrame = contents.mainFrame.framesInSubtree.find((frame) => frame.url.endsWith("/clipboard-frame"));
+  if (!crossOriginFrame) throw new Error("The cross-origin clipboard frame did not load.");
+  // A frame in another process takes clicks only once it draws, so the click repeats until it lands.
+  const focusDeadline = Date.now() + 10_000;
+  while (!(await crossOriginFrame.executeJavaScript("document.activeElement?.tagName === 'TEXTAREA'"))) {
+    if (Date.now() > focusDeadline) {
+      throw new Error("A live view click did not focus the field in a cross-origin frame.");
+    }
+    for (const action of ["move", "down", "up"] as const) {
+      await runCauseEffect(
+        browser.dispatchViewInput(tabId, {
+          type: "pointer",
+          action,
+          x: 160,
+          y: 340,
+          button: "left",
+          clickCount: action === "move" ? 0 : 1,
+          deltaX: 0,
+          deltaY: 0,
+          modifiers: 0,
+        }),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await runCauseEffect(browser.dispatchViewInput(tabId, { type: "paste", text: "across origins" }));
+  const crossOriginPasteEvent = await crossOriginFrame.executeJavaScript("window.__pasteEvent");
+  const crossOriginValue = await crossOriginFrame.executeJavaScript("document.querySelector('textarea').value");
+  await crossOriginFrame.executeJavaScript("document.querySelector('textarea').select()");
+  const fromCrossOriginFrame = await runCauseEffect(browser.copyViewSelection(tabId, 100_000));
+  await runCauseEffect(browser.dispatchViewInput(tabId, { type: "cut", text: "across origins" }));
+  const afterCrossOriginCut = await crossOriginFrame.executeJavaScript("document.querySelector('textarea').value");
+  if (
+    crossOriginPasteEvent !== "across origins" ||
+    crossOriginValue !== "across origins" ||
+    fromCrossOriginFrame !== "across origins" ||
+    afterCrossOriginCut !== ""
+  ) {
+    throw new Error(
+      `A live view paste, copy or cut missed a field in a cross-origin frame: ${JSON.stringify({ crossOriginPasteEvent, crossOriginValue, fromCrossOriginFrame, afterCrossOriginCut })}`,
+    );
+  }
+
+  await field("live-view-password", "password");
+  const fromPassword = await runCauseEffect(browser.copyViewSelection(tabId, 100_000));
+  if (fromPassword !== "") throw new Error("A live view copy read a password field.");
+  // Whoever sits at the host may copy something meanwhile, so the check is that the member's text
+  // never reached the host's clipboard, not that the clipboard stayed the same.
+  const hostClipboardHasMemberText = (await clipboard.readText()).includes(pasted);
+  if (hostClipboardHasMemberText) throw new Error("A live view copy or paste wrote the host clipboard.");
+
+  const reportDirectory = join(process.cwd(), ".openbot-build");
+  await mkdir(reportDirectory, { recursive: true });
+  await writeFile(
+    join(reportDirectory, "browser-live-view-clipboard.json"),
+    `${JSON.stringify(
+      {
+        afterPasteKeys,
+        pasteEvent,
+        afterPaste,
+        copied,
+        tooLarge,
+        afterStaleCut,
+        afterCut,
+        framePasteEvent,
+        fromFrame,
+        crossOriginPasteEvent,
+        crossOriginValue,
+        fromCrossOriginFrame,
+        afterCrossOriginCut,
+        fromPassword,
+        hostClipboardHasMemberText,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await contents.executeJavaScript(
+    `for (const id of ['live-view-text', 'live-view-password', 'live-view-frame']) document.getElementById(id)?.remove();`,
+    true,
+  );
+}
+
+/**
+ * Wait until the view actually delivers a mouse event to the page.
+ *
+ * A key event goes to the focused renderer, but a mouse event needs the view to be producing
+ * compositor frames, and under a virtual display it can take seconds to get there - an animation
+ * frame does not run at all until it does. Chromium drops every mouse event in the meantime and
+ * reports nothing: no error, no pointer event, just a click that never happened. Every scenario
+ * after this one clicks once and means it, so the waiting belongs here rather than in each of them.
+ *
+ * The probe is thrown away, so retrying it costs nothing and proves nothing about the product.
+ */
+async function waitForMouseInput(browser: BrowserHost, tabId: string, contents: WebContents): Promise<void> {
+  await contents.executeJavaScript(
+    `(() => {
+    const probe = document.createElement('button');
+    probe.id = 'smoke-input-probe';
+    probe.textContent = 'Input probe';
+    probe.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647';
+    probe.addEventListener('click', event => {
+      if (event.isTrusted) probe.dataset.clicked = 'true';
+    });
+    document.body.prepend(probe);
+  })()`,
+    true,
+  );
+  const deadline = Date.now() + 60_000;
+  let landed = false;
+  while (!landed && Date.now() < deadline) {
+    await callBrowserTool(browser, "click", {
+      tabId,
+      target: { kind: "role", role: "button", name: "Input probe", exact: true },
+    });
+    landed =
+      (await contents.executeJavaScript(
+        "document.getElementById('smoke-input-probe').dataset.clicked === 'true'",
+        true,
+      )) === true;
+  }
+  await contents.executeJavaScript("document.getElementById('smoke-input-probe').remove()", true);
+  if (!landed) throw new Error("The view never delivered a native mouse event to the page.");
+}
+
+async function runDoubleClickScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const doubleUrl = `${origin}/blocking-frame?double-click`;
+  const doubleTab = await runCauseEffect(browser.open(doubleUrl, "smoke-thread", "smoke-bot"));
+  try {
+    const doubleContents = webContents
+      .getAllWebContents()
+      .find((contents) => !contents.isDestroyed() && contents.getURL() === doubleUrl);
+    if (!doubleContents) throw new Error("Double-click fixture web contents were not available.");
+    await doubleContents.executeJavaScript(
+      `(() => {
+    const button = document.createElement('button');
+    button.textContent = 'Double-click item';
+    button.addEventListener('click', event => {
+      if (event.detail === 1 && event.isTrusted) button.dataset.selected = 'true';
+    });
+    button.addEventListener('dblclick', event => {
+      if (button.dataset.selected === 'true' && event.isTrusted) button.dataset.activated = 'true';
+    });
+    button.id = 'double-click-item';
+    document.body.prepend(button);
+  })()`,
+      true,
+    );
+    // The tab was just opened, so it may have no presented frame yet. Chromium would drop the first
+    // click and the double-click would arrive without the selection before it.
+    await waitForPresentedFrame(doubleContents);
+    const doubleClicked = await callBrowserTool(browser, "click", {
+      tabId: doubleTab.id,
+      target: { kind: "role", role: "button", name: "Double-click item", exact: true },
+      clickCount: 2,
+    });
+    const activated = await doubleContents.executeJavaScript(
+      "document.getElementById('double-click-item').dataset.activated === 'true'",
+      true,
+    );
+    if (!doubleClicked.success || !activated) throw new Error("V2 double-click did not select before activation.");
+    await doubleContents.executeJavaScript("document.getElementById('double-click-item').remove()", true);
+  } finally {
+    await runCauseEffect(browser.close(doubleTab.id));
+  }
+}
+
+async function runDragAction(browser: BrowserHost, tabId: string, v2Contents: WebContents): Promise<void> {
+  const dragged = await callBrowserTool(browser, "drag", {
+    tabId: tabId,
+    source: { kind: "role", role: "button", name: "Drag source", exact: true },
+    target: { kind: "role", role: "button", name: "Drop target", exact: true },
+  });
+  if (!dragged.success) throw new Error(`V2 drag failed: ${toolError(dragged)}`);
+  const dragValue = await v2Contents.executeJavaScript("document.querySelector('output').textContent", true);
+  if (dragValue !== "drag:true") {
+    const dragDiagnostics = await v2Contents.executeJavaScript(
+      `(() => ({
+        output: document.querySelector('output').textContent,
+        source: document.querySelector('[aria-label="Drag source"]').getBoundingClientRect().toJSON(),
+        target: document.querySelector('[aria-label="Drop target"]').getBoundingClientRect().toJSON(),
+        scrollY,
+        viewport: { width: innerWidth, height: innerHeight },
+      }))()`,
+      true,
+    );
+    throw new Error(`V2 drag did not produce a trusted drop event: ${JSON.stringify(dragDiagnostics)}`);
+  }
+}
+
+async function runControlActions(browser: BrowserHost, tabId: string, v2Contents: WebContents): Promise<void> {
+  const selected = await callBrowserTool(browser, "select_option", {
+    tabId: tabId,
+    target: { kind: "role", role: "combobox", name: "Mode", exact: true },
+    values: ["b"],
+  });
+  if (!selected.success) throw new Error(`V2 select failed: ${toolError(selected)}`);
+  const selectionValue = await v2Contents.executeJavaScript(
+    `(() => { const select = document.querySelector('[aria-label="Mode"]'); return { value: select.value, inputTrusted: select.dataset.inputTrusted, changeTrusted: select.dataset.changeTrusted }; })()`,
+    true,
+  );
+  if (
+    !isDynamicRecord(selectionValue) ||
+    selectionValue.value !== "b" ||
+    selectionValue.inputTrusted !== "true" ||
+    selectionValue.changeTrusted !== "true"
+  ) {
+    throw new Error("V2 select did not use trusted native input.");
+  }
+  // An option whose value is the empty string is how a page spells "no selection", and the value is
+  // the only way to address it -- its label is shared with Alpha's initial, so typeahead alone lands
+  // elsewhere. Rejecting the empty string as invalid put a real option out of reach.
+  const clearedSelection = await callBrowserTool(browser, "select_option", {
+    tabId: tabId,
+    target: { kind: "role", role: "combobox", name: "Mode", exact: true },
+    values: [""],
+  });
+  const clearedValue = await v2Contents.executeJavaScript(`document.querySelector('[aria-label="Mode"]').value`, true);
+  if (!clearedSelection.success || clearedValue !== "") {
+    throw new Error(`V2 select could not clear through an empty option: ${toolError(clearedSelection)}`);
+  }
+  const reselected = await callBrowserTool(browser, "select_option", {
+    tabId: tabId,
+    target: { kind: "role", role: "combobox", name: "Mode", exact: true },
+    values: ["b"],
+  });
+  if (!reselected.success) throw new Error(`V2 select could not restore a value: ${toolError(reselected)}`);
+  const partialSelection = await callBrowserTool(browser, "select_option", {
+    tabId: tabId,
+    target: { kind: "role", role: "combobox", name: "Mode", exact: true },
+    values: ["b", "missing"],
+  });
+  if (partialSelection.success || !toolError(partialSelection).includes("single-select")) {
+    throw new Error("V2 single-select accepted multiple requested values.");
+  }
+  const missingSelection = await callBrowserTool(browser, "select_option", {
+    tabId: tabId,
+    target: { kind: "role", role: "combobox", name: "Mode", exact: true },
+    values: ["missing"],
+  });
+  if (missingSelection.success || !toolError(missingSelection).includes("do not exist")) {
+    throw new Error("V2 select silently accepted a missing requested value.");
+  }
+  const checked = await callBrowserTool(browser, "set_checked", {
+    tabId: tabId,
+    target: { kind: "role", role: "checkbox", name: "Agree", exact: true },
+    checked: true,
+  });
+  if (!checked.success) throw new Error(`V2 checkbox failed: ${toolError(checked)}`);
+  const clearedRadio = await callBrowserTool(browser, "set_checked", {
+    tabId: tabId,
+    target: { kind: "role", role: "radio", name: "Primary choice", exact: true },
+    checked: false,
+  });
+  if (clearedRadio.success || !toolError(clearedRadio).includes("cannot be cleared directly")) {
+    throw new Error("V2 selected radio clearing did not return a truthful error.");
+  }
+  const nonCheckable = await callBrowserTool(browser, "set_checked", {
+    tabId: tabId,
+    target: { kind: "role", role: "spinbutton", name: "Quantity", exact: true },
+    checked: false,
+  });
+  if (nonCheckable.success || !toolError(nonCheckable).includes("not checkable")) {
+    throw new Error("V2 set_checked accepted a non-checkable input.");
+  }
+  const contentEditable = await callBrowserTool(browser, "type", {
+    tabId: tabId,
+    target: { kind: "role", role: "textbox", name: "Notes", exact: true },
+    text: "editable text",
+    mode: "replace",
+  });
+  if (!contentEditable.success) throw new Error(`V2 contenteditable typing failed: ${toolError(contentEditable)}`);
+  const appendedContentEditable = await callBrowserTool(browser, "type", {
+    tabId: tabId,
+    target: { kind: "role", role: "textbox", name: "Notes", exact: true },
+    text: " appended",
+    mode: "append",
+  });
+  if (!appendedContentEditable.success) {
+    throw new Error(`V2 contenteditable append failed: ${toolError(appendedContentEditable)}`);
+  }
+  const editableValue = await v2Contents.executeJavaScript(
+    "document.querySelector('[contenteditable]').textContent",
+    true,
+  );
+  if (editableValue !== "editable text appended") {
+    throw new Error("V2 contenteditable target did not receive text.");
+  }
+  // A styled label's ::after covers its radio, as on Stripe Checkout. The label activates the radio,
+  // so the click goes through. The same layer on an element that is not a label still blocks it.
+  const pseudoLabel = await callBrowserTool(browser, "click", {
+    tabId: tabId,
+    target: { kind: "role", role: "radio", name: "Pay by card", exact: true },
+  });
+  if (!pseudoLabel.success) throw new Error(`V2 click through a label ::after failed: ${toolError(pseudoLabel)}`);
+  const pseudoChecked = await v2Contents.executeJavaScript(
+    `document.querySelector('[aria-label="Pay by card"]').checked`,
+    true,
+  );
+  if (pseudoChecked !== true) throw new Error("V2 click through a label ::after did not select the radio.");
+  const pseudoBlocked = await callBrowserTool(browser, "click", {
+    tabId: tabId,
+    target: { kind: "role", role: "radio", name: "Pay by transfer", exact: true },
+  });
+  if (pseudoBlocked.success || !toolError(pseudoBlocked).includes("covered by")) {
+    throw new Error("V2 hit testing ignored a ::after layer that is not a label.");
+  }
+}
+
+async function runKeyboardScenario(browser: BrowserHost, origin: string, temporaryRoot: string): Promise<void> {
+  // Chromium decides implicit form submission and text insertion from the *character* event, not
+  // the key event, so a named key dispatched without one reaches the page as a keydown nobody acts
+  // on: `submit: true` left a plain form unsubmitted and `press("Space")` typed nothing. Nothing is
+  // bound to this field, so only native submission can produce the form's output.
+  const { tab: keysTab, contents: keysContents } = await openTabWithContents(
+    browser,
+    `${origin}/keys`,
+    "smoke-thread",
+    "smoke-bot",
+  );
+  const retainedDocumentChanges: Array<{ tabId: string; documentIds: ReadonlySet<string> }> = [];
+  const unsubscribe = browser.onDocumentChanged((tabId, documentIds) => {
+    retainedDocumentChanges.push({ tabId, documentIds });
+  });
+  try {
+    const typedIntoForm = await callBrowserTool(browser, "type", {
+      tabId: keysTab.id,
+      target: { kind: "css", selector: 'input[aria-label="Query"]' },
+      text: "open",
+      mode: "replace",
+    });
+    if (!typedIntoForm.success) throw new Error(`V2 form field typing failed: ${toolError(typedIntoForm)}`);
+    const spacePressed = await callBrowserTool(browser, "press", {
+      tabId: keysTab.id,
+      target: { kind: "css", selector: 'input[aria-label="Query"]' },
+      key: "Space",
+    });
+    const queryAfterSpace = await keysContents.executeJavaScript(
+      `document.querySelector('input[aria-label="Query"]').value`,
+      true,
+    );
+    if (!spacePressed.success || queryAfterSpace !== "open ") {
+      throw new Error(`V2 press did not insert a space: ${toolError(spacePressed)} (${queryAfterSpace})`);
+    }
+    const nativeSubmit = await callBrowserTool(browser, "type", {
+      tabId: keysTab.id,
+      target: { kind: "css", selector: 'input[aria-label="Query"]' },
+      text: "sesame",
+      mode: "append",
+      submit: true,
+    });
+    const nativeSubmitOutput = await keysContents.executeJavaScript(
+      "document.querySelector('output').textContent",
+      true,
+    );
+    if (!nativeSubmit.success || nativeSubmitOutput !== "form-submit:true") {
+      throw new Error(
+        `V2 submit did not reach native form submission: ${toolError(nativeSubmit)} (${nativeSubmitOutput})`,
+      );
+    }
+    // Shift is not a command modifier. `Shift+Enter` is how every composer on the web spells "line
+    // break, do not submit", so a shortcut whose character event is suppressed reaches the page as a
+    // keydown that inserts nothing while the tool reports success.
+    const typedIntoBody = await callBrowserTool(browser, "type", {
+      tabId: keysTab.id,
+      target: { kind: "css", selector: 'textarea[aria-label="Body"]' },
+      text: "line",
+      mode: "replace",
+    });
+    if (!typedIntoBody.success) throw new Error(`V2 textarea typing failed: ${toolError(typedIntoBody)}`);
+    const shiftEnterPressed = await callBrowserTool(browser, "press", {
+      tabId: keysTab.id,
+      target: { kind: "css", selector: 'textarea[aria-label="Body"]' },
+      key: "Shift+Enter",
+    });
+    const bodyAfterShiftEnter = await keysContents.executeJavaScript(
+      `document.querySelector('textarea[aria-label="Body"]').value`,
+      true,
+    );
+    if (!shiftEnterPressed.success || bodyAfterShiftEnter !== "line\n") {
+      throw new Error(
+        `V2 Shift+Enter inserted no newline: ${toolError(shiftEnterPressed)} (${JSON.stringify(bodyAfterShiftEnter)})`,
+      );
+    }
+    // The character event carries the same modifier mask as the key events around it, or the page sees
+    // an unshifted Enter -- which is how a composer decides to send the message instead of breaking
+    // the line, whatever the textarea ends up containing.
+    const shiftEnterKeypress = await keysContents.executeJavaScript(
+      "document.querySelector('#keypress-log').textContent",
+      true,
+    );
+    if (shiftEnterKeypress !== "keypress:Enter:true") {
+      throw new Error(`V2 Shift+Enter reached the page unshifted: ${shiftEnterKeypress}`);
+    }
+    // An input inside an iframe nested in a shadow root is reachable by target discovery, so its
+    // document has to be reachable by document enumeration too. If it is not, the next frame
+    // navigation reports the document as gone and frees the files the input is still holding.
+    const nestedUploadPath = join(temporaryRoot, "nested-frame-upload.txt");
+    await writeFile(nestedUploadPath, "nested frame upload fixture");
+    let shadowFrameDocumentId = "";
+    const shadowFrameUpload = await callBrowserTool(
+      browser,
+      "upload_files",
+      {
+        tabId: keysTab.id,
+        target: { kind: "role", role: "button", name: "Shadow frame files", exact: true },
+        paths: [nestedUploadPath],
+      },
+      { onUploadAssigned: (_inputId, documentId) => (shadowFrameDocumentId = documentId) },
+    );
+    if (!shadowFrameUpload.success || !shadowFrameDocumentId) {
+      throw new Error(`V2 shadow-root iframe upload failed: ${toolError(shadowFrameUpload)}`);
+    }
+    const changesBeforeTriggerNavigation = retainedDocumentChanges.length;
+    await keysContents.executeJavaScript(
+      `(() => {
+      document.querySelector('iframe[title="Trigger frame"]').src = '/frame-files?file_label=Reloaded+files';
+      return true;
+    })()`,
+      true,
+    );
+    await waitFor(
+      async () =>
+        retainedDocumentChanges.slice(changesBeforeTriggerNavigation).some((change) => change.tabId === keysTab.id),
+      "the trigger navigation document change",
+    );
+    const retainedShadowFrame = retainedDocumentChanges
+      .slice(changesBeforeTriggerNavigation)
+      .some((change) => change.tabId === keysTab.id && change.documentIds.has(shadowFrameDocumentId));
+    if (!retainedShadowFrame) {
+      throw new Error("V2 document enumeration lost an upload document inside a shadow-root iframe.");
+    }
+  } finally {
+    unsubscribe();
+    await runCauseEffect(browser.close(keysTab.id));
+  }
+}
+
+async function expectSnapshot(browser: BrowserHost, tabId: string): Promise<DynamicRecord> {
+  const result = await callBrowserTool(browser, "snapshot", { tabId });
+  const payload = toolTextPayload(result);
+  if (!result.success || !payload) throw new Error(`Snapshot failed: ${toolError(result)}`);
+  return payload;
+}
+
+function snapshotFocus(snapshot: DynamicRecord): { tag: string; name: string; editable: boolean } | null {
+  const focus = snapshot.focus;
+  if (!isDynamicRecord(focus)) return null;
+  return {
+    tag: isString(focus.tag) ? focus.tag : "",
+    name: isString(focus.name) ? focus.name : "",
+    editable: focus.editable === true,
+  };
+}
+
+async function runCanvasGridScenario(browser: BrowserHost, origin: string): Promise<void> {
+  // A spreadsheet, a code editor and a map all paint their own surface, so `type` had no element to
+  // resolve, no `value` to write and no contenteditable to select: every attempt to enter data in
+  // one failed with "Typing requires an element target". Without a target the text has to arrive as
+  // the key events a person produces, which is also the only way the page's own keydown handlers
+  // see the tab and newline that move between columns and rows.
+  const { tab: gridTab, contents: gridContents } = await openTabWithContents(
+    browser,
+    `${origin}/grid`,
+    "smoke-thread",
+    "smoke-bot",
+  );
+  const cellState = () => gridContents.executeJavaScript("document.querySelector('#grid-state').textContent", true);
+  try {
+    const selected = await callBrowserTool(browser, "click", {
+      tabId: gridTab.id,
+      target: { kind: "point", x: 50, y: 20 },
+    });
+    if (!selected.success) throw new Error(`Canvas cell selection failed: ${toolError(selected)}`);
+    const filledRow = await callBrowserTool(browser, "type", {
+      tabId: gridTab.id,
+      text: "12\tDone\n",
+    });
+    if (!filledRow.success) throw new Error(`Canvas grid typing failed: ${toolError(filledRow)}`);
+    const afterRow = await cellState();
+    if (afterRow !== '{"A1":"12","B1":"Done"}') {
+      throw new Error(`Canvas grid did not take the row: ${afterRow}`);
+    }
+    // Enter returned to the first column of the next row, so the second call proves the page kept
+    // the focus the first one left it with, without any element to re-target.
+    const committed = await callBrowserTool(browser, "type", {
+      tabId: gridTab.id,
+      text: "next",
+      submit: true,
+    });
+    if (!committed.success) throw new Error(`Canvas grid submit failed: ${toolError(committed)}`);
+    const afterSubmit = await cellState();
+    if (afterSubmit !== '{"A1":"12","B1":"Done","A2":"next"}') {
+      throw new Error(`Canvas grid did not commit the submitted cell: ${afterSubmit}`);
+    }
+    // Keystrokes with no target land wherever the page put the focus, and a caller that cannot see
+    // where that is finds out only when the data appears in the wrong place. The canvas leaves it on
+    // the document, which is what tells a caller the page interprets the keys itself.
+    const canvasFocus = snapshotFocus(await expectSnapshot(browser, gridTab.id));
+    if (canvasFocus?.tag !== "body" || canvasFocus.editable !== false) {
+      throw new Error(`Canvas grid snapshot misreported the focus: ${JSON.stringify(canvasFocus)}`);
+    }
+    const focusedField = await callBrowserTool(browser, "type", {
+      tabId: gridTab.id,
+      target: { kind: "role", role: "textbox", name: "Grid filter", exact: true },
+      text: "filter",
+    });
+    if (!focusedField.success) throw new Error(`Grid field typing failed: ${toolError(focusedField)}`);
+    const fieldFocus = snapshotFocus(await expectSnapshot(browser, gridTab.id));
+    if (fieldFocus?.tag !== "input" || fieldFocus.name !== "Grid filter" || fieldFocus.editable !== true) {
+      throw new Error(`Grid field snapshot misreported the focus: ${JSON.stringify(fieldFocus)}`);
+    }
+
+    // Replacing and appending are properties of a node's value. Reporting either one for keystrokes
+    // the page interprets itself would claim an edit that never happened.
+    const modeWithoutTarget = await callBrowserTool(browser, "type", {
+      tabId: gridTab.id,
+      text: "ignored",
+      mode: "replace",
+    });
+    if (modeWithoutTarget.success || !toolError(modeWithoutTarget).includes("type mode requires a target")) {
+      throw new Error(`Canvas grid accepted a mode without a target: ${toolError(modeWithoutTarget)}`);
+    }
+  } finally {
+    await runCauseEffect(browser.close(gridTab.id));
+  }
+}
+
+/**
+ * `upload_files` as an agent calls it: staged by `BrowserUploads` before `BrowserHost` sets the input.
+ * Every failure must come back as a failed tool result. A rejected call becomes a JSON-RPC error,
+ * which Codex hides from the agent and logs as a "Provider error".
+ */
+async function runStagedUploadScenario(
+  browser: BrowserHost,
+  tabId: string,
+  uploadPath: string,
+  missingPath: string,
+): Promise<void> {
+  const uploads = new BrowserUploads({
+    browser,
+    attachments: {
+      openSources: (_agentId, paths) =>
+        attachmentCall(() =>
+          Promise.all(paths.map(async (path) => ({ path, handle: await open(path, constants.O_RDONLY) }))),
+        ),
+    },
+    isStopping: () => false,
+    hasTakeover: () => false,
+  });
+  const upload = (target: unknown, paths: string[]) => {
+    browserToolCall += 1;
+    return runCauseEffect(
+      uploads.uploadFiles("smoke-bot", {
+        threadId: "smoke-thread",
+        turnId: `browser-v2-${browserToolCall}`,
+        callId: `browser-v2-call-${browserToolCall}`,
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "upload_files",
+        arguments: { tabId, target, paths },
+      }),
+    );
+  };
+  try {
+    const ambiguous = await upload({ kind: "css", selector: "input[type='file']" }, [uploadPath]);
+    if (ambiguous.success || !toolError(ambiguous).includes("CSS selector is ambiguous")) {
+      throw new Error(`V2 staged upload did not return the ambiguous selector: ${toolError(ambiguous)}`);
+    }
+    const missing = await upload({ kind: "css", selector: 'input[aria-label="Files"]' }, [missingPath]);
+    if (missing.success) throw new Error("V2 staged upload reported success for a missing file.");
+    const staged = await upload({ kind: "css", selector: 'input[aria-label="Files"]' }, [uploadPath]);
+    if (!staged.success) throw new Error(`V2 staged upload failed: ${toolError(staged)}`);
+  } finally {
+    await runCauseEffect(uploads.dispose());
+  }
+}
+
+async function runEvaluationScenario(browser: BrowserHost, tabId: string, v2Contents: WebContents): Promise<void> {
+  const evaluated = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression:
+      "new Promise(resolve => setTimeout(() => { document.body.dataset.evaluated = 'true'; resolve({ title: document.title, async: true, sandboxed: typeof process === 'undefined' && typeof require === 'undefined' }); }, 25))",
+  });
+  const evaluatedValue = toolTextPayload(evaluated);
+  if (!evaluated.success || evaluatedValue?.async !== true || evaluatedValue.sandboxed !== true) {
+    throw new Error(`V2 page evaluation did not return its sandboxed async value: ${toolError(evaluated)}`);
+  }
+  const evaluatedMutation = await v2Contents.executeJavaScript("document.body.dataset.evaluated", true);
+  if (evaluatedMutation !== "true") throw new Error("V2 page evaluation did not run in the main-frame page context.");
+  const evaluationSnapshot = await runCauseEffect(browser.snapshot(tabId));
+  if (!evaluationSnapshot.actions.some((action) => action.action === "evaluate" && action.outcome === "success")) {
+    throw new Error("V2 page evaluation was not recorded in browser action history.");
+  }
+  const thrownEvaluation = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression: "(() => { throw new Error('evaluation-smoke-error'); })()",
+  });
+  if (thrownEvaluation.success || !toolError(thrownEvaluation).includes("evaluation-smoke-error")) {
+    throw new Error("V2 page evaluation did not return a page exception.");
+  }
+  const leakyEvaluation = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression: "(() => { throw new Error('page said password=hunter2'); })()",
+  });
+  if (leakyEvaluation.success || toolError(leakyEvaluation).includes("hunter2")) {
+    throw new Error(`V2 page exception carried a page secret to the provider: ${toolError(leakyEvaluation)}`);
+  }
+  if (!toolError(leakyEvaluation).includes("[redacted]")) {
+    throw new Error(`V2 page exception was not redacted: ${toolError(leakyEvaluation)}`);
+  }
+  const unserializableEvaluation = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression: "undefined",
+  });
+  if (unserializableEvaluation.success || !toolError(unserializableEvaluation).includes("not JSON-serializable")) {
+    throw new Error("V2 page evaluation accepted an unserializable result.");
+  }
+  const oversizedEvaluation = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression: "'x'.repeat(70_000)",
+  });
+  if (oversizedEvaluation.success || !toolError(oversizedEvaluation).includes("exceeds 64 KB")) {
+    throw new Error("V2 page evaluation accepted an oversized result.");
+  }
+  // A promise the page never settles is the one evaluation CDP's own execution timeout does not
+  // bound, so the host has to cancel the pending command itself. If it does not, the tab's queue
+  // waits on that promise forever and every later operation -- including close and shutdown --
+  // blocks behind it, which is what the next call proves it does not.
+  const neverSettlingEvaluation = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression: "new Promise(() => {})",
+    timeoutMs: 300,
+  });
+  if (neverSettlingEvaluation.success || !toolError(neverSettlingEvaluation).includes("timed out")) {
+    throw new Error("V2 page evaluation did not bound a promise the page never settles.");
+  }
+  const evaluationAfterFailure = await callBrowserTool(browser, "evaluate", {
+    tabId: tabId,
+    expression: "({ queueRecovered: true })",
+  });
+  if (!evaluationAfterFailure.success || toolTextPayload(evaluationAfterFailure)?.queueRecovered !== true) {
+    throw new Error(`V2 page evaluation left the action queue unusable: ${toolError(evaluationAfterFailure)}`);
+  }
+  await runWedgedFrameEvaluation(browser, new URL(v2Contents.getURL()).origin);
+}
+
+/**
+ * An evaluation waits for the page to become quiet in every frame. A frame that does not answer, such
+ * as an ad frame whose timers do not run (#3139), must not hold the result until the deadline. The
+ * frame host is a site of its own, so the spinning renderer is not the one of another fixture.
+ */
+async function runWedgedFrameEvaluation(browser: BrowserHost, origin: string): Promise<void> {
+  const { port } = new URL(origin);
+  const { tab, contents } = await openTabWithContents(browser, `${origin}/blocking-frame`, "smoke-thread", "smoke-bot");
+  try {
+    const frameStatus = async (status: string) =>
+      (await contents.executeJavaScript("document.querySelector('output').textContent", true)) === status;
+    await contents.executeJavaScript(
+      `(() => {
+        const frame = document.createElement('iframe');
+        frame.src = 'http://evaluate-spin.localhost:${port}/spinning-frame';
+        document.body.appendChild(frame);
+        return true;
+      })()`,
+      true,
+    );
+    await waitFor(() => frameStatus("frame ready"), "the evaluation frame to report ready");
+    await contents.executeJavaScript(
+      "document.querySelector('iframe').contentWindow.postMessage('spin', '*'); true",
+      true,
+    );
+    await waitFor(() => frameStatus("frame spinning"), "the evaluation frame to start spinning");
+    const evaluated = await callBrowserTool(browser, "evaluate", {
+      tabId: tab.id,
+      expression: "1 + 1",
+      timeoutMs: 5_000,
+    });
+    if (!evaluated.success || toolError(evaluated) !== "2") {
+      throw new Error(`V2 page evaluation waited on a frame that does not answer: ${toolError(evaluated)}`);
+    }
+  } finally {
+    await runCauseEffect(browser.close(tab.id));
+  }
+}
+
+async function runToolBoundaryScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const tab = await runCauseEffect(browser.open(`${origin}/cookie`, "smoke-thread", "smoke-bot"));
+  const otherAgentTab = await runCauseEffect(browser.open(`${origin}/cookie`, "smoke-thread", "other-bot"));
+  try {
+    const invalidToolArguments = [
+      ["click", { tabId: tab.id, target: { kind: "point", x: 10, y: 10 }, clickCount: 1.5 }],
+      ["click", { tabId: tab.id, target: { kind: "point", x: 10, y: 10 }, modifiers: ["Bogus"] }],
+      ["scroll", { tabId: tab.id, deltaY: 100_001 }],
+      ["evaluate", { tabId: tab.id, expression: "1", returnByValue: false }],
+      ["set_environment", { tabId: tab.id, width: 390.5 }],
+    ] as const;
+    for (const [tool, argumentsValue] of invalidToolArguments) {
+      const invalidResult = await callBrowserTool(browser, tool, argumentsValue);
+      if (invalidResult.success || !toolError(invalidResult).includes("Invalid browser tool arguments")) {
+        throw new Error(`Dynamic browser tool accepted invalid ${tool} arguments: ${toolError(invalidResult)}`);
+      }
+    }
+    process.stdout.write("BrowserHost: runtime tool argument schemas passed.\n");
+    const scopedTabsResult = await runCauseEffect(
+      browser.handleDynamicTool({
+        threadId: "smoke-thread",
+        turnId: "browser-smoke-scope-turn",
+        callId: "browser-smoke-scope-call",
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "list_tabs",
+        arguments: {},
+      }),
+    );
+    const scopedTabsContent = scopedTabsResult.contentItems[0];
+    const scopedTabsPayload = scopedTabsContent?.type === "inputText" ? JSON.parse(scopedTabsContent.text) : undefined;
+    if (
+      !scopedTabsResult.success ||
+      !isDynamicRecord(scopedTabsPayload) ||
+      !Array.isArray(scopedTabsPayload.tabs) ||
+      scopedTabsPayload.tabs.some((candidate) => isDynamicRecord(candidate) && candidate.id === otherAgentTab.id)
+    ) {
+      throw new Error("Dynamic browser tools exposed another agent's tab.");
+    }
+    const crossAgentSnapshot = await runCauseEffect(
+      browser.handleDynamicTool({
+        threadId: "smoke-thread",
+        turnId: "browser-smoke-scope-turn",
+        callId: "browser-smoke-cross-agent-call",
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "snapshot",
+        arguments: { tabId: otherAgentTab.id },
+      }),
+    );
+    if (crossAgentSnapshot.success) throw new Error("Dynamic browser tools accessed another agent's tab.");
+    const crossAgentClose = await runCauseEffect(
+      browser.handleDynamicTool({
+        threadId: "smoke-thread",
+        turnId: "browser-smoke-cross-agent-close-turn",
+        callId: "browser-smoke-cross-agent-close-call",
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "close_tab",
+        arguments: { tabId: otherAgentTab.id },
+      }),
+    );
+    if (crossAgentClose.success || !browser.listTabs().some((candidate) => candidate.id === otherAgentTab.id)) {
+      throw new Error("Dynamic browser tools closed another agent's tab.");
+    }
+    const closableToolTab = await runCauseEffect(browser.open(`${origin}/cookie`, "smoke-thread", "smoke-bot"));
+    const firstClose = runCauseEffect(
+      browser.handleDynamicTool({
+        threadId: "smoke-thread",
+        turnId: "browser-smoke-close-turn-1",
+        callId: "browser-smoke-close-call-1",
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "close_tab",
+        arguments: { tabId: closableToolTab.id },
+      }),
+    );
+    const repeatedClose = runCauseEffect(
+      browser.handleDynamicTool({
+        threadId: "smoke-thread",
+        turnId: "browser-smoke-close-turn-2",
+        callId: "browser-smoke-close-call-2",
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool: "close_tab",
+        arguments: { tabId: closableToolTab.id },
+      }),
+    );
+    const closeResults = await Promise.all([firstClose, repeatedClose]);
+    if (closeResults.some((result) => !result.success)) {
+      throw new Error("Repeated agent tab close was not idempotent.");
+    }
+    process.stdout.write("BrowserHost: agent tab isolation passed.\n");
+  } finally {
+    await runCauseEffect(browser.close(tab.id));
+    await runCauseEffect(browser.close(otherAgentTab.id));
+  }
+}
+
+async function runPersistencePhase(root: string, origin: string, phase: string): Promise<void> {
+  if (!new Set(["write", "read", "clear", "verify-cleared", "read-clear"]).has(phase)) {
+    throw new Error(`Unknown persistence phase: ${phase}`);
+  }
+  await app.whenReady();
+  const window = new BrowserWindow({ show: false });
+  const browser = new BrowserHost(window, join(root, "downloads"), join(root, "browser-tabs.json"));
+  await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 800, height: 600 } }));
+  try {
+    if (phase === "read-clear") {
+      // Read proves write persists across restart. Clear runs in the same
+      // boot. A later boot must verify that clear persists across restart.
+      await checkOnePersistencePage(browser, origin, "read", true);
+      await checkOnePersistencePage(browser, origin, "clear", false);
+      await runCauseEffect(browser.flushPersistentStorage());
+    } else {
+      await checkOnePersistencePage(browser, origin, phase, phase === "write" || phase === "read");
+      await runCauseEffect(browser.flushPersistentStorage());
+    }
+  } finally {
+    try {
+      await runCauseEffect(browser.destroy());
+    } finally {
+      window.destroy();
+    }
+  }
+  process.stdout.write(`BrowserHost: persistence ${phase} phase passed.\n`);
+}
+
+async function checkOnePersistencePage(
+  browser: BrowserHost,
+  origin: string,
+  phase: string,
+  expectedStored: boolean,
+): Promise<void> {
+  const tab = await runCauseEffect(
+    browser.open(`${origin}/persistence?phase=${encodeURIComponent(phase)}`, "persistence-thread"),
+  );
+  try {
+    const snapshot = await waitForPersistenceSnapshot(browser, tab.id);
+    const cookie = getString(snapshot, "cookie") ?? "";
+    const localStorageValue = getString(snapshot, "localStorage");
+    const indexedDbValue = getString(snapshot, "indexedDb");
+    // The npm macOS Electron binary does not have OpenBot's production signature or cookie-encryption fuse.
+    // Verify encrypted cookie persistence with the signed app; other platforms cover it in this process test.
+    const requireCrossProcessCookie = phase !== "read" || process.platform !== "darwin";
+    if (
+      (expectedStored &&
+        (localStorageValue !== "kept" ||
+          indexedDbValue !== "kept" ||
+          (requireCrossProcessCookie && !cookie.includes("openbot_persistence=kept")))) ||
+      (!expectedStored &&
+        (cookie.includes("openbot_persistence=kept") || localStorageValue !== null || indexedDbValue !== null))
+    ) {
+      throw new Error(`Browser persistence phase ${phase} returned invalid state: ${JSON.stringify(snapshot)}`);
+    }
+    if (expectedStored && !requireCrossProcessCookie && !cookie.includes("openbot_persistence=kept")) {
+      process.stdout.write("BrowserHost: signed macOS app must verify encrypted cookie persistence.\n");
+    }
+  } finally {
+    await runCauseEffect(browser.close(tab.id));
+  }
+}
+
+async function waitForPersistenceSnapshot(browser: BrowserHost, tabId: string): Promise<PersistenceSnapshot> {
+  let latest = "";
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const snapshot = await runCauseEffect(browser.snapshot(tabId));
+    latest = snapshot.text;
+    try {
+      const parsed = JSON.parse(snapshot.text);
+      if (isDynamicRecord(parsed) && parsed.ready === true) {
+        return {
+          ready: true,
+          cookie: getString(parsed, "cookie") ?? "",
+          localStorage: getString(parsed, "localStorage"),
+          indexedDb: getString(parsed, "indexedDb"),
+        };
+      }
+    } catch {
+      // The page can still be initializing IndexedDB.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Persistence page did not become ready: ${latest}`);
+}
+
+function argumentValue(prefix: string): string | null {
+  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length) || null;
+}
+
+async function runPopupScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const { tab: parent, contents } = await openTabWithContents(
+    browser,
+    `${origin}/popup-parent`,
+    "smoke-thread",
+    "smoke-bot",
+  );
+  const click = async (tabId: string, role: string, name: string) => {
+    const result = await callBrowserTool(browser, "click", {
+      tabId,
+      target: { kind: "role", role, name, exact: true },
+    });
+    if (!result.success) throw new Error(`Popup click failed: ${toolError(result)}`);
+  };
+  try {
+    for (const button of ["Sign in with account", "Blank popup", "Cross-origin sign-in", "Iframe sign-in"]) {
+      await click(parent.id, "button", button);
+      const popup = await waitForValue(() => browser.listTabs().find((tab) => tab.openerTabId === parent.id));
+      const listed = await callBrowserTool(browser, "list_tabs", {});
+      if (!JSON.stringify(toolTextPayload(listed)).includes(popup.id)) throw new Error("Agent cannot discover popup.");
+      const snapshot = await callBrowserTool(browser, "snapshot", { tabId: popup.id, image: "never" });
+      if (!snapshot.success || !JSON.stringify(toolTextPayload(snapshot)).includes("Use test account"))
+        throw new Error("Agent cannot read popup.");
+      const popupContents = webContents
+        .getAllWebContents()
+        .find((item) => item.getURL().endsWith("/popup-login") && !item.isLoading());
+      if (!popupContents) throw new Error("Popup contents missing.");
+      const shared = await popupContents.executeJavaScript(
+        "(location.hostname === 'localhost' || document.cookie.includes('popup_session=shared')) && !!opener && typeof window.openbot === 'undefined' && typeof require === 'undefined'",
+      );
+      if (!shared) throw new Error("Popup lost session, opener, or isolation.");
+      // Named-window reuse must not register another view or lose the live relationship on reload.
+      if (button !== "Cross-origin sign-in" && button !== "Iframe sign-in")
+        await contents.executeJavaScript("window.open('/popup-login', 'auth'); void 0", true);
+      if (popupContents.session !== contents.session) throw new Error("Popup session changed.");
+      if (BrowserWindow.fromWebContents(popupContents) !== BrowserWindow.fromWebContents(contents))
+        throw new Error("Unmanaged popup window.");
+      await runCauseEffect(browser.setVisible({ visible: false }));
+      await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 800, height: 600 } }));
+      if (browser.listTabs().filter((tab) => tab.openerTabId === parent.id).length !== 1)
+        throw new Error("Duplicate named popup.");
+      // Reloading a top-level opener preserves it; reloading removes an iframe opener.
+      if (button !== "Iframe sign-in") await runCauseEffect(browser.reload(parent.id));
+      if (!browser.listTabs().some((tab) => tab.id === popup.id)) throw new Error("Parent reload closed popup.");
+      // Background preview capture must not resize the opener and dispose its login callback.
+      await contents.executeJavaScript(
+        "window.callbackExpired = false; window.callbackViewport = { width: innerWidth, height: innerHeight, scale: devicePixelRatio }; void 0",
+      );
+      await runCauseEffect(browser.capturePreview(parent.id));
+      await click(popup.id, "button", "Use test account");
+      await waitFor(
+        async () => !browser.listTabs().some((tab) => tab.id === popup.id),
+        `${button}: OAuth popup closure`,
+      );
+      await waitFor(
+        async () => (await contents.executeJavaScript("document.querySelector('#result').textContent")) === "Signed in",
+        "OAuth callback",
+      );
+      // listTabs() hides the popup on its "close" event, but the host hands the active tab back to the
+      // opener only after "destroyed", so a slow runner can observe the gap.
+      await waitFor(async () => browser.activeTabId === parent.id, `${button}: popup return to opener`);
+    }
+    const blocked = await callBrowserTool(browser, "click", {
+      tabId: parent.id,
+      target: { kind: "role", role: "button", name: "Blocked frame sign-in", exact: true },
+    });
+    if (blocked.success || !toolError(blocked).includes("covered"))
+      throw new Error("A real covering layer did not block the iframe click.");
+    await click(parent.id, "link", "Independent tab");
+    const independent = await waitForValue(() =>
+      browser.listTabs().find((tab) => tab.id !== parent.id && tab.url === `${origin}/popup-login`),
+    );
+    await waitFor(
+      async () => browser.listTabs().some((tab) => tab.id === independent.id && !tab.loading),
+      "independent popup navigation",
+    );
+    if (independent.openerTabId) throw new Error("noopener link gained an opener.");
+    await runCauseEffect(browser.activate(parent.id));
+    await click(parent.id, "button", "Post sign-in");
+    const post = await waitForValue(() => browser.listTabs().find((tab) => tab.url === `${origin}/popup-post`));
+    const result = await callBrowserTool(browser, "snapshot", { tabId: post.id, image: "never" });
+    if (!JSON.stringify(toolTextPayload(result)).includes("Post received"))
+      throw new Error("Popup form POST was lost.");
+    await runCauseEffect(browser.close(parent.id));
+    if (!browser.listTabs().some((tab) => tab.id === independent.id))
+      throw new Error("Closing opener closed independent tab.");
+    await runCauseEffect(browser.close(independent.id));
+    await runCauseEffect(browser.close(post.id));
+  } finally {
+    await runCauseEffect(browser.close(parent.id));
+  }
+}
+
+async function openTabWithContents(
+  browser: BrowserHost,
+  url: string,
+  ownerThreadId: string,
+  ownerAgentId?: string,
+): Promise<{ tab: Effect.Success<ReturnType<BrowserHost["open"]>>; contents: WebContents }> {
+  const existingIds = new Set(webContents.getAllWebContents().map((contents) => contents.id));
+  const tab = await runCauseEffect(browser.open(url, ownerThreadId, ownerAgentId));
+  const contents = webContents
+    .getAllWebContents()
+    .find((candidate) => !existingIds.has(candidate.id) && !candidate.isDestroyed());
+  if (!contents) throw new Error(`Browser contents were not created for ${url}.`);
+  return { tab, contents };
+}
+
+function callBrowserTool(
+  browser: BrowserHost,
+  tool: string,
+  argumentsValue: unknown,
+  hooks?: Parameters<BrowserHost["handleDynamicTool"]>[1],
+): Promise<DynamicToolResult> {
+  browserToolCall += 1;
+  return runCauseEffect(
+    browser.handleDynamicTool(
+      {
+        threadId: "smoke-thread",
+        turnId: `browser-v2-${browserToolCall}`,
+        callId: `browser-v2-call-${browserToolCall}`,
+        ownerAgentId: "smoke-bot",
+        namespace: "openbot_browser",
+        tool,
+        arguments: argumentsValue,
+      },
+      hooks,
+    ),
+  );
+}
+
+function toolTextPayload(result: DynamicToolResult): DynamicRecord | undefined {
+  const item = result.contentItems.find((candidate) => candidate.type === "inputText");
+  if (item?.type !== "inputText") return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(item.text);
+  } catch {
+    return undefined;
+  }
+  return isDynamicRecord(value) ? value : undefined;
+}
+
+function toolError(result: DynamicToolResult): string {
+  const item = result.contentItems.find((candidate) => candidate.type === "inputText");
+  return item?.type === "inputText" ? item.text : "unknown browser tool error";
+}
+
+async function runIdentityScenario(browser: BrowserHost, origin: string): Promise<void> {
+  const headerTab = await runCauseEffect(browser.open(`${origin}/headers`, "smoke-thread"));
+  const initial = await checkBrowserIdentity(browser, headerTab.id);
+  await runCauseEffect(browser.reload(headerTab.id));
+  const reloaded = await checkBrowserIdentity(browser, headerTab.id);
+  await runCauseEffect(browser.loadUrl(headerTab.id, `${origin}/headers?source=navigation`));
+  const navigated = await checkBrowserIdentity(browser, headerTab.id);
+  const secondTab = await runCauseEffect(browser.open(`${origin}/headers?source=second-tab`, "smoke-thread"));
+  const second = await checkBrowserIdentity(browser, secondTab.id);
+  await runIdentityFrameProbe(browser, origin);
+  await mkdir(".openbot-build", { recursive: true });
+  await writeFile(
+    ".openbot-build/browser-identity.json",
+    JSON.stringify({ initial, reloaded, navigated, second, requests: recordedIdentityAgents }, null, 2),
+  );
+  process.stdout.write("BrowserHost: matching page, reload, navigation, and second-tab identity passed.\n");
+}
+
+async function checkBrowserIdentity(browser: BrowserHost, tabId: string): Promise<DynamicRecord> {
+  const headerSnapshot = await runCauseEffect(browser.snapshot(tabId));
+  const identity = JSON.parse(headerSnapshot.text);
+  if (!isDynamicRecord(identity) || !isDynamicRecord(identity.requestHeaders)) {
+    throw new Error("Browser identity payload is invalid.");
+  }
+  const navigatorUserAgent = getString(identity, "navigatorUserAgent");
+  const navigatorBrands = Array.isArray(identity.navigatorBrands)
+    ? identity.navigatorBrands.filter(isDynamicRecord)
+    : [];
+  const clientHintBrands = getString(identity.requestHeaders, "sec-ch-ua") ?? "";
+  const chromiumMajorVersion = process.versions.chrome.split(".")[0];
+  if (
+    !navigatorUserAgent?.includes(`Chrome/${chromiumMajorVersion}`) ||
+    navigatorUserAgent.includes("Electron/") ||
+    navigatorUserAgent.includes("OpenBot/") ||
+    getString(identity.requestHeaders, "user-agent") !== navigatorUserAgent ||
+    identity.navigatorWebdriver !== false ||
+    getString(identity.requestHeaders, "sec-ch-ua-platform") !== `"${getString(identity, "navigatorPlatform")}"` ||
+    getString(identity.requestHeaders, "sec-ch-ua-mobile") !== (identity.navigatorMobile ? "?1" : "?0") ||
+    !navigatorBrands.some(
+      (brand) => getString(brand, "brand") === "Chromium" && getString(brand, "version") === chromiumMajorVersion,
+    ) ||
+    /Electron|OpenBot/u.test(clientHintBrands) ||
+    !clientHintBrands.includes(`"Chromium";v="${chromiumMajorVersion}"`)
+  ) {
+    throw new Error(`Browser identity headers are invalid: ${headerSnapshot.text}`);
+  }
+  return identity;
+}
+
+async function runIdentityFrameProbe(browser: BrowserHost, origin: string): Promise<void> {
+  // Every source must present the same identity the session carries: a subframe or worker that
+  // falls back to a different string reads as a second, unknown client next to the page.
+  const frameTab = await runCauseEffect(browser.open(`${origin}/identity-frame`, "smoke-thread"));
+  try {
+    const deadline = Date.now() + 15_000;
+    let report: Record<string, string> = {};
+    while (Date.now() < deadline) {
+      try {
+        const parsed = await (await fetch(`${origin}/headers-report`)).json();
+        if (isDynamicRecord(parsed)) {
+          report = Object.fromEntries(
+            Object.entries(parsed).map(([source, agent]) => [source, isString(agent) ? agent : ""]),
+          );
+        }
+      } catch {
+        // The frame or worker request may not have arrived yet.
+      }
+      if (report.document && report.iframe && report.worker) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!report.document || !report.iframe || !report.worker) {
+      throw new Error(`Browser identity probe missed a source: ${JSON.stringify(report)}`);
+    }
+    for (const [source, agent] of Object.entries(report)) {
+      if (agent !== report.document) {
+        throw new Error(`Browser identity differs by source (${source}): ${agent} vs ${report.document}`);
+      }
+    }
+    process.stdout.write("BrowserHost: matching frame and worker identity passed.\n");
+  } finally {
+    await runCauseEffect(browser.close(frameTab.id));
+  }
+}
+
+/** Amazon product pages load a 1x1 ad frame whose timers do not run. Evaluation must still return (#3139). */
+async function runAmazonLiveProbe(browser: BrowserHost): Promise<void> {
+  const { tab, contents } = await openTabWithContents(
+    browser,
+    "https://www.amazon.com.br/s?k=disco+de+vinil",
+    "smoke-thread",
+    "smoke-bot",
+  );
+  try {
+    const product = "a[href*=\\'/dp/\\']";
+    await waitForLive(
+      async () => (await contents.executeJavaScript(`!!document.querySelector('${product}')`, true)) === true,
+      "an Amazon product link",
+    );
+    const productUrl = await contents.executeJavaScript(`document.querySelector('${product}').href`, true);
+    if (!isString(productUrl)) throw new Error("Amazon did not list a product.");
+    await runCauseEffect(browser.loadUrl(tab.id, productUrl));
+    await waitForLive(
+      async () => contents.mainFrame.framesInSubtree.some((frame) => frame.url.includes("amazon-adsystem.com")),
+      "the Amazon ad frame",
+    );
+    const evaluated = await callBrowserTool(browser, "evaluate", {
+      tabId: tab.id,
+      expression: "1 + 1",
+      timeoutMs: 5_000,
+    });
+    if (!evaluated.success || toolError(evaluated) !== "2") {
+      throw new Error(`Amazon product evaluation did not return its value: ${toolError(evaluated)}`);
+    }
+    process.stdout.write("BrowserHost: Amazon product evaluation passed.\n");
+  } finally {
+    await runCauseEffect(browser.close(tab.id));
+  }
+}
+
+async function waitForLive(check: () => Promise<boolean>, waitedFor: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (await check().catch(() => false)) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for ${waitedFor}.`);
+}
+
+async function runGoogleLiveProbe(browser: BrowserHost): Promise<void> {
+  const googleTab = await runCauseEffect(
+    browser.open(
+      "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fwww.google.com%2F&hl=en",
+      "google-live-smoke",
+      "google-live-smoke",
+      true,
+    ),
+  );
+  const identifierPage = await waitForGoogleSnapshot(browser, googleTab.id, (snapshot) =>
+    snapshot.elements.some((element) => element.tag === "input" && !element.disabled),
+  );
+  const identifier = identifierPage.elements.find((element) => element.tag === "input" && !element.disabled);
+  if (!identifier) throw new Error("Google did not show an account identifier field.");
+  await runCauseEffect(
+    browser.act(googleTab.id, identifierPage.revision, {
+      type: "type",
+      ref: identifier.ref,
+      text: "openbot-google-probe@example.com",
+      submit: true,
+    }),
+  );
+  const outcome = await waitForGoogleSnapshot(browser, googleTab.id, (snapshot) => {
+    const normalized = snapshot.text.toLowerCase();
+    return (
+      snapshot.url.includes("/signin/rejected") ||
+      normalized.includes("browser or app may not be secure") ||
+      normalized.includes("couldn’t find your google account") ||
+      normalized.includes("couldn't find your google account") ||
+      normalized.includes("couldn’t find this account") ||
+      normalized.includes("couldn't find this account")
+    );
+  });
+  const normalized = outcome.text.toLowerCase();
+  if (outcome.url.includes("/signin/rejected") || normalized.includes("browser or app may not be secure")) {
+    throw new Error("Google rejected the embedded browser at the account identifier step.");
+  }
+  if (
+    !normalized.includes("couldn’t find your google account") &&
+    !normalized.includes("couldn't find your google account") &&
+    !normalized.includes("couldn’t find this account") &&
+    !normalized.includes("couldn't find this account")
+  ) {
+    throw new Error(`Google returned an unexpected identifier result: ${outcome.text.slice(0, 500)}`);
+  }
+  process.stdout.write("BrowserHost: Google identifier step passed without signin/rejected.\n");
+}
+
+async function runXLiveProbe(browser: BrowserHost): Promise<void> {
+  const xTab = await runCauseEffect(browser.open("https://x.com/", "x-live-smoke", "x-live-smoke", true));
+  let loginPage = await waitForXSnapshot(browser, xTab.id, (snapshot) => {
+    const normalized = snapshot.text.toLowerCase();
+    return (
+      normalized.includes("refuse non-essential cookies") ||
+      snapshot.elements.some((element) => element.name.toLowerCase() === "sign in") ||
+      normalized.includes("something went wrong") ||
+      normalized.includes("this browser is no longer supported")
+    );
+  });
+  let normalized = loginPage.text.toLowerCase();
+  if (normalized.includes("something went wrong") || normalized.includes("this browser is no longer supported")) {
+    throw new Error(`X rejected the embedded browser: ${loginPage.url} ${loginPage.text.slice(0, 500)}`);
+  }
+  let refuseCookies = loginPage.elements.find((element) =>
+    element.name.toLowerCase().includes("refuse non-essential cookies"),
+  );
+  if (!refuseCookies && normalized.includes("refuse non-essential cookies")) {
+    loginPage = await waitForXSnapshot(browser, xTab.id, (snapshot) =>
+      snapshot.elements.some((element) => element.name.toLowerCase().includes("refuse non-essential cookies")),
+    );
+    refuseCookies = loginPage.elements.find((element) =>
+      element.name.toLowerCase().includes("refuse non-essential cookies"),
+    );
+  }
+  if (refuseCookies) {
+    process.stdout.write(`BrowserHost: X cookie control ${JSON.stringify(refuseCookies)}.\n`);
+    loginPage = await runCauseEffect(
+      browser.act(xTab.id, loginPage.revision, { type: "click", ref: refuseCookies.ref }),
+    );
+    loginPage = await waitForXSnapshot(
+      browser,
+      xTab.id,
+      (snapshot) =>
+        !snapshot.text.toLowerCase().includes("refuse non-essential cookies") &&
+        snapshot.elements.some(
+          (element) => element.name.toLowerCase() === "sign in" || (element.tag === "input" && !element.disabled),
+        ),
+    );
+    normalized = loginPage.text.toLowerCase();
+  }
+  if (normalized.includes("something went wrong") || normalized.includes("this browser is no longer supported")) {
+    throw new Error(
+      `X rejected the embedded browser after cookie consent: ${loginPage.url} ${loginPage.text.slice(0, 500)}`,
+    );
+  }
+  if (!loginPage.elements.some((element) => element.tag === "input" && !element.disabled)) {
+    const signIn = loginPage.elements.find((element) => element.name.toLowerCase() === "sign in");
+    if (!signIn) throw new Error(`X did not show a sign-in control: ${loginPage.text.slice(0, 500)}`);
+    loginPage = await runCauseEffect(browser.act(xTab.id, loginPage.revision, { type: "click", ref: signIn.ref }));
+    loginPage = await waitForXSnapshot(browser, xTab.id, (snapshot) =>
+      snapshot.elements.some((element) => element.tag === "input" && !element.disabled),
+    );
+  }
+  const identifier = loginPage.elements.find((element) => element.tag === "input" && !element.disabled);
+  if (!identifier) throw new Error("X did not show an account identifier field.");
+  process.stdout.write("BrowserHost: X login identifier step loaded.\n");
+}
+
+async function runWhatsAppLiveProbe(browser: BrowserHost): Promise<void> {
+  // No credentials needed: the allowlist refusal renders before any login, while the real
+  // login page shows the phone-linking controls instead.
+  const whatsappTab = await runCauseEffect(
+    browser.open("https://web.whatsapp.com/", "whatsapp-live-smoke", "whatsapp-live-smoke", true),
+  );
+  const deadline = Date.now() + 30_000;
+  let page = await runCauseEffect(browser.snapshot(whatsappTab.id));
+  while (Date.now() < deadline) {
+    const normalized = page.text.toLowerCase();
+    if (
+      normalized.includes("works with google chrome") ||
+      normalized.includes("update google chrome") ||
+      normalized.includes("phone number") ||
+      normalized.includes("scan")
+    ) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    page = await runCauseEffect(browser.snapshot(whatsappTab.id));
+  }
+  const normalized = page.text.toLowerCase();
+  if (normalized.includes("works with google chrome") || normalized.includes("update google chrome")) {
+    throw new Error(`WhatsApp rejected the embedded browser: ${page.url} ${page.text.slice(0, 500)}`);
+  }
+  if (!normalized.includes("phone number") && !normalized.includes("scan")) {
+    throw new Error(`WhatsApp returned an unexpected page: ${page.url} ${page.text.slice(0, 500)}`);
+  }
+  process.stdout.write("BrowserHost: WhatsApp login page loaded without a browser block.\n");
+}
+
+async function runCanvaLiveProbe(browser: BrowserHost): Promise<void> {
+  // No credentials needed: the presentations page renders the update-your-browser block for a
+  // refused user agent before any login, and the editor links go through the same gate.
+  const canvaTab = await runCauseEffect(
+    browser.open("https://www.canva.com/presentations/", "canva-live-smoke", "canva-live-smoke", true),
+  );
+  const deadline = Date.now() + 30_000;
+  let page = await runCauseEffect(browser.snapshot(canvaTab.id));
+  while (Date.now() < deadline) {
+    const normalized = page.text.toLowerCase();
+    if (normalized.includes("update your browser") || normalized.includes("presentation")) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    page = await runCauseEffect(browser.snapshot(canvaTab.id));
+  }
+  const normalized = page.text.toLowerCase();
+  if (normalized.includes("update your browser")) {
+    throw new Error(`Canva rejected the embedded browser: ${page.url} ${page.text.slice(0, 500)}`);
+  }
+  if (!normalized.includes("presentation")) {
+    throw new Error(`Canva returned an unexpected page: ${page.url} ${page.text.slice(0, 500)}`);
+  }
+  process.stdout.write("BrowserHost: Canva presentations page loaded without a browser block.\n");
+}
+
+async function runFramerLiveProbe(browser: BrowserHost, panelBounds: BrowserBounds): Promise<void> {
+  // An example.com address gets the same policy verdict as a real one and sends no mail to a
+  // person. The policy also refuses an exact 800x600 viewport, the headless default, so the probe
+  // uses another size for the duration and then restores the panel.
+  await runCauseEffect(browser.setVisible({ visible: true, bounds: { x: 0, y: 0, width: 760, height: 560 } }));
+  const framerTab = await runCauseEffect(
+    browser.open("https://framer.com/login/", "framer-live-smoke", "framer-live-smoke", true),
+  );
+  try {
+    const deadline = Date.now() + 30_000;
+    let page = await runCauseEffect(browser.snapshot(framerTab.id));
+    let email = page.elements.find((element) => element.tag === "input" && !element.disabled);
+    while (!email && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      page = await runCauseEffect(browser.snapshot(framerTab.id));
+      email = page.elements.find((element) => element.tag === "input" && !element.disabled);
+    }
+    if (!email) throw new Error(`Framer did not show the email field: ${page.url} ${page.text.slice(0, 500)}`);
+    await runCauseEffect(
+      browser.act(framerTab.id, page.revision, {
+        type: "type",
+        ref: email.ref,
+        text: "openbot-framer-probe@example.com",
+        submit: true,
+      }),
+    );
+    let normalized = "";
+    while (Date.now() < deadline) {
+      page = await runCauseEffect(browser.snapshot(framerTab.id));
+      normalized = page.text.toLowerCase();
+      if (
+        normalized.includes("verification failed") ||
+        normalized.includes("cannot log you in") ||
+        normalized.includes("verification link sent")
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (normalized.includes("verification failed") || normalized.includes("cannot log you in")) {
+      throw new Error(`Framer refused the embedded browser: ${page.url} ${page.text.slice(0, 500)}`);
+    }
+    if (!normalized.includes("verification link sent")) {
+      throw new Error(`Framer returned an unexpected page: ${page.url} ${page.text.slice(0, 500)}`);
+    }
+    process.stdout.write("BrowserHost: Framer accepted the sign-in request.\n");
+  } finally {
+    await runCauseEffect(browser.close(framerTab.id));
+    await runCauseEffect(browser.setVisible({ visible: true, bounds: panelBounds }));
+  }
+}
+
+async function waitForXSnapshot(
+  browser: BrowserHost,
+  tabId: string,
+  predicate: (snapshot: Effect.Success<ReturnType<BrowserHost["snapshot"]>>) => boolean,
+): Promise<Effect.Success<ReturnType<BrowserHost["snapshot"]>>> {
+  const deadline = Date.now() + 20_000;
+  let snapshot = await runCauseEffect(browser.snapshot(tabId));
+  while (Date.now() < deadline) {
+    if (predicate(snapshot)) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    snapshot = await runCauseEffect(browser.snapshot(tabId));
+  }
+  throw new Error(`Timed out waiting for X: ${snapshot.url} ${snapshot.text.slice(0, 500)}`);
+}
+
+async function waitForGoogleSnapshot(
+  browser: BrowserHost,
+  tabId: string,
+  predicate: (snapshot: Effect.Success<ReturnType<BrowserHost["snapshot"]>>) => boolean,
+): Promise<Effect.Success<ReturnType<BrowserHost["snapshot"]>>> {
+  const deadline = Date.now() + 20_000;
+  let snapshot = await runCauseEffect(browser.snapshot(tabId));
+  while (Date.now() < deadline) {
+    if (snapshot.text.toLowerCase().includes("type the text you hear or see")) {
+      throw new Error("Google requested a CAPTCHA. Complete the sign-in check manually.");
+    }
+    if (predicate(snapshot)) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    snapshot = await runCauseEffect(browser.snapshot(tabId));
+  }
+  throw new Error("Timed out waiting for the Google sign-in step.");
+}
+
+async function expectFailure(operation: () => Promise<unknown>): Promise<void> {
+  try {
+    await operation();
+  } catch {
+    return;
+  }
+  throw new Error("Expected operation to fail.");
+}
+
+interface FinishedDownload {
+  state: "completed" | "cancelled" | "interrupted";
+  path: string;
+}
+
+/**
+ * Resolves when the next download that `contents` starts is done. Call it before the click: the
+ * session emits `will-download` as the response arrives. The host's own listener runs first and
+ * sets the save path, so the item reports the path the host chose.
+ */
+function nextDownloadDone(contents: WebContents, step: string): Promise<FinishedDownload> {
+  const { session } = contents;
+  return new Promise((resolve, reject) => {
+    const started = (_event: ElectronEvent, item: DownloadItem, source: WebContents) => {
+      if (source !== contents) return;
+      session.off("will-download", started);
+      item.once("done", (_doneEvent, state) => {
+        clearTimeout(timer);
+        resolve({ state, path: item.getSavePath() });
+      });
+    };
+    // The limit only turns a dropped click into a failure; a download that starts ends at once.
+    const timer = setTimeout(() => {
+      session.off("will-download", started);
+      reject(new Error(`Timed out waiting for ${step}.`));
+    }, 30_000);
+    session.on("will-download", started);
+  });
+}
+
+async function expectDownloadedFile(download: FinishedDownload, expectedPath: string, step: string): Promise<void> {
+  if (download.state !== "completed" || download.path !== expectedPath) {
+    throw new Error(
+      `The ${step} browser download ended ${download.state} at ${download.path}, not at ${expectedPath}.`,
+    );
+  }
+  if ((await readFile(expectedPath, "utf8")) !== "local download") {
+    throw new Error(`The ${step} browser download saved the wrong content.`);
+  }
+}
+
+async function waitFor(check: () => Promise<boolean>, waitedFor: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      if (await check()) return;
+    } catch {
+      // The checked state may not exist yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${waitedFor}.`);
+}
+
+async function waitForValue<T>(check: () => T | undefined): Promise<T> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const value = check();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for a browser state change.");
+}

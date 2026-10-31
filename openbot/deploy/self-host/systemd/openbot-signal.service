@@ -1,0 +1,28 @@
+[Unit]
+Description=OpenBot Signal (the remote API of remote/api)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openbot
+Group=openbot
+WorkingDirectory=/opt/openbot/openbot/remote/api
+EnvironmentFile=/etc/openbot/signal.env
+ExecStart=/usr/local/bin/bun run src/index.ts
+Restart=on-failure
+RestartSec=5
+
+# The service keeps no data on the disk. It reads the repository and the environment file.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

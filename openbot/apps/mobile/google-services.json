@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1006722609038",
+    "project_id": "openbot-a3328",
+    "storage_bucket": "openbot-a3328.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1006722609038:android:e356f83f470297b6373edf",
+        "android_client_info": {
+          "package_name": "run.openbot.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCyTWfak_PrBH6kst-oNmrEDKROGCF6gZw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

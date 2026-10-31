@@ -1,0 +1,138 @@
+.backup-model-logo {
+  display: inline-flex;
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.backup-model-logo svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  overflow: visible;
+  fill: var(--openbot-provider-current);
+}
+
+.backup-model-option {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.backup-models-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--openbot-space-4);
+}
+
+.backup-models-intro {
+  margin: 0;
+  padding-inline: var(--openbot-space-1);
+}
+
+.backup-models-empty {
+  margin: 0;
+  padding: var(--openbot-space-2) var(--openbot-space-3);
+}
+
+.backup-models-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backup-models-row {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  padding: var(--openbot-space-1) var(--openbot-space-2) var(--openbot-space-1) var(--openbot-space-3);
+}
+
+.backup-models-number {
+  width: var(--openbot-icon-sm);
+  flex: none;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.backup-models-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.backup-models-name {
+  overflow: hidden;
+  color: var(--openbot-text-primary);
+  font-size: var(--openbot-text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-models-state {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: var(--openbot-leading-sm);
+}
+
+/* The same dimming the provider picker uses for an unavailable provider. */
+.backup-models-row:not([data-state="ready"]) .backup-model-logo svg {
+  opacity: 0.44;
+}
+
+.backup-models-row:not([data-state="ready"]) .backup-models-name {
+  color: var(--openbot-text-muted);
+  text-decoration: line-through;
+}
+
+.backup-models-actions {
+  display: inline-flex;
+  flex: none;
+}
+
+.usage-limit-ask-card {
+  display: flex;
+  max-width: 560px;
+  flex-direction: column;
+  gap: var(--openbot-space-3);
+  margin: var(--openbot-space-4) 0 0;
+}
+
+.usage-limit-ask-body {
+  margin: 0;
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-md);
+}
+
+.usage-limit-ask-select {
+  max-width: 320px;
+}
+
+.usage-limit-ask-remember {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  cursor: pointer;
+}
+
+.usage-limit-ask-error {
+  margin: 0;
+  color: var(--openbot-danger);
+  font-size: var(--openbot-text-sm);
+}
+
+.usage-limit-ask-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--openbot-space-2);
+}

@@ -1,0 +1,10 @@
+{
+  "version": "0.52.0",
+  "highlights": [
+    "Give an agent more than one conversation: click + in the chat header to start a new thread. Your tasks are now threads.",
+    "Attach MP4 videos in chat, and see image files that an agent names as previews under its answer.",
+    "Connect Obsidian, Trello, Render, Neon, Prisma, Netlify, Railway, Atlassian, Todoist and Hugging Face from the new Marketplace.",
+    "OpenBot is now available in Dutch.",
+    "Workspace only Pi, Cursor and DeepSeek agents on macOS work again, and a provider CLI update no longer stops OpenBot at start."
+  ]
+}

@@ -1,0 +1,38 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'run.openbot.mobile'
+version = '1.0.0'
+
+expoModule {
+  canBePublished false
+}
+
+android {
+  namespace "run.openbot.mobile.notifications"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+// Expo links `expo-notifications` as a project when it builds it from source, and otherwise as the
+// prebuilt artifact of its `local-maven-repo`, at the version of its package.
+def expoNotificationsDependency() {
+  def project = rootProject.findProject(':expo-notifications')
+  if (project != null) return project
+  def packageJson = providers.exec {
+    workingDir(projectDir)
+    commandLine('node', '--print', "require.resolve('expo-notifications/package.json')")
+  }.standardOutput.asText.get().trim()
+  def version = new groovy.json.JsonSlurper().parse(new File(packageJson)).version
+  return "host.exp.exponent:expo.modules.notifications:${version}"
+}
+
+dependencies {
+  implementation expoNotificationsDependency()
+  // The version that `expo-notifications` uses.
+  implementation 'com.google.firebase:firebase-messaging:25.0.1'
+}

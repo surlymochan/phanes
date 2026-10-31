@@ -1,0 +1,130 @@
+{
+  "name": "@openbot/mobile",
+  "main": "expo-router/entry",
+  "version": "1.4.2",
+  "expo": {
+    "install": {
+      "exclude": [
+        "typescript"
+      ]
+    },
+    "autolinking": {
+      "android": {
+        "buildFromSource": [
+          "expo-splash-screen"
+        ]
+      }
+    }
+  },
+  "reanimated": {
+    "staticFeatureFlags": {
+      "ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS": true
+    }
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@expo/metro-runtime": "~58.0.15",
+    "@expo/ui": "~58.0.22",
+    "@legendapp/list": "3.6.0",
+    "@noble/hashes": "catalog:",
+    "@norbert_bodziony/bloub": "catalog:",
+    "@openbot/brand": "workspace:*",
+    "@openbot/contracts": "workspace:*",
+    "@openbot/i18n": "workspace:*",
+    "@openbot/logging": "workspace:*",
+    "@openbot/team-client": "workspace:*",
+    "@openbot/telemetry": "workspace:*",
+    "@openbot/user-errors": "workspace:*",
+    "@openpanel/react-native": "1.4.2",
+    "@react-native-masked-view/masked-view": "0.3.2",
+    "@shopify/react-native-skia": "2.14.0",
+    "@speed-highlight/core": "catalog:",
+    "@tanstack/react-query": "^5.104.5",
+    "effect": "catalog:",
+    "expo": "~58.0.17",
+    "expo-application": "~58.1.2",
+    "expo-blur": "~58.0.5",
+    "expo-build-properties": "~58.0.11",
+    "expo-camera": "~58.0.12",
+    "expo-clipboard": "~58.0.4",
+    "expo-constants": "~58.0.13",
+    "expo-crypto": "~58.0.7",
+    "expo-dev-client": "~58.0.14",
+    "expo-device": "~58.0.5",
+    "expo-document-picker": "~58.0.4",
+    "expo-file-system": "~58.0.10",
+    "expo-font": "~58.0.9",
+    "expo-glass-effect": "~58.0.4",
+    "expo-haptics": "~58.0.7",
+    "expo-image": "~58.0.16",
+    "expo-image-manipulator": "~58.0.15",
+    "expo-image-picker": "~58.0.10",
+    "expo-keep-awake": "~58.0.3",
+    "expo-linking": "~58.0.14",
+    "expo-local-authentication": "~58.0.2",
+    "expo-localization": "~58.0.5",
+    "expo-media-library": "~58.0.11",
+    "expo-notifications": "~58.1.6",
+    "expo-router": "~58.0.25",
+    "expo-secure-store": "~58.0.2",
+    "expo-sharing": "~58.0.20",
+    "expo-speech-recognition": "58.0.0",
+    "expo-splash-screen": "~58.0.11",
+    "expo-status-bar": "~58.0.4",
+    "expo-symbols": "~58.0.4",
+    "expo-system-ui": "~58.0.6",
+    "expo-updates": "~58.0.18",
+    "expo-video": "~58.0.12",
+    "expo-web-browser": "~58.0.6",
+    "expo-widgets": "~58.0.22",
+    "heroui-native": "^1.0.11",
+    "katex": "catalog:",
+    "lucide-react-native": "^1.61.0",
+    "marked": "catalog:",
+    "mermaid": "catalog:",
+    "pdfjs-dist": "catalog:",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.0",
+    "react-native-gesture-handler": "~3.3.0",
+    "react-native-keyboard-controller": "1.22.7",
+    "react-native-reanimated": "4.7.1",
+    "react-native-safe-area-context": "~5.10.1",
+    "react-native-screens": "~4.30.0",
+    "react-native-svg": "15.16.0",
+    "react-native-uitextview": "2.7.1",
+    "react-native-web": "~0.21.4",
+    "react-native-webview": "14.0.1",
+    "react-native-worklets": "0.13.0",
+    "tailwind-merge": "^3.7.0",
+    "tailwind-variants": "^3.3.1",
+    "tailwindcss": "catalog:",
+    "uniwind": "^1.13.0",
+    "zod": "catalog:",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@types/react": "~19.3.0",
+    "@types/react-dom": "~19.3.0",
+    "typescript": "catalog:"
+  },
+  "scripts": {
+    "start": "expo start",
+    "start:go": "bunx expo start --go --clear",
+    "start:go:tunnel": "bunx expo start --go --clear --tunnel",
+    "android": "bun ../../scripts/mobile-android.ts",
+    "ios": "bun ../../scripts/mobile-ios.ts",
+    "ios:rocketsim": "bun ../../scripts/mobile-ios.ts --rocketsim",
+    "ios:build:local": "bunx eas-cli@latest build --platform ios --profile production --local --output /private/tmp/openbot-testflight.ipa",
+    "ios:release:testflight": "gh workflow run release-ios.yml --ref main",
+    "android:build:local": "bunx eas-cli@latest build --platform android --profile production --local --output /private/tmp/openbot-play.aab",
+    "android:release:play": "gh workflow run release-android.yml --ref main",
+    "lint": "biome check --max-diagnostics=none src",
+    "codegen": "expo customize tsconfig.json && uniwind generate-artifacts --css ./global.css --dts ./src/uniwind-types.d.ts",
+    "typecheck": "bun ../../scripts/mobile-codegen.ts && bun ../../scripts/type-checker.ts --noEmit",
+    "doctor": "bunx expo-doctor@latest"
+  },
+  "private": true
+}

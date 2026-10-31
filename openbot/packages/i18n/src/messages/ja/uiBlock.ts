@@ -1,0 +1,30 @@
+import type { PartialTranslation } from "../../message";
+import type { messages as source } from "../en/uiBlock";
+
+export const messages = {
+  "uiBlock.status.pending": "回答が必要です",
+  "uiBlock.status.answered": "回答済み",
+  "uiBlock.status.expired": "期限切れ",
+  "uiBlock.status.closed": "終了",
+  "uiBlock.outcome.expired": "時間内に応答がありませんでした",
+  "uiBlock.outcome.closed": "回答がないまま終了しました",
+  "uiBlock.confirm.holdHint": "確認するにはボタンを長押しするか、1 回押してから次の手順で確認します",
+  "uiBlock.confirm.prompt": "確認: {action}？",
+  "uiBlock.confirm.accept": "確認",
+  "uiBlock.confirm.previewLabel": "プレビュー",
+  "uiBlock.choice.submit": "送信",
+  "uiBlock.choice.shortcutHint": "{first} から {last} まで押して選択します",
+  "uiBlock.choice.selectedCount": { other: "{count} 件選択" },
+  "uiBlock.choice.noneSelected": "未選択",
+  "uiBlock.quick.label": "クイック返信",
+  "uiBlock.quick.textLabel": "自分の返信",
+  "uiBlock.quick.textPlaceholder": "または自分の返信を入力",
+  "uiBlock.quick.send": "送信",
+  "uiBlock.form.submit": "送信",
+  "uiBlock.form.required": "この項目は必須です",
+  "uiBlock.form.choose": "選択肢を選んでください",
+  "uiBlock.form.notSet": "未設定",
+  "uiBlock.form.invalid": "一部の回答が正しくありません。確認してからもう一度お試しください。",
+  "uiBlock.skip": "スキップ",
+  "uiBlock.error.answerFailed": "回答を送信できませんでした。もう一度お試しください。",
+} as const satisfies PartialTranslation<typeof source>;

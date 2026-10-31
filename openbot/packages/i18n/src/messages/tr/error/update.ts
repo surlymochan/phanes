@@ -1,0 +1,38 @@
+import type { PartialTranslation } from "../../../message";
+import type { messages as source } from "../../en/error/update";
+
+export const messages = {
+  // Kullanıcının okuduğu güncelleyici durumu.
+  "error.update.unsupported": "Güncellemeler yüklü masaüstü derlemelerinde kullanılabilir.",
+  "error.update.notReady": "Bir güncelleme yüklenmeye hazır değil.",
+  "error.update.restartFailed": "OpenBot güncellemeyi yüklemek için yeniden başlatılamadı.",
+  "error.update.downloadStalled": "Güncelleme indirmesi yanıt vermeyi durdurdu. Tekrar deneyin.",
+  "error.update.installFailed": "Güncelleme yüklenemedi. OpenBot'tan çıkıp yeniden açın, ardından tekrar deneyin.",
+  "error.update.downloadFailed": "Güncelleme indirilemedi. Tekrar deneyin.",
+  "error.update.checkFailed": "Güncellemeler denetlenemedi. Tekrar deneyin.",
+  "error.update.checkStalled": "Güncelleme denetimi yanıt vermeyi durdurdu. Tekrar deneyin.",
+  "error.update.checkOffline":
+    "Güncelleme hizmetine ulaşılamadı. İnternet bağlantınızı kontrol edin, ardından tekrar deneyin.",
+  "error.update.checkUnavailable":
+    "Güncelleme hizmeti yanıt vermedi. OpenBot birkaç dakika içinde kendiliğinden tekrar dener.",
+  "error.update.checkNoRelease":
+    "Bu platform için yayımlanmış bir güncelleme bulunamadı. OpenBot birkaç dakika içinde kendiliğinden tekrar dener.",
+  "error.update.managedByNix": "Bu OpenBot kopyasının güncellemelerini Nix yükler. Nix ile güncelleyin.",
+  "error.update.managedByHost":
+    "Bu Mac üzerindeki güncellemeler ana makine tarafından yüklenir. Güncelleme, ana makinenin bakımı çalışana kadar hazır kalır.",
+  "error.update.siblingSession":
+    "Bu uygulamadan çalışan başka bir OpenBot oturumu var. Önce diğer tüm macOS kullanıcı hesaplarında OpenBot'u durdurun, ardından güncellemeyi tekrar yükleyin.",
+  "error.update.siblingSessionSameAccount":
+    "Bu kullanıcı hesabında başka bir OpenBot işlemi hâlâ çalışıyor. Bu işlemi kapatın, ardından güncellemeyi tekrar yükleyin.",
+  "error.update.siblingCheckFailed": "Diğer OpenBot oturumları doğrulanamadı. Yüklemeden önce tekrar deneyin.",
+  // Katılınan bir sunucunun yöneticisi bunları ana makineden okur.
+  "error.update.remoteDisabled": "Sunucu yöneticilerinden gelen güncellemeler bu bilgisayarda kapalı.",
+  "error.update.restartStarted": "OpenBot, güncellemeyi yüklemek için zaten yeniden başlatılıyor.",
+  "error.update.alreadyRestarting": "OpenBot zaten yeniden başlatılıyor.",
+  "error.update.downloadCancelled": "İndirme iptal edildi.",
+  "error.update.noStagedRelease": "Sunucu hiçbir sürüm hazırlamadı.",
+  "error.update.feedUnavailable": "Sürüm akışı kullanılamıyor",
+  "error.update.feedTooLarge": "Sürüm akışı çok büyük",
+  "error.update.noCompatibleRelease": "Uyumlu sürüm yok",
+  "error.update.noReleaseForMachine": "Bu makine için sürüm yok",
+} as const satisfies PartialTranslation<typeof source>;

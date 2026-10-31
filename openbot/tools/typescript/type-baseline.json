@@ -1,0 +1,10 @@
+{
+  "exactOptionalPropertyTypes": {
+    "packages/ui/src/components/ProviderModelPicker.tsx": 1,
+    "packages/ui/src/features/remote-desktop/RemoteDesktopWorkspace.tsx": 1,
+    "packages/ui/src/switch.tsx": 1,
+    "src/backend/local-mcp-bridge.ts": 1,
+    "src/backend/mcp-probe.ts": 1,
+    "src/main/github-mcp-proxy.ts": 2
+  }
+}

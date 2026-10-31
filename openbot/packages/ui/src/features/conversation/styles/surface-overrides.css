@@ -1,0 +1,76 @@
+.settings-panel,
+.browser-panel,
+.remote-desktop-workspace {
+  background: var(--openbot-bg-canvas);
+}
+
+.composer-reply-preview {
+  border-color: var(--openbot-border);
+  background: var(--openbot-bg-surface);
+  color: var(--openbot-text-primary);
+}
+
+.message-reaction-pill {
+  border-color: var(--openbot-border);
+  background: transparent;
+  color: var(--openbot-text-primary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-reaction-pill:not(.message-reaction-pill-readonly):hover {
+    background: var(--openbot-hover);
+  }
+}
+
+.composer,
+.direct-composer {
+  background: var(--openbot-bg-surface);
+}
+
+.direct-composer > button:hover:not(:disabled) {
+  background: var(--openbot-accent-hover);
+}
+
+.remote-desktop-stage,
+.remote-desktop-viewer {
+  background: var(--openbot-bg-canvas);
+  color: var(--openbot-text-secondary);
+}
+
+.remote-desktop-header {
+  background: var(--openbot-bg-sidebar);
+}
+
+.voice-button:active,
+.voice-button-active:active {
+  transform: scale(0.97);
+}
+
+/* A filled field with no border, in the menu item shape. */
+.provider-model-search {
+  height: var(--openbot-control-md);
+  flex-shrink: 0;
+  margin-bottom: var(--ui-menu-padding);
+  border-color: transparent;
+  border-radius: var(--ui-menu-item-radius);
+  background: var(--ui-menu-item-hover);
+  padding-inline: var(--ui-menu-inset);
+  font-size: var(--openbot-text-md);
+}
+
+.provider-model-search:focus-visible {
+  border-color: var(--ui-menu-edge);
+}
+
+.provider-model-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.provider-model-group {
+  padding: var(--openbot-space-2) var(--ui-menu-inset) var(--openbot-space-1);
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-weight: 500;
+}

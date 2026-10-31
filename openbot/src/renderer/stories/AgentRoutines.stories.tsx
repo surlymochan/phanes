@@ -1,0 +1,365 @@
+import type { Routine, RoutineResultDelivery, RoutineResultDestination, RoutineRun } from "@openbot/contracts/ipc";
+import { onCleanup } from "solid-js";
+import { fn } from "storybook/test";
+import type { Meta, StoryObj } from "storybook-solidjs-vite";
+import { AgentRoutinesSettings } from "../src/features/conversation/AgentRoutinesSettings";
+import AgentSettingsPanel from "../src/features/conversation/AgentSettingsPanel";
+import { desktopEventRoutinesApi } from "../src/features/conversation/routine-webhooks-api";
+import { agentRoutinesPort, eventRoutinesPort } from "../src/features/conversation/routines-port";
+import { STORY_AGENT, STORY_AGENT_STATUS, STORY_MODELS, storyRuntimeSettings } from "./fixtures";
+import { createMockOpenBot, type MockOpenBotOptions } from "./mock-openbot";
+
+const morningBrief: Routine = {
+  id: "routine-morning-brief",
+  agentId: "chief",
+  name: "Morning brief",
+  instruction: "Summarize the important market and product changes since yesterday.",
+  active: true,
+  timezone: "Europe/Warsaw",
+  trigger: {
+    id: "trigger-weekdays",
+    routineId: "routine-morning-brief",
+    schedule: { kind: "weekdays", time: "07:00" },
+    nextRunAt: "2026-08-26T05:00:00.000Z",
+    createdAt: "2026-08-25T09:00:00.000Z",
+    updatedAt: "2026-08-25T09:00:00.000Z",
+  },
+  createdAt: "2026-08-25T09:00:00.000Z",
+  updatedAt: "2026-08-25T09:00:00.000Z",
+};
+
+const weeklyPlanning: Routine = {
+  id: "routine-weekly-planning",
+  agentId: "chief",
+  name: "Weekly planning",
+  instruction: "Review open work and prepare the priorities for next week.",
+  active: false,
+  timezone: "Europe/Warsaw",
+  trigger: {
+    id: "trigger-weekly-planning",
+    routineId: "routine-weekly-planning",
+    schedule: { kind: "weekly", weekday: 5, time: "16:00" },
+    nextRunAt: "2026-08-28T14:00:00.000Z",
+    createdAt: "2026-08-25T09:00:00.000Z",
+    updatedAt: "2026-08-25T09:00:00.000Z",
+  },
+  createdAt: "2026-08-25T09:00:00.000Z",
+  updatedAt: "2026-08-25T09:00:00.000Z",
+};
+
+const storyRoutines = [morningBrief, weeklyPlanning];
+
+const fullPanelRuns: RoutineRun[] = [
+  storyRun("run-today", "succeeded", "scheduled", 0),
+  storyRun("run-manual", "needs-attention", "manual", 4),
+  storyRun("run-yesterday", "failed", "scheduled", 28),
+];
+
+function RoutinesStory(props: {
+  routines?: Routine[];
+  runs?: RoutineRun[];
+  localHost?: boolean;
+  results?: Pick<MockOpenBotOptions, "routineResultOptions" | "routineResultDestinations" | "routineResultDeliveries">;
+}) {
+  const previousApi = window.openbot;
+  const mock = createMockOpenBot({ routines: { chief: props.routines ?? storyRoutines }, ...props.results });
+  window.openbot = mock.api;
+  if (props.runs) mock.api.agent.listRoutineRuns = async () => structuredClone(props.runs ?? []);
+  onCleanup(() => {
+    mock.dispose();
+    window.openbot = previousApi;
+  });
+  return (
+    <main style={{ width: "380px", height: "720px", overflow: "auto", background: "var(--openbot-bg-canvas)" }}>
+      <AgentRoutinesSettings
+        port={agentRoutinesPort("chief", false, props.localHost === true)}
+        onCountChange={fn()}
+        onBack={fn()}
+        onClose={fn()}
+      />
+    </main>
+  );
+}
+
+/** A routine that a webhook starts, on the preview host. */
+function WebhookRoutineStory() {
+  const previousApi = window.openbot;
+  const mock = createMockOpenBot({ routines: { chief: [] } });
+  window.openbot = mock.api;
+  const owner = { kind: "agent", id: "chief" } as const;
+  const api = desktopEventRoutinesApi("story-server", false, true);
+  const seeded = api.saveRoutine({
+    owner,
+    name: "Deploy review",
+    instruction: "Check the new production deployment and report regressions.",
+    active: true,
+    timezone: "Europe/Warsaw",
+    trigger: {
+      kind: "webhook",
+      eventType: "deployment.created",
+      filters: [{ pointer: "/deployment/environment", value: "production" }],
+    },
+  });
+  const port = eventRoutinesPort(
+    owner,
+    {
+      ...api,
+      listRoutines: async (input) => {
+        await seeded;
+        return api.listRoutines(input);
+      },
+      // One request that the filter ignored shows in the history.
+      listActivity: async () => [
+        {
+          kind: "received",
+          id: "received-story",
+          deliveryId: "request-story",
+          eventType: "deployment.created",
+          status: "ignored",
+          reason: "filter",
+          runId: null,
+          occurredAt: new Date(Date.now() - 90 * 60_000).toISOString(),
+        },
+      ],
+    },
+    agentRoutinesPort("chief"),
+  );
+  onCleanup(() => {
+    mock.dispose();
+    window.openbot = previousApi;
+  });
+  return (
+    <main style={{ width: "380px", height: "720px", overflow: "auto", background: "var(--openbot-bg-canvas)" }}>
+      <AgentRoutinesSettings port={port} onCountChange={fn()} onBack={fn()} onClose={fn()} />
+    </main>
+  );
+}
+
+function FullSettingsPanelStory() {
+  const previousApi = window.openbot;
+  const previousWidth = window.localStorage.getItem("openbot:settings-panel-width");
+  const mock = createMockOpenBot({ routines: { chief: storyRoutines } });
+  window.openbot = mock.api;
+  mock.api.agent.listRoutineRuns = async (input) =>
+    input.routineId === morningBrief.id ? structuredClone(fullPanelRuns) : [];
+  window.localStorage.setItem("openbot:settings-panel-width", "380");
+
+  onCleanup(() => {
+    mock.dispose();
+    window.openbot = previousApi;
+    if (previousWidth === null) {
+      window.localStorage.removeItem("openbot:settings-panel-width");
+      return;
+    }
+    window.localStorage.setItem("openbot:settings-panel-width", previousWidth);
+  });
+
+  return (
+    <main class="agent-memories-story-stage">
+      <AgentSettingsPanel
+        onOpenUsage={fn()}
+        agent={STORY_AGENT}
+        runtimeSettings={storyRuntimeSettings(STORY_AGENT)}
+        agentStatus={STORY_AGENT_STATUS}
+        modelOptions={STORY_MODELS}
+        working={false}
+        maxWidth={() => 640}
+        onClose={fn()}
+        onWidthChange={fn()}
+        onUpdateAgent={async (agentId, updates) => {
+          await mock.api.agent.updateAgent({ agentId, ...updates });
+        }}
+        onUpdateRuntimeSettings={async (agentId, _settings, updates) => {
+          await mock.api.agent.updateAgent({ agentId, ...updates });
+          return true;
+        }}
+        onSetAgentAvatar={async (agentId, image) => {
+          await mock.api.agent.setAvatar({ agentId, image });
+        }}
+      />
+    </main>
+  );
+}
+
+const meta = {
+  title: "Settings/Agent Routines",
+  component: AgentRoutinesSettings,
+  args: { port: agentRoutinesPort("chief"), onCountChange: fn() },
+  parameters: { layout: "centered", a11y: { test: "error" } },
+} satisfies Meta<typeof AgentRoutinesSettings>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const RoutineList: Story = {
+  render: () => <RoutinesStory />,
+};
+
+export const EmptyDraft: Story = {
+  render: () => <RoutinesStory routines={[]} />,
+};
+
+const runStatuses: RoutineRun["status"][] = [
+  "queued",
+  "running",
+  "needs-attention",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "cancelled",
+];
+
+export const RunHistoryStatuses: Story = {
+  render: () => (
+    <RoutinesStory
+      runs={runStatuses.map((status, index) => ({
+        id: `run-${status}`,
+        routineId: morningBrief.id,
+        agentId: morningBrief.agentId,
+        triggerId: morningBrief.trigger.id,
+        kind: index === 0 ? "manual" : "scheduled",
+        scheduledFor: new Date(Date.now() - index * 3_600_000).toISOString(),
+        routineName: morningBrief.name,
+        instruction: morningBrief.instruction,
+        deliveryId: `delivery-${status}`,
+        status,
+        error: status === "failed" ? "Example failure" : null,
+        createdAt: new Date(Date.now() - index * 3_600_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      }))}
+    />
+  ),
+};
+
+/**
+ * OpenBot was closed for five occurrences of an hourly routine set to run once when OpenBot opens.
+ * It ran the newest one late and recorded the four before it as skipped. Yesterday it skipped one.
+ * The times are on the hour.
+ */
+export const MissedRuns: Story = {
+  render: () => (
+    <RoutinesStory
+      localHost
+      routines={[
+        {
+          ...morningBrief,
+          missedPolicy: "run-once",
+          trigger: { ...morningBrief.trigger, schedule: { kind: "hourly", minute: 0 } },
+        },
+        weeklyPlanning,
+      ]}
+      runs={[
+        { ...storyRun("run-late", "succeeded", "scheduled", 1), createdAt: hoursAgo(0.5) },
+        {
+          ...storyRun("run-skipped", "cancelled", "scheduled", 5),
+          deliveryId: null,
+          missed: { count: 4, until: hoursAgo(2) },
+        },
+        {
+          ...storyRun("run-skipped-yesterday", "cancelled", "scheduled", 30),
+          deliveryId: null,
+          missed: { count: 1, until: null },
+        },
+      ]}
+    />
+  ),
+};
+
+const newsChannel: RoutineResultDestination = {
+  connectionId: "connection-slack",
+  platform: "slack",
+  connectionName: "Acme",
+  placeId: "C-news",
+  placeName: "news",
+};
+
+function storyDelivery(
+  runId: string,
+  status: RoutineResultDelivery["status"],
+  reason: RoutineResultDelivery["reason"],
+  hours: number,
+): RoutineResultDelivery {
+  return {
+    runId,
+    status,
+    reason,
+    attempts: 1,
+    destination: newsChannel,
+    updatedAt: hoursAgo(hours),
+    sentAt: status === "sent" ? hoursAgo(hours) : null,
+  };
+}
+
+/**
+ * Each answer of the morning brief also goes to a Slack channel. One went, one waited a day for its
+ * connection, and OpenBot stopped during one. Each run succeeded: the delivery has its own status.
+ */
+export const ResultDestination: Story = {
+  render: () => (
+    <RoutinesStory
+      localHost
+      runs={[
+        storyRun("run-sent", "succeeded", "scheduled", 0),
+        storyRun("run-expired", "succeeded", "scheduled", 24),
+        storyRun("run-restart", "succeeded", "scheduled", 48),
+      ]}
+      results={{
+        routineResultOptions: [
+          {
+            connectionId: "connection-slack",
+            platform: "slack",
+            connectionName: "Acme",
+            places: [
+              { id: "C-general", name: "general" },
+              { id: "C-news", name: "news" },
+            ],
+            placesFailed: false,
+          },
+        ],
+        routineResultDestinations: { [morningBrief.id]: newsChannel },
+        routineResultDeliveries: {
+          [morningBrief.id]: [
+            storyDelivery("run-sent", "sent", null, 0),
+            storyDelivery("run-expired", "failed", "expired", 0),
+            storyDelivery("run-restart", "uncertain", "restart", 48),
+          ],
+        },
+      }}
+    />
+  ),
+};
+
+export const WebhookRoutine: Story = {
+  render: () => <WebhookRoutineStory />,
+};
+
+export const FullSidePanel: Story = {
+  render: () => <FullSettingsPanelStory />,
+  parameters: { layout: "fullscreen" },
+};
+
+/** Counted back from the start of this hour, so an hourly run in a story falls on its schedule. */
+function hoursAgo(hours: number): string {
+  const hour = new Date();
+  hour.setMinutes(0, 0, 0);
+  return new Date(hour.getTime() - hours * 3_600_000).toISOString();
+}
+
+function storyRun(id: string, status: RoutineRun["status"], kind: RoutineRun["kind"], hours: number): RoutineRun {
+  const scheduledFor = hoursAgo(hours);
+  return {
+    id,
+    routineId: morningBrief.id,
+    agentId: morningBrief.agentId,
+    triggerId: kind === "manual" ? null : morningBrief.trigger.id,
+    kind,
+    scheduledFor,
+    routineName: morningBrief.name,
+    instruction: morningBrief.instruction,
+    deliveryId: `delivery-${id}`,
+    status,
+    error: status === "failed" ? "The agent could not complete this run." : null,
+    createdAt: scheduledFor,
+    updatedAt: scheduledFor,
+  };
+}

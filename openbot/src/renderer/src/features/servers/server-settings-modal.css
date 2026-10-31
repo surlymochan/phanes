@@ -1,0 +1,620 @@
+.server-settings-modal-shell .settings-modal-main {
+  background: var(--openbot-bg-canvas);
+}
+
+.server-settings-modal-shell .settings-modal-scroll-frame::before {
+  background: linear-gradient(
+    to bottom,
+    var(--openbot-bg-canvas) 0%,
+    var(--openbot-bg-canvas) 28%,
+    var(--openbot-bg-canvas-clear) 100%
+  );
+}
+
+.server-settings-modal-shell .settings-modal-scroll-frame::after {
+  background: linear-gradient(
+    to top,
+    var(--openbot-bg-canvas) 0%,
+    var(--openbot-bg-canvas) 28%,
+    var(--openbot-bg-canvas-clear) 100%
+  );
+}
+
+.server-settings-panel {
+  width: 100%;
+  gap: var(--openbot-space-6);
+  animation: none;
+}
+
+.server-settings-logo {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-control-hover);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-semibold);
+  letter-spacing: var(--openbot-tracking-wide);
+}
+
+.server-settings-logo img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  outline: 1px solid var(--openbot-image-outline);
+  outline-offset: -1px;
+}
+
+.server-settings-logo-trigger {
+  border-radius: var(--openbot-radius-md);
+  color: var(--openbot-text-muted);
+}
+
+.server-settings-logo-trigger .server-settings-logo {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.server-settings-logo-placeholder {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+}
+
+.server-settings-item-error {
+  color: var(--openbot-danger);
+}
+
+.server-settings-readonly-name.ui-item {
+  min-height: 72px;
+}
+
+.server-settings-publish-setting.ui-switch-field,
+.server-settings-mute-setting.ui-switch-field {
+  min-height: 64px;
+}
+
+.server-settings-publish-setting.ui-switch-field,
+.server-settings-mute-setting.ui-switch-field {
+  padding: var(--openbot-space-3) var(--openbot-space-4);
+}
+
+.server-settings-publish-setting.ui-switch-field,
+.server-settings-mute-setting.ui-switch-field {
+  width: 100%;
+  justify-content: space-between;
+  gap: var(--openbot-space-6);
+}
+
+.server-settings-readonly-value {
+  min-width: 180px;
+  max-width: 300px;
+  overflow-wrap: anywhere;
+  color: var(--openbot-text-primary);
+  font-weight: var(--openbot-weight-medium);
+  text-align: right;
+  user-select: text;
+}
+
+.server-settings-error-toast {
+  position: absolute;
+  right: var(--openbot-space-6);
+  bottom: var(--openbot-space-6);
+  left: var(--openbot-space-6);
+  z-index: 3;
+  box-shadow: 0 12px 32px var(--openbot-shadow-dialog);
+}
+
+.server-settings-error-toast[data-with-save-bar] {
+  bottom: calc(60px + var(--openbot-space-3));
+}
+
+.server-settings-members-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.server-settings-search {
+  position: relative;
+  width: 188px;
+  flex: 0 0 auto;
+}
+
+.server-settings-search > svg {
+  position: absolute;
+  top: 50%;
+  left: var(--openbot-space-3);
+  z-index: 1;
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  color: var(--openbot-text-muted);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.server-settings-search .ui-input {
+  padding-left: var(--openbot-space-8);
+}
+
+.server-settings-invite-card.ui-card {
+  border: 0;
+  background: var(--openbot-bg-surface);
+  padding: var(--openbot-space-4);
+  box-shadow: none;
+}
+
+.server-settings-invite-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px auto;
+  align-items: start;
+  gap: var(--openbot-space-2);
+}
+
+/* The hidden tab panels stay mounted for the slide animation, so without this the
+   slot sizes to the widest panel and the active one inherits its width as dead space. */
+.server-settings-invite-composer .ui-sliding-tabs-content-slot {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.server-settings-invite-composer .ui-sliding-tabs-content:not([data-selected]) {
+  position: absolute;
+  inset: 0;
+}
+
+.server-settings-invite-mode-panel,
+.server-settings-invite-email-field,
+.server-settings-invite-email-field .ui-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.server-settings-invite-email-field {
+  position: relative;
+  width: 22rem;
+  max-width: 100%;
+}
+
+.server-settings-invite-email-field > .ui-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.server-settings-invite-link-input.ui-input {
+  font-family: var(--openbot-font-mono);
+  cursor: text;
+}
+
+.server-settings-invite-link-input.ui-input::placeholder {
+  font-family: var(--openbot-font-sans);
+}
+
+.server-settings-invite-copy > span {
+  min-width: 9ch;
+  text-align: center;
+}
+
+.server-settings-invite-copy > svg,
+.server-settings-invite-new-link > svg,
+.server-settings-routine-feed-row .ui-button > svg,
+.server-settings-routine-feed-actions .ui-button > svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+  flex: 0 0 auto;
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.server-settings-invite-hint {
+  display: block;
+  margin-top: var(--openbot-space-2);
+}
+
+.server-settings-role-select {
+  width: 100%;
+}
+
+.server-settings-invite-result {
+  border: 0;
+  background: var(--openbot-bg-surface-raised);
+  margin-top: var(--openbot-space-3);
+}
+
+.server-settings-member-row[data-disabled] {
+  background: var(--openbot-bg-control);
+}
+
+.server-settings-member-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-settings-member-actions {
+  min-width: 92px;
+}
+
+.server-settings-member-menu-trigger {
+  position: relative;
+}
+
+.server-settings-member-menu-trigger::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 40px;
+  height: 40px;
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.server-settings-member-menu-trigger svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}
+
+.server-settings-empty-row .ui-item-content {
+  text-align: center;
+}
+
+.server-settings-desktop-icon {
+  width: 40px;
+  height: 40px;
+  justify-content: center;
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-md);
+  background: var(--openbot-bg-control);
+  color: var(--openbot-text-secondary);
+}
+
+.server-settings-desktop-icon svg {
+  width: var(--openbot-icon-lg);
+  height: var(--openbot-icon-lg);
+}
+
+.server-settings-desktop-description {
+  max-width: 360px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.server-settings-desktop-meta {
+  max-width: 260px;
+  display: grid;
+  justify-items: end;
+  gap: var(--openbot-space-1);
+  text-align: right;
+}
+
+.server-settings-desktop-hint {
+  max-width: 220px;
+  text-align: right;
+}
+
+.server-settings-desktop-status {
+  margin-top: var(--openbot-space-1);
+}
+
+@media (max-width: 720px) {
+  .server-settings-readonly-name {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .server-settings-readonly-name .ui-item-actions {
+    width: 100%;
+    max-width: none;
+    justify-content: space-between;
+  }
+
+  .server-settings-readonly-value {
+    min-width: 0;
+    max-width: none;
+    text-align: left;
+  }
+
+  .server-settings-error-toast {
+    right: var(--openbot-space-4);
+    left: var(--openbot-space-4);
+  }
+
+  .server-settings-invite-composer {
+    grid-template-columns: minmax(0, 1fr) 118px;
+  }
+
+  .server-settings-invite-email-field {
+    max-width: none;
+  }
+
+  .server-settings-invite-composer > .ui-button,
+  .server-settings-invite-share {
+    grid-column: 1 / -1;
+  }
+
+  .server-settings-desktop-card .ui-item {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .server-settings-desktop-meta,
+  .server-settings-desktop-hint {
+    max-width: none;
+    margin-left: 52px;
+    justify-items: start;
+    text-align: left;
+  }
+}
+
+@media (max-width: 520px) {
+  :is(.server-settings-invite-section, .server-settings-members-section) .ui-settings-section-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .server-settings-invite-section .ui-settings-section-actions,
+  .server-settings-members-section .ui-settings-section-actions,
+  .server-settings-search {
+    width: 100%;
+  }
+
+  .server-settings-member-row {
+    flex-wrap: wrap;
+  }
+
+  .server-settings-member-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+
+  .server-settings-invite-composer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .server-settings-role-select,
+  .server-settings-invite-composer > .ui-button,
+  .server-settings-invite-share {
+    width: 100%;
+    grid-column: 1;
+  }
+}
+
+.server-settings-invite-share {
+  display: flex;
+  gap: var(--openbot-space-1);
+}
+
+.server-settings-invite-share > .ui-button:last-child {
+  animation: server-settings-invite-qr-in var(--openbot-duration-normal) var(--openbot-ease-out);
+}
+
+@keyframes server-settings-invite-qr-in {
+  from {
+    opacity: 0;
+    transform: translateX(calc(-1 * var(--openbot-space-4)));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.server-settings-invite-qr {
+  animation: server-settings-invite-panel-in var(--openbot-duration-normal) var(--openbot-ease-out);
+  transform-origin: top;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--openbot-space-3);
+  padding: var(--openbot-space-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .server-settings-invite-share > .ui-button:last-child {
+    animation: none;
+  }
+}
+
+@keyframes server-settings-invite-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-1 * var(--openbot-space-3))) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .server-settings-invite-qr {
+    animation: none;
+  }
+}
+
+.server-settings-routine-feed-row {
+  display: flex;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.server-settings-routine-feed-agent {
+  flex: none;
+  width: auto;
+}
+
+.server-settings-routine-feed-row .ui-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--openbot-font-mono);
+  cursor: text;
+}
+
+.server-settings-routine-feed-text {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.server-settings-routine-feed-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--openbot-space-1);
+}
+
+/* The feed area before the first read answers. It fades in after a delay, so a fast answer does not flash it. */
+.server-settings-routine-feed-loading {
+  display: grid;
+  place-items: center;
+  padding: var(--openbot-space-6);
+  animation: server-settings-routine-feed-loading-in var(--openbot-duration-normal) var(--openbot-ease-out)
+    var(--openbot-loading-indicator-delay) both;
+}
+
+@keyframes server-settings-routine-feed-loading-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.server-settings-routine-feed-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--openbot-space-2);
+}
+
+/* The empty pending list: sample invitations land behind the invite action. Both share one cell. */
+.server-invites-empty {
+  display: grid;
+}
+
+.server-invites-empty > * {
+  grid-area: 1 / 1;
+}
+
+/* The middle of the faint list clears for the action, and the list fades out at the bottom. */
+.server-invites-empty-board {
+  min-height: calc(4 * 3.75rem);
+  display: grid;
+  align-content: start;
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
+  mask-image:
+    radial-gradient(ellipse 46% 72% at 50% 50%, var(--openbot-transparent) 58%, var(--openbot-text-primary) 100%),
+    linear-gradient(var(--openbot-text-primary) 70%, var(--openbot-transparent));
+  mask-composite: intersect;
+}
+
+.server-invites-empty-row {
+  animation: server-invites-empty-land 560ms var(--openbot-ease-out) both;
+}
+
+.server-invites-empty-row > .ui-item {
+  padding: var(--openbot-space-3) var(--openbot-space-4);
+}
+
+.server-invites-empty-row + .server-invites-empty-row {
+  position: relative;
+}
+
+.server-invites-empty-row + .server-invites-empty-row::before {
+  position: absolute;
+  top: 0;
+  right: var(--openbot-space-4);
+  left: var(--openbot-space-4);
+  height: 1px;
+  background: var(--openbot-border);
+  content: "";
+}
+
+.server-invites-empty-board[data-leaving] .server-invites-empty-row {
+  animation: server-invites-empty-leave 700ms var(--openbot-ease-out) both;
+}
+
+@keyframes server-invites-empty-land {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(10px) scale(0.98);
+  }
+}
+
+@keyframes server-invites-empty-leave {
+  to {
+    opacity: 0;
+    filter: blur(3px);
+    transform: translateY(-4px);
+  }
+}
+
+.server-invites-empty-pitch {
+  z-index: 1;
+  width: 100%;
+  max-width: 30rem;
+  display: grid;
+  place-self: center;
+  justify-items: center;
+  gap: var(--openbot-space-3);
+  padding: var(--openbot-space-8) var(--openbot-space-6);
+  text-align: center;
+}
+
+.server-invites-empty-title {
+  display: grid;
+  font-size: var(--openbot-text-3xl);
+  font-weight: var(--openbot-weight-semibold);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.server-invites-empty-quiet {
+  color: var(--openbot-text-muted);
+}
+
+/* The one handwritten word writes itself once. The app has no hand font, so it uses the system's. */
+.server-invites-empty-hand {
+  display: inline-block;
+  color: var(--openbot-accent-text);
+  font-family: "Bradley Hand", "Noteworthy", "Segoe Print", cursive;
+  line-height: 1;
+  clip-path: inset(-0.4em 100% -0.4em -0.2em);
+  animation: server-invites-empty-write 560ms linear 450ms forwards;
+}
+
+@keyframes server-invites-empty-write {
+  to {
+    clip-path: inset(-0.4em -0.2em -0.4em -0.2em);
+  }
+}
+
+.server-invites-empty-action {
+  width: 100%;
+  max-width: 20rem;
+  height: var(--openbot-control-lg);
+  margin-top: var(--openbot-space-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .server-invites-empty-row,
+  .server-invites-empty-hand {
+    animation: none;
+    clip-path: none;
+  }
+}

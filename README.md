@@ -1,5 +1,14 @@
 # Phanes
 
+> **当前迁移状态：** 本仓库正收敛 OpenBot、OpenSwarm 和连接层。源码导入与构建检查不代表正式部署或真实任务验收完成；最新状态见 [HANDOFF.md](HANDOFF.md)。
+
+- [`openbot/`](openbot/)：OpenBot Hub 和界面。
+- [`openswarm/`](openswarm/)：执行器、路由与跨主机并发。
+- [`integrations/`](integrations/)：Hub 与执行网络的连接入口。
+- Issue、PR 和 Discussions 以本仓库为入口，既有 Phanes Project 保留历史与跨项目视图。
+
+组件保留各自许可证：OpenBot 使用 [PolyForm Noncommercial 1.0.0](openbot/LICENSE)，OpenSwarm 使用 [Apache 2.0](openswarm/LICENSE)。其他文件适用其自身声明。
+
 **A unified agent network: one control plane, distributed heterogeneous execution, unified resource management, and evidence-based self-improvement.**
 
 Phanes brings three existing systems together into a single network for running fleets of AI coding agents:
@@ -10,7 +19,7 @@ Phanes brings three existing systems together into a single network for running 
 
 GitHub sits alongside them as the evidence surface for code work: issues, pull requests, reviews, and releases that reference run records.
 
-> **Status:** The design has passed a multi-model adversarial review and is being built in stages (see Roadmap). This repository currently hosts the integration handoff/status document ([HANDOFF.md](HANDOFF.md)) and the operations tooling (`tools/`) used to run the fleet day to day.
+> **Status:** The design has passed a multi-model adversarial review and is being built in stages (see Roadmap). This repository contains the component sources and integration entry points as the consolidation proceeds; deployment and end-to-end acceptance remain in progress.
 
 ## Core contract
 

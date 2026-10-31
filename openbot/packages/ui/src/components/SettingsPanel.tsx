@@ -1,0 +1,205 @@
+import { Button, ChevronRight, FieldContext } from "@openbot/ui";
+import type { JSX } from "@solidjs/web";
+import { createUniqueId, onSettled, Show } from "solid-js";
+import { useText } from "../text";
+import { createScrollFades } from "./createScrollFades";
+import { PanelResizer } from "./PanelResizer";
+
+/** The default is also the minimum: a narrower panel breaks the avatar editor and the setting rows. */
+export const SETTINGS_PANEL_DEFAULT = 360;
+export const SETTINGS_PANEL_MAX = 1600;
+/** What the chat under the panel keeps for itself, however far the panel is dragged. */
+const CONVERSATION_PANEL_MIN = 96;
+
+/** Shared right-panel shell; caller owns per-owner sections. */
+
+/** How wide the panel may be drawn before the chat beside it is squeezed out of readability. */
+export function settingsPanelMaxWidth(host: HTMLElement | undefined): number {
+  const available = (host?.clientWidth || window.innerWidth) - CONVERSATION_PANEL_MIN;
+  return Math.min(SETTINGS_PANEL_MAX, Math.max(SETTINGS_PANEL_DEFAULT, available));
+}
+
+export interface SettingsPanelProps {
+  id: string;
+  label: string;
+  width: number;
+  maxWidth: number | (() => number);
+  onResize: (width: number) => void;
+  onResizeEnd: (width: number) => void;
+  children: JSX.Element;
+}
+
+export function SettingsPanel(props: SettingsPanelProps): JSX.Element {
+  const { t } = useText();
+  return (
+    <aside id={props.id} class="settings-panel" aria-label={props.label}>
+      <PanelResizer
+        class="right-panel-resizer"
+        label={t("settings.panel.resize")}
+        controls={props.id}
+        direction="right"
+        value={props.width}
+        defaultValue={SETTINGS_PANEL_DEFAULT}
+        min={SETTINGS_PANEL_DEFAULT}
+        max={props.maxWidth}
+        onResize={props.onResize}
+        onResizeEnd={props.onResizeEnd}
+      />
+      {props.children}
+    </aside>
+  );
+}
+
+/** Header glyphs stay here to stop agent/channel drift. */
+export function SettingsBackIcon(): JSX.Element {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" class="ui-glyph-20 settings-back-icon fill-none stroke-current">
+      <path d="m12.5 4-6 6 6 6" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  );
+}
+
+export function SettingsForwardIcon(): JSX.Element {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" class="ui-glyph-20 settings-forward-icon fill-none stroke-current">
+      <path d="m5.5 4 6 6-6 6m5-12 6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  );
+}
+
+export interface SettingsPanelHeaderProps {
+  title: JSX.Element;
+  onBack?: () => void;
+  backLabel?: string;
+  onClose: () => void;
+  closeLabel: string;
+  /** The first page of a side panel pane. There, the tab names and closes the pane, so this header hides. */
+  paneRoot?: boolean;
+}
+
+/** Fixed 3-column header keeps title centred. */
+export function SettingsPanelHeader(props: SettingsPanelHeaderProps): JSX.Element {
+  const { t } = useText();
+  return (
+    <header class={["settings-panel-header", { "side-panel-pane-header": props.paneRoot === true }]}>
+      <Show when={props.onBack} fallback={<span />}>
+        <Button
+          variant="ghost"
+          type="button"
+          class="settings-panel-nav-button"
+          aria-label={props.backLabel ?? t("common.back")}
+          data-cuelume-tap="navigate"
+          onClick={() => props.onBack?.()}
+        >
+          <SettingsBackIcon />
+        </Button>
+      </Show>
+      <h2>{props.title}</h2>
+      <Button
+        variant="ghost"
+        type="button"
+        class="settings-panel-nav-button side-panel-pane-close"
+        aria-label={props.closeLabel}
+        data-cuelume-tap="close"
+        onClick={() => props.onClose()}
+      >
+        <SettingsForwardIcon />
+      </Button>
+    </header>
+  );
+}
+
+/** The scrolling body of the panel. It fades at an edge that has more content past it. */
+export function SettingsPanelContent(props: { children: JSX.Element }): JSX.Element {
+  const fades = createScrollFades();
+  onSettled(() => fades.stop);
+  return (
+    <div class={["settings-panel-content", fades.classes()]} ref={fades.bind} onScroll={fades.measure}>
+      {/* A page change or an opened section changes the scroll height while the body keeps its size. */}
+      <div ref={fades.watch}>{props.children}</div>
+    </div>
+  );
+}
+
+export interface SettingsFieldProps {
+  label: JSX.Element;
+  class?: string;
+  children: JSX.Element;
+}
+
+/** Label over caller control via shared field id. */
+export function SettingsField(props: SettingsFieldProps): JSX.Element {
+  const controlId = `${createUniqueId()}-control`;
+  return (
+    <FieldContext value={{ controlId }}>
+      <label class={props.class ? `settings-field ${props.class}` : "settings-field"} for={controlId}>
+        <span>{props.label}</span>
+        {props.children}
+      </label>
+    </FieldContext>
+  );
+}
+
+export interface SettingsLinkGroupProps {
+  /** A heading above the rows. A titled group is a region with that name. */
+  title?: JSX.Element;
+  /** Draws the rows in one bordered card, for a panel with several groups one after another. */
+  inset?: boolean;
+  class?: string;
+  children: JSX.Element;
+}
+
+/** The bordered stack the link rows sit in; the rows draw the dividers between themselves. */
+export function SettingsLinkGroup(props: SettingsLinkGroupProps): JSX.Element {
+  const titleId = createUniqueId();
+  const rows = () => (
+    <div class={["settings-link-group", props.class ?? "", { "settings-link-group-inset": Boolean(props.inset) }]}>
+      {props.children}
+    </div>
+  );
+  return (
+    <Show when={props.title} fallback={rows()}>
+      <section class="settings-link-section" aria-labelledby={titleId}>
+        <h3 id={titleId} class="settings-link-section-title">
+          {props.title}
+        </h3>
+        {rows()}
+      </section>
+    </Show>
+  );
+}
+
+export interface SettingsLinkRowProps {
+  /** A 16 px glyph before the label. Rows in one group either all have one or none do. */
+  icon?: JSX.Element;
+  label: JSX.Element;
+  /** The state on the right of the row, such as `3 saved`. A row with none shows only the chevron. */
+  value?: JSX.Element;
+  onClick: (trigger: HTMLButtonElement) => void;
+  ref?: (element: HTMLButtonElement) => void;
+}
+
+/** One row of the group: what it opens on the left, where that stands on the right. */
+export function SettingsLinkRow(props: SettingsLinkRowProps): JSX.Element {
+  return (
+    <Button
+      ref={(element) => props.ref?.(element)}
+      variant="ghost"
+      type="button"
+      class="settings-link"
+      data-cuelume-tap="navigate"
+      onClick={(event) => props.onClick(event.currentTarget)}
+    >
+      <span class="settings-link-label">
+        <Show when={props.icon}>
+          <span class="settings-link-icon">{props.icon}</span>
+        </Show>
+        {props.label}
+      </span>
+      <span class="settings-link-value">
+        {props.value}
+        <ChevronRight />
+      </span>
+    </Button>
+  );
+}

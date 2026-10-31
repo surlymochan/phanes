@@ -1,0 +1,25 @@
+/** Bytes per `String.fromCharCode` call. One call per byte is slow for a file; a small chunk stays under engine argument limits. */
+const BINARY_CHUNK = 0x2000;
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += BINARY_CHUNK)
+    binary += String.fromCharCode(...bytes.subarray(index, index + BINARY_CHUNK));
+  return btoa(binary);
+}
+
+export function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+export function bytesToBase64Url(bytes: Uint8Array): string {
+  return bytesToBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+export function base64UrlToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  return base64ToBytes(value.replaceAll("-", "+").replaceAll("_", "/") + padding);
+}

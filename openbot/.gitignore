@@ -1,0 +1,72 @@
+node_modules/
+*.tsbuildinfo
+out/
+out-*/
+dist/
+apps/*/dist/
+apps/*/.wrangler/
+apps/*/worker-configuration.d.ts
+coverage/
+.DS_Store
+*.log
+*.local
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+!.env.example
+!apps/auth-api/.env.production
+!apps/auth-api/.env.dev
+!remote/.env.production
+*.key
+*.p12
+*.pem
+.idea/
+# Keep shared VS Code settings while ignoring other editor state.
+**/.vscode/*
+!/.vscode/settings.json
+!/.vscode/extensions.json
+!/apps/mobile/.vscode/settings.json
+!/apps/mobile/.vscode/extensions.json
+playwright-report/
+test-results/
+storybook-static/
+Shared/
+!apps/mobile/src/shared/
+!apps/mobile/src/shared/**
+index-*.css
+.openbot-browser-test/
+.openbot-build/
+# The home page beam, a React Bits port. Its license forbids a public copy; CI checks it out
+# from the private nightly-labs/openbot-laser-flow repository.
+/apps/auth-api/src/vendor/laser-flow/
+.worktrees/
+# Claude Code creates git worktrees here; they carry a nested biome.json.
+.claude/worktrees/
+.claude/settings.local.json
+/build/cloudflared/
+/build/cua-driver/
+/build/codex/
+/build/claude/
+/build/grok/
+/build/remote-desktop-runtime/
+/build/remote-desktop-release/
+Bots
+# Local dev-profile agent workspaces; root only, so tracked */agents/ paths stay visible.
+/Agents/
+!apps/mobile/src/features/bots/
+!apps/mobile/src/features/bots/**
+mise.local.toml
+# Local provider credential export. Never commit.
+keys
+# A Firebase service account key sends Android notifications. It goes into the encrypted account
+# service settings only. Never commit.
+*firebase-adminsdk*.json
+# Agent task checklist. Local to one worktree.
+/TASKS.md
+
+# Persistent local development identity and migration recovery.
+.openbot/
+
+# Local self-hosted service secrets.
+/deploy/self-host/env/*.env

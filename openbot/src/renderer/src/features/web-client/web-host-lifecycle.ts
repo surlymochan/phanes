@@ -1,0 +1,231 @@
+import type {
+  HostedServerIssue,
+  HostedServerSleep,
+  HostedServerStart,
+  HostedServerStartStep,
+} from "@openbot/contracts/ipc";
+import { runTeamEffect } from "@openbot/team-client";
+import {
+  HOSTED_HOST_READY_LIMIT_MS,
+  HOSTED_START_FAILED_READS,
+  HOSTED_START_POLL_MS,
+  hostedStartStep,
+} from "@openbot/team-client/hosted-server-wake";
+import { createWebHostedServerWake } from "./web-hosted-server-wake";
+
+/** A sleeping server is asked again after this long, also with no input. */
+const SLEEP_RECHECK_MS = 5 * 60_000;
+
+/** Hosted state owns wake and sleep. The workspace recovery controller owns connection attempts. */
+export function createWebHostLifecycle(options: {
+  accountFetch: typeof fetch;
+  hostId: () => string | null;
+  disposed: () => boolean;
+  status: () => "connecting" | "online" | "offline";
+  hostedSleep: () => HostedServerSleep | null;
+  setHostedSleep: (value: HostedServerSleep | null) => void;
+  setIssue: (value: HostedServerIssue | null) => void;
+  setStart: (value: HostedServerStart | null) => void;
+  suspend: () => void;
+  recover: () => void;
+}) {
+  let hosted = createWebHostedServerWake(options.accountFetch);
+  let revision = 0;
+  let expired = false;
+  /** The next status read while the server starts. */
+  let startTimer: ReturnType<typeof setTimeout> | undefined;
+  let start: HostedServerStart | null = null;
+  /** When the account server first reported the server `running`: OpenBot on it starts. */
+  let runningSince: number | null = null;
+  /** The status reads in a row that failed. */
+  let failedReads = 0;
+  let sleepTimer: ReturnType<typeof setTimeout> | undefined;
+  let removeInput: (() => void) | undefined;
+  let waking: Promise<void> | null = null;
+  const current = (id: string, version: number) =>
+    !options.disposed() && options.hostId() === id && revision === version;
+
+  function clearSleep() {
+    removeInput?.();
+    removeInput = undefined;
+    clearTimeout(sleepTimer);
+  }
+  function starting(id: string) {
+    options.setHostedSleep("waking");
+    options.setIssue(null);
+    if (start) return;
+    setStep(Date.now(), "machine");
+    readStart(id);
+  }
+  function clearStart() {
+    clearTimeout(startTimer);
+    startTimer = undefined;
+    start = null;
+    runningSince = null;
+    failedReads = 0;
+    options.setStart(null);
+  }
+  function expire() {
+    cancelPending();
+    clearStart();
+    expired = true;
+    options.setHostedSleep(null);
+    options.setIssue("start_timeout");
+  }
+  /** The client waits while the server starts. Only OpenBot on a running machine has a time limit. */
+  function setStep(startedAt: number, step: HostedServerStartStep): boolean {
+    if (step !== "openbot") runningSince = null;
+    else runningSince ??= Date.now();
+    if (runningSince !== null && Date.now() - runningSince >= HOSTED_HOST_READY_LIMIT_MS) {
+      expire();
+      return false;
+    }
+    start = { step, startedAt };
+    options.setStart(start);
+    return true;
+  }
+  function readStart(id: string) {
+    const version = revision;
+    startTimer = setTimeout(async () => {
+      startTimer = undefined;
+      if (!current(id, version) || !start || options.status() === "online") return;
+      const status = await runTeamEffect(hosted.status(id));
+      if (!current(id, version) || !start || options.status() === "online") return;
+      const step = status && !status.sleeping ? hostedStartStep(status) : null;
+      if (status && !step) {
+        clearStart();
+        options.setHostedSleep(null);
+        if (status.sleeping) {
+          options.setHostedSleep("sleeping");
+          options.suspend();
+          waitForInput(id);
+        } else if (status.error === "plan_ended") {
+          options.setIssue("plan_ended");
+          options.suspend();
+        } else options.setIssue("wake_failed");
+        return;
+      }
+      // A wake starts a stopped server, and sends a refused start again when its delay ends.
+      if (step === "provider_limit" || status?.state === "stopped") void runTeamEffect(hosted.wake(id));
+      // A failed read is also a reason the host is offline. The client reads again, up to a limit.
+      failedReads = status ? 0 : failedReads + 1;
+      if (failedReads >= HOSTED_START_FAILED_READS) {
+        expire();
+        return;
+      }
+      if (step && !setStep(start.startedAt, step)) return;
+      readStart(id);
+    }, HOSTED_START_POLL_MS);
+  }
+  function waitForInput(id: string) {
+    clearSleep();
+    const version = revision;
+    const input = () => {
+      if (current(id, version)) void retry();
+    };
+    window.addEventListener("pointerdown", input, true);
+    window.addEventListener("keydown", input, true);
+    removeInput = () => {
+      window.removeEventListener("pointerdown", input, true);
+      window.removeEventListener("keydown", input, true);
+    };
+    sleepTimer = setTimeout(() => {
+      if (current(id, version) && !document.hidden)
+        void hostUnavailable(id).then((retry) => {
+          if (retry) options.recover();
+        });
+    }, SLEEP_RECHECK_MS);
+  }
+  async function hostUnavailable(id: string, opened = false): Promise<boolean> {
+    const version = revision;
+    if (!current(id, version) || document.hidden) return false;
+    const availability = await runTeamEffect(hosted.unavailable(id, { wake: !expired }));
+    if (!current(id, version) || options.status() === "online") return false;
+    if (availability === "ended") {
+      options.setHostedSleep(null);
+      options.setIssue("plan_ended");
+      options.suspend();
+      return false;
+    }
+    if (availability === "sleeping") {
+      options.setHostedSleep("sleeping");
+      options.suspend();
+      if (opened) {
+        await retry();
+        return false;
+      }
+      waitForInput(id);
+      return false;
+    }
+    clearSleep();
+    if (availability === "waking" && !expired) starting(id);
+    else if (!start) options.setHostedSleep(null);
+    return true;
+  }
+  function retry(): Promise<void> {
+    if (waking) return waking;
+    const id = options.hostId();
+    if (!id || document.hidden) return Promise.resolve();
+    const version = revision;
+    clearSleep();
+    expired = false;
+    clearStart();
+    options.setIssue(null);
+    starting(id);
+    const promise = runTeamEffect(hosted.wakeForInput(id))
+      .then(async (started) => {
+        if (!current(id, version)) return;
+        if (!started) {
+          clearStart();
+          options.setHostedSleep(null);
+          options.setIssue("wake_failed");
+          const availability = await runTeamEffect(hosted.unavailable(id, { wake: false }));
+          if (!current(id, version)) return;
+          if (availability === "ended") {
+            options.setIssue("plan_ended");
+            options.suspend();
+            return;
+          }
+        }
+        options.recover();
+      })
+      .finally(() => {
+        if (waking === promise) waking = null;
+      });
+    waking = promise;
+    return promise;
+  }
+  function cancelPending() {
+    revision += 1;
+    clearSleep();
+    // The start stays. `resume` reads its state again.
+    clearTimeout(startTimer);
+    startTimer = undefined;
+    hosted.dispose();
+    hosted = createWebHostedServerWake(options.accountFetch);
+    waking = null;
+  }
+  function endSleep() {
+    cancelPending();
+    clearSleep();
+    clearStart();
+    expired = false;
+    waking = null;
+    options.setHostedSleep(null);
+    options.setIssue(null);
+  }
+  function dispose() {
+    endSleep();
+    hosted.dispose();
+  }
+  function resume() {
+    const id = options.hostId();
+    if (!id) return;
+    if (options.hostedSleep() === "sleeping") waitForInput(id);
+    else if (options.hostedSleep() === "waking" || expired) {
+      if (start && startTimer === undefined) readStart(id);
+      options.recover();
+    }
+  }
+  return { hostUnavailable, retry, endSleep, cancelPending, resume, retryAfterRestart: options.recover, dispose };
+}

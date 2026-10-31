@@ -1,0 +1,152 @@
+import { isDynamicIslandServerVisible } from "@openbot/contracts/ipc";
+import { DynamicIslandCoordinator } from "@openbot/team-client/dynamic-island-coordinator";
+import type { DynamicIslandText } from "@openbot/team-client/dynamic-island-presentation";
+import { currentText } from "@openbot/ui/text";
+import { createEffect, flush, onSettled, untrack } from "solid-js";
+import { usePlatform } from "../../platform";
+import { createSimpleContext } from "../../simple-context";
+import { useServers } from "../servers/servers-context";
+import { useSettings } from "../settings/settings-context";
+import { dynamicIslandPort } from "./dynamic-island-port";
+
+/**
+ * The macOS Dynamic Island projection: what the desktop shows about servers the
+ * user is *not* looking at.
+ *
+ * This is the one domain that is deliberately cross-server, so it sits above
+ * everything per-server. `DynamicIslandCoordinator` keeps a runtime per server
+ * id and hands the six turn signals back on a switch (`serverState(serverId)`),
+ * which is why it must outlive any subtree keyed by the active server.
+ * `onScopedEvent` is the other half of that: events for a background server
+ * arrive here and nowhere else, because no per-server domain exists to receive
+ * them.
+ *
+ * Publishing is batched through `queueMicrotask` rather than an effect. Several
+ * of the callers below fire in the same flush - a scoped event, the retain
+ * effect, a resolved action - and main only needs the last presentation, so the
+ * scheduled flag collapses them into one IPC call.
+ *
+ * The coordinator itself is exposed rather than wrapped. Its three remaining
+ * callers (`serverState` on a switch, `replaceServer` from the projection
+ * effect, `resolveAction` from the action handler) each still live outside this
+ * module, and a wrapper per call would only re-declare their signatures.
+ */
+const DynamicIsland = createSimpleContext({
+  name: "Dynamic Island",
+  init: () => {
+    const platform = usePlatform();
+    const { servers, activeServerId } = useServers();
+    const { generalSettings } = useSettings();
+    const coordinator = new DynamicIslandCoordinator(islandText);
+    const connectedServers = new Set(["local"]);
+    let presentationScheduled = false;
+
+    /** Active server first: main renders the head of this list as the leading item. */
+    function serverOrder(): string[] {
+      const activeId = activeServerId();
+      const current = servers();
+      const ids = current
+        .filter((server) => connectedServers.has(server.id) && (server.kind === "local" || server.state === "online"))
+        .map((server) => server.id);
+      ids.sort((left, right) => Number(right === activeId) - Number(left === activeId));
+      const ordered = ids.length > 0 ? ids : ["local"];
+      // A muted server is muted here too: it contributes neither a presentation nor an attention
+      // count. A server that the user hid from the island in Settings is left out the same way. The
+      // filter runs after the `["local"]` fallback so that fallback cannot put a muted or hidden
+      // local server back. An empty list is fine - the coordinator reads it as idle.
+      const muted = new Set(current.filter((server) => server.notificationsMuted).map((server) => server.id));
+      const settings = generalSettings();
+      const choices = {
+        serverVisibility: settings.macBookNotchServers,
+        newServersVisible: settings.macBookNotchNewServers,
+      };
+      return ordered.filter((serverId) => !muted.has(serverId) && isDynamicIslandServerVisible(choices, serverId));
+    }
+
+    function publishPresentation(): void {
+      // The main window owns the island; main rejects a publish from a chat window.
+      if (platform.landingPreview || platform.chatWindow || presentationScheduled) return;
+      presentationScheduled = true;
+      queueMicrotask(() => {
+        presentationScheduled = false;
+        const presentation = coordinator.presentation(serverOrder());
+        void dynamicIslandPort()
+          .dynamicIsland.publishPresentation(presentation)
+          .catch(() => undefined);
+      });
+    }
+
+    createEffect(
+      () =>
+        servers()
+          // Mute belongs in this key: it changes what `serverOrder` returns, and the user has to
+          // see that without restarting the app.
+          .map((server) => `${server.id}:${server.state}:${server.notificationsMuted}`)
+          .join("\u0000"),
+      () => {
+        // The key above decides when this runs; the list is read once for the current state.
+        const currentServers = untrack(servers);
+        const configuredServerIds = new Set(currentServers.map((server) => server.id));
+        for (const serverId of connectedServers) {
+          const server = currentServers.find((candidate) => candidate.id === serverId);
+          if (!configuredServerIds.has(serverId) || (server?.kind === "remote" && server.state !== "online")) {
+            connectedServers.delete(serverId);
+          }
+        }
+        connectedServers.add("local");
+        coordinator.retainServers([...configuredServerIds]);
+        publishPresentation();
+      },
+    );
+
+    // The server choices change what `serverOrder` returns. The island follows a change at once.
+    // A string key, so that a change to another setting, such as a size slider, publishes nothing.
+    createEffect(
+      () => {
+        const settings = generalSettings();
+        return `${settings.macBookNotchNewServers}:${JSON.stringify(settings.macBookNotchServers)}`;
+      },
+      () => publishPresentation(),
+      { defer: true },
+    );
+
+    onSettled(() =>
+      dynamicIslandPort().agent.onScopedEvent((event) => {
+        flush(() => {
+          const server = servers().find((candidate) => candidate.id === event.serverId);
+          if (server?.kind === "remote" && server.state !== "online") return;
+          connectedServers.add(event.serverId);
+          coordinator.applyEvent(event, activeServerId());
+          publishPresentation();
+        });
+      }),
+    );
+
+    return {
+      dynamicIslandCoordinator: coordinator,
+      publishDynamicIslandPresentation: publishPresentation,
+    };
+  },
+});
+
+export const DynamicIslandProvider = DynamicIsland.provider;
+export const useDynamicIsland = DynamicIsland.use;
+
+/** The island text in the current interface language, read for each presentation. */
+function islandText(): DynamicIslandText {
+  const { t, errorMessage } = currentText();
+  return {
+    taskWorking: t("island.task.working"),
+    questionHeader: t("island.question.defaultHeader"),
+    questionText: t("island.question.defaultText"),
+    optionFallback: (number) => t("island.question.optionFallback", { number }),
+    takeoverTitle: t("island.takeover.title"),
+    takeoverDetail: t("island.takeover.detail"),
+    failureTitle: t("island.failure.title"),
+    failureDetail: t("island.failure.detail"),
+    approvalCommand: t("island.approval.title.command"),
+    approvalFileChange: t("island.approval.title.fileChange"),
+    approvalPermissions: t("island.approval.title.permissions"),
+    errorMessage,
+  };
+}

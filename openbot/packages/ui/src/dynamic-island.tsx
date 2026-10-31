@@ -1,0 +1,1212 @@
+import type { DynamicIslandNotchSize } from "@openbot/contracts/ipc";
+import type { JSX } from "@solidjs/web";
+import { createEffect, createSignal, createUniqueId, onCleanup, onSettled, Show, untrack } from "solid-js";
+import { computedBlur, computedScale, type Spring, springKeyframes } from "./spring-motion";
+import { useText } from "./text";
+import { cx, mix, prefersReducedMotion } from "./utils";
+
+export type DynamicIslandViewState = "compact" | "expanded";
+export type DynamicIslandHoverBehavior = "none" | "grow" | "expand";
+export type DynamicIslandDisplayMode = "notch" | "island";
+export type DynamicIslandStateChangeReason = "pointer" | "keyboard" | "hover" | "hover-exit" | "escape";
+
+export type { DynamicIslandNotchSize } from "@openbot/contracts/ipc";
+
+export interface DynamicIslandHoverContentMotion {
+  leadingScale: number;
+  trailingScale: number;
+  outwardTranslateX: number;
+  translateY: number;
+}
+
+export interface DynamicIslandSharedElementMotion {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+export interface DynamicIslandSharedMotion {
+  leading?: DynamicIslandSharedElementMotion | undefined;
+  trailing?: DynamicIslandSharedElementMotion | undefined;
+}
+
+export interface DynamicIslandProps {
+  label: string;
+  compactLeading?: JSX.Element;
+  compactTrailing?: JSX.Element;
+  compactWidth?: number | undefined;
+  /** Overrides the compact height a notch or the default sets, for a user-chosen island size. */
+  compactHeight?: number | undefined;
+  expandedContent: JSX.Element;
+  state: DynamicIslandViewState;
+  onStateChange: (state: DynamicIslandViewState, reason: DynamicIslandStateChangeReason) => void;
+  hoverBehavior?: DynamicIslandHoverBehavior;
+  extendedHoverArea?: boolean | undefined;
+  suppressInitialHover?: boolean | undefined;
+  hoverContentMotion?: DynamicIslandHoverContentMotion;
+  pointerToggle?: boolean | undefined;
+  sharedMotion?: DynamicIslandSharedMotion;
+  /**
+   * Moves the compact content with the surface when the compact size changes, so the leading and
+   * trailing content never leave the surface. A consumer that animates its own content across a
+   * size change turns it off for that change. Defaults to true.
+   */
+  compactContentFollowsResize?: boolean;
+  displayMode?: DynamicIslandDisplayMode | undefined;
+  notchSize?: DynamicIslandNotchSize | undefined;
+  ariaLive?: "off" | "polite" | "assertive" | undefined;
+  class?: string;
+}
+
+const HOVER_EXPAND_DELAY = 300;
+const HOVER_EXIT_DELAY = 100;
+const HOVER_WIDTH_GROWTH = 32;
+/** The compact height with no notch and no user size: `--dynamic-island-notch-height` in the CSS. */
+const DEFAULT_COMPACT_HEIGHT = 32;
+const HOVER_HEIGHT_GROWTH = 8;
+const CONTENT_EXIT_LEAD = 90;
+const PANEL_EXIT_DURATION = CONTENT_EXIT_LEAD + 450;
+const OPEN_SPRING = { response: 0.42, dampingFraction: 1 } as const;
+const CLOSE_SPRING = { response: 0.45, dampingFraction: 1 } as const;
+const HOVER_SPRING = {
+  response: 0.5 / 1.2,
+  dampingFraction: 0.7,
+} as const;
+const CONTENT_SPRING = { response: 0.34, dampingFraction: 0.88 } as const;
+const CONTENT_EXIT_DURATION = 280;
+// The shell holds still for `CONTENT_EXIT_LEAD`, then contracts on `CLOSE_SPRING` and takes the
+// panel's lower half with it: the panel is pinned under the notch and `overflow: clip` on the shell
+// cuts whatever no longer fits. The old exit faded over the full 280ms at a near-unity scale, so
+// roughly 50px of still-visible content was guillotined mid-fade — the bottom vanished at once
+// while the top morphed. Finishing the fade before the shell's edge arrives, and keeping the
+// content shrinking toward the notch after it, makes the panel withdraw instead of being sliced.
+const CONTENT_EXIT_FADE_OFFSET = 0.45;
+const CONTENT_BLUR = 4;
+// `data-compact-resize` marks the compact content as moving. It stays on while one resize follows
+// another, so a slider drag does not flash the motion styles on and off, and it goes at this part of
+// the spring, where the surface slows down, so the content is sharp again as the surface settles.
+const COMPACT_RESIZE_SETTLE = 0.6;
+// How far the compact row still has to go for the full motion styles. `--dynamic-island-compact-motion`
+// is that distance as 0 to 1, so the styles follow the size of the move: one slow slider step barely
+// blurs, and a jump across the range, or a fast drag the surface lags behind, blurs in full.
+const COMPACT_RESIZE_FULL_MOTION_DISTANCE = 120;
+const COMPACT_RESIZE_LARGE_MOTION = 0.5;
+// After a large move, `data-compact-settled` marks the landing for this long, so the compact content
+// can play a short arrival that is shorter than this. A small move, such as one slow slider step,
+// gets none.
+const COMPACT_SETTLED_DURATION = 700;
+const CONTENT_ENTER_DELAY = 90;
+const CONTENT_BLUR_OPEN_DURATION = 460;
+const CONTENT_BLUR_CLOSE_DURATION = 450;
+const COMPACT_RETURN_DURATION = 450;
+const REDUCED_CONTENT_FADE_DURATION = 150;
+const DEFAULT_HOVER_CONTENT_MOTION: DynamicIslandHoverContentMotion = {
+  leadingScale: 1.08,
+  trailingScale: 1.08,
+  outwardTranslateX: 10,
+  translateY: 6,
+};
+
+export const DYNAMIC_ISLAND_COMPACT_EAR_TRACK_WIDTH = 38;
+
+/**
+ * A macOS-notch adaptation of SmoothUI's Dynamic Island pattern.
+ * Source: https://smoothui.dev/r/dynamic-island.json
+ */
+export function DynamicIsland(props: DynamicIslandProps): JSX.Element {
+  const local = props;
+  const { t } = useText();
+  const panelId = `dynamic-island-${createUniqueId()}`;
+  let shell: HTMLDivElement | undefined;
+  let sizeTarget: HTMLDivElement | undefined;
+  let silhouetteRoot: HTMLSpanElement | undefined;
+  let silhouetteBody: HTMLSpanElement | undefined;
+  let leadingShoulder: SVGSVGElement | undefined;
+  let trailingShoulder: SVGSVGElement | undefined;
+  let leadingContent: HTMLSpanElement | undefined;
+  let trailingContent: HTMLSpanElement | undefined;
+  let hoverLeadingContent: HTMLSpanElement | undefined;
+  let hoverTrailingContent: HTMLSpanElement | undefined;
+  let panelContent: HTMLDivElement | undefined;
+  let toggleButton: HTMLButtonElement | undefined;
+  let notchSafeZone: HTMLSpanElement | undefined;
+  let hoverExpandTimer: ReturnType<typeof setTimeout> | undefined;
+  let hoverExitTimer: ReturnType<typeof setTimeout> | undefined;
+  let panelExitTimer: ReturnType<typeof setTimeout> | undefined;
+  let layoutCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  let pointerInside = false;
+  let initialHoverReady = !local.suppressInitialHover;
+  let hoverOpenedState: Exclude<DynamicIslandViewState, "compact"> | null = null;
+  const [isHovering, setIsHovering] = createSignal(false);
+
+  const viewState = () => local.state;
+  const isExpanded = () => viewState() === "expanded";
+  const initialViewState = untrack(viewState);
+  const [layoutState, setLayoutState] = createSignal<DynamicIslandViewState>(initialViewState);
+  const [renderedPanelState, setRenderedPanelState] = createSignal<Exclude<DynamicIslandViewState, "compact"> | null>(
+    initialViewState === "compact" ? null : initialViewState,
+  );
+
+  function setState(next: DynamicIslandViewState, reason: DynamicIslandStateChangeReason): void {
+    if (next === viewState()) return;
+    local.onStateChange(next, reason);
+  }
+
+  function clearHoverTimers(): void {
+    if (hoverExpandTimer !== undefined) clearTimeout(hoverExpandTimer);
+    if (hoverExitTimer !== undefined) clearTimeout(hoverExitTimer);
+    hoverExpandTimer = undefined;
+    hoverExitTimer = undefined;
+  }
+
+  function toggle(reason: "pointer" | "keyboard"): void {
+    clearHoverTimers();
+    hoverOpenedState = null;
+    setState(isExpanded() ? "compact" : "expanded", reason);
+  }
+
+  function handlePointerEnter(event: PointerEvent): void {
+    if (event.pointerType && event.pointerType !== "mouse") return;
+    beginHover();
+  }
+
+  function handlePointerMove(event: PointerEvent): void {
+    if (event.pointerType && event.pointerType !== "mouse") return;
+    if (initialHoverReady) return;
+    initialHoverReady = true;
+    beginHover();
+  }
+
+  function beginHover(): void {
+    if (!initialHoverReady) return;
+    if (pointerInside) return;
+    pointerInside = true;
+    setIsHovering(true);
+    if (hoverExitTimer !== undefined) clearTimeout(hoverExitTimer);
+    hoverExitTimer = undefined;
+    const hoverBehavior = local.hoverBehavior ?? "none";
+    if (hoverBehavior !== "expand" || viewState() === "expanded") return;
+
+    if (hoverExpandTimer !== undefined) clearTimeout(hoverExpandTimer);
+    hoverExpandTimer = setTimeout(() => {
+      hoverExpandTimer = undefined;
+      if (!isHovering() || viewState() === "expanded") return;
+      hoverOpenedState = "expanded";
+      setState("expanded", "hover");
+    }, HOVER_EXPAND_DELAY);
+  }
+
+  function handlePointerLeave(event: PointerEvent): void {
+    if (event.pointerType && event.pointerType !== "mouse") return;
+    endHover();
+  }
+
+  function endHover(): void {
+    if (!initialHoverReady) {
+      initialHoverReady = true;
+      return;
+    }
+    if (!pointerInside) return;
+    pointerInside = false;
+    if (hoverExpandTimer !== undefined) clearTimeout(hoverExpandTimer);
+    hoverExpandTimer = undefined;
+    const openedState = hoverOpenedState;
+
+    if (hoverExitTimer !== undefined) clearTimeout(hoverExitTimer);
+    hoverExitTimer = setTimeout(() => {
+      hoverExitTimer = undefined;
+      if (pointerInside) return;
+      setIsHovering(false);
+      if (!openedState || hoverOpenedState !== openedState || viewState() !== openedState) return;
+      hoverOpenedState = null;
+      setState("compact", "hover-exit");
+    }, HOVER_EXIT_DELAY);
+  }
+
+  createEffect(
+    () => ({
+      layout: layoutState(),
+      rendered: renderedPanelState(),
+      state: viewState(),
+    }),
+    ({ layout, rendered, state }) => {
+      if (hoverOpenedState && state !== hoverOpenedState) hoverOpenedState = null;
+
+      if (layoutCloseTimer !== undefined) clearTimeout(layoutCloseTimer);
+      layoutCloseTimer = undefined;
+      if (state !== "compact") {
+        setLayoutState(state);
+        return;
+      }
+
+      const shouldStageClose = layout === "expanded" && rendered === "expanded";
+      if (!shouldStageClose) {
+        setLayoutState("compact");
+        return;
+      }
+
+      layoutCloseTimer = setTimeout(() => {
+        layoutCloseTimer = undefined;
+        if (viewState() === "compact") setLayoutState("compact");
+      }, CONTENT_EXIT_LEAD);
+    },
+  );
+
+  createEffect(
+    () => ({ rendered: renderedPanelState(), state: viewState() }),
+    ({ rendered, state }) => {
+      if (panelExitTimer !== undefined) clearTimeout(panelExitTimer);
+      panelExitTimer = undefined;
+      if (state !== "compact") {
+        setRenderedPanelState(state);
+        return;
+      }
+      if (!rendered) return;
+      panelExitTimer = setTimeout(() => {
+        panelExitTimer = undefined;
+        setRenderedPanelState(null);
+      }, PANEL_EXIT_DURATION);
+    },
+  );
+
+  createSmoothSizeResize({
+    container: () => shell,
+    content: () => sizeTarget,
+    compactContent: () => [toggleButton, notchSafeZone],
+    compactContentEnabled: () => local.compactContentFollowsResize ?? true,
+    silhouette: () => ({
+      root: silhouetteRoot,
+      body: silhouetteBody,
+      leadingShoulder,
+      trailingShoulder,
+    }),
+    silhouetteTarget: () =>
+      islandSilhouetteTarget(viewState(), local.displayMode ?? "notch", compactHeightScale(local)),
+    sharedLeading: () => leadingContent,
+    sharedLeadingEnabled: () => Boolean(local.sharedMotion?.leading),
+    sharedLeadingTarget: () =>
+      sharedLeadingTarget(
+        viewState(),
+        local.sharedMotion?.leading?.x ?? 27,
+        local.sharedMotion?.leading?.y ?? 54,
+        local.sharedMotion?.leading?.scale ?? 2.4,
+      ),
+    sharedTrailing: () => trailingContent,
+    sharedTrailingEnabled: () => Boolean(local.sharedMotion?.trailing),
+    sharedTrailingTarget: () =>
+      sharedLeadingTarget(
+        viewState(),
+        local.sharedMotion?.trailing?.x ?? 0,
+        local.sharedMotion?.trailing?.y ?? 0,
+        local.sharedMotion?.trailing?.scale ?? 1,
+      ),
+  });
+  createHoverContentMotion({
+    leading: () => hoverLeadingContent,
+    trailing: () => hoverTrailingContent,
+    active: () => isHovering() && viewState() !== "expanded" && (local.hoverBehavior ?? "none") !== "none",
+    state: viewState,
+    motion: () => local.hoverContentMotion ?? DEFAULT_HOVER_CONTENT_MOTION,
+  });
+  createSpringContentTransition({
+    content: () => panelContent,
+    root: () => shell,
+    state: viewState,
+    renderedState: renderedPanelState,
+  });
+  onSettled(() => {
+    const resetHover = () => {
+      // Focus can leave the native overlay without a pointer-leave event.
+      // A pending hover must not reopen it after the surface has collapsed.
+      clearHoverTimers();
+      pointerInside = false;
+      hoverOpenedState = null;
+      setIsHovering(false);
+    };
+    window.addEventListener("blur", resetHover);
+    return () => window.removeEventListener("blur", resetHover);
+  });
+  onCleanup(() => {
+    clearHoverTimers();
+    if (panelExitTimer !== undefined) clearTimeout(panelExitTimer);
+    if (layoutCloseTimer !== undefined) clearTimeout(layoutCloseTimer);
+  });
+
+  return (
+    <section
+      class={cx("dynamic-island", local.class, local.displayMode === "island" && "dynamic-island-external")}
+      style={dynamicIslandStyle(local)}
+      data-slot="dynamic-island"
+      data-state={viewState()}
+      data-layout-state={layoutState()}
+      data-hovered={isHovering() ? "true" : undefined}
+      data-shared-leading={local.sharedMotion?.leading ? "true" : undefined}
+      data-pointer-toggle={local.pointerToggle === false ? "false" : undefined}
+      aria-label={local.label}
+      aria-live={local.ariaLive}
+      onPointerEnter={handlePointerEnter}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
+      onMouseEnter={beginHover}
+      onMouseLeave={endHover}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || viewState() === "compact") return;
+        event.preventDefault();
+        event.stopPropagation();
+        clearHoverTimers();
+        hoverOpenedState = null;
+        setState("compact", "escape");
+        queueMicrotask(() => toggleButton?.focus());
+      }}
+    >
+      <Show when={local.extendedHoverArea}>
+        <span class="dynamic-island-hover-zone" aria-hidden="true" />
+      </Show>
+      <div ref={shell} class="dynamic-island-shell" data-state={viewState()}>
+        <span ref={silhouetteRoot} class="dynamic-island-silhouette" aria-hidden="true">
+          <span ref={silhouetteBody} class="dynamic-island-silhouette-body" />
+          <svg
+            ref={leadingShoulder}
+            class="dynamic-island-shoulder dynamic-island-shoulder-leading"
+            viewBox="0 0 1 1"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <path d="M 0 0 Q 1 0 1 1 L 1 0 Z" />
+          </svg>
+          <svg
+            ref={trailingShoulder}
+            class="dynamic-island-shoulder dynamic-island-shoulder-trailing"
+            viewBox="0 0 1 1"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <path d="M 1 0 Q 0 0 0 1 L 0 0 Z" />
+          </svg>
+        </span>
+        <div ref={sizeTarget} class="dynamic-island-size-target">
+          <button
+            ref={toggleButton}
+            class="dynamic-island-toggle"
+            type="button"
+            aria-controls={panelId}
+            aria-expanded={isExpanded() ? "true" : "false"}
+            aria-label={t(isExpanded() ? "island.action.collapse" : "island.action.expand", { label: local.label })}
+            // A click that does not toggle gets no cue. The cue reads the state before the toggle.
+            data-cuelume-open={local.pointerToggle === false ? undefined : isExpanded() ? "close" : ""}
+            data-cuelume-emphasis="subtle"
+            onClick={(event) => {
+              if (event.detail > 0 && local.pointerToggle === false) return;
+              toggle(event.detail === 0 ? "keyboard" : "pointer");
+            }}
+          >
+            <span class="dynamic-island-ear dynamic-island-ear-leading" aria-hidden="true">
+              <span ref={leadingContent} class="dynamic-island-ear-content">
+                <span ref={hoverLeadingContent} class="dynamic-island-hover-content dynamic-island-hover-leading">
+                  {local.compactLeading}
+                </span>
+              </span>
+            </span>
+            <span ref={notchSafeZone} class="dynamic-island-notch-safe-zone" aria-hidden="true" />
+            <span class="dynamic-island-ear dynamic-island-ear-trailing" aria-hidden="true">
+              <span ref={trailingContent} class="dynamic-island-ear-content dynamic-island-trailing-content">
+                <span class="dynamic-island-trailing-compact">
+                  <span ref={hoverTrailingContent} class="dynamic-island-hover-content dynamic-island-hover-trailing">
+                    {local.compactTrailing}
+                  </span>
+                </span>
+              </span>
+            </span>
+          </button>
+
+          <Show keyed when={renderedPanelState()}>
+            {(_contentState) => (
+              <div
+                id={panelId}
+                class="dynamic-island-panel"
+                data-slot="dynamic-island-panel"
+                data-phase={
+                  viewState() === "compact" ? (layoutState() === "compact" ? "leaving" : "exiting") : "entering"
+                }
+                aria-hidden={viewState() === "compact" ? "true" : undefined}
+                inert={viewState() === "compact" ? true : undefined}
+              >
+                <div ref={panelContent} class="dynamic-island-content">
+                  {local.expandedContent}
+                </div>
+              </div>
+            )}
+          </Show>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function dynamicIslandStyle(props: DynamicIslandProps): string | undefined {
+  const compactWidth =
+    props.compactWidth ??
+    (props.displayMode !== "island" && props.notchSize !== undefined
+      ? props.notchSize.width + DYNAMIC_ISLAND_COMPACT_EAR_TRACK_WIDTH * 2
+      : undefined);
+  const compactHeight = props.compactHeight ?? props.notchSize?.height;
+  const styles = [
+    compactWidth === undefined ? undefined : `--dynamic-island-compact-width: ${compactWidth}px`,
+    props.notchSize === undefined ? undefined : `--dynamic-island-notch-width: ${props.notchSize.width}px`,
+    compactHeight === undefined ? undefined : `--dynamic-island-notch-height: ${compactHeight}px`,
+  ].filter((style): style is string => style !== undefined);
+  return styles.length > 0 ? styles.join("; ") : undefined;
+}
+
+interface SmoothSizeResizeOptions {
+  container: () => HTMLElement | undefined;
+  content: () => HTMLElement | undefined;
+  /**
+   * The compact row and the notch gap in it. They take a new compact size at once, so they follow
+   * the surface on the same spring.
+   */
+  compactContent: () => (HTMLElement | undefined)[];
+  compactContentEnabled: () => boolean;
+  silhouette: () => {
+    root: HTMLSpanElement | undefined;
+    body: HTMLSpanElement | undefined;
+    leadingShoulder: SVGSVGElement | undefined;
+    trailingShoulder: SVGSVGElement | undefined;
+  };
+  silhouetteTarget: () => IslandSilhouetteGeometry;
+  sharedLeading: () => HTMLSpanElement | undefined;
+  sharedLeadingEnabled: () => boolean;
+  sharedLeadingTarget: () => SharedElementTransform;
+  sharedTrailing: () => HTMLSpanElement | undefined;
+  sharedTrailingEnabled: () => boolean;
+  sharedTrailingTarget: () => SharedElementTransform;
+}
+
+interface IslandSilhouetteGeometry {
+  topRadius: number;
+  bottomRadius: number;
+  capsuleRadius?: number | undefined;
+}
+
+/**
+ * The compact height against the height the island has by default. A lower island gets smaller
+ * bottom corners, and a higher one larger corners.
+ */
+function compactHeightScale(props: Pick<DynamicIslandProps, "compactHeight" | "notchSize">): number {
+  const base = props.notchSize?.height ?? DEFAULT_COMPACT_HEIGHT;
+  return (props.compactHeight ?? base) / base;
+}
+
+function islandSilhouetteTarget(
+  state: DynamicIslandViewState,
+  displayMode: DynamicIslandDisplayMode,
+  compactScale: number,
+): IslandSilhouetteGeometry {
+  if (displayMode === "island") {
+    if (state === "expanded") return { topRadius: 0, bottomRadius: 0, capsuleRadius: 24 };
+    return { topRadius: 0, bottomRadius: 0, capsuleRadius: 16 * compactScale };
+  }
+  if (state === "expanded") return { topRadius: 19, bottomRadius: 24 };
+  // A lower island loses its corners faster than its height, or a short island reads as a pill.
+  const cornerScale = compactScale < 1 ? compactScale * compactScale : compactScale;
+  return { topRadius: 6, bottomRadius: 14 * cornerScale };
+}
+
+interface SharedElementTransform {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+function sharedLeadingTarget(
+  state: DynamicIslandViewState,
+  expandedX: number,
+  expandedY: number,
+  expandedScale: number,
+): SharedElementTransform {
+  if (state === "expanded") return { x: expandedX, y: expandedY, scale: expandedScale };
+  return { x: 0, y: 0, scale: 1 };
+}
+
+interface HoverContentMotionOptions {
+  leading: () => HTMLSpanElement | undefined;
+  trailing: () => HTMLSpanElement | undefined;
+  active: () => boolean;
+  state: () => DynamicIslandViewState;
+  motion: () => DynamicIslandHoverContentMotion;
+}
+
+function createHoverContentMotion(options: HoverContentMotionOptions): void {
+  let leadingAnimation: Animation | undefined;
+  let trailingAnimation: Animation | undefined;
+
+  createEffect(
+    () => ({ active: options.active(), motion: options.motion(), state: options.state() }),
+    ({ active, motion, state }) => {
+      const leading = options.leading();
+      const trailing = options.trailing();
+      if (!leading || !trailing) return;
+
+      const leadingTarget = active
+        ? { x: -motion.outwardTranslateX, y: motion.translateY, scale: motion.leadingScale }
+        : { x: 0, y: 0, scale: 1 };
+      const trailingTarget = active
+        ? { x: motion.outwardTranslateX, y: motion.translateY, scale: motion.trailingScale }
+        : { x: 0, y: 0, scale: 1 };
+      const spring = state === "expanded" ? OPEN_SPRING : HOVER_SPRING;
+      const leadingStart = readCurrentTransform(leading, { x: 0, y: 0, scale: 1 });
+      const trailingStart = readCurrentTransform(trailing, { x: 0, y: 0, scale: 1 });
+
+      leadingAnimation?.cancel();
+      trailingAnimation?.cancel();
+      leadingAnimation = animateHoverContent(leading, leadingStart, leadingTarget, spring);
+      trailingAnimation = animateHoverContent(trailing, trailingStart, trailingTarget, spring);
+    },
+  );
+
+  onCleanup(() => {
+    leadingAnimation?.cancel();
+    trailingAnimation?.cancel();
+  });
+}
+
+function animateHoverContent(
+  element: HTMLElement,
+  start: SharedElementTransform,
+  target: SharedElementTransform,
+  spring: Spring,
+): Animation | undefined {
+  writeSharedTransform(element, target);
+  const animate = element.animate?.bind(element);
+  if (prefersReducedMotion() || !animate || transformsMatch(start, target)) return undefined;
+  const animation = animate(sharedElementKeyframes(start, target, spring), {
+    duration: spring.response * 1_000,
+    easing: "linear",
+  });
+  void animation.finished.catch(() => undefined);
+  return animation;
+}
+
+function transformsMatch(left: SharedElementTransform, right: SharedElementTransform): boolean {
+  return (
+    Math.abs(left.x - right.x) < 0.01 && Math.abs(left.y - right.y) < 0.01 && Math.abs(left.scale - right.scale) < 0.001
+  );
+}
+
+function createSmoothSizeResize(options: SmoothSizeResizeOptions): void {
+  let animations: Animation[] = [];
+  let previousSize: { width: number; height: number } | undefined;
+  let previousSilhouette: IslandSilhouetteGeometry | undefined;
+  let previousSharedLeading: SharedElementTransform | undefined;
+  let previousSharedTrailing: SharedElementTransform | undefined;
+  let targetSilhouette = untrack(options.silhouetteTarget);
+  let targetSharedLeading = untrack(options.sharedLeadingTarget);
+  let targetSharedTrailing = untrack(options.sharedTrailingTarget);
+  let sharedLeadingEnabled = untrack(options.sharedLeadingEnabled);
+  let sharedTrailingEnabled = untrack(options.sharedTrailingEnabled);
+  let compactContentEnabled = untrack(options.compactContentEnabled);
+  const previousCompactContentSizes = new Map<HTMLElement, { width: number; height: number } | undefined>();
+  let compactContentAnimating = false;
+  let compactResizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
+  let compactSettledTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearCompactSettled(): void {
+    if (compactSettledTimer !== undefined) clearTimeout(compactSettledTimer);
+    compactSettledTimer = undefined;
+    options.container()?.removeAttribute("data-compact-settled");
+  }
+
+  function settleCompactResize(): void {
+    if (compactResizeSettleTimer !== undefined) clearTimeout(compactResizeSettleTimer);
+    compactResizeSettleTimer = undefined;
+    const container = options.container();
+    const landedLargeMove = container?.dataset.compactMotion === "large";
+    container?.removeAttribute("data-compact-resize");
+    container?.style.removeProperty("--dynamic-island-compact-motion");
+    container?.removeAttribute("data-compact-motion");
+    if (!container || !landedLargeMove) return;
+    clearCompactSettled();
+    container.dataset.compactSettled = "true";
+    compactSettledTimer = setTimeout(clearCompactSettled, COMPACT_SETTLED_DURATION);
+  }
+
+  createEffect(options.silhouetteTarget, (target) => {
+    targetSilhouette = target;
+  });
+  createEffect(options.compactContentEnabled, (enabled) => {
+    compactContentEnabled = enabled;
+  });
+  createEffect(
+    () => ({
+      enabled: options.sharedLeadingEnabled(),
+      target: options.sharedLeadingTarget(),
+    }),
+    ({ enabled, target }) => {
+      sharedLeadingEnabled = enabled;
+      targetSharedLeading = target;
+      // A status can become idle while expanded. Give the transform back to
+      // CSS so the idle icon does not keep the status avatar's panel position.
+      if (!enabled) options.sharedLeading()?.style.removeProperty("transform");
+    },
+  );
+  createEffect(
+    () => ({
+      enabled: options.sharedTrailingEnabled(),
+      target: options.sharedTrailingTarget(),
+    }),
+    ({ enabled, target }) => {
+      sharedTrailingEnabled = enabled;
+      targetSharedTrailing = target;
+      if (!enabled) options.sharedTrailing()?.style.removeProperty("transform");
+    },
+  );
+  function finishAnimation(current?: Animation[]): void {
+    if (current && animations !== current) return;
+    animations = [];
+    compactContentAnimating = false;
+    const container = options.container();
+    container?.removeAttribute("data-resizing");
+    settleCompactResize();
+  }
+
+  onSettled(() => {
+    const observer = new ResizeObserver(() => {
+      const container = options.container();
+      const content = options.content();
+      if (!container || !content) return;
+      const nextSize = layoutSize(content);
+      const previous = previousSize;
+      const silhouette = options.silhouette();
+      const targetGeometry = targetSilhouette;
+      const previousGeometry = previousSilhouette;
+      const sharedLeading = sharedLeadingEnabled ? options.sharedLeading() : undefined;
+      const sharedTrailing = sharedTrailingEnabled ? options.sharedTrailing() : undefined;
+      const previousLeadingTransform = previousSharedLeading;
+      const previousTrailingTransform = previousSharedTrailing;
+      previousSize = nextSize;
+      previousSilhouette = targetGeometry;
+      previousSharedLeading = targetSharedLeading;
+      previousSharedTrailing = targetSharedTrailing;
+      const compactContent = options
+        .compactContent()
+        .filter((element): element is HTMLElement => element !== undefined);
+      if (!previous) {
+        for (const element of compactContent) previousCompactContentSizes.set(element, readElementSize(element));
+        writeContainerSize(container, nextSize);
+        writeSilhouetteGeometry(silhouette, targetGeometry);
+        if (sharedLeading) writeSharedTransform(sharedLeading, targetSharedLeading);
+        if (sharedTrailing) writeSharedTransform(sharedTrailing, targetSharedTrailing);
+        return;
+      }
+      if (sizesMatch(previous, nextSize) && silhouetteGeometryMatches(previousGeometry, targetGeometry)) return;
+      const computed = getComputedStyle(container);
+      const animatedWidth = Number.parseFloat(computed.width);
+      const animatedHeight = Number.parseFloat(computed.height);
+      const start =
+        animations.length > 0 && Number.isFinite(animatedWidth) && Number.isFinite(animatedHeight)
+          ? { width: animatedWidth, height: animatedHeight }
+          : previous;
+      const startGeometry =
+        animations.length > 0
+          ? readCurrentSilhouette(silhouette.root, silhouette.body, previousGeometry ?? targetGeometry)
+          : (previousGeometry ?? targetGeometry);
+      const startLeadingTransform =
+        animations.length > 0
+          ? readCurrentTransform(sharedLeading, previousLeadingTransform ?? targetSharedLeading)
+          : (previousLeadingTransform ?? targetSharedLeading);
+      const startTrailingTransform =
+        animations.length > 0
+          ? readCurrentTransform(sharedTrailing, previousTrailingTransform ?? targetSharedTrailing)
+          : (previousTrailingTransform ?? targetSharedTrailing);
+      const compactContentStarts = new Map(
+        compactContent.map((element) => [
+          element,
+          compactContentAnimating ? readElementSize(element) : previousCompactContentSizes.get(element),
+        ]),
+      );
+
+      for (const active of animations) active.cancel();
+      compactContentAnimating = false;
+      // Read after the cancel, so the size is the CSS target and not a frame of the old animation.
+      const compactContentTargets = new Map(compactContent.map((element) => [element, readElementSize(element)]));
+      for (const [element, size] of compactContentTargets) previousCompactContentSizes.set(element, size);
+      writeContainerSize(container, nextSize);
+      writeSilhouetteGeometry(silhouette, targetGeometry);
+      if (sharedLeading) writeSharedTransform(sharedLeading, targetSharedLeading);
+      if (sharedTrailing) writeSharedTransform(sharedTrailing, targetSharedTrailing);
+      if (prefersReducedMotion()) {
+        finishAnimation();
+        return;
+      }
+      container.setAttribute("data-resizing", "true");
+      const opening =
+        nextSize.width > start.width ||
+        nextSize.height > start.height ||
+        (targetGeometry.capsuleRadius ?? 0) > (startGeometry.capsuleRadius ?? 0);
+      const spring = resizeSpring(container, start, nextSize, opening);
+      const animationOptions: KeyframeAnimationOptions = {
+        duration: spring.response * 1_000,
+        easing: "linear",
+      };
+      const current = [container.animate(resizeKeyframes(start, nextSize, spring), animationOptions)];
+      if (silhouette.body && silhouette.leadingShoulder && silhouette.trailingShoulder) {
+        current.push(
+          silhouette.body.animate(silhouetteBodyKeyframes(startGeometry, targetGeometry, spring), animationOptions),
+          silhouette.leadingShoulder.animate(
+            shoulderKeyframes(startGeometry, targetGeometry, spring),
+            animationOptions,
+          ),
+          silhouette.trailingShoulder.animate(
+            shoulderKeyframes(startGeometry, targetGeometry, spring),
+            animationOptions,
+          ),
+        );
+      }
+      if (silhouette.root && startGeometry.capsuleRadius !== undefined && targetGeometry.capsuleRadius !== undefined) {
+        current.push(
+          silhouette.root.animate(capsuleRadiusKeyframes(startGeometry, targetGeometry, spring), animationOptions),
+        );
+      }
+      if (sharedLeading) {
+        current.push(
+          sharedLeading.animate(
+            sharedElementKeyframes(startLeadingTransform, targetSharedLeading, spring),
+            animationOptions,
+          ),
+        );
+      }
+      if (sharedTrailing) {
+        current.push(
+          sharedTrailing.animate(
+            sharedElementKeyframes(startTrailingTransform, targetSharedTrailing, spring),
+            animationOptions,
+          ),
+        );
+      }
+      for (const element of compactContentEnabled ? compactContent : []) {
+        const elementStart = compactContentStarts.get(element);
+        const elementTarget = compactContentTargets.get(element);
+        if (!elementStart || !elementTarget || sizesMatch(elementStart, elementTarget)) continue;
+        current.push(element.animate(resizeKeyframes(elementStart, elementTarget, spring), animationOptions));
+        compactContentAnimating = true;
+      }
+      if (compactContentAnimating) {
+        // Tells the compact content that it moves, and which way the row goes.
+        const row = compactContent[0] && compactContentTargets.get(compactContent[0]);
+        const rowStart = compactContent[0] && compactContentStarts.get(compactContent[0]);
+        clearCompactSettled();
+        container.dataset.compactResize = row && rowStart && row.width < rowStart.width ? "shrink" : "grow";
+        const travel = row && rowStart ? Math.abs(row.width - rowStart.width) : COMPACT_RESIZE_FULL_MOTION_DISTANCE;
+        const motion = Math.min(1, travel / COMPACT_RESIZE_FULL_MOTION_DISTANCE);
+        container.style.setProperty("--dynamic-island-compact-motion", motion.toFixed(3));
+        // A style that cannot scale, such as a radius token, applies to a large move only. It stays
+        // until the motion settles, so a smaller step inside the same motion does not take it back.
+        if (motion >= COMPACT_RESIZE_LARGE_MOTION) container.dataset.compactMotion = "large";
+        if (compactResizeSettleTimer !== undefined) clearTimeout(compactResizeSettleTimer);
+        compactResizeSettleTimer = setTimeout(settleCompactResize, spring.response * 1_000 * COMPACT_RESIZE_SETTLE);
+      } else {
+        settleCompactResize();
+      }
+      animations = current;
+      void Promise.all(current.map((active) => active.finished))
+        .then(() => {
+          if (animations !== current) return;
+          for (const active of current) active.cancel();
+          finishAnimation(current);
+        })
+        .catch(() => undefined);
+    });
+    const content = options.content();
+    if (content) observer.observe(content);
+    return () => observer.disconnect();
+  });
+
+  onCleanup(() => {
+    for (const active of animations) active.cancel();
+    finishAnimation();
+    clearCompactSettled();
+  });
+}
+
+/**
+ * The element's size before any transform of an ancestor. A consumer can scale the island, as the
+ * Settings preview does to fit a narrow frame, and the shell must still get the unscaled size.
+ */
+function layoutSize(element: HTMLElement): { width: number; height: number } {
+  const rect = element.getBoundingClientRect();
+  const ratio = element.offsetWidth > 0 && rect.width > 0 ? rect.width / element.offsetWidth : 1;
+  return { width: rect.width / ratio, height: rect.height / ratio };
+}
+
+function readElementSize(element: HTMLElement): { width: number; height: number } | undefined {
+  const computed = getComputedStyle(element);
+  const width = Number.parseFloat(computed.width);
+  const height = Number.parseFloat(computed.height);
+  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : undefined;
+}
+
+function writeContainerSize(container: HTMLElement, size: { width: number; height: number }): void {
+  container.style.width = `${size.width}px`;
+  container.style.height = `${size.height}px`;
+}
+
+function writeSilhouetteGeometry(
+  silhouette: {
+    root: HTMLSpanElement | undefined;
+    body: HTMLSpanElement | undefined;
+    leadingShoulder: SVGSVGElement | undefined;
+    trailingShoulder: SVGSVGElement | undefined;
+  },
+  geometry: IslandSilhouetteGeometry,
+): void {
+  if (silhouette.root && geometry.capsuleRadius !== undefined) {
+    silhouette.root.style.borderRadius = `${geometry.capsuleRadius}px`;
+  }
+  if (silhouette.body) {
+    silhouette.body.style.insetInlineStart = `${geometry.topRadius}px`;
+    silhouette.body.style.insetInlineEnd = `${geometry.topRadius}px`;
+    silhouette.body.style.borderBottomLeftRadius = `${geometry.bottomRadius}px`;
+    silhouette.body.style.borderBottomRightRadius = `${geometry.bottomRadius}px`;
+  }
+  for (const shoulder of [silhouette.leadingShoulder, silhouette.trailingShoulder]) {
+    if (!shoulder) continue;
+    shoulder.style.width = `${geometry.topRadius}px`;
+    shoulder.style.height = `${geometry.topRadius}px`;
+  }
+}
+
+function writeSharedTransform(element: HTMLElement, transform: SharedElementTransform): void {
+  element.style.transform = `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`;
+}
+
+function readCurrentTransform(
+  element: HTMLElement | undefined,
+  fallback: SharedElementTransform,
+): SharedElementTransform {
+  if (!element) return fallback;
+  const transform = getComputedStyle(element).transform;
+  if (!transform || transform === "none") return { x: 0, y: 0, scale: 1 };
+  return parseTransformFunctions(transform) ?? fallback;
+}
+
+function parseTransformFunctions(transform: string): SharedElementTransform | undefined {
+  const matrix3d = transform.match(/^matrix3d\(([^)]+)\)$/);
+  if (matrix3d) {
+    const values = matrix3d[1]?.split(",").map(Number);
+    if (values?.length === 16 && values.every(Number.isFinite)) {
+      return { x: values[12] ?? 0, y: values[13] ?? 0, scale: values[0] ?? 1 };
+    }
+  }
+
+  const matrix = transform.match(/^matrix\(([^)]+)\)$/);
+  if (matrix) {
+    const values = matrix[1]?.split(",").map(Number);
+    if (values?.length === 6 && values.every(Number.isFinite)) {
+      return { x: values[4] ?? 0, y: values[5] ?? 0, scale: values[0] ?? 1 };
+    }
+  }
+
+  const translate = transform.match(/translate3d\(\s*(-?[\d.]+)px,\s*(-?[\d.]+)px,\s*-?[\d.]+(?:px)?\s*\)/);
+  const scale = transform.match(/scale\(\s*(-?[\d.]+)\s*\)/);
+  if (!translate && !scale) return undefined;
+  return {
+    x: Number(translate?.[1] ?? 0),
+    y: Number(translate?.[2] ?? 0),
+    scale: Number(scale?.[1] ?? 1),
+  };
+}
+
+function readCurrentSilhouette(
+  root: HTMLElement | undefined,
+  body: HTMLElement | undefined,
+  fallback: IslandSilhouetteGeometry,
+): IslandSilhouetteGeometry {
+  const capsuleRadius = root ? Number.parseFloat(getComputedStyle(root).borderTopLeftRadius) : Number.NaN;
+  if (!body) {
+    return {
+      ...fallback,
+      capsuleRadius: Number.isFinite(capsuleRadius) ? capsuleRadius : fallback.capsuleRadius,
+    };
+  }
+  const style = getComputedStyle(body);
+  const topRadius = Number.parseFloat(style.insetInlineStart || style.left);
+  const bottomRadius = Number.parseFloat(style.borderBottomLeftRadius);
+  return {
+    topRadius: Number.isFinite(topRadius) ? topRadius : fallback.topRadius,
+    bottomRadius: Number.isFinite(bottomRadius) ? bottomRadius : fallback.bottomRadius,
+    capsuleRadius: Number.isFinite(capsuleRadius) ? capsuleRadius : fallback.capsuleRadius,
+  };
+}
+
+function sizesMatch(left: { width: number; height: number }, right: { width: number; height: number }): boolean {
+  return Math.abs(left.width - right.width) < 0.5 && Math.abs(left.height - right.height) < 0.5;
+}
+
+function silhouetteGeometryMatches(
+  left: IslandSilhouetteGeometry | undefined,
+  right: IslandSilhouetteGeometry,
+): boolean {
+  if (!left) return false;
+  return (
+    Math.abs(left.topRadius - right.topRadius) < 0.5 &&
+    Math.abs(left.bottomRadius - right.bottomRadius) < 0.5 &&
+    Math.abs((left.capsuleRadius ?? 0) - (right.capsuleRadius ?? 0)) < 0.5
+  );
+}
+
+function resizeKeyframes(
+  start: { width: number; height: number },
+  end: { width: number; height: number },
+  spring: Spring,
+): Keyframe[] {
+  return springKeyframes(
+    spring,
+    (progress) => ({
+      width: `${mix(start.width, end.width, progress)}px`,
+      height: `${mix(start.height, end.height, progress)}px`,
+    }),
+    24,
+  );
+}
+
+function silhouetteBodyKeyframes(
+  start: IslandSilhouetteGeometry,
+  end: IslandSilhouetteGeometry,
+  spring: Spring,
+): Keyframe[] {
+  return springKeyframes(spring, (progress) => ({
+    insetInlineStart: `${mix(start.topRadius, end.topRadius, progress)}px`,
+    insetInlineEnd: `${mix(start.topRadius, end.topRadius, progress)}px`,
+    borderBottomLeftRadius: `${mix(start.bottomRadius, end.bottomRadius, progress)}px`,
+    borderBottomRightRadius: `${mix(start.bottomRadius, end.bottomRadius, progress)}px`,
+  }));
+}
+
+function shoulderKeyframes(start: IslandSilhouetteGeometry, end: IslandSilhouetteGeometry, spring: Spring): Keyframe[] {
+  return springKeyframes(spring, (progress) => {
+    const radius = mix(start.topRadius, end.topRadius, progress);
+    return {
+      width: `${radius}px`,
+      height: `${radius}px`,
+    };
+  });
+}
+
+function capsuleRadiusKeyframes(
+  start: IslandSilhouetteGeometry,
+  end: IslandSilhouetteGeometry,
+  spring: Spring,
+): Keyframe[] {
+  const startRadius = start.capsuleRadius ?? end.capsuleRadius ?? 0;
+  const endRadius = end.capsuleRadius ?? startRadius;
+  return springKeyframes(spring, (progress) => ({
+    borderRadius: `${mix(startRadius, endRadius, progress)}px`,
+  }));
+}
+
+function sharedElementKeyframes(
+  start: SharedElementTransform,
+  end: SharedElementTransform,
+  spring: Spring,
+): Keyframe[] {
+  return springKeyframes(spring, (progress) => ({
+    transform: `translate3d(${mix(start.x, end.x, progress)}px, ${mix(start.y, end.y, progress)}px, 0) scale(${mix(start.scale, end.scale, progress)})`,
+  }));
+}
+
+function resizeSpring(
+  container: HTMLElement,
+  start: { width: number; height: number },
+  end: { width: number; height: number },
+  opening: boolean,
+) {
+  const isHoverResize =
+    container.dataset.state === "compact" &&
+    Math.abs(end.height - start.height) <= HOVER_HEIGHT_GROWTH + 0.5 &&
+    Math.abs(end.width - start.width) <= HOVER_WIDTH_GROWTH + 0.5;
+  if (isHoverResize) return HOVER_SPRING;
+  return opening ? OPEN_SPRING : CLOSE_SPRING;
+}
+
+interface SpringContentTransitionOptions {
+  content: () => HTMLDivElement | undefined;
+  root: () => HTMLDivElement | undefined;
+  state: () => DynamicIslandViewState;
+  renderedState: () => Exclude<DynamicIslandViewState, "compact"> | null;
+}
+
+function createSpringContentTransition(options: SpringContentTransitionOptions): void {
+  let animations: Animation[] = [];
+  let knownContent: HTMLDivElement | undefined;
+  let previousPhase = "";
+
+  createEffect(
+    () => {
+      const state = options.state();
+      const renderedState = options.renderedState();
+      return {
+        entering: state !== "compact",
+        phase: `${state}:${renderedState ?? "none"}`,
+      };
+    },
+    ({ entering, phase }) => {
+      if (phase === previousPhase) return;
+      previousPhase = phase;
+      const content = options.content();
+      if (!content) return;
+
+      const isNewContent = knownContent !== content;
+      const style = getComputedStyle(content);
+      const startOpacity = isNewContent && entering ? 0 : Number.parseFloat(style.opacity);
+      const startScale = isNewContent && entering ? 0.965 : computedScale(style.transform);
+      const expandedTargets = islandMotionTargets(content);
+      const compactTargets = islandMotionTargets(options.root()?.querySelector(".dynamic-island-toggle") ?? undefined);
+      const currentBlurs = captureIslandBlurs([...expandedTargets, ...compactTargets]);
+      knownContent = content;
+      for (const active of animations) active.cancel();
+      animations = [];
+      const animate = content.animate?.bind(content);
+      if (!animate) return;
+
+      const reducedMotion = prefersReducedMotion();
+      const current: Animation[] = [];
+
+      if (reducedMotion) {
+        for (const target of [...expandedTargets, ...compactTargets]) target.style.removeProperty("filter");
+        current.push(
+          animate(
+            [
+              { opacity: startOpacity, transform: "none" },
+              { opacity: entering ? 1 : 0, transform: "none" },
+            ],
+            {
+              duration: REDUCED_CONTENT_FADE_DURATION,
+              delay: entering && isNewContent ? CONTENT_ENTER_DELAY : 0,
+              easing: "linear",
+              fill: "both",
+            },
+          ),
+        );
+      } else {
+        current.push(
+          entering
+            ? animate(springContentEntranceKeyframes(startOpacity, startScale), {
+                duration: CONTENT_SPRING.response * 1_000,
+                delay: isNewContent ? CONTENT_ENTER_DELAY : 0,
+                easing: "linear",
+                fill: "both",
+              })
+            : animate(
+                [
+                  { opacity: startOpacity, transform: `translateY(0px) scale(${startScale})`, offset: 0 },
+                  { opacity: 0, transform: "translateY(-6px) scale(0.94)", offset: CONTENT_EXIT_FADE_OFFSET },
+                  { opacity: 0, transform: "translateY(-12px) scale(0.86)", offset: 1 },
+                ],
+                {
+                  duration: CONTENT_EXIT_DURATION,
+                  easing: "ease-in-out",
+                  fill: "both",
+                },
+              ),
+        );
+
+        if (entering) {
+          current.push(
+            ...animateIslandBlur(expandedTargets, 0, {
+              duration: CONTENT_BLUR_OPEN_DURATION,
+              delay: isNewContent ? CONTENT_ENTER_DELAY : 0,
+              initialBlur: CONTENT_BLUR,
+            }),
+            ...animateIslandBlur(compactTargets, CONTENT_BLUR, {
+              duration: CONTENT_BLUR_OPEN_DURATION,
+              initialBlurs: currentBlurs,
+            }),
+          );
+        } else {
+          current.push(
+            ...animateIslandBlur(expandedTargets, CONTENT_BLUR, {
+              duration: CONTENT_BLUR_CLOSE_DURATION,
+              initialBlurs: currentBlurs,
+            }),
+            ...animateIslandBlur(compactTargets, 0, {
+              duration: COMPACT_RETURN_DURATION,
+              delay: CONTENT_EXIT_LEAD,
+              initialBlurs: currentBlurs,
+            }),
+          );
+        }
+      }
+      animations = current;
+      void Promise.all(current.map((active) => active.finished))
+        .then(() => {
+          if (animations !== current) return;
+          for (const target of expandedTargets) {
+            if (entering) target.style.removeProperty("filter");
+            else target.style.filter = `blur(${CONTENT_BLUR}px)`;
+          }
+          for (const target of compactTargets) {
+            if (entering && !reducedMotion) target.style.filter = `blur(${CONTENT_BLUR}px)`;
+            else target.style.removeProperty("filter");
+          }
+          animations = [];
+          for (const active of current) active.cancel();
+        })
+        .catch(() => undefined);
+    },
+  );
+
+  onCleanup(() => {
+    for (const active of animations) active.cancel();
+  });
+}
+
+function springContentEntranceKeyframes(startOpacity: number, startScale: number): Keyframe[] {
+  return springKeyframes(
+    CONTENT_SPRING,
+    (progress) => ({
+      opacity: Math.min(1, mix(startOpacity, 1, progress)),
+      transform: `scale(${mix(startScale, 1, progress)})`,
+    }),
+    20,
+  );
+}
+
+interface IslandBlurAnimationOptions {
+  duration: number;
+  delay?: number;
+  initialBlur?: number;
+  initialBlurs?: ReadonlyMap<HTMLElement, number>;
+}
+
+function islandMotionTargets(root: ParentNode | undefined): HTMLElement[] {
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-island-motion-content]"));
+}
+
+function animateIslandBlur(targets: HTMLElement[], endBlur: number, options: IslandBlurAnimationOptions): Animation[] {
+  const animations: Animation[] = [];
+  const smoothBlur = "ease-in-out";
+  for (const target of targets) {
+    const animate = target.animate?.bind(target);
+    if (!animate) continue;
+    const resolvedStartBlur =
+      options.initialBlur ?? options.initialBlurs?.get(target) ?? computedBlur(getComputedStyle(target).filter);
+    const keyframes: Keyframe[] = [
+      { filter: `blur(${resolvedStartBlur}px)`, offset: 0, easing: smoothBlur },
+      { filter: `blur(${endBlur}px)`, offset: 1 },
+    ];
+    animations.push(
+      animate(keyframes, {
+        duration: options.duration,
+        delay: options.delay ?? 0,
+        easing: "linear",
+        fill: "both",
+      }),
+    );
+  }
+  return animations;
+}
+
+function captureIslandBlurs(targets: HTMLElement[]): Map<HTMLElement, number> {
+  return new Map(targets.map((target) => [target, computedBlur(getComputedStyle(target).filter)]));
+}

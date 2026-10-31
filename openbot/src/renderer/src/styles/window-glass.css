@@ -1,0 +1,68 @@
+/* The transparent window on macOS. Main gives the main window the system blur and a clear
+ * background, and sets `data-openbot-window-glass` on the root. Only the layers that make the page
+ * change here: the frame, the content card and the pages that fill the card. The surface tokens do
+ * not change, so dialogs, menus, tooltips, toasts, the composer and the cards stay solid. A browser
+ * tab, an iframe or a canvas stays opaque: CSS cannot make a native view clear. */
+:root[data-openbot-window-glass] {
+  --window-glass-frame: color-mix(in srgb, var(--openbot-bg-frame) 20%, transparent);
+  --window-glass-card: color-mix(in srgb, var(--openbot-bg-canvas) 45%, transparent);
+}
+
+:root[data-openbot-window-glass] body {
+  background: transparent;
+}
+
+:root[data-openbot-window-glass] .app-window {
+  --window-frame: var(--window-glass-frame);
+}
+
+/* The narrow window has no card: the panes sit on the frame. */
+@media (max-width: 720px) {
+  :root[data-openbot-window-glass] .app-window > .app-frame-edge {
+    background: var(--window-glass-card);
+  }
+}
+
+@media (min-width: 721px) {
+  /* The window paints the frame once. Opaque, these layers repeat its color; translucent, each one
+   * would add its tint again, and the top row would show darker than the page rail. */
+  :root[data-openbot-window-glass] .app-window > .app-frame-edge,
+  :root[data-openbot-window-glass] .app-window > .app-frame-edge > .server-rail {
+    background: transparent;
+  }
+
+  :root[data-openbot-window-glass] .app-window > .app-frame-edge::before,
+  :root[data-openbot-window-glass]
+    .app-window
+    > .app-frame-edge
+    .side-panel-maximized
+    > :is(.settings-panel, .browser-panel),
+  :root[data-openbot-window-glass] .app-frame-edge .diagram-view-body {
+    background: var(--window-glass-card);
+  }
+}
+
+/* The pages in the card are clear, so the card's tint shows once and not twice. */
+:root[data-openbot-window-glass]
+  .app-window
+  :is(.schedule-pane, .agent-usage, .diagram-view, .settings-page-content .agent-files-view) {
+  background: transparent;
+}
+
+:root[data-openbot-window-glass] .app-window .diagram-board-viewport {
+  background-color: transparent;
+}
+
+/* The Settings fades cover the rows that scroll under them, so they take the card's tint. */
+:root[data-openbot-window-glass] .app-window .settings-page-content .settings-modal-scroll-frame::before {
+  background: linear-gradient(to bottom, var(--window-glass-card) 28%, transparent 100%);
+}
+
+:root[data-openbot-window-glass] .app-window .settings-page-content .settings-modal-scroll-frame::after {
+  background: linear-gradient(to top, var(--window-glass-card) 28%, transparent 100%);
+}
+
+/* The full-bleed browser covers the window with its own frame and card. */
+:root[data-openbot-window-glass] .browser-full-view {
+  background: var(--window-glass-frame);
+}

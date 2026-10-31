@@ -1,0 +1,247 @@
+import {
+  elementScroll,
+  measureElement as measureRowElement,
+  observeElementOffset,
+  observeElementRect,
+  type VirtualItem,
+  Virtualizer,
+} from "@tanstack/virtual-core";
+import { createEffect, createSignal, createStore, onSettled, untrack } from "solid-js";
+
+interface ChatVirtualizerOptions<TScrollElement extends Element, TItemElement extends Element> {
+  count: () => number;
+  getScrollElement: () => TScrollElement | null;
+  estimateSize: (index: number) => number;
+  getItemKey: (index: number) => string | number;
+  keyVersion: () => unknown;
+  scrollMargin: () => number;
+  /** Whether the reader is following new messages instead of reading older ones. */
+  stickToLatest?: () => boolean;
+  onChange?: (virtualizer: Virtualizer<TScrollElement, TItemElement>) => void;
+}
+
+export interface ChatVirtualizer<TItemElement extends Element> {
+  getVirtualItems: () => VirtualItem[];
+  getTotalSize: () => number;
+  isVirtualized: () => boolean;
+  measureElement: (element: TItemElement | null) => void;
+  scrollMargin: () => number;
+  /**
+   * Where a row starts in the scroll content: measured once the row has rendered, estimated before.
+   * Read it with `getTotalSize`, which changes when a measurement does.
+   */
+  itemStart: (index: number) => number | undefined;
+  /** Opens a row at the top of the list, rendered or not. A smooth scroll animates there. */
+  scrollToIndex: (index: number, options?: { smooth?: boolean }) => void;
+  /** Scrolls to a position in the scroll content. It replaces the target of an earlier `scrollToIndex`. */
+  scrollToOffset: (offset: number) => void;
+}
+
+const STATIC_CHAT_LIMIT = 100;
+const SCROLL_END_THRESHOLD = 80;
+
+export function createChatVirtualizer<TScrollElement extends Element, TItemElement extends Element>(
+  options: ChatVirtualizerOptions<TScrollElement, TItemElement>,
+): ChatVirtualizer<TItemElement> {
+  // The first rows only; the effect below tracks the count, keys and margin from here on.
+  const initialCount = untrack(options.count);
+  const [virtualItems, setVirtualItems] = createSignal<VirtualItem[]>(
+    untrack(() => fallbackItems(initialCount, options.estimateSize, options.getItemKey, options.scrollMargin())),
+  );
+  const [totalSize, setTotalSize] = createSignal(initialCount * options.estimateSize(0));
+  const stableItems = new Map<VirtualItem["key"], { item: VirtualItem; update: (next: VirtualItem) => void }>();
+  // Within this threshold of the end, the virtualizer keeps the reader at the end when a row grows or
+  // one is added. The rows end above the activity line, so a reader who scrolled up a little still
+  // counts as at the end, and each growth of a streaming reply would move them down. Only a reader who
+  // follows the latest message counts. It is set before each measurement and each change of rows.
+  const syncScrollEndThreshold = (instance: Virtualizer<TScrollElement, TItemElement>): void => {
+    instance.options.scrollEndThreshold = options.stickToLatest?.() === false ? -1 : SCROLL_END_THRESHOLD;
+  };
+  const virtualizer = new Virtualizer<TScrollElement, TItemElement>({
+    count: 0,
+    getScrollElement: options.getScrollElement,
+    estimateSize: options.estimateSize,
+    getItemKey: options.getItemKey,
+    observeElementRect,
+    observeElementOffset,
+    measureElement: (element, entry, instance) => {
+      syncScrollEndThreshold(instance);
+      return measureRowElement(element, entry, instance);
+    },
+    scrollToFn: (offset, scroll, instance) => {
+      const element = instance.scrollElement;
+      if (element && scroll.adjustments !== undefined && options.stickToLatest?.()) {
+        // Rows end above the activity line. An estimate correction that follows the last row
+        // leaves that line below the view, then the chat's own follow pulls back to the real
+        // bottom, and the two move the chat up and down while a turn runs.
+        elementScroll(element.scrollHeight - element.clientHeight, { ...scroll, adjustments: 0 }, instance);
+        return;
+      }
+      elementScroll(offset, scroll, instance);
+    },
+    overscan: 5,
+    anchorTo: "end",
+    followOnAppend: "auto",
+    scrollEndThreshold: SCROLL_END_THRESHOLD,
+    initialRect: { width: 1, height: 600 },
+  });
+  let refreshQueued = false;
+
+  const refresh = (): void => {
+    const measured = [...virtualizer.getVirtualItems()];
+    const count = options.count();
+    const items =
+      count <= STATIC_CHAT_LIMIT || measured.length === 0
+        ? fallbackItems(count, options.estimateSize, options.getItemKey, options.scrollMargin())
+        : measured;
+    const activeKeys = new Set(items.map((item) => item.key));
+    const nextItems = items.map((item) => {
+      const existing = stableItems.get(item.key);
+      if (existing) {
+        if (!virtualItemsEqual(existing.item, item)) existing.update(item);
+        return existing.item;
+      }
+      const [stored, setStored] = createStore(Object.assign({}, item));
+      stableItems.set(item.key, { item: stored, update: (next) => setStored(() => next) });
+      return stored;
+    });
+    for (const key of stableItems.keys()) {
+      if (!activeKeys.has(key)) stableItems.delete(key);
+    }
+    setVirtualItems((current) =>
+      current.length === nextItems.length && current.every((item, index) => item === nextItems[index])
+        ? current
+        : nextItems,
+    );
+    setTotalSize(virtualizer.getTotalSize() || count * options.estimateSize(0));
+  };
+
+  const scheduleRefresh = (): void => {
+    if (refreshQueued) return;
+    refreshQueued = true;
+    queueMicrotask(() => {
+      refreshQueued = false;
+      refresh();
+    });
+  };
+
+  createEffect(
+    () => {
+      const count = options.count();
+      return {
+        count,
+        keyVersion: options.keyVersion(),
+        scrollMargin: options.scrollMargin(),
+      };
+    },
+    ({ count, scrollMargin }) => {
+      // The virtualizer calls `getItemKey` here; `keyVersion` above is what tracks the keys.
+      untrack(() => {
+        syncScrollEndThreshold(virtualizer);
+        virtualizer.setOptions({
+          ...virtualizer.options,
+          count,
+          getScrollElement: options.getScrollElement,
+          estimateSize: options.estimateSize,
+          getItemKey: options.getItemKey,
+          scrollMargin,
+          onChange: (instance) => {
+            scheduleRefresh();
+            untrack(() => options.onChange?.(instance));
+          },
+        });
+        virtualizer._willUpdate();
+      });
+      scheduleRefresh();
+    },
+  );
+
+  onSettled(() => {
+    const cleanup = virtualizer._didMount();
+    virtualizer._willUpdate();
+    scheduleRefresh();
+    return cleanup;
+  });
+
+  return {
+    getVirtualItems: () => {
+      return virtualItems();
+    },
+    getTotalSize: totalSize,
+    isVirtualized: () => options.count() > STATIC_CHAT_LIMIT,
+    measureElement: (element) => {
+      if (!element) {
+        virtualizer.measureElement(null);
+        return;
+      }
+      // Solid can run a ref before data-index and the row contents are committed.
+      queueMicrotask(() => {
+        if (element.isConnected) virtualizer.measureElement(element);
+      });
+    },
+    scrollMargin: options.scrollMargin,
+    itemStart: (index) => virtualizer.measurementsCache[index]?.start,
+    scrollToIndex: (index, scroll) =>
+      virtualizer.scrollToIndex(index, { align: "start", behavior: scroll?.smooth ? "smooth" : "auto" }),
+    scrollToOffset: (offset) => virtualizer.scrollToOffset(offset, { align: "start", behavior: "auto" }),
+  };
+}
+
+/* The reader is at the start of the loaded transcript when the first rows are on the screen. */
+const HISTORY_BOUNDARY_ROWS = 5;
+const HISTORY_BOUNDARY_DISTANCE = 80;
+
+/**
+ * Whether the reader has reached the start of the loaded transcript, which is what asks the chat
+ * for the next older page.
+ *
+ * Both the distance and the row index are needed. A transcript that is short against its viewport
+ * renders its first row at every scroll position, so the row index alone reports the boundary
+ * while the reader sits at the newest message: the chat then pages in its history under a reply
+ * that is still arriving, and each page moves the transcript under the reader. The distance alone
+ * reports the boundary in a virtualized transcript that keeps its first row far above the screen.
+ */
+export function chatHistoryBoundaryReached(
+  scrollElement: HTMLElement | undefined,
+  firstRenderedIndex: number,
+): boolean {
+  if (!scrollElement) return false;
+  return scrollElement.scrollTop <= HISTORY_BOUNDARY_DISTANCE && firstRenderedIndex <= HISTORY_BOUNDARY_ROWS;
+}
+
+export function calculateChatScrollMargin(
+  scrollElement: HTMLElement | undefined,
+  virtualRoot: HTMLElement | undefined,
+): number {
+  if (!scrollElement || !virtualRoot) return 0;
+  return Math.max(
+    0,
+    virtualRoot.getBoundingClientRect().top - scrollElement.getBoundingClientRect().top + scrollElement.scrollTop,
+  );
+}
+
+function virtualItemsEqual(left: VirtualItem, right: VirtualItem): boolean {
+  return (
+    left.key === right.key &&
+    left.index === right.index &&
+    left.start === right.start &&
+    left.end === right.end &&
+    left.size === right.size &&
+    left.lane === right.lane
+  );
+}
+
+function fallbackItems(
+  count: number,
+  estimateSize: (index: number) => number,
+  getItemKey: (index: number) => string | number,
+  scrollMargin: number,
+): VirtualItem[] {
+  const startIndex = count <= 100 ? 0 : Math.max(0, count - 10);
+  return Array.from({ length: count - startIndex }, (_, offset): VirtualItem => {
+    const index = startIndex + offset;
+    const size = estimateSize(index);
+    const start = scrollMargin + index * size;
+    return { key: getItemKey(index), index, start, end: start + size, size, lane: 0 };
+  });
+}

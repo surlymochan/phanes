@@ -1,0 +1,39 @@
+import type { PartialTranslation } from "../../../message";
+import type { messages as source } from "../../en/error/host";
+
+export const messages = {
+  // Errors from host setup, publishing, and host maintenance.
+  "error.host.iceServersMissing": "Remote Signal ICE sunucularını sağlamadı.",
+  "error.host.keyRotationUnavailable": "Bu sunucu, hesap hizmeti olmadan anahtarını değiştiremez.",
+  "error.host.keyRotationRefused":
+    "Hesap hizmeti yeni sunucu anahtarını kabul etmedi. Mevcut anahtar kullanılmaya devam ediyor.",
+  "error.host.webRtcNotConfigured": "WebRTC ana makine hizmeti yapılandırılmamış.",
+  "error.host.runtimeNotInstalled": "Uzak masaüstü çalışma zamanı kurulu değil.",
+  "error.host.setupUnavailable": "İzin kurulumu kullanılamıyor.",
+  "error.host.accountChangedDuringUpdate": "Bu sunucu güncellenirken oturum açmış hesap değişti.",
+  "error.host.nameBeforePublish": "Yayımlamadan önce bu OpenBot'a bir ad verin.",
+  "error.host.memberNotFound": "Uzak üye mevcut değil.",
+  "error.host.publishBeforeInvite": "Davet oluşturmadan önce bu OpenBot'u herkese açık hale getirin.",
+  "error.host.teamAccessUnavailable": "Ekip erişiminiz kullanılamıyor.",
+  "error.host.ownerIdentityUnavailable": "Ana makine sahibi kimliği kullanılamıyor.",
+  "error.host.reserveAddressFailed": "Genel adres rezerve edilemedi.",
+  "error.host.publishFailed": "Bu OpenBot yayımlanamadı.",
+  "error.host.mobileConnectPublishFailed": "Bu OpenBot Mobile Connect için yayımlanamadı.",
+  "error.host.mobileConnectHostChanged": "Mobile Connect ana makinesi değişti. Tekrar deneyin.",
+  "error.host.noServer": "Bu bilgisayarda değiştirilecek bir sunucu yok.",
+  "error.host.identityLocalOnly": "Sunucu adı ve logosu yalnızca onu çalıştıran bilgisayarda değiştirilebilir.",
+  "error.host.timezoneInvalid": "Bu saat dilimi bilinmiyor.",
+  "error.host.maintenanceInterrupted":
+    "Ana makine bakımı kesintiye uğradı. Tekrar denemeden önce uygulamayı doğrulayın ve ana makine durumunu sıfırlayın.",
+  "error.host.updateFailed":
+    "{phase} sırasında ana makine güncellemesi başarısız oldu. Durumu sıfırlamadan önce paket sahipliğini, imzalamayı, kiracı durumunu ve boş disk alanını doğrulayın.",
+  "error.host.tenantsNotIdle": "Kiracılar iki saat içinde beş dakika boşta kalmadı.",
+  "error.host.tenantShutdownTimeout": "Kiracı kapatması zaman aşımına uğradı. Hiçbir uygulama değişimi başlatılmadı.",
+  "error.host.tenantHealthMissing":
+    "Yeniden başlatmanın ardından kiracı sağlık raporları eksik veya sağlıksız. Başka bir güncellemeden önce kiracı oturumlarını inceleyin.",
+  "error.host.nameBeforeDevelopment": "Yerel geliştirmeyi başlatmadan önce bu OpenBot'a bir ad verin.",
+  "error.host.developmentNotReady": "Yerel geliştirme ana makinesi hazır değil.",
+  "error.host.maintenanceConfigChanged": "Bakım sırasında ana makine yapılandırması değişti.",
+  "error.host.maintenanceMissingRelease": "Hazırlanmış sürüm eksik.",
+  "error.host.maintenanceVersionMismatch": "Kurulu sürüm uyuşmuyor.",
+} as const satisfies PartialTranslation<typeof source>;

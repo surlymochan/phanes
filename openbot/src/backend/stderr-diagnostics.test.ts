@@ -1,0 +1,211 @@
+// @vitest-environment node
+
+import type { McpServerConfig } from "@openbot/contracts/ipc";
+import { redactText, registerSecretValue } from "@openbot/logging";
+import { describe, expect, it } from "vitest";
+import { redactAppServerDiagnostic } from "./app-server-client";
+import { mcpSecretValues, redactMcpValues } from "./mcp-redaction";
+import { createDiagnosticStream } from "./stderr-diagnostics";
+
+function httpMcpServer(url: string): McpServerConfig {
+  return {
+    id: "test-mcp",
+    name: "Test MCP",
+    transport: "http",
+    enabled: true,
+    command: "",
+    args: [],
+    env: [],
+    envPassthrough: [],
+    workingDirectory: "",
+    url,
+    headers: [],
+  };
+}
+
+function collect(limit?: number) {
+  const messages: string[] = [];
+  const stream = createDiagnosticStream({
+    redact: redactText,
+    emit: (message) => messages.push(message),
+    ...(limit === undefined ? {} : { limit }),
+  });
+  return { messages, stream };
+}
+
+/*
+ * A provider CLI writes its failures to stderr, and OpenBot shows them and logs them. The pipe
+ * decides where a chunk ends, so the record boundary has to be found here: redaction reads one
+ * string, and half a record reads as prose that happens to hold a credential.
+ */
+describe("stderr diagnostics", () => {
+  it("keeps opaque app-server token masking after shared redaction", () => {
+    const registered = "custom-provider-secret-273cbf91";
+    const opaqueTokens = "sess-opaque-session-273cbf91 token-opaque-token-273cbf91";
+    registerSecretValue(registered);
+
+    expect(redactAppServerDiagnostic(opaqueTokens)).toBe("[redacted] [redacted]");
+
+    const sharedRedacted = redactMcpValues(`${opaqueTokens} ${registered}`, []);
+    expect(redactAppServerDiagnostic(sharedRedacted)).toBe("[redacted] [redacted] [redacted]");
+  });
+
+  it("masks every MCP URL query value before shared redaction", () => {
+    const url = "https://mcp.example.com/mcp?user_id=private-user-42&key=abcdef123456";
+    const message = redactAppServerDiagnostic(
+      redactMcpValues(`ERROR connecting ${url}`, mcpSecretValues([httpMcpServer(url)])),
+    );
+
+    expect(message).toBe("ERROR connecting https://mcp.example.com/mcp?•••");
+    expect(message).not.toContain("private-user-42");
+    expect(message).not.toContain("abcdef123456");
+  });
+
+  it("masks a single MCP URL query value", () => {
+    const url = "https://mcp.example.com/mcp?key=abcdef123456";
+    const message = redactAppServerDiagnostic(
+      redactMcpValues(`ERROR connecting ${url}`, mcpSecretValues([httpMcpServer(url)])),
+    );
+
+    expect(message).toBe("ERROR connecting https://mcp.example.com/mcp?•••");
+    expect(message).not.toContain("abcdef123456");
+  });
+
+  it("redacts a record that arrives in two chunks", () => {
+    const { messages, stream } = collect();
+    stream.push('ERROR request failed: {"headers":{"X-Tenant":"');
+    // Nothing yet: the record has no newline, so it is not a record yet.
+    expect(messages).toEqual([]);
+
+    stream.push('tenant-secret"}}\n');
+
+    expect(messages).toEqual(['ERROR request failed: {"headers":{"X-Tenant":"[redacted]"}}']);
+  });
+
+  it("keeps a record whole when its payload runs over several lines", () => {
+    const { messages, stream } = collect();
+    // The CLI pretty-prints its payload, so the newline inside it ends no record. Read line by line,
+    // `{"X-Tenant":"tenant-secret"}` arrives without the `headers` name that redacts what is under
+    // it, and the credential is emitted and shown.
+    stream.push('ERROR {"headers":\n{"X-Tenant":"tenant-secret"},"message":"request failed"}\nplain line\n');
+
+    expect(messages).toEqual(['ERROR {"headers":{"X-Tenant":"[redacted]"},"message":"request failed"}', "plain line"]);
+    expect(messages.join("\n")).not.toContain("tenant-secret");
+  });
+
+  it("waits for the text that says what an opening bracket is", () => {
+    const { messages, stream } = collect();
+    // The line ends on the bracket itself, so nothing after it says yet whether a record starts here
+    // or a sentence ends. Read as the end of a record, the lines under it lose the `headers` name
+    // that redacts what they hold.
+    // The chunk ends on the bracket, so the decision has to wait for the chunk that follows it.
+    stream.push("ERROR {");
+    expect(messages).toEqual([]);
+
+    stream.push('\n"headers":\n{"X-Tenant":"tenant-secret"},"message":"request failed"}\n');
+
+    expect(messages).toEqual(['ERROR {"headers":{"X-Tenant":"[redacted]"},"message":"request failed"}']);
+    expect(messages.join("\n")).not.toContain("tenant-secret");
+  });
+
+  // A brace in prose closes nothing. Holding the lines under it would keep every later record unread
+  // until the bound, and the CLI writes its progress on those lines.
+  it("ends a record on a bracket that opens no payload", () => {
+    const { messages, stream } = collect();
+    stream.push("the agent wrote {\nand then stopped\n");
+
+    expect(messages).toEqual(["the agent wrote {", "and then stopped"]);
+  });
+
+  // What `console.error("Error handling request", message, error)` in the ACP SDK writes. Read line
+  // by line, the user got `Error handling request {` and `message: 'Internal error',` as toasts (#1193).
+  it("keeps a util.inspect dump whole and ends it at the first line that is not indented", () => {
+    const { messages, stream } = collect();
+    const dump = [
+      "Error handling request {",
+      "  jsonrpc: '2.0',",
+      "  id: 3,",
+      "  method: 'session/prompt',",
+      "  params: { sessionId: 'abc', text: 'it is {open' }",
+      "} {",
+      "  code: -32603,",
+      "  message: 'Internal error',",
+      "  data: { details: '401 Unauthorized' }",
+      "}",
+    ].join("\n");
+    stream.push(dump.slice(0, 30));
+    stream.push(`${dump.slice(30)}\nnext line\nError: can't {connect\n`);
+
+    expect(messages).toEqual([dump, "next line", "Error: can't {connect"]);
+  });
+
+  // One pass over the text, whatever its shape: a payload that stays open over many lines used to be
+  // read again from its start at every one of them.
+  it("reads a long unterminated payload without rescanning it", () => {
+    const { messages, stream } = collect();
+    const start = Date.now();
+    stream.push(`ERROR {"headers":${"\n".repeat(60_000)}`);
+
+    expect(Date.now() - start).toBeLessThan(1_000);
+    expect(messages).toEqual([]);
+  });
+
+  it("emits every complete record in one chunk and holds the rest", () => {
+    const { messages, stream } = collect();
+    stream.push('first line\nsecond line\n{"apiKey":"abcdef123456"');
+    expect(messages).toEqual(["first line", "second line"]);
+
+    stream.push("}\n");
+    expect(messages).toEqual(["first line", "second line", '{"apiKey":"[redacted]"}']);
+  });
+
+  it("reads what is held when the process exits without a newline", () => {
+    const { messages, stream } = collect();
+    stream.push("the agent stopped");
+    stream.flush();
+    expect(messages).toEqual(["the agent stopped"]);
+
+    // Nothing is held twice: a second flush after the first has nothing to say.
+    stream.flush();
+    expect(messages).toHaveLength(1);
+  });
+
+  it("keeps no more than the bound, and shows no credential it could not read", () => {
+    const { messages, stream } = collect(32);
+    stream.push('ERROR request failed: {"headers":{"X-Tenant":"');
+    expect(messages).toEqual(["ERROR request failed: [redacted-unscanned]"]);
+
+    // The rest of that record is thrown away with it. Read as a record of its own it is plain text,
+    // and the credential in it matches no rule.
+    stream.push('tenant-secret"},"message":"request failed"}\nplain line\n');
+
+    expect(messages).toEqual(["ERROR request failed: [redacted-unscanned]", "plain line"]);
+    expect(messages.join(" ")).not.toContain("tenant-secret");
+  });
+
+  it("holds nothing from a record it threw away when the process exits", () => {
+    const { messages, stream } = collect(32);
+    stream.push('ERROR request failed: {"headers":{"X-Tenant":"');
+    stream.push('tenant-secret"},"message":"request');
+    stream.flush();
+
+    expect(messages).toEqual(["ERROR request failed: [redacted-unscanned]"]);
+  });
+
+  // Grok's CLI keeps its colour on a pipe, so a record arrives wrapped in escape sequences. Read as
+  // text they were shown to the user, and they sit between a label and its value where the redactor
+  // looks for a key-value pair.
+  it("removes terminal colour before redacting and before showing a record", () => {
+    const { messages, stream } = collect();
+    const esc = String.fromCharCode(27);
+    stream.push(
+      `${esc}[2m2026-09-14T08:28:39.022673Z${esc}[0m ${esc}[31mERROR${esc}[0m ${esc}[3mname${esc}[0m${esc}[2m=${esc}[0m"BatchSpanProcessor.ExporterError"\n`,
+    );
+    stream.push(`${esc}[3mapiKey${esc}[0m${esc}[2m=${esc}[0mabcdef123456\n`);
+
+    expect(messages).toEqual([
+      '2026-09-14T08:28:39.022673Z ERROR name="BatchSpanProcessor.ExporterError"',
+      "apiKey=[redacted]",
+    ]);
+  });
+});

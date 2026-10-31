@@ -1,0 +1,23 @@
+# Support
+
+OpenBot is an early source-available project maintained on a best-effort basis.
+
+- Use the GitHub issue forms for reproducible bugs and focused feature requests. We close issues
+  that do not come from a form or that do not answer the required fields. See
+  [Report a problem](docs/TROUBLESHOOTING.md#report-a-problem) for the data that a bug report needs.
+- Use GitHub Discussions for setup questions, ideas, and general help.
+- Use the private process in `SECURITY.md` for vulnerabilities.
+
+If you installed a release, first confirm that `codex --version` or `claude --version` works in
+Terminal. Run `codex login` or `claude auth login`. Restart OpenBot after signing in. See
+[Troubleshooting](docs/TROUBLESHOOTING.md) for safe reset and uninstall steps.
+
+If you are developing from source, run:
+
+```bash
+bun run codex:doctor
+bun run check
+```
+
+Share only the relevant, redacted output. Never post credentials, private files, conversation
+contents, `~/.codex`, `~/.claude`, Electron `userData`, or full unreviewed stderr in public.

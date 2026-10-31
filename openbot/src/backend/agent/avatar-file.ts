@@ -1,0 +1,65 @@
+import { open } from "node:fs/promises";
+import { resolve } from "node:path";
+import { AVATAR_MIME_TYPES, isValidAvatarImage } from "@openbot/contracts/avatar-images";
+import { AVATAR_IMAGE_LIMITS } from "@openbot/contracts/input-limits";
+import { sourceText } from "@openbot/i18n/source";
+import { Effect, Schema, Stream } from "effect";
+import { causeHelpers } from "../effect-boundary";
+
+const SIZE_ERROR = sourceText("error.agent.avatarTooLarge");
+
+class AvatarFileFailed extends Schema.TaggedError<AvatarFileFailed>()("AvatarFileFailed", {
+  cause: Schema.Defect(),
+}) {}
+
+const { io: avatarIo } = causeHelpers(AvatarFileFailed);
+
+export const loadAvatarFile = Effect.fn("AvatarFile.load")(function* (path: string, workspacePath: string) {
+  const source = yield* readSource(resolve(workspacePath, path));
+  const mimeType = AVATAR_MIME_TYPES.find((type) => isValidAvatarImage(type, source));
+  if (!mimeType) return yield* new AvatarFileFailed({ cause: new Error(sourceText("error.agent.avatarType")) });
+  return { mimeType, bytes: source };
+});
+
+const readSource = Effect.fn("AvatarFile.readSource")((path: string) =>
+  Effect.acquireUseRelease(
+    avatarIo(() => open(path, "r")).pipe(
+      Effect.mapError(
+        () =>
+          new AvatarFileFailed({
+            cause: new Error(sourceText("error.agent.avatarUnreadable")),
+          }),
+      ),
+    ),
+    (file) =>
+      Effect.gen(function* () {
+        const metadata = yield* avatarIo(() => file.stat());
+        if (!metadata.isFile())
+          return yield* new AvatarFileFailed({ cause: new Error(sourceText("error.agent.avatarNotRegularFile")) });
+        if (metadata.size > AVATAR_IMAGE_LIMITS.storedBytes)
+          return yield* new AvatarFileFailed({ cause: new Error(SIZE_ERROR) });
+        const chunks: Buffer[] = [];
+        let length = 0;
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => file.createReadStream({ autoClose: false, end: AVATAR_IMAGE_LIMITS.storedBytes })),
+          (stream) =>
+            Stream.fromAsyncIterable<Buffer, AvatarFileFailed>(stream, (cause) => new AvatarFileFailed({ cause })).pipe(
+              Stream.runForEach((chunk) =>
+                Effect.gen(function* () {
+                  length += chunk.length;
+                  if (length > AVATAR_IMAGE_LIMITS.storedBytes)
+                    return yield* new AvatarFileFailed({ cause: new Error(SIZE_ERROR) });
+                  chunks.push(chunk);
+                }),
+              ),
+            ),
+          (stream) =>
+            Effect.sync(() => {
+              stream.destroy();
+            }),
+        );
+        return Buffer.concat(chunks, length);
+      }),
+    (file) => avatarIo(() => file.close()),
+  ),
+);

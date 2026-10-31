@@ -1,0 +1,323 @@
+import { INPUT_LIMITS } from "./input-limits";
+import { type AvatarHue, isAvatarHue, isAvatarSeed } from "./ipc-agent-identity";
+import { type AgentModelChoice, isAgentModelChoice } from "./ipc-agents";
+import {
+  type AgentApproval,
+  type AgentApprovalPermissions,
+  type BrowserTakeoverRequest,
+  isBrowserTakeoverRequest,
+} from "./ipc-approvals";
+import { isBoundedString, isIdentifier, isNullableBoundedString, isRequestId } from "./ipc-bounded-values";
+import { isBoolean, isDynamicRecord, isNumber, isOneOf } from "./runtime-values";
+
+export const AGENT_RUNTIME_TEXT_LIMIT = 240;
+export const AGENT_RUNTIME_QUESTION_HEADER_LIMIT = 80;
+export const AGENT_RUNTIME_QUESTION_DESCRIPTION_LIMIT = 120;
+export const AGENT_RUNTIME_WORKING_ITEMS_LIMIT = 3;
+export const AGENT_RUNTIME_ATTENTION_LIMIT = 4;
+export const AGENT_RUNTIME_PERMISSION_PATHS_LIMIT = 3;
+export const AGENT_RUNTIME_SNAPSHOT_BYTES_LIMIT = 256 * 1024;
+
+export interface AgentRuntimeRosterEntry {
+  id: string;
+  name: string;
+  notifications: boolean;
+  preview: string;
+  updatedAt: string | null;
+  avatarSeed: string;
+  avatarHue: AvatarHue | null;
+  avatarUrl: string | null;
+}
+
+function isAgentRuntimeRosterEntry(value: unknown): value is AgentRuntimeRosterEntry {
+  return (
+    isDynamicRecord(value) &&
+    isIdentifier(value.id) &&
+    isBoundedString(value.name, INPUT_LIMITS.agentName) &&
+    isBoolean(value.notifications) &&
+    isBoundedString(value.preview, AGENT_RUNTIME_TEXT_LIMIT) &&
+    (value.updatedAt === null || isBoundedString(value.updatedAt, 160)) &&
+    isAvatarSeed(value.avatarSeed) &&
+    (value.avatarHue === null || isAvatarHue(value.avatarHue)) &&
+    (value.avatarUrl === null || isBoundedString(value.avatarUrl, INPUT_LIMITS.avatarUrl))
+  );
+}
+
+export interface AgentRuntimeWorkItem {
+  id: string;
+  agentId: string;
+  turnId: string | null;
+  status: "starting" | "running" | "failed";
+  text: string;
+  error: string | null;
+}
+
+function isRuntimeWorkItem(value: unknown): value is AgentRuntimeWorkItem {
+  return (
+    isDynamicRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.agentId) &&
+    (value.turnId === null || isIdentifier(value.turnId)) &&
+    isOneOf(["starting", "running", "failed"] as const, value.status) &&
+    isBoundedString(value.text, AGENT_RUNTIME_TEXT_LIMIT) &&
+    isNullableBoundedString(value.error, AGENT_RUNTIME_TEXT_LIMIT)
+  );
+}
+
+export interface AgentRuntimePromptQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isSecret: boolean;
+  options: Array<{ label: string; description: string }> | null;
+  /** See `AgentPromptQuestion.multiSelect`. */
+  multiSelect?: boolean;
+}
+
+function isRuntimePromptQuestion(value: unknown): value is AgentRuntimePromptQuestion {
+  return (
+    isDynamicRecord(value) &&
+    isIdentifier(value.id) &&
+    isBoundedString(value.header, AGENT_RUNTIME_QUESTION_HEADER_LIMIT) &&
+    isBoundedString(value.question, AGENT_RUNTIME_TEXT_LIMIT) &&
+    isBoolean(value.isSecret) &&
+    (value.multiSelect === undefined || isBoolean(value.multiSelect)) &&
+    (value.options === null ||
+      (Array.isArray(value.options) &&
+        value.options.length <= INPUT_LIMITS.promptOptions &&
+        value.options.every(
+          (option) =>
+            isDynamicRecord(option) &&
+            isBoundedString(option.label, INPUT_LIMITS.promptOptionLabel) &&
+            isBoundedString(option.description, AGENT_RUNTIME_QUESTION_DESCRIPTION_LIMIT),
+        )))
+  );
+}
+
+export interface AgentRuntimeApproval extends AgentApproval {
+  truncated: boolean;
+}
+
+function isRuntimeApproval(value: unknown): value is AgentRuntimeApproval {
+  if (!isDynamicRecord(value)) return false;
+  return (
+    isRequestId(value.requestId) &&
+    isIdentifier(value.agentId) &&
+    isIdentifier(value.threadId) &&
+    isIdentifier(value.turnId) &&
+    isOneOf(["command", "file-change", "permissions"] as const, value.kind) &&
+    isNullableBoundedString(value.command, AGENT_RUNTIME_TEXT_LIMIT) &&
+    isNullableBoundedString(value.cwd, AGENT_RUNTIME_TEXT_LIMIT) &&
+    isNullableBoundedString(value.reason, AGENT_RUNTIME_TEXT_LIMIT) &&
+    isNullableBoundedString(value.grantRoot, AGENT_RUNTIME_TEXT_LIMIT) &&
+    isBoolean(value.truncated) &&
+    (value.permissions === null || isRuntimeApprovalPermissions(value.permissions))
+  );
+}
+
+// The twin of `isAgentApprovalPermissions` in `ipc-approvals.ts`, bounded by the snapshot's tighter
+// limits instead of the IPC ones. Kept apart on purpose: merging them onto either bound would either
+// let a snapshot exceed its byte cap or reject a legitimate full approval.
+function isRuntimeApprovalPermissions(value: unknown): value is AgentApprovalPermissions {
+  return (
+    isDynamicRecord(value) &&
+    isDynamicRecord(value.fileSystem) &&
+    isRuntimePathList(value.fileSystem.read) &&
+    isRuntimePathList(value.fileSystem.write) &&
+    isBoolean(value.network)
+  );
+}
+
+function isRuntimePathList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= AGENT_RUNTIME_PERMISSION_PATHS_LIMIT &&
+    value.every((path) => isBoundedString(path, AGENT_RUNTIME_TEXT_LIMIT))
+  );
+}
+
+/** What fills a part of the context window, in the order the popover lists it. */
+export const AGENT_CONTEXT_CATEGORIES = [
+  "systemPrompt",
+  "memoryFiles",
+  "tools",
+  "skills",
+  "toolResults",
+  "messages",
+  "other",
+] as const;
+
+export type AgentContextCategory = (typeof AGENT_CONTEXT_CATEGORIES)[number];
+
+export interface AgentContextCategoryUsage {
+  category: AgentContextCategory;
+  tokens: number;
+}
+
+/** Local desktop context state. Frozen Team adapters do not carry this field. */
+export interface AgentContextState {
+  agentId: string;
+  threadId: string;
+  usage: {
+    usedTokens: number;
+    windowTokens: number;
+    autoCompactAt: number | null;
+    nativeManaged: boolean;
+    estimated?: boolean;
+    /** The provider's estimate of what fills `usedTokens`. Absent when the provider gives only a total. */
+    categories?: AgentContextCategoryUsage[];
+  } | null;
+  compaction: {
+    id: string;
+    startedAt: number;
+    status: "running" | "completed" | "failed";
+    beforeTokens?: number;
+    afterTokens?: number;
+    expectedMs?: number;
+  } | null;
+}
+
+function isContextCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** One row per category at most, each a token count. */
+export function isAgentContextCategories(value: unknown): value is AgentContextCategoryUsage[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= AGENT_CONTEXT_CATEGORIES.length &&
+    value.every(
+      (row) => isDynamicRecord(row) && isOneOf(AGENT_CONTEXT_CATEGORIES, row.category) && isContextCount(row.tokens),
+    ) &&
+    new Set(value.map((row) => row.category)).size === value.length
+  );
+}
+
+function isAgentContextState(value: unknown): value is AgentContextState {
+  if (!isDynamicRecord(value) || !isIdentifier(value.agentId) || !isIdentifier(value.threadId)) return false;
+  const usage = value.usage;
+  const compaction = value.compaction;
+  return (
+    (usage === null ||
+      (isDynamicRecord(usage) &&
+        isContextCount(usage.usedTokens) &&
+        isContextCount(usage.windowTokens) &&
+        usage.windowTokens > 0 &&
+        isBoolean(usage.nativeManaged) &&
+        (usage.estimated === undefined || isBoolean(usage.estimated)) &&
+        (usage.categories === undefined || isAgentContextCategories(usage.categories)) &&
+        (usage.autoCompactAt === null || (isContextCount(usage.autoCompactAt) && usage.autoCompactAt <= 1)))) &&
+    (compaction === null ||
+      (isDynamicRecord(compaction) &&
+        isIdentifier(compaction.id) &&
+        isContextCount(compaction.startedAt) &&
+        isOneOf(["running", "completed", "failed"] as const, compaction.status) &&
+        (compaction.beforeTokens === undefined || isContextCount(compaction.beforeTokens)) &&
+        (compaction.afterTokens === undefined || isContextCount(compaction.afterTokens)) &&
+        (compaction.expectedMs === undefined || isContextCount(compaction.expectedMs))))
+  );
+}
+
+export interface AgentRuntimeSnapshot {
+  contextStates?: AgentContextState[];
+  agents: AgentRuntimeRosterEntry[];
+  activeTurns: Array<{ agentId: string; threadId: string; turnId: string }>;
+  work: AgentRuntimeWorkItem[];
+  latestMessages: Array<{ agentId: string; id: string; text: string; createdAt: string }>;
+  attentionComplete: boolean;
+  pendingPrompts: Array<{
+    requestId: string | number;
+    agentId: string;
+    threadId: string;
+    turnId: string;
+    questions: AgentRuntimePromptQuestion[];
+  }>;
+  pendingApprovals: AgentRuntimeApproval[];
+  pendingBrowserTakeovers: BrowserTakeoverRequest[];
+  failedTurns: Array<{ agentId: string; turnId: string }>;
+  /**
+   * The agents whose queue waits for a provider plan limit to reset, in epoch seconds. Absent from
+   * a released Team API snapshot: its adapters project a fixed key list.
+   */
+  usageLimits?: Array<{ agentId: string; resetsAt: number | null }>;
+  /**
+   * Each provider account and model that a usage limit holds, also when no agent is on it now. Absent
+   * from a released Team API snapshot, as `usageLimits` is.
+   */
+  usageLimitedModels?: AgentModelChoice[];
+}
+
+export function isAgentRuntimeSnapshot(value: unknown): value is AgentRuntimeSnapshot {
+  if (!isDynamicRecord(value)) return false;
+  return (
+    (value.contextStates === undefined ||
+      (Array.isArray(value.contextStates) &&
+        value.contextStates.length <= INPUT_LIMITS.agents &&
+        value.contextStates.every(isAgentContextState))) &&
+    Array.isArray(value.agents) &&
+    value.agents.length <= INPUT_LIMITS.agents &&
+    value.agents.every(isAgentRuntimeRosterEntry) &&
+    Array.isArray(value.activeTurns) &&
+    value.activeTurns.length <= INPUT_LIMITS.agents &&
+    value.activeTurns.every(
+      (turn) =>
+        isDynamicRecord(turn) && isIdentifier(turn.agentId) && isIdentifier(turn.threadId) && isIdentifier(turn.turnId),
+    ) &&
+    Array.isArray(value.work) &&
+    value.work.length <= AGENT_RUNTIME_WORKING_ITEMS_LIMIT + AGENT_RUNTIME_ATTENTION_LIMIT &&
+    value.work.every(isRuntimeWorkItem) &&
+    Array.isArray(value.latestMessages) &&
+    value.latestMessages.length <= INPUT_LIMITS.agents &&
+    value.latestMessages.every(
+      (message) =>
+        isDynamicRecord(message) &&
+        isIdentifier(message.agentId) &&
+        isIdentifier(message.id) &&
+        isBoundedString(message.text, AGENT_RUNTIME_TEXT_LIMIT) &&
+        isBoundedString(message.createdAt, 160),
+    ) &&
+    isBoolean(value.attentionComplete) &&
+    Array.isArray(value.pendingPrompts) &&
+    value.pendingPrompts.length <= AGENT_RUNTIME_ATTENTION_LIMIT &&
+    value.pendingPrompts.every(isRuntimePrompt) &&
+    Array.isArray(value.pendingApprovals) &&
+    value.pendingApprovals.length <= AGENT_RUNTIME_ATTENTION_LIMIT &&
+    value.pendingApprovals.every(isRuntimeApproval) &&
+    Array.isArray(value.pendingBrowserTakeovers) &&
+    value.pendingBrowserTakeovers.length <= AGENT_RUNTIME_ATTENTION_LIMIT &&
+    value.pendingBrowserTakeovers.every(isBrowserTakeoverRequest) &&
+    value.pendingPrompts.length + value.pendingApprovals.length + value.pendingBrowserTakeovers.length <=
+      AGENT_RUNTIME_ATTENTION_LIMIT &&
+    Array.isArray(value.failedTurns) &&
+    value.failedTurns.length <= INPUT_LIMITS.agents &&
+    value.failedTurns.every(
+      (turn) => isDynamicRecord(turn) && isIdentifier(turn.agentId) && isIdentifier(turn.turnId),
+    ) &&
+    (value.usageLimits === undefined ||
+      (Array.isArray(value.usageLimits) &&
+        value.usageLimits.length <= INPUT_LIMITS.agents &&
+        value.usageLimits.every(
+          (limit) =>
+            isDynamicRecord(limit) &&
+            isIdentifier(limit.agentId) &&
+            (limit.resetsAt === null || (isNumber(limit.resetsAt) && Number.isFinite(limit.resetsAt))),
+        ))) &&
+    (value.usageLimitedModels === undefined ||
+      (Array.isArray(value.usageLimitedModels) &&
+        value.usageLimitedModels.length <= INPUT_LIMITS.agents &&
+        value.usageLimitedModels.every(isAgentModelChoice)))
+  );
+}
+
+function isRuntimePrompt(value: unknown): value is AgentRuntimeSnapshot["pendingPrompts"][number] {
+  return (
+    isDynamicRecord(value) &&
+    isRequestId(value.requestId) &&
+    isIdentifier(value.agentId) &&
+    isIdentifier(value.threadId) &&
+    isIdentifier(value.turnId) &&
+    Array.isArray(value.questions) &&
+    value.questions.length <= INPUT_LIMITS.promptQuestions &&
+    value.questions.every(isRuntimePromptQuestion)
+  );
+}

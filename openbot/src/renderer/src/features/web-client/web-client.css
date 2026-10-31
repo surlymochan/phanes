@@ -1,0 +1,394 @@
+@import "../../styles.css";
+@source "../../";
+
+.web-app {
+  min-width: 0;
+  height: 100dvh;
+  color: var(--openbot-text-primary);
+  background: var(--openbot-bg-canvas);
+}
+.web-app-frame {
+  min-width: 0;
+  height: 100%;
+}
+
+/* The browser has no window controls, so the rail starts at the top. */
+.web-app-frame > .server-rail {
+  padding-top: var(--openbot-space-3);
+}
+
+.web-app-frame > .server-rail::before {
+  display: none;
+}
+
+.web-app-frame > .server-rail::after {
+  top: 0;
+}
+
+.web-mobile-navigation {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .web-app-window {
+    --web-mobile-navigation-height: 64px;
+  }
+
+  /* The workspace pane shows the page rail at its left, so its pages stay in reach on a phone. */
+  .web-app-window:has(> .web-app-frame[data-web-mobile-pane="workspace"]) > .window-rail {
+    display: flex;
+    padding-bottom: calc(
+      var(--web-mobile-navigation-height) +
+      env(safe-area-inset-bottom, 0px) +
+      var(--openbot-space-3)
+    );
+  }
+
+  .web-app-frame {
+    /* The workspace pane gives the rail a 56px column, also in the macOS geometry. */
+    --server-rail-width: 56px;
+
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: calc(var(--web-mobile-navigation-height) + env(safe-area-inset-bottom, 0px));
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] > .server-rail,
+  .web-app-frame[data-web-mobile-pane="conversation"] > .sidebar {
+    display: none;
+  }
+
+  /* One pane at a time leaves nothing to resize. */
+  .web-app-frame > .left-panel-resizer {
+    display: none;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .conversation-panel,
+  .web-app-frame[data-web-mobile-pane="conversation"] .diagram-view,
+  .web-app-frame[data-web-mobile-pane="conversation"] .remote-compatibility-screen {
+    grid-column: 1;
+    min-width: 0;
+  }
+
+  .web-app-frame[data-web-mobile-pane="workspace"] {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .web-app-frame[data-web-mobile-pane="workspace"] .conversation-panel,
+  .web-app-frame[data-web-mobile-pane="workspace"] .diagram-view,
+  .web-app-frame[data-web-mobile-pane="workspace"] .remote-compatibility-screen,
+  .web-app-frame[data-web-mobile-pane="workspace"] > .server-connection-workspace {
+    display: none;
+  }
+
+  .web-app-frame[data-web-mobile-pane="workspace"] > .server-rail {
+    display: flex;
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .web-app-frame[data-web-mobile-pane="workspace"] > .sidebar {
+    display: flex;
+    grid-column: 2;
+    grid-row: 1;
+    width: auto;
+  }
+
+  /* The server menu view draws no rail, so the sidebar takes the full width. */
+  .web-app-frame[data-web-mobile-pane="workspace"]:not(.app-frame-with-server-rail) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .web-app-frame[data-web-mobile-pane="workspace"]:not(.app-frame-with-server-rail) > .sidebar {
+    grid-column: 1;
+  }
+
+  .web-mobile-navigation {
+    position: fixed;
+    z-index: var(--openbot-layer-popover);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    min-height: var(--web-mobile-navigation-height);
+    align-items: center;
+    justify-content: center;
+    border-top: 1px solid var(--openbot-border);
+    background: color-mix(in srgb, var(--openbot-bg-sidebar) 94%, transparent);
+    padding: var(--openbot-space-2) max(var(--openbot-space-3), env(safe-area-inset-left, 0px))
+      calc(var(--openbot-space-2) + env(safe-area-inset-bottom, 0px))
+      max(var(--openbot-space-3), env(safe-area-inset-right, 0px));
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+  }
+
+  .web-mobile-navigation-list {
+    display: grid;
+    width: min(100%, 360px);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--openbot-space-1);
+  }
+
+  .web-mobile-navigation-button {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    gap: var(--openbot-space-2);
+    border: 1px solid transparent;
+    border-radius: var(--openbot-radius-lg);
+    color: var(--openbot-text-muted);
+    font-size: var(--openbot-text-sm);
+    font-weight: var(--openbot-weight-semibold);
+  }
+
+  .web-mobile-navigation-button > svg {
+    width: var(--openbot-icon-md);
+    height: var(--openbot-icon-md);
+    stroke-width: var(--openbot-icon-stroke);
+  }
+
+  .web-mobile-navigation-button[data-active="true"] {
+    border-color: var(--openbot-border);
+    background: var(--openbot-bg-control);
+    color: var(--openbot-text-primary);
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .conversation-header {
+    padding-inline: var(--openbot-space-2);
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .conversation-header-actions {
+    gap: var(--openbot-space-1);
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .conversation-header .provider-model-trigger {
+    max-width: 132px;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .conversation-panel:has(.settings-panel) .settings-panel {
+    width: 100%;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .conversation-panel.browser-panel-active {
+    padding-right: 0;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .browser-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  /*
+   * A phone has no room beside the chat. An open pane takes the full width under the chat header,
+   * which keeps its panel button, and the tab row is a second row. A maximized pane covers the chat
+   * header, as on desktop.
+   */
+  .web-app-frame[data-web-mobile-pane="conversation"]
+    .side-panel-docked:not(.side-panel-maximized)
+    > .conversation-header {
+    width: 100%;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"]
+    .side-panel-docked
+    > :is(.conversation-scroll, .composer-wrap, .unread-messages-banner, .chat-search) {
+    visibility: hidden;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .side-panel-docked > .side-panel-header {
+    width: 100%;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"]
+    .side-panel-docked:not(.side-panel-maximized)
+    > .side-panel-header {
+    top: var(--left-header-height, 38px);
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .side-panel-docked > .side-panel-header::before,
+  .web-app-frame[data-web-mobile-pane="conversation"] .side-panel-docked .right-panel-resizer {
+    display: none;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"]
+    .side-panel-docked:not(.side-panel-maximized)
+    > :is(.browser-panel, .settings-panel) {
+    top: calc(2 * var(--left-header-height, 38px));
+  }
+
+  /* The pane list has no tabs, so it starts under the chat header. */
+  .web-app-frame[data-web-mobile-pane="conversation"] .side-panel-docked:has(> .side-panel-empty) > .side-panel-header {
+    display: none;
+  }
+
+  .web-app-frame[data-web-mobile-pane="conversation"] .side-panel-docked:has(> .side-panel-empty) > .side-panel-empty {
+    top: var(--left-header-height, 38px);
+  }
+
+  .web-app .join-server-backdrop {
+    padding: var(--openbot-space-3);
+  }
+
+  .web-app .join-server-content {
+    padding: var(--openbot-space-6) var(--openbot-space-4);
+  }
+
+  .web-app .ui-dialog-content {
+    max-width: calc(100vw - 24px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .web-mobile-navigation-button {
+    transition: none;
+  }
+}
+
+/* Takes the conversation-panel grid cell, so it follows the same desktop and mobile placement. */
+.web-connect.conversation-panel {
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  padding: var(--openbot-space-8) var(--openbot-space-4);
+}
+
+.web-connect-card {
+  display: flex;
+  width: min(420px, 100%);
+  flex-direction: column;
+  gap: var(--openbot-space-6);
+}
+
+.web-connect-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--openbot-space-2);
+  text-align: center;
+}
+
+.web-connect-header .ui-heading {
+  font-size: var(--openbot-text-3xl);
+  font-weight: var(--openbot-weight-bold);
+  line-height: var(--openbot-leading-3xl);
+}
+
+.web-connect-header .ui-text {
+  max-width: 340px;
+  line-height: var(--openbot-leading-sm);
+}
+
+.web-connect-logo {
+  --app-logo-background: var(--openbot-surface-light);
+  width: 64px;
+  height: 64px;
+  flex: 0 0 auto;
+  margin-bottom: var(--openbot-space-4);
+  border-radius: var(--openbot-radius-xl);
+  box-shadow:
+    0 12px 28px var(--openbot-shadow-dialog),
+    inset 0 1px 0 var(--openbot-border-strong);
+}
+
+.web-connect-steps {
+  display: grid;
+  margin: 0;
+  padding: var(--openbot-space-1);
+  list-style: none;
+  border: 1px solid var(--openbot-border);
+  border-radius: var(--openbot-radius-lg);
+  background: var(--openbot-bg-surface);
+}
+
+.web-connect-steps li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--openbot-space-3);
+  padding: var(--openbot-space-2) var(--openbot-space-3);
+}
+
+.web-connect-steps li + li {
+  border-top: 1px solid var(--openbot-border);
+}
+
+.web-connect-steps .ui-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.web-connect-step-number {
+  display: grid;
+  width: var(--openbot-control-xs);
+  height: var(--openbot-control-xs);
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--openbot-border-strong);
+  border-radius: var(--openbot-radius-pill);
+  background: var(--openbot-bg-control-active);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-semibold);
+}
+
+.web-connect-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--openbot-space-3);
+}
+
+/* Side by side; the buttons stack when the card is too narrow for both labels. */
+.web-connect-primary-actions {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  gap: var(--openbot-space-2);
+}
+
+.web-connect-primary-actions .ui-button {
+  min-width: 160px;
+  flex: 1 1 0;
+}
+
+/* The public site sets `a { color: inherit }`, which beats the zero-specificity button colour. */
+.web-connect-download.ui-button-variant-default,
+.web-connect-download.ui-button-variant-default:hover {
+  color: var(--openbot-text-on-light);
+}
+
+.web-connect-download.ui-button-variant-outline {
+  color: var(--openbot-text-secondary);
+}
+
+/* The same hover query as the shared outline button, so a tap leaves no hover colour. */
+@media (hover: hover) and (pointer: fine) and (min-width: 601px) {
+  .web-connect-download.ui-button-variant-outline:hover {
+    color: var(--openbot-text-primary);
+  }
+}
+
+.web-connect-hosted.ui-button {
+  width: 100%;
+}
+
+.web-connect-refresh.ui-button {
+  color: var(--openbot-text-muted);
+}
+
+.web-connect-hosted.ui-button svg,
+.web-connect-actions .ui-button svg {
+  width: var(--openbot-icon-md);
+  height: var(--openbot-icon-md);
+  flex: 0 0 auto;
+  stroke-width: var(--openbot-icon-stroke);
+}
+
+.web-connect-refresh.ui-button svg {
+  width: var(--openbot-icon-sm);
+  height: var(--openbot-icon-sm);
+}

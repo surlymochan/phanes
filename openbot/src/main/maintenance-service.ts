@@ -1,0 +1,237 @@
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { arch, release as osRelease, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import type { AgentSummary, ExportResult } from "@openbot/contracts/ipc";
+import type { AppTranslate } from "@openbot/i18n";
+import { Effect } from "effect";
+import { app, type BrowserWindow, dialog } from "electron";
+import type { AgentService } from "../backend/agent-service";
+import type { BrowserHost } from "../backend/browser-host";
+import type { MailboxStore } from "../backend/mailbox-store";
+import { type ArchiveOperationError, archiveCall, archiveFailure, archiveSync } from "./archive-effects";
+import { createBackupArchive } from "./backup-archive";
+import type { ResourceMonitor } from "./resource-monitor";
+import type { TraceFile } from "./trace-file";
+import type { UpdateService } from "./update-service";
+
+interface MaintenanceContext {
+  service: AgentService;
+  browser: BrowserHost;
+  mailbox: MailboxStore;
+  updater: UpdateService;
+  trace: TraceFile;
+  resources: ResourceMonitor;
+  parentWindow: BrowserWindow | null;
+  translate: AppTranslate;
+}
+export const exportOpenBotData = Effect.fn("Archive.exportOpenBotData")(function* (
+  context: Pick<MaintenanceContext, "service" | "mailbox" | "parentWindow" | "translate">,
+): Effect.fn.Return<ExportResult, ArchiveOperationError> {
+  const destination = yield* chooseExportDestinationEffect(
+    context.parentWindow,
+    `OpenBot-backup-${new Date().toISOString().slice(0, 10)}.zip`,
+    [{ name: context.translate("dialog.filter.zipArchive"), extensions: ["zip"] }],
+  );
+  if (!destination) return { saved: false };
+
+  const archiveCandidate = `${destination}.${randomUUID()}.tmp.zip`;
+  return yield* Effect.acquireUseRelease(
+    archiveCall(() => mkdtemp(join(tmpdir(), "openbot-export-"))),
+    (temporaryRoot) =>
+      Effect.gen(function* () {
+        const exportRoot = join(temporaryRoot, "OpenBot Backup");
+        yield* archiveCall(() => mkdir(exportRoot, { recursive: true, mode: 0o700 })).pipe(Effect.uninterruptible);
+        const agents = context.service.listAgents();
+        const [conversations, queues, attachments] = yield* Effect.all(
+          [
+            Effect.forEach(
+              agents,
+              (agent) =>
+                context.service
+                  .readConversation(agent.id)
+                  .pipe(Effect.mapError((error) => archiveFailure(error.cause))),
+              {
+                concurrency: "unbounded",
+              },
+            ),
+            archiveSync(() => agents.map((agent) => context.service.listQueue(agent.id))),
+            context.mailbox.listExportAttachments().pipe(Effect.mapError((error) => archiveFailure(error.cause))),
+          ],
+          { concurrency: "unbounded" },
+        );
+        const manifest = {
+          // 4, not 3: a schema 3 archive a released build wrote spells the roster `bots`, and this one spells
+          // it `agents`. Anything reading the manifest picks its parser by this number, so leaving it at 3
+          // hands a reader the wrong shape under a version that promised the old one.
+          schemaVersion: 4,
+          exportedAt: new Date().toISOString(),
+          application: { name: "OpenBot", version: app.getVersion() },
+          scope: {
+            includes: ["agent profiles", "agent memories", "conversation snapshots", "queues", "attachments"],
+            excludes: [
+              "Codex credentials",
+              "OpenCode Go key",
+              "custom provider API keys",
+              "custom agent environment values",
+              "browser cookies",
+              "agent workspace files",
+            ],
+          },
+          agents: agents.map(toBackupAgent),
+          memories: agents.flatMap((agent) => context.service.listMemories(agent.id)),
+          conversations,
+          queues,
+        };
+        yield* archiveCall(() =>
+          writeFile(join(exportRoot, "openbot-data.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+          }),
+        ).pipe(Effect.uninterruptible);
+        for (const attachment of attachments) {
+          const target = join(exportRoot, attachment.relativePath);
+          yield* archiveCall(() => mkdir(dirname(target), { recursive: true, mode: 0o700 })).pipe(
+            Effect.uninterruptible,
+          );
+          yield* archiveCall(() => copyFile(attachment.sourcePath, target)).pipe(Effect.uninterruptible);
+        }
+        yield* createBackupArchive(process.platform, exportRoot, archiveCandidate);
+        yield* archiveCall(() => rename(archiveCandidate, destination)).pipe(Effect.uninterruptible);
+        return { saved: true };
+      }),
+    (temporaryRoot) =>
+      Effect.gen(function* () {
+        yield* archiveCall(() =>
+          Promise.all([rm(temporaryRoot, { recursive: true, force: true }), rm(archiveCandidate, { force: true })]),
+        );
+      }),
+  );
+});
+
+export const exportDiagnostics = Effect.fn("Archive.exportDiagnostics")(function* (
+  context: Pick<
+    MaintenanceContext,
+    "service" | "browser" | "updater" | "trace" | "resources" | "parentWindow" | "translate"
+  >,
+): Effect.fn.Return<ExportResult, ArchiveOperationError> {
+  const destination = yield* chooseExportDestinationEffect(
+    context.parentWindow,
+    `OpenBot-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+    [{ name: context.translate("dialog.filter.jsonDocument"), extensions: ["json"] }],
+  );
+  if (!destination) return { saved: false };
+
+  const status = context.service.getStatus();
+  const agents = context.service.listAgents();
+  const queueCounts = agents.map((agent) => {
+    const queue = context.service.listQueue(agent.id);
+    return {
+      agentId: agent.id,
+      deliveries: Object.fromEntries(
+        ["queued", "starting", "running", "completed", "failed", "interrupted", "cancelled"].map((deliveryStatus) => [
+          deliveryStatus,
+          queue.deliveries.filter((delivery) => delivery.status === deliveryStatus).length,
+        ]),
+      ),
+    };
+  });
+  const mcpServers = context.service.listMcpServers();
+  const update = context.updater.getStatus();
+  const diagnostics = {
+    // 4, not 3: schema 3 had a one-time `memory` reading, and this report has the `resources` summaries.
+    schemaVersion: 4,
+    generatedAt: new Date().toISOString(),
+    application: {
+      version: app.getVersion(),
+      packaged: app.isPackaged,
+      platform: process.platform,
+      architecture: arch(),
+      osRelease: osRelease(),
+      electron: process.versions.electron,
+      chromium: process.versions.chrome,
+      node: process.versions.node,
+    },
+    agent: {
+      phase: status.phase,
+      cliVersion: status.cliVersion,
+      authentication: status.auth.kind,
+      capabilities: status.capabilities,
+      fullAccess: status.fullAccess,
+      agentCount: agents.length,
+      queues: queueCounts,
+    },
+    // Ids, transports and whether each one is enabled. A name is user text and a configuration holds
+    // `env` values and headers, so neither one belongs in a report the user mails to somebody else.
+    mcpServers: {
+      count: mcpServers.length,
+      enabledCount: mcpServers.filter((config) => config.enabled).length,
+      servers: mcpServers.map((config) => ({
+        mcpServerId: config.id,
+        transport: config.transport,
+        enabled: config.enabled,
+      })),
+    },
+    browser: {
+      tabCount: context.browser.listTabs().length,
+      activeControlCount: context.browser.getControlState().sessions.length,
+    },
+    // Process groups and provider ids with memory, CPU and delays: never a PID, a command or a path.
+    resources: context.resources.diagnostics(),
+    update: {
+      phase: update.phase,
+      currentVersion: update.currentVersion,
+      availableVersion: update.availableVersion,
+      progress: update.progress,
+      checkedAt: update.checkedAt,
+      errorCode: update.errorCode,
+      history: context.updater.getDiagnostics(),
+    },
+    // IPC channels and turn origins with counts, outcomes and durations, from the local trace file.
+    trace: yield* context.trace.summarize(),
+    privacy:
+      "Contains no conversations, URLs, email addresses, tokens, file contents, file paths, or raw error messages.",
+  };
+  yield* archiveCall(() =>
+    writeFile(destination, `${JSON.stringify(diagnostics, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    }),
+  ).pipe(Effect.uninterruptible);
+  return { saved: true };
+});
+
+const chooseExportDestinationEffect = Effect.fn("Archive.chooseExportDestination")(function* (
+  parentWindow: BrowserWindow | null,
+  defaultName: string,
+  filters: Electron.FileFilter[],
+): Effect.fn.Return<string | null, ArchiveOperationError> {
+  const options: Electron.SaveDialogOptions = {
+    defaultPath: join(app.getPath("documents"), defaultName),
+    filters,
+    showsTagField: false,
+  };
+  const result = parentWindow
+    ? yield* archiveCall(() => dialog.showSaveDialog(parentWindow, options))
+    : yield* archiveCall(() => dialog.showSaveDialog(options));
+  return result.canceled || !result.filePath ? null : result.filePath;
+});
+
+function toBackupAgent(agent: AgentSummary): Omit<AgentSummary, "workspacePath"> {
+  return {
+    id: agent.id,
+    provider: agent.provider,
+    name: agent.name,
+    title: agent.title,
+    description: agent.description,
+    notifications: agent.notifications,
+    model: agent.model,
+    reasoningEffort: agent.reasoningEffort,
+    threadId: agent.threadId,
+    preview: agent.preview,
+    updatedAt: agent.updatedAt,
+    avatarSeed: agent.avatarSeed,
+    avatarHue: agent.avatarHue,
+    avatarUrl: agent.avatarUrl,
+  };
+}
