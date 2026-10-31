@@ -502,6 +502,41 @@ def coverage_note(plan: dict, raw: dict) -> str:
     return "；".join(notes)
 
 
+def observation_months(plan: dict) -> list[str]:
+    """按自然月份顺序列出观察期间的期次。"""
+    periods = plan["periods"]
+    months = []
+    year, number = (int(part) for part in periods["start"].split("-"))
+    while f"{year:04d}-{number:02d}" <= periods["end"]:
+        months.append(f"{year:04d}-{number:02d}")
+        number += 1
+        if number > 12:
+            year += 1
+            number = 1
+    return months
+
+
+def missing_observation_notes(plan: dict, raw: dict) -> list[str]:
+    """生成观察期间内原始指标缺失期次的口径说明。"""
+    tables = (
+        ("cost", (OVERALL_COST, REVOPS_COST, OPS_COST)),
+        ("heads", (OVERALL_HEADS, REVOPS_HEADS)),
+        ("revenue", (REVENUE,)),
+    )
+    notes = []
+    for table_name, columns in tables:
+        table = raw[table_name]
+        for column in columns:
+            missing = [
+                month
+                for month in observation_months(plan)
+                if cell(table, month, column) is None
+            ]
+            if missing:
+                notes.append(f"{COLUMN_NAMES[column]} 缺 {'、'.join(missing)} 数据，按 null 处理")
+    return notes
+
+
 def build_insights(plan: dict, facts: dict, raw: dict) -> list[dict]:
     """生成洞察：事实、推断与边界分别标注。"""
     periods = plan["periods"]
@@ -879,6 +914,7 @@ def build_snapshot(plan: dict, raw: dict) -> dict:
         "null 含义：表示该期次未统计、未提供或无同口径对比数据，界面显示为未提供，"
         "不以 0 或其他推测值替代。"
     )
+    notes.extend(missing_observation_notes(plan, raw))
     snapshot = {
         "口径说明": notes,
         "scope": {

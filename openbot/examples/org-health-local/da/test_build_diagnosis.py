@@ -139,6 +139,29 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertEqual(income["2026-05H1参考"], 12.4)
         self.assertEqual(income["年末目标"], 15.2)
 
+    def test_missing_observation_period_is_explained_in_scope_notes(self) -> None:
+        """观察期间内原始指标缺期次时追加确定性的 null 口径说明。"""
+        raw_dir = self.folder / "raw-with-gap"
+        shutil.copytree(SAMPLE_RAW, raw_dir)
+        revenue = raw_dir / "revenue.csv"
+        lines = revenue.read_text(encoding="utf-8").splitlines()
+        revenue.write_text(
+            "\n".join(line for line in lines if not line.startswith("2026-06,")) + "\n",
+            encoding="utf-8",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+        notes = data["口径说明"]
+        self.assertIn("整体技术人力成本 缺 2026-05 数据，按 null 处理", notes)
+        self.assertIn("整体折算人头 缺 2026-05 数据，按 null 处理", notes)
+        self.assertIn("收入 缺 2026-06 数据，按 null 处理", notes)
+        self.assertEqual(
+            [note for note in notes if "收入 缺" in note],
+            ["收入 缺 2026-06 数据，按 null 处理"],
+        )
+
     def test_sections_are_generated(self) -> None:
         """洞察、来源口径、风险与建议都按任务书生成。"""
         data = self.build()
