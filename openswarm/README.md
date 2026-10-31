@@ -687,6 +687,14 @@ shows today's ledger usage. Admission reserves requested minutes for live runs; 
 lane assignments and batches refuse excess work with `budget_exceeded_daily` (exit 3).
 Budgets apply to the ledger on each host; remote runs also check that host's policy.
 
+For a shared `fleet-capacity` coordinator reached through a restricted SSH
+forced-command endpoint, make the reservation owner the final command argument.
+For example, gores1 uses
+`["/usr/bin/ssh", "-T", "-F", "/root/.ssh/openswarm-pi/config", "openswarm-pi-broker", "gores1"]`.
+The endpoint's forced command ignores the SSH remote-command text for execution,
+but OpenSwarm records that final `gores1` value in run status and reuses it for
+release and TTL recovery. Do not infer ownership from an SSH alias.
+
 `risk.enforce` defaults to `["push", "publish", "secret print", "rm outside worktree", "sudo"]`.
 The runner stops one-shot executors or aborts lane turns on matching command events,
 without requiring `watch`. Results include `status: stopped`, `error_class: risk_blocked`
