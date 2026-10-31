@@ -3386,15 +3386,53 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
         rdir = os.path.dirname(path)
         run_id = status.get("id") or os.path.basename(rdir)
         reserved_at = status.get("fleet_reserved_at")
-        if (status.get("fleet_host") != owner or status.get("state") in ("finished", "unroutable", "dry-run")
+        acquire_pending = status.get("fleet_reservation_pending") is True
+        release_pending = status.get("fleet_release_pending")
+        has_release_pending = (isinstance(release_pending, dict)
+                               and isinstance(release_pending.get("token"), str)
+                               and len(release_pending["token"]) == 32
+                               and release_pending.get("host") == owner
+                               and isinstance(release_pending.get("run_id"), str))
+        if (status.get("fleet_host") != owner
                 or status.get("fleet_recovered_at")
                 or not isinstance(reserved_at, (int, float)) or isinstance(reserved_at, bool)
-                or now - reserved_at < ttl or pid_alive(status.get("runner_pid"))):
+                or now - reserved_at < ttl):
+            continue
+        # `release_pending` is only persisted by a call site that has already
+        # established it is safe to release this exact token. Retrying it never
+        # inspects or signals a resident lane process.
+        if has_release_pending:
+            candidates.append((reserved_at, path, status, rdir, run_id, "release-pending"))
+            continue
+        # A lost acquire reply is recorded before a worker starts. Reconcile it
+        # only while it is still explicitly pending and no executor was recorded.
+        # Every other record retains the dead-runner/tree checks below.
+        if acquire_pending:
+            if not recorded_executor_records(rdir):
+                candidates.append((reserved_at, path, status, rdir, run_id, "acquire-pending"))
+            continue
+        if pid_alive(status.get("runner_pid")):
             continue
         checked = status.get("fleet_recovery_checked_at", reserved_at)
-        candidates.append((checked if isinstance(checked, (int, float)) else reserved_at, path, status, rdir, run_id))
-    for _, path, status, rdir, run_id in sorted(candidates, key=lambda row: row[0])[:max_candidates]:
+        candidates.append((checked if isinstance(checked, (int, float)) else reserved_at, path, status, rdir, run_id,
+                           "dead-runner"))
+    for _, path, status, rdir, run_id, recovery_kind in sorted(candidates, key=lambda row: row[0])[:max_candidates]:
         set_status(rdir, fleet_recovery_checked_at=now)
+        if recovery_kind == "release-pending":
+            if release_fleet_slot(rdir, confirmed=True, pending_release=status["fleet_release_pending"],
+                                  guard_command=command):
+                # A later retry may already have started a new reservation in
+                # this run directory.  Do not mark the whole run recovered:
+                # this exact old token is resolved, while a newer token must
+                # remain eligible for its own lifecycle checks.
+                set_status(rdir, fleet_release_recovered_at=now, fleet_recovery_outcome="release-retried")
+                recovered.append(run_id)
+            continue
+        if recovery_kind == "acquire-pending":
+            if release_fleet_slot(rdir, confirmed=True, guard_command=command):
+                set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="acquire-reconciled")
+                recovered.append(run_id)
+            continue
         if not executor_stopped(rdir):
             stop_orphaned_executor(rdir)
         if not executor_stopped(rdir):
@@ -3409,8 +3447,15 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
             set_status(rdir, fleet_reservation_error=str(error))
             continue
         if answer.get("recovered"):
-            set_status(rdir, fleet_recovered_at=now, fleet_reservation_error=None)
+            set_status(rdir, fleet_recovered_at=now, fleet_reservation_error=None,
+                       fleet_reservation_token=None, fleet_reservation_pending=None)
             recovered.append(run_id)
+        else:
+            # The coordinator definitely has no matching row.  Keeping the local token would
+            # retry an already-resolved uncertain admission forever, so mark the checked result.
+            set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="not-found",
+                       fleet_reservation_error=None, fleet_reservation_token=None,
+                       fleet_reservation_pending=None)
     return recovered
 
 
@@ -3430,8 +3475,38 @@ def lane_recover_expired_fleet_slots(lane, policy):
         return []
 
 
-def release_fleet_slot(rdir):
+def release_fleet_slot(rdir, *, confirmed=False, pending_release=None, guard_command=None):
     item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    if pending_release is not None:
+        token, owner, run_id = (pending_release.get("token"), pending_release.get("host"),
+                                pending_release.get("run_id")) if isinstance(pending_release, dict) else (None, None, None)
+        if not (isinstance(token, str) and len(token) == 32 and isinstance(owner, str) and isinstance(run_id, str)):
+            return False
+        try:
+            command = guard_command or fleet_guard_command()
+        except RuntimeError as error:
+            set_status(rdir, fleet_reservation_error=str(error))
+            return False
+        if not command or fleet_guard_host(command) != owner:
+            set_status(rdir, fleet_reservation_error="fleet reservation guard owner is unavailable")
+            return False
+        item = (command, {"run_id": run_id, "token": token})
+    if not item:
+        # A runner can die after the coordinator committed `acquire` but before its RPC response
+        # or before this process populated the in-memory map.  Reconstruct only a reservation that
+        # was durably tied to this exact run and current guard owner.
+        token, owner = status.get("fleet_reservation_token"), status.get("fleet_host")
+        if isinstance(token, str) and len(token) == 32 and isinstance(owner, str):
+            try:
+                command = guard_command or fleet_guard_command()
+            except RuntimeError as error:
+                set_status(rdir, fleet_reservation_error=str(error))
+                return False
+            if not command or fleet_guard_host(command) != owner:
+                set_status(rdir, fleet_reservation_error="fleet reservation guard owner is unavailable")
+                return False
+            item = (command, {"run_id": status.get("id") or os.path.basename(rdir), "token": token})
     if not item:
         return True
     command, payload = item
@@ -3441,10 +3516,22 @@ def release_fleet_slot(rdir):
             break
         except RuntimeError as error:
             if attempt == 2:
-                set_status(rdir, fleet_reservation_error=str(error))
+                changes = {"fleet_reservation_error": str(error)}
+                if confirmed:
+                    changes["fleet_release_pending"] = {"token": payload["token"],
+                                                        "host": fleet_guard_host(command),
+                                                        "run_id": payload["run_id"]}
+                set_status(rdir, **changes)
                 return False
             time.sleep(0.2 * (attempt + 1))
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
+    changes = {"fleet_reservation_error": None}
+    if status.get("fleet_reservation_token") == payload["token"]:
+        changes.update(fleet_reservation_token=None, fleet_reservation_pending=None)
+    previous_pending = status.get("fleet_release_pending")
+    if isinstance(previous_pending, dict) and previous_pending.get("token") == payload["token"]:
+        changes["fleet_release_pending"] = None
+    set_status(rdir, **changes)
     return True
 
 
@@ -3499,20 +3586,33 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                         counts[key] += 1
             if all(counts[key] < cap for key, cap in limits.items()):
                 admitted = True
+                uncertain_admission = False
                 if command:
+                    # Persist enough information to recover an acquire that the coordinator has
+                    # committed but whose reply is lost.  The same token makes a later acquire
+                    # idempotent; the TTL path still requires a dead runner and stopped executors.
+                    set_status(rdir, fleet_host=fleet_guard_host(command), fleet_reserved_at=NOW(),
+                               fleet_reservation_token=token, fleet_reservation_pending=True,
+                               fleet_reservation_error=None)
                     try:
                         admitted = bool(fleet_guard_call(command, payload).get("admitted"))
                     except RuntimeError as error:
                         admitted = False
+                        uncertain_admission = True
                         set_status(rdir, fleet_reservation_error=str(error))
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
+                    set_status(rdir, fleet_reservation_pending=None)
+                elif command and not uncertain_admission:
+                    # A definite rejection cannot have created a coordinator reservation.
+                    set_status(rdir, fleet_host=None, fleet_reserved_at=None,
+                               fleet_reservation_token=None, fleet_reservation_pending=None)
             else:
                 admitted = False
             if admitted and keep_waiting and not keep_waiting():
                 # The coordinator call may have taken longer than the task's
                 # budget or overlapped cancellation. Do not start an executor.
-                release_fleet_slot(rdir)
+                release_fleet_slot(rdir, confirmed=True)
                 return False
             if admitted:
                 set_status(rdir, state="running", backend=backend, provider=provider,
@@ -3645,7 +3745,7 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
         if normal_child_exit or error_class in (None, "rate_limit", "risk_blocked") or (
                 backend == "agy" and rc == 1 and (error_class == "upstream_forbidden"
                                                    or (meta or {}).get("finished_reason"))):
-            release_fleet_slot(rdir)
+            release_fleet_slot(rdir, confirmed=True)
         elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
             set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
         set_status(rdir, state="routing", concurrency_keys=[])
@@ -5673,7 +5773,7 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
             git(["worktree", "remove", "--force", review_worktree], original_repo, timeout=60)
             shutil.rmtree(review_worktree, ignore_errors=True)
         save_raw()
-        if acquired and safe_release and release_fleet_slot(slot_dir):
+        if acquired and safe_release and release_fleet_slot(slot_dir, confirmed=True):
             set_status(slot_dir, state="finished", finished=NOW())
             shutil.rmtree(slot_dir, ignore_errors=True)
         elif not acquired:
@@ -8020,7 +8120,7 @@ def lane_do_run(lane, spec, child, server, current):
                         or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
                                                            and lane["backend"] == "agy" and not child.alive())
                         or normal_child_exit):
-                    release_fleet_slot(rdir)
+                    release_fleet_slot(rdir, confirmed=True)
                 elif os.path.realpath(rdir) in _FLEET_RESERVATIONS:
                     set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
                 attempts.append({"backend": attempt_lane["backend"], "model": model,

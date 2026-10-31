@@ -171,6 +171,148 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(call.call_count, 3)
         self.assertIn(rdir, xs._FLEET_RESERVATIONS)
 
+    def test_timeout_after_committed_acquire_persists_ttl_recovery_metadata(self):
+        """A lost acquire reply must leave a recoverable record without starting work."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'lost-acquire-reply'
+        command = [str(BIN), 'gocc']
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 0.1}}
+        real_call = xs.fleet_guard_call
+
+        def commit_then_timeout(_command, payload, timeout=15):
+            answer = real_call(command, payload, timeout=timeout)
+            if payload['op'] == 'acquire':
+                raise RuntimeError('coordinator unavailable: reply lost')
+            return answer
+
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=command), \
+             mock.patch.object(xs, 'fleet_guard_call', side_effect=commit_then_timeout):
+            self.assertFalse(xs.reserve_provider_slot(str(rdir), 'pi', 'minimax-cn', policy,
+                                                       keep_waiting=lambda: False))
+        status = json.loads((rdir / 'status.json').read_text())
+        self.assertEqual(status['fleet_host'], 'gocc')
+        self.assertTrue(status['fleet_reservation_token'])
+        self.assertTrue(status['fleet_reservation_pending'])
+        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'NOW', return_value=status['fleet_reserved_at'] + 1):
+            self.assertEqual(xs.recover_expired_fleet_slots(command, policy), ['lost-acquire-reply'])
+        recovered = json.loads((rdir / 'status.json').read_text())
+        self.assertIsNone(recovered['fleet_reservation_token'])
+        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
+    def test_finished_release_failure_recovers_after_process_restart(self):
+        """A confirmed release retry must not kill a resident lane child."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        data = pathlib.Path(self.temp.name, 'data')
+        rdir = runs / 'release-failed'
+        command = [str(BIN), 'gocc']
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 0.1}}
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'DATA', str(data)), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=command):
+            self.assertTrue(xs.reserve_provider_slot(str(rdir), 'pi', 'minimax-cn', policy,
+                                                      keep_waiting=lambda: True))
+        status = json.loads((rdir / 'status.json').read_text())
+        supervisor = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        resident = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        try:
+            self.assertIsNone(supervisor.poll())
+            self.assertIsNone(resident.poll())
+            lane_state = data / 'lanes' / 'P1' / 'state.json'
+            lane_state.parent.mkdir(parents=True)
+            lane_state.write_text(json.dumps({'supervisor_pid': supervisor.pid, 'child_pid': resident.pid,
+                                               'state': 'idle'}))
+            xs.set_status(str(rdir), state='finished', status='failed', lane='P1', runner_pid=supervisor.pid,
+                          **xs.executor_status_fields(resident.pid, None))
+            with mock.patch.object(xs, 'fleet_guard_call', side_effect=RuntimeError('coordinator unavailable')):
+                self.assertFalse(xs.release_fleet_slot(str(rdir), confirmed=True))
+            self.assertTrue(json.loads((rdir / 'status.json').read_text())['fleet_release_pending'])
+            # Simulate a supervisor restart: recovery may use only the exact
+            # persisted release token, never the resident executor process.
+            xs._FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
+            with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'DATA', str(data)), \
+                 mock.patch.object(xs, 'NOW', return_value=status['fleet_reserved_at'] + 1):
+                self.assertEqual(xs.recover_expired_fleet_slots(command, policy), ['release-failed'])
+            self.assertIsNone(supervisor.poll())
+            self.assertIsNone(resident.poll())
+        finally:
+            supervisor.terminate()
+            supervisor.wait(timeout=5)
+            resident.terminate()
+            resident.wait(timeout=5)
+        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+
+    def test_terminal_resident_lane_without_confirmed_release_is_retained(self):
+        """A terminal status alone never releases or kills a live resident lane child."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        data = pathlib.Path(self.temp.name, 'data')
+        rdir = runs / 'resident-terminal'
+        command = [str(BIN), 'gocc']
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 0.1}}
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'DATA', str(data)), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=command):
+            self.assertTrue(xs.reserve_provider_slot(str(rdir), 'pi', 'minimax-cn', policy,
+                                                      keep_waiting=lambda: True))
+        status = json.loads((rdir / 'status.json').read_text())
+        supervisor = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        resident = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        try:
+            lane_state = data / 'lanes' / 'P1' / 'state.json'
+            lane_state.parent.mkdir(parents=True)
+            lane_state.write_text(json.dumps({'supervisor_pid': supervisor.pid, 'child_pid': resident.pid,
+                                               'state': 'idle'}))
+            xs.set_status(str(rdir), state='finished', lane='P1', runner_pid=supervisor.pid,
+                          **xs.executor_status_fields(resident.pid, None))
+            with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'DATA', str(data)), \
+                 mock.patch.object(xs, 'NOW', return_value=status['fleet_reserved_at'] + 1):
+                self.assertEqual(xs.recover_expired_fleet_slots(command, policy), [])
+            self.assertIsNone(supervisor.poll())
+            self.assertIsNone(resident.poll())
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        finally:
+            supervisor.terminate()
+            supervisor.wait(timeout=5)
+            resident.terminate()
+            resident.wait(timeout=5)
+            self.assertTrue(self.call('gocc', op='release', token=status['fleet_reservation_token'],
+                                      run_id='resident-terminal')['released'])
+
+    def test_live_runner_with_persisted_reservation_is_not_recovered(self):
+        """An in-flight run keeps capacity even if its durable token is past TTL."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'still-running'
+        command = [str(BIN), 'gocc']
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 0.1}}
+        token = '1' * 32
+        reserved_at = time.time()
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='still-running',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        supervisor = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            xs.set_status(str(rdir), id='still-running', state='running', runner_pid=supervisor.pid,
+                          fleet_host='gocc', fleet_reserved_at=reserved_at,
+                          fleet_reservation_token=token, executor_pid=None, executor_pgid=None)
+            with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+                 mock.patch.object(xs, 'RUNS', str(runs)), \
+                 mock.patch.object(xs, 'NOW', return_value=reserved_at + 1):
+                self.assertEqual(xs.recover_expired_fleet_slots(command, policy), [])
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        finally:
+            supervisor.terminate()
+            supervisor.wait(timeout=5)
+            self.assertTrue(self.call('gocc', op='release', token=token, run_id='still-running')['released'])
+
     def test_remote_review_assignment_passes_read_only_to_lane(self):
         root = pathlib.Path(self.temp.name)
         binary = root / '.local/bin/openswarm'
