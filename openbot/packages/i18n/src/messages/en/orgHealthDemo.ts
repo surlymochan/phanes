@@ -32,6 +32,7 @@ export const messages = defineMessages("orgHealthDemo", {
   "orgHealthDemo.metrics": "Aggregate indicators",
   "orgHealthDemo.metricsNote":
     "Cost is in CNY 10,000 per month excluding operations and facilities; equivalent headcount is not people count.",
+  "orgHealthDemo.calibration": "Data calibration",
   "orgHealthDemo.actual": "Actual",
   "orgHealthDemo.yearEndTarget": "Year-end target / estimate",
   "orgHealthDemo.rateNote": "Technical labor cost ratio = labor cost ÷ revenue converted to CNY (illustrative basis).",
