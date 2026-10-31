@@ -70,6 +70,15 @@ class CheckSiteTest(unittest.TestCase):
         )
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
 
+    def test_missing_referenced_file_fails(self) -> None:
+        dist = self.make_dist()
+        (dist / "index.html").write_text(
+            '<script src="./missing.js"></script>', encoding="utf-8"
+        )
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing.js 不存在", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

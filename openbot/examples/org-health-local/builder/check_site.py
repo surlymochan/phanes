@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from html.parser import HTMLParser
 import json
 import re
 import sys
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +21,21 @@ REQUIRED_FILES = (
 )
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 EXTERNAL_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+
+
+class LocalReferences(HTMLParser):
+    """收集 HTML 中会加载本地资源的引用。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.references: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attribute = {"script": "src", "link": "href", "img": "src"}.get(tag)
+        if attribute:
+            value = dict(attrs).get(attribute)
+            if value:
+                self.references.append(value)
 
 
 def sha256(path: Path) -> str:
@@ -85,6 +102,22 @@ def check_site(dist: Path) -> list[str]:
                 failures.append(f"失败：{relative} 引用了外部 http(s) 资源")
             else:
                 print(f"通过：{relative} 未引用外部 http(s) 资源")
+
+    index_path = paths["index.html"]
+    if index_path.is_file() and index_path.stat().st_size:
+        parser = LocalReferences()
+        parser.feed(index_path.read_text(encoding="utf-8", errors="replace"))
+        for reference in parser.references:
+            parsed = urlsplit(reference)
+            if parsed.scheme or parsed.netloc or reference.startswith("/"):
+                continue
+            if not parsed.path:
+                continue
+            target = index_path.parent / unquote(parsed.path)
+            if not target.is_file():
+                failures.append(f"失败：index.html 引用的本地文件 {parsed.path} 不存在")
+            else:
+                print(f"通过：index.html 引用的本地文件 {parsed.path} 存在")
 
     report_path = paths["build-report.json"]
     if report_path.is_file() and report_path.stat().st_size:
