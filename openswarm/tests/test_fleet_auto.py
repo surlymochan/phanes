@@ -2,6 +2,7 @@
 import pathlib
 import runpy
 import contextlib
+import errno
 import io
 import json
 import os
@@ -325,6 +326,47 @@ class FleetAutoTests(unittest.TestCase):
              self.assertRaisesRegex(RuntimeError, 'acknowledgement unavailable'):
             MOD['main']()
         self.assertEqual(run.call_count, 1)
+
+    def socket_tempdir(self):
+        base = tempfile.gettempdir()
+        os.makedirs(base, exist_ok=True)
+        return tempfile.TemporaryDirectory(prefix='err-', dir=base)
+
+    def test_missing_lane_socket_reports_readable_error(self):
+        lane = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'openswarm'))
+        with self.socket_tempdir() as directory:
+            sockpath = str(pathlib.Path(directory) / 'l.sock')
+            with mock.patch.dict(lane['lane_call'].__globals__, {'lane_socket_path':lambda _: sockpath}):
+                reply = lane['lane_call']('K1', {'op':'assign', 'run_id':'missing-socket-test'})
+        self.assertFalse(reply['ok'])
+        self.assertIn('control socket unavailable', reply['error'])
+        self.assertIn('Errno %d' % errno.ENOENT, reply['error'])
+        self.assertIn(os.strerror(errno.ENOENT), reply['error'])
+
+    def test_non_json_lane_reply_reports_readable_error(self):
+        lane = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'openswarm'))
+        with self.socket_tempdir() as directory:
+            sockpath = str(pathlib.Path(directory) / 'l.sock')
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(sockpath)
+            listener.listen(1)
+            received = []
+            def accept_with_garbled_reply():
+                connection, _ = listener.accept()
+                with connection:
+                    received.append(json.loads(connection.recv(65536)))
+                    connection.sendall(b'not json\n')
+                listener.close()
+            thread = threading.Thread(target=accept_with_garbled_reply)
+            thread.start()
+            with mock.patch.dict(lane['lane_call'].__globals__, {'lane_socket_path':lambda _: sockpath}):
+                reply = lane['lane_call']('K1', {'op':'assign', 'run_id':'garbled-reply-test'})
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(received[0]['run_id'], 'garbled-reply-test')
+        self.assertFalse(reply['ok'])
+        self.assertIn('control socket unavailable', reply['error'])
+        self.assertIn('Expecting value', reply['error'])
 
     def test_local_explicit_busy_falls_back(self):
         local = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'},
