@@ -65,6 +65,13 @@ class CheckSiteTest(unittest.TestCase):
         (dist / "styles.css").unlink()
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
 
+    def test_empty_file_fails(self) -> None:
+        dist = self.make_dist()
+        (dist / "styles.css").write_text("", encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("styles.css 为空", result.stdout)
+
     def test_changed_data_fails_validation(self) -> None:
         dist = self.make_dist()
         data = json.loads((dist / "data/diagnosis.json").read_text(encoding="utf-8"))
