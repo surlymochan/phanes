@@ -344,7 +344,7 @@ def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
     heads_columns = (OVERALL_HEADS, REVOPS_HEADS)
     forecast_columns = cost_columns + heads_columns + (REVENUE,)
     return {
-        "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns),
+        "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns, non_negative=True),
         "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True),
         "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True),
         "forecast": load_table(

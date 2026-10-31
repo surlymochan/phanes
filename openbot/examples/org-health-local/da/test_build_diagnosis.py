@@ -608,13 +608,11 @@ class AbnormalRawDataTest(unittest.TestCase):
         self.assertIn("utf-8", result.stdout + result.stderr)
         self.assertFalse(self.out_path.exists())
 
-    @unittest.expectedFailure
     def test_negative_cost_is_rejected(self) -> None:
         """负数成本应判为原始数据错误。
 
-        已知 bug：当前实现只校验数值是否有限，不校验符号（da/build_diagnosis.py:283-295）。
-        -10.4 会被原样写进快照，并生成负的成本率（约-12.9%）与负的成本占比（-79.8%），
-        与“成本率=成本÷同期收入折人民币”的口径矛盾。修复后本用例应改回普通用例。
+        成本不能为负数：负数成本会被原样写进快照，并生成负的成本率与负的成本占比，
+        与“成本率=成本÷同期收入折人民币”的口径矛盾。
         """
         raw_dir = copy_raw(self.folder, "raw-negative-cost")
         cost = raw_dir / "cost.csv"
