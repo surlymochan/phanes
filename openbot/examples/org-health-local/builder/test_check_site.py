@@ -65,6 +65,13 @@ class CheckSiteTest(unittest.TestCase):
         (dist / "styles.css").unlink()
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
 
+    def test_file_dist_fails_with_path_error(self) -> None:
+        dist = Path(self.tmp.name) / "dist-file"
+        dist.write_text("not a directory", encoding="utf-8")
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"失败：站点路径不存在或不是目录：{dist}", result.stdout)
+
     def test_empty_file_fails(self) -> None:
         dist = self.make_dist()
         (dist / "styles.css").write_text("", encoding="utf-8")
