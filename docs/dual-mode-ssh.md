@@ -49,6 +49,8 @@ ssh -F ~/.ssh/openswarm-hub/config gocc -- true
 
 不要把私钥、密码、known-hosts 内容或 agent socket 放进仓库或 bridge 配置。
 
+box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持该循环。
+
 ## Fleet 主机和十 lane 拓扑
 
 自动路由的主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、
