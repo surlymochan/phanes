@@ -218,8 +218,14 @@ def period_sort_key(value: object, keys: list[str]) -> tuple[str, int]:
     return (prefix, idx)
 
 
-def validate_brief(brief: dict) -> list[str]:
-    """按 brief.schema.json 校验任务书，返回错误说明列表。"""
+def validate_brief(brief: object) -> list[str]:
+    """按 brief.schema.json 校验任务书，返回错误说明列表。
+
+    顶层不是 JSON 对象（数组、字符串等）时只报类型错误，不去取字段，
+    避免调用 brief.get() 时抛出 AttributeError。
+    """
+    if not isinstance(brief, dict):
+        return ["任务书必须是 JSON 对象"]
     errors = Validator(load_schema(SCHEMA_PATH)).errors(brief)
     period = brief.get("观察期间", {})
     keys = period.get("期次", []) if isinstance(period, dict) else []
@@ -328,6 +334,9 @@ def main(argv: list[str] | None = None) -> int:
             print("任务书校验失败：")
             for message in errors:
                 print(f"  {message}")
+            if not isinstance(brief, dict):
+                # 顶层不是对象属于输入问题，在 stderr 上补一句带路径的提示。
+                print(f"任务书必须是 JSON 对象：{args.check}", file=sys.stderr)
             return EXIT_INVALID
         print("任务书校验通过")
         return EXIT_OK
