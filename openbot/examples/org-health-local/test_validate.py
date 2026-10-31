@@ -432,6 +432,36 @@ class ValidateTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("/metrics/0/数值", result.stdout + result.stderr)
 
+    def test_command_line_reports_top_level_array(self) -> None:
+        """命令行校验顶层数组时退出码非 0，并报告顶层类型错误而非 traceback。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "array.json"
+            path.write_text(json.dumps([self.data], ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/: 期望类型 object，实际为 array", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_command_line_reports_top_level_string(self) -> None:
+        """命令行校验顶层字符串时退出码非 0，并报告顶层类型错误而非 traceback。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "string.json"
+            path.write_text(json.dumps("合成诊断"), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path)],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/: 期望类型 object，实际为 string", output)
+        self.assertNotIn("Traceback", output)
+
 
 if __name__ == "__main__":
     unittest.main()
