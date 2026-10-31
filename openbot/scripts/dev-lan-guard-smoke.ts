@@ -10,6 +10,7 @@ import {
   applyLanSignInPolicy,
   assertSafeDevelopmentNetwork,
   configureMobileConnectDevelopmentNetwork,
+  developmentBindHost,
   parseDevelopmentTarget,
   servicesForTarget,
 } from "./dev-services";
@@ -73,6 +74,36 @@ check("--lan refuses normalized development sign-in-code flags", () => {
     );
   }
   return { lan: invocation.lan, values, developmentCode: "refused" };
+});
+
+check("--lan is the only way to open the LAN", () => {
+  assert.equal(developmentBindHost(false), "127.0.0.1");
+  assert.equal(developmentBindHost(true), "0.0.0.0");
+  const environment: NodeJS.ProcessEnv = {
+    OPENBOT_API_PORT: "3100",
+    REMOTE_SIGNAL_PORT: "3101",
+  };
+  configureMobileConnectDevelopmentNetwork(servicesForTarget("app"), environment, interfaces, false);
+  assert.equal(environment.OPENBOT_API_HOST, "127.0.0.1");
+  assert.equal(environment.REMOTE_SIGNAL_HOST, "127.0.0.1");
+  return { loopback: developmentBindHost(false), lan: developmentBindHost(true) };
+});
+
+check("the LAN bind refuses an exposed sign-in code", () => {
+  assert.throws(
+    () =>
+      configureMobileConnectDevelopmentNetwork(
+        servicesForTarget("app"),
+        { OPENBOT_API_PORT: "3100", REMOTE_SIGNAL_PORT: "3101" },
+        interfaces,
+        true,
+        { AUTH_EXPOSE_DEVELOPMENT_CODE: "true" },
+      ),
+    /Cannot use --lan while AUTH_EXPOSE_DEVELOPMENT_CODE=true/u,
+  );
+  // The loopback start keeps the code: nobody on the network can reach it.
+  assert.doesNotThrow(() => assertSafeDevelopmentNetwork(false, { AUTH_EXPOSE_DEVELOPMENT_CODE: "true" }));
+  return { lan: true, developmentCode: "refused" };
 });
 
 check("--lan keeps the phone flow with normal code delivery", () => {

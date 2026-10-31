@@ -12,8 +12,8 @@ credential. The worker needs bubblewrap, socat, and a Pi 0.73-compatible install
 The launcher disables extension, skill and context discovery, starts with an empty
 environment, and lets the sandbox reach only the broker socket. The broker accepts
 only the configured model and the MiniMax messages endpoint.
-Each broker process accepts at most 64 inference requests; restart the bridge when
-that limit is reached.
+Each broker process accepts at most four concurrent inference requests and refuses a
+fifth with HTTP 503 until one of them finishes.
 
 From a machine with the existing SSH identities, start the bounded bridge:
 
@@ -28,8 +28,8 @@ separate OpenSwarm state directory, preserving the existing fleet configuration.
 alive for the run. Interrupting it or reaching its time limit closes its SSH sessions
 and removes its private sockets. It is a transport process, not an executor.
 
-Pi read-only review and consult are deliberately rejected until their own sandbox
-contract is verified. One-shot isolated Pi cannot resume a rate-limited session;
+Pi read-only review and consult run only through the isolated launcher; without it
+they are rejected. One-shot isolated Pi cannot resume a rate-limited session;
 resident RPC Pi keeps its session inside the sandbox. A missing bridge, unsupported
 host, unapproved model or unisolated binary fails closed. Do not turn off
 `pi.require_isolation` on a host containing credentials or other valuable data.

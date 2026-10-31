@@ -295,6 +295,17 @@ export function applyLanSignInPolicy(lan: boolean, environment: NodeJS.ProcessEn
   if (lan) environment.OPENBOT_DEV_REMOTE_ROLE ??= "none";
 }
 
+// The LAN is opened only when the caller asks for it by name. Every other
+// start binds the loopback interface, so a development stack is not reachable
+// from the local network by accident.
+export function developmentBindHost(lan: boolean): "127.0.0.1" | "0.0.0.0" {
+  return lan ? "0.0.0.0" : "127.0.0.1";
+}
+
+// A LAN stack that returns sign-in codes is an open login on the local
+// network: everyone who can reach the API signs in as the account. The
+// command line refuses the pair before anything starts, and the bind refuses
+// it again, so no other caller opens the LAN while the code is readable.
 export function assertSafeDevelopmentNetwork(lan: boolean, environment: NodeJS.ProcessEnv): void {
   if (lan && normalizeBooleanFlag(environment.AUTH_EXPOSE_DEVELOPMENT_CODE ?? "")) {
     throw new Error(
@@ -498,7 +509,13 @@ async function allocateDevelopmentPorts(
         logger.info(`Signal health port ${DEFAULT_REMOTE_HEALTH_PORT} is busy. Using ${healthPort}.`);
       }
     }
-    configureMobileConnectDevelopmentNetwork(services, sharedEnvironment, networkInterfaces(), lan);
+    // The bind reads the account settings, so an exposed development sign-in
+    // code is refused where the LAN is opened and not only on the command
+    // line.
+    configureMobileConnectDevelopmentNetwork(services, sharedEnvironment, networkInterfaces(), lan, {
+      ...developmentEnvironment,
+      ...sharedEnvironment,
+    });
     if (sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL) {
       logger.info(`Mobile Connect API: ${sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL}`);
     }
@@ -636,15 +653,21 @@ export function configureMobileConnectDevelopmentNetwork(
   environment: NodeJS.ProcessEnv,
   interfaces: DevelopmentNetworkInterfaces,
   lan: boolean,
+  // The account settings the bind reads: the development sign-in code lives
+  // with the API configuration, not with the bind addresses.
+  accountEnvironment: NodeJS.ProcessEnv = environment,
 ): void {
   const hasMobileClient = services.some((service) => service === "app" || service === "test-client");
   const apiPort = readPort(environment.OPENBOT_API_PORT);
   if (!apiPort) return;
+  // The LAN bind and an exposed sign-in code must not meet here either, so
+  // the refusal holds for every caller and not only for the command line.
+  assertSafeDevelopmentNetwork(lan, accountEnvironment);
   const address = lan && hasMobileClient ? selectMobileConnectLanAddress(interfaces) : null;
   if (lan && hasMobileClient && !address) {
     throw new Error("Cannot use --lan: no private IPv4 address was found for Mobile Connect.");
   }
-  const bindHost = lan ? "0.0.0.0" : "127.0.0.1";
+  const bindHost = developmentBindHost(lan);
   environment.OPENBOT_API_HOST = bindHost;
 
   if (services.includes("remote")) {

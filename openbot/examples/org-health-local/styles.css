@@ -357,6 +357,45 @@ h1 em {
 .metric-foot-note {
   margin-left: auto;
 }
+.calibration-panel {
+  margin-top: 14px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 12px 18px;
+  font-size: 12px;
+}
+.calibration-panel[hidden] {
+  display: none;
+}
+.calibration-summary {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--teal);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+.calibration-summary:hover {
+  color: var(--ink);
+}
+.calibration-content {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #536569;
+  line-height: 1.7;
+}
+.calibration-content p {
+  margin: 0;
+}
+.calibration-content strong {
+  color: var(--ink);
+}
 .insight-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

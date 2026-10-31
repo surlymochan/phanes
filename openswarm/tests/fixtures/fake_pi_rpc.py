@@ -66,6 +66,12 @@ for line in sys.stdin:
         aborted = False
         if "LANE_TEST_RISK" in prompt:
             send({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "git push secret-value"}})
+        if "LANE_TEST_RM_OUTSIDE" in prompt:
+            send({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "rm -rf /etc/fake-outside"}})
+        if "LANE_TEST_STREAM" in prompt:
+            partial = {"role": "assistant", "content": [{"type": "text", "text": "x" * 4000}]}
+            send({"type": "message_update", "message": partial,
+                  "assistantMessageEvent": {"type": "text_delta", "delta": "x", "partial": partial}})
         wait_seconds = 1 if "LANE_TEST_WAIT_SHORT" in prompt else 20 if "LANE_TEST_WAIT" in prompt else 0.25
         wait_until = time.time() + wait_seconds
         while time.time() < wait_until:

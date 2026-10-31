@@ -57,6 +57,7 @@ try {
       assert.equal((await page.locator(selector).textContent())?.trim(), "—");
     }
     assert.equal((await page.locator("#stage-list").textContent())?.trim(), "");
+    assert.equal(await page.locator("#calibration-panel").isVisible(), false);
   };
   for (const [language, expected, metricLabels, unavailable] of [
     [
@@ -104,6 +105,11 @@ try {
     for (const label of metricLabels) await page.getByText(label, { exact: true }).waitFor();
     assert.equal(await page.getByText("15", { exact: true }).count(), 1);
     assert.equal(await page.getByText(unavailable, { exact: true }).count(), 6);
+    assert.equal(await page.locator("#calibration-panel").isVisible(), true);
+    assert.equal(
+      await page.locator("#calibration-panel summary").innerText(),
+      language === "zh" ? "数据口径" : "Data calibration",
+    );
     checks.push(`${language} valid snapshot`);
   }
   const legacy = {
@@ -138,6 +144,7 @@ try {
   ]) {
     await page.getByText(text, { exact: true }).waitFor();
   }
+  assert.equal(await page.locator("#calibration-panel").isVisible(), false);
   checks.push("legacy snapshot valid");
   const missingStage = structuredClone(legacy);
   missingStage.指标.pop();

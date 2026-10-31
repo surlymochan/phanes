@@ -28,6 +28,7 @@ export const messages = {
   "orgHealthDemo.timeNote": "年末值不是已发生实际；5 月缺少同口径整体成本与人头值。",
   "orgHealthDemo.metrics": "聚合指标快照",
   "orgHealthDemo.metricsNote": "成本为人民币万元/月，不含运维与设施；折算人头不等于自然人数。",
+  "orgHealthDemo.calibration": "数据口径",
   "orgHealthDemo.actual": "实际",
   "orgHealthDemo.yearEndTarget": "年末目标 / 测算",
   "orgHealthDemo.rateNote": "技术人力成本率 = 技术人力成本 ÷ 同期收入折人民币（示例口径）",

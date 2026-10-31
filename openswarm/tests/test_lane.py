@@ -418,6 +418,32 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(json.loads(response.stdout)["error"], "budget_exceeded_daily")
         self.assertEqual(self.lane_state()["state"], "idle")
 
+    def test_rm_outside_worktree_is_refused_and_the_turn_continues(self):
+        for backend in ("pi", "codex"):
+            with self.subTest(backend=backend):
+                self.set_config(backend)
+                self.start_lane()
+                run_id = self.assign("LANE_TEST_RM_OUTSIDE LANE_TEST_WAIT")
+                self.assertEqual(self.wait_run(run_id)["status"], "done")
+                result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+                self.assertIsNone(result.get("error_class"))
+                self.assertFalse(result.get("risk_blocks"))
+                self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"), "completed")
+                events = (self.data / "runs" / run_id / f"events.1.{backend}.jsonl").read_text()
+                self.assertIn('"risk_denied"', events)
+                self.assertIn('"risk_resume"', events)
+                self.cli("lane", "down", self.lane_name)
+
+    def test_pi_streaming_updates_do_not_repeat_the_message_snapshot(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_STREAM")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        rows = [json.loads(line) for line in (self.data / "runs" / run_id / "events.1.pi.jsonl").read_text().splitlines()]
+        update = next(row for row in rows if row.get("type") == "message_update")
+        self.assertNotIn("message", update)
+        self.assertEqual(update["assistantMessageEvent"], {"type": "text_delta", "delta": "x"})
+
     def test_risk_aborts_lane_turns_without_watch(self):
         for backend in ("pi", "codex", "cursor"):
             with self.subTest(backend=backend):
