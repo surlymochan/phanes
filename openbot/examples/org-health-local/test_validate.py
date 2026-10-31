@@ -462,6 +462,30 @@ class ValidateTest(unittest.TestCase):
         self.assertIn("/: 期望类型 object，实际为 string", output)
         self.assertNotIn("Traceback", output)
 
+    def test_command_line_reports_unsupported_schema_keyword(self) -> None:
+        """结构定义含不支持的关键字时退出码为 2，stderr 指出关键字名且不出现 traceback。"""
+        schema = copy.deepcopy(self.schema)
+        schema["unevaluatedProperties"] = False
+        with temporary_directory() as folder:
+            path = Path(folder) / "schema.json"
+            path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "validate.py"),
+                    "--schema",
+                    str(path),
+                    str(EXAMPLE_PATH),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("不支持的关键字", result.stderr)
+        self.assertIn("unevaluatedProperties", result.stderr)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -219,7 +219,7 @@ python3 validate.py --json /abs/path/to/diagnosis.json   # 机器可读结果
 python3 builder/check_site.py <dist>
 ```
 
-- `validate.py`：退出码 `0` 通过 / `1` 校验失败 / `2` 文件不可读
+- `validate.py`：退出码 `0` 通过 / `1` 校验失败 / `2` 输入不可用（文件不可读或结构定义不可用）
   （`openbot/examples/org-health-local/validate.py:28-30`、`:304-316`）；
   失败时逐条打印出错路径（如 `/scope/schema版本`）。
   **注意**：它没有 `--data` 选项，只有位置参数与 `--schema`、`--json`

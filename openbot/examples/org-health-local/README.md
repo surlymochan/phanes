@@ -248,7 +248,7 @@ python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结
 python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  # 指定结构定义
 ```
 
-退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
+退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可用（文件缺失、不是合法 JSON 或结构定义不可用）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。结构定义含不支持的关键字时 stderr 指出关键字名，不输出 traceback。校验器单元测试包含在 `python3 run_tests.py` 中。
 
 ## Review 角色：独立交叉审查
 

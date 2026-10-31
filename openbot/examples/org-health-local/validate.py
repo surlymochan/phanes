@@ -6,7 +6,7 @@
 
 默认校验 data/diagnosis.json。只使用标准库。校验失败时退出码非 0，
 并逐条打印出错路径，例如 /scope/schema版本。退出码：0 全部通过，
-1 有文件未通过校验，2 输入不可读（文件缺失或不是合法 JSON）。
+1 有文件未通过校验，2 输入不可用（文件缺失、不是合法 JSON 或结构定义不可用）。
 
 字段处理规则全部来自结构定义，不在代码里写死字段名：
 - 定义里 required 列出的字段缺省时报错（_check_object）；
@@ -304,7 +304,10 @@ def main(argv: list[str] | None = None) -> int:
             "校验 diagnosis.json 是否符合 schema/diagnosis.schema.json。"
             "默认校验 data/diagnosis.json，也可以给出多个待校验文件。"
         ),
-        epilog="退出码：0 全部通过；1 有文件未通过校验；2 输入不可读（文件缺失或不是合法 JSON）。",
+        epilog=(
+            "退出码：0 全部通过；1 有文件未通过校验；"
+            "2 输入不可用（文件缺失、不是合法 JSON 或结构定义不可用）。"
+        ),
     )
     parser.add_argument(
         "paths",
@@ -340,7 +343,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(str(cause), file=sys.stderr)
             unreadable += 1
             continue
-        errors = validator.errors(data)
+        try:
+            errors = validator.errors(data)
+        except ValueError as cause:
+            # 结构定义不可用（不支持的关键字、引用错误等）：按输入不可用处理，不输出 traceback。
+            print(str(cause), file=sys.stderr)
+            if args.json:
+                json_errors.append({"path": str(path), "message": str(cause)})
+            unreadable += 1
+            continue
         if isinstance(data, dict) and isinstance(data.get("scope"), dict):
             schema_version = data["scope"].get("schema版本", schema_version)
         if errors:
