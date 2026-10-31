@@ -118,9 +118,12 @@ Token total is `inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens`
 ```bash
 python3 validate_tasks.py
 python3 -m unittest tests.test_harness -v
+python3 -m unittest tests.test_validate_tasks -v
 ```
 
 `validate_tasks.py` checks, with no model, that the original repo passes the visible tests and fails the hidden tests, and that `solution.patch` passes both.
+
+`tests/test_validate_tasks.py` drives `validate_tasks.py` with synthetic tasks in a temp dir: a complete task validates, a task missing `repo/`, `hidden/`, or `solution.patch` is reported, and `main()` exits 1 and names the failed task. Two cases stay `expectedFailure`: a task without `TASK.md` and a task with unreadable `meta.json` crash the run instead of being reported as a failed task.
 
 The unit test drives `run.py` through a fake `cursor-agent` that fixes pagination and prints a `result.usage` line. It checks that hidden tests are absent while the agent runs, that tokens and the session id are recorded, that a second invocation skips the finished cell, and that the SVG is a white three-panel chart.
 
