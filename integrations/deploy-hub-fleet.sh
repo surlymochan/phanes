@@ -274,6 +274,16 @@ unload_launch_agent() {
   return 1
 }
 
+launch_agent_running() {
+  domain="$1"; label="$2"; executable="$3"
+  for attempt in 1 2 3 4 5; do
+    if launchctl print "$domain/$label" 2>/dev/null | grep -F "program = $executable" >/dev/null && \
+       launchctl print "$domain/$label" 2>/dev/null | grep -F "state = running" >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 roll_service() {
   lane="$1"
   if [ "$(uname -s)" = Darwin ]; then
@@ -297,8 +307,7 @@ PY
     domain="gui/$(id -u)"
     unload_launch_agent "$domain" "$label" || return
     bootstrap_launch_agent "$domain" "$plist" || return
-    launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm-fleet" >/dev/null || return
-    launchctl print "$domain/$label" | grep -F "state = running" >/dev/null || return
+    launch_agent_running "$domain" "$label" "$release_bin/openswarm-fleet" || return
   else
     case "$lane" in
       K1) unit=openswarm-executor-cursor.service ;; M1) unit=openswarm-executor-pi.service ;;
@@ -336,7 +345,8 @@ restore_service() {
     domain="gui/$(id -u)"
     unload_launch_agent "$domain" "$label" || return
     bootstrap_launch_agent "$domain" "$plist"
-    launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
+    old_executable="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist")"
+    launch_agent_running "$domain" "$label" "$old_executable"
   else
     case "$lane" in
       K1) unit=openswarm-executor-cursor.service ;; M1) unit=openswarm-executor-pi.service ;;
@@ -441,8 +451,12 @@ PY
     sleep 1
   done
   test "$started" -eq 1 || return 1
-  launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm" >/dev/null || return
-  launchctl print "$domain/$label" | grep -F "state = running" >/dev/null || return
+  for attempt in 1 2 3 4 5; do
+    if launchctl print "$domain/$label" 2>/dev/null | grep -F "program = $release_bin/openswarm" >/dev/null && \
+       launchctl print "$domain/$label" 2>/dev/null | grep -F "state = running" >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
 }
 
 local_restore_service() {
@@ -468,7 +482,14 @@ local_restore_service() {
     sleep 1
   done
   test "$started" -eq 1
-  launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
+  local old_executable
+  old_executable="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist")"
+  for attempt in 1 2 3 4 5; do
+    if launchctl print "$domain/$label" 2>/dev/null | grep -F "program = $old_executable" >/dev/null && \
+       launchctl print "$domain/$label" 2>/dev/null | grep -F "state = running" >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
 }
 
 local_apply() {
