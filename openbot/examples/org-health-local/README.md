@@ -1,5 +1,19 @@
 # 本机组织健康诊断示例
 
+<!--
+diagnosis.json 顶层字段一览（以 schema/diagnosis.schema.json 为准）：
+- scope：数据范围与口径元数据，包含数据截止、观察月份、来源、schema版本（当前为 4）。
+- 口径说明：可选的期间、单位及 null 含义说明列表。
+- conclusion：诊断结论。
+- origin：数据来源标识。
+- metrics：按页面顺序排列的指标数据。
+- insights：洞察条目列表。
+- definitions：指标定义列表。
+- risks：风险条目列表。
+- recommendations：建议条目列表。
+- stage：可选的流程阶段信息。
+-->
+
 ## 三 Bot demo：一分钟查看
 
 `demo/` 是三棒（Boss → DA → Builder）加独立审查在本目录用合成样本实跑出来的产物，按
