@@ -83,6 +83,17 @@ class CheckSiteTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("styles.css 为空", result.stdout)
 
+    def test_empty_dist_fails_with_readable_reason(self) -> None:
+        """空 dist 目录必须以非 0 退出，并给出可读的失败原因（缺 index.html 等），不抛 Traceback。"""
+        dist = Path(self.tmp.name) / "empty-dist"
+        dist.mkdir()
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("失败：index.html 不存在", message)
+        self.assertIn("站点检查失败", message)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_changed_data_fails_validation(self) -> None:
         dist = self.make_dist()
         data = json.loads((dist / "data/diagnosis.json").read_text(encoding="utf-8"))
