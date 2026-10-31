@@ -96,6 +96,41 @@ class FleetAutoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'invalid automatic routing'):
                 G['remote_sources']()
 
+    def test_extra_remote_sources_preserve_default_gocc_and_reject_ambiguity(self):
+        extra = '[{"host":"govpn","ssh_alias":"openswarm-govpn-gateway"}]'
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': extra}):
+            self.assertEqual(G['remote_sources'](), [G['DEFAULT_REMOTE_SOURCE'],
+                                                     {'host':'govpn','ssh_alias':'openswarm-govpn-gateway'}])
+        for config in (
+            '[{"host":"gocc","ssh_alias":"other-gateway"}]',
+            '[{"host":"gores1","ssh_alias":"openswarm-gores-gateway"}]',
+            '[{"host":"govpn","ssh_alias":"a"},{"host":"govpn","ssh_alias":"b"}]',
+        ):
+            with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': config}):
+                with self.assertRaisesRegex(RuntimeError, 'conflicting automatic routing'):
+                    G['remote_sources']()
+
+    def test_same_lane_name_on_remote_hosts_keeps_gateway_origin(self):
+        govpn = {'host': 'govpn', 'ssh_alias': 'openswarm-govpn-gateway'}
+        calls = []
+        def remote(request):
+            if request['op'] == 'lanes':
+                return [{'name':'K1', 'state':'idle', 'backend':'cursor', 'model':'composer'}]
+            raise G['LaneBusy']('remote lane is busy')
+        def remote_from(source, request):
+            calls.append((source, request))
+            if request['op'] == 'lanes':
+                return [{'name':'K1', 'state':'idle', 'backend':'cursor', 'model':'composer'}]
+            return {'id':'govpn-k1','state':'queued'}
+        args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task']
+        with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {
+                'local_lanes': lambda: [], 'remote_sources': lambda: [G['DEFAULT_REMOTE_SOURCE'], govpn],
+                'remote': remote, 'remote_from': remote_from}), contextlib.redirect_stdout(io.StringIO()) as out:
+            MOD['main']()
+        self.assertEqual(json.loads(out.getvalue())['host'], 'govpn')
+        self.assertEqual(calls[-1], (govpn, mock.ANY))
+        self.assertEqual(calls[-1][1]['lane'], 'K1')
+
     def test_review_uses_available_remote_lane_and_marks_read_only(self):
         def remote(req):
             if req['op'] == 'lanes':
