@@ -129,6 +129,83 @@ MINIMAL_FORECAST_CSV = (
 )
 
 
+class ParsePeriodsTest(unittest.TestCase):
+    """直接测试任务书观察期间的解析，不启动命令行子进程。"""
+
+    def test_explicit_periods_keep_as_of_or_infer_month_end(self) -> None:
+        """显式锚点原样返回，缺数据截止时推算月末。"""
+        brief = {
+            "观察期间": {
+                "起始期次": "2026-01",
+                "参考期次": "2026-05",
+                "截止期次": "2026-09",
+                "数据截止": "2026-09-28",
+            }
+        }
+        self.assertEqual(
+            build_diagnosis.parse_periods(brief),
+            {"start": "2026-01", "reference": "2026-05", "end": "2026-09", "as_of": "2026-09-28"},
+        )
+
+        brief["观察期间"].pop("数据截止")
+        self.assertEqual(build_diagnosis.parse_periods(brief)["as_of"], "2026-09-30")
+
+    def test_boss_period_list_uses_actual_reference_and_observed_month(self) -> None:
+        """Boss 格式期次列表按实际、参考和观察月份映射锚点。"""
+        brief = {
+            "观察期间": {
+                "观察月份": "2026-09",
+                "期次": ["2026-01实际", "2026-05H1参考", "2026-09实际"],
+            }
+        }
+        self.assertEqual(
+            build_diagnosis.parse_periods(brief),
+            {"start": "2026-01", "reference": "2026-05", "end": "2026-09", "as_of": "2026-09-30"},
+        )
+
+    def test_string_periods_use_first_middle_and_last_month(self) -> None:
+        """字符串中的三个期次依次作为起始、参考和截止。"""
+        self.assertEqual(
+            build_diagnosis.parse_periods({"观察期间": "从 2026-01 到 2026-05，截止 2026-09"}),
+            {"start": "2026-01", "reference": "2026-05", "end": "2026-09", "as_of": "2026-09-30"},
+        )
+
+    def test_string_periods_with_one_or_two_months_require_reference(self) -> None:
+        """字符串只有一或两个期次时因缺少参考期次报错。"""
+        for value in ("2026-09", "2026-01 至 2026-09"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(build_diagnosis.BriefError, "参考期次"):
+                    build_diagnosis.parse_periods({"观察期间": value})
+
+    def test_parse_periods_reports_invalid_or_missing_fields(self) -> None:
+        """缺字段及格式错误均抛 BriefError，并指出对应字段名。"""
+        cases = (
+            ({}, "观察期间"),
+            ({"观察期间": {"参考期次": "2026-05", "截止期次": "2026-09"}}, "起始期次"),
+            ({"观察期间": {"起始期次": "2026-01", "参考期次": "2026-05"}}, "截止期次"),
+            ({"观察期间": {"起始期次": "2026-01", "截止期次": "2026-09"}}, "参考期次"),
+            (
+                {"观察期间": {"起始期次": "2026-1", "参考期次": "2026-05", "截止期次": "2026-09"}},
+                "起始期次",
+            ),
+            (
+                {
+                    "观察期间": {
+                        "起始期次": "2026-01",
+                        "参考期次": "2026-05",
+                        "截止期次": "2026-09",
+                        "数据截止": "2026-09-9",
+                    }
+                },
+                "数据截止",
+            ),
+        )
+        for brief, field in cases:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(build_diagnosis.BriefError, field):
+                    build_diagnosis.parse_periods(brief)
+
+
 class BuildDiagnosisTest(unittest.TestCase):
     """用合成原始数据生成快照并校验。"""
 
