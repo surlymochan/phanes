@@ -55,6 +55,17 @@ class BuildSiteTest(unittest.TestCase):
             argv += ["--bundle", str(bundle)]
         return build_site.main(argv)
 
+    def run_cli(
+        self, data: Path = EXAMPLE_PATH, out: Path | None = None, bundle: Path | None = None
+    ) -> subprocess.CompletedProcess:
+        """以子进程运行 build_site.py 命令行。"""
+        script = EX_ROOT / "builder" / "build_site.py"
+        target_out = self.out if out is None else out
+        argv = [sys.executable, str(script), "--data", str(data), "--out", str(target_out)]
+        if bundle is not None:
+            argv += ["--bundle", str(bundle)]
+        return subprocess.run(argv, capture_output=True, text=True)
+
     def test_build_writes_all_files(self) -> None:
         """构建产物包含页面、样式、包、数据与构建报告。"""
         self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
@@ -149,6 +160,35 @@ class BuildSiteTest(unittest.TestCase):
         self.assertIn("demo/vendor/app.bundle.js", stderr.getvalue())
         self.assertFalse(self.out.exists(), "bundle 缺失时不应生成 dist")
 
+    def test_data_path_is_directory_fails(self) -> None:
+        """输入路径是目录时以 2 退出，且不生成 dist。"""
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        folder = self.root / "data_dir"
+        folder.mkdir()
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            code = self.build(data=folder, bundle=self.bundle)
+        self.assertEqual(code, build_site.EXIT_USAGE)
+        self.assertIn(str(folder), stderr.getvalue())
+        self.assertFalse(self.out.exists(), "输入是目录时不应生成 dist")
+
+    def test_corrupted_json_data_fails(self) -> None:
+        """数据不是合法 JSON 时以 1 退出，且不生成 dist。"""
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        path = self.root / "corrupted.json"
+        path.write_text("{不是合法 JSON", encoding="utf-8")
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            code = self.build(data=path, bundle=self.bundle)
+        self.assertEqual(code, build_site.EXIT_INVALID)
+        self.assertIn(str(path), stderr.getvalue())
+        self.assertIn("不是合法 JSON", stderr.getvalue())
+        self.assertFalse(self.out.exists(), "坏 JSON 时不应生成 dist")
+
     def test_bun_command_matches_serve(self) -> None:
         """不带 --bundle 时使用与 serve.py 相同的 bun 命令。"""
         serve = build_site.load_module("org_health_serve", EX_ROOT / "serve.py")
@@ -211,6 +251,31 @@ class BuildSiteTest(unittest.TestCase):
         )
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse((self.out / "bad").exists(), "坏数据时不应生成 dist")
+
+    def test_command_line_data_path_is_directory_fails(self) -> None:
+        """输入路径是目录时命令行返回输入错误契约退出码，报错含定位路径且不生成 dist。"""
+        dir_path = self.root / "input_directory"
+        dir_path.mkdir()
+        out_dir = self.root / "dist_from_dir"
+        result = self.run_cli(data=dir_path, out=out_dir, bundle=self.bundle)
+        self.assertIn(result.returncode, (build_site.EXIT_INVALID, build_site.EXIT_USAGE))
+        self.assertEqual(result.returncode, build_site.EXIT_USAGE)
+        output = result.stdout + result.stderr
+        self.assertIn(str(dir_path), output)
+        self.assertFalse(out_dir.exists(), "输入路径是目录时不应生成 dist 或留下半成品")
+
+    def test_command_line_corrupted_json_fails(self) -> None:
+        """诊断 JSON 损坏时命令行返回输入错误契约退出码，报错含定位路径且不生成 dist。"""
+        corrupted = self.root / "corrupted_diagnosis.json"
+        corrupted.write_text("{不是合法 JSON", encoding="utf-8")
+        out_dir = self.root / "dist_from_corrupted_json"
+        result = self.run_cli(data=corrupted, out=out_dir, bundle=self.bundle)
+        self.assertIn(result.returncode, (build_site.EXIT_INVALID, build_site.EXIT_USAGE))
+        self.assertEqual(result.returncode, build_site.EXIT_INVALID)
+        output = result.stdout + result.stderr
+        self.assertIn(str(corrupted), output)
+        self.assertIn("不是合法 JSON", output)
+        self.assertFalse(out_dir.exists(), "诊断 JSON 损坏时不应生成 dist 或留下半成品")
 
 
 if __name__ == "__main__":
