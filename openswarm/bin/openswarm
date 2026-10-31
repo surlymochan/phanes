@@ -9956,7 +9956,7 @@ class WatchMessages:
             self.prompt_id = event.get("id")
         if method == "session/update" and kind == "agent_message_chunk":
             content = update.get("content") or {}
-            if content.get("type") == "text":
+            if isinstance(content, dict) and content.get("type") == "text":
                 self.chunks.append(content.get("text") or "")
             return []
         if not method and ("result" in event or "error" in event) and "id" in event:

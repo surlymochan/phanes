@@ -50,6 +50,21 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(messages.feed({"type": "item.completed", "item": {
             "type": "agent_message", "text": "codex"}}), [("msg", "codex")])
 
+    def test_watch_ignores_unknown_missing_and_non_text_events(self):
+        messages = xs.WatchMessages()
+        events = [
+            {"type": "unknown"},
+            {"type": "assistant"},
+            {"type": "message_end"},
+            {"method": "session/update", "params": {}},
+            update("agent_message_chunk"),
+            update("agent_message_chunk", content={"type": "image", "url": "ignored"}),
+            update("agent_message_chunk", content="ignored"),
+        ]
+        for event in events:
+            self.assertEqual(messages.feed(event), [])
+        self.assertEqual(messages.flush(), [])
+
     def test_quiet_keeps_alerts_and_heartbeat_has_lane_diff_and_last_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
