@@ -48,6 +48,21 @@ def run_step(name, command, stdout=None):
     return True
 
 
+def source_commit():
+    """返回当前 git 仓库提交；不在仓库内时返回 None。"""
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
 def main(argv=None):
     args = parse_args(argv)
     bundle = args.bundle
@@ -67,6 +82,9 @@ def main(argv=None):
         ('DA', [sys.executable, str(args.da), '--brief', str(brief), '--raw', str(args.raw), '--out', str(diagnosis)]),
     ]
     build = [sys.executable, str(args.builder), '--data', str(diagnosis), '--out', str(dist)]
+    commit = source_commit()
+    if commit is not None:
+        build.extend(['--source-commit', commit])
     if bundle:
         build.extend(['--bundle', str(bundle)])
     commands.extend([

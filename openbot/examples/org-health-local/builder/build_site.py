@@ -2,7 +2,7 @@
 """把诊断快照构建成可预览的静态站点目录。
 
 用法：
-    python3 EX/builder/build_site.py --data <diagnosis.json> --out <dist> [--bundle <app.bundle.js>]
+    python3 EX/builder/build_site.py --data <diagnosis.json> --out <dist> [--bundle <app.bundle.js>] [--source-commit SHA]
 
 先用示例目录的 validate.py 校验数据；数据不合格时退出码非 0，并且不生成 dist 目录。
 构建产物：
@@ -80,7 +80,7 @@ def copy_static_files(out_dir: Path) -> None:
         shutil.copyfile(EX_ROOT / name, out_dir / name)
 
 
-def write_report(out_dir: Path, data_path: Path) -> dict:
+def write_report(out_dir: Path, data_path: Path, source_commit: str | None = None) -> dict:
     """写 build-report.json：输入路径、输入 sha256、文件清单、生成时间。"""
     files = []
     for relative in SITE_FILES:
@@ -98,13 +98,20 @@ def write_report(out_dir: Path, data_path: Path) -> dict:
         "文件清单": files,
         "生成时间": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if source_commit is not None:
+        report["来源提交"] = source_commit
     (out_dir / REPORT_NAME).write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return report
 
 
-def build_site(data_path: Path, out_dir: Path, bundle_path: Path | None = None) -> dict:
+def build_site(
+    data_path: Path,
+    out_dir: Path,
+    bundle_path: Path | None = None,
+    source_commit: str | None = None,
+) -> dict:
     """把已校验的数据构建成 dist 目录，返回 build-report 的内容。
 
     data_path 是诊断快照；bundle_path 是已编译好的浏览器包，给 None 时调用 bun 打包。
@@ -117,7 +124,7 @@ def build_site(data_path: Path, out_dir: Path, bundle_path: Path | None = None) 
         build_bundle(out_dir / BUNDLE_NAME)
     else:
         shutil.copyfile(bundle_path, out_dir / BUNDLE_NAME)
-    return write_report(out_dir, data_path)
+    return write_report(out_dir, data_path, source_commit)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -131,6 +138,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="已编译好的浏览器包；不给则调用 bun 打包",
     )
+    parser.add_argument("--source-commit", default=None, help="来源 git 提交 SHA")
     return parser.parse_args(argv)
 
 
@@ -140,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     data_path: Path = args.data
     out_dir: Path = args.out
     bundle_path: Path | None = args.bundle
+    source_commit: str | None = args.source_commit
 
     if not data_path.is_file():
         print(f"数据文件不存在：{data_path}", file=sys.stderr)
@@ -172,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
 
     created = not out_dir.exists()
     try:
-        report = build_site(data_path, out_dir, bundle_path)
+        report = build_site(data_path, out_dir, bundle_path, source_commit)
     except (OSError, subprocess.CalledProcessError) as cause:
         print(f"构建失败：{cause}", file=sys.stderr)
         if created and out_dir.exists():

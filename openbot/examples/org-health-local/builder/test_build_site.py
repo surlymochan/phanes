@@ -134,6 +134,18 @@ class BuildSiteTest(unittest.TestCase):
                 self.assertEqual(entry["sha256"], sha256_of(target))
                 self.assertEqual(entry["字节数"], target.stat().st_size)
 
+    def test_report_records_source_commit_when_provided(self) -> None:
+        """指定来源提交时写入报告顶层字段。"""
+        self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
+        report = build_site.build_site(EXAMPLE_PATH, self.out, self.bundle, "abc123")
+        self.assertEqual(report["来源提交"], "abc123")
+
+    def test_report_omits_source_commit_when_not_provided(self) -> None:
+        """未指定来源提交时保持既有报告字段。"""
+        self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        self.assertNotIn("来源提交", report)
+
     def test_invalid_data_fails_and_writes_nothing(self) -> None:
         """数据不合格时退出码非 0，且不生成 dist。"""
         broken = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
