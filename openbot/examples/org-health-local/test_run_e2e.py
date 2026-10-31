@@ -23,7 +23,7 @@ class RunE2ETest(unittest.TestCase):
         self.bundle.write_text('fake', encoding='utf-8')
         self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
-    def write_stub(self, path, role, failing=False):
+    def write_stub(self, path, role, failing=False, probe=False):
         source = '''import json, pathlib, sys
 role = ROLE
 args = sys.argv[1:]
@@ -34,12 +34,20 @@ if FAIL:
 if role == 'boss':
     pathlib.Path(args[args.index('--out') + 1]).write_text('{}', encoding='utf-8')
 elif role == 'da':
-    pathlib.Path(args[args.index('--out') + 1]).write_text('{}', encoding='utf-8')
+    out = pathlib.Path(args[args.index('--out') + 1])
+    raw = pathlib.Path(args[args.index('--raw') + 1])
+    payload = {'raw_files': sorted(p.name for p in raw.iterdir())} if PROBE else {}
+    out.write_text(json.dumps(payload), encoding='utf-8')
 elif role == 'builder':
     out = pathlib.Path(args[args.index('--out') + 1])
     out.mkdir(parents=True, exist_ok=True)
-    (out / 'index.html').write_text('ok', encoding='utf-8')
-'''.replace('ROLE', repr(role)).replace('LOG', repr(str(self.log))).replace('FAIL', repr(failing))
+    if PROBE:
+        bundle = pathlib.Path(args[args.index('--bundle') + 1])
+        (out / 'index.html').write_text(bundle.read_text(encoding='utf-8'), encoding='utf-8')
+    else:
+        (out / 'index.html').write_text('ok', encoding='utf-8')
+'''.replace('ROLE', repr(role)).replace('LOG', repr(str(self.log)))
+        source = source.replace('FAIL', repr(failing)).replace('PROBE', repr(probe))
         path.write_text(source, encoding='utf-8')
 
     def command(self):
@@ -67,6 +75,33 @@ elif role == 'builder':
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
+
+    def test_custom_raw_and_bundle_are_forwarded_and_artifacts_are_checkable(self):
+        """自定义 --raw / --bundle 必须透传给对应角色，最终产物可检查。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role, probe=True)
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+        self.bundle.write_text('console.log("custom-bundle");', encoding='utf-8')
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = dict(self.calls())
+        self.assertEqual(calls['boss'], ['--out', str(self.workdir / 'brief.json')])
+        self.assertEqual(calls['da'], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
+                                       '--out', str(self.workdir / 'diagnosis.json')])
+        self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                                            '--bundle', str(self.bundle)])
+        self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
+        # 自定义路径生效，不回退到默认 sample-raw 与 demo bundle
+        self.assertNotIn(str(ROOT / 'da' / 'sample-raw'), result.stdout)
+        self.assertNotIn(str(ROOT / 'demo' / 'vendor' / 'app.bundle.js'), result.stdout)
+        self.assertIn(f'使用 bundle: {self.bundle}', result.stdout)
+        self.assertIn(str(self.raw), result.stdout)
+        # 产物可检查：DA 读到自定义 raw 目录，Builder 用自定义 bundle 产出站点
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
+        self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
+                         'console.log("custom-bundle");')
 
     def test_uses_demo_bundle_by_default(self):
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
