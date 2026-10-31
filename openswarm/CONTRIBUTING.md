@@ -28,6 +28,7 @@ bin/openswarm route --type review --difficulty 3
 - Keep `SKILL.md` in sync when behaviour or flags change. It is what the planning agent reads.
 - Never add code that reads another tool's credentials by default. New local data sources go behind a
   `local_sources.*` switch in `policy.json` and must be listed in the README table.
+- executor lane 任务不得改 worktree 外路径；scratch 用 TMPDIR。
 - Run the suite before pushing; CI runs it on Linux and macOS, Python 3.9 / 3.11 / 3.13, plus gitleaks.
 
 ## Adding a backend
