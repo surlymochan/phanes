@@ -111,10 +111,10 @@ try {
   assert.equal(await page.locator("#stage-list").innerText(), "");
   checks.push("legacy snapshot with empty stage rejected");
   for (const [name, mutate] of [
-    ["blank stage title", (value) => (value.指标[4].标题 = " ")],
-    ["blank stage source", (value) => (value.指标[4].来源口径 = " ")],
-    ["blank stage label", (value) => (value.指标[4].指标[0].分档 = " ")],
-    ["blank stage example", (value) => (value.指标[4].指标[0].例证 = " ")],
+    ["blank stage title", (value: typeof legacy) => (value.指标[4].标题 = " ")],
+    ["blank stage source", (value: typeof legacy) => (value.指标[4].来源口径 = " ")],
+    ["blank stage label", (value: typeof legacy) => (value.指标[4].指标[0].分档 = " ")],
+    ["blank stage example", (value: typeof legacy) => (value.指标[4].指标[0].例证 = " ")],
   ] as const) {
     const malformed = structuredClone(legacy);
     mutate(malformed);
