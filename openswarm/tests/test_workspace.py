@@ -266,6 +266,23 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual(new, expect_new)
             xs.cleanup_worktree(ws, fin["commit"])
 
+    def test_baseline_verify_clean_success_has_no_failures_or_new_failures(self):
+        ws = xs.prepare_workspace(self.repo, "clean-baseline", True)
+        verify = xs.run_verify("true", ws["root"], 30)
+        base = xs.verify_against_baseline("true", ws, 30)
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=ws["root"],
+                                        capture_output=True, text=True).stdout, "")
+        self.assertEqual(verify["rc"], 0)
+        self.assertEqual(verify["failing"], [])
+        self.assertEqual(base["rc"], 0)
+        self.assertEqual(xs.failing_tests(base["output"]), set())
+        self.assertEqual(sorted(set(verify["failing"]) - xs.failing_tests(base["output"])), [])
+        self.assertEqual(xs.adjust_status_for_verify("partial", verify)[0], "done")
+        self.assertEqual(xs.adjust_status_for_change_evidence(
+            "done", None, commit=None, workspace_changed=False, changed=False, read_only=False, verify=verify),
+            ("done", None))
+        xs.cleanup_worktree(ws, None)
+
     def test_secret_print_rule_targets_credentials_only(self):
         import re
         rx = re.compile(next(r for r, n in xs.DEFAULT_RISKS if n == "possible secret print"), re.I)
