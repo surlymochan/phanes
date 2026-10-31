@@ -4,18 +4,49 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 home = Path.home()
 cli = str(home / '.local/bin/openswarm')
 ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'openswarm-pi-broker']
+DEFAULT_REMOTE_SOURCE = {'host': 'gocc', 'ssh_alias': 'openswarm-pi-broker'}
 
 class LaneBusy(RuntimeError):
     pass
 
-def remote(payload):
-    p = subprocess.run(ssh, input=json.dumps(payload), capture_output=True, text=True, timeout=35)
+def remote_sources():
+    """Read the explicit trusted gateway list for automatic fleet routing.
+
+    The legacy single gocc endpoint remains the default.  New executor hosts
+    are opt-in through a bounded list of SSH aliases already constrained by
+    the local SSH configuration; the task payload never chooses an endpoint.
+    """
+    raw = os.environ.get('OPENSWARM_AUTO_REMOTE_SOURCES')
+    if raw is None:
+        return [DEFAULT_REMOTE_SOURCE]
+    try:
+        sources = json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError('invalid automatic routing remote source configuration') from error
+    if not isinstance(sources, list) or not sources:
+        raise RuntimeError('invalid automatic routing remote source configuration')
+    validated = []
+    for source in sources:
+        if not isinstance(source, dict):
+            raise RuntimeError('invalid automatic routing remote source configuration')
+        host, alias = source.get('host'), source.get('ssh_alias')
+        if (not isinstance(host, str) or not isinstance(alias, str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
+            raise RuntimeError('invalid automatic routing remote source configuration')
+        validated.append({'host': host, 'ssh_alias': alias})
+    return validated
+
+def remote_from(source, payload):
+    command = [*ssh[:-1], source['ssh_alias']]
+    p = subprocess.run(command, input=json.dumps(payload), capture_output=True, text=True, timeout=35)
     try: result = json.loads(p.stdout)
     except ValueError: raise RuntimeError('gocc dispatch gateway unavailable')
     if p.returncode or not result.get('ok'):
@@ -26,25 +57,60 @@ def remote(payload):
         raise RuntimeError('gocc dispatch gateway rejected request')
     return result['result']
 
+def remote(payload):
+    """Compatibility wrapper for the legacy gocc gateway and its tests."""
+    return remote_from(DEFAULT_REMOTE_SOURCE, payload)
+
 def local_lanes():
     p = subprocess.run([cli, 'lane', 'status'], capture_output=True, text=True, timeout=15)
     if p.returncode: raise RuntimeError('local lane status unavailable')
     return json.loads(p.stdout)
 
 def preference(kind, difficulty):
+    """Return backend preference, not a fixed lane inventory.
+
+    The fleet grows by adding lanes.  Routing must therefore select an idle
+    lane by backend rather than silently retaining the original one-lane names.
+    Capacity admission remains the source of truth for each backend and the
+    total fleet cap.
+    """
     if kind == 'migration':
-        return ['A1', 'C1', 'GH2', 'K1', 'M1'] if difficulty >= 4 else ['A1', 'C1', 'GH1', 'M1', 'K1']
+        return ['agy', 'cursor', 'pi', 'copilot', 'codex'] if difficulty >= 4 else ['agy', 'pi', 'cursor', 'copilot', 'codex']
     if difficulty >= 5:
-        return ['C1', 'GH2', 'A1', 'K1', 'M1']
+        return ['agy', 'cursor', 'pi', 'copilot', 'codex']
     if difficulty >= 4:
-        return ['GH2', 'C1', 'A1', 'K1', 'M1']
+        return ['agy', 'cursor', 'pi', 'copilot', 'codex']
     if kind in ('test', 'refactor', 'debug'):
-        return ['K1', 'C1', 'GH1', 'M1', 'A1']
+        return ['cursor', 'pi', 'agy', 'copilot', 'codex']
     if kind in ('mechanical', 'format', 'rename', 'docs') and difficulty <= 2:
-        return ['M1', 'GH1', 'K1', 'C1', 'A1']
+        return ['pi', 'cursor', 'agy', 'copilot', 'codex']
     if difficulty <= 2:
-        return ['GH1', 'M1', 'K1', 'C1', 'A1']
-    return ['C1', 'K1', 'GH1', 'M1', 'A1']
+        return ['pi', 'cursor', 'agy', 'copilot', 'codex']
+    return ['pi', 'cursor', 'agy', 'copilot', 'codex']
+
+def discovered_lanes():
+    """Keep the dispatch origin with every lane, including duplicate names."""
+    rows = []
+    for row in local_lanes():
+        rows.append({**row, '_origin': 'local'})
+    for source in remote_sources():
+        try:
+            request = {'op':'lanes'}
+            result = remote(request) if source == DEFAULT_REMOTE_SOURCE else remote_from(source, request)
+            for row in result:
+                rows.append({**row, '_origin': 'remote', '_remote_source': source})
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            pass
+    return rows
+
+def available_in_preference(lanes, backends):
+    """Return every idle matching lane in deterministic backend/name order."""
+    idle = [row for row in lanes if row.get('state') == 'idle']
+    ordered = []
+    for backend in backends:
+        matches = [row for row in idle if row.get('backend') == backend]
+        ordered.extend(sorted(matches, key=lambda row: (row.get('name', ''), row.get('_origin', ''))))
+    return ordered
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -67,25 +133,23 @@ def main():
     if not base or len(base)>100 or any(c not in '0123456789abcdef' for c in base):
         raise ValueError('base must be a hexadecimal commit')
     read_only = args.type in ('review', 'research', 'audit', 'second-opinion')
-    lanes = local_lanes()
-    try: lanes += remote({'op':'lanes'})
-    except (RuntimeError, OSError, subprocess.SubprocessError): pass
-    available = {row['name']: row for row in lanes if row.get('state') == 'idle'}
-    ordered = [x for x in preference(args.type,args.difficulty) if x in available]
+    lanes = discovered_lanes()
+    ordered = available_in_preference(lanes, preference(args.type,args.difficulty))
     if not ordered:
         raise RuntimeError('no available fleet lane')
-    for lane in ordered:
-        row = available[lane]
+    for row in ordered:
+        lane = row['name']
+        local = row['_origin'] == 'local'
         result = {'ok': True, 'lane': lane, 'backend': row['backend'], 'model': row['model'],
-                  'host': 'gores1' if lane in ('M1','K1') else 'gocc',
+                  'host': 'gores1' if local else row['_remote_source']['host'],
                   'profile': {'type': args.type, 'difficulty': args.difficulty}}
         if read_only: result['read_only'] = True
-        if lane == 'M1' and read_only:
+        if local and row['backend'] == 'pi' and read_only:
             result['lane'] = None
             result['execution_mode'] = 'one-shot'
         if args.dry_run:
             print(json.dumps(result)); return
-        if lane == 'M1' and read_only:
+        if local and row['backend'] == 'pi' and read_only:
             command = [cli, 'run', '--type', 'review', '--backend', 'pi', '--read-only', '--no-fallback',
                        '--cwd', str(repo), '--base', base, '--prompt', prompt, '--detach',
                        '--budget-minutes', str(args.budget_minutes)]
@@ -96,7 +160,7 @@ def main():
             except ValueError: raise RuntimeError('local dispatch acknowledgement unavailable')
             if proc.returncode or not response.get('id'):
                 raise RuntimeError('local dispatch acknowledgement unavailable')
-        elif lane in ('M1','K1'):
+        elif local:
             command = [cli,'lane','assign',lane,'--prompt',prompt,'--base',base,
                        '--budget-minutes',str(args.budget_minutes)]
             if args.title: command += ['--title', args.title]
@@ -113,9 +177,11 @@ def main():
                 raise RuntimeError('local dispatch acknowledgement unavailable')
         else:
             try:
-                response = remote({'op':'assign','lane':lane,'prompt':prompt,'base':base,
-                                   'title':args.title,'verify':args.verify,'budget_minutes':args.budget_minutes,
-                                   'read_only':read_only})
+                request = {'op':'assign','lane':lane,'prompt':prompt,'base':base,
+                           'title':args.title,'verify':args.verify,'budget_minutes':args.budget_minutes,
+                           'read_only':read_only}
+                source = row['_remote_source']
+                response = remote(request) if source == DEFAULT_REMOTE_SOURCE else remote_from(source, request)
             except LaneBusy:
                 continue
         result.update({'id':response['id'], 'state':response['state']})
