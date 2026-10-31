@@ -25,6 +25,7 @@ import json
 import math
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -272,10 +273,19 @@ def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
     missing = [name for name in required if name not in fieldnames]
     if missing:
         raise RawDataError(f"原始数据 {path.name} 缺少必需列：{'、'.join(missing)}")
+    duplicated = [name for name, count in Counter(fieldnames).items() if count > 1 and name]
+    if duplicated:
+        raise RawDataError(f"原始数据 {path.name} 表头出现重复列：{'、'.join(duplicated)}")
     rows: list[dict[str, str]] = []
     for number, row in enumerate(reader, start=2):
         if None in row:
             raise RawDataError(f"原始数据 {path.name} 第 {number} 行的字段数多于表头")
+        # 字段数少于表头时 DictReader 把缺的取值写成 None：该列在这行里是空的。
+        empty = [name for name in required if row.get(name) is None]
+        if empty:
+            raise RawDataError(
+                f"原始数据 {path.name} 第 {number} 行缺少 {'、'.join(empty)} 的取值（字段数少于表头）"
+            )
         rows.append(row)
     return rows
 
