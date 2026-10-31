@@ -56,6 +56,30 @@ class HubBridgeTests(unittest.TestCase):
         self.assertEqual(command.call_args.args[0],
                          [G['native'], 'fleet', 'exec', 'gocc', '--', 'fleet', '_run-info', 'gocc-a1'])
 
+    def test_local_info_stop_and_bundle_prefix_native_and_bundle_on_executor(self):
+        responses = [
+            {'id': 'local-k1', 'result': {}}, {'ok': True}, {'branch': 'openswarm/local-k1', 'bundle': 'AA=='},
+        ]
+        command = mock.Mock(side_effect=responses)
+        with mock.patch.dict(G, {'local_command': command}):
+            self.assertEqual(MOD['local_gateway']({'op': 'info', 'id': 'local-k1', 'host': 'local'}), responses[0])
+            self.assertEqual(MOD['local_gateway']({'op': 'stop', 'id': 'local-k1', 'host': 'local'}), responses[1])
+            self.assertEqual(MOD['local_gateway']({'op': 'bundle', 'id': 'local-k1', 'host': 'local'}), responses[2])
+        self.assertEqual([call.args[0] for call in command.call_args_list], [
+            [G['native'], 'fleet', '_run-info', 'local-k1'],
+            [G['native'], 'stop', 'local-k1'],
+            [G['native'], 'fleet', '_bundle', 'local-k1'],
+        ])
+
+    def test_remote_bundle_is_built_on_its_executor_host(self):
+        command = mock.Mock(return_value={'branch': 'openswarm/gocc-a1', 'bundle': 'AA=='})
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'local_command': command}):
+            result = MOD['local_gateway']({'op': 'bundle', 'id': 'gocc-a1', 'host': 'gocc'})
+        self.assertEqual(result['branch'], 'openswarm/gocc-a1')
+        self.assertEqual(command.call_args.args[0],
+                         [G['native'], 'fleet', 'exec', 'gocc', '--', 'fleet', '_bundle', 'gocc-a1'])
+
     def test_local_router_keeps_unlisted_historical_host_on_legacy_gateway(self):
         legacy = mock.Mock(return_value={'id': 'old', 'result': {}})
         with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
@@ -64,6 +88,21 @@ class HubBridgeTests(unittest.TestCase):
             self.assertEqual(MOD['dispatch_gateway']({'op': 'info', 'id': 'old', 'host': 'old-host'}),
                              {'id': 'old', 'result': {}})
         legacy.assert_called_once()
+
+    def test_old_gocc_receipt_keeps_legacy_transport_after_direct_mode_is_enabled(self):
+        db = MOD['db_open']()
+        db.execute("INSERT INTO handoffs (request_id,state,run_id,host,created,route) VALUES (?,?,?,?,?,NULL)",
+                   ('old-request', 'accepted', 'old-gocc', 'gocc', 1))
+        db.close()
+        legacy = mock.Mock(return_value={'id': 'old-gocc', 'result': {'result': {'summary': 'done'}}})
+        local = mock.Mock()
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'gateway': legacy, 'local_gateway': local}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(MOD['mapped']('old-gocc', 'info'))
+        legacy.assert_called_once()
+        local.assert_not_called()
 
     def test_local_router_no_lane_is_rejected_without_pending_handoff(self):
         local = mock.Mock(side_effect=MOD['NoAvailableLane']('no available fleet lane'))

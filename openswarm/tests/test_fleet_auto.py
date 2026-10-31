@@ -73,6 +73,37 @@ class FleetAutoTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'fleet host configuration'):
                     G['fleet_hosts']()
 
+    def test_copilot_prefers_sonnet_for_hard_and_haiku_for_routine_work(self):
+        lanes = [
+            {'name': 'GH1', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-haiku-5.5'},
+            {'name': 'GH2', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-sonnet-5.5'},
+        ]
+        routine = G['available_in_preference'](lanes, ['copilot'], 'impl', 2)
+        hard = G['available_in_preference'](lanes, ['copilot'], 'impl', 4)
+        self.assertEqual([row['name'] for row in routine], ['GH1', 'GH2'])
+        self.assertEqual([row['name'] for row in hard], ['GH2', 'GH1'])
+
+    def test_configured_cli_and_wrapper_use_candidate_home_for_auto(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cli = root / 'fleet-cli'
+            cli.write_text('#!' + sys.executable + '\n'
+                           'import json,os,sys\n'
+                           'expected=os.path.join(os.environ["HOME"],".claude","openswarm-executor-candidate")\n'
+                           'if os.environ.get("OPENSWARM_HOME") != expected: raise SystemExit(9)\n'
+                           'if sys.argv[1:3] == ["lane","status"]:\n'
+                           ' print(json.dumps([{"name":"K1","state":"idle","backend":"cursor","model":"composer"}]))\n'
+                           'else: print(json.dumps([]))\n')
+            cli.chmod(0o755)
+            wrapper = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'openswarm-fleet'
+            env = {**os.environ, 'HOME': str(root), 'OPENSWARM_AUTO_CLI': str(cli),
+                   'OPENSWARM_AUTO_FLEET_HOSTS': '["gocc"]'}
+            result = subprocess.run([str(wrapper), 'auto', '--type', 'test', '--difficulty', '2',
+                                     '--base', 'abcdef0', '--prompt', 'task', '--dry-run'],
+                                    env=env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['host'], 'gores1')
+
     def test_review_uses_available_remote_lane_and_marks_read_only(self):
         def remote(req):
             if req['op'] == 'lanes':
