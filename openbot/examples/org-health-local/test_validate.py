@@ -534,6 +534,92 @@ class ValidateTest(unittest.TestCase):
         self.assertRegex(output["errors"][0]["message"], r"第 \d+ 行第 \d+ 列")
         self.assertEqual(result.stderr, "")
 
+    def test_command_line_multiple_valid_files_reports_exit_code_zero_and_passed(self) -> None:
+        """传入两个合格数据文件时退出码为 0，逐个打印校验通过。"""
+        with temporary_directory() as folder:
+            path1 = Path(folder) / "valid1.json"
+            path2 = Path(folder) / "valid2.json"
+            content = json.dumps(self.data, ensure_ascii=False)
+            path1.write_text(content, encoding="utf-8")
+            path2.write_text(content, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(path1), str(path2)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"{path1}: 校验通过", result.stdout)
+        self.assertIn(f"{path2}: 校验通过", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+    def test_command_line_mixed_files_reports_exit_code_one_and_details(self) -> None:
+        """传入一个合格文件与一个不合规文件时退出码为 1，合格文件输出通过、不合规文件输出具体错误路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = 3
+        with temporary_directory() as folder:
+            valid_path = Path(folder) / "valid.json"
+            broken_path = Path(folder) / "broken.json"
+            valid_path.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
+            broken_path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), str(valid_path), str(broken_path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{valid_path}: 校验通过", result.stdout)
+        self.assertIn(f"{broken_path}: 校验失败", result.stdout)
+        self.assertIn("/scope/schema版本", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+    def test_command_line_json_mixed_files_reports_summary_and_errors(self) -> None:
+        """传入合格与不合规文件并加 --json 参数时退出码为 1，stdout 输出包含全部文件在内的汇总状态与错误列表。"""
+        broken = copy.deepcopy(self.data)
+        broken["scope"]["schema版本"] = 3
+        with temporary_directory() as folder:
+            valid_path = Path(folder) / "valid.json"
+            broken_path = Path(folder) / "broken.json"
+            valid_path.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
+            broken_path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--json", str(valid_path), str(broken_path)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 1)
+        raw_stdout = result.stdout.strip()
+        output = json.loads(result.stdout)
+        self.assertEqual(raw_stdout, json.dumps(output, ensure_ascii=False))
+        self.assertFalse(output["ok"])
+        self.assertIsInstance(output["errors"], list)
+        self.assertEqual(len(output["errors"]), 1)
+        self.assertEqual(output["errors"][0]["path"], f"{broken_path}/scope/schema版本")
+        self.assertIn("/scope/schema版本", output["errors"][0]["message"])
+        self.assertEqual(result.stderr, "")
+
+    def test_command_line_json_multiple_valid_files_reports_summary(self) -> None:
+        """传入两个合格数据文件并加 --json 参数时退出码为 0，stdout 输出汇总状态为通过且错误列表为空。"""
+        with temporary_directory() as folder:
+            path1 = Path(folder) / "valid1.json"
+            path2 = Path(folder) / "valid2.json"
+            content = json.dumps(self.data, ensure_ascii=False)
+            path1.write_text(content, encoding="utf-8")
+            path2.write_text(content, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--json", str(path1), str(path2)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        raw_stdout = result.stdout.strip()
+        output = json.loads(result.stdout)
+        self.assertEqual(raw_stdout, json.dumps(output, ensure_ascii=False))
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["errors"], [])
+        self.assertEqual(output["schema_version"], 4)
+        self.assertEqual(result.stderr, "")
+
+
 
 if __name__ == "__main__":
     unittest.main()
