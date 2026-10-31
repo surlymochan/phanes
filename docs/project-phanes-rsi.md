@@ -5,6 +5,8 @@ issue 标签 `lane-ready` / `in-progress` / `lane-pr` 与看板状态的对应�
 
 看板是**执行视图**，GitHub issue 是**任务队列**；两者靠标签对齐，靠人/脚本维护。
 
+双模式现已具备冒烟 PR 证据：SSH fleet 与 GitHub issue bus 均有记录，可引用 #296/#297/#354 号段核对。
+
 ---
 
 ## 1. 看板地址
