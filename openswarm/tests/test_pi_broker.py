@@ -183,6 +183,71 @@ https.request = (_options, callback) => {
                 proc.wait(timeout=5)
                 proc.stderr.close()
 
+    def test_cancelled_request_releases_exactly_one_of_four_slots(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            marker = pathlib.Path(root, 'started')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https'); const fs = require('node:fs');
+const {EventEmitter} = require('node:events'); const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const count = Number(fs.existsSync(process.env.STARTED) ? fs.readFileSync(process.env.STARTED, 'utf8') : 0) + 1;
+    fs.writeFileSync(process.env.STARTED, String(count));
+    const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {}; upstream.complete = true;
+    callback(upstream); setTimeout(() => upstream.end('ok-' + count), 500);
+  }; return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), STARTED=str(marker))
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            active, replacement = [], None
+            def start_valid():
+                body = json.dumps({'model':'allowed-model','messages':[]}).encode()
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(3); client.connect(path)
+                client.sendall(b'POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n'
+                               + b'Content-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body)
+                return client
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+                active = [start_valid() for _ in range(4)]
+                while (not marker.exists() or marker.read_text() != '4') and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(marker.read_text(), '4')
+                blocked = UnixHTTP(path)
+                blocked.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                self.assertEqual(blocked.getresponse().status, 503); blocked.close()
+                active[0].close()
+                time.sleep(0.08)
+                replacement = start_valid()
+                while marker.read_text() != '5' and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(marker.read_text(), '5')
+                blocked = UnixHTTP(path)
+                blocked.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                self.assertEqual(blocked.getresponse().status, 503); blocked.close()
+                self.assertTrue(all(b'200' in client.recv(4096) for client in active[1:]))
+                self.assertIn(b'200', replacement.recv(4096))
+                for client in active[1:]: client.close()
+                replacement.close()
+            finally:
+                for client in active:
+                    try: client.close()
+                    except OSError: pass
+                if replacement is not None:
+                    try: replacement.close()
+                    except OSError: pass
+                proc.terminate(); proc.wait(timeout=5); proc.stderr.close()
+
     def test_rotation_waits_for_both_boundary_requests_to_finish(self):
         with tempfile.TemporaryDirectory() as root:
             module = pathlib.Path(root, 'auth.mjs')
