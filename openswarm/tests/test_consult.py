@@ -54,10 +54,7 @@ with open(os.path.join(log_dir, backend + ".json"), "w") as stream:
     started = time.clock_gettime(time.CLOCK_MONOTONIC) if hasattr(time, "clock_gettime") else time.time()
     json.dump({"argv": argv, "cwd": os.getcwd(), "started": started}, stream)
 if os.environ.get("FAKE_CONSULT_BARRIER"):
-    deadline = time.monotonic() + 5
     while not all(os.path.isfile(os.path.join(log_dir, name + ".json")) for name in ("agy", "pi")):
-        if time.monotonic() >= deadline:
-            sys.exit(9)
         time.sleep(0.01)
 if os.environ.get("FAKE_CONSULT_TIMEOUT_BACKEND") == backend:
     time.sleep(30)
@@ -236,11 +233,15 @@ class ConsultTests(unittest.TestCase):
 
     def test_executors_run_in_parallel(self):
         os.environ["FAKE_CONSULT_BARRIER"] = "1"
-        start = time.monotonic()
         code, result = self.run_consult(["agy", "pi"], deadline=0.25)
-        elapsed = time.monotonic() - start
         self.assertEqual(code, 0)
-        self.assertLess(elapsed, 3.0)
+        # Worktree creation and cleanup vary with a loaded runner. The executor
+        # start timestamps are the property this test needs to prove.
+        with open(os.path.join(self.logs, "agy.json"), encoding="utf-8") as stream:
+            agy_started = json.load(stream)["started"]
+        with open(os.path.join(self.logs, "pi.json"), encoding="utf-8") as stream:
+            pi_started = json.load(stream)["started"]
+        self.assertLess(abs(agy_started - pi_started), 1.0)
         self.assertTrue(all(row["valid"] for row in result["answers"]))
 
     def test_total_concurrency_cap_serializes_admission(self):
