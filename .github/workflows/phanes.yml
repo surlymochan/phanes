@@ -46,3 +46,25 @@ jobs:
       - run: bun run typecheck:node
       - run: bun run i18n:check
       - run: bun run build
+  openbot-scenario-tests:
+    name: OpenBot scenario tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run scenario unit tests
+        run: |
+          find openbot/examples/org-health-local -type f -name 'test_*.py' -print0 |
+            while IFS= read -r -d '' test_file; do
+              test_dir="$(dirname "$test_file")"
+              test_name="$(basename "$test_file" .py)"
+              (cd "$test_dir" && python -m unittest "$test_name" -v)
+            done
+      - name: Validate scenario data
+        run: python openbot/examples/org-health-local/validate.py
