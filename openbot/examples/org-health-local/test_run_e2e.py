@@ -181,6 +181,22 @@ elif role == 'builder':
                                        str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')])
         self.assertTrue((self.workdir / 'review.md').is_file())
 
+    def test_checker_failure_skips_review_and_returns_nonzero(self):
+        """站点自检失败时以非零退出，开启 --review 也不执行审查，且不打印预览命令。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 3), exit_code=5)
+        result = subprocess.run(self.command() + ['--review', '--reviewer', str(self.scripts[4])],
+                                capture_output=True, text=True)
+        # 失败结果明确：退出码非 0，报出失败步骤与检查器的退出码
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 检查', result.stderr)
+        self.assertIn('退出码 5', result.stderr)
+        # 阶段顺序不变：自检失败后审查者不被调用，也不写出审查记录
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker'])
+        self.assertFalse((self.workdir / REVIEW_REPORT).exists())
+        # 失败不误报为成功：不再打印成功路径才有的预览命令
+        self.assertNotIn('预览命令', result.stdout)
+
     def test_review_failure_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
             self.write_stub(path, role, failing=(index == 4))
