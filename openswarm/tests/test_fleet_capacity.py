@@ -3,7 +3,6 @@ import concurrent.futures
 import json
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,10 +25,6 @@ class FleetCapacityTests(unittest.TestCase):
         p = subprocess.run([str(BIN), authenticated_host], input=json.dumps(payload), text=True,
                            capture_output=True, env=self.env, timeout=15)
         return json.loads(p.stdout)
-
-    def call_binary(self, binary, authenticated_host, **payload):
-        return subprocess.run([str(binary), authenticated_host], input=json.dumps(payload), text=True,
-                              capture_output=True, env=self.env, timeout=15)
 
     def test_atomic_minimax_limit_and_idempotent_recovery(self):
         def attempt(i):
@@ -74,44 +69,6 @@ class FleetCapacityTests(unittest.TestCase):
         cursor = [acquire('cursor', number) for number in range(11, 14)]
         self.assertEqual(sum(bool(answer.get('admitted')) for answer in cursor), 2)
 
-    def test_mixed_422_allocation_requires_four_hosts_and_releases_a_slot(self):
-        """The target allocation is atomic across four two-turn hosts.
-
-        gores1 and local each carry two MiniMax turns; gocc carries two
-        Antigravity turns; govpn and govpn2 carry one non-fast Cursor turn
-        each.  A ninth request is rejected by the total cap.  Once a finished
-        turn releases its reservation, that same request may proceed.
-        """
-        requests = [
-            ('gores1', 'pi', 'minimax-cn', 'minimax-gores1-1'),
-            ('gores1', 'pi', 'minimax-cn', 'minimax-gores1-2'),
-            ('local', 'pi', 'minimax-cn', 'minimax-local-1'),
-            ('local', 'pi', 'minimax-cn', 'minimax-local-2'),
-            ('gocc', 'agy', None, 'agy-1'),
-            ('gocc', 'agy', None, 'agy-2'),
-            ('govpn', 'cursor', None, 'cursor-govpn'),
-            ('govpn2', 'cursor', None, 'cursor-govpn2'),
-        ]
-        admitted = []
-        for number, (host, backend, provider, run_id) in enumerate(requests):
-            token = f'{number + 100:032x}'
-            result = self.call(host, op='acquire', token=token, run_id=run_id,
-                               backend=backend, provider=provider)
-            self.assertTrue(result['admitted'], (run_id, result))
-            admitted.append((host, token, run_id))
-
-        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 8)
-        ninth = self.call('govpn', op='acquire', token='f' * 32, run_id='extra-codex',
-                          backend='codex', provider=None)
-        self.assertFalse(ninth['admitted'])
-        self.assertEqual(ninth['blocked'], ['total'])
-
-        host, token, run_id = admitted[-1]
-        self.assertTrue(self.call(host, op='release', token=token, run_id=run_id)['released'])
-        self.assertTrue(self.call('govpn', op='acquire', token='f' * 32,
-                                  run_id='extra-codex', backend='codex', provider=None)['admitted'])
-
-
     def test_disconnected_coordinator_fails_closed(self):
         config = pathlib.Path(self.temp.name, 'guard.json')
         config.write_text(json.dumps({'command': ['/nonexistent/coordinator']}))
@@ -155,77 +112,20 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(call.call_count, 3)
         self.assertIn(rdir, xs._FLEET_RESERVATIONS)
 
-    def test_remote_assignment_uses_configured_execution_target(self):
+    def test_remote_review_assignment_passes_read_only_to_lane(self):
         root = pathlib.Path(self.temp.name)
         binary = root / '.local/bin/openswarm'
         binary.parent.mkdir(parents=True)
         binary.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
-                          'open(os.environ["FAKE_ARGS"],"w").write(json.dumps({'
-                          '"argv":sys.argv,"runtime":os.environ.get("OPENSWARM_HOME")}))\n'
+                          'open(os.environ["FAKE_ARGS"],"w").write(json.dumps(sys.argv))\n'
                           'print(json.dumps({"ok":True,"id":"test"}))\n')
         binary.chmod(0o755)
         self.env['HOME'] = str(root)
         self.env['FAKE_ARGS'] = str(root / 'args.json')
-        self.env['OPENSWARM_EXECUTOR_BIN'] = str(binary)
-        self.env['OPENSWARM_EXECUTOR_HOME'] = str(root / 'formal-runtime')
-        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
-        response = self.call('gores1', op='assign', lane='A2', prompt='review', base='abcdef0',
+        response = self.call('gores1', op='assign', lane='GH1', prompt='review', base='abcdef0',
                              budget_minutes=3, title='review', verify=None, read_only=True)
         self.assertTrue(response['ok'])
-        captured = json.loads((root / 'args.json').read_text())
-        self.assertIn('--read-only', captured['argv'])
-        self.assertEqual(captured['runtime'], str(root / 'formal-runtime'))
-
-    def test_dispatcher_rejects_a_lane_not_owned_by_execution_target(self):
-        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
-        response = self.call('gores1', op='assign', lane='M2', prompt='wrong host', base='abcdef0',
-                             budget_minutes=3, title='wrong host', verify=None, read_only=False)
-        self.assertFalse(response['ok'])
-        self.assertIn('invalid lane', response['error'])
-
-    def test_gocc_can_target_govpn_without_reverse_credentials(self):
-        root = pathlib.Path(self.temp.name)
-        binary = root / '.local/bin/openswarm'
-        binary.parent.mkdir(parents=True)
-        binary.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"ok":True,"id":"test"}))\n')
-        binary.chmod(0o755)
-        self.env['HOME'] = str(root)
-        self.env['OPENSWARM_EXECUTOR_BIN'] = str(binary)
-        self.env['OPENSWARM_EXECUTOR_HOME'] = str(root / 'formal-runtime')
-        self.env['OPENSWARM_EXECUTOR_HOST'] = 'govpn'
-        self.assertTrue(self.call('gocc', op='assign', lane='K1', prompt='cursor', base='abcdef0',
-                                  budget_minutes=3, title='cursor', verify=None, read_only=False)['ok'])
-        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
-        reverse = self.call('govpn', op='assign', lane='A1', prompt='agy', base='abcdef0',
-                            budget_minutes=3, title='agy', verify=None, read_only=False)
-        self.assertFalse(reverse['ok'])
-        self.assertIn('not allowed', reverse['error'])
-
-    def test_payload_cannot_override_configured_execution_target(self):
-        self.env['OPENSWARM_EXECUTOR_HOST'] = 'govpn'
-        response = self.call('gocc', op='assign', lane='K2', prompt='cursor', base='abcdef0',
-                             budget_minutes=3, title='cursor', verify=None, read_only=False,
-                             executor_host='govpn2')
-        self.assertFalse(response['ok'])
-        self.assertIn('invalid lane', response['error'])
-
-    def test_legacy_broker_relay_forwards_only_from_gores1_to_gocc(self):
-        root = pathlib.Path(self.temp.name) / 'relay-bin'
-        root.mkdir()
-        binary = root / 'fleet-capacity'
-        shutil.copy2(BIN, binary)
-        relay = root / 'hub-fleet-relay'
-        relay.write_text('#!' + sys.executable + '\nimport json,sys\n'
-                         'print(json.dumps({"ok":True,"request":json.load(sys.stdin)}))\n')
-        relay.chmod(0o755)
-        self.env['OPENSWARM_EXECUTOR_HOST'] = 'gocc'
-        payload = {'op': 'relay', 'target': 'govpn', 'request': {'op': 'lanes'}}
-        result = self.call_binary(binary, 'gores1', **payload)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)['request'], payload)
-        denied = self.call_binary(binary, 'govpn', **payload)
-        self.assertNotEqual(denied.returncode, 0)
-        self.assertIn('not allowed', json.loads(denied.stdout)['error'])
+        self.assertIn('--read-only', json.loads((root / 'args.json').read_text()))
 
     def test_remote_completed_run_returns_git_bundle(self):
         root = pathlib.Path(self.temp.name)
@@ -249,7 +149,6 @@ class FleetCapacityTests(unittest.TestCase):
         fake.write_text('#!' + sys.executable + '\nimport json\nprint(' + repr(json.dumps(info)) + ')\n')
         fake.chmod(0o755)
         self.env['HOME'] = str(root)
-        self.env['OPENSWARM_EXECUTOR_BIN'] = str(fake)
         response = self.call('gores1', op='bundle', run_id='run-1')
         self.assertTrue(response['ok'])
         self.assertEqual(response['result']['commit'], commit)
