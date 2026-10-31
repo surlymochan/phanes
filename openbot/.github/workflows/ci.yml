@@ -473,6 +473,54 @@ jobs:
         if: ${{ !cancelled() }}
         run: bun run test:backup-model-failover
 
+      - name: Run the fleet turn gate E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/fleet-turn-gate-e2e.ts
+
+      - name: Run the fleet transport E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/fleet-turn-transport-e2e.ts
+
+      - name: Run the Codex fleet admission E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/app-server-fleet-e2e.ts
+
+      - name: Run the Pi fleet admission E2E test
+        if: ${{ !cancelled() }}
+        run: |
+          bun scripts/pi-fleet-e2e.ts
+          bun scripts/pi-fleet-e2e.ts --timeout
+          bun scripts/pi-fleet-e2e.ts --interrupt
+          bun scripts/pi-fleet-e2e.ts --idle
+          bun scripts/pi-fleet-e2e.ts --stop
+          bun scripts/pi-fleet-e2e.ts --release-stop
+          bun scripts/pi-fleet-e2e.ts --acquire-stop
+          bun scripts/pi-fleet-e2e.ts --compact-release-stop
+
+      - name: Run the fleet configuration E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/fleet-turn-config-e2e.ts
+
+      - name: Run the ACP fleet admission E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/acp-fleet-e2e.ts
+
+      - name: Run the Copilot fleet admission E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/copilot-fleet-e2e.ts
+
+      - name: Run the ACP stream loss E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/acp-stream-loss-e2e.ts
+
+      - name: Run the Codex compaction fleet deadline E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/codex-compaction-queue-e2e.ts --fleet-late
+
+      - name: Run the Codex compaction missing-start E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/codex-compaction-queue-e2e.ts --fleet-no-start
+
       - name: Run the ZIP attachment E2E test
         if: ${{ !cancelled() }}
         run: bun run test:zip-attachments
@@ -581,6 +629,15 @@ jobs:
             .openbot-build/claude-late-steer-e2e/
             .openbot-build/provider-session-reuse-e2e/
             .openbot-build/backup-model-failover-e2e/
+            .openbot-build/fleet-turn-gate-e2e/
+            .openbot-build/fleet-turn-transport-e2e/
+            .openbot-build/app-server-fleet-e2e/
+            .openbot-build/pi-fleet-e2e/
+            .openbot-build/acp-fleet-e2e/
+            .openbot-build/copilot-fleet-e2e/
+            .openbot-build/acp-stream-loss-e2e/
+            .openbot-build/fleet-turn-config-e2e/
+            .openbot-build/codex-compaction-fleet-late-e2e/
             .openbot-build/zip-attachment-e2e/
             .openbot-build/mp4-attachment-e2e/
             .openbot-build/agent-mcp-tools-e2e/

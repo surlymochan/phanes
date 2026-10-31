@@ -34,6 +34,7 @@ import {
 } from "./acp-configuration";
 import { AcpConnection, type AcpConnectionOptions } from "./acp-connection";
 import type { AcpFlavor } from "./acp-flavor";
+import { configuredFleetTurnGate } from "./agent/fleet-turn-config";
 import { acpPlanSteps, PLAN_UPDATED_METHOD } from "./agent/plan-updates";
 import { elicitationOptions, elicitationValue, secretElicitationField } from "./agent/prompts";
 import type { AgentProvider, DiagnosticOrigin } from "./agent-client";
@@ -267,6 +268,8 @@ export const OPENBOT_ACP_CLIENT_INFO = { name: "openbot", title: "OpenBot", vers
 
 export interface AcpProviderOptions {
   provider: AgentProvider;
+  /** Explicit fleet mapping for a known custom ACP executable. */
+  fleetBackend?: "copilot";
   /** Durable history supplied by the database. ACP never owns a full conversation snapshot. */
   history?: AcpHistoryPersistence | undefined;
   /** The name in error text. The provider name when absent; a custom agent gives its own. */
@@ -428,6 +431,16 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
   /** The answer text of the private prompt in progress. One prompt runs at a time. */
   #privateAnswer: string[] | null = null;
   readonly #privatePromptLock = Semaphore.makeUnsafe(1);
+  readonly #privatePrompts = new Map<string, Deferred.Deferred<string, ProviderClientOperationError>>();
+  readonly #fleet: ReturnType<typeof configuredFleetTurnGate>;
+  readonly #fleetBackend: "cursor" | "agy" | "copilot" | null;
+  readonly #fleetThreads = new Map<string, string>();
+  readonly #fleetSent = new Set<string>();
+  readonly #fleetCompleting = new Set<string>();
+  readonly #fleetReleases = new Set<Promise<void>>();
+  readonly #fleetAdmissions = new Set<Promise<void>>();
+  readonly #fleetPendingStarts = new Map<string, AbortController>();
+  #stopping = false;
   readonly #serverRequests = new PendingServerRequests((request) => this.emit("request", request));
   #initialized: Deferred.Deferred<void, ProviderClientOperationError> | null = null;
   #scope = Scope.makeUnsafe();
@@ -444,6 +457,32 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
     private readonly options: AcpProviderOptions,
   ) {
     super();
+    this.#fleetBackend =
+      options.fleetBackend ??
+      (options.provider === "cursor" ? "cursor" : options.provider === "antigravity" ? "agy" : null);
+    this.#fleet = this.#fleetBackend ? configuredFleetTurnGate() : null;
+    this.on("notification", (notification) => {
+      if (notification.method !== "turn/completed" || !this.#fleet) return;
+      const threadId = getString(notification.params, "threadId");
+      const turnId = getString(getRecord(notification.params, "turn"), "id");
+      if (!threadId || !turnId || !this.#fleetThreads.has(threadId)) return;
+      if (this.#threads.get(threadId)?.activeTurn?.abandoned) {
+        this.#retainFleetTurn(threadId);
+        return;
+      }
+      this.#fleetCompleting.add(threadId);
+      const release = runCauseEffect(this.#fleet.completed(threadId, turnId))
+        .then(() => {
+          if (!this.#fleet?.has(threadId)) {
+            this.#fleetThreads.delete(threadId);
+            this.#fleetSent.delete(threadId);
+          }
+        })
+        .catch(() => this.emit("diagnostic", sourceText("error.provider.fleetUnavailable")))
+        .then(() => undefined)
+        .finally(() => this.#fleetCompleting.delete(threadId));
+      this.#trackFleetRelease(release);
+    });
     this.#flavor = options.flavor;
     this.#transport = new AcpConnection({
       provider: options.provider,
@@ -473,7 +512,10 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
         if (failedTurn && failedTurn.sdkFailureAt === null) failedTurn.sdkFailureAt = failedTurn.text.length;
         this.emit("diagnostic", message, origin);
       },
-      exit: (error) => this.emit("exit", error),
+      exit: (error) => {
+        this.#retainFleetTurns();
+        this.emit("exit", error);
+      },
       client: () => ({
         requestPermission: (params) => runCauseEffect(this.#requestPermission(params)),
         sessionUpdate: (params) => this.#sessionUpdate(params),
@@ -635,11 +677,12 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
   }
 
   get running(): boolean {
-    return this.#transport.running;
+    return this.#transport.running && !this.#stopping;
   }
 
   start(): void {
-    if (this.running) return;
+    if (this.#transport.running) return;
+    this.#stopping = false;
     this.#scope = Scope.makeUnsafe();
     this.#transport.start();
   }
@@ -647,6 +690,10 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
   readonly stop = Effect.fn("AcpAgentClient.stop")(function* (
     this: AcpAgentClient,
   ): Effect.fn.Return<void, ProviderClientOperationError> {
+    this.#stopping = true;
+    this.#retainFleetTurns();
+    yield* Effect.promise(() => Promise.all([...this.#fleetAdmissions]).then(() => undefined));
+    yield* Effect.promise(() => Promise.all([...this.#fleetReleases]).then(() => undefined));
     yield* this.#transport
       .stop(
         Effect.gen({ self: this }, function* () {
@@ -661,6 +708,139 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
       )
       .pipe(Effect.ensuring(Scope.close(this.#scope, Exit.void)));
   }, Effect.uninterruptible);
+
+  readonly #admitFleetTurn = Effect.fn("AcpAgentClient.admitFleetTurn")(function* (
+    this: AcpAgentClient,
+    id: string,
+    signal?: AbortSignal,
+  ) {
+    const gate = this.#fleet;
+    const backend = this.#fleetBackend;
+    if (!gate || !backend) return;
+    let finishAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      finishAdmission = resolve;
+    });
+    this.#fleetAdmissions.add(admission);
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen({ self: this }, function* () {
+        while (true) {
+          if (!this.running || this.#stopping || signal?.aborted)
+            return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
+          if (gate.requiresRecovery(backend))
+            return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
+          if (
+            !gate.has(id) &&
+            (yield* gate
+              .begin(id, backend, null)
+              .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable"))))))
+          ) {
+            if (!this.running || this.#stopping || signal?.aborted) {
+              yield* gate
+                .cancelBeforeSend(id)
+                .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+              return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
+            }
+            const reservation = gate.reservationId(id);
+            if (!reservation)
+              return yield* providerFailure(new Error(sourceText("error.provider.fleetIdentityUnconfirmed")));
+            this.#fleetThreads.set(id, reservation);
+            return;
+          }
+          yield* restore(
+            Effect.raceFirst(
+              Effect.sleep(1_000),
+              Effect.callback<void, ProviderClientOperationError>((resume) => {
+                const aborted = () =>
+                  resume(Effect.fail(providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+                if (signal?.aborted) aborted();
+                else signal?.addEventListener("abort", aborted, { once: true });
+                return Effect.sync(() => signal?.removeEventListener("abort", aborted));
+              }),
+            ),
+          );
+        }
+      }),
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#fleetAdmissions.delete(admission);
+          finishAdmission();
+        }),
+      ),
+    );
+  });
+
+  #retainFleetTurn(id: string): void {
+    const reservation = this.#fleetThreads.get(id);
+    if (reservation && this.#fleet?.owns(id, reservation)) this.#fleet.uncertain(id);
+  }
+
+  #trackFleetRelease(release: Promise<void>): void {
+    this.#fleetReleases.add(release);
+    void release.finally(() => this.#fleetReleases.delete(release));
+  }
+
+  #completePrivateFleetTurn(id: string): Effect.Effect<void, ProviderClientOperationError> {
+    const gate = this.#fleet;
+    if (!gate) return Effect.void;
+    return Effect.gen({ self: this }, function* () {
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      this.#fleetCompleting.add(id);
+      this.#fleetReleases.add(pending);
+      yield* gate.completed(id, id).pipe(
+        Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (!gate.has(id)) {
+              this.#fleetThreads.delete(id);
+              this.#fleetSent.delete(id);
+            }
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            this.#fleetCompleting.delete(id);
+            this.#fleetReleases.delete(pending);
+            finish();
+          }),
+        ),
+      );
+    });
+  }
+
+  #retainFleetTurns(): void {
+    for (const controller of this.#fleetPendingStarts.values()) controller.abort();
+    for (const id of this.#fleetThreads.keys()) {
+      if (this.#fleetCompleting.has(id)) continue;
+      if (this.#fleetSent.has(id)) {
+        this.#retainFleetTurn(id);
+        this.#fleetThreads.delete(id);
+        this.#fleetSent.delete(id);
+      } else {
+        this.#trackFleetRelease(
+          runCauseEffect(this.#cancelOrRetainFleetTurn(id)).catch(() => this.#retainFleetTurn(id)),
+        );
+      }
+    }
+  }
+
+  #cancelOrRetainFleetTurn(id: string): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const gate = this.#fleet;
+      const reservation = this.#fleetThreads.get(id);
+      if (!gate || !reservation || !gate.owns(id, reservation)) return;
+      if (this.#fleetSent.has(id)) {
+        this.#retainFleetTurn(id);
+        return;
+      }
+      yield* gate.cancelBeforeSend(id).pipe(Effect.catch(() => Effect.sync(() => this.#retainFleetTurn(id))));
+      if (!gate.has(id)) this.#fleetThreads.delete(id);
+    });
+  }
 
   readonly readSessionSettings = Effect.fn("AcpAgentClient.readSessionSettings")(function* (
     this: AcpAgentClient,
@@ -763,21 +943,39 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
     if (!this.running) return yield* providerFailure(new Error("ACP client is not running."));
     yield* this.#ensureInitializedEffect();
     if (!this.#signedIn) return null;
-    // The time limit starts when the lock is held, so a prompt that waits for another one keeps its time.
-    const answer = yield* this.#privatePromptLock.withPermit(
-      this.#privatePromptOnce(prompt).pipe(
-        Effect.timeoutOrElse({
-          duration: this.#requestTimeoutMs,
-          orElse: () =>
-            Effect.fail(providerFailure(new TimeoutError(`${this.#label} request timed out: usage prompt`))),
-        }),
-      ),
-    );
+    const answer = yield* this.#privatePrompt(prompt);
     return this.#redact(answer).trim() || null;
   });
 
   #privatePrompt(text: string): Effect.Effect<string, ProviderClientOperationError> {
-    return this.#privatePromptLock.withPermit(this.#privatePromptOnce(text));
+    return Effect.gen({ self: this }, function* () {
+      const existing = this.#privatePrompts.get(text);
+      if (existing) return yield* Deferred.await(existing);
+      const result = Deferred.makeUnsafe<string, ProviderClientOperationError>();
+      this.#privatePrompts.set(text, result);
+      const prompt = this.#privatePromptLock.withPermit(
+        this.#privatePromptOnce(text).pipe(
+          Effect.timeoutOrElse({
+            duration: this.#requestTimeoutMs,
+            orElse: () =>
+              Effect.fail(providerFailure(new TimeoutError(`${this.#label} request timed out: usage prompt`))),
+          }),
+        ),
+      );
+      yield* Effect.forkIn(
+        prompt.pipe(
+          Effect.onExit((exit) =>
+            Deferred.done(result, exit).pipe(
+              Effect.andThen(Effect.sync(() => this.#privatePrompts.delete(text))),
+              Effect.asVoid,
+            ),
+          ),
+        ),
+        this.#scope,
+        { startImmediately: true },
+      );
+      return yield* Deferred.await(result);
+    });
   }
 
   /**
@@ -797,20 +995,45 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
       this.#privateSession = { connection, sessionId };
     }
     const { sessionId } = this.#privateSession;
-    const answer: string[] = [];
-    this.#privateAnswer = answer;
-    return yield* providerCall(() => connection.prompt({ sessionId, prompt: [{ type: "text", text }] })).pipe(
-      Effect.map(() => answer.join("")),
-      Effect.onExit((exit) =>
-        Effect.gen({ self: this }, function* () {
-          this.#privateAnswer = null;
-          if (!Exit.hasInterrupts(exit)) return;
-          this.#privateSession = null;
-          // `session/cancel` is a notification, so this does not wait for the agent.
-          yield* providerCall(() => connection.cancel({ sessionId })).pipe(Effect.ignore);
-        }),
-      ),
-    );
+    const fleetId = `private-${randomUUID()}`;
+    return yield* Effect.gen({ self: this }, function* () {
+      if (this.#fleet) {
+        yield* this.#admitFleetTurn(fleetId);
+        this.#fleet.sent(fleetId);
+        this.#fleetSent.add(fleetId);
+        yield* this.#fleet
+          .started(fleetId, fleetId)
+          .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+      }
+      const answer: string[] = [];
+      this.#privateAnswer = answer;
+      const result = yield* providerCall(() => connection.prompt({ sessionId, prompt: [{ type: "text", text }] })).pipe(
+        Effect.map(() => answer.join("")),
+        Effect.onExit((exit) =>
+          Effect.gen({ self: this }, function* () {
+            this.#privateAnswer = null;
+            if (!Exit.hasInterrupts(exit)) return;
+            this.#privateSession = null;
+            // `session/cancel` is a notification, so this does not wait for the agent.
+            yield* providerCall(() => connection.cancel({ sessionId })).pipe(Effect.ignore);
+          }),
+        ),
+        Effect.catch((error) =>
+          Effect.gen({ self: this }, function* () {
+            if (error.cause instanceof RequestError && this.#fleet) {
+              yield* this.#completePrivateFleetTurn(fleetId);
+            } else {
+              this.#retainFleetTurn(fleetId);
+            }
+            return yield* error;
+          }),
+        ),
+      );
+      if (this.#fleet) {
+        yield* this.#completePrivateFleetTurn(fleetId);
+      }
+      return result;
+    }).pipe(Effect.onError(() => this.#cancelOrRetainFleetTurn(fleetId)));
   });
 
   readonly request = Effect.fn("AcpAgentClient.request")(function* <T>(
@@ -977,7 +1200,39 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
         return yield* providerSync(() => decoder({ thread: { id: threadId, turns: [] } }));
       }
       case "turn/start": {
-        const response = yield* this.#startTurnEffect(params);
+        const threadId = yield* providerSync(() => requiredString(params, "threadId"));
+        const controller = this.#fleet ? new AbortController() : null;
+        const previousReservation = this.#fleetThreads.get(threadId);
+        if (controller && this.#fleetPendingStarts.has(threadId))
+          return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
+        if (controller) this.#fleetPendingStarts.set(threadId, controller);
+        const response = yield* Effect.gen({ self: this }, function* () {
+          if (this.#fleet) {
+            yield* this.#admitFleetTurn(threadId, controller?.signal);
+          }
+          return yield* this.#startTurnEffect(params);
+        }).pipe(
+          Effect.onError(() =>
+            this.#fleetThreads.get(threadId) !== previousReservation
+              ? this.#cancelOrRetainFleetTurn(threadId)
+              : Effect.void,
+          ),
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (controller && this.#fleetPendingStarts.get(threadId) === controller)
+                this.#fleetPendingStarts.delete(threadId);
+            }),
+          ),
+        );
+        if (this.#fleet) {
+          yield* this.#fleet
+            .started(threadId, response.turn.id)
+            .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+          if (!this.#fleet.has(threadId)) {
+            this.#fleetThreads.delete(threadId);
+            this.#fleetSent.delete(threadId);
+          }
+        }
         return yield* providerSync(() => decoder(response));
       }
       case "turn/steer": {
@@ -1001,6 +1256,11 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
       }
       case "turn/interrupt": {
         const threadId = yield* providerSync(() => requiredString(params, "threadId"));
+        const pending = this.#fleetPendingStarts.get(threadId);
+        if (pending && !this.#fleetSent.has(threadId)) {
+          pending.abort();
+          return yield* providerSync(() => decoder({}));
+        }
         // A closed idle session has no turn to stop.
         if (this.#threads.isReleased(threadId)) return yield* providerSync(() => decoder({}));
         const thread = yield* providerSync(() => this.#requireThread(threadId));
@@ -1773,8 +2033,14 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
       abandoned: false,
       reportedCost: null,
     };
+    if (this.#fleetPendingStarts.get(threadId)?.signal.aborted)
+      return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
     thread.activeTurn = turn;
     this.#threads.holdForTurn(thread);
+    if (this.#fleet) {
+      this.#fleet.sent(threadId);
+      this.#fleetSent.add(threadId);
+    }
     this.emit("notification", {
       method: "turn/started",
       params: { threadId: thread.id, turn: { id: turn.id, status: "inProgress" } },
@@ -1801,10 +2067,12 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
     turn: AcpTurn,
     prompt: ContentBlock[],
   ): Effect.fn.Return<void, ProviderClientOperationError> {
+    let responseConfirmed = false;
     try {
       const response = providerResult(
         yield* Effect.result(providerCall(() => this.#requireConnection().prompt({ sessionId: thread.id, prompt }))),
       );
+      responseConfirmed = true;
       if (thread.activeTurn !== turn || turn.completing) return;
       // `promptId` names this result: a delivery that runs again keeps its turn ID.
       if (response.usage)
@@ -1851,6 +2119,8 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
         status === "failed" ? (turn.providerError ?? response.stopReason) : null,
       );
     } catch (error) {
+      // A broken ACP stream does not prove the provider stopped its in-flight prompt.
+      if (!responseConfirmed && !(error instanceof RequestError)) turn.abandoned = true;
       yield* this.#completeTurn(thread, turn, turn.stopped ? "interrupted" : "failed", turn.stopped ? null : error);
     }
   });

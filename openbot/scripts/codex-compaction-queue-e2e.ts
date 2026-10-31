@@ -15,7 +15,14 @@ import { Effect } from "effect";
 import type { AgentBrowserHost } from "../src/backend/agent/turn-lifecycle";
 import { getString, isRecord } from "../src/backend/protocol";
 
-const OUT = resolve(import.meta.dirname, "../.openbot-build/codex-compaction-queue-e2e");
+const OUT = resolve(
+  import.meta.dirname,
+  process.argv.includes("--fleet-no-start")
+    ? "../.openbot-build/codex-compaction-fleet-no-start-e2e"
+    : process.argv.includes("--fleet-late")
+      ? "../.openbot-build/codex-compaction-fleet-late-e2e"
+      : "../.openbot-build/codex-compaction-queue-e2e",
+);
 const root = await mkdtemp(join(tmpdir(), "openbot-compaction-queue-"));
 const userData = join(root, "user-data");
 const home = join(root, "home");
@@ -23,6 +30,8 @@ const logPath = join(root, "protocol.jsonl");
 const controlPath = join(root, "control.json");
 const fakeCodex = join(root, "codex");
 const COMPACTION_TIMEOUT_MS = 1_500;
+const fleetNoStart = process.argv.includes("--fleet-no-start");
+const fleetLate = process.argv.includes("--fleet-late") || fleetNoStart;
 
 // Before the service modules load: the Codex process and the stores read the home folder.
 process.env.HOME = home;
@@ -31,6 +40,23 @@ process.env.OPENBOT_CODEX_PATH = fakeCodex;
 process.env.OPENBOT_FAKE_CODEX_LOG = logPath;
 process.env.OPENBOT_FAKE_CODEX_CONTROL = controlPath;
 mkdirSync(home, { recursive: true });
+if (fleetLate) {
+  const coordinator = join(root, "coordinator.mjs");
+  const fleetConfig = join(root, "fleet.json");
+  writeFileSync(
+    coordinator,
+    `
+import { readFileSync } from 'node:fs';
+const request = JSON.parse(readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify(request.op === 'acquire' ? {ok:true, admitted:true} : {ok:true, released:true}));
+`,
+  );
+  writeFileSync(
+    fleetConfig,
+    JSON.stringify({ journalDirectory: join(root, "journal"), command: [process.execPath, coordinator] }),
+  );
+  process.env.OPENBOT_FLEET_CAPACITY_CONFIG = fleetConfig;
+}
 
 const { AgentService } = await import("../src/backend/agent-service");
 const { AgentStore } = await import("../src/backend/agent-store");
@@ -96,12 +122,10 @@ const answer = (message) => {
       return;
     }
     case "thread/compact/start": {
-      const { compactionMs, ignoreInterrupt } = control();
+      const { compactionMs, ignoreInterrupt, delayStartMs = 0 } = control();
       const turnId = "compact-turn-" + (++turns);
       const item = { type: "contextCompaction", id: "compact-item-" + turnId };
       write({ id: message.id, result: {} });
-      write({ method: "turn/started", params: { threadId: params.threadId, turn: { id: turnId } } });
-      write({ method: "item/started", params: { threadId: params.threadId, turnId, item } });
       const finish = (status) => {
         if (compacting.get(params.threadId)?.turnId !== turnId) return;
         compacting.delete(params.threadId);
@@ -110,8 +134,12 @@ const answer = (message) => {
         if (status === "completed") write({ method: "item/completed", params: { threadId: params.threadId, turnId, item } });
         write({ method: "turn/completed", params: { threadId: params.threadId, turn: { id: turnId, status } } });
       };
-      const timer = setTimeout(() => finish("completed"), compactionMs);
+      const timer = setTimeout(() => finish("completed"), compactionMs + delayStartMs);
       compacting.set(params.threadId, { turnId, finish, ignoreInterrupt });
+      setTimeout(() => {
+        write({ method: "turn/started", params: { threadId: params.threadId, turn: { id: turnId } } });
+        write({ method: "item/started", params: { threadId: params.threadId, turnId, item } });
+      }, delayStartMs);
       return;
     }
     case "turn/interrupt": {
@@ -243,11 +271,26 @@ const agents = new AgentService({
 try {
   await runCauseEffect(agents.initialize());
 
-  const cases = [
-    { name: "compaction ends by itself", compactionMs: 400, ignoreInterrupt: false, end: "completed" },
-    { name: "deadline stops the compaction", compactionMs: 60_000, ignoreInterrupt: false, end: "interrupted" },
-    { name: "refused start waits for the compaction", compactionMs: 4_000, ignoreInterrupt: true, end: "completed" },
-  ] as const;
+  const cases = fleetLate
+    ? ([
+        {
+          name: "late compaction is stopped after admission",
+          compactionMs: 60_000,
+          delayStartMs: fleetNoStart ? 60_000 : 2_000,
+          ignoreInterrupt: false,
+          end: "interrupted",
+        },
+      ] as const)
+    : ([
+        { name: "compaction ends by itself", compactionMs: 400, ignoreInterrupt: false, end: "completed" },
+        { name: "deadline stops the compaction", compactionMs: 60_000, ignoreInterrupt: false, end: "interrupted" },
+        {
+          name: "refused start waits for the compaction",
+          compactionMs: 4_000,
+          ignoreInterrupt: true,
+          end: "completed",
+        },
+      ] as const);
 
   for (const [index, entry] of cases.entries()) {
     await writeFile(controlPath, JSON.stringify(entry));
@@ -302,6 +345,12 @@ try {
     };
     report.cases.push(result);
     assert.equal(result.statusWhileCompacting, "queued", `${entry.name}: the message did not wait`);
+    if (fleetNoStart) {
+      assert.equal(result.finalStatus, "failed", "stalled provider was stopped");
+      assert.equal(result.interruptSent, false, "no unknown turn id was interrupted");
+      result.passed = true;
+      continue;
+    }
     assert.equal(result.finalStatus, "completed", `${entry.name}: ${result.finalError ?? result.finalStatus}`);
     assert.equal(result.compactionEnd, entry.end, `${entry.name}: the compaction did not end as expected`);
     assert.equal(result.interruptSent, entry.compactionMs > COMPACTION_TIMEOUT_MS, `${entry.name}: turn/interrupt`);

@@ -1008,6 +1008,11 @@ function customAgentChild(
   const values = config.env.map((entry) => entry.value);
   return new AcpAgentClient({ executable, version: "", source: "system" }, timeout, {
     provider: "acp",
+    ...(config.id === "copilot" ||
+    /^copilot(?:\.exe|\.cmd)?$/iu.test(basename(config.command)) ||
+    /^copilot(?:\.exe|\.cmd)?$/iu.test(basename(executable))
+      ? { fleetBackend: "copilot" as const }
+      : {}),
     flavor: customAgentFlavor(config.command),
     label: config.name,
     allowNoModels: true,

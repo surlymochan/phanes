@@ -831,6 +831,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       providers: this.#providers,
       emitError: (code, error, agentId) => this.#emitError(code, error, agentId),
       scheduleDrain: (agentId) => this.#drain.scheduleDrain(agentId),
+      stopUnresponsiveClient: (client) => this.#providers.stopUnresponsiveClient(client),
       rotateSession: (agentId, client, threadId) => this.#threads.rotateProviderSession(agentId, client, threadId),
       rotatesSession: (agentId, threadId) => this.#threads.rotatesSession(agentId, threadId),
       compacted: (threadId) => {

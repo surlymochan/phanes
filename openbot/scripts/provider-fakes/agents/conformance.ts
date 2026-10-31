@@ -4,6 +4,7 @@
 //   the agent does not have (`gone-…`). Each form is the one that the provider's flavor recognizes.
 // - `FAKE_SIGNED_OUT=1` refuses each new session, as an agent does before its sign-in.
 // A prompt with the text `wait` runs until the client cancels it. Each other prompt answers at once.
+import { closeSync, fstatSync } from "node:fs";
 import {
   type AcpError,
   type AcpParams,
@@ -103,6 +104,24 @@ serveFakeAcpAgent(
       const sessionId = request.params.sessionId ?? "";
       const text = promptText(request.params);
       logEntry({ event: "prompt", sessionId, model: models.get(sessionId) ?? null, text });
+      if (text.trim() === "drop-stream") {
+        const stdout = fstatSync(1);
+        for (let fd = 3; fd < 64; fd++) {
+          try {
+            const candidate = fstatSync(fd);
+            if (candidate.dev === stdout.dev && candidate.ino === stdout.ino) closeSync(fd);
+          } catch {
+            // Most descriptor numbers are unused.
+          }
+        }
+        closeSync(1);
+        setInterval(() => {}, 60_000);
+        return;
+      }
+      if (text.trim() === "reject-prompt") {
+        peer.fail(request, { code: -32000, message: "Prompt rejected" });
+        return;
+      }
       if (text.trim() === "wait") {
         waiting.set(sessionId, () => peer.reply(request, { stopReason: "cancelled" }));
         return;
@@ -114,6 +133,7 @@ serveFakeAcpAgent(
   {
     onNotification: (method, params) => {
       if (method !== "session/cancel") return;
+      if (process.env.FAKE_IGNORE_CANCEL === "1") return;
       const sessionId = params.sessionId ?? "";
       logEntry({ event: "cancel", sessionId });
       waiting.get(sessionId)?.();

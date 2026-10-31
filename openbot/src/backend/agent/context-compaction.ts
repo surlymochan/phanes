@@ -16,6 +16,7 @@ interface ThreadContextBudget {
   /** `stopping`: the deadline asked Codex to stop the compaction turn, and the queue waits for its end. */
   phase: "idle" | "requested" | "running" | "stopping";
   compactionTurnId: string | null;
+  deadlineExpired?: boolean;
   lastCompactedTokens: number | null;
 }
 
@@ -31,6 +32,7 @@ export interface ContextCompactionOptions {
   providers: ProviderPort;
   emitError(code: string, error: unknown, agentId?: string): void;
   scheduleDrain(agentId: string): void;
+  stopUnresponsiveClient?(client: AgentClient): void;
   /** Replaces the session for a `handoff` compaction. The new session, or `null` when none replaced it. */
   rotateSession(
     agentId: string,
@@ -75,6 +77,7 @@ export class ContextCompaction {
   readonly #providers: ProviderPort;
   readonly #emitError: (code: string, error: unknown, agentId?: string) => void;
   readonly #scheduleDrain: (agentId: string) => void;
+  readonly #stopUnresponsiveClient: (client: AgentClient) => void;
   readonly #rotateSession: ContextCompactionOptions["rotateSession"];
   readonly #rotatesSession: ContextCompactionOptions["rotatesSession"];
   readonly #budgets = new Map<string, ThreadContextBudget>();
@@ -93,6 +96,7 @@ export class ContextCompaction {
   #usageTimer: NodeJS.Timeout | null = null;
 
   constructor(options: ContextCompactionOptions) {
+    this.#stopUnresponsiveClient = options.stopUnresponsiveClient ?? ((client) => Effect.runFork(client.stop()));
     this.#changed = options.changed ?? (() => {});
     this.#compacted = options.compacted ?? (() => {});
     this.#timeoutMs = options.timeoutMs ?? CONTEXT_COMPACTION_TIMEOUT_MS;
@@ -307,7 +311,25 @@ export class ContextCompaction {
       );
       const turnId = budget.compactionTurnId;
       if (budget.phase === "running" && turnId) this.#stop(agentId, threadId, client, turnId);
-      else this.#abandon(agentId, threadId);
+      else {
+        // A sent request may still start later; retain its lane until its outcome is known.
+        if (client.cancelPendingCompaction?.(threadId) === false) {
+          budget.deadlineExpired = true;
+          const grace = setTimeout(
+            () => {
+              if (budget.phase !== "requested" || !budget.deadlineExpired) return;
+              // No start event arrived: stop the uncertain provider before releasing the lane.
+              this.#stopUnresponsiveClient(client);
+              this.#abandon(agentId, threadId);
+            },
+            Math.max(this.#graceMs, 5_000),
+          );
+          grace.unref?.();
+          this.#timers.set(threadId, grace);
+          return;
+        }
+        this.#abandon(agentId, threadId);
+      }
     }, this.#timeoutMs);
     timer.unref?.();
     this.#timers.set(threadId, timer);
@@ -355,6 +377,10 @@ export class ContextCompaction {
     if (budget?.phase !== "requested" || this.#compacting.get(threadId)?.agentId !== agentId) return false;
     budget.phase = "running";
     budget.compactionTurnId = turnId;
+    if (budget.deadlineExpired) {
+      const client = this.#compacting.get(threadId)?.client;
+      if (client) this.#stop(agentId, threadId, client, turnId);
+    }
     return true;
   }
 
@@ -540,6 +566,7 @@ export class ContextCompaction {
       budget.pending = false;
       budget.phase = "idle";
       budget.compactionTurnId = null;
+      delete budget.deadlineExpired;
     }
     if (this.#compacting.get(threadId)?.agentId === agentId) this.#compacting.delete(threadId);
   }

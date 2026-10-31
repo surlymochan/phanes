@@ -7,6 +7,7 @@ import { type DynamicRecord, isBoolean, isString } from "@openbot/contracts/runt
 import { sourceText } from "@openbot/i18n/source";
 import { redactText } from "@openbot/logging";
 import { Effect, Exit, Schema, Scope, Semaphore } from "effect";
+import { configuredFleetTurnGate } from "./agent/fleet-turn-config";
 import { secretElicitationField } from "./agent/prompts";
 import { type AgentClient, type DiagnosticOrigin, MissingPiSessionError, RequestTimeoutError } from "./agent-client";
 import { type AgentCliInfo, cliPathEnvironment, cliSpawnTarget } from "./cli";
@@ -122,6 +123,7 @@ interface ClientEvents {
   request: [AppServerRequest];
   exit: [Error];
   diagnostic: [string, DiagnosticOrigin?];
+  "fleet-release-drain": [number];
 }
 
 /** Owns Pi's native sessions. The database owns OpenBot history and agent identity. */
@@ -136,6 +138,15 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
   readonly #opening = Semaphore.makeUnsafe(1);
   /** Processes of opens in flight. They are not in `#threads` until the open retains them. */
   readonly #starting = new Set<PiRpc>();
+  readonly #fleet = configuredFleetTurnGate();
+  readonly #fleetThreads = new Map<string, string>();
+  readonly #fleetSent = new Set<string>();
+  readonly #fleetCompleting = new Set<string>();
+  readonly #fleetReleases = new Set<Promise<void>>();
+  readonly #fleetAdmissions = new Set<Promise<void>>();
+  readonly #fleetPendingStarts = new Map<string, AbortController>();
+  readonly #fleetPendingCompactions = new Map<string, AbortController>();
+  readonly #compacting = new Set<string>();
   #scope = Scope.makeUnsafe();
   #running = false;
   constructor(
@@ -154,7 +165,8 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
       this.#running = true;
     }
   }
-  canReleaseProcess = (): boolean => [...this.#threads.values()].every((thread) => thread.turn === null);
+  canReleaseProcess = (): boolean =>
+    this.#compacting.size === 0 && [...this.#threads.values()].every((thread) => thread.turn === null);
   notify(): void {
     /* Pi has no post-initialize notification. */
   }
@@ -184,6 +196,16 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
 
   readonly stop = Effect.fn("PiAgentClient.stop")(function* (this: PiAgentClient) {
     this.#running = false;
+    for (const controller of this.#fleetPendingStarts.values()) controller.abort();
+    for (const controller of this.#fleetPendingCompactions.values()) controller.abort();
+    yield* Effect.promise(() => Promise.all([...this.#fleetAdmissions]).then(() => undefined));
+    for (const threadId of this.#fleetThreads.keys()) {
+      if (!this.#fleetCompleting.has(threadId)) yield* this.#cancelOrRetainFleetTurn(threadId);
+    }
+    this.emit("fleet-release-drain", this.#fleetReleases.size);
+    yield* Effect.promise(() => Promise.all([...this.#fleetReleases]).then(() => undefined));
+    this.#fleetThreads.clear();
+    this.#fleetSent.clear();
     this.#requests.rejectAll(sourceText("error.provider.piStopped"));
     for (const rpc of this.#starting) yield* rpc.stop();
     // Wait until each open in flight fails and cleans up, or retains a thread that the loop below closes.
@@ -211,7 +233,8 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
       this.#released.delete(id);
       return;
     }
-    if (thread.turn) return yield* providerFailure(new Error(sourceText("error.provider.piSessionBusy")));
+    if (thread.turn || this.#compacting.has(id))
+      return yield* providerFailure(new Error(sourceText("error.provider.piSessionBusy")));
     yield* this.#close(thread);
     this.#threads.delete(id);
     this.#released.delete(id);
@@ -219,7 +242,7 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
 
   readonly releaseIdleThreads = Effect.fn("PiAgentClient.releaseIdleThreads")(function* (this: PiAgentClient) {
     for (const [id, thread] of this.#threads) {
-      if (thread.turn) continue;
+      if (thread.turn || this.#compacting.has(id)) continue;
       if (thread.configured) this.#released.set(id, thread.params);
       yield* this.#close(thread);
       this.#threads.delete(id);
@@ -288,14 +311,53 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
       case "turn/start":
       case "turn/steer": {
         const id = yield* providerSync(() => requiredString(params, "threadId"));
-        const thread = yield* this.#thread(id, params);
-        response = yield* thread.gate.withPermit(
-          method === "turn/steer" ? this.#steer(thread, params) : this.#prompt(thread, params),
+        const controller = method === "turn/start" && this.#fleet ? new AbortController() : null;
+        const previousReservation = this.#fleetThreads.get(id);
+        if (controller && (this.#fleetPendingStarts.has(id) || this.#fleetPendingCompactions.has(id)))
+          return yield* providerFailure(new Error(sourceText("error.provider.piSessionBusy")));
+        if (controller) this.#fleetPendingStarts.set(id, controller);
+        response = yield* Effect.gen({ self: this }, function* () {
+          if (method === "turn/start" && this.#fleet) {
+            yield* this.#admitFleetTurn(id, controller?.signal);
+          }
+          const thread = yield* this.#thread(id, params);
+          return yield* thread.gate.withPermit(
+            method === "turn/steer" ? this.#steer(thread, params) : this.#prompt(thread, params),
+          );
+        }).pipe(
+          Effect.onError(() =>
+            this.#fleetThreads.get(id) !== previousReservation ? this.#cancelOrRetainFleetTurn(id) : Effect.void,
+          ),
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (controller && this.#fleetPendingStarts.get(id) === controller) this.#fleetPendingStarts.delete(id);
+            }),
+          ),
         );
+        if (method === "turn/start" && this.#fleet) {
+          const turnId = getString(getRecord(response, "turn"), "id");
+          if (!turnId) {
+            this.#retainFleetTurn(id);
+            return yield* providerFailure(new Error(sourceText("error.provider.fleetIdentityUnconfirmed")));
+          }
+          yield* this.#fleet
+            .started(id, turnId)
+            .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+          if (!this.#fleet.has(id)) {
+            this.#fleetThreads.delete(id);
+            this.#fleetSent.delete(id);
+          }
+        }
         break;
       }
       case "turn/interrupt": {
         const id = yield* providerSync(() => requiredString(params, "threadId"));
+        const pending = this.#fleetPendingStarts.get(id);
+        if (pending && !this.#fleetSent.has(id)) {
+          pending.abort();
+          response = {};
+          break;
+        }
         const thread = this.#threads.get(id);
         if (thread?.turn) {
           thread.turn.stopped = true;
@@ -307,8 +369,71 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
       }
       case "thread/compact/start": {
         const id = yield* providerSync(() => requiredString(params, "threadId"));
-        const thread = yield* this.#thread(id, params);
-        yield* thread.gate.withPermit(thread.rpc.request({ type: "compact" }, timeoutMs ?? 120_000));
+        if (this.#compacting.has(id) || this.#fleetPendingStarts.has(id))
+          return yield* providerFailure(new Error(sourceText("error.provider.piSessionBusy")));
+        this.#compacting.add(id);
+        const controller = this.#fleet ? new AbortController() : null;
+        const previousReservation = this.#fleetThreads.get(id);
+        if (controller) this.#fleetPendingCompactions.set(id, controller);
+        yield* Effect.gen({ self: this }, function* () {
+          if (this.#fleet) {
+            yield* this.#admitFleetTurn(id, controller?.signal);
+          }
+          const thread = yield* this.#thread(id, params);
+          yield* thread.gate.withPermit(
+            Effect.gen({ self: this }, function* () {
+              if (this.#fleet) {
+                if (controller?.signal.aborted)
+                  return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
+                this.#fleet.sent(id);
+                this.#fleetSent.add(id);
+                if (this.#fleetPendingCompactions.get(id) === controller) this.#fleetPendingCompactions.delete(id);
+              }
+              yield* thread.rpc.request({ type: "compact" }, timeoutMs ?? 120_000);
+            }),
+          );
+          if (this.#fleet) {
+            const fleet = this.#fleet;
+            const turnId = `compact-${randomUUID()}`;
+            let finishRelease!: () => void;
+            const release = new Promise<void>((resolve) => {
+              finishRelease = resolve;
+            });
+            this.#fleetCompleting.add(id);
+            this.#fleetReleases.add(release);
+            yield* Effect.gen({ self: this }, function* () {
+              yield* fleet
+                .started(id, turnId)
+                .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+              yield* fleet
+                .completed(id, turnId)
+                .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+              if (!fleet.has(id)) {
+                this.#fleetThreads.delete(id);
+                this.#fleetSent.delete(id);
+              }
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  this.#fleetCompleting.delete(id);
+                  this.#fleetReleases.delete(release);
+                  finishRelease();
+                }),
+              ),
+            );
+          }
+        }).pipe(
+          Effect.onError(() =>
+            this.#fleetThreads.get(id) !== previousReservation ? this.#cancelOrRetainFleetTurn(id) : Effect.void,
+          ),
+          Effect.ensuring(
+            Effect.sync(() => {
+              this.#compacting.delete(id);
+              if (controller && this.#fleetPendingCompactions.get(id) === controller)
+                this.#fleetPendingCompactions.delete(id);
+            }),
+          ),
+        );
         response = {};
         break;
       }
@@ -317,6 +442,95 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
     }
     return yield* providerSync(() => decoder(response));
   });
+
+  cancelPendingCompaction(id: string): boolean | undefined {
+    if (!this.#fleet) return undefined;
+    const pending = this.#fleetPendingCompactions.get(id);
+    if (!pending) return false;
+    pending.abort();
+    return true;
+  }
+
+  readonly #admitFleetTurn = Effect.fn("PiAgentClient.admitFleetTurn")(function* (
+    this: PiAgentClient,
+    id: string,
+    signal?: AbortSignal,
+  ) {
+    const gate = this.#fleet;
+    if (!gate) return;
+    let finishAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      finishAdmission = resolve;
+    });
+    this.#fleetAdmissions.add(admission);
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen({ self: this }, function* () {
+        while (true) {
+          if (!this.running || signal?.aborted)
+            return yield* providerFailure(new Error(sourceText("error.provider.piStopped")));
+          if (gate.requiresRecovery("pi"))
+            return yield* providerFailure(new Error(sourceText("error.provider.fleetUnavailable")));
+          // Pi is conservatively counted against MiniMax as well until the active provider is verified.
+          if (
+            !gate.has(id) &&
+            (yield* gate
+              .begin(id, "pi", "minimax-cn")
+              .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable"))))))
+          ) {
+            if (!this.running || signal?.aborted) {
+              yield* gate
+                .cancelBeforeSend(id)
+                .pipe(Effect.mapError(() => providerFailure(new Error(sourceText("error.provider.fleetUnavailable")))));
+              return yield* providerFailure(new Error(sourceText("error.provider.piStopped")));
+            }
+            const reservation = gate.reservationId(id);
+            if (!reservation)
+              return yield* providerFailure(new Error(sourceText("error.provider.fleetIdentityUnconfirmed")));
+            this.#fleetThreads.set(id, reservation);
+            return;
+          }
+          yield* restore(
+            Effect.raceFirst(
+              Effect.sleep(1_000),
+              Effect.callback<void, ProviderClientOperationError>((resume) => {
+                const aborted = () =>
+                  resume(Effect.fail(providerFailure(new Error(sourceText("error.provider.piStopped")))));
+                if (signal?.aborted) aborted();
+                else signal?.addEventListener("abort", aborted, { once: true });
+                return Effect.sync(() => signal?.removeEventListener("abort", aborted));
+              }),
+            ),
+          );
+        }
+      }),
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#fleetAdmissions.delete(admission);
+          finishAdmission();
+        }),
+      ),
+    );
+  });
+
+  #retainFleetTurn(id: string): void {
+    const reservation = this.#fleetThreads.get(id);
+    if (reservation && this.#fleet?.owns(id, reservation)) this.#fleet.uncertain(id);
+  }
+
+  #cancelOrRetainFleetTurn(id: string): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const gate = this.#fleet;
+      const reservation = this.#fleetThreads.get(id);
+      if (!gate || !reservation || !gate.owns(id, reservation)) return;
+      if (this.#fleetSent.has(id)) {
+        this.#retainFleetTurn(id);
+        return;
+      }
+      yield* gate.cancelBeforeSend(id).pipe(Effect.catch(() => Effect.sync(() => this.#retainFleetTurn(id))));
+      if (!gate.has(id)) this.#fleetThreads.delete(id);
+    });
+  }
 
   readonly #models = Effect.fn("PiAgentClient.models")(function* (this: PiAgentClient, timeoutMs?: number) {
     // With no key a key-only provider has no models, and Pi need not start.
@@ -477,6 +691,7 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
       });
       rpc.on("exit", (error) => {
         if (thread?.closed) return;
+        if (thread?.turn) this.#retainFleetTurn(thread.id);
         if (thread?.turn) this.#background(this.#finish(thread, "failed", error.message));
         this.emit("exit", error);
       });
@@ -610,7 +825,13 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
       finishing: false,
     };
     this.#addUserMessage(turn, prompt.message);
+    if (this.#fleetPendingStarts.get(thread.id)?.signal.aborted)
+      return yield* providerFailure(new Error(sourceText("error.provider.piStopped")));
     thread.turn = turn;
+    if (this.#fleet) {
+      this.#fleet.sent(thread.id);
+      this.#fleetSent.add(thread.id);
+    }
     this.#notify("turn/started", thread, { turn: { id: turn.id, status: "inProgress" } });
     // Subscribe before sending: a completed event can precede the prompt acknowledgement.
     yield* Effect.forkIn(
@@ -618,9 +839,11 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
         Effect.flatMap((response) =>
           response.disposition === "handled" && thread.turn === turn ? this.#finish(thread, "completed") : Effect.void,
         ),
-        Effect.catch((failure) =>
-          thread.turn === turn ? this.#finish(thread, "failed", this.#redact(String(failure.cause))) : Effect.void,
-        ),
+        Effect.catch((failure) => {
+          if (thread.turn !== turn) return Effect.void;
+          this.#retainFleetTurn(thread.id);
+          return this.#finish(thread, "failed", this.#redact(String(failure.cause)));
+        }),
       ),
       this.#scope,
       { startImmediately: true },
@@ -684,6 +907,24 @@ export class PiAgentClient extends EventEmitter<ClientEvents> implements AgentCl
   }
 
   #notify(method: string, thread: PiThread, params: DynamicRecord): void {
+    if (method === "turn/completed" && this.#fleetThreads.has(thread.id) && this.#fleet) {
+      const turnId = getString(getRecord(params, "turn"), "id");
+      if (turnId) {
+        this.#fleetCompleting.add(thread.id);
+        const release = runCauseEffect(this.#fleet.completed(thread.id, turnId))
+          .then(() => {
+            if (!this.#fleet?.has(thread.id)) {
+              this.#fleetThreads.delete(thread.id);
+              this.#fleetSent.delete(thread.id);
+            }
+          })
+          .catch(() => this.emit("diagnostic", sourceText("error.provider.fleetUnavailable")))
+          .then(() => undefined)
+          .finally(() => this.#fleetCompleting.delete(thread.id));
+        this.#fleetReleases.add(release);
+        void release.finally(() => this.#fleetReleases.delete(release));
+      }
+    }
     // Usage contains only validated numeric counters. Generic secret-name matching masks `*Tokens`.
     const safe = method === "openbot/usage" ? params : redactMcpRecord(params, this.#secretValues());
     this.emit("notification", {

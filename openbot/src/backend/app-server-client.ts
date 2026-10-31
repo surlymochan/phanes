@@ -3,8 +3,12 @@ import { EventEmitter } from "node:events";
 import { type DynamicRecord, isNumber, isString } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import { Effect, Fiber } from "effect";
+import { configuredFleetTurnGate } from "./agent/fleet-turn-config";
+import type { FleetTurnGate } from "./agent/fleet-turn-gate";
+import { isPlanLimitDiagnostic } from "./agent/provider-diagnostics";
 import { type AgentProvider, RequestTimeoutError } from "./agent-client";
 import { cliSpawnTarget } from "./cli";
+import { runCauseEffect } from "./effect-boundary";
 import { JsonLineDecoder, LineTooLongError } from "./jsonl";
 import {
   type AppServerNotification,
@@ -17,7 +21,7 @@ import {
   type RpcMessage,
   type ThreadItem,
 } from "./protocol";
-import { ProviderClientOperationError } from "./provider-client-effects";
+import { ProviderClientOperationError, toProviderClientOperationError } from "./provider-client-effects";
 import {
   PROVIDER_HISTORY_PAGE_SIZE,
   type ProviderHistoryConsumer,
@@ -69,12 +73,27 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
 
   /** Added to the inherited environment, such as the `CODEX_HOME` of an account after the first. */
   readonly #extraEnv: Readonly<Record<string, string>> | undefined;
+  readonly #fleet: FleetTurnGate | null;
+  readonly #fleetThreads = new Map<string, string>();
+  readonly #fleetReleases = new Set<Promise<void>>();
+  readonly #fleetAdmissions = new Set<Promise<void>>();
+  readonly #fleetPendingAdmissions = new Set<string>();
+  readonly #fleetCompactions = new Map<string, { turnId: string | null; confirmed: boolean }>();
+  readonly #fleetStarts = new Map<string, { observed: string | null; confirmed: string | null }>();
+  #fleetWaitAbort = new AbortController();
+  readonly #pendingCompactionAdmissions = new Map<string, AbortController>();
 
-  constructor(executable: string, requestTimeoutMs = 30_000, extraEnv?: Readonly<Record<string, string>>) {
+  constructor(
+    executable: string,
+    requestTimeoutMs = 30_000,
+    extraEnv?: Readonly<Record<string, string>>,
+    fleet?: FleetTurnGate | null,
+  ) {
     super();
     this.#executable = executable;
     this.#requestTimeoutMs = requestTimeoutMs;
     this.#extraEnv = extraEnv;
+    this.#fleet = fleet === undefined ? configuredFleetTurnGate() : fleet;
   }
 
   get running(): boolean {
@@ -85,6 +104,7 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
     if (this.running) return;
 
     this.#stopping = false;
+    this.#fleetWaitAbort = new AbortController();
     this.#decoder = new JsonLineDecoder();
     const target = cliSpawnTarget(this.#executable, ["app-server", "--listen", "stdio://"]);
     const child = spawn(target.command, target.args, {
@@ -127,12 +147,17 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
   }
 
   readonly stop = Effect.fn("CodexAppServer.stop")(function* (this: CodexAppServerClient) {
+    this.#fleetWaitAbort.abort();
+    yield* Effect.promise(() => Promise.all([...this.#fleetAdmissions]).then(() => undefined));
     const child = this.#process;
     if (!child) {
       if (this.#ending) yield* Fiber.join(this.#ending);
+      yield* Effect.promise(() => Promise.all([...this.#fleetReleases]).then(() => undefined));
       return;
     }
     this.#stopping = true;
+    this.#retainFleetReservations();
+    yield* Effect.promise(() => Promise.all([...this.#fleetReleases]).then(() => undefined));
     this.#cancelToolRequests();
     this.#process = null;
     for (const pending of this.#pending.values()) pending.reject(new Error("Codex App Server stopped."));
@@ -268,21 +293,232 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
     decoder: ResponseDecoder<T>,
     timeoutMs = this.#requestTimeoutMs,
   ) {
+    let fleetThread: string | null = null;
+    let fleetReservation: string | null = null;
+    let fleetCompactionAbort: AbortController | null = null;
+    if (this.#fleet && (method === "turn/start" || method === "thread/compact/start")) {
+      if (!isRecord(params) || !isString(params.threadId) || !params.threadId) {
+        return yield* new ProviderClientOperationError({
+          cause: new Error(sourceText("error.provider.fleetUnavailable")),
+        });
+      }
+      fleetThread = params.threadId;
+      const threadId = fleetThread;
+      if (this.#fleetPendingAdmissions.has(threadId)) {
+        return yield* new ProviderClientOperationError({
+          cause: new Error(sourceText("error.provider.fleetUnavailable")),
+        });
+      }
+      if (!this.running) {
+        return yield* new ProviderClientOperationError({ cause: new Error("Codex App Server is not running.") });
+      }
+      const compactionAbort = method === "thread/compact/start" ? new AbortController() : null;
+      const previousReservation = this.#fleetThreads.get(threadId);
+      let finishAdmission!: () => void;
+      const admission = new Promise<void>((resolve) => {
+        finishAdmission = resolve;
+      });
+      this.#fleetAdmissions.add(admission);
+      this.#fleetPendingAdmissions.add(threadId);
+      fleetCompactionAbort = compactionAbort;
+      if (compactionAbort) this.#pendingCompactionAdmissions.set(threadId, compactionAbort);
+      fleetReservation = yield* this.#admitFleetTurn(threadId, compactionAbort?.signal).pipe(
+        toProviderClientOperationError,
+        Effect.onError(() =>
+          Effect.gen({ self: this }, function* () {
+            if (compactionAbort && this.#pendingCompactionAdmissions.get(threadId) === compactionAbort)
+              this.#pendingCompactionAdmissions.delete(threadId);
+            const owned = this.#fleetThreads.get(threadId);
+            if (owned && owned !== previousReservation && this.#fleet?.owns(threadId, owned)) {
+              yield* this.#fleet.rejectedBeforeTurn(threadId).pipe(Effect.ignore);
+              if (!this.#fleet.has(threadId)) this.#fleetThreads.delete(threadId);
+            }
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            this.#fleetAdmissions.delete(admission);
+            this.#fleetPendingAdmissions.delete(threadId);
+            finishAdmission();
+          }),
+        ),
+      );
+      if (method === "thread/compact/start") this.#fleetCompactions.set(threadId, { turnId: null, confirmed: false });
+      else this.#fleetStarts.set(threadId, { observed: null, confirmed: null });
+    }
     const id = this.#nextId++;
     const child = this.#process;
     return yield* Effect.callback<T, ProviderClientOperationError>((resume) => {
       this.#pending.set(id, {
-        resolve: (value) =>
-          resume(
-            Effect.try({
-              try: () => decoder(value),
-              catch: (cause) => new ProviderClientOperationError({ cause }),
-            }),
-          ),
-        reject: (cause) => resume(Effect.fail(new ProviderClientOperationError({ cause }))),
+        resolve: (value) => {
+          if (fleetThread && fleetReservation && this.#fleet) {
+            const gate = this.#fleet;
+            const threadId = fleetThread;
+            if (!gate.owns(threadId, fleetReservation)) {
+              resume(
+                Effect.fail(
+                  new ProviderClientOperationError({
+                    cause: new Error(sourceText("error.provider.fleetIdentityUnconfirmed")),
+                  }),
+                ),
+              );
+              return;
+            }
+            if (method === "thread/compact/start") {
+              const compaction = this.#fleetCompactions.get(threadId);
+              if (!compaction) {
+                gate.uncertain(threadId);
+                resume(
+                  Effect.fail(
+                    new ProviderClientOperationError({
+                      cause: new Error(sourceText("error.provider.fleetIdentityUnconfirmed")),
+                    }),
+                  ),
+                );
+                return;
+              }
+              compaction.confirmed = true;
+              const decoded = Effect.try({
+                try: () => decoder(value),
+                catch: (cause) => new ProviderClientOperationError({ cause }),
+              });
+              resume(
+                compaction.turnId
+                  ? this.#trackFleetResponse(gate.started(threadId, compaction.turnId)).pipe(
+                      toProviderClientOperationError,
+                      Effect.tap(() =>
+                        Effect.sync(() => {
+                          if (!gate.has(threadId)) {
+                            this.#fleetThreads.delete(threadId);
+                            this.#fleetCompactions.delete(threadId);
+                          }
+                        }),
+                      ),
+                      Effect.andThen(decoded),
+                    )
+                  : decoded,
+              );
+              return;
+            }
+            if (!isRecord(value) || !isRecord(value.turn) || !isString(value.turn.id)) {
+              gate.uncertain(threadId);
+              resume(
+                Effect.fail(
+                  new ProviderClientOperationError({
+                    cause: new Error(sourceText("error.provider.fleetIdentityUnconfirmed")),
+                  }),
+                ),
+              );
+              return;
+            }
+            const turnId = value.turn.id;
+            const start = this.#fleetStarts.get(threadId);
+            if (!start || (start.observed && start.observed !== turnId)) {
+              gate.uncertain(threadId);
+              if (this.#process)
+                this.#fail(new Error(sourceText("error.provider.fleetIdentityUnconfirmed")), this.#process);
+              resume(
+                Effect.fail(
+                  new ProviderClientOperationError({
+                    cause: new Error(sourceText("error.provider.fleetIdentityUnconfirmed")),
+                  }),
+                ),
+              );
+              return;
+            }
+            start.confirmed = turnId;
+            resume(
+              this.#trackFleetResponse(gate.started(threadId, turnId)).pipe(
+                toProviderClientOperationError,
+                Effect.andThen(
+                  Effect.try({
+                    try: () => {
+                      if (!gate.has(threadId)) {
+                        this.#fleetThreads.delete(threadId);
+                        this.#fleetStarts.delete(threadId);
+                      }
+                      return decoder(value);
+                    },
+                    catch: (cause) => new ProviderClientOperationError({ cause }),
+                  }),
+                ),
+              ),
+            );
+          } else {
+            resume(
+              Effect.try({
+                try: () => decoder(value),
+                catch: (cause) => new ProviderClientOperationError({ cause }),
+              }),
+            );
+          }
+        },
+        reject: (cause) => {
+          if (
+            method === "turn/start" &&
+            fleetThread &&
+            fleetReservation &&
+            this.#fleet?.owns(fleetThread, fleetReservation) &&
+            cause instanceof AppServerError &&
+            (/\bis archived\b|thread not found:|\bno rollout found\b/i.test(cause.message) ||
+              isPlanLimitDiagnostic(cause.message) ||
+              (cause.code === -32603 &&
+                cause.message.startsWith(
+                  "failed to submit turn input: ActiveTurnNotSteerable { turn_kind: Compact",
+                ))) &&
+            !this.#fleetStarts.get(fleetThread)?.observed
+          ) {
+            const threadId = fleetThread;
+            resume(
+              this.#trackFleetResponse(this.#fleet.rejectedBeforeTurn(threadId)).pipe(
+                toProviderClientOperationError,
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    this.#fleetThreads.delete(threadId);
+                    this.#fleetStarts.delete(threadId);
+                  }),
+                ),
+                Effect.andThen(Effect.fail(new ProviderClientOperationError({ cause }))),
+              ),
+            );
+            return;
+          }
+          resume(Effect.fail(new ProviderClientOperationError({ cause })));
+        },
       });
       try {
+        if (
+          fleetCompactionAbort?.signal.aborted &&
+          fleetThread &&
+          fleetReservation &&
+          this.#fleet?.owns(fleetThread, fleetReservation)
+        ) {
+          const threadId = fleetThread;
+          resume(
+            this.#trackFleetResponse(this.#fleet.rejectedBeforeTurn(threadId)).pipe(
+              toProviderClientOperationError,
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  this.#fleetThreads.delete(threadId);
+                  this.#fleetCompactions.delete(threadId);
+                }),
+              ),
+              Effect.andThen(
+                Effect.fail(
+                  new ProviderClientOperationError({ cause: new Error("Compaction admission was cancelled.") }),
+                ),
+              ),
+            ),
+          );
+          return Effect.sync(() => this.#pending.delete(id));
+        }
         this.#write({ method, id, params: method === "thread/resume" ? metadataOnlyResumeParams(params) : params });
+        if (
+          fleetCompactionAbort &&
+          fleetThread &&
+          this.#pendingCompactionAdmissions.get(fleetThread) === fleetCompactionAbort
+        )
+          this.#pendingCompactionAdmissions.delete(fleetThread);
         if (method === "turn/interrupt" && isRecord(params) && isString(params.threadId) && isString(params.turnId)) {
           this.#interruptedTurns.add(JSON.stringify([params.threadId, params.turnId]));
           this.#cancelToolRequests(params.threadId, params.turnId);
@@ -301,9 +537,123 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
             ),
           ),
       }),
-      Effect.ensuring(Effect.sync(() => this.#pending.delete(id))),
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#pending.delete(id);
+          if (
+            fleetCompactionAbort &&
+            fleetThread &&
+            this.#pendingCompactionAdmissions.get(fleetThread) === fleetCompactionAbort
+          )
+            this.#pendingCompactionAdmissions.delete(fleetThread);
+        }),
+      ),
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          if (fleetThread && fleetReservation && this.#fleet?.owns(fleetThread, fleetReservation)) {
+            this.#fleet.uncertain(fleetThread);
+          }
+        }),
+      ),
     );
   });
+
+  cancelPendingCompaction(threadId: string): boolean | undefined {
+    if (!this.#fleet) return undefined;
+    const pending = this.#pendingCompactionAdmissions.get(threadId);
+    if (!pending) return false;
+    pending.abort();
+    return true;
+  }
+
+  #trackFleetResponse<A, E>(operation: Effect.Effect<A, E>): Effect.Effect<A, E> {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    this.#fleetReleases.add(pending);
+    return operation.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#fleetReleases.delete(pending);
+          finish();
+        }),
+      ),
+    );
+  }
+
+  #admitFleetTurn(threadId: string, compactionSignal?: AbortSignal) {
+    return Effect.uninterruptibleMask((restore) =>
+      Effect.gen({ self: this }, function* () {
+        const gate = this.#fleet;
+        if (!gate)
+          return yield* new ProviderClientOperationError({
+            cause: new Error(sourceText("error.provider.fleetUnavailable")),
+          });
+        const child = this.#process;
+        const signal = this.#fleetWaitAbort.signal;
+        while (true) {
+          if (signal.aborted || compactionSignal?.aborted || !child || this.#process !== child || !this.running)
+            return yield* new ProviderClientOperationError({
+              cause: new Error(sourceText("error.provider.fleetUnavailable")),
+            });
+          if (gate.requiresRecovery("codex"))
+            return yield* new ProviderClientOperationError({
+              cause: new Error(sourceText("error.provider.fleetUnavailable")),
+            });
+          if (!gate.has(threadId) && (yield* gate.begin(threadId, "codex", null))) {
+            if (signal.aborted || compactionSignal?.aborted || this.#process !== child || !this.running) {
+              yield* gate.cancelBeforeSend(threadId);
+              return yield* new ProviderClientOperationError({
+                cause: new Error(sourceText("error.provider.fleetUnavailable")),
+              });
+            }
+            gate.sent(threadId);
+            const reservationId = gate.reservationId(threadId);
+            if (!reservationId)
+              return yield* new ProviderClientOperationError({
+                cause: new Error(sourceText("error.provider.fleetIdentityUnconfirmed")),
+              });
+            this.#fleetThreads.set(threadId, reservationId);
+            return reservationId;
+          }
+          yield* restore(
+            Effect.raceFirst(
+              Effect.sleep(1_000),
+              Effect.callback<void, ProviderClientOperationError>((resume) => {
+                const aborted = () =>
+                  resume(
+                    Effect.fail(
+                      new ProviderClientOperationError({
+                        cause: new Error(sourceText("error.provider.fleetUnavailable")),
+                      }),
+                    ),
+                  );
+                if (signal.aborted || compactionSignal?.aborted) aborted();
+                else {
+                  signal.addEventListener("abort", aborted, { once: true });
+                  compactionSignal?.addEventListener("abort", aborted, { once: true });
+                }
+                return Effect.sync(() => {
+                  signal.removeEventListener("abort", aborted);
+                  compactionSignal?.removeEventListener("abort", aborted);
+                });
+              }),
+            ),
+          );
+        }
+      }),
+    );
+  }
+
+  #retainFleetReservations(): void {
+    for (const [threadId, reservationId] of this.#fleetThreads) {
+      if (this.#fleet?.owns(threadId, reservationId)) this.#fleet.uncertain(threadId);
+    }
+    this.#fleetThreads.clear();
+    this.#fleetCompactions.clear();
+    this.#fleetStarts.clear();
+  }
 
   notify(method: string, params: unknown = {}): void {
     this.#write({ method, params });
@@ -355,6 +705,67 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
           params: message.params,
         });
       } else {
+        if (
+          this.#fleet &&
+          (message.method === "turn/started" || message.method === "turn/completed") &&
+          isRecord(message.params) &&
+          isString(message.params.threadId) &&
+          isRecord(message.params.turn) &&
+          isString(message.params.turn.id)
+        ) {
+          const threadId = message.params.threadId;
+          const turnId = message.params.turn.id;
+          if (!this.#fleetThreads.has(threadId)) {
+            if (message.method === "turn/started" && this.#process) {
+              this.#fail(new Error("Codex started a turn without fleet admission."), this.#process);
+              return;
+            }
+          } else {
+            if (message.method === "turn/started") {
+              const compaction = this.#fleetCompactions.get(threadId);
+              if (compaction) {
+                if (compaction.turnId && compaction.turnId !== turnId) {
+                  this.#fleet.uncertain(threadId);
+                  if (this.#process)
+                    this.#fail(new Error("Codex compaction turn identity is uncertain."), this.#process);
+                  return;
+                }
+                compaction.turnId = turnId;
+                if (compaction.confirmed)
+                  void runCauseEffect(this.#fleet.started(threadId, turnId)).catch(() => {
+                    if (this.#process)
+                      this.#fail(new Error("Codex compaction turn identity is uncertain."), this.#process);
+                  });
+              } else {
+                const start = this.#fleetStarts.get(threadId);
+                if (
+                  !start ||
+                  (start.observed && start.observed !== turnId) ||
+                  (start.confirmed && start.confirmed !== turnId)
+                ) {
+                  this.#fleet.uncertain(threadId);
+                  if (this.#process) this.#fail(new Error("Codex started an unadmitted turn."), this.#process);
+                  return;
+                }
+                start.observed = turnId;
+              }
+            }
+            if (message.method === "turn/completed") {
+              const release = runCauseEffect(this.#fleet.completed(threadId, turnId))
+                .then(() => {
+                  if (!this.#fleet?.has(threadId)) {
+                    this.#fleetThreads.delete(threadId);
+                    this.#fleetCompactions.delete(threadId);
+                    this.#fleetStarts.delete(threadId);
+                  }
+                })
+                .catch(() => this.emit("diagnostic", "Fleet turn reservation requires operator recovery."))
+                .then(() => undefined);
+              this.#fleetReleases.add(release);
+              void release.finally(() => this.#fleetReleases.delete(release));
+            }
+          }
+        }
         if (
           message.method === "turn/completed" &&
           isRecord(message.params) &&
@@ -427,6 +838,8 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
 
   #fail(error: Error, child: ChildProcessWithoutNullStreams): void {
     if (this.#process !== child) return;
+    this.#fleetWaitAbort.abort();
+    this.#retainFleetReservations();
     this.#cancelToolRequests();
     this.#process = null;
 

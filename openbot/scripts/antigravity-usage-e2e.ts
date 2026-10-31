@@ -80,11 +80,15 @@ function handle(message) {
   }
   if (message.method === "session/prompt") {
     const text = message.params.prompt.map((block) => block.text).join("");
-    if (text.startsWith("/usage")) write({ method: "session/update", params: {
-      sessionId: message.params.sessionId,
-      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.FAKE_AGY_ANSWER } },
-    } });
-    write({ id: message.id, result: { stopReason: "end_turn" } });
+    const finish = () => {
+      if (text.startsWith("/usage")) write({ method: "session/update", params: {
+        sessionId: message.params.sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.FAKE_AGY_ANSWER } },
+      } });
+      write({ id: message.id, result: { stopReason: "end_turn" } });
+    };
+    if (text.startsWith("/usage") && process.env.FAKE_AGY_DELAY) setTimeout(finish, Number(process.env.FAKE_AGY_DELAY));
+    else finish();
     return;
   }
   write({ id: message.id, result: {} });
@@ -121,6 +125,7 @@ interface UsageCase {
 interface Report {
   passed: boolean;
   googleSignIn?: UsageCase;
+  sharedTimeout?: { promptCount: number; timedOutCaller: boolean; remainingCallerSucceeded: boolean };
   perModel?: UsageCase[];
   groups?: AccountUsage;
   apiKeySignIn?: UsageCase;
@@ -182,8 +187,26 @@ try {
   // 1. A Google sign-in on 1.4.1: the Gemini group's weekly window, both reads in one session.
   const google = await readUsage("1.4.1", GOOGLE_ANSWER, 2, "gemini-3.8-flash-high");
   report.googleSignIn = google;
-  assert.deepEqual(google.prompts, ["/usage", "/usage"], "1.4.1 is sent `/usage` for each read");
-  assert.equal(google.usageSessions.length, 1, "the second read reuses the first read's session");
+  assert.deepEqual(google.prompts, ["/usage"], "concurrent reads share one `/usage` prompt");
+  assert.equal(google.usageSessions.length, 1, "the shared read uses one private session");
+  await rm(log, { force: true });
+  process.env.FAKE_AGY_DELAY = "250";
+  const delayed = requireProviderDriver("antigravity").createClient(
+    await install("1.4.1"),
+    10_000,
+    NO_PROVIDER_CREDENTIALS,
+  );
+  clients.push(delayed);
+  delayed.start();
+  await runCauseEffect(delayed.request("initialize", {}, (value) => value));
+  const short = runCauseEffect(delayed.request("account/rateLimits/read", {}, decodeAccountRateLimitsReadResult, 50));
+  const long = runCauseEffect(delayed.request("account/rateLimits/read", {}, decodeAccountRateLimitsReadResult, 2_000));
+  await assert.rejects(short);
+  assert.ok((await long).rateLimits);
+  const promptCount = (await readLog()).filter((entry) => entry.method === "session/prompt").length;
+  assert.equal(promptCount, 1);
+  report.sharedTimeout = { promptCount, timedOutCaller: true, remainingCallerSucceeded: true };
+  delete process.env.FAKE_AGY_DELAY;
   for (const reading of google.readings)
     assert.deepEqual(reading.rateLimits, {
       limitId: "antigravity",

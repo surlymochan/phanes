@@ -68,6 +68,8 @@ export interface AgentClient {
     decoder: ResponseDecoder<T>,
     timeoutMs?: number,
   ): Effect.Effect<T, ProviderClientOperationError>;
+  /** Cancels a compaction that has not yet been sent to its provider. */
+  cancelPendingCompaction?(externalThreadId: string): boolean | undefined;
   notify(method: string, params?: unknown): void;
   respond(id: RequestId, result: unknown): void;
   respondError(id: RequestId, error: RpcError): void;

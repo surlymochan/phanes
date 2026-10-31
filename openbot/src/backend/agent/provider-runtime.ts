@@ -340,6 +340,10 @@ const INITIAL_STATUS: AgentStatus = {
  * ProviderPort above is what those five places get now.
  */
 export class ProviderRuntime implements ProviderPort {
+  /** Treat an unresponsive client as lost so its owner clears turns and schedules a restart. */
+  stopUnresponsiveClient(client: AgentClient): void {
+    this.#handleExit(client, new Error(sourceText("error.provider.compactionUnconfirmed")));
+  }
   readonly #conversation: ConversationRuntime;
   readonly #hooks: ProviderHooks;
   readonly #emit: (event: AgentEvent) => void;
