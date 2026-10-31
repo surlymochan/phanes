@@ -3,7 +3,12 @@
 
 覆盖：生成结果的结构与字段齐全、schema版本 为 4、口径与合成示例一致、
 禁止事项含必需条目，以及 --goal/--month 覆盖与命令行的退出码。
+
+观察期间的期次顺序、重复期次与起止倒置按当前行为断言：已支持的情形直接断言，
+已知缺口用 `unittest.expectedFailure` 标注并写明原因，不改实现。
 """
+from __future__ import annotations
+
 import json
 import os
 import subprocess
@@ -28,6 +33,13 @@ SCHEMA_PATH = ROOT / "brief.schema.json"
 BRIEF_KEYS = {"目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"}
 REQUIRED_FORBIDS = ("不得写入真实组织数据", "不作个人/薪酬/编制判断")
 
+# 期次锚点的期望顺序：2026-01实际 → 2026-05H1参考 → 2026-09实际 → 年末测算 → 年末目标。
+ORDERED_PERIODS = ["2026-01实际", "2026-05H1参考", "2026-09实际", "年末测算", "年末目标"]
+# 期次乱序：参考基准排到最前，实际期次随后。
+SCRAMBLED_PERIODS = ["2026-05H1参考", "2026-01实际", "2026-09实际", "年末测算", "年末目标"]
+# 重复期次：2026-01实际 出现两次。
+DUPLICATED_PERIODS = ["2026-01实际", "2026-05H1参考", "2026-01实际", "年末测算", "年末目标"]
+
 
 def load_json(path: Path):
     """读取 JSON 文件。"""
@@ -40,6 +52,25 @@ def temporary_directory() -> tempfile.TemporaryDirectory:
     if parent and Path(parent).is_dir():
         return tempfile.TemporaryDirectory(dir=parent)
     return tempfile.TemporaryDirectory()
+
+
+def brief_with_period(keys: list[str], anchors: dict | None = None) -> dict:
+    """生成任务书并改写期次与起止锚点。
+
+    说明与口径里的期次表述同步改写，保证任务书里只剩下待检的那一处缺陷。
+    """
+    brief = make_brief.build_brief()
+    period = brief["观察期间"]
+    month = period["观察月份"]
+    period["期次"] = list(keys)
+    period["说明"] = (
+        f"观察月份 {month}，数据截止 {period['数据截止']}；"
+        f"期次锚点 {'、'.join(keys)}，与站点数值序列的键名一致。"
+    )
+    brief["口径"] = make_brief.build_definitions(list(keys), month)
+    if anchors:
+        period.update(anchors)
+    return brief
 
 
 class MakeBriefTest(unittest.TestCase):
@@ -243,6 +274,104 @@ class MakeBriefTest(unittest.TestCase):
                 code = make_brief.main(["--check", str(path)])
         self.assertEqual(code, 1)
         self.assertIn("期望值 4", output.getvalue())
+
+
+class PeriodOrderTest(unittest.TestCase):
+    """观察期间的期次顺序、重复期次与起止倒置。"""
+
+    def errors(self, brief: dict) -> list[str]:
+        """返回结构错误列表。"""
+        return make_brief.validate_brief(brief)
+
+    def test_生成期次按顺序且不重复(self) -> None:
+        """生成侧：期次锚点按时间顺序且不重复。"""
+        brief = make_brief.build_brief()
+        keys = brief["观察期间"]["期次"]
+        self.assertEqual(keys, ORDERED_PERIODS)
+        self.assertEqual(len(set(keys)), len(keys))
+        # 观察月份与首个锚点同月时（2026-01），period_keys 去重后只剩四个锚点。
+        self.assertEqual(
+            make_brief.period_keys("2026-01"),
+            ["2026-01实际", "2026-05H1参考", "年末测算", "年末目标"],
+        )
+
+    def test_生成任务书不写起止锚点(self) -> None:
+        """生成侧：任务书不写起始/参考/截止期次，这三个字段只出现在人工任务书里。"""
+        period = make_brief.build_brief()["观察期间"]
+        for name in ("起始期次", "参考期次", "截止期次"):
+            with self.subTest(field=name):
+                self.assertNotIn(name, period)
+
+    def test_当前不校验期次顺序重复与起止倒置(self) -> None:
+        """当前行为：三类期次问题都通过校验（已知缺口，见下面的 expectedFailure 用例）。
+
+        修复校验后本用例应改写为“必须报出”，或随 expectedFailure 用例一起删除。
+        """
+        cases = {
+            "期次乱序": brief_with_period(SCRAMBLED_PERIODS),
+            "重复期次": brief_with_period(DUPLICATED_PERIODS),
+            "起始晚于截止": brief_with_period(
+                ORDERED_PERIODS,
+                {"起始期次": "2026-09实际", "参考期次": "2026-05H1参考", "截止期次": "2026-01实际"},
+            ),
+        }
+        for name, brief in cases.items():
+            with self.subTest(scenario=name):
+                self.assertEqual(self.errors(brief), [])
+
+    @unittest.expectedFailure
+    def test_期次乱序_应报出错误(self) -> None:
+        """期次锚点乱序时应报出顺序错误。
+
+        已知 bug：validate_brief 只做 schema 校验与起止/参考期次的归属校验
+        （boss/make_brief.py:214-223），不校验期次顺序；乱序任务书照样校验通过，
+        DA 会按乱掉的顺序取数。实现补上顺序校验后，删掉 expectedFailure 标记。
+        """
+        errors = self.errors(brief_with_period(SCRAMBLED_PERIODS))
+        self.assertTrue(any("期次" in message for message in errors), "期次乱序时未报出错误")
+
+    @unittest.expectedFailure
+    def test_重复期次_应报出错误(self) -> None:
+        """期次锚点重复时应报出重复错误。
+
+        已知 bug：结构定义只要求期次至少 4 个（boss/brief.schema.json 的 `期次`），
+        validate_brief 也不查重复；重复锚点会让同一期次被取两次数或被静默覆盖。
+        实现补上去重校验后，删掉 expectedFailure 标记。
+        """
+        errors = self.errors(brief_with_period(DUPLICATED_PERIODS))
+        self.assertTrue(any("期次" in message for message in errors), "重复期次时未报出错误")
+
+    @unittest.expectedFailure
+    def test_起始晚于截止_应报出错误(self) -> None:
+        """起始期次晚于截止期次时应报出错误。
+
+        已知 bug：validate_brief 只检查起止/参考期次是否在期次列表里
+        （boss/make_brief.py:220-222），不比较三者的先后；起止倒置的任务书照样通过，
+        DA 会把观察窗口算反。实现补上先后比较后，删掉 expectedFailure 标记。
+        """
+        errors = self.errors(
+            brief_with_period(
+                ORDERED_PERIODS,
+                {"起始期次": "2026-09实际", "参考期次": "2026-05H1参考", "截止期次": "2026-01实际"},
+            )
+        )
+        self.assertTrue(any("期次" in message for message in errors), "起始晚于截止时未报出错误")
+
+    @unittest.expectedFailure
+    def test_check_期次乱序_退出码非零(self) -> None:
+        """--check 校验乱序期次的任务书时退出码应非 0。
+
+        已知 bug：与 test_期次乱序_应报出错误 同源，--check 只看校验错误列表，
+        乱序期次当前仍打印“任务书校验通过”并返回 0。修复后删掉 expectedFailure 标记。
+        """
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            brief = brief_with_period(SCRAMBLED_PERIODS)
+            path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = make_brief.main(["--check", str(path)])
+        self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":
