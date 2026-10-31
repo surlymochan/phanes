@@ -182,6 +182,7 @@ try {
   await assertLegacyDataCleared();
   checks.push("rejected legacy evidence cleared");
   const missingOptional = structuredClone(snapshot);
+  delete missingOptional["口径说明"];
   delete missingOptional.insights;
   missingOptional.definitions = [];
   delete missingOptional.risks;
@@ -195,6 +196,7 @@ try {
     await page.getByText(emptyText, { exact: true }).first().waitFor();
     assert.equal(await page.getByText("15", { exact: true }).count(), 1);
     assert.equal(await page.getByText(emptyText, { exact: true }).count(), 4);
+    assert.equal(await page.locator("#calibration-panel").isVisible(), false);
     checks.push(`${language} snapshot with optional blocks missing or empty`);
   }
   const invalid = structuredClone(snapshot);

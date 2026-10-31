@@ -10,7 +10,7 @@
 
 ## 结构定义与校验
 
-`schema/diagnosis.schema.json` 是 `data/diagnosis.json` 的结构定义（JSON Schema draft 2020-12）。字段与 `app.js` 读取的字段一致：`scope` 给出口径和 `schema版本`（固定为 4），`metrics` 按页面顺序给出四个指标，数值区分数值序列（数值或 `null`）与比率序列（数值、`null` 或字符串）。定义只覆盖当前格式；`app.js` 仍兼容的旧中文键格式不在定义内。
+`schema/diagnosis.schema.json` 是 `data/diagnosis.json` 的结构定义（JSON Schema draft 2020-12）。字段与 `app.js` 读取的字段一致：`scope` 给出口径和 `schema版本`（固定为 4），可选字段 `口径说明`（字符串数组）提供页面数据口径说明折叠面板，`metrics` 按页面顺序给出四个指标，数值区分数值序列（数值或 `null`）与比率序列（数值、`null` 或字符串）。定义只覆盖当前格式；`app.js` 仍兼容的旧中文键格式不在定义内。
 
 `validate.py` 只用标准库，按该定义校验数据文件：
 

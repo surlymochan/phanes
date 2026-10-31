@@ -53,6 +53,23 @@ class ValidateTest(unittest.TestCase):
         """合成示例通过校验。"""
         self.assertEqual(self.errors(self.data), [])
 
+    def test_optional_calibration_can_be_omitted(self) -> None:
+        """口径说明为可选字段，字段缺失时仍可通过校验（不改变旧数据接受范围）。"""
+        data = copy.deepcopy(self.data)
+        data.pop("口径说明", None)
+        self.assertEqual(self.errors(data), [])
+
+    def test_invalid_calibration_fails(self) -> None:
+        """口径说明包含空字符串或非法格式时失败，并指出路径。"""
+        broken = copy.deepcopy(self.data)
+        broken["口径说明"] = [""]
+        errors = self.errors(broken)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("/口径说明/0" in message for message in errors),
+            f"错误信息未指出路径：{errors}",
+        )
+
     def test_missing_field_fails(self) -> None:
         """缺少必需字段时失败，并指出路径。"""
         broken = copy.deepcopy(self.data)
