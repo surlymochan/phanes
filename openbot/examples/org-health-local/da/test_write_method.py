@@ -86,6 +86,39 @@ class WriteMethodTest(unittest.TestCase):
         self.assertNotIn("120", content)
         self.assertNotIn("8", content)
 
+    def test_creates_missing_output_parent_directories(self):
+        """--out 的父目录不存在时自动创建多层目录，并正常写出方法说明。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            brief_path = temp / "brief.json"
+            data_path = temp / "diagnosis.json"
+            out_path = temp / "reports" / "2026" / "09" / "method.md"
+            brief_path.write_text(json.dumps(BRIEF, ensure_ascii=False), encoding="utf-8")
+            data_path.write_text(json.dumps(DIAGNOSIS, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--brief",
+                    str(brief_path),
+                    "--data",
+                    str(data_path),
+                    "--out",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(out_path.parent.is_dir())
+            self.assertTrue(out_path.is_file())
+            content = out_path.read_text(encoding="utf-8")
+
+        self.assertIn("# 数据口径说明", content)
+        self.assertIn("活跃度", content)
+
     def test_brief_method_numeric_leak_fails_without_writing(self):
         brief = {**BRIEF, "口径": ["按任务书定义计算", "12 万元/月"]}
         diagnosis = {
