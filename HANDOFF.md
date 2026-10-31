@@ -22,7 +22,7 @@ OpenBot 来源 main：`2f02a65b1bebebae8640ddf971f1719f33139f53`；OpenSwarm 来
 | 已通过 | 未验证 | 失败 / 待修 |
 |---|---|---|
 | Antigravity 正确账号额度及真实任务；服务重启后的任务 | 五类执行器经本机 Hub 自动路由的真实任务与结果回传 | 父进程异常退出后的名额自动回收尚未实现，[#3](https://github.com/surlymochan/phanes/issues/3) |
-| Phanes 目录中的 OpenSwarm 53 项针对性测试、OpenBot 类型和语言检查、Pi/Codex 准入测试 | 三台主机运行同一个 Phanes 提交、全局并发观察及任务后预约归零 | OpenBot 主线队列和备用模型 E2E 失败，[#7](https://github.com/surlymochan/phanes/issues/7) |
+| Phanes 目录中的 OpenSwarm 53 项针对性测试、OpenBot 类型和语言检查、Pi/Codex 准入测试 | 三台主机运行同一个 Phanes 提交、全局并发观察及任务后预约归零；dev 脚本 LAN 守卫（`--lan` 与 `AUTH_EXPOSE_DEVELOPMENT_CODE` 互斥）在本工作树未运行验证，[#11](https://github.com/surlymochan/phanes/issues/11) | OpenBot 主线队列和备用模型 E2E 失败，[#7](https://github.com/surlymochan/phanes/issues/7) |
 | 源码导入时，两组件目录树分别与来源提交一致 | 远端结果自动交回、三 Bot 场景及主机重启恢复 | Phanes 完整构建、CI 与正式部署尚未完成 |
 
 ## 未完成
