@@ -55,14 +55,14 @@ class RunE2ETest(unittest.TestCase):
         self.bundle.write_text('fake', encoding='utf-8')
         self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
-    def write_stub(self, path, role, failing=False, probe=False):
+    def write_stub(self, path, role, failing=False, probe=False, exit_code=7):
         source = '''import json, pathlib, sys
 role = ROLE
 args = sys.argv[1:]
 with open(LOG, 'a', encoding='utf-8') as stream:
     stream.write(json.dumps([role, args]) + "\\n")
 if FAIL:
-    raise SystemExit(7)
+    raise SystemExit(EXIT_CODE)
 if role == 'boss':
     pathlib.Path(args[args.index('--out') + 1]).write_text('{}', encoding='utf-8')
 elif role == 'da':
@@ -80,6 +80,7 @@ elif role == 'builder':
         (out / 'index.html').write_text('ok', encoding='utf-8')
 '''.replace('ROLE', repr(role)).replace('LOG', repr(str(self.log)))
         source = source.replace('FAIL', repr(failing)).replace('PROBE', repr(probe))
+        source = source.replace('EXIT_CODE', repr(exit_code))
         path.write_text(source, encoding='utf-8')
 
     def command(self):
@@ -152,6 +153,18 @@ elif role == 'builder':
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('步骤失败: DA', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+
+    def test_builder_failure_stops_pipeline_and_returns_nonzero(self):
+        """Builder 失败时打印失败步骤并以非零退出，站点自检不再执行。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 2), exit_code=3)
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('步骤失败: Builder', result.stderr)
+        self.assertIn('退出码 3', result.stderr)
+        # 后续步骤（站点自检）不再执行
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder'])
+        self.assertNotIn('[检查] 命令', result.stdout)
 
     def test_optional_review_runs_after_checker_and_writes_output(self):
         for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
