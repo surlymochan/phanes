@@ -367,6 +367,22 @@ class MakeBriefTest(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_check_missing_file_exits_one_without_traceback(self) -> None:
+        """命令行 --check 文件不存在时退出码为 1，且不打印 traceback。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "missing-brief.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("无法读取任务书", output)
+        self.assertIn(str(path), output)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 class PeriodOrderTest(unittest.TestCase):
     """观察期间的期次顺序、重复期次与起止倒置。"""
