@@ -2,10 +2,10 @@
 
 ## Team API compatibility boundary
 
-Current remote connections use Team API protocol v8 over three ordered WebRTC DataChannels: `rpc`,
-`events`, and `files`. A sandboxed hidden Chromium page owns each `RTCPeerConnection`. Electron main
-uses a `MessagePort` and transfers binary data as `ArrayBuffer`. Signal carries SDP and ICE only,
-except the Slack requests of an agent's Slack app (see [Messaging connections](channels-and-messaging.md#messaging-connections)).
+Current remote connections use Team API protocol v8 over four ordered WebRTC DataChannels: `rpc`,
+`events`, `files`, and `desktop`. A sandboxed hidden Chromium page owns each `RTCPeerConnection`.
+Electron main uses a `MessagePort` and transfers binary data as `ArrayBuffer`. Signal carries SDP
+and ICE only, except the Slack requests of an agent's Slack app (see [Messaging connections](channels-and-messaging.md#messaging-connections)).
 OpenBot Mobile uses the same ticket, authentication transcript, framing, RPC codec, and event stream.
 In Expo Go, an Expo DOM component owns the browser `RTCPeerConnection` inside a hidden WebView and
 passes only serializable, validated commands and events to the native React UI; no native WebRTC
