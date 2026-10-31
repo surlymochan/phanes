@@ -1,6 +1,9 @@
 """check_site.py 的静态站点验收测试。"""
+from __future__ import annotations
+
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,8 +17,8 @@ SOURCE_DATA = ROOT / "data" / "diagnosis.json"
 
 
 class CheckSiteTest(unittest.TestCase):
-    def make_dist(self) -> Path:
-        folder = Path(self.tmp.name) / "dist"
+    def make_dist(self, folder_name: str = "dist") -> Path:
+        folder = Path(self.tmp.name) / folder_name
         (folder / "data").mkdir(parents=True)
         (folder / "index.html").write_text('<link rel="stylesheet" href="./styles.css">', encoding="utf-8")
         (folder / "app.bundle.js").write_text("console.log('fixture');", encoding="utf-8")
@@ -43,9 +46,10 @@ class CheckSiteTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def run_checker(self, dist: Path) -> subprocess.CompletedProcess:
+    def run_checker(self, *args: str | Path, cwd: Path | None = None) -> subprocess.CompletedProcess:
+        cmd = [sys.executable, str(CHECKER)] + [str(arg) for arg in args]
         return subprocess.run(
-            [sys.executable, str(CHECKER), str(dist)], capture_output=True, text=True
+            cmd, capture_output=True, text=True, cwd=cwd
         )
 
     def test_valid_dist_passes(self) -> None:
@@ -236,6 +240,41 @@ class CheckSiteTest(unittest.TestCase):
         report["文件清单"][0]["sha256"] = "0" * 64
         (dist / "build-report.json").write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
         self.assertNotEqual(self.run_checker(dist).returncode, 0)
+
+    def test_cli_no_args_fails_and_requires_dist(self) -> None:
+        """不传任何参数调用时退出码非 0，stderr 提示缺少必选位置参数 dist。"""
+        result = self.run_checker()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dist", result.stderr)
+        self.assertIn("required", result.stderr.lower())
+
+    def test_cli_help_option_displays_usage_and_dist(self) -> None:
+        """传入 --help 时退出码为 0，stdout 包含 dist 位置参数说明与用法。"""
+        result = self.run_checker("--help")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("usage:", result.stdout.lower())
+        self.assertIn("dist", result.stdout)
+        self.assertIn("静态站点目录", result.stdout)
+
+    def test_cli_path_with_spaces_and_relative_path(self) -> None:
+        """传入包含空格的目录路径或相对路径时仍能正常读取并完成检查。"""
+        # 1. 包含空格的目录路径
+        dist_with_spaces = self.make_dist("dist with spaces")
+        result_spaces = self.run_checker(dist_with_spaces)
+        self.assertEqual(result_spaces.returncode, 0, result_spaces.stdout + result_spaces.stderr)
+        self.assertIn("站点检查通过", result_spaces.stdout)
+
+        # 2. 从当前工作目录计算的相对路径
+        rel_dist = Path(os.path.relpath(dist_with_spaces, Path.cwd()))
+        result_rel = self.run_checker(rel_dist)
+        self.assertEqual(result_rel.returncode, 0, result_rel.stdout + result_rel.stderr)
+        self.assertIn("站点检查通过", result_rel.stdout)
+
+        # 3. 相对路径（在父目录下使用相对目录名）
+        dist_rel_name = self.make_dist("dist_relative")
+        result_cwd = self.run_checker(dist_rel_name.name, cwd=dist_rel_name.parent)
+        self.assertEqual(result_cwd.returncode, 0, result_cwd.stdout + result_cwd.stderr)
+        self.assertIn("站点检查通过", result_cwd.stdout)
 
 
 if __name__ == "__main__":
