@@ -19,13 +19,14 @@ def parse_args(argv=None):
     parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py')
     parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py')
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py')
+    parser.add_argument('--review', action='store_true', help='检查后运行交叉审阅并写入 review.md')
     return parser.parse_args(argv)
 
 
-def run_step(name, command):
+def run_step(name, command, stdout=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
-    result = subprocess.run(command)
+    result = subprocess.run(command, stdout=stdout)
     elapsed = time.monotonic() - started
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
@@ -51,11 +52,15 @@ def main(argv=None):
     commands.extend([
         ('Builder', build),
         ('检查', [sys.executable, str(args.checker), str(dist)]),
-        ('审查', [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]),
     ])
     for name, command in commands:
         if not run_step(name, command):
             return 1
+    if args.review:
+        review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
+        with (workdir / 'review.md').open('w', encoding='utf-8') as output:
+            if not run_step('审查', review, stdout=output):
+                return 1
     print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
     return 0
 
