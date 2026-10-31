@@ -304,6 +304,24 @@ elif role == 'builder':
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder'])
         self.assertNotIn('[检查] 命令', result.stdout)
 
+    def test_missing_explicit_bundle_stops_at_builder(self):
+        """显式 bundle 不存在时，Builder 失败并阻断检查与审查。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role)
+        command = self.command()
+        command[command.index('--bundle') + 1] = 'nonexistent.bundle.js'
+        command[command.index('--builder') + 1] = str(ROOT / 'builder' / 'build_site.py')
+        command += ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('步骤失败: Builder', result.stderr)
+        self.assertIn('bundle 文件不存在或不是有效文件', result.stderr)
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+        for step in ('检查', '审查'):
+            self.assertNotIn(f'[{step}] 命令', result.stdout)
+
     def test_checker_failure_stops_pipeline_and_skips_review(self):
         """Checker 失败时打印失败步骤并以非零退出，独立审查步骤跳过不执行。"""
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
