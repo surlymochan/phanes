@@ -233,6 +233,35 @@ class PatternsTests(unittest.TestCase):
         self.assertEqual(output["retirement_proposals"], [])
         self.assertEqual(output["insufficient_samples"], 1)
 
+    def test_retire_check_without_history_leaves_patterns_unchanged(self):
+        pattern_path = self.write_pattern("P-0030", "Active pattern")
+        original_content = pattern_path.read_text(encoding="utf-8")
+        original_skills = sorted(p.name for p in self.skills.iterdir())
+
+        output = json.loads(self.run_command("patterns", "retire-check"))
+        self.assertEqual(output["retirement_proposals"], [])
+        self.assertEqual(output["patterns_checked"], 1)
+        self.assertEqual(output["insufficient_samples"], 1)
+        self.assertFalse(self.proposals.exists())
+        self.assertEqual(sorted(p.name for p in self.skills.iterdir()), original_skills)
+        self.assertEqual(pattern_path.read_text(encoding="utf-8"), original_content)
+        parsed = xs.parse_pattern_markdown(pattern_path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["status"], "active")
+
+        self.ledger.parent.mkdir(parents=True, exist_ok=True)
+        self.ledger.write_text(json.dumps({"id": "other-run", "ts": xs.NOW() - 60,
+                                           "card_type": "docs", "backend": "codex",
+                                           "patterns_injected": [], "exec_pass": True,
+                                           "accepted": True}) + "\n", encoding="utf-8")
+        output = json.loads(self.run_command("patterns", "retire-check"))
+        self.assertEqual(output["retirement_proposals"], [])
+        self.assertEqual(output["patterns_checked"], 1)
+        self.assertEqual(output["insufficient_samples"], 1)
+        self.assertFalse(self.proposals.exists())
+        self.assertEqual(sorted(p.name for p in self.skills.iterdir()), original_skills)
+        self.assertEqual(pattern_path.read_text(encoding="utf-8"), original_content)
+
+
 
 if __name__ == "__main__":
     unittest.main()
