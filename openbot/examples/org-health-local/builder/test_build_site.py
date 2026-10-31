@@ -70,6 +70,23 @@ class BuildSiteTest(unittest.TestCase):
         self.assertEqual((self.out / "app.bundle.js").read_bytes(), self.bundle.read_bytes())
         self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), EXAMPLE_PATH.read_bytes())
 
+    def test_utf8_diagnosis_copy_matches_input_and_report(self) -> None:
+        """含 UTF-8 中文内容的诊断快照复制后保持字节与摘要一致。"""
+        diagnosis = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+        diagnosis["conclusion"] = "中文诊断快照：复制后字节必须完全一致。"
+        input_path = self.root / "utf8-diagnosis.json"
+        input_path.write_text(json.dumps(diagnosis, ensure_ascii=False), encoding="utf-8")
+
+        self.assertEqual(self.build(data=input_path, bundle=self.bundle), build_site.EXIT_OK)
+        copied = self.out / "data/diagnosis.json"
+        self.assertEqual(copied.read_bytes(), input_path.read_bytes())
+
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        listed = next(entry for entry in report["文件清单"] if entry["路径"] == "data/diagnosis.json")
+        self.assertEqual(report["sha256"], sha256_of(input_path))
+        self.assertEqual(listed["sha256"], sha256_of(input_path))
+        self.assertEqual(listed["字节数"], input_path.stat().st_size)
+
     def test_report_records_input_and_files(self) -> None:
         """构建报告记录输入路径、输入 sha256、文件清单与生成时间。"""
         self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
