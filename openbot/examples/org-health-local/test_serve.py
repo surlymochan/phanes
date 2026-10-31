@@ -5,6 +5,7 @@
 import http.client
 import io
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -321,6 +322,58 @@ class StartupPreviewTests(unittest.TestCase):
     def test_default_port_is_8765(self):
         self.assertEqual(serve.parse_args([]).port, 8765)
         self.assertEqual(serve.parse_args(['--port', '1234']).port, 1234)
+
+
+class PortRangeArgumentTests(unittest.TestCase):
+    """--port 边界：负数与超过 65535 的端口由 argparse 以非 0 退出并把范围提示写到 stderr。"""
+
+    def run_cli(self, port):
+        """运行 serve.py 命令行，返回 (退出码, stdout, stderr)。"""
+        result = subprocess.run(
+            [sys.executable, str(serve.ROOT / 'serve.py'), '--port', str(port)],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_negative_port_fails_with_range_hint(self):
+        for port in (-1, -65535):
+            with self.subTest(port=port):
+                code, out, err = self.run_cli(port)
+                self.assertNotEqual(code, 0)
+                self.assertIn('0-65535', err)
+                self.assertIn(str(port), err)
+                self.assertNotIn('预览地址', out)
+
+    def test_port_above_maximum_fails_with_range_hint(self):
+        for port in (65536, 70000):
+            with self.subTest(port=port):
+                code, out, err = self.run_cli(port)
+                self.assertNotEqual(code, 0)
+                self.assertIn('0-65535', err)
+                self.assertIn(str(port), err)
+                self.assertNotIn('预览地址', out)
+
+    def test_parse_args_reports_range_error_to_stderr(self):
+        # argparse 用 SystemExit(非 0) 结束，范围提示只出现在 stderr。
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                serve.parse_args(['--port', '-1'])
+        self.assertNotEqual(caught.exception.code, 0)
+        self.assertIn('0-65535', stderr.getvalue())
+
+    def test_port_zero_is_accepted_as_dynamic_port(self):
+        # 端口 0 是既有约定：由内核分配动态端口，不算非法参数。
+        args = serve.parse_args(['--port', '0'])
+        self.assertEqual(args.port, 0)
+        server = serve.create_server(args.port, args.data, root=args.root)
+        self.addCleanup(server.server_close)
+        self.assertGreater(server.server_address[1], 0)
+
+    def test_boundary_ports_are_accepted(self):
+        self.assertEqual(serve.parse_args(['--port', '0']).port, 0)
+        self.assertEqual(serve.parse_args(['--port', '65535']).port, 65535)
 
 
 class PortInUseTests(unittest.TestCase):
