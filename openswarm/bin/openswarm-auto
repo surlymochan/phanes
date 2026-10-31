@@ -48,6 +48,25 @@ def fleet_hosts():
         raise RuntimeError('invalid automatic routing fleet host configuration')
     return hosts
 
+def backend_filters(hosts):
+    """Optional administrator-owned backend allowlists for each fleet host."""
+    raw = os.environ.get('OPENSWARM_AUTO_HOST_BACKENDS')
+    if raw is None:
+        return {}
+    try:
+        filters = json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError('invalid automatic routing backend configuration') from error
+    allowed_hosts = {local_host(), *hosts}
+    if (not isinstance(filters, dict) or not filters
+            or any(not isinstance(host, str) or host not in allowed_hosts
+                   or not isinstance(backends, list) or not backends
+                   or any(not isinstance(backend, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', backend)
+                          for backend in backends)
+                   for host, backends in filters.items())):
+        raise RuntimeError('invalid automatic routing backend configuration')
+    return {host: set(backends) for host, backends in filters.items()}
+
 def fleet_lanes(host):
     process = subprocess.run([cli, 'fleet', 'exec', host, '--', 'lane', 'status'],
                              capture_output=True, text=True, timeout=35)
@@ -101,12 +120,17 @@ def preference(kind, difficulty):
     return ['pi', 'cursor', 'agy', 'copilot', 'codex']
 
 def discovered_lanes():
-    rows = [{**row, '_origin': 'local'} for row in local_lanes()]
     hosts = fleet_hosts()
+    filters = backend_filters(hosts)
+    local_allowed = filters.get(local_host())
+    rows = [{**row, '_origin': 'local'} for row in local_lanes()
+            if local_allowed is None or row.get('backend') in local_allowed]
     if hosts:
         for host in hosts:
             try:
-                rows.extend({**row, '_origin': 'fleet', '_fleet_host': host} for row in fleet_lanes(host))
+                allowed = filters.get(host)
+                rows.extend({**row, '_origin': 'fleet', '_fleet_host': host} for row in fleet_lanes(host)
+                            if allowed is None or row.get('backend') in allowed)
             except (RuntimeError, OSError, subprocess.SubprocessError):
                 pass
         return rows

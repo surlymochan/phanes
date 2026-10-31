@@ -73,6 +73,42 @@ class FleetAutoTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'fleet host configuration'):
                     G['fleet_hosts']()
 
+    def test_backend_host_filters_keep_local_cursor_slots_distinct_from_remote_duplicates(self):
+        local = [
+            {'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'},
+            {'name': 'K2', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'},
+            {'name': 'M3', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+        ]
+        inventory = {
+            'gores1': [
+                {'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'},
+                {'name': 'M1', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+            ],
+            'gocc': [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'Gemini'}],
+        }
+        args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0',
+                '--prompt', 'task', '--dry-run']
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":["cursor"],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        with mock.patch.object(sys, 'argv', args), mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {'local_lanes': lambda: local,
+                                    'fleet_lanes': lambda host: inventory[host]}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['main']()
+        result = json.loads(output.getvalue())
+        self.assertEqual((result['host'], result['lane'], result['backend']), ('local', 'K1', 'cursor'))
+
+    def test_backend_host_filters_reject_invalid_hosts_and_backends(self):
+        environment = {'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+                       'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1"]'}
+        for raw in ('[]', '{"unknown":["pi"]}', '{"local":[]}', '{"local":["bad backend"]}'):
+            with mock.patch.dict(os.environ, {**environment, 'OPENSWARM_AUTO_HOST_BACKENDS': raw}):
+                with self.assertRaisesRegex(RuntimeError, 'backend configuration'):
+                    G['backend_filters'](G['fleet_hosts']())
+
     def test_copilot_prefers_sonnet_for_hard_and_haiku_for_routine_work(self):
         lanes = [
             {'name': 'GH1', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-haiku-5.5'},
