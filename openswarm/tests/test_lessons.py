@@ -280,6 +280,72 @@ class LessonsTests(unittest.TestCase):
             'source: "https://example.test/findings/7"\n',
         )
 
+    def test_empty_lessons_lists_serialize_to_stable_empty_structure(self):
+        proposal = {
+            "kind": "new",
+            "id": "L-0099",
+            "date": "2026-11-01",
+            "title": "Validate empty applies_to serialization",
+            "root_cause_class": "other",
+            "recurrences": 0,
+            "rule": "Empty applies_to lists serialize to stable structure.",
+            "applies_to": {
+                "card_types": [],
+                "paths": [],
+                "backends": [],
+            },
+            "source": "https://example.test/findings/99",
+        }
+
+        yaml_text = xs.lesson_proposal_yaml(proposal)
+        self.assertEqual(
+            yaml_text,
+            'id: "L-0099"\n'
+            'date: "2026-11-01"\n'
+            'title: "Validate empty applies_to serialization"\n'
+            'root_cause_class: "other"\n'
+            'recurrences: 0\n'
+            'rule: "Empty applies_to lists serialize to stable structure."\n'
+            'guard_level: L2\n'
+            'applies_to:\n'
+            '  card_types: []\n'
+            '  paths: []\n'
+            '  backends: []\n'
+            'source: "https://example.test/findings/99"\n',
+        )
+
+        parsed = xs.parse_lesson_yaml(yaml_text)
+        self.assertEqual(set(parsed["applies_to"].keys()), {"card_types", "paths", "backends"})
+        self.assertEqual(parsed["applies_to"]["card_types"], [])
+        self.assertEqual(parsed["applies_to"]["paths"], [])
+        self.assertEqual(parsed["applies_to"]["backends"], [])
+
+        minimal_yaml = (
+            "id: L-0100\n"
+            "rule: Test rule\n"
+            "guard_level: L2\n"
+            "applies_to:\n"
+        )
+        parsed_minimal = xs.parse_lesson_yaml(minimal_yaml)
+        self.assertEqual(set(parsed_minimal["applies_to"].keys()), {"card_types", "paths", "backends"})
+        self.assertEqual(parsed_minimal["applies_to"], {
+            "card_types": [],
+            "paths": [],
+            "backends": [],
+        })
+
+        self.assertEqual(xs.lesson_yaml_scalar("[]", allow_list=True), [])
+
+        xs.append_ledger({"id": "lesson-empty-run", "lessons_injected": []})
+        entry = json.loads(Path(xs.LEDGER).read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIn("lessons_injected", entry)
+        self.assertEqual(entry["lessons_injected"], [])
+
+        summary = xs.lesson_markdown_summary("2026-11-01", [])
+        self.assertIn("Proposals: 0", summary)
+        self.assertIn("No new proposals.", summary)
+
+
     def test_propose_writes_new_lesson_with_class_paths_profile_and_source(self):
         self.set_ledger_finding(extra_comments=[
             {"id": 702, "user": {"login": "reviewer"}, "body": "**[P0] Not from Codex**\nP0 Badge"},
