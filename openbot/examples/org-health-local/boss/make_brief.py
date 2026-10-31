@@ -211,6 +211,13 @@ def build_brief(
     }
 
 
+def period_sort_key(value: object, keys: list[str]) -> tuple[str, int]:
+    """返回期次用于先后比较的键值（YYYY-MM 前缀与期次列表索引）。"""
+    prefix = value[:7] if isinstance(value, str) and MONTH_PATTERN.match(value[:7]) else ""
+    idx = keys.index(value) if isinstance(value, str) and value in keys else 0
+    return (prefix, idx)
+
+
 def validate_brief(brief: dict) -> list[str]:
     """按 brief.schema.json 校验任务书，返回错误说明列表。"""
     errors = Validator(load_schema(SCHEMA_PATH)).errors(brief)
@@ -220,6 +227,44 @@ def validate_brief(brief: dict) -> list[str]:
         for name in ("起始期次", "参考期次", "截止期次"):
             if name in period and period[name] not in keys:
                 errors.append(f"/观察期间/{name}: 必须是期次列表中的值")
+
+        if isinstance(keys, list):
+            dated = [
+                item[:7]
+                for item in keys
+                if isinstance(item, str) and MONTH_PATTERN.match(item[:7])
+            ]
+            is_valid_order = dated == sorted(dated)
+            if not is_valid_order:
+                observed = period.get("观察月份")
+                if isinstance(observed, str) and keys == period_keys(observed):
+                    is_valid_order = True
+            if not is_valid_order:
+                errors.append("/观察期间/期次: 必须按时间升序排列")
+
+        start = period.get("起始期次")
+        ref = period.get("参考期次")
+        end = period.get("截止期次")
+        if start is not None and ref is not None and end is not None:
+            if start in keys and ref in keys and end in keys:
+                if not (
+                    period_sort_key(start, keys)
+                    <= period_sort_key(ref, keys)
+                    <= period_sort_key(end, keys)
+                ):
+                    errors.append(
+                        "/观察期间/起始期次: 必须满足起始期次 ≤ 参考期次 ≤ 截止期次"
+                    )
+        else:
+            if start is not None and ref is not None and start in keys and ref in keys:
+                if period_sort_key(start, keys) > period_sort_key(ref, keys):
+                    errors.append("/观察期间/起始期次: 起始期次必须早于或等于参考期次")
+            if ref is not None and end is not None and ref in keys and end in keys:
+                if period_sort_key(ref, keys) > period_sort_key(end, keys):
+                    errors.append("/观察期间/参考期次: 参考期次必须早于或等于截止期次")
+            if start is not None and end is not None and start in keys and end in keys:
+                if period_sort_key(start, keys) > period_sort_key(end, keys):
+                    errors.append("/观察期间/起始期次: 起始期次必须早于或等于截止期次")
     return errors
 
 

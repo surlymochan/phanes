@@ -313,13 +313,9 @@ class PeriodOrderTest(unittest.TestCase):
                 self.assertNotIn(name, period)
 
     def test_当前不校验期次顺序重复与起止倒置(self) -> None:
-        """当前行为：三类期次问题都通过校验（已知缺口，见下面的 expectedFailure 用例）。
-
-        修复校验后本用例应改写为“必须报出”，或随 expectedFailure 用例一起删除。
-        """
+        """期次乱序与起始晚于截止场景必须报出错误。"""
         cases = {
             "期次乱序": brief_with_period(SCRAMBLED_PERIODS),
-            "重复期次": brief_with_period(DUPLICATED_PERIODS),
             "起始晚于截止": brief_with_period(
                 ORDERED_PERIODS,
                 {"起始期次": "2026-09实际", "参考期次": "2026-05H1参考", "截止期次": "2026-01实际"},
@@ -327,9 +323,10 @@ class PeriodOrderTest(unittest.TestCase):
         }
         for name, brief in cases.items():
             with self.subTest(scenario=name):
-                self.assertEqual(self.errors(brief), [])
+                errors = self.errors(brief)
+                self.assertNotEqual(errors, [])
+                self.assertTrue(any("期次" in message for message in errors))
 
-    @unittest.expectedFailure
     def test_期次乱序_应报出错误(self) -> None:
         """期次锚点乱序时应报出顺序错误。
 
@@ -372,7 +369,6 @@ class PeriodOrderTest(unittest.TestCase):
         self.assertIn("重复", output.getvalue())
         self.assertIn("期次", output.getvalue())
 
-    @unittest.expectedFailure
     def test_起始晚于截止_应报出错误(self) -> None:
         """起始期次晚于截止期次时应报出错误。
 
@@ -388,7 +384,6 @@ class PeriodOrderTest(unittest.TestCase):
         )
         self.assertTrue(any("期次" in message for message in errors), "起始晚于截止时未报出错误")
 
-    @unittest.expectedFailure
     def test_check_期次乱序_退出码非零(self) -> None:
         """--check 校验乱序期次的任务书时退出码应非 0。
 
