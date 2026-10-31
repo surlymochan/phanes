@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Relay only Pi inference bytes over restricted SSH stdio."""
+import errno
 import os
 import pathlib
 import select
@@ -22,7 +23,14 @@ while True:
             sock.sendall(data)
         else:
             stdin_open = False
-            sock.shutdown(socket.SHUT_WR)
+            # stdin EOF and the upstream response/close can become ready in
+            # the same select cycle. On macOS the peer may win that race,
+            # making the write-half close report a normal disconnection.
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError as error:
+                if error.errno not in (errno.ENOTCONN, errno.EPIPE):
+                    raise
     if sock in ready:
         data = sock.recv(65536)
         if not data:

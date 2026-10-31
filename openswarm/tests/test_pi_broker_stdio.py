@@ -40,7 +40,8 @@ class PiBrokerStdioTests(unittest.TestCase):
                     client.close(); listener.close()
                 worker = threading.Thread(target=serve); worker.start()
                 process = subprocess.run([str(relay)], input=raw, capture_output=True,
-                                         env=dict(os.environ, HOME=str(root), MARKER=str(marker)), check=True)
+                                         env=dict(os.environ, HOME=str(root), MARKER=str(marker)))
+                self.assertEqual(process.returncode, 0, process.stderr.decode(errors='replace'))
                 worker.join(timeout=2)
                 self.assertFalse(worker.is_alive())
                 sock_path.unlink()
