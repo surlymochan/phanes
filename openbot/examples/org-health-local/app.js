@@ -20,6 +20,28 @@ const fmt = (value, digits = 2) =>
         maximumFractionDigits: digits,
       });
 const valueFor = (series, label) => series?.[label] ?? null;
+const DEFAULT_PERIODS = {
+  observationMonth: "2026-09",
+  start: "2026-01实际",
+  reference: "2026-05H1参考",
+  end: "2026-09实际",
+  forecast: "年末测算",
+  target: "年末目标",
+};
+function periodKeys(scope, series) {
+  const observationMonth = scope?.["观察月份"] || DEFAULT_PERIODS.observationMonth;
+  const keys = Object.keys(series || {});
+  const actualKeys = keys.filter((key) => /^\d{4}-\d{2}实际$/.test(key)).sort();
+  const end = `${observationMonth}实际`;
+  return {
+    observationMonth,
+    start: actualKeys.find((key) => key !== end) || DEFAULT_PERIODS.start,
+    reference: keys.find((key) => key.endsWith("H1参考")) || DEFAULT_PERIODS.reference,
+    end,
+    forecast: DEFAULT_PERIODS.forecast,
+    target: DEFAULT_PERIODS.target,
+  };
+}
 function normalizeSnapshot(data) {
   if (data?.scope) return data;
   if (!data?.范围 || !Array.isArray(data?.指标)) return data;
@@ -53,13 +75,14 @@ function normalizeSnapshot(data) {
   };
 }
 function metricCard(title, unit, series, delta, options = {}) {
+  const periods = options.periods || DEFAULT_PERIODS;
   const points = [
-    ["2026-01实际", t("orgHealthDemo.actual01"), "actual"],
-    ["2026-05H1参考", t("orgHealthDemo.reference05"), "frozen"],
-    ["2026-09实际", t("orgHealthDemo.actual09"), "actual"],
-    [options.forecastKey || "年末测算", options.forecastLabel || t("orgHealthDemo.forecast"), "forecast"],
+    [periods.start, t("orgHealthDemo.actual01"), "actual"],
+    [periods.reference, t("orgHealthDemo.reference05"), "frozen"],
+    [periods.end, t("orgHealthDemo.actual09"), "actual"],
+    [options.forecastKey || periods.forecast, options.forecastLabel || t("orgHealthDemo.forecast"), "forecast"],
   ];
-  // May is retained as an explicit unavailable anchor; forecast is visually separated.
+  // The reference period is retained as an explicit unavailable anchor; forecast is visually separated.
   return `<article class="metric-card"><div class="metric-name">${title}</div><div class="metric-unit">${unit}</div><div class="metric-values">${points
     .map(([key, label, type]) => {
       const v = valueFor(series, key);
@@ -70,10 +93,12 @@ function metricCard(title, unit, series, delta, options = {}) {
 }
 function render(data) {
   const expected = ["整体技术人力成本", "整体折算人头", "营收业务（含共享平台）技术人力成本与折算人头", "收入与成本率"];
+  const scope = data.scope || {};
+  const observationMonth = scope["观察月份"] || DEFAULT_PERIODS.observationMonth;
   if (
-    data.scope?.["schema版本"] !== 4 ||
-    data.scope?.["观察月份"] !== "2026-09" ||
-    !data.scope?.["数据截止"] ||
+    scope["schema版本"] !== 4 ||
+    !/^\d{4}-\d{2}$/.test(observationMonth) ||
+    !scope["数据截止"] ||
     expected.some((title, i) => data.metrics?.[i]?.["标题"] !== title) ||
     !["insights", "definitions", "risks", "recommendations"].every(
       (key) => data[key] == null || Array.isArray(data[key]),
@@ -81,10 +106,9 @@ function render(data) {
   ) {
     throw new Error(t("orgHealthDemo.badStructure"));
   }
-  const scope = data.scope;
   $("#conclusion").textContent = data.conclusion;
   $("#asof-short").textContent = t("orgHealthDemo.asOf", { date: scope["数据截止"] });
-  $("#scope-month").textContent = scope["观察月份"];
+  $("#scope-month").textContent = observationMonth;
   $("#scope-date").textContent = scope["数据截止"];
   $("#scope-source").textContent = `${scope["来源"]} · schema v${scope["schema版本"]}`;
   $("#footer-source").textContent = t("orgHealthDemo.sourceLine", { origin: data.origin });
@@ -100,6 +124,7 @@ function render(data) {
   }
   const m = data.metrics;
   const overallCost = m[0].数值;
+  const periods = periodKeys(scope, overallCost);
   const overallHeads = m[1].数值;
   const revenueOps = m[2].数值;
   const revenue = m[3].数值["收入万美元每月"];
@@ -107,19 +132,19 @@ function render(data) {
   const revRates = m[3].数值["营收业务技术人力成本率"];
   const fullRates = m[3].数值["全口径技术成本率含运维设施"];
   const numericSeries = [overallCost, overallHeads, revenueOps?.成本, revenueOps?.折算人头, revenue];
-  const dates = ["2026-01实际", "2026-05H1参考", "2026-09实际"];
+  const dates = [periods.start, periods.reference, periods.end];
   if (
     numericSeries.some(
       (series, i) =>
         !series ||
-        [...dates, i === 4 ? "年末目标" : "年末测算"].some(
+        [...dates, i === 4 ? periods.target : periods.forecast].some(
           (key) =>
             !(key in series) ||
             (series[key] !== null && (typeof series[key] !== "number" || !Number.isFinite(series[key]))),
         ),
     ) ||
-    overallCost["2026-05H1参考"] !== null ||
-    overallHeads["2026-05H1参考"] !== null ||
+    overallCost[periods.reference] !== null ||
+    overallHeads[periods.reference] !== null ||
     !costRates ||
     !revRates ||
     !fullRates
@@ -128,15 +153,15 @@ function render(data) {
   }
   const asPercent = (x) => (x == null ? t("orgHealthDemo.notProvided") : String(x));
   const difference = (series, digits = 2) => {
-    const start = series["2026-01实际"],
-      end = series["2026-09实际"];
+    const start = series[periods.start],
+      end = series[periods.end];
     if (start == null || end == null) return t("orgHealthDemo.notProvided");
     const change = Number(end) - Number(start);
     return `${change > 0 ? "+" : ""}${fmt(change, digits)}`;
   };
   const percentChange = (series) => {
-    const start = series["2026-01实际"],
-      end = series["2026-09实际"];
+    const start = series[periods.start],
+      end = series[periods.end];
     if (start == null || end == null || !Number(start)) return t("orgHealthDemo.notProvided");
     const change = (Number(end) / Number(start) - 1) * 100;
     return `${change > 0 ? "+" : ""}${fmt(change, 1)}%`;
@@ -147,35 +172,35 @@ function render(data) {
       t("orgHealthDemo.costUnit"),
       overallCost,
       `${t("orgHealthDemo.change")} <strong>${difference(overallCost, 1)} ${t("orgHealthDemo.moneyUnit")} · ${percentChange(overallCost)}</strong>`,
-      { digits: 1 },
+      { digits: 1, periods },
     ),
     metricCard(
       t("orgHealthDemo.headcount"),
       t("orgHealthDemo.headUnit"),
       overallHeads,
       `${t("orgHealthDemo.change")} <strong>${difference(overallHeads, 1)} · ${percentChange(overallHeads)}</strong>`,
-      { digits: 1 },
+      { digits: 1, periods },
     ),
     metricCard(
       t("orgHealthDemo.revenueCost"),
       t("orgHealthDemo.revenueCostUnit"),
       revenueOps.成本,
       `${t("orgHealthDemo.change")} <strong>${difference(revenueOps.成本, 1)} ${t("orgHealthDemo.moneyUnit")}</strong>`,
-      { digits: 1 },
+      { digits: 1, periods },
     ),
     metricCard(
       t("orgHealthDemo.revenueHeadcount"),
       t("orgHealthDemo.revenueHeadUnit"),
       revenueOps.折算人头,
       `${t("orgHealthDemo.change")} <strong>${difference(revenueOps.折算人头, 1)}</strong>`,
-      { digits: 1 },
+      { digits: 1, periods },
     ),
     metricCard(
       t("orgHealthDemo.revenue"),
       t("orgHealthDemo.revenueUnit"),
       revenue,
       `${t("orgHealthDemo.revenueChange")} <strong>${percentChange(revenue)}</strong> · ${t("orgHealthDemo.yearEndRevenue")}`,
-      { digits: 0, forecastKey: "年末目标", forecastLabel: t("orgHealthDemo.forecastTarget") },
+      { digits: 0, forecastKey: periods.target, forecastLabel: t("orgHealthDemo.forecastTarget"), periods },
     ),
     metricCard(
       t("orgHealthDemo.costRatio"),
@@ -183,13 +208,13 @@ function render(data) {
       costRates,
       safe(
         t("orgHealthDemo.ratioSummary", {
-          a: asPercent(revRates["2026-01实际"]),
-          b: asPercent(revRates["2026-09实际"]),
-          c: asPercent(fullRates["整体2026-01实际"]),
-          d: asPercent(fullRates["整体2026-09实际"]),
+          a: asPercent(revRates[periods.start]),
+          b: asPercent(revRates[periods.end]),
+          c: asPercent(fullRates[`整体${periods.start}`]),
+          d: asPercent(fullRates[`整体${periods.end}`]),
         }),
       ),
-      { format: asPercent, forecastLabel: t("orgHealthDemo.forecastRevenue"), warn: true },
+      { format: asPercent, forecastLabel: t("orgHealthDemo.forecastRevenue"), warn: true, periods },
     ),
   ].join("");
   const emptyState = () => `<div class="empty-state">${t("orgHealthDemo.noData")}</div>`;
