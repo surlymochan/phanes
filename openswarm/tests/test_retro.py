@@ -171,6 +171,55 @@ class RetroTests(unittest.TestCase):
             self.assertTrue(xs.retro_step("lessons escalate", args, self.policy))
         self.assertEqual(run.call_args.args[0][-2:], ["lessons", "escalate"])
 
+    def test_is_failure_covers_exec_pass_false_and_failed_or_rejected_status(self):
+        self.assertTrue(xs.retro_is_failure({"exec_pass": False, "status": "done"}))
+        self.assertTrue(xs.retro_is_failure({"exec_pass": True, "status": "failed"}))
+        self.assertTrue(xs.retro_is_failure({"exec_pass": True, "status": "rejected"}))
+        self.assertFalse(xs.retro_is_failure({"exec_pass": True, "status": "done"}))
+        self.assertFalse(xs.retro_is_failure({"exec_pass": None, "status": "done"}))
+        self.assertFalse(xs.retro_is_failure({}))
+
+    def test_rejected_covers_accepted_false_or_rejected_status(self):
+        entries = [
+            {"id": "not-accepted", "status": "done", "accepted": False},
+            {"id": "status-rejected", "status": "rejected", "accepted": True},
+            {"id": "no-accepted-field", "status": "done"},
+            {"id": "accepted", "status": "done", "accepted": True},
+        ]
+        self.assertEqual([entry["id"] for entry in xs.retro_rejected(entries)],
+                         ["not-accepted", "status-rejected"])
+
+    def test_failure_counts_fall_back_to_last_attempt_error_class(self):
+        entries = [
+            {"id": "direct", "status": "failed", "error_class": "exec_error"},
+            {"id": "attempts", "status": "failed",
+             "attempts": [{"error_class": "timeout"}, {"error_class": "exec_error"}]},
+            {"id": "blank-last-attempt", "status": "failed",
+             "attempts": [{"error_class": "timeout"}, {"error_class": ""}]},
+            {"id": "no-class", "status": "failed"},
+            {"id": "no-class-attempts", "status": "failed", "attempts": [{"note": "no class"}]},
+            {"id": "bad-attempts", "status": "failed", "attempts": "exec_error"},
+            {"id": "passed", "status": "done", "error_class": "exec_error"},
+        ]
+        self.assertEqual(xs.retro_failure_counts(entries), [("exec_error", 2), ("timeout", 1)])
+
+    def test_failure_counts_sorted_by_count_then_name(self):
+        entries = [
+            {"id": "1", "status": "failed", "error_class": "zeta"},
+            {"id": "2", "status": "failed", "error_class": "alpha"},
+            {"id": "3", "status": "failed", "error_class": "zeta"},
+            {"id": "4", "status": "failed", "error_class": "beta"},
+            {"id": "5", "status": "failed", "error_class": "alpha"},
+        ]
+        self.assertEqual(xs.retro_failure_counts(entries), [("alpha", 2), ("zeta", 2), ("beta", 1)])
+
+    def test_ledger_fixture_classifies_failures_and_rejections(self):
+        entries = list(xs.ledger_entries_from(xs.fleet_ledger_path()))
+        self.assertEqual([entry["id"] for entry in entries], ["pass-1", "reject-2", "run-3"])
+        self.assertEqual([entry["id"] for entry in entries if xs.retro_is_failure(entry)], ["reject-2"])
+        self.assertEqual([entry["id"] for entry in xs.retro_rejected(entries)], ["reject-2"])
+        self.assertEqual(xs.retro_failure_counts(entries), [("exec_error", 1)])
+
 
 if __name__ == "__main__":
     unittest.main()
