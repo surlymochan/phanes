@@ -18,6 +18,7 @@ def parse_args(argv=None):
     parser.add_argument('--da', type=Path, default=ROOT / 'da' / 'build_diagnosis.py')
     parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py')
     parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py')
+    parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py')
     return parser.parse_args(argv)
 
 
@@ -47,7 +48,11 @@ def main(argv=None):
     build = [sys.executable, str(args.builder), '--data', str(diagnosis), '--out', str(dist)]
     if args.bundle:
         build.extend(['--bundle', str(args.bundle)])
-    commands.extend([('Builder', build), ('检查', [sys.executable, str(args.checker), str(dist)])])
+    commands.extend([
+        ('Builder', build),
+        ('检查', [sys.executable, str(args.checker), str(dist)]),
+        ('审查', [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]),
+    ])
     for name, command in commands:
         if not run_step(name, command):
             return 1
