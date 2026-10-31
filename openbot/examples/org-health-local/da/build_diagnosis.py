@@ -752,7 +752,7 @@ def build_insights(plan: dict, facts: dict, raw: dict) -> list[dict]:
 
 
 def answer_question(question: str, facts: dict) -> tuple[str, str]:
-    """按关键词把任务书问题对应到已算出的证据；成本增减问题补出增减金额与百分比；没有对应口径时标为边界。"""
+    """按关键词把任务书问题对应到已算出的证据；成本增减问题补出增减金额与百分比；成本率问题补出收入数值；没有对应口径时标为边界。"""
     cost = facts["overall_cost"]
     heads = facts["overall_heads"]
     revops_cost = facts["revops_cost"]
@@ -781,6 +781,7 @@ def answer_question(question: str, facts: dict) -> tuple[str, str]:
     if "率" in question:
         return (
             "事实",
+            f"收入 {fmt_number(income['start'])} → {fmt_number(income['end'])} 万美元/月；"
             f"整体技术人力成本率 {fmt_rate(ratios['overall']['start'])} → {fmt_rate(ratios['overall']['end'])}；"
             f"营收业务技术人力成本率 {fmt_rate(ratios['revops']['start'])} → {fmt_rate(ratios['revops']['end'])}；"
             f"全口径技术成本率（含运维设施）{fmt_rate(ratios['full']['start'])} → {fmt_rate(ratios['full']['end'])}。",

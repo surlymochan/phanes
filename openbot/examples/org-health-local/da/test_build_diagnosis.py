@@ -613,6 +613,31 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertIn("成本占比 未提供", content)
         self.assertIn("人头占比 未提供", content)
 
+    def test_answer_question_rate_branch_also_answers_income(self) -> None:
+        """问题同时问“率”与“收入”时，回答要给出收入起止数值与“万美元/月”单位。
+
+        问题带“率”会命中成本率分支，若该分支不补收入数值，回答就完全漏掉收入。
+        """
+        facts = {
+            "overall_cost": {"start": 10.4, "end": 12.4},
+            "overall_heads": {"start": 10.4, "end": 12.4},
+            "revops_cost": {"start": 8.3, "end": 9.9},
+            "revops_heads": {"start": 8.3, "end": 9.9},
+            "income": {"start": 11.2, "end": 13.6, "forecast": 14.8, "target": 15.2},
+            "ratios": {
+                "overall": {"start": 0.129, "end": 0.127},
+                "revops": {"start": 0.103, "end": 0.101},
+                "full": {"start": 0.155, "end": 0.152},
+            },
+        }
+        question = "观察期间的收入是多少（万美元/月）？整体技术人力成本率与营收业务技术人力成本率各是多少？"
+        kind, content = build_diagnosis.answer_question(question, facts)
+        self.assertEqual(kind, "事实")
+        self.assertIn("收入 11.2 → 13.6 万美元/月", content)
+        self.assertIn("万美元/月", content)
+        self.assertIn("整体技术人力成本率 约12.9% → 约12.7%", content)
+        self.assertIn("营收业务技术人力成本率 约10.3% → 约10.1%", content)
+
 
 class AbnormalRawDataTest(unittest.TestCase):
     """异常原始数据：缺期次、负数、重复行、CSV 多余列与重复列名。"""
