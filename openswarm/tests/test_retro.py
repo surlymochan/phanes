@@ -221,7 +221,8 @@ class RetroTests(unittest.TestCase):
         self.assertEqual(xs.retro_failure_counts(entries), [("exec_error", 1)])
 
     def test_retro_ratio_empty_and_non_boolean_items_and_formatting(self):
-        self.assertEqual(xs.retro_ratio([], "accepted"), "— (0/0)")
+        empty_prs = []
+        self.assertEqual(xs.retro_ratio(empty_prs, "accepted"), "— (0/0)")
         non_booleans = [
             {"accepted": 1},
             {"accepted": 0},
@@ -246,7 +247,8 @@ class RetroTests(unittest.TestCase):
         self.assertEqual(xs.retro_ratio([{"accepted": False}, {"accepted": False}], "accepted"), "0/2 (0%)")
 
     def test_retro_peer_review_p1_ratio_filters_corrupted_entries_and_counts_priority(self):
-        self.assertEqual(xs.retro_peer_review_p1_ratio([]), "— (0/0)")
+        empty_prs = []
+        self.assertEqual(xs.retro_peer_review_p1_ratio(empty_prs), "— (0/0)")
         corrupted = [
             {},
             {"peer_review": None},
@@ -281,7 +283,8 @@ class RetroTests(unittest.TestCase):
         self.assertEqual(xs.retro_peer_review_p1_ratio(entries), "3/5 (60%)")
 
     def test_retro_exec_pass_ratio_counts_boolean_ratio_and_nulls(self):
-        self.assertEqual(xs.retro_exec_pass_ratio([]), "0/0; null=0")
+        empty_prs = []
+        self.assertEqual(xs.retro_exec_pass_ratio(empty_prs), "0/0; null=0")
         all_null = [
             {"exec_pass": None},
             {"exec_pass": "pass"},
