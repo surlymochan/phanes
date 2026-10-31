@@ -21,6 +21,8 @@ from run_e2e import REVIEW_REPORT, source_commit  # noqa: E402  (需要先让示
 RUNNER = ROOT / 'run_e2e.py'
 REVIEWER = ROOT / 'review' / 'cross_check.py'
 SOURCE_COMMIT = source_commit()
+# root 用户不受目录写权限限制，只读目录的用例在 root 下跳过。
+IS_ROOT = hasattr(os, 'geteuid') and os.geteuid() == 0
 
 
 class RunE2EArgumentContractTest(unittest.TestCase):
@@ -450,6 +452,84 @@ elif role == 'builder':
         self.assertTrue(report.is_file(), '审查失败时未写出审查记录')
         self.assertIn('审查桩输出', report.read_text(encoding='utf-8'))
         # 失败不误报为成功：不再打印成功路径才有的预览命令
+        self.assertNotIn('预览命令', result.stdout)
+
+    def test_workdir_occupied_by_file_reports_readable_error(self):
+        """工作目录被同名文件占用时给出可读提示并非零退出，不裸抛 Traceback。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        occupied = self.root / 'occupied'
+        occupied.write_text('占位文件', encoding='utf-8')
+        command = self.command()
+        command[command.index('--workdir') + 1] = str(occupied)
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('工作目录不可用', result.stderr)
+        self.assertIn('占用', result.stderr)
+        self.assertIn(str(occupied.resolve()), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 工作目录不可用时不启动任何角色步骤
+        self.assertNotIn('[Boss] 命令', result.stdout)
+        self.assertFalse(self.log.exists())
+
+    @unittest.skipIf(IS_ROOT, 'root 用户不受目录写权限限制')
+    def test_readonly_workdir_reports_readable_error(self):
+        """工作目录不可写时给出可读提示并非零退出，不裸抛 Traceback。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        readonly = self.root / 'readonly'
+        readonly.mkdir()
+        readonly.chmod(0o500)
+        self.addCleanup(readonly.chmod, 0o700)
+        command = self.command()
+        command[command.index('--workdir') + 1] = str(readonly)
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('工作目录不可写', result.stderr)
+        self.assertIn(str(readonly.resolve()), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 工作目录不可写时不启动任何角色步骤
+        self.assertNotIn('[Boss] 命令', result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_occupied_timings_file_reports_readable_error(self):
+        """耗时记录路径被目录占用时给出可读提示并非零退出，不误报成功。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        timings = self.workdir / 'timings.json'
+        timings.mkdir()
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('耗时记录写入失败', result.stderr)
+        self.assertIn(str(timings.resolve()), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 步骤都跑完了，但耗时记录写不出来就不算成功
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker'])
+        self.assertNotIn('预览命令', result.stdout)
+
+    def test_occupied_review_report_reports_readable_error(self):
+        """审查报告路径被目录占用时给出可读提示并非零退出，不裸抛 Traceback。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role)
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        (self.workdir / REVIEW_REPORT).mkdir()
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('审查报告无法写入', result.stderr)
+        self.assertIn(str((self.workdir / REVIEW_REPORT).resolve()), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 审查记录写不出来时不再调用审查者，也不误报成功
+        self.assertNotIn('reviewer', [call[0] for call in self.calls()])
         self.assertNotIn('预览命令', result.stdout)
 
 

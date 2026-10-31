@@ -2,6 +2,7 @@
 """Run the synthetic Boss to DA to Builder pipeline."""
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -24,6 +25,40 @@ def parse_args(argv=None):
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py')
     parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
     return parser.parse_args(argv)
+
+
+def prepare_workdir(workdir):
+    """确保工作目录可用；不可用时返回可读的失败提示，可用时返回 None。"""
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        # 目标路径被同名文件占用时 mkdir 会抛异常，转成可读提示。
+        return f'工作目录不可用: {workdir} (路径已被文件占用)'
+    except OSError as error:
+        return f'工作目录不可用: {workdir} ({error.strerror or str(error)})'
+    if not os.access(workdir, os.W_OK):
+        return f'工作目录不可写: {workdir} (权限不足，无法写入产物)'
+    return None
+
+
+def open_report(path):
+    """打开审查报告文件；被占用或不可写时给出可读提示并返回 None。"""
+    try:
+        return path.open('w', encoding='utf-8')
+    except OSError as error:
+        print(f'审查报告无法写入: {path} ({error.strerror or str(error)})', file=sys.stderr, flush=True)
+        return None
+
+
+def write_timings(workdir, timings):
+    """写出耗时记录；写不进去时给出可读提示并返回 False。"""
+    path = workdir / 'timings.json'
+    try:
+        path.write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    except OSError as error:
+        print(f'耗时记录写入失败: {path} ({error.strerror or str(error)})', file=sys.stderr, flush=True)
+        return False
+    return True
 
 
 def run_step(name, command, timings, stdout=None):
@@ -78,7 +113,11 @@ def main(argv=None):
     if bundle is not None:
         print(f'使用 bundle: {bundle}', flush=True)
     workdir = args.workdir.resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
+    # 工作目录被占用或不可写时先给出可读提示，避免只留下裸 Traceback。
+    problem = prepare_workdir(workdir)
+    if problem is not None:
+        print(problem, file=sys.stderr, flush=True)
+        return 1
     timings = []
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
@@ -97,19 +136,28 @@ def main(argv=None):
         ('Builder', build),
         ('检查', [sys.executable, str(args.checker), str(dist)]),
     ])
+    status = 0
     try:
         for name, command in commands:
             if not run_step(name, command, timings):
-                return 1
-        if args.review:
+                status = 1
+                break
+        if status == 0 and args.review:
             review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
-            with (workdir / REVIEW_REPORT).open('w', encoding='utf-8') as output:
-                if not run_step('审查', review, timings, stdout=output):
-                    return 1
-        print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
-        return 0
+            report = open_report(workdir / REVIEW_REPORT)
+            if report is None:
+                status = 1
+            else:
+                with report:
+                    if not run_step('审查', review, timings, stdout=report):
+                        status = 1
     finally:
-        (workdir / 'timings.json').write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        # 耗时记录写不进去时整体判失败，不误报成功。
+        if not write_timings(workdir, timings):
+            status = 1
+    if status == 0:
+        print(f'预览命令: python3 {ROOT / "serve.py"} --root {dist}', flush=True)
+    return status
 
 
 if __name__ == '__main__':
