@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
-"""Relay one SSH stdio stream to the local broker without exposing a shell."""
+"""Relay Pi HTTP, or a guarded capacity JSON request, over restricted SSH stdio."""
 import os
 import pathlib
 import select
 import socket
+import subprocess
+import sys
 
 path = pathlib.Path.home() / 'Library' / 'Caches' / 'openswarm-pi-broker' / 'broker.sock'
+first = os.read(0, 1)
+
+# The existing forced-command endpoint already reaches this executable.  Fleet
+# guards use one JSON request per connection, while Pi clients always begin an
+# HTTP request.  Keeping the protocols distinct preserves the Pi byte stream
+# and avoids adding a listener, credential, or SSH entry point.
+if first == b'{':
+    request = first + sys.stdin.buffer.read()
+    capacity = pathlib.Path(__file__).with_name('fleet-capacity')
+    process = subprocess.run([str(capacity), 'gocc'], input=request,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    sys.stdout.buffer.write(process.stdout)
+    sys.exit(process.returncode)
+
 sock = socket.socket(socket.AF_UNIX)
 sock.connect(str(path))
+if first:
+    sock.sendall(first)
 stdin_open = True
 while True:
     readers = [sock] + ([0] if stdin_open else [])
