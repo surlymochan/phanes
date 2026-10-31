@@ -55,12 +55,14 @@ class RunE2ETest(unittest.TestCase):
         self.bundle.write_text('fake', encoding='utf-8')
         self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
-    def write_stub(self, path, role, failing=False, probe=False, exit_code=7):
+    def write_stub(self, path, role, failing=False, probe=False, exit_code=7, echo=None):
         source = '''import json, pathlib, sys
 role = ROLE
 args = sys.argv[1:]
 with open(LOG, 'a', encoding='utf-8') as stream:
     stream.write(json.dumps([role, args]) + "\\n")
+if ECHO is not None:
+    print(ECHO, flush=True)
 if FAIL:
     raise SystemExit(EXIT_CODE)
 if role == 'boss':
@@ -81,6 +83,7 @@ elif role == 'builder':
 '''.replace('ROLE', repr(role)).replace('LOG', repr(str(self.log)))
         source = source.replace('FAIL', repr(failing)).replace('PROBE', repr(probe))
         source = source.replace('EXIT_CODE', repr(exit_code))
+        source = source.replace('ECHO', repr(echo))
         path.write_text(source, encoding='utf-8')
 
     def command(self):
@@ -185,6 +188,23 @@ elif role == 'builder':
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('步骤失败: 审查', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker', 'reviewer'])
+
+    def test_review_failure_keeps_report_and_is_not_reported_as_success(self):
+        """审查失败时 e2e 以非零退出，review.md 仍写出审查者输出，失败不误报为成功。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 4), exit_code=4, echo='审查桩输出')
+        result = subprocess.run(self.command() + ['--review', '--reviewer', str(self.scripts[4])],
+                                capture_output=True, text=True)
+        # 失败结果明确：退出码非 0，且报出失败步骤与审查者的退出码
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        self.assertIn('退出码 4', result.stderr)
+        # 审查记录仍被创建，并保留审查者的输出
+        report = self.workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file(), '审查失败时未写出审查记录')
+        self.assertIn('审查桩输出', report.read_text(encoding='utf-8'))
+        # 失败不误报为成功：不再打印成功路径才有的预览命令
+        self.assertNotIn('预览命令', result.stdout)
 
 
 class RunE2EReviewContractTest(unittest.TestCase):
