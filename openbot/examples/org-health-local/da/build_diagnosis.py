@@ -1007,12 +1007,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--brief", type=Path, required=True, help="任务书 JSON 路径。")
     parser.add_argument("--raw", type=Path, required=True, help="原始数据目录（若干 CSV）。")
     parser.add_argument("--out", type=Path, required=True, help="输出诊断快照 JSON 路径。")
+    parser.add_argument("--strict", action="store_true", help="任一指标缺少观察期次数据时失败。")
     args = parser.parse_args(argv)
     try:
         snapshot = build_from_files(args.brief, args.raw)
     except (BriefError, RawDataError, SnapshotError) as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_DATA
+    if args.strict:
+        missing = [note for note in snapshot["口径说明"] if " 缺 " in note and note.endswith(" 数据，按 null 处理")]
+        if missing:
+            print("严格模式失败：观察期间存在指标缺失期次：" + "；".join(missing), file=sys.stderr)
+            return EXIT_DATA
     write_snapshot(args.out, snapshot)
     print(f"{args.out}: 已生成诊断快照")
     return EXIT_OK

@@ -56,7 +56,7 @@ def temporary_directory() -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory()
 
 
-def run_cli(brief_path: Path, raw_dir: Path, out_path: Path) -> subprocess.CompletedProcess:
+def run_cli(brief_path: Path, raw_dir: Path, out_path: Path, strict: bool = False) -> subprocess.CompletedProcess:
     """调用 build_diagnosis.py 命令行。"""
     return subprocess.run(
         [
@@ -68,7 +68,7 @@ def run_cli(brief_path: Path, raw_dir: Path, out_path: Path) -> subprocess.Compl
             str(raw_dir),
             "--out",
             str(out_path),
-        ],
+        ] + (["--strict"] if strict else []),
         capture_output=True,
         text=True,
     )
@@ -162,6 +162,22 @@ class BuildDiagnosisTest(unittest.TestCase):
             [note for note in notes if "收入 缺" in note],
             ["收入 缺 2026-06 数据，按 null 处理"],
         )
+
+    def test_strict_mode_fails_on_missing_observation_period(self) -> None:
+        """严格模式遇观察期间指标缺失时中文报错且不写快照。"""
+        raw_dir = self.folder / "raw-with-gap"
+        shutil.copytree(SAMPLE_RAW, raw_dir)
+        revenue = raw_dir / "revenue.csv"
+        lines = revenue.read_text(encoding="utf-8").splitlines()
+        revenue.write_text(
+            "\n".join(line for line in lines if not line.startswith("2026-06,")) + "\n",
+            encoding="utf-8",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path, strict=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("严格模式失败", result.stderr)
+        self.assertIn("收入 缺 2026-06 数据", result.stderr)
+        self.assertFalse(self.out_path.exists())
 
     def test_sections_are_generated(self) -> None:
         """洞察、来源口径、风险与建议都按任务书生成。"""
