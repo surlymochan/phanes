@@ -20,7 +20,10 @@
     字符串与数组按其中出现的 `YYYY-MM` 提取，得到期次集合。
     - 快照 `scope.观察月份` 必须落在该集合内；
     - 任务书若显式给出 `截止期次`，必须等于 `scope.观察月份`；
-    - 任务书若显式给出 `数据截止`，必须等于 `scope.数据截止`。
+    - 任务书若显式给出 `数据截止`，必须等于 `scope.数据截止`；
+    - 快照 `metrics[*].数值` 的期次键必须与任务书期次锚点一致：Boss 格式取
+      `观察期间.期次`，其他格式取起始/参考/截止锚点；锚点只写到月份时按月份比对，
+      全口径成本率的键去掉「整体」前缀后与其余指标同口径。
 
 【必答问题引用规则】
     可搜索文本 = 快照 insights 与 recommendations 里的全部字符串（键名与值）。
@@ -60,6 +63,13 @@ SEGMENT_PATTERN = re.compile(r"[0-9A-Za-z一-鿿]+")
 # 任务书 `观察期间` 里表示截止期次与数据截止的键名。
 END_KEYS = ("截止期次", "截止", "截止月份", "end")
 AS_OF_KEYS = ("数据截止", "数据截止日期", "asOf")
+
+# 任务书 `观察期间` 里表示期次锚点的键名（非 Boss 格式）。
+ANCHOR_KEYS = ("起始期次", "参考期次", "截止期次")
+
+# 全口径成本率的期次键带「整体」前缀；比对期次键时去掉，与其余指标同口径。
+FULL_RATE_PREFIX = "整体"
+FULL_RATE_MARK = "全口径"
 
 # 任务书 `必答问题` 条目里表示 id 与问题正文的键名。
 QUESTION_ID_KEYS = ("id", "ID", "编号", "题号", "问题编号", "序号")
@@ -218,9 +228,75 @@ def check_period(brief: dict, diagnosis: dict) -> Result:
     cutoff = scope.get("数据截止")
     if as_of and isinstance(cutoff, str) and as_of != cutoff:
         problems.append(f"任务书 `观察期间.数据截止`={as_of} 与 `scope.数据截止`={cutoff} 不一致")
+    missing_keys, extra_keys = period_key_mismatch(brief, diagnosis)
+    if missing_keys or extra_keys:
+        mismatch = "快照期次键与任务书期次锚点不一致"
+        if missing_keys:
+            mismatch += f"；缺少：{'、'.join(missing_keys)}"
+        if extra_keys:
+            mismatch += f"；多出：{'、'.join(extra_keys)}"
+        problems.append(mismatch)
     if problems:
         return Result(False, name, "；".join(problems))
     return Result(True, name, f"`scope.观察月份`={observed} 在任务书观察期间（{listed}）内")
+
+
+def period_key_mismatch(brief: dict, diagnosis: dict) -> tuple[list[str], list[str]]:
+    """比对任务书期次锚点与快照期次键，返回（缺失的期次键，多出的期次键）。
+
+    任务书锚点：Boss 格式取 `观察期间.期次`；其他格式取 `观察期间` 里的起始期次、
+    参考期次与截止期次。锚点只写到月份（如 `2026-01`）时按月份比对，否则按期次键
+    整体比对；任务书没有给出可比锚点时不做比较。
+
+    快照期次键：取 `metrics[*].数值` 的键名；全口径成本率的键去掉「整体」前缀，
+    与其余指标同口径。快照没有期次键时没有可比对象，返回空差异。
+    """
+    window = brief.get("观察期间")
+    anchors: list[str] = []
+    if isinstance(window, dict):
+        listed = window.get("期次")
+        if isinstance(listed, list):
+            anchors = [item.strip() for item in listed if isinstance(item, str) and item.strip()]
+        else:
+            for name in ANCHOR_KEYS:
+                value = first_text(window, name)
+                if value:
+                    anchors.append(value)
+    if not anchors:
+        return [], []
+
+    def collect(node: dict, path: tuple[str, ...], found: set[str]) -> None:
+        """递归收集 `数值` 里的期次键。"""
+        for key, value in node.items():
+            if isinstance(value, dict):
+                collect(value, path + (key,), found)
+                continue
+            name = key
+            if name.startswith(FULL_RATE_PREFIX) and any(FULL_RATE_MARK in part for part in path):
+                name = name[len(FULL_RATE_PREFIX) :]
+            found.add(name)
+
+    keys: set[str] = set()
+    metrics = diagnosis.get("metrics")
+    if isinstance(metrics, list):
+        for metric in metrics:
+            if not isinstance(metric, dict):
+                continue
+            values = metric.get("数值")
+            if not isinstance(values, dict):
+                continue
+            title = metric.get("标题")
+            collect(values, (title,) if isinstance(title, str) else (), keys)
+    if not keys:
+        return [], []
+
+    if all(MONTH_PATTERN.fullmatch(anchor) for anchor in anchors):
+        expected = {month for anchor in anchors for month in MONTH_PATTERN.findall(anchor)}
+        actual = {month for key in keys for month in MONTH_PATTERN.findall(key)}
+    else:
+        expected = set(anchors)
+        actual = keys
+    return sorted(expected - actual), sorted(actual - expected)
 
 
 def check_version(brief: dict, diagnosis: dict) -> Result:

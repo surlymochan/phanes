@@ -251,18 +251,19 @@ class CrossCheckTest(unittest.TestCase):
         failures = self.failing(self.check())
         self.assertTrue(failures, "快照期次与任务书观察月份不一致时未报出")
 
-    @unittest.expectedFailure
     def test_brief_period_keys_mismatch_fails(self) -> None:
         """快照数值序列的期次键与任务书 `观察期间.期次` 不一致时必须报出。
 
-        当前实现只核对 `scope.观察月份`，没有比对快照各指标的期次键与任务书期次锚点，
-        DA 用错期次锚点时漏报。实现补上该比较后，删掉 expectedFailure 标记。
+        期次键比对并入「期间一致」检查项：DA 用错期次锚点时，detail 里说明多出与
+        缺少的期次键。
         """
         self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
         for metric in self.diagnosis["metrics"]:
             rename_period_key(metric["数值"], "2026-09实际", "2026-08实际")
         failures = self.failing(self.check())
         self.assertTrue(failures, "快照期次键与任务书期次不一致时未报出")
+        self.assertEqual(failures[0].name, "期间一致")
+        self.assertIn("2026-08实际", failures[0].detail)
 
     def test_version_mismatch_fails(self) -> None:
         """任务书与快照的 schema版本 不一致时失败。"""
