@@ -169,6 +169,19 @@ class ValidateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_command_line_help_lists_options(self) -> None:
+        """--help 列出命令行选项、默认数据文件与退出码，与 README 的用法一致。"""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "validate.py"), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("data/diagnosis.json", result.stdout)
+        self.assertIn("--schema", result.stdout)
+        self.assertIn("--json", result.stdout)
+        self.assertIn("退出码", result.stdout)
+
     def test_command_line_json_accepts_example(self) -> None:
         """JSON 输出包含通过状态及 schema 版本。"""
         result = subprocess.run(

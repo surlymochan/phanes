@@ -10,7 +10,7 @@
 | Boss | `demo/brief.json` | 任务书：目标、观察期间、口径、必答问题、禁止事项 |
 | DA | `demo/diagnosis.json` | 诊断快照（schema v4），输入是 `demo/brief.json` 与 `da/sample-raw/` 的合成 CSV |
 | Builder | `demo/site/` | 静态站点：`index.html`、`app.bundle.js`、`styles.css`、`data/diagnosis.json`、`build-report.json` |
-| Review | `demo/review.md` | 交叉审查报告，`review/cross_check.py` 逐条 PASS/FAIL；本地跑 `run_e2e.py --review` 时写出，仓库未提交 |
+| Review | `demo/review.md` | 交叉审查报告，`review/cross_check.py` 逐条 PASS/FAIL；本地跑 `run_e2e.py --review` 时写出，仓库已提交该报告（当前结论：不通过） |
 
 各环节的产出说明另见 `demo/boss-notes.md` 与 `demo/da-notes.md`。
 
@@ -23,7 +23,8 @@ python3 serve.py --root demo/site
 ```
 
 服务启动后在浏览器打开 http://127.0.0.1:8765/ 。仓库里 `demo/site/` 只提交了 `build-report.json`
-（`app.bundle.js` 约 7.5 MB，不入库），所以第一次预览要先跑上面第一条命令重建站点。
+（站点产物里的 `app.bundle.js` 约 7.5 MB，不入库；预构建的浏览器包在 `demo/vendor/app.bundle.js`），
+所以第一次预览要先跑上面第一条命令重建站点。
 
 重新生成整条产物链：
 
@@ -160,12 +161,12 @@ openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backe
 cd openbot/examples/org-health-local && python3 run_tests.py
 ```
 
-运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder、检查和独立审查。审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本，`--reviewer` 默认使用 `review/cross_check.py`。
+运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。
 
 加 `--review` 时审查记录写到 `<workdir>/review.md`：审查通过写 PASS 行，审查失败仍写 FAIL 行并让整体返回非 0，
 即失败路径也留有产物可查。
 
-仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
+`openbot/` 目录下运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `openbot/.openbot-build/org-health-demo-e2e/`（仓库根目录没有 `package.json`，这条命令要在 `openbot/` 里跑）。
 
 服务边界测试覆盖 loopback Host 白名单、路径白名单、目录与穿越请求拒绝、`--root` 产物目录服务、`--data` 指定的数据文件、启动提示和端口占用处理；全部单元测试均由 `python3 run_tests.py` 运行。
 
@@ -189,11 +190,14 @@ python3 builder/check_site.py "$tmp_dir/dist"
 
 ## Boss 角色：生成诊断任务书
 
-`boss/make_brief.py` 生成任务书；可用 `--fx` 写入 `口径.汇率`（正数，人民币/美元），省略时保持默认输出且不写汇率。`观察期间` 可选写入 `起始期次`、`参考期次`、`截止期次`，各值必须来自 `期次` 列表。
+`boss/make_brief.py` 生成任务书；可用 `--fx` 写入 `口径.汇率`（正数，人民币/美元），省略时保持默认输出且不写汇率；`--goal` 覆盖「目标」（可重复给出，不给时用内置默认目标）。`观察期间` 可选写入 `起始期次`、`参考期次`、`截止期次`，各值必须来自 `期次` 列表。
 
 ```bash
-python3 boss/make_brief.py --out <brief.json> [--month YYYY-MM] [--fx 人民币/美元]
+python3 boss/make_brief.py --out <brief.json> [--goal 目标] [--month YYYY-MM] [--fx 人民币/美元]
+python3 boss/make_brief.py --check <brief.json>   # 校验已有任务书，不生成新文件
 ```
+
+`--out` 与 `--check` 互斥：生成用 `--out`，校验已有任务书用 `--check`（按 `boss/brief.schema.json` 校验，通过时退出码 0，不通过时退出码 1）。
 
 ## DA 角色：合成原始数据 → 诊断快照
 
@@ -227,9 +231,10 @@ cd openbot/examples/org-health-local
 python3 validate.py                            # 校验 data/diagnosis.json
 python3 validate.py /absolute/path/to/diagnosis.json
 python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结果
+python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  # 指定结构定义
 ```
 
-校验失败时退出码非 0，并逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
+退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
 
 ## Review 角色：独立交叉审查
 
@@ -259,9 +264,11 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 
 ```bash
 cd openbot/examples/org-health-local
-python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle app.bundle.js
+python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle demo/vendor/app.bundle.js
 ```
 
 产物为 `dist/index.html`、`dist/app.bundle.js`、`dist/styles.css`、`dist/data/diagnosis.json`
-和 `dist/build-report.json`。不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）；
+和 `dist/build-report.json`。`--bundle` 指向已编译好的浏览器包，文件必须已存在（仓库里可用
+`demo/vendor/app.bundle.js`）；不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）。
+退出码契约：`0` 构建成功，`1` 数据未通过校验或 bundle 文件不存在，`2` 输入不可用，`3` 打包或写出失败。
 单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络，并包含在 `python3 run_tests.py` 中。
