@@ -8,7 +8,7 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
 
 配套的可执行示例编排：[`openswarm/examples/org-diagnosis-pipeline.json`](../../../openswarm/examples/org-diagnosis-pipeline.json)
 （`python3 -m json.tool openswarm/examples/org-diagnosis-pipeline.json` 可解析）。
-从零跑通演示可参考：[`docs/scenario/org-diagnosis/demo.md`](demo.md)。
+从零跑通演示可参考：[运行手册 `runbook.md`](runbook.md) 和[常见问题 `faq.md`](faq.md)。
 
 ## 1. 场景与角色
 
@@ -77,11 +77,10 @@ openswarm run \
   同时在仓库内提交 `docs/scenario/org-diagnosis/out/da-method.md`，逐条说明结论字段的数据来源路径、
   计算口径与已知缺口，**不含真实数字**。
 - **产物**：`${DIAGNOSIS}`（仓库外，真实数据）+ `docs/scenario/org-diagnosis/out/da-method.md`（仓库内）。
-- **`--verify`**：`python3 openbot/examples/org-health-local/validate.py --data "<DIAGNOSIS>" &&
-  test -s docs/scenario/org-diagnosis/out/da-method.md`
-  —— 其中 `openbot/examples/org-health-local/validate.py` 由 **DA 校验器 issue**（与 #54 同批次的并行
-  issue）提供，**当前仓库还没有这个文件**；在它落地前本阶段的 `--verify` 不可执行，临时替代为
-  `python3 -m json.tool "<DIAGNOSIS>" >/dev/null`（只查 JSON 形状，不查 schema）。
+- **`--verify`**：`python3 openbot/examples/org-health-local/validate.py "<DIAGNOSIS>" &&
+  test -s docs/scenario/org-diagnosis/out/da-method.md`。`validate.py` 已在仓库内，接受一个或多个
+  位置参数（不接受 `--data`），按 schema v4 校验快照；退出码 `0` 表示全部通过，`1` 表示校验失败，
+  `2` 表示输入不可读或不是合法 JSON。
 
 ```bash
 openswarm run \
@@ -89,7 +88,7 @@ openswarm run \
   --backend codex --type impl --difficulty 4 --budget-minutes 30 \
   --title 组织诊断数据分析 \
   --task-file <workspace>/tasks/da.md \
-  --verify 'python3 openbot/examples/org-health-local/validate.py --data <workspace>/out/da/diagnosis.json && test -s docs/scenario/org-diagnosis/out/da-method.md'
+  --verify 'python3 openbot/examples/org-health-local/validate.py <workspace>/out/da/diagnosis.json && test -s docs/scenario/org-diagnosis/out/da-method.md'
 ```
 
 ### 3.3 Builder：站点接入
@@ -100,10 +99,10 @@ openswarm run \
   这个外部数据入口；真实数据不得进入仓库；改动限于 `openbot/examples/org-health-local/`，
   并在 `docs/scenario/org-diagnosis/out/builder-notes.md` 记录改动点与验证方式；不引入新的运行时依赖。
 - **产物**：`openbot/examples/org-health-local/` 的改动 + `docs/scenario/org-diagnosis/out/builder-notes.md`。
-- **`--verify`**：`python3 openbot/examples/org-health-local/test_serve.py --data "<DIAGNOSIS>"`
-  —— `test_serve.py` 由 **Builder 测试 issue** 提供，**当前仓库还没有这个文件**；在它落地前本阶段没有
-  自动门禁，可先用仓库已有的 `bun run test:org-health-demo`（`openbot/package.json:194`）覆盖合成示例，
-  但它需要 bun 与 Chrome，且不覆盖真实数据。
+- **`--verify`**：`python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_serve.py'`。
+  `test_serve.py` 已在仓库内，是不接受 `--data` 参数的 Python 标准库 unittest；测试会在临时目录注入
+  数据并覆盖 `serve.py` 的 loopback、白名单路径、`--data`/`--root` 边界。退出码 `0` 表示全部测试通过，
+  `1` 表示测试失败；参数错误等 unittest/解释器错误为非 `0`。
 
 ```bash
 openswarm run \
@@ -111,7 +110,7 @@ openswarm run \
   --backend codex --type impl --difficulty 3 --budget-minutes 25 \
   --title 组织诊断站点接入 \
   --task-file <workspace>/tasks/builder.md \
-  --verify 'python3 openbot/examples/org-health-local/test_serve.py --data <workspace>/out/da/diagnosis.json'
+  --verify "python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_serve.py'"
 ```
 
 ## 4. 阶段之间的交接
@@ -184,7 +183,7 @@ git -C <repo> show --stat <stage-commit>
 ## 7. 运行示例编排
 
 示例编排 `openswarm/examples/org-diagnosis-pipeline.json` 描述了变量、三阶段、交接规则、审查门禁和
-未落地依赖。下面这段 runner 按顺序执行三个阶段，做完一个阶段就交叉审查，并把上一阶段的提交喂给
+运行依赖。下面这段 runner 按顺序执行三个阶段，做完一个阶段就交叉审查，并把上一阶段的提交喂给
 下一阶段的 `--base`（可直接从仓库根目录运行）：
 
 ```bash
@@ -280,18 +279,19 @@ PY
   （`openswarm/bin/openswarm:4923-4926`），真实数据放仓库内会被误改写。
 - runner 只做编排，不做合并；合并仍由人工评审后执行。
 
-## 8. 未落地依赖
+## 8. 运行依赖
 
 | 依赖 | 提供方 | 影响 |
 |---|---|---|
-| `openbot/examples/org-health-local/validate.py` | DA 校验器 issue（与 #54 同批次的并行 issue） | 未落地前 DA 阶段的 `--verify` 不可执行，只能退回 `python3 -m json.tool` |
-| `openbot/examples/org-health-local/test_serve.py` | Builder 测试 issue | 未落地前 Builder 阶段没有自动门禁 |
+| `openbot/examples/org-health-local/validate.py` | 仓库内 schema 校验器 | DA 阶段按位置参数传入仓库外的 `${DIAGNOSIS}`；退出码 `0`/`1`/`2` 分别表示通过/校验失败/输入不可读 |
+| `openbot/examples/org-health-local/test_serve.py` | 仓库内 unittest | Builder 阶段用 `python3 -m unittest discover ... -p 'test_serve.py'` 执行；退出码 `0` 表示通过，`1` 表示测试失败 |
 | `bun run test:org-health-demo`（`openbot/package.json:194`） | 仓库已有 | 需要 bun 与 Chrome，且只覆盖合成示例数据 |
 | 真实组织数据文件 | 数据提供方 | 必须自行放在仓库外，流水线不提供真实数据 |
 
 ## 9. 已知限制
 
-- 本文档只描述编排方式，没有跑过真实组织数据：三个阶段的 `--verify` 依赖上表中两个尚未落地的脚本。
+- 本文档只描述编排方式，没有跑过真实组织数据：DA 的校验命令接收仓库外的 `${DIAGNOSIS}`，Builder 的
+  `test_serve.py` 使用临时数据覆盖服务边界；真实组织数据仍须留在仓库外。
 - 示例编排固定使用 `codex` 执行、`pi` 审查；换执行器时要同时满足跨族审查约束
   （`openswarm/bin/openswarm:5487-5494`）。
 - 审查是只读的第二意见，最终验收仍属控制面：`openswarm` 不合并、不推送，验收决定由人做出
