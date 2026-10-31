@@ -1,20 +1,51 @@
 #!/usr/bin/env python3
-"""Generate a numeric-free data-method note from a brief and diagnosis."""
+"""Generate a numeric-free data-method note from a brief and diagnosis.
+
+用法：
+    python3 da/write_method.py --brief <brief.json> --data <diagnosis.json> --out <method.md> [--raw <dir>]
+
+`--raw` 指向原始 CSV 目录：给出时方法说明里增加“数据来源”小节，逐个列出 CSV 文件名与数据行数
+（不含表头），按文件名排序；不给时该小节写明未提供原始数据目录。
+"""
 
 import argparse
+import csv
 import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Iterable, List, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?%?")
+
+DATA_SOURCE_HEADING = "## 数据来源"
+
+
+class MethodError(Exception):
+    """输入数据不可用。"""
 
 
 def load_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def count_data_rows(path: Path) -> int:
+    """统计 CSV 的数据行数（不含表头）；空行不计入。"""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as cause:
+        raise MethodError(f"无法读取原始数据 {path}：{cause}") from cause
+    rows = [row for row in csv.reader(text.splitlines()) if row and any(cell.strip() for cell in row)]
+    return max(len(rows) - 1, 0)
+
+
+def data_sources(raw_dir: Path) -> List[Tuple[str, int]]:
+    """列出原始 CSV 的文件名与数据行数（不含表头），按文件名排序。"""
+    if not raw_dir.is_dir():
+        raise MethodError(f"原始数据目录不存在：{raw_dir}")
+    return [(path.name, count_data_rows(path)) for path in sorted(raw_dir.glob("*.csv"), key=lambda item: item.name)]
 
 
 def brief_method(brief: Any) -> str:
@@ -93,13 +124,20 @@ def conclusion_sections(diagnosis: dict) -> Iterable[Tuple[str, str, Any, List[s
         yield "结论", "conclusion", conclusion, []
 
 
-def render(brief: dict, diagnosis: dict) -> str:
+def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]] = None) -> str:
     method = brief_method(brief)
     periods = brief.get("观察期间", "未提供")
     if isinstance(periods, list):
         period_text = "、".join(str(period) for period in periods)
     else:
         period_text = str(periods)
+
+    if sources is None:
+        source_lines = ["未提供原始数据目录（`--raw`），无法列出数据来源文件。"]
+    elif not sources:
+        source_lines = ["原始数据目录里没有 CSV 文件。"]
+    else:
+        source_lines = [f"- `{name}`：{count} 行数据（不含表头）" for name, count in sources]
 
     sections = list(metric_sections(diagnosis)) + list(conclusion_sections(diagnosis))
     lines = [
@@ -110,6 +148,10 @@ def render(brief: dict, diagnosis: dict) -> str:
         f"## 统一口径\n\n{method}",
         "",
         f"## 观察期间\n\n{period_text}",
+        "",
+        DATA_SOURCE_HEADING,
+        "",
+        *source_lines,
         "",
         "## 指标与结论字段",
         "",
@@ -130,6 +172,17 @@ def render(brief: dict, diagnosis: dict) -> str:
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def strip_data_source(text: str) -> str:
+    """去掉“数据来源”小节。
+
+    该小节里的行数是原始 CSV 的行数，不是诊断数值，自检时不参与泄露比对。
+    """
+    pattern = re.compile(
+        r"^" + re.escape(DATA_SOURCE_HEADING) + r"\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL
+    )
+    return pattern.sub("", text)
 
 
 def numeric_literals(value: Any) -> List[str]:
@@ -155,14 +208,23 @@ def main(argv: List[str] = None) -> int:
     parser.add_argument("--brief", required=True, type=Path)
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--raw", type=Path, help="原始 CSV 目录；给出时列出数据来源文件与行数。")
     args = parser.parse_args(argv)
 
     brief = load_json(args.brief)
     diagnosis = load_json(args.data)
-    output = render(brief, diagnosis)
+    sources = None
+    if args.raw is not None:
+        try:
+            sources = data_sources(args.raw)
+        except MethodError as cause:
+            print(str(cause), file=sys.stderr)
+            return 1
+    output = render(brief, diagnosis, sources)
     # Period labels and array indexes are deliberately present in source paths;
     # exclude those structural strings from the value-only leak check.
-    check_output = re.sub(r"`[^`]*`", "", output)
+    # 数据来源小节里的行数是原始 CSV 的行数，不是诊断数值，同样排除。
+    check_output = re.sub(r"`[^`]*`", "", strip_data_source(output))
     periods = brief.get("观察期间", []) if isinstance(brief, dict) else []
     if isinstance(periods, list):
         for period in periods:
