@@ -311,10 +311,12 @@ def load_table(
     key_column: str,
     columns: tuple[str, ...],
     non_negative: bool = False,
+    non_negative_columns: tuple[str, ...] = (),
 ) -> dict[str, dict[str, float | None]]:
     """读取一张 CSV，按期次索引各列数值。
 
-    non_negative 为真时，各列数值必须是非负数，负数按原始数据错误报出。
+    non_negative 为真时各列数值都必须是非负数；non_negative_columns 列出额外要求非负的列。
+    负数按原始数据错误报出。
     """
     rows = read_table(path, (key_column,) + columns)
     table: dict[str, dict[str, float | None]] = {}
@@ -327,7 +329,7 @@ def load_table(
         values: dict[str, float | None] = {}
         for name in columns:
             value = parse_number(row.get(name), path, name, number)
-            if non_negative and value is not None and value < 0:
+            if value is not None and value < 0 and (non_negative or name in non_negative_columns):
                 raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {name} 必须是非负数：{value}")
             values[name] = value
         table[key] = values
@@ -344,8 +346,10 @@ def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
     return {
         "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns),
         "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True),
-        "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,)),
-        "forecast": load_table(raw_dir / FORECAST_FILE, "期次", forecast_columns),
+        "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True),
+        "forecast": load_table(
+            raw_dir / FORECAST_FILE, "期次", forecast_columns, non_negative_columns=(REVENUE,)
+        ),
     }
 
 
