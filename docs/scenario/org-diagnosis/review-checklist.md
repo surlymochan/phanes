@@ -28,7 +28,7 @@
 
 | 检查项 | 看哪个文件/字段 | 通过条件 |
 | --- | --- | --- |
-| Schema v4 | `<scenario-workdir>/evidence/diagnosis.json` 的 `scope.schema_version`、顶层字段、`metrics`；对照 `openbot/examples/org-health-local/schema/diagnosis.schema.json` 和 `app.js` | 明确为 schema v4，结构和指标标题/顺序满足页面校验；可复现执行 `python3 openbot/examples/org-health-local/validate.py --data <快照路径>` 并通过。 |
+| Schema v4 | `<scenario-workdir>/evidence/diagnosis.json` 的 `scope.schema_version`、顶层字段、`metrics`；对照 `openbot/examples/org-health-local/schema/diagnosis.schema.json` 和 `app.js` | 明确为 schema v4，结构和指标标题/顺序满足页面校验；可复现执行 `python3 openbot/examples/org-health-local/validate.py <快照路径>` 并通过（快照路径是位置参数）。 |
 | 任务书对应 | `diagnosis.json` 的 `scope`、`metrics`、`definitions`、`insights`；`evidence/` 中口径说明及 `da-method.md` | 观察期间、截止、来源、单位和定义与任务书一致；每个结论/指标均能在证据说明中追到来源字段和计算方法。 |
 | null 含义 | `diagnosis.json` 中为 `null` 的指标/期间及对应证据说明 | `null` 仅表示真实期间缺口，说明具体缺什么；没有把未取数、未知或未验证伪装成缺口值，也没有以估算值填补；页面显示“未提供”。 |
 | 合成与真实数据区分 | 快照 `origin`、`scope`、证据来源；合成基准 `openbot/examples/org-health-local/data/diagnosis.json` | 实际交付快照来自授权真实来源时如实标明；合成示例清楚标为合成，仅用于流程/页面验证，绝不冒充真实诊断或支持真实结论。真实快照正文留在仓库外。 |
@@ -48,7 +48,7 @@
 
 ## 独立复核及脚本状态
 
-审查者应独立检查 Boss、DA、Builder 的输入输出，且不得以 Builder 自述或脚本退出码替代对证据与口径的判断。流水线文档中提到的 `validate.py`（DA 校验器 issue，与 #54 同批次并行）和 `test_serve.py`（Builder 测试 issue；`docs/scenario/org-diagnosis/pipeline.md` 未给出具体编号）当时标注为尚未合入；本仓库当前已存在这两个文件。使用时仍须按实际版本确认行为与验证记录。`cross_check.py` 当前不在仓库中，本清单不依赖该脚本；若后续引入，应在其 PR/提交说明中注明对应 issue 号，并仍保留人工审查证据。`builder/check_site.py` 已合入（#76）。
+审查者应独立检查 Boss、DA、Builder 的输入输出，且不得以 Builder 自述或脚本退出码替代对证据与口径的判断。`validate.py`、`test_serve.py` 和 `review/cross_check.py` 均已在仓库内。使用时仍须按实际版本确认行为与验证记录：`validate.py` 以位置参数接收快照，退出码 `0`/`1`/`2` 分别表示通过/校验失败/输入不可读；`test_serve.py` 以 unittest 运行，退出码 `0` 表示通过，`1` 表示测试失败；`cross_check.py` 使用 `--brief <brief.json> --data <diagnosis.json> [--dist <dist>] [--out <report.md>]`，逐项输出 `PASS`/`FAIL`，退出码 `0` 表示全部通过，`1` 表示至少一项失败，`2` 表示输入不可读或不是 JSON 对象。三者都不改变真实组织数据必须留在仓库外的边界。`builder/check_site.py` 已合入（#76）。
 
 ## 审查结论模板
 
