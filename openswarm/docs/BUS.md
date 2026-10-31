@@ -35,7 +35,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
 openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
 ```
 
-Pass `--repos owner/repo[,owner/repo]` to set a worker-local target repository allowlist, or configure `bus.worker_repos`; with neither configured the worker refuses every task. Omit `--once` for a resident worker. `--backend` may be `codex`, `ocgo`, `deepseek`, `cursor`, or `pi`; `--model` is optional. A task's `verify` command runs only when it exactly matches `worker_verify_allow` or the worker's own `--verify`; other task commands are ignored and reported in the result followups. Set `open_pr` to `true` to have the worker open a draft PR after pushing its branch.
+Pass `--repos owner/repo[,owner/repo]` to set a worker-local target repository allowlist, or configure `bus.worker_repos`; with neither configured the worker refuses every task. Omit `--once` for a resident worker. `--backend` may be `codex`, `ocgo`, `deepseek`, `cursor`, `agy`, or `pi`; `--model` is optional. A task's `verify` command runs only when it exactly matches `worker_verify_allow` or the worker's own `--verify`; other task commands are ignored and reported in the result followups. Set `open_pr` to `true` to have the worker open a draft PR after pushing its branch.
 
 Dispatch a task from a target repository whose `origin` is its GitHub remote. The selected base commit must already be advertised by a remote branch or tag; push it first if necessary:
 
