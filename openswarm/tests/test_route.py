@@ -122,6 +122,13 @@ class RoutingScenarios(unittest.TestCase):
         policy["routing"]["default_order"] = ["ocgo", "codex"]
         self.check(prof("mechanical", 1), scenario(), {"backend": "ocgo"}, policy)
 
+    def test_20_disabled_default_backend_is_skipped_for_policy_fallback(self):
+        st = scenario()
+        st["codex"]["binary"] = None
+        self.check(prof(d=3), st, {"backend": "ocgo",
+                                   "skipped": lambda s: s.get("codex") == "no working codex binary"},
+                   OPT_IN_POLICY)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
