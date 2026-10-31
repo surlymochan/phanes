@@ -22,8 +22,8 @@ python3 da/build_diagnosis.py --brief <brief.json> --raw da/sample-raw --out <di
 python3 validate.py <diagnosis.json>
 ```
 
-- 任务书至少给出 `观察期间`（起始期次、参考期次、截止期次、数据截止）与 `口径`（各指标定义和汇率）；可选 `目标`、`必答问题`、`数据需求`、`禁止事项`、`schema版本`（=4）。
-- 原始数据目录放四张 CSV：`cost.csv`（月度技术人力成本与运维设施成本）、`heads.csv`（月度折算人头）、`revenue.csv`（月度收入）、`forecast.csv`（年末测算与年末目标）。`da/sample-raw/` 是纯合成样本，数值与 `data/diagnosis.json` 同量级。
+- 任务书可用 DA 格式 `观察期间.起始期次/参考期次/截止期次`，或 Boss 格式 `观察期间.期次`、`观察月份`、`数据截止`。Boss 格式按列表顺序取首个“实际”为起始、首个含“参考”的期次为参考、与观察月份匹配的“实际”为截止。`口径` 提供指标定义；汇率可写在任务书，缺省时从 `fx.csv` 读取。
+- 原始数据目录放 `cost.csv`（月度技术人力成本与运维设施成本）、`heads.csv`（月度折算人头）、`revenue.csv`（月度收入）、`forecast.csv`（年末测算与年末目标）和汇率缺省时使用的 `fx.csv`（`人民币每美元` 列）。`da/sample-raw/` 包含纯合成样本，含合成汇率 7.2，数值与 `data/diagnosis.json` 同量级。
 - 缺列、缺文件、缺汇率时退出码非 0；缺数据的期次写 `null`，不填估算值。输出确定性：同一份任务书与原始数据得到同一份 JSON，键序固定。
 - 单元测试：`cd openbot/examples/org-health-local && python3 -m unittest da.test_build_diagnosis -v`。
 
