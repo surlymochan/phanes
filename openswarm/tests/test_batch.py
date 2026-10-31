@@ -269,9 +269,14 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         reply = json.loads(proc.stdout)
         path = self.data / "batches" / reply["id"] / "summary.json"
         deadline = time.monotonic() + 15
+        summary = None
         while time.monotonic() < deadline:
-            summary = json.loads(path.read_text())
-            if summary["state"] in ("finished", "failed"):
+            try:
+                summary = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                # detached worker 可能正在原子替换 summary 文件。
+                summary = None
+            if summary and summary["state"] in ("finished", "failed"):
                 break
             time.sleep(0.05)
         else:

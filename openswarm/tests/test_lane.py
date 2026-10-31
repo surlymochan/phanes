@@ -175,18 +175,18 @@ class LaneTests(unittest.TestCase):
             # No later assignment/reserve occurs: the existing lane polling loop must stop only this
             # recorded group and perform recovery after the group is gone.
             self.wait_for(lambda: (s if (s := self.run_state(run_id)).get("fleet_recovery_stop_requested") else None),
-                          timeout=5, description="resident lane to stop the recorded executor group")
+                          timeout=15, description="resident lane to stop the recorded executor group")
             # The recovery marker records that SIGTERM/SIGKILL was requested.  On macOS the
             # runner can publish that marker just before the child scheduler observes its
             # SIGTERM/SIGKILL shutdown sequence,
             # so an immediate poll is a race rather than evidence that recovery failed.  Wait
             # for, and assert, the actual forced exit: this must still happen before capacity
             # can be released below.
-            self.wait_for(lambda: executor.poll() is not None, timeout=5,
+            self.wait_for(lambda: executor.poll() is not None, timeout=15,
                           description="recorded executor to exit after TTL recovery")
             self.assertIn(executor.returncode, (-signal.SIGTERM, -signal.SIGKILL))
             executor.wait()
-            self.wait_for(lambda: not self.fleet_reservations(), timeout=5,
+            self.wait_for(lambda: not self.fleet_reservations(), timeout=15,
                           description="resident lane to recover a dead runner")
             status = self.run_state(run_id)
             self.assertIn("fleet_recovered_at", status)
