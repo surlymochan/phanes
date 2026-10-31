@@ -49,6 +49,25 @@ class RoutingWeightsTests(unittest.TestCase):
         ]}), 5)
         self.assertIsNone(xs.routing_tokens({}))
 
+    def test_routing_outcome_prefers_boolean_accepted_then_exec_pass(self):
+        self.assertIs(xs.routing_outcome({"accepted": True, "exec_pass": False}), True)
+        self.assertIs(xs.routing_outcome({"accepted": False, "exec_pass": True}), False)
+        self.assertIs(xs.routing_outcome({"accepted": "yes", "exec_pass": True}), True)
+        self.assertIs(xs.routing_outcome({"accepted": "no", "exec_pass": False}), False)
+        self.assertIsNone(xs.routing_outcome({"accepted": "yes", "exec_pass": "no"}))
+
+    def test_routing_passed_only_accepts_true_routing_outcome(self):
+        self.assertTrue(xs.routing_passed({"accepted": True}))
+        self.assertFalse(xs.routing_passed({"accepted": False}))
+        self.assertFalse(xs.routing_passed({"accepted": "yes", "exec_pass": "yes"}))
+        self.assertFalse(xs.routing_passed({}))
+
+    def test_outcome_label_formats_routing_outcome(self):
+        self.assertEqual(xs.outcome_label({"accepted": True, "status": "done"}), "pass")
+        self.assertEqual(xs.outcome_label({"accepted": False, "status": "failed"}), "fail/failed")
+        self.assertEqual(xs.outcome_label({"accepted": False}), "fail/unknown")
+        self.assertEqual(xs.outcome_label({"accepted": "yes", "exec_pass": "no"}), "unknown")
+
     def test_fixture_ledger_computes_all_routing_metrics(self):
         rows = [
             {"backend": "codex", "model": "m1", "card_type": "fix", "status": "done", "exec_pass": True,
