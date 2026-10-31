@@ -394,6 +394,35 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("收入万美元", result.stdout + result.stderr)
 
+    def test_forecast_missing_column_exits_nonzero(self) -> None:
+        """forecast.csv 缺少必需列时退出码非 0，stderr 含列名。"""
+        required_columns = (
+            "期次",
+            "整体技术人力成本万元",
+            "营收业务技术人力成本万元",
+            "整体折算人头",
+            "营收业务折算人头",
+            "运维设施成本万元",
+            "收入万美元",
+        )
+        for missing_col in required_columns:
+            with self.subTest(column=missing_col):
+                raw_dir = copy_raw(self.folder, f"raw-forecast-missing-{missing_col}")
+                forecast = raw_dir / "forecast.csv"
+                lines = csv_lines(forecast)
+                header = lines[0].split(",")
+                idx = header.index(missing_col)
+                write_csv_lines(
+                    forecast,
+                    [",".join(row.split(",")[:idx] + row.split(",")[idx + 1:]) for row in lines],
+                )
+                out_path = self.folder / f"diagnosis-missing-{missing_col}.json"
+                result = run_cli(self.brief_path, raw_dir, out_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("forecast.csv", result.stderr)
+                self.assertIn(missing_col, result.stderr)
+                self.assertFalse(out_path.exists())
+
     def test_missing_file_exits_nonzero(self) -> None:
         """原始数据缺文件时退出码非 0。"""
         raw_dir = self.folder / "raw"
