@@ -80,9 +80,60 @@ def result(cmd, payload=None, timeout=45):
         raise ValueError('fleet command rejected request')
     return data
 
+def lane_request(req):
+    """Serve Hub-local route discovery/assignment against this host's lanes.
+
+    This is intentionally a narrow JSON operation exposed by the existing Hub
+    SSH endpoint.  The lane supervisor and its configured global guard still
+    perform final admission; this endpoint only avoids treating the host as a
+    second router.
+    """
+    op = req.get('op')
+    if op == 'lanes':
+        return result([cli, 'lane', 'status'])
+    if op != 'assign':
+        raise ValueError('invalid lane operation')
+    lane, prompt, base = req.get('lane'), req.get('prompt'), req.get('base')
+    verify, title, budget = req.get('verify'), req.get('title'), req.get('budget_minutes')
+    if (not isinstance(lane, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', lane)
+            or not isinstance(prompt, str) or not 0 < len(prompt) <= 50000
+            or not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{7,64}', base)
+            or isinstance(budget, bool) or not isinstance(budget, (int, float)) or not 0 < budget <= 40
+            or verify is not None and (not isinstance(verify, str) or len(verify) > 4096)
+            or title is not None and (not isinstance(title, str) or not 0 < len(title) <= 160)):
+        raise ValueError('invalid lane request')
+    command = [cli, 'lane', 'assign', lane, '--prompt', prompt, '--base', base,
+               '--budget-minutes', str(budget)]
+    if verify:
+        command += ['--verify', verify]
+    if title:
+        command += ['--title', title]
+    if req.get('read_only') is True:
+        command.append('--read-only')
+    return result(command, timeout=45)
+
+def relay(req):
+    """Forward a Hub-local source through this host's fixed source inventory."""
+    host, payload = req.get('target'), req.get('request')
+    if not isinstance(host, str) or not isinstance(payload, dict):
+        raise ValueError('invalid relay request')
+    if host == 'gores1':
+        return lane_request(payload)
+    source = source_for_host(host)
+    if payload.get('op') not in ('lanes', 'assign', 'run_info', 'bundle', 'stop'):
+        raise ValueError('invalid relay request')
+    data = result(remote_command(source), remote_payload(source, payload), timeout=140)
+    if not isinstance(data, dict) or 'result' not in data:
+        raise ValueError('relay target returned invalid result')
+    return data['result']
+
 def main():
     req = json.load(sys.stdin)
     op = req.get('op')
+    if op in ('lanes', 'assign'):
+        return lane_request(req)
+    if op == 'relay':
+        return relay(req)
     if op == 'submit':
         prompt, title, base = req.get('prompt'), req.get('title'), req.get('base')
         kind, difficulty, budget, verify = req.get('type'), req.get('difficulty'), req.get('budget'), req.get('verify')

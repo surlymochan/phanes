@@ -59,6 +59,17 @@ class HubBridgeTests(unittest.TestCase):
             self.assertTrue(MOD['mapped']('run-govpn','info'))
             self.assertIn('Executor host: govpn',json.loads(output.getvalue())['result']['result']['summary'])
 
+    def test_local_router_owns_submit_and_local_result_lifecycle(self):
+        reply = {'id':'local-m3','state':'queued','host':'local','backend':'pi','model':'MiniMax'}
+        local = mock.Mock(return_value=reply)
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER':'1'}), \
+                mock.patch.dict(G, {'local_gateway':local}), contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['run_submit'](self.args)
+            self.assertEqual(MOD['dispatch_gateway']({'op':'info','id':'local-m3','host':'local'}), reply)
+        self.assertEqual(json.loads(output.getvalue())['executor_host'], 'local')
+        self.assertEqual(local.call_args_list[0].args[0]['op'], 'submit')
+        self.assertEqual(local.call_count, 2)
+
     def test_finished_remote_commit_is_fetched_for_local_review(self):
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)
@@ -175,6 +186,32 @@ class HubBridgeTests(unittest.TestCase):
                 (['/usr/bin/ssh', '-T', '-F', str(Path.home() / '.ssh/openswarm-fleet/config'),
                   'openswarm-govpn-gateway'], {'op':remote_op, 'run_id':'run-govpn'})])
             self.assertEqual(json.loads(output.getvalue())['result'], {'id':'run-govpn'})
+
+    def test_hub_gateway_serves_its_local_lane_endpoint(self):
+        req = {'op':'lanes'}
+        calls = []
+        def run(command, input=None, **_kwargs):
+            calls.append((command, input))
+            return subprocess.CompletedProcess(command, 0, json.dumps([{'name':'M1','state':'idle'}]), '')
+        with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(req))), \
+                mock.patch.object(subprocess, 'run', side_effect=run), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
+        self.assertEqual(calls[0][0][-2:], ['lane','status'])
+        self.assertEqual(json.loads(output.getvalue())['result'], [{'name':'M1','state':'idle'}])
+
+    def test_hub_gateway_relays_hub_local_source_to_gocc(self):
+        req = {'op':'relay','target':'gocc','request':{'op':'lanes'}}
+        calls = []
+        def run(command, input=None, **_kwargs):
+            calls.append((command, json.loads(input)))
+            return subprocess.CompletedProcess(command, 0, json.dumps({'ok':True,'result':[]}), '')
+        with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(req))), \
+                mock.patch.object(subprocess, 'run', side_effect=run), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
+        self.assertEqual(calls[0][1], {'op':'lanes'})
+        self.assertEqual(json.loads(output.getvalue())['result'], [])
 
     def test_remote_gateway_relays_lifecycle_through_gocc(self):
         sources = json.dumps([{'host':'govpn','ssh_alias':'openswarm-pi-broker','via':'gocc'}])

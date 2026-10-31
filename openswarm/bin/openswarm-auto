@@ -9,8 +9,9 @@ import subprocess
 import sys
 
 home = Path.home()
-cli = str(home / '.local/bin/openswarm')
-ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'openswarm-pi-broker']
+cli = os.environ.get('OPENSWARM_AUTO_CLI', str(home / '.local/bin/openswarm'))
+ssh_config = os.environ.get('OPENSWARM_AUTO_SSH_CONFIG', str(home / '.ssh/openswarm-fleet/config'))
+ssh = ['/usr/bin/ssh', '-T', '-F', str(Path(ssh_config).expanduser()), 'openswarm-pi-broker']
 DEFAULT_REMOTE_SOURCE = {'host': 'gocc', 'ssh_alias': 'openswarm-pi-broker'}
 
 class LaneBusy(RuntimeError):
@@ -24,7 +25,12 @@ def remote_sources():
     the local SSH configuration; the task payload never chooses an endpoint.
     """
     raw = os.environ.get('OPENSWARM_AUTO_REMOTE_SOURCES')
+    mode = os.environ.get('OPENSWARM_AUTO_REMOTE_SOURCE_MODE', 'extend')
+    if mode not in ('extend', 'replace'):
+        raise RuntimeError('invalid automatic routing remote source configuration')
     if raw is None:
+        if mode == 'replace':
+            raise RuntimeError('invalid automatic routing remote source configuration')
         return [DEFAULT_REMOTE_SOURCE]
     try:
         sources = json.loads(raw)
@@ -35,8 +41,8 @@ def remote_sources():
     # Keep the legacy gocc route even after extra hosts are configured.  Hub
     # handoff rows persist their executor host and old rows must remain
     # queryable after a fleet expansion.
-    validated = [DEFAULT_REMOTE_SOURCE]
-    seen = {'gocc'}
+    validated = [] if mode == 'replace' else [DEFAULT_REMOTE_SOURCE]
+    seen = set() if mode == 'replace' else {'gocc'}
     for source in sources:
         if not isinstance(source, dict):
             raise RuntimeError('invalid automatic routing remote source configuration')
@@ -45,14 +51,16 @@ def remote_sources():
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', alias)):
             raise RuntimeError('invalid automatic routing remote source configuration')
-        if host == 'gocc':
+        if via not in (None, 'gocc', 'gores1'):
+            raise RuntimeError('invalid automatic routing remote source configuration')
+        if host == 'gores1' and mode != 'replace':
+            raise RuntimeError('conflicting automatic routing remote source configuration')
+        if host in seen or (via is not None and host == via):
+            raise RuntimeError('conflicting automatic routing remote source configuration')
+        if host == 'gocc' and mode != 'replace':
             if alias != DEFAULT_REMOTE_SOURCE['ssh_alias'] or via is not None:
                 raise RuntimeError('conflicting automatic routing remote source configuration')
             continue
-        if via not in (None, 'gocc'):
-            raise RuntimeError('invalid automatic routing remote source configuration')
-        if host == 'gores1' or host in seen:
-            raise RuntimeError('conflicting automatic routing remote source configuration')
         seen.add(host)
         item = {'host': host, 'ssh_alias': alias}
         if via:
@@ -66,7 +74,7 @@ def remote_from(source, payload):
     # transport.  The outer process never receives an arbitrary SSH alias:
     # the relay maps this logical target to its own fixed target inventory.
     request = ({'op': 'relay', 'target': source['host'], 'request': payload}
-               if source.get('via') == 'gocc' else payload)
+               if source.get('via') else payload)
     p = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True, timeout=35)
     try: result = json.loads(p.stdout)
     except ValueError: raise RuntimeError('gocc dispatch gateway unavailable')
@@ -86,6 +94,12 @@ def local_lanes():
     p = subprocess.run([cli, 'lane', 'status'], capture_output=True, text=True, timeout=15)
     if p.returncode: raise RuntimeError('local lane status unavailable')
     return json.loads(p.stdout)
+
+def local_host():
+    host = os.environ.get('OPENSWARM_AUTO_LOCAL_HOST', 'gores1')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host):
+        raise RuntimeError('invalid automatic routing local host configuration')
+    return host
 
 def preference(kind, difficulty):
     """Return backend preference, not a fixed lane inventory.
@@ -162,7 +176,7 @@ def main():
         lane = row['name']
         local = row['_origin'] == 'local'
         result = {'ok': True, 'lane': lane, 'backend': row['backend'], 'model': row['model'],
-                  'host': 'gores1' if local else row['_remote_source']['host'],
+                  'host': local_host() if local else row['_remote_source']['host'],
                   'profile': {'type': args.type, 'difficulty': args.difficulty}}
         if read_only: result['read_only'] = True
         if local and row['backend'] == 'pi' and read_only:
