@@ -1,4 +1,6 @@
 """check_site.py 的静态站点验收测试。"""
+from __future__ import annotations
+
 import hashlib
 import json
 import os
