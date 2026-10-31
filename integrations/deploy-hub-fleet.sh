@@ -255,6 +255,25 @@ atomic_install() {
 atomic_install "$release_bin/openswarm-fleet-bundle-adapter" "$runtime/bin/openswarm-fleet-bundle-adapter"
 atomic_install "$release_bin/fleet-result-bundle" "$runtime/bin/fleet-result-bundle"
 
+bootstrap_launch_agent() {
+  domain="$1"; plist="$2"
+  for attempt in 1 2 3; do
+    if launchctl bootstrap "$domain" "$plist"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+unload_launch_agent() {
+  domain="$1"; label="$2"
+  launchctl bootout "$domain/$label" || true
+  for attempt in 1 2 3 4 5; do
+    if ! launchctl print "$domain/$label" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 roll_service() {
   lane="$1"
   if [ "$(uname -s)" = Darwin ]; then
@@ -276,8 +295,8 @@ with os.fdopen(fd, 'wb') as out: plistlib.dump(data, out)
 os.chmod(temp, 0o600); os.replace(temp, path)
 PY
     domain="gui/$(id -u)"
-    launchctl bootout "$domain/$label" || true
-    launchctl bootstrap "$domain" "$plist" || return
+    unload_launch_agent "$domain" "$label" || return
+    bootstrap_launch_agent "$domain" "$plist" || return
     launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm-fleet" >/dev/null || return
     launchctl print "$domain/$label" | grep -F "state = running" >/dev/null || return
   else
@@ -315,8 +334,8 @@ restore_service() {
     plist="$HOME/Library/LaunchAgents/$label.plist"
     cp -p "$backup_root/$label.plist" "$plist"
     domain="gui/$(id -u)"
-    launchctl bootout "$domain/$label" || true
-    launchctl bootstrap "$domain" "$plist"
+    unload_launch_agent "$domain" "$label" || return
+    bootstrap_launch_agent "$domain" "$plist"
     launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
   else
     case "$lane" in
@@ -410,7 +429,18 @@ os.chmod(temp, 0o600); os.replace(temp, path)
 PY
   domain="gui/$(id -u)"
   launchctl bootout "$domain/$label" || true
-  launchctl bootstrap "$domain" "$plist" || return
+  local unloaded=0
+  for attempt in 1 2 3 4 5; do
+    if ! launchctl print "$domain/$label" >/dev/null 2>&1; then unloaded=1; break; fi
+    sleep 1
+  done
+  test "$unloaded" -eq 1 || return 1
+  local started=0 attempt
+  for attempt in 1 2 3; do
+    if launchctl bootstrap "$domain" "$plist"; then started=1; break; fi
+    sleep 1
+  done
+  test "$started" -eq 1 || return 1
   launchctl print "$domain/$label" | grep -F "program = $release_bin/openswarm" >/dev/null || return
   launchctl print "$domain/$label" | grep -F "state = running" >/dev/null || return
 }
@@ -426,7 +456,18 @@ local_restore_service() {
   cp -p "$backup_root/$label.plist" "$plist"
   domain="gui/$(id -u)"
   launchctl bootout "$domain/$label" || true
-  launchctl bootstrap "$domain" "$plist"
+  local unloaded=0
+  for attempt in 1 2 3 4 5; do
+    if ! launchctl print "$domain/$label" >/dev/null 2>&1; then unloaded=1; break; fi
+    sleep 1
+  done
+  test "$unloaded" -eq 1 || return 1
+  local started=0 attempt
+  for attempt in 1 2 3; do
+    if launchctl bootstrap "$domain" "$plist"; then started=1; break; fi
+    sleep 1
+  done
+  test "$started" -eq 1
   launchctl print "$domain/$label" | grep -F "state = running" >/dev/null
 }
 
