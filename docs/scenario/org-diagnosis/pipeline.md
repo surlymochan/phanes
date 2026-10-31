@@ -1,19 +1,20 @@
 # 组织诊断场景：Boss→DA→Builder 三角色流水线
 
-Refs #54（#6「三 Bot 场景」的一部分）。
+Refs #71、#54（#6「三 Bot 场景」的一部分）。
 
 本文给出用 OpenSwarm 编排「组织健康诊断」三阶段流水线的做法：每个阶段的角色、任务提示、产物路径和
 `--verify` 门禁；阶段之间用上一阶段的提交作为下一阶段的 `--base`；每阶段结束后做一次跨执行器交叉审查。
-真实组织数据不进入仓库，只经仓库外的 `--data` 绝对路径传入。
+真实组织数据不进入仓库，只经仓库外的绝对路径传入（DA `--raw <dir>`，Builder `--data <diagnosis.json>`，预览 `serve.py --root <dist>`）。
 
 配套的可执行示例编排：[`openswarm/examples/org-diagnosis-pipeline.json`](../../../openswarm/examples/org-diagnosis-pipeline.json)
 （`python3 -m json.tool openswarm/examples/org-diagnosis-pipeline.json` 可解析）。
+从零跑通演示可参考：[`docs/scenario/org-diagnosis/demo.md`](demo.md)。
 
 ## 1. 场景与角色
 
 诊断站点已经在仓库内落地：`openbot/examples/org-health-local/`（`serve.py` + `app.js` + `index.html`），
 用合成示例数据渲染「技术人力成本 / 折算人头 / 收入与成本率」等指标。真实组织数据按
-`openbot/examples/org-health-local/README.md:5` 的约定保存在仓库外，只经 `--data` 传入。
+`openbot/examples/org-health-local/README.md:5` 的约定保存在仓库外，只经绝对路径传入。
 
 本流水线把「做一次组织诊断」拆成三个角色：
 
@@ -21,7 +22,7 @@ Refs #54（#6「三 Bot 场景」的一部分）。
 |---|---|---|---|---|
 | 1 | Boss | 把诊断目标变成口径与问题清单（任务书） | `docs/scenario/org-diagnosis/out/boss-brief.json`（仓库内） | 否 |
 | 2 | DA | 按任务书口径把真实数据归并成结构化诊断 | `${DIAGNOSIS}`（仓库外）+ `docs/scenario/org-diagnosis/out/da-method.md`（仓库内） | 是（仅仓库外那份） |
-| 3 | Builder | 让站点能加载并正确渲染真实诊断数据 | `openbot/examples/org-health-local/` 改动 + `docs/scenario/org-diagnosis/out/builder-notes.md`（仓库内） | 否 |
+| 3 | Builder | 基于诊断快照构建静态分发包并执行静态检查 | `${DIST}`（仓库外）+ `openbot/examples/org-health-local/` 改动（可选）+ `docs/scenario/org-diagnosis/out/builder-notes.md`（仓库内） | 是（仅仓库外 dist 中的 diagnosis.json） |
 
 ```
                  提交/分支交接（下一阶段 --base = 上一阶段 commit）
@@ -31,7 +32,7 @@ Refs #54（#6「三 Bot 场景」的一部分）。
         │                 │                  │
         └──── 交叉审查 ────┴──── 交叉审查 ────┘   （openswarm review，跨执行器族）
 
-   真实数据：${DATA} ──DA──► ${DIAGNOSIS} ──路径──► serve.py --data （全程在仓库外）
+   真实数据：${RAW_DIR} ──DA──► ${DIAGNOSIS} ──Builder──► ${DIST} ──预览──► serve.py --root （全程在仓库外）
 ```
 
 三个阶段都由 `openswarm run` 执行：每次运行在独立 worktree 里进行，分支名 `openswarm/<run-id>`
