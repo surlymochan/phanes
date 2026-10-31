@@ -9,6 +9,39 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  changes:
+    name: Detect changed components
+    runs-on: ubuntu-24.04
+    outputs:
+      openswarm: ${{ steps.detect.outputs.openswarm }}
+      openbot: ${{ steps.detect.outputs.openbot }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "openswarm=true" >> "$GITHUB_OUTPUT"
+            echo "openbot=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          openswarm=false
+          openbot=false
+          while IFS= read -r path; do
+            case "$path" in
+              openswarm/*|.github/*) openswarm=true ;;
+            esac
+            case "$path" in
+              openbot/*|.github/*) openbot=true ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA...HEAD")
+          echo "openswarm=$openswarm" >> "$GITHUB_OUTPUT"
+          echo "openbot=$openbot" >> "$GITHUB_OUTPUT"
   example-json:
     name: Validate example JSON
     runs-on: ubuntu-24.04
@@ -24,6 +57,8 @@ jobs:
           done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
   openswarm:
     name: OpenSwarm tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.openswarm == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -49,6 +84,8 @@ jobs:
           python bin/openswarm route --type impl --difficulty 3
   openbot:
     name: OpenBot type and language checks
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -64,6 +101,8 @@ jobs:
       - run: bun run build
   openbot-scenario-tests:
     name: OpenBot scenario tests (Python ${{ matrix.python }})
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
