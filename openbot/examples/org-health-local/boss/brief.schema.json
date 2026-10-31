@@ -84,6 +84,18 @@
         "说明": {
           "type": "string",
           "minLength": 1
+        },
+        "起始期次": {
+          "type": "string",
+          "minLength": 1
+        },
+        "参考期次": {
+          "type": "string",
+          "minLength": 1
+        },
+        "截止期次": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -104,6 +116,11 @@
         },
         "收入与成本率": {
           "$ref": "#/$defs/口径项"
+        },
+        "汇率": {
+          "description": "人民币/美元，表示每美元折合人民币数。",
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       }
     },

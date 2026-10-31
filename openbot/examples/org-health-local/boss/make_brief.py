@@ -178,12 +178,19 @@ def build_definitions(keys: list[str], month: str) -> dict:
     }
 
 
-def build_brief(goals: list[str] | None = None, month: str | None = None) -> dict:
+def build_brief(
+    goals: list[str] | None = None, month: str | None = None, fx: float | None = None
+) -> dict:
     """生成任务书。goals 覆盖“目标”，month 覆盖观察月份。"""
     observed = DEFAULT_MONTH if month is None else month
     if not MONTH_PATTERN.match(observed):
         raise ValueError(f"观察月份必须是 YYYY-MM（月份在 01-12 之间）：{observed}")
     keys = period_keys(observed)
+    definitions = build_definitions(keys, observed)
+    if fx is not None:
+        if isinstance(fx, bool) or not isinstance(fx, (int, float)) or fx <= 0:
+            raise ValueError("汇率必须是正数（人民币/美元）")
+        definitions["汇率"] = fx
     return {
         "目标": list(goals) if goals else list(DEFAULT_GOALS),
         "观察期间": {
@@ -195,7 +202,7 @@ def build_brief(goals: list[str] | None = None, month: str | None = None) -> dic
                 f"期次锚点 {'、'.join(keys)}，与站点数值序列的键名一致。"
             ),
         },
-        "口径": build_definitions(keys, observed),
+        "口径": definitions,
         "必答问题": list(DEFAULT_QUESTIONS),
         "数据需求": [dict(item) for item in DEFAULT_DATA_NEEDS],
         "禁止事项": list(DEFAULT_FORBIDS),
@@ -205,7 +212,14 @@ def build_brief(goals: list[str] | None = None, month: str | None = None) -> dic
 
 def validate_brief(brief: dict) -> list[str]:
     """按 brief.schema.json 校验任务书，返回错误说明列表。"""
-    return Validator(load_schema(SCHEMA_PATH)).errors(brief)
+    errors = Validator(load_schema(SCHEMA_PATH)).errors(brief)
+    period = brief.get("观察期间", {})
+    keys = period.get("期次", []) if isinstance(period, dict) else []
+    if isinstance(period, dict):
+        for name in ("起始期次", "参考期次", "截止期次"):
+            if name in period and period[name] not in keys:
+                errors.append(f"/观察期间/{name}: 必须是期次列表中的值")
+    return errors
 
 
 def write_brief(brief: dict, path: Path) -> None:
@@ -232,6 +246,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=f"覆盖观察月份，格式 YYYY-MM。默认 {DEFAULT_MONTH}。",
     )
+    parser.add_argument("--fx", type=float, default=None, help="汇率，人民币/美元；默认不写入任务书。")
     return parser.parse_args(argv)
 
 
@@ -239,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     """生成任务书并写出文件。返回进程退出码。"""
     args = parse_args(argv)
     try:
-        brief = build_brief(args.goal, args.month)
+        brief = build_brief(args.goal, args.month, args.fx)
     except ValueError as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE

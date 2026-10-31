@@ -51,7 +51,7 @@ class MakeBriefTest(unittest.TestCase):
 
     def errors(self, brief: dict) -> list[str]:
         """返回结构错误列表。"""
-        return self.validator.errors(brief)
+        return make_brief.validate_brief(brief)
 
     def test_schema_uses_draft_2020_12(self) -> None:
         """结构定义声明 JSON Schema draft 2020-12。"""
@@ -94,7 +94,7 @@ class MakeBriefTest(unittest.TestCase):
     def test_口径_covers_metric_titles(self) -> None:
         """口径与示例 metrics 的标题、顺序一一对应。"""
         titles = [metric["标题"] for metric in self.example["metrics"]]
-        self.assertEqual(list(self.brief["口径"]), titles)
+        self.assertEqual([key for key in self.brief["口径"] if key != "汇率"], titles)
         self.assertEqual(list(self.brief["口径"]), list(make_brief.METRIC_TITLES))
 
     def test_口径_states_units_and_period(self) -> None:
@@ -144,6 +144,23 @@ class MakeBriefTest(unittest.TestCase):
         self.assertIn("2026-01实际", period["期次"])
         self.assertEqual(self.errors(brief), [])
 
+    def test_optional_fx_and_period_anchors(self) -> None:
+        """可选汇率和期间锚点符合 DA 契约。"""
+        brief = make_brief.build_brief(fx=7.2)
+        self.assertEqual(brief["口径"]["汇率"], 7.2)
+        self.assertEqual(self.errors(brief), [])
+        period = brief["观察期间"]
+        period.update({"起始期次": period["期次"][0], "参考期次": period["期次"][1], "截止期次": period["期次"][2]})
+        self.assertEqual(self.errors(brief), [])
+        period["参考期次"] = "不存在"
+        self.assertTrue(any("参考期次" in error for error in self.errors(brief)))
+
+    def test_invalid_fx_rejected(self) -> None:
+        """汇率必须是正数。"""
+        for fx in (0, -1):
+            with self.subTest(fx=fx), self.assertRaises(ValueError):
+                make_brief.build_brief(fx=fx)
+
     def test_invalid_month_rejected(self) -> None:
         """非法观察月份被拒绝。"""
         for month in ("2026-13", "2026-1", "26-01", ""):
@@ -156,12 +173,13 @@ class MakeBriefTest(unittest.TestCase):
         with temporary_directory() as folder:
             path = Path(folder) / "brief.json"
             code = make_brief.main(
-                ["--out", str(path), "--goal", "复核成本率", "--month", "2026-11"]
+                ["--out", str(path), "--goal", "复核成本率", "--month", "2026-11", "--fx", "7.2"]
             )
             self.assertEqual(code, 0)
             written = load_json(path)
         self.assertEqual(written["目标"], ["复核成本率"])
         self.assertEqual(written["观察期间"]["观察月份"], "2026-11")
+        self.assertEqual(written["口径"]["汇率"], 7.2)
         self.assertEqual(self.errors(written), [])
 
     def test_command_line_rejects_invalid_month(self) -> None:
