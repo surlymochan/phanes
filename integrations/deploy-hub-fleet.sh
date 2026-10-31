@@ -4,7 +4,7 @@ set -euo pipefail
 # Deploy the existing Hub fleet path. Default mode is deliberately read-only.
 usage() {
   cat <<'EOF'
-Usage: integrations/deploy-hub-fleet.sh [--apply] [--restart-hub] <main-sha>
+Usage: integrations/deploy-hub-fleet.sh [--apply] [--restart-hub] [--local-only] <main-sha>
 
 Without --apply this only validates the real local/gocc/gores1 paths and the
 selected commit. --apply rolls only idle, clean lanes. --restart-hub is a
@@ -14,10 +14,12 @@ EOF
 
 apply=0
 restart_hub=0
+local_only=0
 while (($#)); do
   case "$1" in
     --apply) apply=1 ;;
     --restart-hub) restart_hub=1 ;;
+    --local-only) local_only=1 ;;
     -h|--help) usage; exit 0 ;;
     *) break ;;
   esac
@@ -71,8 +73,10 @@ REMOTE
 }
 
 echo "preflight: Hub=$hub_runtime; gocc=$gocc_repo; gores1=$gores1_repo"
-remote_preflight gocc "$gocc_runtime" "$gocc_repo" 'C1,A1,A2,GH1,GH2'
-remote_preflight gores1 "$gores1_runtime" "$gores1_repo" 'K1,M1,M2,M3,M4'
+if (( ! local_only )); then
+  remote_preflight gocc "$gocc_runtime" "$gocc_repo" 'C1,A1,A2,GH1,GH2'
+  remote_preflight gores1 "$gores1_runtime" "$gores1_repo" 'K1,M1,M2,M3,M4'
+fi
 test -x "$local_runtime/bin/openswarm"
 local_status="$(OPENSWARM_HOME="$local_home" "$local_runtime/bin/openswarm" lane status)"
 for lane in K1 K2; do test -d "$local_home/lanes/$lane/wt"; done
@@ -551,8 +555,10 @@ PY
   done
 }
 
-remote_apply gocc "$gocc_runtime" "$gocc_repo" 'C1,A1,A2,GH1,GH2'
-remote_apply gores1 "$gores1_runtime" "$gores1_repo" 'K1,M1,M2,M3,M4'
+if (( ! local_only )); then
+  remote_apply gocc "$gocc_runtime" "$gocc_repo" 'C1,A1,A2,GH1,GH2'
+  remote_apply gores1 "$gores1_runtime" "$gores1_repo" 'K1,M1,M2,M3,M4'
+fi
 local_apply
 install_local_runtime
 
