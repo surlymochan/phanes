@@ -32,8 +32,7 @@ class FleetCapacityTests(unittest.TestCase):
                              token=f'{i:032x}', run_id=f'run-{i}', backend='pi', provider='minimax-cn')
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             answers = list(pool.map(attempt, range(8)))
-        # Four MiniMax turns may be admitted globally, subject to each host's
-        # independent cap of two.
+        # Four MiniMax turns may be admitted globally.
         self.assertEqual(sum(bool(a.get('admitted')) for a in answers), 4)
         winner = next(i for i, a in enumerate(answers) if a.get('admitted'))
         host = 'gocc' if winner % 2 else 'gores1'
@@ -50,14 +49,13 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertTrue(self.call(owner, op='release', token=f'{i:032x}', run_id=f'run-{i}')['released'])
         self.assertEqual(self.call(host, op='status')['reservations'], [])
 
-    def test_agy_and_cursor_caps_match_requested_422_allocation(self):
+    def test_agy_and_copilot_caps_match_requested_422_allocation(self):
         def acquire(backend, number):
             host = 'gocc' if number % 2 else 'gores1'
             return self.call(host, op='acquire', token=f'{number:032x}',
                              run_id=f'{backend}-{number}', backend=backend, provider=None)
 
-        # Test each backend cap separately. gocc and local remain limited to
-        # two turns; gores1 owns the four MiniMax turns in the three-host plan.
+        # Test each backend cap separately in the two-host deployment plan.
         agy = [acquire('agy', number) for number in range(1, 5)]
         self.assertEqual(sum(bool(answer.get('admitted')) for answer in agy), 2)
         for number, answer in enumerate(agy, 1):
@@ -66,16 +64,14 @@ class FleetCapacityTests(unittest.TestCase):
                 self.assertTrue(self.call(host, op='release', token=f'{number:032x}',
                                           run_id=f'agy-{number}')['released'])
 
-        cursor = [acquire('cursor', number) for number in range(11, 14)]
-        self.assertEqual(sum(bool(answer.get('admitted')) for answer in cursor), 2)
+        copilot = [acquire('copilot', number) for number in range(11, 14)]
+        self.assertEqual(sum(bool(answer.get('admitted')) for answer in copilot), 2)
 
-    def test_three_host_mixed_422_allocation_releases_a_slot(self):
-        """The three-host layout admits 4 Pi, 2 AGY and 2 Cursor turns.
+    def test_two_host_mixed_422_allocation_releases_a_slot(self):
+        """The two-host layout admits 4 Pi, 2 AGY and 2 Copilot turns.
 
-        gocc stays at two Antigravity turns and local at two Cursor turns;
-        gores1 supplies the four MiniMax turns.  A ninth turn is rejected by
-        the global cap.  Releasing a completed local turn makes that host and
-        the global slot available again.
+        gocc owns two Antigravity turns and two Copilot turns; gores1 supplies
+        the four MiniMax turns. A ninth turn is rejected by the global cap.
         """
         requests = [
             ('gores1', 'pi', 'minimax-cn', 'minimax-1'),
@@ -84,8 +80,8 @@ class FleetCapacityTests(unittest.TestCase):
             ('gores1', 'pi', 'minimax-cn', 'minimax-4'),
             ('gocc', 'agy', None, 'agy-1'),
             ('gocc', 'agy', None, 'agy-2'),
-            ('local', 'cursor', None, 'cursor-1'),
-            ('local', 'cursor', None, 'cursor-2'),
+            ('gocc', 'copilot', None, 'copilot-1'),
+            ('gocc', 'copilot', None, 'copilot-2'),
         ]
         admitted = []
         for number, (host, backend, provider, run_id) in enumerate(requests):
@@ -96,14 +92,14 @@ class FleetCapacityTests(unittest.TestCase):
             admitted.append((host, token, run_id))
 
         self.assertEqual(len(self.call('gocc', op='status')['reservations']), 8)
-        ninth = self.call('local', op='acquire', token='f' * 32, run_id='extra-codex',
+        ninth = self.call('gocc', op='acquire', token='f' * 32, run_id='extra-codex',
                           backend='codex', provider=None)
         self.assertFalse(ninth['admitted'])
         self.assertIn('total', ninth['blocked'])
 
         host, token, run_id = admitted[-1]
         self.assertTrue(self.call(host, op='release', token=token, run_id=run_id)['released'])
-        self.assertTrue(self.call('local', op='acquire', token='f' * 32,
+        self.assertTrue(self.call('gocc', op='acquire', token='f' * 32,
                                   run_id='extra-codex', backend='codex', provider=None)['admitted'])
 
     def test_disconnected_coordinator_fails_closed(self):
@@ -242,10 +238,14 @@ class FleetCapacityTests(unittest.TestCase):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
         second = dict(op='acquire', token='2' * 32, run_id='two', backend='agy', provider=None)
         third = dict(op='acquire', token='3' * 32, run_id='three', backend='copilot', provider=None)
+        fourth = dict(op='acquire', token='4' * 32, run_id='four', backend='cursor', provider=None)
+        fifth = dict(op='acquire', token='5' * 32, run_id='five', backend='agy', provider=None)
         self.assertTrue(self.call('gocc', **first)['admitted'])
         self.assertTrue(self.call('gocc', **second)['admitted'])
-        self.assertEqual(self.call('gocc', **third)['blocked'], ['host:gocc'])
-        self.assertTrue(self.call('gores1', **third)['admitted'])
+        self.assertTrue(self.call('gocc', **third)['admitted'])
+        self.assertTrue(self.call('gocc', **fourth)['admitted'])
+        self.assertEqual(self.call('gocc', **fifth)['blocked'], ['host:gocc'])
+        self.assertTrue(self.call('gores1', **fifth)['admitted'])
 
     def test_local_host_shares_backend_limit_and_cannot_recover(self):
         local = dict(op='acquire', token='1' * 32, run_id='local-turn', backend='codex', provider=None)

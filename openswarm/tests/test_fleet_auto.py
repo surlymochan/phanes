@@ -4,6 +4,7 @@ import runpy
 import contextlib
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -28,16 +29,172 @@ class FleetAutoTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())['lane'], 'K1')
 
     def test_task_profiles_cover_all_five_backends(self):
-        expected = [('mechanical', 1, 'M1'), ('test', 2, 'K1'), ('impl', 2, 'GH1'),
-                    ('impl', 3, 'C1'), ('impl', 4, 'GH2'), ('migration', 3, 'A1')]
-        for kind, difficulty, lane in expected:
-            self.assertEqual(preference(kind, difficulty)[0], lane)
+        expected = [('mechanical', 1, 'pi'), ('test', 2, 'cursor'), ('impl', 2, 'pi'),
+                    ('impl', 3, 'pi'), ('impl', 4, 'agy'), ('migration', 3, 'agy')]
+        for kind, difficulty, backend in expected:
+            self.assertEqual(preference(kind, difficulty)[0], backend)
 
     def test_complex_copilot_never_falls_back_to_haiku(self):
         for kind in ('impl', 'test', 'migration'):
             for difficulty in (4, 5):
-                self.assertNotIn('GH1', preference(kind, difficulty))
-        self.assertNotIn('GH2', preference('impl', 2))
+                self.assertLess(preference(kind, difficulty).index('agy'), preference(kind, difficulty).index('copilot'))
+        self.assertLess(preference('impl', 2).index('pi'), preference('impl', 2).index('copilot'))
+
+    def test_existing_fleet_inventory_discovers_and_assigns_three_host_layout(self):
+        inventory = {
+            'gores1': [{'name': f'M{number}', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'}
+                        for number in range(1, 5)],
+            'gocc': [{'name': f'A{number}', 'state': 'idle', 'backend': 'agy', 'model': 'Gemini'}
+                     for number in range(1, 3)],
+        }
+        local = [{'name': f'K{number}', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'}
+                 for number in range(1, 3)]
+        assigned = mock.Mock(return_value={'id': 'gocc-a1', 'state': 'queued'})
+        remote = mock.Mock()
+        discovered = mock.Mock(side_effect=lambda host: inventory[host])
+        args = ['openswarm-auto', '--type', 'migration', '--difficulty', '4', '--base', 'abcdef0', '--prompt', 'task']
+        with mock.patch.object(sys, 'argv', args), \
+                mock.patch.dict(os.environ, {'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \
+                mock.patch.dict(G, {'local_lanes': lambda: local,
+                                    'fleet_lanes': discovered,
+                                    'fleet_assign': assigned,
+                                    'remote': remote}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['main']()
+        result = json.loads(output.getvalue())
+        self.assertEqual((result['host'], result['lane'], result['backend']), ('gocc', 'A1', 'agy'))
+        self.assertEqual([call.args[0] for call in discovered.call_args_list], ['gores1', 'gocc'])
+        self.assertEqual(assigned.call_args.args[:2], ('gocc', 'A1'))
+        remote.assert_not_called()
+
+    def test_fleet_host_configuration_rejects_non_inventory_syntax(self):
+        for raw in ('{}', '["local"]', '["gores1","gores1"]', '["bad host"]'):
+            with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_FLEET_HOSTS': raw}):
+                with self.assertRaisesRegex(RuntimeError, 'fleet host configuration'):
+                    G['fleet_hosts']()
+
+    def test_backend_host_filters_keep_local_cursor_slots_distinct_from_remote_duplicates(self):
+        local = [
+            {'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'},
+            {'name': 'K2', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'},
+            {'name': 'M3', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+        ]
+        inventory = {
+            'gores1': [
+                {'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'},
+                {'name': 'M1', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+            ],
+            'gocc': [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'Gemini'}],
+        }
+        args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0',
+                '--prompt', 'task', '--dry-run']
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":["cursor"],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        with mock.patch.object(sys, 'argv', args), mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {'local_lanes': lambda: local,
+                                    'fleet_lanes': lambda host: inventory[host]}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['main']()
+        result = json.loads(output.getvalue())
+        self.assertEqual((result['host'], result['lane'], result['backend']), ('local', 'K1', 'cursor'))
+
+    def test_backend_host_filters_reject_invalid_hosts_and_backends(self):
+        environment = {'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+                       'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1"]'}
+        for raw in ('[]', '{"unknown":["pi"]}', '{"local":["bad backend"]}'):
+            with mock.patch.dict(os.environ, {**environment, 'OPENSWARM_AUTO_HOST_BACKENDS': raw}):
+                with self.assertRaisesRegex(RuntimeError, 'backend configuration'):
+                    G['backend_filters'](G['fleet_hosts']())
+
+    def test_empty_local_allowlist_skips_missing_local_lane_runtime(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gocc":["agy"]}',
+        }
+        local = mock.Mock(side_effect=RuntimeError('local lane status unavailable'))
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {
+                    'local_lanes': local,
+                    'fleet_lanes': lambda host: [{'name':'A1','state':'idle','backend':'agy','model':'gemini'}],
+                }):
+            rows = G['discovered_lanes']()
+        self.assertEqual([(row['name'], row['_origin']) for row in rows], [('A1', 'fleet')])
+        local.assert_not_called()
+
+    def test_total_remote_discovery_outage_is_not_reported_as_no_lane(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {'fleet_lanes': mock.Mock(side_effect=OSError('unreachable'))}):
+            with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable: gores1,gocc'):
+                G['discovered_lanes']()
+
+    def test_total_remote_outage_does_not_block_available_local_lane(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":["cursor"],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        local = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'}]
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {'local_lanes': lambda: local,
+                                    'fleet_lanes': mock.Mock(side_effect=OSError('unreachable'))}):
+            rows = G['discovered_lanes']()
+        self.assertEqual([row['name'] for row in rows], ['K1'])
+
+    def test_partial_remote_discovery_outage_keeps_other_host_available(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        def lanes(host):
+            if host == 'gores1':
+                raise OSError('unreachable')
+            return [{'name':'A1','state':'idle','backend':'agy','model':'gemini'}]
+        with mock.patch.dict(os.environ, environment), mock.patch.dict(G, {'fleet_lanes': lanes}):
+            rows = G['discovered_lanes']()
+        self.assertEqual([row['name'] for row in rows], ['A1'])
+
+    def test_copilot_prefers_sonnet_for_hard_and_haiku_for_routine_work(self):
+        lanes = [
+            {'name': 'GH1', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-haiku-5.5'},
+            {'name': 'GH2', 'state': 'idle', 'backend': 'copilot', 'model': 'claude-sonnet-5.5'},
+        ]
+        routine = G['available_in_preference'](lanes, ['copilot'], 'impl', 2)
+        hard = G['available_in_preference'](lanes, ['copilot'], 'impl', 4)
+        self.assertEqual([row['name'] for row in routine], ['GH1', 'GH2'])
+        self.assertEqual([row['name'] for row in hard], ['GH2'])
+
+    def test_configured_cli_and_wrapper_use_candidate_home_for_auto(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cli = root / 'fleet-cli'
+            cli.write_text('#!' + sys.executable + '\n'
+                           'import json,os,sys\n'
+                           'expected=os.path.join(os.environ["HOME"],".claude","openswarm-executor-candidate")\n'
+                           'if os.environ.get("OPENSWARM_HOME") != expected: raise SystemExit(9)\n'
+                           'if os.environ.get("OPENSWARM_FLEET_GUARD_CONFIG") != os.path.join(expected,"fleet-capacity.json"): raise SystemExit(10)\n'
+                           'if os.environ.get("OPENSWARM_FLEET_GUARD_REQUIRED") != "1": raise SystemExit(11)\n'
+                           'if sys.argv[1:3] == ["lane","status"]:\n'
+                           ' print(json.dumps([{"name":"K1","state":"idle","backend":"cursor","model":"composer"}]))\n'
+                           'else: print(json.dumps([]))\n')
+            cli.chmod(0o755)
+            wrapper = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'openswarm-fleet'
+            env = {**os.environ, 'HOME': str(root), 'OPENSWARM_AUTO_CLI': str(cli),
+                   'OPENSWARM_AUTO_FLEET_HOSTS': '["gocc"]'}
+            result = subprocess.run([str(wrapper), 'auto', '--type', 'test', '--difficulty', '2',
+                                     '--base', 'abcdef0', '--prompt', 'task', '--dry-run'],
+                                    env=env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['host'], 'gores1')
 
     def test_review_uses_available_remote_lane_and_marks_read_only(self):
         def remote(req):

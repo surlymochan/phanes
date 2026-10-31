@@ -8965,6 +8965,18 @@ def cmd_fleet(args):
         row["result"] = jload(os.path.join(RUNS, rid, "result.json"))
         print(json.dumps(row, ensure_ascii=False))
         return
+    if args.fleet_cmd == "_bundle":
+        rid = safe_id(args.run_id)
+        if not os.path.exists(os.path.join(RUNS, rid, "status.json")):
+            raise ValueError(f"no such run: {rid}")
+        row = run_digest(rid)
+        row["result"] = jload(os.path.join(RUNS, rid, "result.json"))
+        bundle = subprocess.run([sys.executable, str(Path(__file__).with_name("fleet-result-bundle"))],
+                                input=json.dumps(row), text=True, capture_output=True, timeout=140)
+        if bundle.returncode:
+            raise RuntimeError("fleet result bundle is unavailable")
+        print(bundle.stdout, end="")
+        return
     if args.fleet_cmd == "_verify":
         print(json.dumps(verify_in_worktree(args.repo, args.rev, args.verify, args.timeout), ensure_ascii=False))
         return
@@ -11213,6 +11225,8 @@ def main():
     fp.add_argument("--into", help="destination JSONL path")
     fleet_sub.add_parser("_snapshot", help=argparse.SUPPRESS)
     fp = fleet_sub.add_parser("_run-info", help=argparse.SUPPRESS)
+    fp.add_argument("run_id")
+    fp = fleet_sub.add_parser("_bundle", help=argparse.SUPPRESS)
     fp.add_argument("run_id")
     fp = fleet_sub.add_parser("_verify", help=argparse.SUPPRESS)
     fp.add_argument("--repo", required=True)

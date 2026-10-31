@@ -27,6 +27,10 @@ gateway_errors = ('no available fleet lane', 'available lanes changed or rejecte
 class NoAvailableLane(RuntimeError):
     pass
 
+class PreDispatchRejected(RuntimeError):
+    """No executor was contacted, so the handoff can safely be rejected."""
+    pass
+
 def gateway(payload):
     proc = subprocess.run(transport, input=json.dumps(payload), text=True, capture_output=True,
                           timeout=150 if payload.get('op') == 'bundle' else 100)
@@ -39,12 +43,103 @@ def gateway(payload):
         raise RuntimeError(reason if reason in gateway_errors else 'fleet gateway rejected request')
     return data['result']
 
+def local_router_enabled():
+    return os.environ.get('OPENSWARM_HUB_LOCAL_ROUTER') == '1'
+
+def local_fleet_hosts():
+    raw = os.environ.get('OPENSWARM_AUTO_FLEET_HOSTS')
+    if raw is None:
+        return []
+    try:
+        hosts = json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError('local fleet host configuration invalid') from error
+    if (not isinstance(hosts, list) or not hosts
+            or any(not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)
+                   or host == 'local' for host in hosts)
+            or len(set(hosts)) != len(hosts)):
+        raise RuntimeError('local fleet host configuration invalid')
+    return hosts
+
+def direct_fleet_enabled():
+    return local_router_enabled() and bool(local_fleet_hosts())
+
+def local_command(command, payload=None, timeout=100):
+    process = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
+                             text=True, capture_output=True, timeout=timeout)
+    try:
+        data = json.loads(process.stdout)
+    except ValueError as error:
+        raise RuntimeError('local fleet response unavailable') from error
+    if process.returncode or not isinstance(data, dict) or data.get('ok') is False:
+        if isinstance(data, dict) and data.get('error') in (
+                'no available fleet lane', 'available lanes changed or rejected the task'):
+            raise NoAvailableLane(data['error'])
+        if isinstance(data, dict) and isinstance(data.get('error'), str) and \
+                data['error'].startswith('fleet lane discovery unavailable:'):
+            raise PreDispatchRejected(data['error'])
+        raise RuntimeError('local fleet command rejected request')
+    return data
+
+def local_host_command(host, command, payload=None, timeout=100):
+    if host == 'local':
+        return local_command([native, *command], payload, timeout)
+    if host not in local_fleet_hosts():
+        raise RuntimeError('local fleet host is not configured')
+    return local_command([native, 'fleet', 'exec', host, '--', *command], payload, timeout)
+
+def local_gateway(payload):
+    """Route via this Hub's existing fleet inventory and local lane runtime."""
+    op = payload.get('op')
+    if op == 'submit':
+        prompt, title, base = payload.get('prompt'), payload.get('title'), payload.get('base')
+        kind, difficulty = payload.get('type'), payload.get('difficulty')
+        budget, verify = payload.get('budget'), payload.get('verify')
+        if not isinstance(prompt, str) or not isinstance(title, str) or not isinstance(base, str):
+            raise RuntimeError('local fleet command rejected request')
+        with tempfile.TemporaryDirectory(prefix='openswarm-hub-local-card-') as directory:
+            os.chmod(directory, 0o700)
+            card = Path(directory) / 'task.md'; card.write_text(prompt); card.chmod(0o600)
+            command = [native, 'auto', '--type', str(kind), '--difficulty', str(difficulty),
+                       '--task-file', str(card), '--title', title, '--base', base,
+                       '--budget-minutes', str(budget)]
+            if verify:
+                command += ['--verify', str(verify)]
+            # `openswarm-auto` queries fleet hosts serially (35 seconds per
+            # host) before a possible 45-second assignment.  Its bridge
+            # deadline must cover that valid work, or an accepted task can
+            # lose its acknowledgement and leave the Hub journal pending.
+            return local_command(command, timeout=15 + 35 * len(local_fleet_hosts()) + 45 + 10)
+    run_id, host = payload.get('id'), payload.get('host')
+    if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id):
+        raise RuntimeError('local fleet command rejected request')
+    if op == 'info':
+        return local_host_command(host, ['fleet', '_run-info', run_id])
+    if op == 'stop':
+        return local_host_command(host, ['stop', run_id])
+    if op == 'bundle':
+        # Compatibility adapters may spend 60 seconds reading run metadata and
+        # another 140 seconds building the source-host bundle.
+        return local_host_command(host, ['fleet', '_bundle', run_id], timeout=210)
+    raise RuntimeError('local fleet command rejected request')
+
+def dispatch_gateway(payload, legacy=False):
+    # The opt-in direct route preserves historical handoffs: an unconfigured
+    # executor host remains on the legacy gateway instead of being guessed.
+    if not legacy and direct_fleet_enabled() and (payload.get('op') == 'submit'
+                                   or payload.get('host') in {'local', *local_fleet_hosts()}):
+        return local_gateway(payload)
+    return gateway(payload)
+
 def db_open():
     store.mkdir(parents=True, mode=0o700, exist_ok=True)
     db = sqlite3.connect(str(store / 'dispatch.sqlite'), timeout=10, isolation_level=None)
     os.chmod(store / 'dispatch.sqlite', 0o600)
     db.execute('PRAGMA busy_timeout=10000')
-    db.execute('CREATE TABLE IF NOT EXISTS handoffs (request_id TEXT PRIMARY KEY, state TEXT NOT NULL, run_id TEXT, host TEXT, created REAL NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS handoffs (request_id TEXT PRIMARY KEY, state TEXT NOT NULL, run_id TEXT, host TEXT, created REAL NOT NULL, route TEXT)')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(handoffs)')}
+    if 'route' not in columns:
+        db.execute('ALTER TABLE handoffs ADD COLUMN route TEXT')
     return db
 
 def run_submit(args):
@@ -82,23 +177,30 @@ def run_submit(args):
     db = db_open(); db.execute('BEGIN IMMEDIATE')
     if db.execute("SELECT 1 FROM handoffs WHERE state='pending' LIMIT 1").fetchone():
         db.execute('ROLLBACK'); db.close(); raise RuntimeError('an earlier handoff is unresolved; reconcile before dispatch')
-    db.execute('INSERT INTO handoffs VALUES (?,?,?,?,?)',(request_id,'pending',None,None,time.time()))
+    route = 'fleet' if direct_fleet_enabled() else 'gateway'
+    db.execute('INSERT INTO handoffs (request_id,state,run_id,host,created,route) VALUES (?,?,?,?,?,?)',
+               (request_id,'pending',None,None,time.time(),route))
     db.execute('COMMIT'); db.close()
     # Do not remove a pending intent on timeout or error: a remote task may have
     # been accepted even when its acknowledgement was lost.
     try:
-        reply = gateway({'op':'submit','prompt':card,'title':opts.title,'base':base,'type':kind,
-                         'difficulty':difficulty,'budget':opts.budget_minutes,'verify':opts.verify})
-    except NoAvailableLane as error:
+        reply = dispatch_gateway({'op':'submit','prompt':card,'title':opts.title,'base':base,'type':kind,
+                                  'difficulty':difficulty,'budget':opts.budget_minutes,'verify':opts.verify})
+    except (NoAvailableLane, PreDispatchRejected) as error:
         db = db_open()
         db.execute("UPDATE handoffs SET state='rejected' WHERE request_id=? AND state='pending'", (request_id,))
         db.close()
+        if isinstance(error, PreDispatchRejected):
+            raise RuntimeError(str(error)) from error
         raise RuntimeError('no available fleet lane; retry when an executor is idle') from error
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
-        reason = str(error) if str(error) in gateway_errors else 'gateway unavailable or response lost'
+        reason = (str(error) if str(error) in gateway_errors
+                  or str(error).startswith('fleet lane discovery unavailable:')
+                  else 'gateway unavailable or response lost')
         raise RuntimeError(f'handoff {request_id} unresolved ({reason}); inspect the remote run before reconciliation') from error
     run_id, host = reply.get('id'), reply.get('host')
-    if not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id) or host not in ('gocc','gores1'):
+    if (not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id)
+            or not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)):
         raise RuntimeError('invalid acknowledgement; handoff requires reconciliation')
     db = db_open(); db.execute('BEGIN IMMEDIATE')
     db.execute("UPDATE handoffs SET state='accepted',run_id=?,host=? WHERE request_id=?",(run_id,host,request_id))
@@ -106,14 +208,14 @@ def run_submit(args):
     print(json.dumps({'id':run_id,'state':reply.get('state'),'host':'local','executor_host':host,
                       'backend':reply.get('backend'),'model':reply.get('model')}))
 
-def fetch_result(run_id, host, result):
+def fetch_result(run_id, host, result, route):
     branch, commit = result.get('branch'), result.get('commit')
     if branch != 'openswarm/' + run_id or not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40,64}', commit):
         return
     repo = json.loads(config_path.read_text())['repo']
     exists = subprocess.run(['git', '-C', repo, 'cat-file', '-e', commit + '^{commit}'], capture_output=True)
     if exists.returncode:
-        payload = gateway({'op': 'bundle', 'id': run_id, 'host': host})
+        payload = dispatch_gateway({'op': 'bundle', 'id': run_id, 'host': host}, legacy=route != 'fleet')
         if payload.get('branch') != branch or payload.get('commit') != commit:
             raise ValueError('result bundle does not match the completed task')
         with tempfile.TemporaryDirectory(prefix='openswarm-result-') as directory:
@@ -129,15 +231,15 @@ def fetch_result(run_id, host, result):
 
 
 def mapped(run_id, op):
-    db=db_open(); row=db.execute("SELECT host FROM handoffs WHERE state='accepted' AND run_id=?",(run_id,)).fetchone(); db.close()
+    db=db_open(); row=db.execute("SELECT host,route FROM handoffs WHERE state='accepted' AND run_id=?",(run_id,)).fetchone(); db.close()
     if not row: return False
-    data=gateway({'op':op,'id':run_id,'host':row[0]})
+    data=dispatch_gateway({'op':op,'id':run_id,'host':row[0]}, legacy=row[1] != 'fleet')
     if op == 'info' and isinstance(data.get('result'),dict):
         # The local Hub host is a logical gateway. Preserve evidence of where
         # the executor ran in the result rather than claiming it ran locally.
         res=data['result']; final=res.get('result')
         try:
-            fetch_result(run_id, row[0], res)
+            fetch_result(run_id, row[0], res, row[1])
         except (ValueError, KeyError, OSError, subprocess.SubprocessError, RuntimeError):
             res['local_review_error'] = 'The completed result could not be fetched for local review.'
             if isinstance(final, dict) and isinstance(final.get('summary'), str):
@@ -150,9 +252,9 @@ def main():
     args=sys.argv[1:]
     if args == ['bridge', 'status']:
         db = db_open()
-        rows = db.execute('SELECT request_id,state,run_id,host,created FROM handoffs ORDER BY created').fetchall()
+        rows = db.execute('SELECT request_id,state,run_id,host,created,route FROM handoffs ORDER BY created').fetchall()
         db.close()
-        print(json.dumps({'handoffs':[dict(zip(('request_id','state','run_id','host','created'),row)) for row in rows]}))
+        print(json.dumps({'handoffs':[dict(zip(('request_id','state','run_id','host','created','route'),row)) for row in rows]}))
         return
     if args[:2] == ['bridge', 'clear-unsubmitted']:
         p = argparse.ArgumentParser()
@@ -166,15 +268,15 @@ def main():
         print(json.dumps({'ok':True,'cleared':a.request_id})); return
     if args[:2] == ['bridge', 'reconcile']:
         p = argparse.ArgumentParser()
-        p.add_argument('--request-id', required=True); p.add_argument('--host', choices=['gocc','gores1'], required=True)
+        p.add_argument('--request-id', required=True); p.add_argument('--host', required=True)
         p.add_argument('--run-id', required=True); p.add_argument('--confirm', required=True)
         a = p.parse_args(args[2:])
         if a.confirm != 'matching-terminal-run-verified': raise ValueError('explicit terminal run confirmation required')
         db = db_open()
-        row = db.execute('SELECT state FROM handoffs WHERE request_id=?',(a.request_id,)).fetchone()
+        row = db.execute('SELECT state,route FROM handoffs WHERE request_id=?',(a.request_id,)).fetchone()
         db.close()
         if not row or row[0] != 'pending': raise ValueError('request is not pending')
-        info = gateway({'op':'info','id':a.run_id,'host':a.host})
+        info = dispatch_gateway({'op':'info','id':a.run_id,'host':a.host}, legacy=row[1] != 'fleet')
         if info.get('id') != a.run_id or not isinstance(info.get('result'),dict):
             raise ValueError('matching run is not terminal')
         db = db_open()
