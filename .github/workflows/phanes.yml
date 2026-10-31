@@ -1,0 +1,47 @@
+name: Phanes components
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  openswarm:
+    name: OpenSwarm tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        python: ["3.9", "3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: openswarm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Offline CLI smoke test
+        env:
+          OPENSWARM_STATE_FILE: examples/demo-state.json
+        run: |
+          export OPENSWARM_HOME="$(mktemp -d)"
+          python bin/openswarm status
+          python bin/openswarm route --type impl --difficulty 3
+  openbot:
+    name: OpenBot type and language checks
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: openbot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.11'
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck:node
+      - run: bun run i18n:check
