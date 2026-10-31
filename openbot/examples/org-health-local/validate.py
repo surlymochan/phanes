@@ -2,10 +2,11 @@
 """校验 diagnosis.json 是否符合 schema/diagnosis.schema.json。
 
 用法：
-    python3 validate.py [文件 ...]
+    python3 validate.py [--schema 结构定义] [--json] [文件 ...]
 
 默认校验 data/diagnosis.json。只使用标准库。校验失败时退出码非 0，
-并逐条打印出错路径，例如 /scope/schema版本。
+并逐条打印出错路径，例如 /scope/schema版本。退出码：0 全部通过，
+1 有文件未通过校验，2 输入不可读（文件缺失或不是合法 JSON）。
 
 字段处理规则全部来自结构定义，不在代码里写死字段名：
 - 定义里 required 列出的字段缺省时报错（_check_object）；
@@ -299,7 +300,11 @@ def validate_data(data: object, schema: dict) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     """校验命令行给出的文件。返回进程退出码。"""
     parser = argparse.ArgumentParser(
-        description="校验 diagnosis.json 是否符合 schema/diagnosis.schema.json。"
+        description=(
+            "校验 diagnosis.json 是否符合 schema/diagnosis.schema.json。"
+            "默认校验 data/diagnosis.json，也可以给出多个待校验文件。"
+        ),
+        epilog="退出码：0 全部通过；1 有文件未通过校验；2 输入不可读（文件缺失或不是合法 JSON）。",
     )
     parser.add_argument(
         "paths",
