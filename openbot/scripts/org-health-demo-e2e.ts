@@ -53,6 +53,10 @@ try {
     ]) {
       assert.equal(await page.getByText(text, { exact: true }).count(), 0);
     }
+    for (const selector of ["#stage-title", "#stage-note"]) {
+      assert.equal((await page.locator(selector).textContent())?.trim(), "—");
+    }
+    assert.equal((await page.locator("#stage-list").textContent())?.trim(), "");
   };
   for (const [language, expected, metricLabels, unavailable] of [
     [
