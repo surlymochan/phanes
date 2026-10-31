@@ -211,6 +211,34 @@ class BuildDiagnosisTest(unittest.TestCase):
             ["收入 缺 2026-06 数据，按 null 处理"],
         )
 
+    def test_zero_revenue_makes_cost_rate_null_without_changing_scope(self) -> None:
+        """收入全为 0 时成本率为 null，且不影响其它指标与观察范围。"""
+        baseline = self.build()
+        raw_dir = copy_raw(self.folder, "raw-zero-revenue")
+        revenue = raw_dir / "revenue.csv"
+        lines = csv_lines(revenue)
+        write_csv_lines(
+            revenue,
+            [lines[0]] + [f"{line.split(',', 1)[0]},0" for line in lines[1:]],
+        )
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("ZeroDivisionError", result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+
+        rate = data["metrics"][3]["数值"]["整体技术人力成本率"]
+        for period in ("2026-01实际", "2026-05H1参考", "2026-09实际"):
+            self.assertIsNone(rate[period])
+        self.assertEqual(data["scope"]["观察月份"], baseline["scope"]["观察月份"])
+        self.assertEqual(data["scope"]["数据截止"], baseline["scope"]["数据截止"])
+        self.assertEqual(data["metrics"][:3], baseline["metrics"][:3])
+        self.assertEqual(
+            data["metrics"][3]["数值"]["收入万美元每月"]["年末测算"],
+            baseline["metrics"][3]["数值"]["收入万美元每月"]["年末测算"],
+        )
+        self.assertEqual(rate["年末测算"], baseline["metrics"][3]["数值"]["整体技术人力成本率"]["年末测算"])
+
     def test_strict_mode_fails_on_missing_observation_period(self) -> None:
         """严格模式遇观察期间指标缺失时中文报错且不写快照。"""
         raw_dir = self.folder / "raw-with-gap"
