@@ -68,6 +68,89 @@ class ValidateTest(unittest.TestCase):
         """返回校验错误列表。"""
         return self.validator.errors(data)
 
+    def test_numeric_constraints_report_boundaries_and_ignore_boolean_values(self) -> None:
+        """数值边界关键字报错并带路径，布尔值不参与数值比较。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "below": {"minimum": 10},
+                "above": {"maximum": 20},
+                "exclusive": {"exclusiveMinimum": 10},
+                "boolean": {"minimum": 10, "maximum": 20, "exclusiveMinimum": 10},
+            },
+        }
+        instance = {"below": 9, "above": 21, "exclusive": 10, "boolean": True}
+
+        errors = validate.Validator(schema).errors(instance)
+
+        self.assertTrue(any("/below" in message for message in errors), errors)
+        self.assertTrue(any("/above" in message for message in errors), errors)
+        self.assertTrue(any("/exclusive" in message for message in errors), errors)
+        self.assertFalse(any("/boolean" in message for message in errors), errors)
+
+    def test_string_constraints_report_length_and_pattern_errors(self) -> None:
+        """字符串长度与正则约束不满足时报告对应路径。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "too_short": {"minLength": 3},
+                "too_long": {"maxLength": 3},
+                "wrong_pattern": {"pattern": r"^OK-[0-9]+$"},
+            },
+        }
+        instance = {"too_short": "ab", "too_long": "abcd", "wrong_pattern": "nope"}
+
+        errors = validate.Validator(schema).errors(instance)
+
+        self.assertTrue(any("/too_short" in message for message in errors), errors)
+        self.assertTrue(any("/too_long" in message for message in errors), errors)
+        self.assertTrue(any("/wrong_pattern" in message for message in errors), errors)
+
+    def test_enum_and_const_report_invalid_values(self) -> None:
+        """enum 和 const 不满足时报告对应路径。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "choice": {"enum": ["red", "blue"]},
+                "version": {"const": 4},
+            },
+        }
+        instance = {"choice": "green", "version": 3}
+
+        errors = validate.Validator(schema).errors(instance)
+
+        self.assertTrue(any("/choice" in message for message in errors), errors)
+        self.assertTrue(any("/version" in message for message in errors), errors)
+
+    def test_object_property_count_constraints_report_errors(self) -> None:
+        """对象字段数低于或高于边界时报告对象路径。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "too_few": {"type": "object", "minProperties": 2},
+                "too_many": {"type": "object", "maxProperties": 1},
+            },
+        }
+        instance = {"too_few": {"a": 1}, "too_many": {"a": 1, "b": 2}}
+
+        errors = validate.Validator(schema).errors(instance)
+
+        self.assertTrue(any("/too_few" in message for message in errors), errors)
+        self.assertTrue(any("/too_many" in message for message in errors), errors)
+
+    def test_additional_properties_schema_validates_undeclared_fields(self) -> None:
+        """additionalProperties 为子结构时，未声明字段按子结构校验并带路径。"""
+        schema = {
+            "type": "object",
+            "properties": {"known": {"type": "string"}},
+            "additionalProperties": {"type": "number", "minimum": 0},
+        }
+        instance = {"known": "ok", "extra": -1}
+
+        errors = validate.Validator(schema).errors(instance)
+
+        self.assertTrue(any("/extra" in message for message in errors), errors)
+
     def test_schema_uses_draft_2020_12(self) -> None:
         """结构定义声明 JSON Schema draft 2020-12。"""
         self.assertEqual(self.schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
