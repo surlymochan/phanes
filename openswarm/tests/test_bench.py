@@ -41,6 +41,62 @@ class BenchOpenswarm(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old)
 
+    def test_equal_price_models_keep_catalogue_order(self):
+        old = os.environ.copy()
+        try:
+            home = tempfile.mkdtemp(prefix="openswarm-bench-test-")
+            xs = harness.load_openswarm(home)
+            policy = {
+                "codex": {
+                    "tier_keywords": {"deep": [], "fast": [], "balanced": []},
+                    "legacy_keywords": [],
+                }
+            }
+            catalogue = {"models": [
+                {
+                    "id": "ocgo-first",
+                    "family": "test",
+                    "backends": ["ocgo"],
+                    "description": "first synthetic model",
+                    "priority": 1,
+                    "context_window": 1000,
+                    "efforts": ["medium"],
+                    "release_date": "2026-01-01",
+                    "context": 1000,
+                    "monthly_limit_usd": 60,
+                    "excluded": False,
+                    "cost_band": "cheap-flash",
+                },
+                {
+                    "id": "ocgo-second",
+                    "family": "test",
+                    "backends": ["ocgo"],
+                    "description": "second synthetic model",
+                    "priority": 2,
+                    "context_window": 1000,
+                    "efforts": ["medium"],
+                    "release_date": "2026-01-02",
+                    "context": 1000,
+                    "monthly_limit_usd": 60,
+                    "excluded": False,
+                    "cost_band": "cheap-flash",
+                },
+            ]}
+            scenario = {
+                "codex": {"five_hour": 0.0, "seven_day": 0.0},
+                "deepseek_balance_cny": 100.0,
+            }
+
+            state = harness.build_state(xs, policy, catalogue, scenario)
+
+            self.assertEqual(
+                [model["id"] for model in state["ocgo"]["models"]],
+                ["ocgo-first", "ocgo-second"],
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
     def test_decisions_are_deterministic(self):
         old = os.environ.copy()
         try:
