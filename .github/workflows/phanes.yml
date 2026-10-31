@@ -1,7 +1,7 @@
 name: Phanes components
 on:
   push:
-    branches: [main]
+    branches: [main, codex/phanes-unification]
   pull_request:
 permissions:
   contents: read
