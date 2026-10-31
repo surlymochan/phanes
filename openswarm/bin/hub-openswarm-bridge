@@ -27,6 +27,10 @@ gateway_errors = ('no available fleet lane', 'available lanes changed or rejecte
 class NoAvailableLane(RuntimeError):
     pass
 
+class PreDispatchRejected(RuntimeError):
+    """No executor was contacted, so the handoff can safely be rejected."""
+    pass
+
 def gateway(payload):
     proc = subprocess.run(transport, input=json.dumps(payload), text=True, capture_output=True,
                           timeout=150 if payload.get('op') == 'bundle' else 100)
@@ -73,7 +77,7 @@ def local_command(command, payload=None, timeout=100):
             raise NoAvailableLane(data['error'])
         if isinstance(data, dict) and isinstance(data.get('error'), str) and \
                 data['error'].startswith('fleet lane discovery unavailable:'):
-            raise RuntimeError(data['error'])
+            raise PreDispatchRejected(data['error'])
         raise RuntimeError('local fleet command rejected request')
     return data
 
@@ -182,10 +186,12 @@ def run_submit(args):
     try:
         reply = dispatch_gateway({'op':'submit','prompt':card,'title':opts.title,'base':base,'type':kind,
                                   'difficulty':difficulty,'budget':opts.budget_minutes,'verify':opts.verify})
-    except NoAvailableLane as error:
+    except (NoAvailableLane, PreDispatchRejected) as error:
         db = db_open()
         db.execute("UPDATE handoffs SET state='rejected' WHERE request_id=? AND state='pending'", (request_id,))
         db.close()
+        if isinstance(error, PreDispatchRejected):
+            raise RuntimeError(str(error)) from error
         raise RuntimeError('no available fleet lane; retry when an executor is idle') from error
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         reason = (str(error) if str(error) in gateway_errors

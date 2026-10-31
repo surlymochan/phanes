@@ -140,8 +140,17 @@ class HubBridgeTests(unittest.TestCase):
         response = subprocess.CompletedProcess([], 1,
             json.dumps({'ok': False, 'error': 'fleet lane discovery unavailable: gores1,gocc'}), '')
         with mock.patch.object(subprocess, 'run', return_value=response):
-            with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable: gores1,gocc'):
+            with self.assertRaisesRegex(MOD['PreDispatchRejected'], 'fleet lane discovery unavailable: gores1,gocc'):
                 MOD['local_command'](['auto'])
+
+    def test_discovery_outage_rejects_handoff_without_leaving_pending(self):
+        rejected = MOD['PreDispatchRejected']('fleet lane discovery unavailable: gores1,gocc')
+        with mock.patch.dict(G, {'gateway': mock.Mock(side_effect=rejected)}):
+            with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable: gores1,gocc'):
+                MOD['run_submit'](self.args)
+        db = MOD['db_open']()
+        self.assertEqual(db.execute('select state from handoffs').fetchall(), [('rejected',)])
+        db.close()
 
     def test_local_command_classifies_changed_lane_error_as_unavailable(self):
         response = mock.Mock(returncode=0, stdout=json.dumps(

@@ -136,6 +136,19 @@ class FleetAutoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable: gores1,gocc'):
                 G['discovered_lanes']()
 
+    def test_total_remote_outage_does_not_block_available_local_lane(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":["cursor"],"gores1":["pi"],"gocc":["agy"]}',
+        }
+        local = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'}]
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch.dict(G, {'local_lanes': lambda: local,
+                                    'fleet_lanes': mock.Mock(side_effect=OSError('unreachable'))}):
+            rows = G['discovered_lanes']()
+        self.assertEqual([row['name'] for row in rows], ['K1'])
+
     def test_partial_remote_discovery_outage_keeps_other_host_available(self):
         environment = {
             'OPENSWARM_AUTO_LOCAL_HOST': 'local',

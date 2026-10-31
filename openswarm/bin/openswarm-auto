@@ -141,7 +141,7 @@ def discovered_lanes():
         # A partial outage may still leave a usable host, but silently turning
         # a total fleet-discovery outage into "no available lane" hides the
         # operational distinction from the Hub handoff journal.
-        if len(unavailable) == len(hosts):
+        if len(unavailable) == len(hosts) and not rows:
             raise RuntimeError('fleet lane discovery unavailable: ' + ','.join(unavailable))
         return rows
     try:
