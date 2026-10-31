@@ -149,6 +149,19 @@ elif role == 'builder':
         self.assertEqual(builder_call[-2:], ['--bundle', str(ROOT / 'demo' / 'vendor' / 'app.bundle.js')])
         self.assertIn(str(ROOT / 'demo' / 'vendor' / 'app.bundle.js'), result.stdout)
 
+    def test_boss_failure_stops_pipeline_and_returns_nonzero(self):
+        """Boss 失败时打印失败步骤并以非零退出，后续步骤（DA/Builder/站点自检）不再执行。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 0), exit_code=5)
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: Boss', result.stderr)
+        self.assertIn('退出码 5', result.stderr)
+        # Boss 之后的步骤（DA、Builder、站点自检）不再执行
+        self.assertEqual([call[0] for call in self.calls()], ['boss'])
+        for step in ('DA', 'Builder', '检查'):
+            self.assertNotIn(f'[{step}] 命令', result.stdout)
+
     def test_failure_stops_pipeline_and_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
             self.write_stub(path, role, failing=(index == 1))
