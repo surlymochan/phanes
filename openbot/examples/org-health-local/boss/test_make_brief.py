@@ -493,6 +493,43 @@ class PeriodOrderTest(unittest.TestCase):
                 code = make_brief.main(["--check", str(path)])
         self.assertEqual(code, 1)
 
+    def test_期次为空数组_应报出错误(self) -> None:
+        """期次列表为空数组时校验应失败并指出期次错误。"""
+        brief = make_brief.build_brief()
+        brief["观察期间"]["期次"] = []
+        errors = self.errors(brief)
+        self.assertTrue(errors, "期次为空数组时未报出错误")
+        self.assertTrue(
+            any("期次" in message for message in errors),
+            "期次为空数组时未报出指向期次的错误",
+        )
+
+    def test_命令行拒绝期次为空数组且stderr指出期次(self) -> None:
+        """生成结果期次列表为空数组时命令行应报错，stderr 指出期次且不写出任务书。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            empty = make_brief.build_brief()
+            empty["观察期间"]["期次"] = []
+            output = StringIO()
+            with patch.object(make_brief, "build_brief", return_value=empty), redirect_stderr(output):
+                code = make_brief.main(["--out", str(path)])
+        self.assertNotEqual(code, 0)
+        self.assertFalse(path.exists())
+        self.assertIn("期次", output.getvalue())
+
+    def test_check_期次为空数组_退出码非零(self) -> None:
+        """--check 校验期次为空数组的任务书时退出码应非 0。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            brief = make_brief.build_brief()
+            brief["观察期间"]["期次"] = []
+            path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                code = make_brief.main(["--check", str(path)])
+        self.assertEqual(code, 1)
+        self.assertIn("期次", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
