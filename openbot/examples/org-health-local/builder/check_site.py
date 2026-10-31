@@ -75,6 +75,10 @@ def report_hashes(report: object) -> dict[str, str]:
 def check_site(dist: Path) -> list[str]:
     """返回逐条检查结果；空列表表示通过。"""
     failures: list[str] = []
+    if not dist.is_dir():
+        failures.append(f"失败：站点路径不存在或不是目录：{dist}")
+        return failures
+
     paths: dict[str, Path] = {}
     for relative in REQUIRED_FILES:
         path = dist / relative
