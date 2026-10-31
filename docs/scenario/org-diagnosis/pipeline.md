@@ -163,7 +163,7 @@ openswarm review <run-id> --by pi --json
 ## 6. 真实数据边界
 
 - 真实组织数据只经**仓库外的绝对路径**进入：`python3 openbot/examples/org-health-local/serve.py
-  --data /absolute/path/to/diagnosis.json`（`openbot/examples/org-health-local/serve.py:39-42`）。
+  --data /absolute/path/to/diagnosis.json`（`openbot/examples/org-health-local/serve.py:49-66`）。
 - 仓库内只保留合成示例 `openbot/examples/org-health-local/data/diagnosis.json`；
   `openbot/scripts/org-health-demo-e2e.ts:13-16` 也是把合成数据复制到临时目录再经 `--data` 传入，
   作为「数据不落库」的既有做法。

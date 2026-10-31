@@ -36,7 +36,7 @@
 ### 2.3 Builder（建站）
 
 - 站点结构以合成示例为准：`openbot/examples/org-health-local/index.html` 页面骨架、`openbot/examples/org-health-local/app.js` 渲染与校验、`openbot/examples/org-health-local/styles.css` 样式、`openbot/examples/org-health-local/serve.py` 本机服务。
-- 真实数据只通过 `--data /absolute/path/to/diagnosis.json` 注入（`openbot/examples/org-health-local/serve.py:40`、`openbot/examples/org-health-local/README.md:5`），不复制进站点目录。
+- 真实数据只通过 `--data /absolute/path/to/diagnosis.json` 注入（`openbot/examples/org-health-local/serve.py:53`、`openbot/examples/org-health-local/README.md:5`），不复制进站点目录。
 - 验证报告须记录访问 URL、启动命令、端口、实际检查项与失败项，便于他人复现。
 
 ## 3. 交接工件清单与路径约定
@@ -72,7 +72,7 @@
 1. `<scenario-workdir>` 必须位于仓库工作树之外；不得在仓库根目录或任何子目录下写入真实数据文件。
 2. 仓库内唯一的诊断数据文件是合成示例 `openbot/examples/org-health-local/data/diagnosis.json`，且必须保持人工构造。
 3. 快照文件名固定为 `diagnosis.json`（放在 `<scenario-workdir>/evidence/` 内）；顶层字段与 `metrics` 的标题顺序不得改动，否则页面判为结构错误（`openbot/examples/org-health-local/app.js:74-82`）。
-4. 页面固定请求同源路由 `/data/diagnosis.json`（`openbot/examples/org-health-local/app.js:234`），真实文件位置由服务端的 `--data` 决定（`openbot/examples/org-health-local/serve.py:24-27`、`openbot/examples/org-health-local/serve.py:42`）。
+4. 页面固定请求同源路由 `/data/diagnosis.json`（`openbot/examples/org-health-local/app.js:234`），真实文件位置由服务端的 `--data` 决定（`openbot/examples/org-health-local/serve.py:36-39`、`openbot/examples/org-health-local/serve.py:53`）。
 5. 交接以"路径 + sha256"传递，不把真实数据正文粘进 Issue、PR、聊天记录或工单。
 
 ## 4. 交接流程与放行条件
@@ -101,9 +101,10 @@
 ### 5.2 验证
 
 - [ ] 仓库内合成示例的回归脚本 `bun run test:org-health-demo` 通过（`openbot/package.json:194`），覆盖中英文与回退语言、无效数据、无效 Host 与私有路径（`openbot/scripts/org-health-demo-e2e.ts:107`、`openbot/scripts/org-health-demo-e2e.ts:189-193`）。
-- [ ] 站点在本机可访问：服务只绑定回环地址 `127.0.0.1`（`openbot/examples/org-health-local/serve.py:44`），启动后打印实际 URL（`openbot/examples/org-health-local/serve.py:45`）。
-- [ ] 非 `127.0.0.1:<port>` / `localhost:<port>` 的 Host 头被拒（403），白名单外路径返回 404（`openbot/examples/org-health-local/serve.py:16-21`）。
-- [ ] 目录列表被关闭（`openbot/examples/org-health-local/serve.py:29-31`）；请求日志不落盘（`openbot/examples/org-health-local/serve.py:33-35`）。
+- [ ] 站点在本机可访问：服务只绑定回环地址 `127.0.0.1`（`openbot/examples/org-health-local/serve.py:87`），启动后打印预览地址、站点根目录、诊断数据文件与路径白名单（`openbot/examples/org-health-local/serve.py:94-100`）。
+- [ ] 端口被占用时打印明确错误并以非 0 退出，不静默改用其他端口（`openbot/examples/org-health-local/serve.py:74-81`、`openbot/examples/org-health-local/serve.py:105-121`）。
+- [ ] 非 `127.0.0.1:<port>` / `localhost:<port>` 的 Host 头被拒（403），白名单外路径返回 404（`openbot/examples/org-health-local/serve.py:26-34`）。
+- [ ] 目录列表被关闭（`openbot/examples/org-health-local/serve.py:41-43`）；请求日志不落盘（`openbot/examples/org-health-local/serve.py:45-47`）。
 - [ ] 验证报告记录访问 URL、启动命令、端口、逐项检查结果与失败项，可被第三方复现。
 
 ### 5.3 隐私边界
@@ -128,10 +129,11 @@
 | `openbot/examples/org-health-local/README.md` | 3 | 合成示例说明、本机启动方式与端口 8765 |
 | `openbot/examples/org-health-local/README.md` | 5 | 真实数据必须存仓库外、`--data` 用法 |
 | `openbot/examples/org-health-local/README.md` | 7 | `bun run test:org-health-demo` 回归脚本与输出目录 `.openbot-build/` |
-| `openbot/examples/org-health-local/serve.py` | 16-21 | Host 校验 403 与路径白名单 404 |
-| `openbot/examples/org-health-local/serve.py` | 24-27 | `/data/diagnosis.json` 到真实数据文件的映射 |
-| `openbot/examples/org-health-local/serve.py` | 29-35 | 关闭目录列表、不写请求日志 |
-| `openbot/examples/org-health-local/serve.py` | 39-45 | `--port` / `--data` 参数、构建前端、回环监听与 URL 输出 |
+| `openbot/examples/org-health-local/serve.py` | 26-34 | Host 校验 403 与路径白名单 404 |
+| `openbot/examples/org-health-local/serve.py` | 36-39 | `/data/diagnosis.json` 到真实数据文件的映射 |
+| `openbot/examples/org-health-local/serve.py` | 41-47 | 关闭目录列表、不写请求日志 |
+| `openbot/examples/org-health-local/serve.py` | 49-66 | `--port` / `--data` 参数与端口预检 |
+| `openbot/examples/org-health-local/serve.py` | 83-100 | 构建前端、回环监听与预览地址、路径信息输出 |
 | `openbot/examples/org-health-local/app.js` | 23-56 | 旧版结构兼容与结构校验 |
 | `openbot/examples/org-health-local/app.js` | 73-82 | schema v4、观察月份与指标顺序校验 |
 | `openbot/examples/org-health-local/app.js` | 109-127 | 期次与数值格式校验，非法即判失败 |
