@@ -183,6 +183,70 @@ class ValidateTest(unittest.TestCase):
         self.assertIn("--json", result.stdout)
         self.assertIn("退出码", result.stdout)
 
+    def test_command_line_schema_missing_reports_exit_code_two_and_path(self) -> None:
+        """--schema 指向不存在文件时退出码为 2，并提示结构定义路径。"""
+        with temporary_directory() as folder:
+            missing = Path(folder) / "missing-schema.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "validate.py"),
+                    "--schema",
+                    str(missing),
+                    str(EXAMPLE_PATH),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, validate.EXIT_USAGE)
+        self.assertIn("无法读取结构定义", result.stderr)
+        self.assertIn(str(missing), result.stderr)
+        self.assertNotIn("Traceback", output)
+
+    def test_command_line_schema_corrupted_json_reports_exit_code_two(self) -> None:
+        """--schema 文件是损坏 JSON 时退出码为 2，并提示不是合法 JSON。"""
+        with temporary_directory() as folder:
+            broken = Path(folder) / "corrupted-schema.json"
+            broken.write_text("{不是合法 JSON", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "validate.py"),
+                    "--schema",
+                    str(broken),
+                    str(EXAMPLE_PATH),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, validate.EXIT_USAGE)
+        self.assertIn("不是合法 JSON", result.stderr)
+        self.assertNotIn("Traceback", output)
+
+    def test_command_line_schema_non_object_reports_exit_code_two(self) -> None:
+        """--schema 顶层不是对象时退出码为 2，并提示结构定义必须是对象。"""
+        with temporary_directory() as folder:
+            non_object = Path(folder) / "array-schema.json"
+            non_object.write_text("[]", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "validate.py"),
+                    "--schema",
+                    str(non_object),
+                    str(EXAMPLE_PATH),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, validate.EXIT_USAGE)
+        self.assertIn("结构定义", result.stderr)
+        self.assertIn("必须是对象", result.stderr)
+        self.assertNotIn("Traceback", output)
+
     def test_command_line_json_accepts_example(self) -> None:
         """JSON 输出包含通过状态及 schema 版本。"""
         result = subprocess.run(
