@@ -169,6 +169,21 @@ elif role == 'builder':
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder'])
         self.assertNotIn('[检查] 命令', result.stdout)
 
+    def test_checker_failure_stops_pipeline_and_skips_review(self):
+        """Checker 失败时打印失败步骤并以非零退出，独立审查步骤跳过不执行。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 3), exit_code=5)
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('步骤失败: 检查', result.stderr)
+        self.assertIn('退出码 5', result.stderr)
+        # 站点检查失败后，后续独立审查步骤不再执行
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker'])
+        self.assertNotIn('[审查] 命令', result.stdout)
+        self.assertNotIn('reviewer', [call[0] for call in self.calls()])
+        self.assertFalse((self.workdir / REVIEW_REPORT).is_file())
+
     def test_optional_review_runs_after_checker_and_writes_output(self):
         for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
             self.write_stub(path, role)
