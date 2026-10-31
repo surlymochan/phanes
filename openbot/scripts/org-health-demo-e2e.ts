@@ -11,6 +11,7 @@ const output = join(root, ".openbot-build", "org-health-demo-e2e");
 const temporary = await mkdtemp(join(tmpdir(), "openbot-health-demo-"));
 const data = join(temporary, "diagnosis.json");
 const source = await readFile(join(root, "examples/org-health-local/data/diagnosis.json"), "utf8");
+const snapshot = JSON.parse(source);
 await writeFile(data, source);
 const server = spawn("python3", [join(root, "examples/org-health-local/serve.py"), "--port", "0", "--data", data], {
   stdio: ["ignore", "pipe", "pipe"],
@@ -52,9 +53,38 @@ try {
       .getByText(language === "zh" ? "整体技术人力成本" : "Total technical labor cost", { exact: false })
       .first()
       .waitFor();
+    assert.equal(await page.locator("#metric-grid .metric-card").count(), 6);
+    assert.notEqual(await page.locator("#asof-short").innerText(), language === "zh" ? "加载失败" : "Loading failed");
     checks.push(`${language} valid snapshot`);
   }
-  const invalid = JSON.parse(source);
+  const legacy = {
+    标题: "Synthetic historical snapshot",
+    结论: snapshot.conclusion,
+    范围: snapshot.scope,
+    指标: [
+      ...snapshot.metrics,
+      {
+        标题: "Synthetic categories",
+        来源口径: "Synthetic only",
+        指标: [
+          { 分档: "A", 例证: "Example A" },
+          { 分档: "B", 例证: "Example B" },
+        ],
+      },
+    ],
+    来源口径: snapshot.definitions,
+    洞察: snapshot.insights,
+    风险: snapshot.risks,
+    建议: snapshot.recommendations,
+  };
+  await writeFile(data, JSON.stringify(legacy));
+  await page.goto(`${url}/?lang=zh`);
+  await page.getByText("整体技术人力成本", { exact: false }).first().waitFor();
+  assert.equal(await page.locator("#metric-grid .metric-card").count(), 6);
+  assert.equal(await page.locator("#scope-month").innerText(), "2026-09");
+  assert.equal(await page.locator("#stage-list > div").count(), 2);
+  checks.push("legacy snapshot valid");
+  const invalid = structuredClone(snapshot);
   delete invalid.metrics[3].数值["收入万美元每月"]["年末目标"];
   await writeFile(data, JSON.stringify(invalid));
   for (const [language, expected] of [
