@@ -34,6 +34,7 @@ if not bundle.is_file():
 info = subprocess.run([str(base), 'fleet', '_run-info', args[2]], text=True,
                       capture_output=True, timeout=60)
 if info.returncode:
+    sys.stdout.write(info.stdout)
     sys.stderr.write(info.stderr)
     sys.exit(info.returncode)
 try:

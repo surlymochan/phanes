@@ -111,7 +111,9 @@ def local_gateway(payload):
     if op == 'stop':
         return local_host_command(host, ['stop', run_id])
     if op == 'bundle':
-        return local_host_command(host, ['fleet', '_bundle', run_id], timeout=140)
+        # Compatibility adapters may spend 60 seconds reading run metadata and
+        # another 140 seconds building the source-host bundle.
+        return local_host_command(host, ['fleet', '_bundle', run_id], timeout=210)
     raise RuntimeError('local fleet command rejected request')
 
 def dispatch_gateway(payload, legacy=False):
