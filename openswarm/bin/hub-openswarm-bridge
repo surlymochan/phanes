@@ -98,7 +98,8 @@ def run_submit(args):
         reason = str(error) if str(error) in gateway_errors else 'gateway unavailable or response lost'
         raise RuntimeError(f'handoff {request_id} unresolved ({reason}); inspect the remote run before reconciliation') from error
     run_id, host = reply.get('id'), reply.get('host')
-    if not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id) or host not in ('gocc','gores1'):
+    if (not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id)
+            or not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host)):
         raise RuntimeError('invalid acknowledgement; handoff requires reconciliation')
     db = db_open(); db.execute('BEGIN IMMEDIATE')
     db.execute("UPDATE handoffs SET state='accepted',run_id=?,host=? WHERE request_id=?",(run_id,host,request_id))
@@ -166,9 +167,11 @@ def main():
         print(json.dumps({'ok':True,'cleared':a.request_id})); return
     if args[:2] == ['bridge', 'reconcile']:
         p = argparse.ArgumentParser()
-        p.add_argument('--request-id', required=True); p.add_argument('--host', choices=['gocc','gores1'], required=True)
+        p.add_argument('--request-id', required=True); p.add_argument('--host', required=True)
         p.add_argument('--run-id', required=True); p.add_argument('--confirm', required=True)
         a = p.parse_args(args[2:])
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', a.host):
+            raise ValueError('invalid host')
         if a.confirm != 'matching-terminal-run-verified': raise ValueError('explicit terminal run confirmation required')
         db = db_open()
         row = db.execute('SELECT state FROM handoffs WHERE request_id=?',(a.request_id,)).fetchone()
