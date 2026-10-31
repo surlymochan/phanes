@@ -84,6 +84,18 @@ class WriteMethodTest(unittest.TestCase):
         self.assertNotIn("120", content)
         self.assertNotIn("8", content)
 
+    def test_brief_method_numeric_leak_fails_without_writing(self):
+        brief = {**BRIEF, "口径": ["按任务书定义计算", "12 万元/月"]}
+        diagnosis = {
+            "metrics": [{"标题": "成本", "数值": {"月度": {"一月": 12}}}]
+        }
+
+        code, stderr, content = run_write_method(brief, diagnosis)
+
+        self.assertEqual(code, 1)
+        self.assertIn("生成文档包含诊断数值：12", stderr)
+        self.assertEqual(content, "")
+
     def test_lists_raw_csv_files_and_row_counts(self):
         raw_files = {
             "heads.csv": "月份,整体折算人头\n2026-01,10\n2026-02,11\n2026-03,12\n",
