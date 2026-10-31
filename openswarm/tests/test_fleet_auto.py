@@ -4,6 +4,7 @@ import runpy
 import contextlib
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -28,16 +29,72 @@ class FleetAutoTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())['lane'], 'K1')
 
     def test_task_profiles_cover_all_five_backends(self):
-        expected = [('mechanical', 1, 'M1'), ('test', 2, 'K1'), ('impl', 2, 'GH1'),
-                    ('impl', 3, 'C1'), ('impl', 4, 'GH2'), ('migration', 3, 'A1')]
-        for kind, difficulty, lane in expected:
-            self.assertEqual(preference(kind, difficulty)[0], lane)
+        expected = [('mechanical', 1, 'pi'), ('test', 2, 'cursor'), ('impl', 2, 'pi'),
+                    ('impl', 3, 'pi'), ('impl', 4, 'agy'), ('migration', 3, 'agy')]
+        for kind, difficulty, backend in expected:
+            self.assertEqual(preference(kind, difficulty)[0], backend)
 
     def test_complex_copilot_never_falls_back_to_haiku(self):
         for kind in ('impl', 'test', 'migration'):
             for difficulty in (4, 5):
-                self.assertNotIn('GH1', preference(kind, difficulty))
-        self.assertNotIn('GH2', preference('impl', 2))
+                self.assertLess(preference(kind, difficulty).index('agy'), preference(kind, difficulty).index('copilot'))
+        self.assertLess(preference('impl', 2).index('pi'), preference('impl', 2).index('copilot'))
+
+    def test_discovers_all_idle_lanes_for_expanded_backend_capacity(self):
+        lanes = [
+            {'name': 'M4', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+            {'name': 'A2', 'state': 'idle', 'backend': 'agy', 'model': 'Gemini'},
+            {'name': 'K2', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'},
+            {'name': 'M2', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+            {'name': 'M1', 'state': 'busy', 'backend': 'pi', 'model': 'MiniMax'},
+            {'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'Gemini'},
+            {'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'},
+            {'name': 'M3', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'},
+        ]
+        ordered = G['available_in_preference'](lanes, ['pi', 'agy', 'cursor'])
+        self.assertEqual([row['name'] for row in ordered], ['M2', 'M3', 'M4', 'A1', 'A2', 'K1', 'K2'])
+
+    def test_duplicate_lane_names_remain_distinct_by_dispatch_origin(self):
+        local = [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'local-gemini'}]
+        def remote(request):
+            if request['op'] == 'lanes':
+                return [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'remote-gemini'}]
+            self.assertEqual(request['lane'], 'A1')
+            return {'id': 'remote-a1', 'state': 'queued'}
+        args = ['openswarm-auto', '--type', 'migration', '--difficulty', '4', '--base', 'abcdef0', '--prompt', 'task']
+        local_busy = mock.Mock(returncode=1, stdout=json.dumps({'ok': False, 'error': 'lane A1 is busy (busy)'}))
+        with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes': lambda: local, 'remote': remote}), \
+                mock.patch.object(G['subprocess'], 'run', return_value=local_busy), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            MOD['main']()
+        result = json.loads(out.getvalue())
+        self.assertEqual((result['id'], result['host'], result['lane']), ('remote-a1', 'gocc', 'A1'))
+
+    def test_explicit_remote_gateway_host_is_used_for_discovery_and_dispatch(self):
+        extra = {'host': 'govpn', 'ssh_alias': 'openswarm-govpn-gateway'}
+        calls = []
+        def remote(request):
+            self.assertEqual(request, {'op': 'lanes'})
+            return []
+        def remote_from(source, request):
+            calls.append((source, request))
+            if request == {'op': 'lanes'}:
+                return [{'name': 'K2', 'state': 'idle', 'backend': 'cursor', 'model': 'composer-2.5[fast=false]'}]
+            return {'id': 'govpn-k2', 'state': 'queued'}
+        args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task']
+        with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {
+                'local_lanes': lambda: [], 'remote_sources': lambda: [G['DEFAULT_REMOTE_SOURCE'], extra],
+                'remote': remote, 'remote_from': remote_from}), contextlib.redirect_stdout(io.StringIO()) as out:
+            MOD['main']()
+        self.assertEqual(json.loads(out.getvalue())['host'], 'govpn')
+        self.assertEqual(calls, [(extra, {'op': 'lanes'}),
+                                 (extra, mock.ANY)])
+        self.assertEqual(calls[1][1]['lane'], 'K2')
+
+    def test_remote_source_configuration_rejects_untrusted_alias_syntax(self):
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': '[{"host":"gocc","ssh_alias":"bad alias"}]'}):
+            with self.assertRaisesRegex(RuntimeError, 'invalid automatic routing'):
+                G['remote_sources']()
 
     def test_review_uses_available_remote_lane_and_marks_read_only(self):
         def remote(req):
