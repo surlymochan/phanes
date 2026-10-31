@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -66,7 +67,7 @@ https.request = (options, callback) => {
                 proc.terminate()
                 proc.wait(timeout=5)
 
-    def test_aborted_upstream_releases_busy_slot(self):
+    def test_aborted_upstream_releases_in_flight_slot(self):
         with tempfile.TemporaryDirectory() as root:
             module = pathlib.Path(root, 'auth.mjs')
             module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
@@ -104,7 +105,9 @@ https.request = (_options, callback) => {
                 response = client.getresponse()
                 busy_client = UnixHTTP(path)
                 busy_client.request('POST', '/other', '{}')
-                self.assertEqual(busy_client.getresponse().status, 503)
+                # Capacity is now two. An otherwise invalid request must not
+                # pretend the single active slot made the broker unavailable.
+                self.assertEqual(busy_client.getresponse().status, 403)
                 busy_client.close()
                 try:
                     response.read()
@@ -118,6 +121,124 @@ https.request = (_options, callback) => {
                 client.close()
             finally:
                 proc.terminate()
+                proc.wait(timeout=5)
+                proc.stderr.close()
+
+    def test_two_requests_stream_concurrently_and_release_independently(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            marker = pathlib.Path(root, 'started')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const count = Number(fs.existsSync(process.env.STARTED) ? fs.readFileSync(process.env.STARTED, 'utf8') : 0) + 1;
+    fs.writeFileSync(process.env.STARTED, String(count));
+    const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {}; upstream.complete = true;
+    callback(upstream); setTimeout(() => upstream.end('ok-' + count), 300);
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), STARTED=str(marker))
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+                replies = []
+                def request():
+                    client = UnixHTTP(path)
+                    client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                    response = client.getresponse()
+                    replies.append((response.status, response.read()))
+                    client.close()
+                first, second = threading.Thread(target=request), threading.Thread(target=request)
+                first.start(); second.start()
+                while (not marker.exists() or marker.read_text() != '2') and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(marker.read_text(), '2')
+                saturated = UnixHTTP(path)
+                saturated.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                self.assertEqual(saturated.getresponse().status, 503)
+                saturated.close()
+                first.join(timeout=5); second.join(timeout=5)
+                self.assertFalse(first.is_alive()); self.assertFalse(second.is_alive())
+                self.assertEqual(sorted(status for status, _body in replies), [200, 200])
+                client = UnixHTTP(path)
+                client.request('POST', '/other', '{}')
+                self.assertEqual(client.getresponse().status, 403)
+                client.close()
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+                proc.stderr.close()
+
+    def test_rotation_waits_for_both_boundary_requests_to_finish(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            counter = pathlib.Path(root, 'counter')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const count = Number(fs.existsSync(process.env.COUNTER) ? fs.readFileSync(process.env.COUNTER, 'utf8') : 0) + 1;
+    fs.writeFileSync(process.env.COUNTER, String(count));
+    const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {}; upstream.complete = true;
+    callback(upstream);
+    setTimeout(() => upstream.end('ok-' + count), count === 63 ? 80 : count === 64 ? 360 : 0);
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), COUNTER=str(counter))
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 8
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+                for _ in range(62):
+                    client = UnixHTTP(path)
+                    client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                    self.assertEqual(client.getresponse().status, 200)
+                    client.close()
+                replies = []
+                def request():
+                    client = UnixHTTP(path)
+                    client.request('POST', '/v1/messages', json.dumps({'model':'allowed-model','messages':[]}))
+                    response = client.getresponse()
+                    replies.append((response.status, response.read()))
+                    client.close()
+                early, late = threading.Thread(target=request), threading.Thread(target=request)
+                early.start(); late.start()
+                early.join(timeout=5); late.join(timeout=5)
+                self.assertFalse(early.is_alive()); self.assertFalse(late.is_alive())
+                self.assertEqual(sorted(status for status, _body in replies), [200, 200])
+                # Once both terminal responses have drained the supervised broker may rotate.
+                while proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(proc.poll(), 0)
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
                 proc.wait(timeout=5)
                 proc.stderr.close()
 

@@ -16,19 +16,35 @@ try { key = await AuthStorage.create().getApiKey('minimax-cn'); }
 catch { throw new Error('MiniMax credential unavailable'); }
 if (typeof key !== 'string' || !key || /[\r\n]/.test(key)) throw new Error('MiniMax credential unavailable');
 const maxBytes = 8 * 1024 * 1024;
-let busy = false, accepted = 0;
+// Two resident Pi lanes share this broker. Track every in-flight request so
+// one completion cannot admit a third while another request is still streaming.
+const maxInFlight = 2, maxAccepted = 64;
+let inFlight = 0, accepted = 0, rotating = false;
+
+function rotateWhenDrained() {
+  if (!rotating || inFlight !== 0) return;
+  // Stop accepting only after every accepted response has drained. Do not use
+  // closeAllConnections: at the rotation boundary it could cut off a peer.
+  server.close(() => { try { unlinkSync(socket); } catch {} process.exit(0); });
+}
+
 const server = createServer((req, res) => {
   const fail = (status, message) => { if (!res.headersSent) res.writeHead(status, {'content-type': 'text/plain'}); res.end(message); };
-  if (busy || accepted >= 64) return fail(503, 'broker temporarily unavailable');
+  if (inFlight >= maxInFlight || accepted >= maxAccepted) return fail(503, 'broker temporarily unavailable');
   if (req.method !== 'POST' || !['/v1/messages', '/v1/messages?beta=true'].includes(req.url)) return fail(403, 'request refused');
   const beta = req.headers['anthropic-beta'];
   if (beta !== undefined && (typeof beta !== 'string' || !/^[a-z0-9, -]{1,512}$/i.test(beta))) return fail(400, 'invalid beta header');
   const length = Number(req.headers['content-length']);
   if (!Number.isSafeInteger(length) || length < 1 || length > maxBytes || req.headers['transfer-encoding']) return fail(400, 'invalid size');
-  busy = true;
+  inFlight += 1;
   req.setTimeout(20000, () => req.destroy());
   let settled = false;
-  const release = () => { if (!settled) { settled = true; busy = false; } };
+  const release = () => {
+    if (settled) return;
+    settled = true;
+    inFlight -= 1;
+    rotateWhenDrained();
+  };
   let size = 0; const parts = [];
   req.on('data', chunk => { size += chunk.length; if (size <= maxBytes) parts.push(chunk); else req.destroy(); });
   req.on('error', release);
@@ -41,19 +57,7 @@ const server = createServer((req, res) => {
       release(); return fail(403, 'model or request refused');
     }
     accepted += 1;
-    if (accepted >= 64) {
-      // A disconnected client may never emit finish. Stop on either terminal
-      // event so the supervised broker cannot remain permanently at its cap.
-      let stopping = false;
-      const stopAtLimit = () => {
-        if (stopping) return;
-        stopping = true;
-        server.close(() => { try { unlinkSync(socket); } catch {} process.exit(0); });
-        server.closeAllConnections?.();
-      };
-      res.once('finish', stopAtLimit);
-      res.once('close', stopAtLimit);
-    }
+    if (accepted >= maxAccepted) rotating = true;
     // Forward the parsed value, not the original bytes: duplicate JSON keys must not
     // let the upstream select a different model from the one checked above.
     const payload = Buffer.from(JSON.stringify(parsed));
