@@ -3150,6 +3150,8 @@ def exec_hermes(d, st, prompt, wd, rdir, timeout, evp):
     child = None
     try:
         child = LaneChild(lane, wd, policy)
+        set_status(rdir, executor_pid=child.pid, executor_pgid=child.pgid,
+                   events=evp, attempt_started=NOW())
         spec = {"started": NOW(), "budget_minutes": timeout / 60, "_event_file": evp}
         final, usage, error, rc, _, detail = lane_run_turn(lane, child, spec, prompt, {"path": wd}, rdir,
                                                            None, {}, [])
@@ -6916,6 +6918,10 @@ class CursorHeadlessChild(AgyChild):
                                 start_new_session=True)
         events, stderr_lines = queue.Queue(), []
         self.proc, self.events, self.stderr_lines = proc, events, stderr_lines
+        try:
+            self.pgid = os.getpgid(proc.pid)
+        except OSError:
+            self.pgid = None
         threading.Thread(target=self._read_stdout, args=(proc, events), daemon=True).start()
         threading.Thread(target=self._read_stderr, args=(proc, stderr_lines), daemon=True).start()
         return proc.pid

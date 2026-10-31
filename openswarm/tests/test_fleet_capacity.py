@@ -357,5 +357,39 @@ class FleetCapacityTests(unittest.TestCase):
         os.killpg(pgid, signal.SIGKILL)
         self.assertTrue(xs.release_fleet_slot(rdir))
 
+    def test_hermes_one_shot_parent_with_child_retains_reservation(self):
+        """Hermes must publish its LaneChild group before one-shot release checks."""
+        rdir = pathlib.Path(self.temp.name, 'runs', 'hermes-normal-exit-with-child')
+        rdir.mkdir(parents=True)
+        marker = pathlib.Path(self.temp.name, 'hermes-child.pid')
+        fixture = HERE / 'fixtures' / 'fake_cursor_acp.py'
+        fixture.chmod(0o755)
+        policy = {'concurrency': {'total': 8},
+                  'hermes': {'binary': str(fixture), 'provider': 'minimax-cn'}}
+        env = {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name,
+               'FAKE_CURSOR_CHILD_PID': str(marker), 'FAKE_CHILD_DEVNULL': '1'}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.object(xs, 'load_policy', return_value=policy), \
+             mock.patch.object(xs, 'minimax_key_from_pi', return_value=None), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': xs.exec_hermes}):
+            attempts, _final, error = xs.run_executor_with_rate_limit(
+                'pi', {'backend': 'pi', 'model': 'composer-2.5', 'provider': 'minimax-cn'}, {},
+                'LANE_TEST_EXIT_WITH_CHILD', self.temp.name, str(rdir), xs.NOW() + 30, policy)
+        try:
+            self.assertEqual(error, 'exec_error')
+            self.assertEqual(attempts[0]['rc'], 1)
+            self.assertTrue(marker.exists(), attempts)
+            self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+            pgid = json.loads((rdir / 'status.json').read_text())['executor_pgid']
+            os.killpg(pgid, signal.SIGKILL)
+            self.assertTrue(xs.release_fleet_slot(str(rdir)))
+        finally:
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
 if __name__ == '__main__':
     unittest.main()

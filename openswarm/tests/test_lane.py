@@ -717,6 +717,32 @@ class LaneTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_headless_cursor_parent_with_child_retains_shared_fleet_slot(self):
+        """Headless Cursor must record its group before testing an ordinary exit."""
+        self.set_config("cursor", model="composer-2.5[fast=false]")
+        config_path = self.data / "lanes.json"
+        config = json.loads(config_path.read_text())
+        config["lanes"][0].update({"mode": "headless",
+                                   "binary": str(FIXTURES / "fake_cursor_headless.py")})
+        config_path.write_text(json.dumps(config))
+        self.enable_fleet_guard()
+        child_marker = self.root / "headless-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_CHILD")
+        try:
+            self.assertEqual(self.wait_run(run_id)["status"], "failed")
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            reservations = self.fleet_reservations()
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_live_lane_turn_keeps_shared_fleet_slot(self):
         self.set_config("cursor")
         self.enable_fleet_guard()
