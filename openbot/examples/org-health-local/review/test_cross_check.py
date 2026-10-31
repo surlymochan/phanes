@@ -238,18 +238,18 @@ class CrossCheckTest(unittest.TestCase):
         self.assertEqual(failures[0].name, "期间一致")
         self.assertIn("观察月份", failures[0].detail)
 
-    @unittest.expectedFailure
     def test_brief_observed_month_mismatch_fails(self) -> None:
         """快照期次落在任务书提到的其他期次上时必须报出。
 
-        当前实现只检查 `scope.观察月份` 是否落在任务书 `观察期间` 里出现过的月份集合内；
-        Boss 格式任务书的 `说明` 会列出全部期次锚点，快照落到 2026-01 时集合内命中，漏报。
-        实现补上“任务书观察月份与快照期次”比较后，删掉 expectedFailure 标记。
+        Boss 格式任务书的 `说明` 会列出全部期次锚点，快照落到 2026-01 时期次集合内命中，
+        需再比对任务书 `观察期间.观察月份` 与快照 `scope.观察月份`。
         """
         self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
         self.diagnosis["scope"]["观察月份"] = "2026-01"
         failures = self.failing(self.check())
         self.assertTrue(failures, "快照期次与任务书观察月份不一致时未报出")
+        self.assertEqual(failures[0].name, "期间一致")
+        self.assertIn("观察月份", failures[0].detail)
 
     @unittest.expectedFailure
     def test_brief_period_keys_mismatch_fails(self) -> None:

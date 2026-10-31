@@ -19,6 +19,7 @@
     任务书 `观察期间` 可为对象、字符串或字符串数组：对象里的期次按 `YYYY-MM` 提取，
     字符串与数组按其中出现的 `YYYY-MM` 提取，得到期次集合。
     - 快照 `scope.观察月份` 必须落在该集合内；
+    - 任务书若显式给出 `观察月份`（Boss 格式），必须等于 `scope.观察月份`；
     - 任务书若显式给出 `截止期次`，必须等于 `scope.观察月份`；
     - 任务书若显式给出 `数据截止`，必须等于 `scope.数据截止`。
 
@@ -60,6 +61,9 @@ SEGMENT_PATTERN = re.compile(r"[0-9A-Za-z一-鿿]+")
 # 任务书 `观察期间` 里表示截止期次与数据截止的键名。
 END_KEYS = ("截止期次", "截止", "截止月份", "end")
 AS_OF_KEYS = ("数据截止", "数据截止日期", "asOf")
+
+# 任务书 `观察期间` 里表示观察月份（Boss 格式）的键名。
+OBSERVED_KEYS = ("观察月份",)
 
 # 任务书 `必答问题` 条目里表示 id 与问题正文的键名。
 QUESTION_ID_KEYS = ("id", "ID", "编号", "题号", "问题编号", "序号")
@@ -176,25 +180,27 @@ def load_json(path: Path) -> dict:
     return data
 
 
-def brief_period(brief: dict) -> tuple[set[str], str | None, str | None]:
-    """返回任务书观察期间的期次集合、显式截止期次与显式数据截止。"""
+def brief_period(brief: dict) -> tuple[set[str], str | None, str | None, str | None]:
+    """返回任务书观察期间的期次集合、显式截止期次、显式数据截止与显式观察月份。"""
     window = brief.get("观察期间")
     months: set[str] = set()
     end: str | None = None
     as_of: str | None = None
+    observed: str | None = None
     if isinstance(window, dict):
         for value in window.values():
             if isinstance(value, str):
                 months.update(MONTH_PATTERN.findall(value))
         end = first_text(window, *END_KEYS)
         as_of = first_text(window, *AS_OF_KEYS)
+        observed = first_text(window, *OBSERVED_KEYS)
     elif isinstance(window, str):
         months.update(MONTH_PATTERN.findall(window))
     elif isinstance(window, list):
         for item in window:
             if isinstance(item, str):
                 months.update(MONTH_PATTERN.findall(item))
-    return months, end, as_of
+    return months, end, as_of, observed
 
 
 def check_period(brief: dict, diagnosis: dict) -> Result:
@@ -206,13 +212,17 @@ def check_period(brief: dict, diagnosis: dict) -> Result:
     observed = scope.get("观察月份")
     if not isinstance(observed, str) or not observed.strip():
         return Result(False, name, "诊断快照缺少 `scope.观察月份`")
-    months, end, as_of = brief_period(brief)
+    months, end, as_of, brief_observed = brief_period(brief)
     if not months:
         return Result(False, name, "任务书缺少 `观察期间`，无法核对期间")
     listed = "/".join(sorted(months))
     problems: list[str] = []
     if observed not in months:
         problems.append(f"`scope.观察月份`={observed} 不在任务书观察期间（{listed}）内")
+    if brief_observed and brief_observed != observed:
+        problems.append(
+            f"任务书 `观察期间.观察月份`={brief_observed} 与 `scope.观察月份`={observed} 不一致"
+        )
     if end and end != observed:
         problems.append(f"任务书 `观察期间.截止期次`={end} 与 `scope.观察月份`={observed} 不一致")
     cutoff = scope.get("数据截止")
