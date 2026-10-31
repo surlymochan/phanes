@@ -208,6 +208,14 @@ class DistRootServeTests(unittest.TestCase):
         self.assertEqual(status_index, 200)
         self.assertEqual(body_index, self.index.read_bytes())
 
+    def test_root_defaults_data_path_and_serves_that_file(self):
+        args = serve.parse_args(['--port', '0', '--root', str(self.dist)])
+        self.assertEqual(args.data, self.data.resolve())
+
+        status, body = self.request('/data/diagnosis.json')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, self.data.read_bytes())
+
     def test_unlisted_files_are_not_found(self):
         for path in ('/build-report.json', '/secret.txt', '/app.js', '/README.md', '/data', '/data/'):
             with self.subTest(path=path):
