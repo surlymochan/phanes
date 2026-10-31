@@ -91,6 +91,23 @@ class FleetAutoTests(unittest.TestCase):
                                  (extra, mock.ANY)])
         self.assertEqual(calls[1][1]['lane'], 'K2')
 
+    def test_gocc_relay_source_envelopes_discovery_and_assignment(self):
+        source = {'host': 'govpn', 'ssh_alias': 'openswarm-gocc-fleet-relay', 'via': 'gocc'}
+        calls = []
+        def run(command, input=None, **_kwargs):
+            calls.append((command, json.loads(input)))
+            request = calls[-1][1]['request']
+            response = ([] if request['op'] == 'lanes' else {'id': 'govpn-k1', 'state': 'queued'})
+            return subprocess.CompletedProcess(command, 0, json.dumps({'ok': True, 'result': response}), '')
+        with mock.patch.object(G['subprocess'], 'run', side_effect=run):
+            self.assertEqual(G['remote_from'](source, {'op':'lanes'}), [])
+            self.assertEqual(G['remote_from'](source, {'op':'assign','lane':'K1'}),
+                             {'id':'govpn-k1','state':'queued'})
+        self.assertEqual([item[0][-1] for item in calls], ['openswarm-gocc-fleet-relay'] * 2)
+        self.assertEqual(calls[0][1], {'op':'relay','target':'govpn','request':{'op':'lanes'}})
+        self.assertEqual(calls[1][1], {'op':'relay','target':'govpn',
+                                       'request':{'op':'assign','lane':'K1'}})
+
     def test_remote_source_configuration_rejects_untrusted_alias_syntax(self):
         with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': '[{"host":"gocc","ssh_alias":"bad alias"}]'}):
             with self.assertRaisesRegex(RuntimeError, 'invalid automatic routing'):
@@ -109,6 +126,16 @@ class FleetAutoTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': config}):
                 with self.assertRaisesRegex(RuntimeError, 'conflicting automatic routing'):
                     G['remote_sources']()
+
+    def test_relay_source_only_allows_gocc_as_transit(self):
+        raw = '[{"host":"govpn","ssh_alias":"openswarm-gocc-fleet-relay","via":"gocc"}]'
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': raw}):
+            self.assertEqual(G['remote_sources']()[-1],
+                             {'host':'govpn','ssh_alias':'openswarm-gocc-fleet-relay','via':'gocc'})
+        raw = '[{"host":"govpn","ssh_alias":"relay","via":"other"}]'
+        with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_REMOTE_SOURCES': raw}):
+            with self.assertRaisesRegex(RuntimeError, 'invalid automatic routing'):
+                G['remote_sources']()
 
     def test_same_lane_name_on_remote_hosts_keeps_gateway_origin(self):
         govpn = {'host': 'govpn', 'ssh_alias': 'openswarm-govpn-gateway'}
