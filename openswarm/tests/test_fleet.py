@@ -72,6 +72,44 @@ class FleetTests(unittest.TestCase):
                                str(config) if name == "LANES_FILE" else default):
             self.assertEqual(xs.lane_config(), [])
 
+    def duplicate_lane_config(self):
+        """A lane topology that repeats a lane name must stay unreadable for operators."""
+        repo = self.root / "repo"
+        repo.mkdir()
+        config = self.root / "lanes.json"
+        config.write_text(json.dumps({"lanes": [
+            {"name": "L1", "backend": "cursor", "model": "composer-2.5", "repo": str(repo)},
+            {"name": "L1", "backend": "cursor", "model": "composer-2.5", "repo": str(repo)},
+        ]}))
+        return config
+
+    def test_duplicate_lane_name_is_rejected_with_readable_error(self):
+        config = self.duplicate_lane_config()
+        with mock.patch.object(xs, "envvar", side_effect=lambda name, default=None:
+                               str(config) if name == "LANES_FILE" else default):
+            with self.assertRaises(ValueError) as raised:
+                xs.lane_config()
+        message = str(raised.exception)
+        self.assertIn("invalid lane config", message)
+        self.assertIn(str(config), message)
+        self.assertIn("lanes[1]", message)
+        self.assertIn("duplicate lane name 'L1'", message)
+
+    def test_capacity_snapshot_reports_duplicate_lane_name_reason(self):
+        config = self.duplicate_lane_config()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {"OPENSWARM_FLEET_CAPACITY_ONLY": "1"}))
+            stack.enter_context(mock.patch.object(xs, "envvar", side_effect=lambda name, default=None:
+                                                  str(config) if name == "LANES_FILE" else default))
+            stack.enter_context(mock.patch.object(xs, "execution_provider", return_value="provider"))
+            stack.enter_context(mock.patch.object(xs, "load_policy", return_value={}))
+            snapshot = xs.fleet_snapshot()
+        self.assertEqual(snapshot["lanes"], [])
+        self.assertFalse(snapshot["lane_config_valid"])
+        self.assertIn("invalid lane config", snapshot["lane_config_error"])
+        self.assertIn("duplicate lane name 'L1'", snapshot["lane_config_error"])
+        self.assertIn("lanes[1]", snapshot["lane_config_error"])
+
     def test_fleet_snapshot_preserves_invalid_lane_config_reason(self):
         config = self.root / "lanes.json"
         config.write_text('{"lanes": [')
