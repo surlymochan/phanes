@@ -403,6 +403,55 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("heads.csv", result.stdout + result.stderr)
 
+    def test_help_succeeds(self) -> None:
+        """--help 正常显示命令行帮助。"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--brief", result.stdout)
+        self.assertIn("--raw", result.stdout)
+
+    def test_missing_brief_argument_exits_nonzero_with_chinese_error(self) -> None:
+        """缺少 --brief 时退出码非 0，并提示缺少参数。"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--raw", str(SAMPLE_RAW), "--out", str(self.out_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("缺少必需参数", result.stderr)
+        self.assertIn("--brief", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_raw_argument_exits_nonzero_with_chinese_error(self) -> None:
+        """缺少 --raw 时退出码非 0，并提示缺少参数。"""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--brief", str(self.brief_path), "--out", str(self.out_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("缺少必需参数", result.stderr)
+        self.assertIn("--raw", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_raw_directory_exits_nonzero_with_chinese_error(self) -> None:
+        """原始数据目录不存在时退出码非 0，并给出中文错误。"""
+        result = run_cli(self.brief_path, self.folder / "missing-raw", self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据目录不存在", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_invalid_brief_json_exits_nonzero_with_chinese_error(self) -> None:
+        """任务书不是 JSON 时退出码非 0，并给出中文错误。"""
+        invalid_brief = self.folder / "invalid-brief.json"
+        invalid_brief.write_text("不是 JSON", encoding="utf-8")
+        result = run_cli(invalid_brief, SAMPLE_RAW, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("不是合法 JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_brief_without_rate_exits_nonzero(self) -> None:
         """任务书缺汇率时退出码非 0。"""
         folder = self.folder / "no-rate"
@@ -443,7 +492,8 @@ class BuildDiagnosisTest(unittest.TestCase):
         result = run_cli(self.brief_path, SAMPLE_RAW, out_dir)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(str(out_dir), result.stderr)
-        self.assertTrue("IsADirectoryError" in result.stderr or "Is a directory" in result.stderr)
+        self.assertIn("无法写出诊断快照", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(list(out_dir.iterdir()), [])
 
         # 情形 2：--out 指向父级为常规文件的非法路径
@@ -451,7 +501,8 @@ class BuildDiagnosisTest(unittest.TestCase):
         result2 = run_cli(self.brief_path, SAMPLE_RAW, file_as_parent)
         self.assertNotEqual(result2.returncode, 0)
         self.assertIn(str(file_as_parent), result2.stderr)
-        self.assertTrue("NotADirectoryError" in result2.stderr or "Not a directory" in result2.stderr)
+        self.assertIn("无法写出诊断快照", result2.stderr)
+        self.assertNotIn("Traceback", result2.stderr)
         self.assertFalse(file_as_parent.exists())
 
         # 全程未在默认位置留下部分快照
