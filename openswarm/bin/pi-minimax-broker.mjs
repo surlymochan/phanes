@@ -16,6 +16,12 @@ try { key = await AuthStorage.create().getApiKey('minimax-cn'); }
 catch { throw new Error('MiniMax credential unavailable'); }
 if (typeof key !== 'string' || !key || /[\r\n]/.test(key)) throw new Error('MiniMax credential unavailable');
 const maxBytes = 8 * 1024 * 1024;
+// The upload timeout bounds a slow request body only. It is cleared once the body
+// is complete, so a slow inference may take longer than this value. The default
+// is the production value; the override exists so the test suite can exercise the
+// same path without waiting for a fixed multi-second delay.
+const uploadTimeout = Number(process.env.OPENSWARM_BROKER_UPLOAD_TIMEOUT_MS);
+const uploadTimeoutMs = Number.isFinite(uploadTimeout) && uploadTimeout > 0 ? uploadTimeout : 20000;
 // Four resident Pi lanes share this broker. Track every in-flight request so
 // one completion cannot admit a fifth while peers are still streaming. The
 // fleet coordinator remains responsible for the cross-host/global limit.
@@ -31,7 +37,7 @@ const server = createServer((req, res) => {
   const length = Number(req.headers['content-length']);
   if (!Number.isSafeInteger(length) || length < 1 || length > maxBytes || req.headers['transfer-encoding']) return fail(400, 'invalid size');
   inFlight += 1;
-  req.setTimeout(20000, () => req.destroy());
+  req.setTimeout(uploadTimeoutMs, () => req.destroy());
   let settled = false;
   const release = () => {
     if (settled) return;

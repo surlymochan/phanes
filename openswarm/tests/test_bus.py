@@ -215,7 +215,7 @@ class BusTests(unittest.TestCase):
         self.assertEqual(ledger[-1]["status"], "done")
 
     def test_untrusted_claim_and_result_are_ignored(self):
-        thread, outcome, issue = self.start_planner(budget=0.035)
+        thread, outcome, issue = self.start_planner(budget=0.02)
         self.add_comment(issue["number"], "/claim intruder", login="not-allowed")
         self.add_comment(issue["number"], "/claim external-agent", login="executor")
         self.set_labels(issue["number"], ["claimed"], ["queued"])

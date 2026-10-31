@@ -72,7 +72,7 @@ for line in sys.stdin:
             partial = {"role": "assistant", "content": [{"type": "text", "text": "x" * 4000}]}
             send({"type": "message_update", "message": partial,
                   "assistantMessageEvent": {"type": "text_delta", "delta": "x", "partial": partial}})
-        wait_seconds = 1 if "LANE_TEST_WAIT_SHORT" in prompt else 20 if "LANE_TEST_WAIT" in prompt else 0.25
+        wait_seconds = 1 if "LANE_TEST_WAIT_SHORT" in prompt else 20 if "LANE_TEST_WAIT" in prompt else 0.1
         wait_until = time.time() + wait_seconds
         while time.time() < wait_until:
             ready, _, _ = select.select([sys.stdin], [], [], 0.1)

@@ -13,7 +13,9 @@ The launcher disables extension, skill and context discovery, starts with an emp
 environment, and lets the sandbox reach only the broker socket. The broker accepts
 only the configured model and the MiniMax messages endpoint.
 Each broker process accepts at most four concurrent inference requests and refuses a
-fifth with HTTP 503 until one of them finishes.
+fifth with HTTP 503 until one of them finishes. The broker drops a request body that
+stalls for 20 seconds (`OPENSWARM_BROKER_UPLOAD_TIMEOUT_MS` overrides that bound);
+the limit covers the upload only, so a slow inference may take longer.
 
 From a machine with the existing SSH identities, start the bounded bridge:
 
