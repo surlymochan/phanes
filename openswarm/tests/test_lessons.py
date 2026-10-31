@@ -419,6 +419,79 @@ class LessonsTests(unittest.TestCase):
         self.assertFalse(output_dir.exists())
         self.assertFalse((self.root / "proposals" / "seen.json").exists())
 
+    def test_propose_empty_or_no_p0_p1_findings_returns_empty_proposals_without_error(self):
+        output = self.run_propose()
+        self.assertIn("wrote 0 lesson proposal", output)
+        today = xs.policy_day(self.policy)[0]
+        today_dir = self.root / "proposals" / today
+        self.assertEqual(list(today_dir.glob("*.yaml")), [])
+        summary = (today_dir / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("Proposals: 0", summary)
+        self.assertIn("No new proposals.", summary)
+
+        output_dry = self.run_propose("--dry-run")
+        self.assertIn("Proposals: 0", output_dry)
+        self.assertIn("No new proposals.", output_dry)
+
+        repo, number = "octo/project", 15
+        path = Path(xs.LEDGER)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "id": "run-p2-only",
+            "ts": xs.NOW(),
+            "backend": "codex",
+            "card_type": "fix",
+            "files_changed": ["src/archive.py"],
+            "pr": {"repo": repo, "number": number, "url": f"https://github.com/{repo}/pull/{number}"},
+            "review_findings": {"p0": 0, "p1": 0, "p2": 2},
+        }) + "\n", encoding="utf-8")
+
+        output_no_p0p1 = self.run_propose()
+        self.assertIn("wrote 0 lesson proposal", output_no_p0p1)
+        self.assertEqual(list(today_dir.glob("*.yaml")), [])
+
+        path.write_text(json.dumps({
+            "id": "run-with-comments",
+            "ts": xs.NOW(),
+            "backend": "codex",
+            "card_type": "fix",
+            "files_changed": ["src/archive.py"],
+            "pr": {"repo": repo, "number": number, "url": f"https://github.com/{repo}/pull/{number}"},
+            "review_findings": {"p0": 0, "p1": 1, "p2": 0},
+        }) + "\n", encoding="utf-8")
+        self.make_gh({
+            f"repos/{repo}/pulls/{number}/comments?per_page=100&page=1": [
+                {"id": 801, "user": {"login": "reviewer"}, "body": "**[P1] Not from Codex**\nP1 Badge"},
+                {"id": 802, "user": {"login": "chatgpt-codex-connector[bot]"}, "body": "**[P2] Minor issue**\nP2 Badge"},
+            ]
+        })
+
+        output_no_codex_p0p1 = self.run_propose()
+        self.assertIn("wrote 0 lesson proposal", output_no_codex_p0p1)
+        self.assertEqual(list(today_dir.glob("*.yaml")), [])
+
+    def test_lesson_read_comments_returns_empty_list_for_empty_or_non_p0_p1_review(self):
+        self.assertEqual(xs.lesson_read_comments({}), [])
+        self.assertEqual(xs.lesson_read_comments({"pr": None}), [])
+        self.assertEqual(xs.lesson_read_comments({"pr": {"repo": "invalid_repo", "number": 1}}), [])
+
+        repo, number = "octo/project", 16
+        self.make_gh({f"repos/{repo}/pulls/{number}/comments?per_page=100&page=1": []})
+        entry_empty = {"id": "run-empty", "pr": {"repo": repo, "number": number}}
+        with mock.patch.dict(os.environ, self.gh):
+            self.assertEqual(xs.lesson_read_comments(entry_empty), [])
+
+        self.make_gh({
+            f"repos/{repo}/pulls/{number}/comments?per_page=100&page=1": [
+                {"id": 801, "user": {"login": "reviewer"}, "body": "**[P1] Not from Codex**\nP1 Badge"},
+                {"id": 802, "user": {"login": "chatgpt-codex-connector[bot]"}, "body": "**[P2] Minor issue**\nP2 Badge"},
+            ]
+        })
+        entry_p2 = {"id": "run-p2", "pr": {"repo": repo, "number": number}}
+        with mock.patch.dict(os.environ, self.gh):
+            self.assertEqual(xs.lesson_read_comments(entry_p2), [])
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
