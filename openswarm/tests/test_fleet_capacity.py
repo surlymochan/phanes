@@ -28,6 +28,15 @@ class FleetCapacityTests(unittest.TestCase):
                            capture_output=True, env=self.env, timeout=15)
         return json.loads(p.stdout)
 
+    def test_linux_release_requires_cgroup_v2_proof(self):
+        with mock.patch.object(xs.sys, 'platform', 'linux'):
+            self.assertFalse(xs.executor_cgroup_empty({}))
+            self.assertFalse(xs.executor_stopped(str(pathlib.Path(self.temp.name) / 'missing-run')))
+
+    def test_non_linux_does_not_require_cgroup_proof(self):
+        with mock.patch.object(xs.sys, 'platform', 'darwin'):
+            self.assertTrue(xs.executor_cgroup_empty({}))
+
     def test_atomic_minimax_limit_and_idempotent_recovery(self):
         def attempt(i):
             return self.call('gocc' if i % 2 else 'gores1', op='acquire',

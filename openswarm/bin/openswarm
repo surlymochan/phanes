@@ -3853,7 +3853,39 @@ def executor_status_fields(pid, pgid=None):
             pgid = os.getpgid(int(pid))
         except (OSError, TypeError, ValueError):
             pgid = None
-    return {"executor_pid": pid, "executor_pgid": pgid, "executor_identity": process_identity(pid)}
+    return {"executor_pid": pid, "executor_pgid": pgid, "executor_identity": process_identity(pid),
+            "executor_cgroup": executor_cgroup_path(pid)}
+
+
+def executor_cgroup_path(pid):
+    """Return a readable, non-root cgroup v2 directory for this executor, if provable."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open(f"/proc/{int(pid)}/cgroup", encoding="utf-8") as stream:
+            entries = [line.rstrip("\n").split(":", 2) for line in stream]
+        relative = next(row[2] for row in entries if len(row) == 3 and row[:2] == ["", "0"])
+        if relative == "/" or ".." in relative.split("/"):
+            return None
+        path = os.path.join("/sys/fs/cgroup", relative.lstrip("/"))
+        with open(os.path.join(path, "cgroup.procs"), encoding="ascii") as stream:
+            pids = {int(line) for line in stream if line.strip()}
+        return path if int(pid) in pids else None
+    except (OSError, StopIteration, TypeError, ValueError):
+        return None
+
+
+def executor_cgroup_empty(status):
+    if not sys.platform.startswith("linux"):
+        return True
+    path = status.get("executor_cgroup")
+    if not isinstance(path, str) or not path.startswith("/sys/fs/cgroup/"):
+        return False
+    try:
+        with open(os.path.join(path, "cgroup.procs"), encoding="ascii") as stream:
+            return not any(line.strip() for line in stream)
+    except OSError:
+        return False
 
 
 def executor_descendants_fields(pid):
@@ -3907,6 +3939,9 @@ def recorded_executor_identity_matches(status):
 
 def executor_stopped(rdir):
     """A failure may release capacity only after every recorded executor group has gone."""
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    if not executor_cgroup_empty(status):
+        return False
     for record in recorded_executor_records(rdir):
         if pid_alive(record.get("pid")) or process_group_alive(record.get("pgid")):
             return False
