@@ -62,6 +62,39 @@ class PatternsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "line 3: unsupported applies_to key 'audience'"):
             xs.parse_pattern_markdown(text)
 
+    def test_parse_pattern_rejects_id_with_whitespace(self):
+        for bad_id in ('"P-0001 "', '" P-0001"', "P- 0001", '"P-00 01"', '"P 0001"'):
+            text = (
+                "---\n"
+                f"id: {bad_id}\n"
+                "title: \"Invalid ID with whitespace\"\n"
+                "applies_to:\n"
+                "source: \"PR #556\"\n"
+                "status: active\n"
+                "---\n"
+                "Body\n"
+            )
+            with self.subTest(bad_id=bad_id):
+                with self.assertRaisesRegex(ValueError, "^id must use the P-0001 pattern ID format$"):
+                    xs.parse_pattern_markdown(text)
+
+    def test_parse_pattern_rejects_id_with_path_separators(self):
+        for bad_id in ('"P-0001/nested"', '"../P-0001"', '"/P-0001"', "P-0001/sub", '"P-0001/"',
+                       "'P-0001\\nested'", "'..\\P-0001'", "'\\P-0001'", "'P-0001\\'"):
+            text = (
+                "---\n"
+                f"id: {bad_id}\n"
+                "title: \"Invalid ID with path separator\"\n"
+                "applies_to:\n"
+                "source: \"PR #556\"\n"
+                "status: active\n"
+                "---\n"
+                "Body\n"
+            )
+            with self.subTest(bad_id=bad_id):
+                with self.assertRaisesRegex(ValueError, "^id must use the P-0001 pattern ID format$"):
+                    xs.parse_pattern_markdown(text)
+
     def test_parse_pattern_extracts_metadata_and_body(self):
         text = (
             "---\n"
