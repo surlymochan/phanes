@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Run one SSH reverse StreamLocal forward for a remote fleet guard socket.
+
+The surrounding launchd/systemd service owns restart policy.  A failed or
+closed tunnel therefore exits nonzero and leaves remote executor admission
+failed closed until its supervisor restores the connection.
+"""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--remote-socket', required=True)
+    parser.add_argument('--local-socket', required=True)
+    parser.add_argument('--ssh-config')
+    args = parser.parse_args()
+    command = ['/usr/bin/ssh', '-N', '-T', '-o', 'ExitOnForwardFailure=yes',
+               '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+               '-o', 'StreamLocalBindUnlink=yes']
+    if args.ssh_config:
+        command += ['-F', args.ssh_config]
+    command += ['-R', f'{args.remote_socket}:{args.local_socket}', args.host]
+    return subprocess.run(command).returncode
+
+
+if __name__ == '__main__':
+    sys.exit(main())

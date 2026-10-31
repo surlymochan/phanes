@@ -33,6 +33,8 @@ DISPATCH_CALLERS = {
 # OPENSWARM_EXECUTOR_HOME when its formal runtime lives elsewhere.
 RUNTIME_HOME = os.environ.get('OPENSWARM_EXECUTOR_HOME',
                               str(Path.home() / '.claude/openswarm-executor-candidate'))
+EXECUTOR_BIN = os.environ.get('OPENSWARM_EXECUTOR_BIN',
+                               str(Path.home() / 'tools/openswarm-executor-candidate/bin/openswarm-fleet'))
 # The forced SSH command identifies the authenticated caller.  Reservations
 # belong to that caller, while lane commands run on this configured target.
 EXECUTOR_HOST = os.environ.get('OPENSWARM_EXECUTOR_HOST', 'gocc')
@@ -44,17 +46,27 @@ caller_host = sys.argv[1]
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
+    if op == 'relay':
+        # Relay is available only on the existing gores1 -> gocc broker path.
+        # hub-fleet-relay itself validates the configured gocc -> remote target.
+        if caller_host != 'gores1' or EXECUTOR_HOST != 'gocc':
+            raise ValueError('authenticated caller is not allowed to relay')
+        relay = Path(__file__).with_name('hub-fleet-relay')
+        process = subprocess.run([sys.executable, str(relay)], input=json.dumps(request),
+                                 text=True, capture_output=True, timeout=150)
+        sys.stdout.write(process.stdout)
+        sys.exit(process.returncode)
     if op in ('lanes', 'assign', 'run_info', 'bundle', 'stop'):
         if caller_host not in DISPATCH_CALLERS.get(EXECUTOR_HOST, set()):
             raise ValueError('authenticated caller is not allowed for executor target')
-        command = [str(Path.home() / '.local/bin/openswarm'), 'lane']
+        command = [EXECUTOR_BIN, 'lane']
         if op == 'lanes':
             command += ['status']
         elif op in ('run_info', 'bundle', 'stop'):
             run_id = request.get('run_id')
             if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id):
                 raise ValueError('invalid run id')
-            command = [str(Path.home() / '.local/bin/openswarm')]
+            command = [EXECUTOR_BIN]
             command += ['fleet', '_run-info', run_id] if op in ('run_info', 'bundle') else ['stop', run_id]
         else:
             lane = request.get('lane')

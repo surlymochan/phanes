@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""JSON stdin/stdout adapter for a reverse-forwarded fleet coordinator socket."""
+import argparse
+import json
+import socket
+import sys
+
+MAX_RESPONSE_BYTES = 64 * 1024
+
+
+def fail(error):
+    print(json.dumps({'ok': False, 'error': f'fleet capacity coordinator unavailable: {error}'}))
+    return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--socket', required=True)
+    parser.add_argument('--timeout', type=float, default=15)
+    args = parser.parse_args()
+    if not 0 < args.timeout <= 30:
+        return fail('invalid timeout')
+    try:
+        request = json.load(sys.stdin)
+        if not isinstance(request, dict):
+            return fail('invalid request')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(args.timeout)
+            connection.connect(args.socket)
+            connection.sendall((json.dumps(request, separators=(',', ':')) + '\n').encode('utf-8'))
+            data = bytearray()
+            while b'\n' not in data and len(data) <= MAX_RESPONSE_BYTES:
+                chunk = connection.recv(min(4096, MAX_RESPONSE_BYTES + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+        if len(data) > MAX_RESPONSE_BYTES or not data.endswith(b'\n'):
+            return fail('invalid response')
+        answer = json.loads(data.decode('utf-8'))
+        if not isinstance(answer, dict):
+            return fail('invalid response')
+        print(json.dumps(answer, separators=(',', ':')))
+        return 0 if answer.get('ok') else 1
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        return fail(error)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
