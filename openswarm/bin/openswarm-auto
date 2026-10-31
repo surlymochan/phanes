@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 home = Path.home()
-cli = str(home / '.local/bin/openswarm')
+cli = os.environ.get('OPENSWARM_AUTO_CLI', str(home / '.local/bin/openswarm'))
 ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'openswarm-pi-broker']
 
 class LaneBusy(RuntimeError):
@@ -116,13 +116,19 @@ def discovered_lanes():
         pass
     return rows
 
-def available_in_preference(lanes, backends):
+def available_in_preference(lanes, backends, kind, difficulty):
     idle = [row for row in lanes if row.get('state') == 'idle']
     ordered = []
     for backend in backends:
-        ordered.extend(sorted((row for row in idle if row.get('backend') == backend),
-                              key=lambda row: (row.get('name', ''), row.get('_origin', ''),
-                                               row.get('_fleet_host', ''))))
+        def lane_key(row):
+            model = str(row.get('model') or '').lower()
+            if backend == 'copilot':
+                preferred = 'sonnet' if difficulty >= 4 else 'haiku'
+                model_rank = 0 if preferred in model else 1
+            else:
+                model_rank = 0
+            return (model_rank, row.get('name', ''), row.get('_origin', ''), row.get('_fleet_host', ''))
+        ordered.extend(sorted((row for row in idle if row.get('backend') == backend), key=lane_key))
     return ordered
 
 def main():
@@ -147,7 +153,7 @@ def main():
         raise ValueError('base must be a hexadecimal commit')
     read_only = args.type in ('review', 'research', 'audit', 'second-opinion')
     lanes = discovered_lanes()
-    ordered = available_in_preference(lanes, preference(args.type,args.difficulty))
+    ordered = available_in_preference(lanes, preference(args.type,args.difficulty), args.type, args.difficulty)
     if not ordered:
         raise RuntimeError('no available fleet lane')
     for row in ordered:
