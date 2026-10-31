@@ -229,6 +229,57 @@ class LessonsTests(unittest.TestCase):
             sys.argv = old_argv
         self.assertIn("[L-0013] protect src path", output.getvalue())
 
+    def test_lesson_proposal_yaml_formats_recurrence_with_quoted_values(self):
+        proposal = {
+            "kind": "recurrence",
+            "lesson_id": 'L-0042"quoted',
+            "root_cause_class": "input\\validation",
+            "recurrences": 3,
+            "source": "https://example.test/review?id=7&note=\"quoted\"",
+        }
+
+        self.assertEqual(
+            xs.lesson_proposal_yaml(proposal),
+            'proposal_type: recurrence\n'
+            'lesson_id: "L-0042\\\"quoted"\n'
+            'root_cause_class: "input\\\\validation"\n'
+            'recurrences: 3\n'
+            'source: "https://example.test/review?id=7&note=\\\"quoted\\\""\n',
+        )
+
+    def test_lesson_proposal_yaml_formats_new_lesson_and_applies_to_lists(self):
+        proposal = {
+            "kind": "new",
+            "id": "L-0007",
+            "date": "2026-11-01",
+            "title": 'Validate "archive" input',
+            "root_cause_class": "input_validation",
+            "recurrences": 1,
+            "rule": "Reject\\unsafe input",
+            "applies_to": {
+                "card_types": ["fix", "docs"],
+                "paths": ["src/*.py", "README.md"],
+                "backends": ["codex", "local"],
+            },
+            "source": "https://example.test/findings/7",
+        }
+
+        self.assertEqual(
+            xs.lesson_proposal_yaml(proposal),
+            'id: "L-0007"\n'
+            'date: "2026-11-01"\n'
+            'title: "Validate \\\"archive\\\" input"\n'
+            'root_cause_class: "input_validation"\n'
+            'recurrences: 1\n'
+            'rule: "Reject\\\\unsafe input"\n'
+            'guard_level: L2\n'
+            'applies_to:\n'
+            '  card_types: ["fix", "docs"]\n'
+            '  paths: ["src/*.py", "README.md"]\n'
+            '  backends: ["codex", "local"]\n'
+            'source: "https://example.test/findings/7"\n',
+        )
+
     def test_propose_writes_new_lesson_with_class_paths_profile_and_source(self):
         self.set_ledger_finding(extra_comments=[
             {"id": 702, "user": {"login": "reviewer"}, "body": "**[P0] Not from Codex**\nP0 Badge"},
