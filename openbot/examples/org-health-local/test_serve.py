@@ -3,10 +3,13 @@
 仅使用标准库且不调用 bun：在临时端口起服务后逐条检查响应状态码。
 """
 import http.client
+import io
+import socket
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -262,6 +265,99 @@ class DistRootServeTests(unittest.TestCase):
         args_with_data = serve.parse_args(['--root', str(self.dist), '--data', str(override_data)])
         self.assertEqual(args_with_data.root, self.dist.resolve())
         self.assertEqual(args_with_data.data, override_data.resolve())
+
+
+class StartupPreviewTests(unittest.TestCase):
+    """启动提示：可点击预览地址、站点根目录、诊断数据文件与路径白名单。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dist = Path(self.tmp.name) / 'dist'
+        (self.dist / 'data').mkdir(parents=True)
+        (self.dist / 'index.html').write_bytes(b'<!doctype html><title>dist index</title>')
+        (self.dist / 'data' / 'diagnosis.json').write_bytes(b'{"source": "dist-diagnosis"}')
+        self.ports = []
+
+    def run_main(self, argv):
+        """运行 main 并捕获输出；serve_forever 被替换为记录端口后关闭服务。"""
+        def fake_serve_forever(server, *args, **kwargs):
+            self.ports.append(server.server_address[1])
+            server.server_close()
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(serve.ThreadingHTTPServer, 'serve_forever', fake_serve_forever):
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = serve.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_default_startup_prints_preview_address_and_paths(self):
+        with patch.object(serve, 'build_bundle'), patch('os.chdir'):
+            code, out, err = self.run_main(['--port', '0'])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.ports), 1)
+        self.assertGreater(self.ports[0], 0)
+        self.assertIn(f'预览地址: http://127.0.0.1:{self.ports[0]}/', out)
+        self.assertIn(f'站点根目录: {serve.ROOT}', out)
+        self.assertIn(f'诊断数据文件: {serve.DATA}', out)
+        for path in serve.ALLOWED_PATHS:
+            self.assertIn(path, out)
+
+    def test_dist_startup_prints_dist_root_and_data_file(self):
+        override = Path(self.tmp.name) / 'override.json'
+        override.write_bytes(b'{"source": "override-data"}')
+        code, out, err = self.run_main(['--port', '0', '--root', str(self.dist), '--data', str(override)])
+        self.assertEqual(code, 0)
+        self.assertIn(f'预览地址: http://127.0.0.1:{self.ports[0]}/', out)
+        self.assertIn(f'站点根目录: {self.dist.resolve()}', out)
+        self.assertIn(f'诊断数据文件: {override.resolve()}', out)
+
+    def test_dist_startup_defaults_data_file_inside_dist(self):
+        code, out, err = self.run_main(['--port', '0', '--root', str(self.dist)])
+        self.assertEqual(code, 0)
+        self.assertIn(f'站点根目录: {self.dist.resolve()}', out)
+        self.assertIn(f'诊断数据文件: {(self.dist / "data" / "diagnosis.json").resolve()}', out)
+
+    def test_default_port_is_8765(self):
+        self.assertEqual(serve.parse_args([]).port, 8765)
+        self.assertEqual(serve.parse_args(['--port', '1234']).port, 1234)
+
+
+class PortInUseTests(unittest.TestCase):
+    """端口被占用时明确报错并以非 0 退出，不静默改用其他端口。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dist = Path(self.tmp.name) / 'dist'
+        (self.dist / 'data').mkdir(parents=True)
+        (self.dist / 'index.html').write_bytes(b'<!doctype html><title>dist index</title>')
+        self.dist_data = self.dist / 'data' / 'diagnosis.json'
+        self.dist_data.write_bytes(b'{"source": "dist-diagnosis"}')
+        # 先绑定的 socket 占用端口，模拟端口冲突。
+        self.occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(self.occupied.close)
+        self.occupied.bind(('127.0.0.1', 0))
+        self.occupied.listen(1)
+        self.port = self.occupied.getsockname()[1]
+
+    def test_ensure_port_available_raises_for_occupied_port(self):
+        with self.assertRaises(serve.PortInUseError) as caught:
+            serve.ensure_port_available(self.port)
+        self.assertIn(str(self.port), str(caught.exception))
+
+    def test_ensure_port_available_accepts_free_port(self):
+        serve.ensure_port_available(0)
+
+    def test_main_exits_nonzero_when_port_is_occupied(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(serve, 'create_server') as mock_create:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = serve.main(['--port', str(self.port), '--root', str(self.dist)])
+        self.assertNotEqual(code, 0)
+        self.assertIn(f'端口 {self.port} 已被占用', stderr.getvalue())
+        self.assertNotIn('预览地址', stdout.getvalue())
+        mock_create.assert_not_called()
 
 
 if __name__ == '__main__':
