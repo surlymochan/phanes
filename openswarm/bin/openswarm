@@ -3149,9 +3149,10 @@ def exec_hermes(d, st, prompt, wd, rdir, timeout, evp):
             "provider": d.get("provider") or (policy.get("hermes") or {}).get("provider") or "minimax-cn"}
     child = None
     try:
-        child = LaneChild(lane, wd, policy)
-        set_status(rdir, executor_pid=child.pid, executor_pgid=child.pgid,
-                   events=evp, attempt_started=NOW())
+        child = LaneChild(lane, wd, policy,
+                          on_started=lambda started: set_status(
+                              rdir, executor_pid=started.pid, executor_pgid=started.pgid,
+                              events=evp, attempt_started=NOW()))
         spec = {"started": NOW(), "budget_minutes": timeout / 60, "_event_file": evp}
         final, usage, error, rc, _, detail = lane_run_turn(lane, child, spec, prompt, {"path": wd}, rdir,
                                                            None, {}, [])
@@ -6628,7 +6629,7 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
 
 
 class LaneChild:
-    def __init__(self, lane, cwd, policy):
+    def __init__(self, lane, cwd, policy, on_started=None):
         self.lane, self.cwd = lane, cwd
         _tmpdir, self.env = configure_executor_environment(cwd)
         self.events = queue.Queue()
@@ -6691,6 +6692,8 @@ class LaneChild:
             self.pgid = os.getpgid(self.proc.pid)
         except OSError:
             self.pgid = None
+        if on_started:
+            on_started(self)
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
         if backend == "codex":
