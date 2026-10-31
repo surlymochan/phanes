@@ -5,3 +5,5 @@
 页面使用固定的 2026 年示例口径；实际诊断数据必须保存在仓库外，替换使用前需核对期间、指标定义和结构。使用 `python3 serve.py --data /absolute/path/to/diagnosis.json` 读取该文件，不要将真实数据复制到仓库或提交。
 
 仓库根目录运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `.openbot-build/`。
+
+示例目录内运行 `python3 -m unittest test_serve -v` 可验证本机服务边界（仅标准库，不调用 Bun）：loopback Host 白名单、路径白名单、目录与穿越请求拒绝，以及 `--data` 指定的数据文件。
