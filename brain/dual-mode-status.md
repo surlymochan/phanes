@@ -21,7 +21,7 @@ Project：https://github.com/users/surlymochan/projects/6
 | 协议与代码（`openswarm bus` / `bus-worker` / `run --backend github-issue`） | ✅ 在仓库 `openswarm/docs/BUS.md` |
 | bus 仓 init + policy.local 落地 | ❌ 未在本环境跑通（#225） |
 | claim/digest/cancel 回归 | 🔧 #227 |
-| 与 phanes Project / lane-ready 标签体系衔接说明 | 🔧 backlog rsi-08 / #238 一带 |
+| 与 phanes Project / lane-ready 标签体系衔接说明 | 🔧 backlog rsi-08 / #238 一带；标签↔看板 Status 对应建议见 [`docs/project-phanes-rsi.md`](../docs/project-phanes-rsi.md) |
 
 说明：当前 **lane-ready → autodispatch → PR** 是「用 GitHub issue 做任务队列」的受控闭环，**不是** openswarm 的 `github-issue` bus 协议。两者都要稳定：前者喂受控 SSH lane；后者给外部/他人 agent。
 
