@@ -213,6 +213,44 @@ class RoutingWeightsTests(unittest.TestCase):
         self.assertIn("codex / c1", line)
         self.assertTrue(line.endswith("pass"))
 
+    def test_routing_weighted_is_disabled_by_default_and_stays_record_only(self):
+        # 1. 验证 policy 默认配置中 routing.weighted 必须为 False（保持 record-only 门控开启）
+        default_policy = xs.load_policy()
+        self.assertIn("routing", default_policy)
+        self.assertIs(default_policy["routing"].get("weighted"), False,
+                      "policy.json routing.weighted must default to False until controlled comparisons promote it")
+
+        # 2. 验证回归选择器默认不使用 weighted routing，即使存在更优 advice 也保持只读不生效
+        card = {
+            "id": "c1",
+            "repo_path": str(self.root),
+            "task": "fix issue",
+            "meta": {"difficulty": 3, "card_type": "fix", "base_commit": "HEAD", "verify": "true",
+                     "verify_fails_on_base": False, "est_minutes": 5},
+        }
+        advice_mock = {"backend": "ocgo", "model": "m2", "reason": "better pass rate"}
+        state = copy.deepcopy(BASE_STATE)
+
+        # 默认无 --routing 参数（即 selector['routing'] is None 或 static）
+        default_selector = {"kind": "routing", "routing": None}
+        with mock.patch.object(xs, "get_state", return_value=state), \
+                mock.patch.object(xs, "routing_advice", return_value=advice_mock):
+            backend, model, advice = xs.regress_select_backend(card, default_selector, default_policy)
+            # 默认必须为 (None, None, None)，绝不走 advice
+            self.assertIsNone(backend)
+            self.assertIsNone(model)
+            self.assertIsNone(advice)
+
+        # 只有显式声明 routing == 'weighted' 时才会使用 advice
+        weighted_selector = {"kind": "routing", "routing": "weighted"}
+        with mock.patch.object(xs, "get_state", return_value=state), \
+                mock.patch.object(xs, "routing_advice", return_value=advice_mock):
+            backend, model, advice = xs.regress_select_backend(card, weighted_selector, default_policy)
+            self.assertEqual(backend, "ocgo")
+            self.assertEqual(model, "m2")
+            self.assertEqual(advice, advice_mock)
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
