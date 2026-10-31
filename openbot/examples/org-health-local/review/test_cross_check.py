@@ -541,10 +541,22 @@ class CrossCheckTest(unittest.TestCase):
             data = write_json(base / "diagnosis.json", self.diagnosis)
             dist = base / "nonexistent_dist"
             result = run_script(brief, data, dist)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL 站点数据一致", result.stdout)
         self.assertIn("站点目录缺少 `data/diagnosis.json`", result.stdout)
         self.assertIn(str(dist), result.stdout)
+
+    def test_report_parent_missing_fails(self) -> None:
+        """--out 的父目录不存在时命令行非零退出且输出包含可读错误。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            report = base / "missing_parent" / "report.md"
+            result = run_script(brief, data, out=report)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("无法写入报告", result.stderr)
+        self.assertIn(str(report), result.stderr)
 
 
 if __name__ == "__main__":
