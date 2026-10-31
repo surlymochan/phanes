@@ -1,3 +1,4 @@
 /app.bundle.js
 /dist/
 __pycache__/
+.openswarm-tmp/
