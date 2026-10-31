@@ -283,6 +283,52 @@ class BuildSiteTest(unittest.TestCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse((self.out / "bad").exists(), "坏数据时不应生成 dist")
 
+    def test_command_line_help_lists_required_options(self) -> None:
+        """帮助信息成功退出，并说明 data、out 与 bundle 参数。"""
+        script = EX_ROOT / "builder" / "build_site.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--data", result.stdout)
+        self.assertIn("--out", result.stdout)
+        self.assertIn("--bundle", result.stdout)
+
+    def test_command_line_missing_required_data_fails(self) -> None:
+        """命令行缺少 --data 时以非 0 退出并提示必需参数。"""
+        script = EX_ROOT / "builder" / "build_site.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--out", str(self.out)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--data", result.stderr)
+        self.assertIn("required", result.stderr)
+
+    def test_command_line_missing_required_out_fails(self) -> None:
+        """命令行缺少 --out 时以非 0 退出并提示必需参数。"""
+        script = EX_ROOT / "builder" / "build_site.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--data", str(EXAMPLE_PATH)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--out", result.stderr)
+        self.assertIn("required", result.stderr)
+
+    def test_command_line_creates_deep_missing_output_parent(self) -> None:
+        """输出目录的多级父目录不存在时，命令行会创建完整站点。"""
+        deep_out = self.root / "level-one" / "level-two" / "level-three" / "dist"
+        result = self.run_cli(out=deep_out, bundle=self.bundle)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((deep_out / "index.html").is_file())
+        self.assertTrue((deep_out / "data/diagnosis.json").is_file())
+        self.assertTrue((deep_out / "build-report.json").is_file())
+
     def test_command_line_data_path_is_directory_fails(self) -> None:
         """输入路径是目录时命令行返回输入错误契约退出码，报错含定位路径且不生成 dist。"""
         dir_path = self.root / "input_directory"
