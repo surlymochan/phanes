@@ -74,6 +74,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Check D1 migration numbers
+        run: python openbot/apps/auth-api/scripts/check_migration_numbers.py openbot/apps/auth-api/migrations
       - name: Run scenario unit tests
         run: |
           find openbot/examples/org-health-local -type f -name 'test_*.py' -print0 |
