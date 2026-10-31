@@ -179,6 +179,20 @@ class LessonsTests(unittest.TestCase):
         self.assertEqual(len(ids), 10)
         self.assertLessEqual(len(block), xs.LESSONS_MAX_CHARS)
 
+    def test_selection_skips_empty_list_and_damaged_yaml_without_reordering_valid_lessons(self):
+        for index in range(15):
+            self.write_lesson(f"{index * 2:02}.yaml", f"L-{index + 200:04}", "x" * 280)
+        (self.lessons / "01-empty.yaml").write_text("", encoding="utf-8")
+        (self.lessons / "03-list.yaml").write_text("- not a lesson\n", encoding="utf-8")
+        (self.lessons / "05-damaged.yaml").write_text(
+            "id: L-0299\nrule: [unterminated\n", encoding="utf-8")
+
+        block, ids = xs.select_lessons(self.policy, "fix", "codex")
+
+        self.assertEqual(ids, [f"L-{index:04}" for index in range(200, 210)])
+        self.assertEqual(len(ids), 10)
+        self.assertLessEqual(len(block), xs.LESSONS_MAX_CHARS)
+
     def test_preview_command_prints_selected_block(self):
         self.write_lesson("preview.yaml", "L-0013", "protect src path", paths="[src/*.py]", backends="[codex]")
         old_argv = sys.argv
