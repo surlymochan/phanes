@@ -251,6 +251,56 @@ class MakeBriefTest(unittest.TestCase):
             written = load_json(path)
         self.assertEqual(self.errors(written), [])
 
+    def test_cli_help_describes_options(self) -> None:
+        """--help 成功退出，并完整展示 CLI 选项及其说明。"""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "make_brief.py"), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for option in ("--out", "--check", "--goal", "--month", "--fx"):
+            with self.subTest(option=option):
+                self.assertIn(option, result.stdout)
+        for description in (
+            "任务书输出路径。",
+            "校验已有任务书路径。",
+            "覆盖“目标”",
+            "格式 YYYY-MM",
+            "汇率，人民币/美元",
+        ):
+            with self.subTest(description=description):
+                self.assertIn(description, result.stdout)
+
+    def test_cli_requires_out_or_check(self) -> None:
+        """未指定 --out 或 --check 时进程失败并提示必填参数。"""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "make_brief.py")],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("必须指定 --out 或 --check", result.stdout + result.stderr)
+
+    def test_cli_rejects_invalid_month_format(self) -> None:
+        """--month 非法格式时以状态码 2 退出并提示 YYYY-MM。"""
+        for month in ("2026-9", "2026-13"):
+            with self.subTest(month=month), temporary_directory() as folder:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "make_brief.py"),
+                        "--out",
+                        str(Path(folder) / "brief.json"),
+                        "--month",
+                        month,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("必须是 YYYY-MM", result.stdout + result.stderr)
+
     def test_check_accepts_existing_brief(self) -> None:
         """--check 校验符合 schema 的已有任务书。"""
         output = StringIO()
