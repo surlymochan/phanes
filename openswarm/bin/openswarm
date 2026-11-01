@@ -6252,6 +6252,12 @@ def bus_worker_task_is_trusted(issue, task, comments, allowed_planners):
     return bool(digests) and digests[0].get("body") == expected
 
 
+def bus_worker_claim_mutated(issue, task, comments, allowed_planners):
+    """Return true when the claimed task JSON or its planner digest changed."""
+    current_task = bus_extract_task(issue.get("body", ""))
+    return current_task != task or not bus_worker_task_is_trusted(issue, task, comments, allowed_planners)
+
+
 def bus_comments(repo, number):
     return gh_pages(f"repos/{repo}/issues/{number}/comments")
 
@@ -6763,6 +6769,7 @@ def bus_worker_run(issue, cfg, args, policy):
             command += ["--verify", effective_verify]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
+        claim_mutation = None
         next_renewal = NOW() + max(1.0, cfg["claim_lease_seconds"] / 2)
         while process.poll() is None:
             current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
@@ -6771,11 +6778,28 @@ def bus_worker_run(issue, cfg, args, policy):
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
                 process.wait(timeout=60)
                 return False
+            if bus_worker_claim_mutated(current, task, bus_comments(cfg["repo"], issue["number"]),
+                                        cfg["allowed_planners"]):
+                claim_mutation = "claim_task_mutated"
+                subprocess.run([sys.executable, os.path.realpath(__file__), "stop", task["run_id"]],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                process.wait(timeout=60)
+                break
             if NOW() >= next_renewal:
                 bus_comment(cfg["repo"], issue["number"], f"/claim {args.name}")
                 next_renewal = NOW() + max(1.0, cfg["claim_lease_seconds"] / 2)
             time.sleep(min(cfg["poll_seconds"], 2))
         process.communicate()
+        if claim_mutation:
+            report = {"status": "failed", "run_id": task["run_id"],
+                      "summary": "aborted: claimed task JSON or digest changed during execution",
+                      "files_changed": [], "tests": "not run: claim task mutated", "followups": [],
+                      "branch": None, "commit": None, "pr_url": None, "error_class": claim_mutation}
+            bus_comment(cfg["repo"], issue["number"], "```openswarm-result\n" +
+                        json.dumps(report, ensure_ascii=False, indent=2) + "\n```")
+            bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels["failed"]],
+                                 remove=[labels["queued"], labels["claimed"]])
+            return True
         if labels["cancelled"] in issue_label_names(gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")):
             return False
         local = jload(os.path.join(rdir, "result.json"), {}) or {}
