@@ -9655,7 +9655,109 @@ def fleet_snapshot():
             "lane_config_error": config_error}
 
 
+HARVEST_STDERR_TAIL_LINES = 5
+
+
+def harvest_stderr_tail(data):
+    """Keep the last lines of a remote error stream so a failed host stays diagnosable."""
+    text = (data or b"").decode(errors="replace").strip()
+    if not text:
+        return ""
+    return "\n".join(text.splitlines()[-HARVEST_STDERR_TAIL_LINES:])
+
+
+def fleet_harvest_failure(host, lane, run_id, exit_code, error, stderr=""):
+    """One host-level failure record; it never hides the exit code or the remote error."""
+    return {"host": host["name"], "lane": lane, "run_id": run_id, "status": "failed",
+            "exit_code": exit_code, "stderr": stderr, "error": error}
+
+
+def fleet_harvest_run(host, lane, run_id, into):
+    """Fetch one assigned run's result bundle; a remote failure is recorded, never raised."""
+    try:
+        safe_id(run_id)
+    except ValueError:
+        return fleet_harvest_failure(host, lane, run_id, 0, "invalid remote run id")
+    rc, out, err = host_run(host, host_openswarm(host, ["fleet", "_run-info", run_id]), timeout=60)
+    if rc:
+        return fleet_harvest_failure(host, lane, run_id, rc, f"remote run info failed (rc={rc})",
+                                     harvest_stderr_tail(err))
+    try:
+        document = json.loads(out)
+    except (ValueError, UnicodeError):
+        return fleet_harvest_failure(host, lane, run_id, 0, "remote run info is not valid JSON")
+    result = document.get("result") if isinstance(document, dict) else None
+    if not isinstance(result, dict) or not result:
+        return fleet_harvest_failure(host, lane, run_id, 0, "result bundle has no result.json")
+    # Every bundle is written under its own host and run, so a failed host can
+    # never overwrite the bundle another host already delivered.
+    path = os.path.join(into, host["name"], run_id + ".json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump({"id": run_id, "host": host["name"], "lane": lane, "result": result},
+                  stream, ensure_ascii=False, indent=2)
+    return {"host": host["name"], "lane": lane, "run_id": run_id, "status": "completed",
+            "bundle": path, "result": result}
+
+
+def fleet_harvest_host(host, into):
+    """Collect every assigned lane result of one host; the other hosts keep their work."""
+    rc, out, err = host_run(host, host_openswarm(host, ["fleet", "_snapshot"]), timeout=30)
+    if rc:
+        return [fleet_harvest_failure(host, None, None, rc, f"fleet snapshot failed (rc={rc})",
+                                      harvest_stderr_tail(err))]
+    try:
+        snapshot = json.loads(out)
+    except (ValueError, UnicodeError):
+        return [fleet_harvest_failure(host, None, None, 0, "fleet snapshot is not valid JSON")]
+    if not isinstance(snapshot, dict):
+        return [fleet_harvest_failure(host, None, None, 0, "fleet snapshot is not an object")]
+    entries = []
+    for lane in snapshot.get("lanes") or []:
+        if not isinstance(lane, dict):
+            continue
+        run_id = lane.get("current_run")
+        if not run_id:
+            continue
+        entries.append(fleet_harvest_run(host, lane.get("name"), run_id, into))
+    return entries
+
+
+def cmd_fleet_harvest(args):
+    """Harvest the assigned lane results of every fleet host into one manifest."""
+    hosts = fleet_config()
+    requested = [name.strip() for name in (args.hosts or "").split(",") if name.strip()]
+    unknown = [name for name in requested if name not in hosts]
+    if unknown:
+        raise ValueError("unknown fleet host: " + ", ".join(unknown))
+    selected = [hosts[name] for name in dict.fromkeys(requested)] if requested else list(hosts.values())
+    if not selected:
+        raise ValueError("fleet has no hosts")
+    into = os.path.abspath(os.path.expanduser(args.into or os.path.join(DATA, "harvest")))
+    completed, failed = [], []
+    for host in selected:
+        for entry in fleet_harvest_host(host, into):
+            (completed if entry["status"] == "completed" else failed).append(entry)
+    status = "failed" if failed and not completed else ("partial" if failed else "completed")
+    report = {"ok": not failed, "status": status, "into": into,
+              "completed": completed, "failed": failed}
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        for entry in completed:
+            print(f"{entry['host']}  {entry['lane']}  {entry['run_id']}  completed  {entry['bundle']}")
+        for entry in failed:
+            print(f"{entry['host']}  {entry['lane'] or '-'}  {entry['run_id'] or '-'}  failed  "
+                  f"rc={entry['exit_code']}  {entry['error']}", file=sys.stderr)
+        print(f"harvested {len(completed)} result bundle(s) into {into} (status={status})")
+    if failed:
+        raise SystemExit(1)
+
+
 def cmd_fleet(args):
+    if args.fleet_cmd == "harvest":
+        cmd_fleet_harvest(args)
+        return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
         return
@@ -11947,6 +12049,10 @@ def main():
     fp.add_argument("--timeout", type=float, default=300)
     fp.add_argument("host")
     fp.add_argument("args", nargs=argparse.REMAINDER)
+    fp = fleet_sub.add_parser("harvest", help="collect assigned lane results from fleet hosts")
+    fp.add_argument("--hosts", help="comma-separated fleet host names")
+    fp.add_argument("--into", help="destination directory for harvested result bundles")
+    fp.add_argument("--json", action="store_true", help="print the harvest manifest as JSON")
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")

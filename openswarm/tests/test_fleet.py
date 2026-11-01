@@ -10,7 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-import _load
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _load  # noqa: E402
 
 xs = _load.load()
 
@@ -208,6 +209,101 @@ class FleetTests(unittest.TestCase):
                               env={**xs.os.environ, "OPENSWARM_HOME": str(self.root)}, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 7)
         self.assertEqual(json.loads(proc.stdout), ["run", "--prompt", "$(false); literal"])
+
+    def fake_fleet_transport(self):
+        """A fake ssh that answers the fleet snapshot and run-info calls of the harvest."""
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        ssh = fake_bin / "ssh"
+        ssh.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "alias = sys.argv[1]\n"
+            "command = ' '.join(sys.argv[3:])\n"
+            "root = pathlib.Path(os.environ['OPENSWARM_TEST_FLEET_ROOT'])\n"
+            "spec = json.loads((root / (alias + '.json')).read_text())\n"
+            "if '_snapshot' in command:\n"
+            "    print(json.dumps(spec['snapshot']))\n"
+            "elif '_run-info' in command:\n"
+            "    if spec.get('exit_code'):\n"
+            "        sys.stderr.write(spec.get('stderr', ''))\n"
+            "        raise SystemExit(spec['exit_code'])\n"
+            "    print(json.dumps(spec['document']))\n"
+            "else:\n"
+            "    raise SystemExit(9)\n"
+        )
+        ssh.chmod(0o755)
+        return fake_bin
+
+    def harvest(self, fake_bin, destination):
+        """Run the fleet harvest against the fake fleet and return its exit code and manifest."""
+        original_argv = sys.argv
+        try:
+            sys.argv = ["openswarm", "fleet", "harvest", "--json", "--into", str(destination)]
+            with mock.patch.dict(xs.os.environ, {"PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
+                                                  "OPENSWARM_TEST_FLEET_ROOT": str(self.root)}), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    xs.main()
+                    code = 0
+                except SystemExit as exit_code:
+                    code = exit_code.code
+            return code, json.loads(output.getvalue())
+        finally:
+            sys.argv = original_argv
+
+    def test_harvest_keeps_completed_bundle_when_a_host_fails(self):
+        fake_bin = self.fake_fleet_transport()
+        (self.root / "good.json").write_text(json.dumps({
+            "snapshot": {"lanes": [{"name": "L1", "state": "idle", "current_run": "run-1"}], "active_runs": []},
+            "document": {"id": "run-1", "state": "finished",
+                         "result": {"id": "run-1", "status": "done", "branch": "openswarm/run-1",
+                                    "commit": "a" * 40, "summary": "harvested good result"}}}))
+        (self.root / "bad.json").write_text(json.dumps({
+            "snapshot": {"lanes": [{"name": "L2", "state": "idle", "current_run": "run-2"}], "active_runs": []},
+            "exit_code": 3, "stderr": "lane L2: result bundle unavailable\n"}))
+        self.config([{"name": "good", "kind": "ssh", "ssh": "good"},
+                     {"name": "bad", "kind": "ssh", "ssh": "bad"}])
+        destination = self.root / "harvest"
+        code, report = self.harvest(fake_bin, destination)
+        self.assertEqual(code, 1)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual([entry["host"] for entry in report["completed"]], ["good"])
+        self.assertEqual([entry["host"] for entry in report["failed"]], ["bad"])
+        completed = report["completed"][0]
+        self.assertEqual(completed["run_id"], "run-1")
+        self.assertEqual(completed["lane"], "L1")
+        bundle = pathlib.Path(completed["bundle"])
+        self.assertTrue(bundle.is_file())
+        self.assertGreater(bundle.stat().st_size, 0)
+        self.assertEqual(json.loads(bundle.read_text())["result"]["summary"], "harvested good result")
+        failed = report["failed"][0]
+        self.assertEqual(failed["run_id"], "run-2")
+        self.assertEqual(failed["lane"], "L2")
+        self.assertEqual(failed["exit_code"], 3)
+        self.assertIn("result bundle unavailable", failed["stderr"])
+        # A failed host writes no bundle, so it cannot overwrite the completed one.
+        self.assertFalse((destination / "bad" / "run-2.json").exists())
+        self.assertEqual(sorted(path.name for path in (destination / "good").iterdir()), ["run-1.json"])
+
+    def test_harvest_marks_a_bundle_without_result_json_as_failed(self):
+        fake_bin = self.fake_fleet_transport()
+        (self.root / "stale.json").write_text(json.dumps({
+            "snapshot": {"lanes": [{"name": "L3", "state": "idle", "current_run": "run-3"}], "active_runs": []},
+            "document": {"id": "run-3", "state": "finished"}}))
+        self.config([{"name": "stale", "kind": "ssh", "ssh": "stale"}])
+        destination = self.root / "harvest"
+        code, report = self.harvest(fake_bin, destination)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["completed"], [])
+        failed = report["failed"][0]
+        self.assertEqual(failed["host"], "stale")
+        self.assertEqual(failed["run_id"], "run-3")
+        self.assertEqual(failed["exit_code"], 0)
+        self.assertIn("result.json", failed["error"])
+        self.assertFalse(destination.exists())
 
     def test_invalid_config_rejected(self):
         self.config([{"name": "x", "kind": "ssh", "ssh": "-unsafe"}])
