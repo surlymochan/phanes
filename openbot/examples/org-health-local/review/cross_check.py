@@ -399,7 +399,7 @@ def check_dist(data_path: Path, dist: Path) -> Result:
     name = "站点数据一致"
     site = Path(dist) / "data" / "diagnosis.json"
     if not site.is_file():
-        return Result(False, name, f"站点目录缺少 `data/diagnosis.json`：{site}")
+        return Result(False, name, f"站点目录缺少 `data/diagnosis.json`（缺失的站点产物：{site}）")
     try:
         site_bytes = site.read_bytes()
         data_bytes = Path(data_path).read_bytes()
