@@ -167,6 +167,14 @@ and `python3 tools/check-ad-heartbeat-stall.py --fixture-fresh` (expected 0).
 
 Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft alerts (disk_soft/mem_soft) stay in `health.alert` without pausing.
 
+During dual-mode cooldown, the production pause set is restricted to
+`PAUSE-HOST-ib1`, `PAUSE-HOST-ib2`, `PAUSE-M1`, and `PAUSE-M2`. The offline
+check uses a fake pause directory and never changes the real state:
+
+```bash
+python3 tools/check-pause-set-cooldown.py
+```
+
 ## ctl-loop child reaping and restart (Refs #951)
 
 `~/phanes-ctl/bin/ctl-loop` is the supervisor for the resident `ad` (`lane-autodispatch`),
