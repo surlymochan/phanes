@@ -36,7 +36,16 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             pass
 
     def send_error(self, code, message=None, explain=None):
-        """所有未实现方法都返回稳定 405，并声明允许的方法。"""
+        """返回稳定的错误正文，避免未知路径出现空响应。"""
+        if code == 404 and message is None:
+            body = b'Not Found\n'
+            self.send_response(404, 'Not Found')
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if getattr(self, 'command', 'GET') != 'HEAD':
+                self.wfile.write(body)
+            return
         if code == 501:
             body = b'Method Not Allowed\n'
             self.send_response(405, 'Method Not Allowed')
