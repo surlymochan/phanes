@@ -18,6 +18,7 @@ Subcommands:
   lessons          preview, propose, and escalate executor lessons
   patterns         propose reusable patterns and check active patterns for retirement
   lane             manage long-lived Codex app-server / Cursor ACP / Pi RPC executor lanes
+  doctor           report lane sandbox and proxy prerequisites (read-only, installs nothing)
   fleet            inspect hosts, forward openswarm commands, render lanes.json from one fleet inventory
   batch            queue task cards across fleet hosts and collect their branches
   verify-remote    verify a fleet run on another host in a temporary worktree
@@ -7382,7 +7383,7 @@ def lane_validate_socket_path(name):
     return path
 
 
-def lane_config():
+def lane_config(check_env_mode=True):
     path = envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
     try:
         with open(path, encoding="utf-8") as stream:
@@ -7446,7 +7447,7 @@ def lane_config():
             raise ValueError(f"invalid lane config {where}: binary override is not executable")
         if lane.get("memory_max") is not None and parse_memory_bytes(lane["memory_max"]) is None:
             raise ValueError(f"invalid lane config {where}: memory_max must be a size such as 900M")
-        error = lane_env_config_error(lane)
+        error = lane_env_config_error(lane, check_mode=check_env_mode)
         if error:
             raise ValueError(f"invalid lane config {where}: {error}")
         out.append(dict(lane))
@@ -7464,7 +7465,7 @@ def lane_env_files(lane):
     return [value] if isinstance(value, str) else list(value)
 
 
-def lane_env_config_error(lane):
+def lane_env_config_error(lane, check_mode=True):
     """Validate the per-lane environment: "env_file" (absolute path or list) and "env" (string map)."""
     if lane.get("backend") == "pi" and (lane.get("env_file") is not None or lane.get("env") is not None):
         return "env/env_file are not supported for pi lanes (pi-isolated starts with a cleared environment)"
@@ -7474,7 +7475,7 @@ def lane_env_config_error(lane):
     for path in lane_env_files(lane):
         if not isinstance(path, str) or not os.path.isabs(path) or "\n" in path:
             return "env_file must be an absolute path or a list of absolute paths"
-        error = env_file_mode_error(path)
+        error = env_file_mode_error(path) if check_mode else None
         if error:
             return error
     env = lane.get("env")
@@ -7558,8 +7559,8 @@ def lane_apply_environment(lane):
     return sorted(extra)
 
 
-def lanes_by_name(names=None):
-    cfg = lane_config()
+def lanes_by_name(names=None, check_env_mode=True):
+    cfg = lane_config(check_env_mode=check_env_mode)
     if not names:
         return cfg
     by_name = {x["name"]: x for x in cfg}
@@ -13393,6 +13394,244 @@ def cmd_regress_compare(args):
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
+# ---------------------------------------------------------------- doctor
+
+# `openswarm doctor` is read-only: it reports what a lane needs before it runs and never installs
+# or changes anything. Every finding is ok / warn / fail, and any fail makes the command exit non-zero.
+DOCTOR_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+DOCTOR_PROXY_TIMEOUT = 3.0
+DOCTOR_DISK_WARN_BYTES = 1 << 30
+DOCTOR_DISK_FAIL_BYTES = 256 << 20
+# Codex's Linux sandbox needs these on PATH; the fix hints are printed, never run.
+CODEX_SANDBOX_TOOLS = (
+    ("bwrap", "bubblewrap (bwrap)", "apt-get install bubblewrap"),
+    ("slirp4netns", "slirp4netns", "apt-get install slirp4netns"),
+    ("iptables", "iptables", "apt-get install iptables"),
+)
+CODEX_SANDBOX_FALLBACKS = {
+    "bwrap": ("/usr/bin/bwrap", "/usr/local/bin/bwrap"),
+    "slirp4netns": ("/usr/bin/slirp4netns", "/usr/local/bin/slirp4netns"),
+    "iptables": ("/sbin/iptables", "/usr/sbin/iptables"),
+}
+
+
+def doctor_check(name, status, detail, fix=None):
+    """One doctor finding. `fix` is a hint for the operator, never an action openswarm performs."""
+    return {"name": name, "status": status, "detail": detail, "fix": fix}
+
+
+def doctor_lanes_file():
+    return envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
+
+
+def doctor_backend_binary(lane, policy):
+    """The executor binary a lane would start, resolved exactly like the lane child resolves it.
+
+    The order is the runtime order: the backend environment override wins over the lane's own
+    "binary" field, so the doctor never checks a binary the lane would not start.
+    """
+    backend = lane.get("backend")
+    if backend == "codex":
+        return codex_resolved_binary(policy, lane)
+    if backend == "cursor":
+        return envvar("CURSOR_BIN") or lane.get("binary") or cursor_bin()
+    if backend == "copilot":
+        return envvar("COPILOT_BIN") or lane.get("binary") or copilot_bin()
+    if backend == "pi":
+        return envvar("PI_RPC_BIN") or lane.get("binary") or pi_bin()
+    if backend == "hermes":
+        if lane.get("binary"):
+            return lane["binary"]
+        return hermes_bin(policy)
+    if backend == "agy":
+        return envvar("AGY_BIN") or lane.get("binary") or agy_bin()
+    return None
+
+
+def doctor_binary_check(lane, policy):
+    backend = lane.get("backend")
+    binary = doctor_backend_binary(lane, policy)
+    if binary and os.path.isfile(binary) and os.access(binary, os.X_OK):
+        return doctor_check("binary", "ok", f"{backend} binary: {binary}")
+    if binary:
+        detail, fix = f"{backend} binary is not executable: {binary}", f"chmod +x {binary}"
+    else:
+        detail, fix = f"{backend} binary not found", f"install {backend} or set an absolute lane binary"
+    return doctor_check("binary", "fail", detail, fix)
+
+
+def doctor_sandbox_checks():
+    """Codex's Linux sandbox needs bwrap, slirp4netns, and iptables on PATH."""
+    checks = []
+    for tool, label, install in CODEX_SANDBOX_TOOLS:
+        path = shutil.which(tool)
+        if path:
+            checks.append(doctor_check(f"sandbox.{tool}", "ok", f"{label}: {path}"))
+            continue
+        elsewhere = [p for p in CODEX_SANDBOX_FALLBACKS.get(tool, ()) if os.path.exists(p)]
+        if elsewhere:
+            detail = f"{label} is not on PATH (found at {elsewhere[0]})"
+            fix = f"ln -s {elsewhere[0]} /usr/local/bin/{tool}"
+        else:
+            detail, fix = f"{label} not found on PATH", install
+        checks.append(doctor_check(f"sandbox.{tool}", "fail", detail, fix))
+    return checks
+
+
+def doctor_env_file_paths(lane):
+    """The lane env_file paths, as the runtime reads them: one entry per configured file."""
+    return [os.path.expanduser(path) for path in lane_env_files(lane) if isinstance(path, str)]
+
+
+def doctor_env_file_check(lane):
+    """Every lane env_file must exist and stay private, with the same rule the runtime applies."""
+    paths = doctor_env_file_paths(lane)
+    if not paths:
+        return None
+    missing, loose = [], []
+    for path in paths:
+        if not os.path.exists(path):
+            missing.append(path)
+            continue
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        if mode & 0o077:
+            loose.append(f"{path} (mode {mode:04o})")
+    if missing:
+        return doctor_check("env_file", "fail", "env_file is missing: " + ", ".join(missing),
+                            "create the file with the lane environment, or drop the env_file field")
+    if loose:
+        return doctor_check("env_file", "fail",
+                            "env_file is readable by group or other: " + ", ".join(loose),
+                            "chmod 600 " + " ".join(paths))
+    return doctor_check("env_file", "ok", "env_file is private: " + ", ".join(paths))
+
+
+def doctor_lane_environment(lane):
+    """Use the current lane supervisor environment; env_file is applied by the supervisor."""
+    env = dict(os.environ)
+    extra, problems = lane_environment(lane)
+    if not problems:
+        env.update(extra)
+    return env
+
+
+def doctor_proxy_check(env):
+    """The lane proxy must accept a TCP connection before a run can reach the model."""
+    name, value = "", ""
+    for candidate in DOCTOR_PROXY_VARS:
+        found = (env.get(candidate) or "").strip()
+        if found:
+            name, value = candidate, found
+            break
+    if not value:
+        return doctor_check("proxy", "warn", "no HTTPS_PROXY in the lane environment",
+                            "set HTTPS_PROXY in the lane env_file when the gateway needs a proxy")
+    try:
+        parsed = urllib.parse.urlsplit(value if "//" in value else "//" + value)
+        host, port = parsed.hostname, parsed.port
+    except ValueError as error:
+        return doctor_check("proxy", "fail", f"{name} is not a usable proxy URL: {value} ({error})",
+                            "use a URL such as http://host:port; the check opens a TCP connection to host:port")
+    if not host:
+        return doctor_check("proxy", "fail", f"{name} is not a usable proxy URL: {value}",
+                            "use a URL such as http://host:port; the check opens a TCP connection to host:port")
+    port = port or 80
+    try:
+        with socket.create_connection((host, port), timeout=DOCTOR_PROXY_TIMEOUT):
+            return doctor_check("proxy", "ok", f"{name} {host}:{port} accepted a TCP connection")
+    except OSError as error:
+        return doctor_check("proxy", "fail", f"{name} {host}:{port} is not reachable: {error}",
+                            "start the proxy or correct the lane HTTPS_PROXY value")
+
+
+def doctor_disk_check(lane):
+    """Free space on the disk that holds the lane worktree."""
+    worktree = os.path.join(DATA, "lanes", lane["name"], "wt")
+    probe = worktree
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError as error:
+        return doctor_check("disk", "fail", f"cannot read free space for {worktree}: {error}",
+                            "check the lane data directory")
+    detail = f"{free / (1 << 30):.1f} GiB free on the worktree disk ({probe})"
+    if free < DOCTOR_DISK_FAIL_BYTES:
+        return doctor_check("disk", "fail", detail, "free space on the worktree disk before the next run")
+    if free < DOCTOR_DISK_WARN_BYTES:
+        return doctor_check("disk", "warn", detail, "free space on the worktree disk before the next run")
+    return doctor_check("disk", "ok", detail)
+
+
+def doctor_lane_report(lane, policy, system=None):
+    """Every prerequisite of one lane, in report order."""
+    system = sys.platform if system is None else system
+    checks = [doctor_binary_check(lane, policy)]
+    if lane.get("backend") == "codex" and system.startswith("linux"):
+        checks.extend(doctor_sandbox_checks())
+    env_file_check = doctor_env_file_check(lane)
+    if env_file_check:
+        checks.append(env_file_check)
+    checks.append(doctor_proxy_check(doctor_lane_environment(lane)))
+    checks.append(doctor_disk_check(lane))
+    status = "fail" if any(c["status"] == "fail" for c in checks) else (
+        "warn" if any(c["status"] == "warn" for c in checks) else "ok")
+    return {"name": lane["name"], "backend": lane.get("backend"), "status": status, "checks": checks}
+
+
+def doctor_report(lane_name=None, policy=None, system=None):
+    """The doctor report for one lane or for every configured lane."""
+    policy = load_policy() if policy is None else policy
+    lanes_file = doctor_lanes_file()
+    notes = []
+    if not os.path.exists(lanes_file):
+        if lane_name:
+            raise ValueError(f"no lane config at {lanes_file}")
+        notes.append(f"no lane config at {lanes_file}")
+        lanes = []
+    else:
+        # doctor reports a loose env_file mode as its own check instead of refusing the whole lane config.
+        lanes = lanes_by_name([lane_name] if lane_name else None, check_env_mode=False)
+    reports = [doctor_lane_report(lane, policy, system=system) for lane in lanes]
+    counts = {"ok": 0, "warn": 0, "fail": 0}
+    for report in reports:
+        for check in report["checks"]:
+            counts[check["status"]] = counts.get(check["status"], 0) + 1
+    if not reports and not notes:
+        notes.append("no lanes are configured")
+    return {"ok": counts["fail"] == 0, "lanes": reports, "notes": notes,
+            "summary": {**counts, "lanes": len(reports)}}
+
+
+def doctor_text(report):
+    lines = []
+    for note in report["notes"]:
+        lines.append(f"note  {note}")
+    for lane in report["lanes"]:
+        lines.append(f"lane  {lane['name']}  backend={lane['backend']}  status={lane['status']}")
+        for check in lane["checks"]:
+            lines.append(f"  {check['status']:<4} {check['name']:<20} {check['detail']}")
+            if check["fix"]:
+                lines.append(f"       fix: {check['fix']}")
+    counts = report["summary"]
+    lines.append(f"summary ok={counts['ok']} warn={counts['warn']} fail={counts['fail']} "
+                 f"lanes={counts['lanes']}")
+    return "\n".join(lines)
+
+
+def cmd_doctor(args, policy):
+    report = doctor_report(args.lane, policy)
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(doctor_text(report))
+    if not report["ok"]:
+        sys.exit(1)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="openswarm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -13711,6 +13950,10 @@ def main():
     lp = lane_sub.add_parser("serve", help=argparse.SUPPRESS)
     lp.add_argument("name")
 
+    sp = sub.add_parser("doctor", help="report lane sandbox and proxy prerequisites (read-only)")
+    sp.add_argument("--lane", help="check one configured lane; default checks every configured lane")
+    sp.add_argument("--json", action="store_true", help="print the report as JSON")
+
     sp = sub.add_parser("ingest-claude")
     sp.add_argument("--five-hour", type=float)
     sp.add_argument("--seven-day", type=float)
@@ -13904,6 +14147,12 @@ def main():
             if a.lane_cmd == "serve":
                 traceback.print_exc()
             print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+    elif a.cmd == "doctor":
+        try:
+            cmd_doctor(a, policy)
+        except ValueError as error:
+            print(f"openswarm: {error}", file=sys.stderr)
             sys.exit(2)
     elif a.cmd == "ingest-claude":
         ingest_claude(a)

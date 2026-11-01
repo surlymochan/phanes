@@ -236,6 +236,7 @@ the `验收：` line and the section headings do not count. A pull request's eff
 | `openswarm fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `openswarm fleet exec worker -- lane status` |
 | `openswarm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `openswarm fleet ledger pull --hosts worker,sandbox` |
 | `openswarm fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `openswarm fleet render-lanes --inventory fleet-inventory.json --check` |
+| `openswarm doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk) without installing anything. | `openswarm doctor --lane C1 --json` |
 | `openswarm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `openswarm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
 
 ### Learn
@@ -482,6 +483,19 @@ openswarm lane abort C1                  # openswarm stop <run-id> also aborts a
 openswarm lane down C1 K1 M1
 openswarm lane launchd-plist C1           # prints a KeepAlive LaunchAgent plist; does not install it
 openswarm lane systemd-unit K1             # prints a system systemd unit; does not install it
+```
+
+`openswarm doctor` is the read-only preflight of a lane. It reports whether the lane's executor binary exists and
+is executable, whether Codex's Linux sandbox finds `bwrap`, `slirp4netns`, and `iptables` on `PATH`, whether a lane
+`env_file` exists with mode `600` or stricter, whether the lane environment's `HTTPS_PROXY` accepts a TCP
+connection, and how much space is left on the disk that holds the lane worktree. Every item is `ok`, `warn`, or
+`fail` with a fix hint, and any `fail` exits non-zero. The doctor only reads: it never installs a package, creates a
+symlink, or writes a file, so the fix hints stay the operator's decision.
+
+```bash
+openswarm doctor                         # every configured lane
+openswarm doctor --lane C1               # one lane, text report with fix hints
+openswarm doctor --json                  # machine-readable report
 ```
 
 Lane runs use the normal `runs/<id>` files, `openswarm/<id>` commit branch, host verification, ledger, `watch`,
