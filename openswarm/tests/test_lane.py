@@ -928,6 +928,38 @@ class LaneTests(unittest.TestCase):
         self.assertFalse(any(line.startswith("EnvironmentFile=") for line in lines))
         self.assertNotIn("http://file", "\n".join(lines))
 
+    def test_draining_lane_refuses_new_work_without_a_restart(self):
+        self.set_config("cursor")
+        self.start_lane()
+        self.edit_lane(drain=True)
+        refused = self.cli("lane", "assign", self.lane_name, "--prompt", "new work", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("draining", refused.stdout + refused.stderr)
+        row = next(r for r in json.loads(self.cli("lane", "status").stdout) if r["name"] == self.lane_name)
+        self.assertTrue(row["drain"])
+        self.assertEqual(row["state"], "idle")
+        self.edit_lane(drain=False)
+        run_id = self.assign("work after undrain")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+
+    def test_drain_must_be_a_boolean(self):
+        self.set_config("cursor")
+        self.edit_lane(drain="yes")
+        result = self.cli("lane", "status", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("drain must be true or false", result.stderr)
+
+    def test_unreadable_lanes_json_refuses_new_work_with_the_reason(self):
+        with mock.patch.object(xs, "lane_config", side_effect=ValueError("invalid lane config 'x': broken")):
+            refusal = xs.lane_drain_check("L1")
+        self.assertNotIn("draining", refusal)
+        self.assertIn("cannot read its lanes.json drain setting", refusal["error"])
+        self.assertIn("broken", refusal["error"])
+        with mock.patch.object(xs, "lane_config", return_value=[{"name": "L1", "drain": True}]):
+            self.assertTrue(xs.lane_drain_check("L1")["draining"])
+        with mock.patch.object(xs, "lane_config", return_value=[{"name": "L1"}]):
+            self.assertIsNone(xs.lane_drain_check("L1"))
+
     def test_systemd_unit_without_lane_env_is_unchanged(self):
         unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
         self.assertNotIn("EnvironmentFile=", unit)

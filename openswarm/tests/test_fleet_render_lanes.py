@@ -158,6 +158,31 @@ class FleetRenderLanesTests(unittest.TestCase):
         self.assertEqual(report["hosts"]["gorelay"],
                          {"ok": True, "extra": [], "missing": [], "changed": []})
 
+    def test_render_carries_an_inventory_drain_and_rejects_a_non_boolean_one(self):
+        inventory = self.inventory({"gorelay": {"kind": "local", "lanes": [self.lane("A1", drain=True)]}})
+        report, code = self.render(inventory)
+        self.assertEqual(code, 0)
+        self.assertIs(report["hosts"]["gorelay"]["lanes"][0]["drain"], True)
+        bad = self.inventory({"gorelay": {"kind": "local", "lanes": [self.lane("A1", drain="yes")]}}, "bad.json")
+        with self.assertRaisesRegex(ValueError, "drain must be true or false"):
+            self.render(bad)
+
+    def test_check_lists_a_host_side_drain_without_calling_it_drift(self):
+        lanes_file = self.root / "lanes.json"
+        lanes_file.write_text(json.dumps({"lanes": [self.lane("A1", drain=True), self.lane("A2")]}))
+        inventory = self.inventory({"gorelay": {"kind": "local", "lanes_file": str(lanes_file),
+                                                 "lanes": [self.lane("A1"), self.lane("A2")]}})
+        report, code = self.render(inventory, check=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["hosts"]["gorelay"],
+                         {"ok": True, "extra": [], "missing": [], "changed": [], "draining": ["A1"]})
+        pinned = self.inventory({"gorelay": {"kind": "local", "lanes_file": str(lanes_file),
+                                              "lanes": [self.lane("A1", drain=False), self.lane("A2")]}},
+                                "pinned.json")
+        report, code = self.render(pinned, check=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["hosts"]["gorelay"]["changed"], [{"lane": "A1", "fields": ["drain"]}])
+
     def test_check_reports_a_host_without_a_lanes_file(self):
         inventory = self.inventory({"gorelay": {
             "kind": "local", "lanes_file": str(self.root / "absent.json"), "lanes": [self.lane("A1")]}})

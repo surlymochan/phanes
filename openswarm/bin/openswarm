@@ -7451,6 +7451,8 @@ def lane_config(check_env_mode=True):
         error = lane_env_config_error(lane, check_mode=check_env_mode)
         if error:
             raise ValueError(f"invalid lane config {where}: {error}")
+        if lane.get("drain") is not None and not isinstance(lane["drain"], bool):
+            raise ValueError(f"invalid lane config {where}: drain must be true or false")
         out.append(dict(lane))
     return out
 
@@ -8211,6 +8213,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                     answer = {"ok": True, "id": existing, "reused": True, "state": lane_run_state(existing)}
                 elif state.get("state") != "idle" or current.get("run_id"):
                     answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
+                elif (drain_error := lane_drain_check(lane["name"])):
+                    answer = {"ok": False, **drain_error}
                 else:
                     rid = req.get("run_id")
                     if not rid or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", rid):
@@ -9524,6 +9528,25 @@ def cmd_lane_down(args):
     print(json.dumps({"lanes": results}, indent=2, ensure_ascii=False))
 
 
+def lane_draining(name):
+    """lanes.json "drain": true keeps a lane running (its current turn finishes) but refuses new work.
+
+    Read fresh on every assignment, so draining or undraining a lane needs no restart. Fails closed:
+    a lanes.json that no longer validates raises, so the assignment is refused with the reason."""
+    return any(lane["name"] == name and lane.get("drain") is True for lane in lane_config())
+
+
+def lane_drain_check(name):
+    """The refusal an assignment gets from a draining lane (or an unreadable lanes.json), else None."""
+    try:
+        draining = lane_draining(name)
+    except ValueError as error:
+        return {"error": f"lane {name} cannot read its lanes.json drain setting, not taking new work: {error}"}
+    if draining:
+        return {"draining": True, "error": f"lane {name} is draining (lanes.json drain: true); not taking new work"}
+    return None
+
+
 def lane_status_rows():
     rows = []
     for lane in lane_config():
@@ -9547,6 +9570,8 @@ def lane_status_rows():
                      "provider": execution_provider(lane["backend"], policy=load_policy(), lane=lane),
                      "uptime_seconds": round(NOW() - state["started"], 1) if state.get("started") else None,
                      "last_error": state.get("last_error")})
+        if lane.get("drain") is True:
+            rows[-1]["drain"] = True
     return rows
 
 
@@ -10971,7 +10996,7 @@ def cmd_fleet_harvest(args):
 
 # The lane fields a lanes.json entry may carry (the schema `lane_config` reads).
 LANE_CONFIG_FIELDS = ("name", "backend", "model", "repo", "effort", "fallback_models",
-                      "provider", "binary", "memory_max", "env_file", "env", "mode")
+                      "provider", "binary", "memory_max", "env_file", "env", "mode", "drain")
 LANE_CONFIG_BACKENDS = ("codex", "cursor", "agy", "pi", "hermes", "copilot")
 # The host fields an inventory entry may carry on top of its lane list.
 FLEET_INVENTORY_HOST_FIELDS = ("kind", "ssh", "box", "openswarm", "lanes_file", "lanes")
@@ -11028,6 +11053,8 @@ def fleet_inventory_render_lanes(entry, where):
             raise ValueError(f"invalid fleet inventory {lane_where}: model is required")
         if backend == "codex" and (not isinstance(lane.get("effort"), str) or not lane["effort"].strip()):
             raise ValueError(f"invalid fleet inventory {lane_where}: codex effort is required")
+        if "drain" in lane and not isinstance(lane["drain"], bool):
+            raise ValueError(f"invalid fleet inventory {lane_where}: drain must be true or false")
         out.append({field: lane[field] for field in LANE_CONFIG_FIELDS if field in lane})
     return out
 
@@ -11085,19 +11112,29 @@ def fleet_inventory_read_lanes(host, entry, where):
 
 
 def fleet_lanes_diff(expected, actual):
-    """Compare rendered lanes with the lanes a host has: extra, missing, and changed lanes."""
+    """Compare rendered lanes with the lanes a host has: extra, missing, and changed lanes.
+
+    `drain` is a runtime switch: a host lane drained by hand while the inventory leaves `drain` out is
+    not drift, but it is listed under "draining" so a re-render that would drop it is never silent."""
     expected_by_name = {lane["name"]: lane for lane in expected}
     actual_by_name = {lane["name"]: lane for lane in (actual or [])
                       if isinstance(lane, dict) and isinstance(lane.get("name"), str)}
     extra = sorted(set(actual_by_name) - set(expected_by_name))
     missing = sorted(set(expected_by_name) - set(actual_by_name))
-    changed = []
+    changed, draining = [], []
     for name in sorted(set(expected_by_name) & set(actual_by_name)):
         want, have = expected_by_name[name], actual_by_name[name]
-        fields = sorted(field for field in set(want) | set(have) if want.get(field) != have.get(field))
+        runtime_drain = "drain" not in want
+        if runtime_drain and have.get("drain") is True:
+            draining.append(name)
+        fields = sorted(field for field in set(want) | set(have)
+                        if want.get(field) != have.get(field) and not (field == "drain" and runtime_drain))
         if fields:
             changed.append({"lane": name, "fields": fields})
-    return {"extra": extra, "missing": missing, "changed": changed}
+    diff = {"extra": extra, "missing": missing, "changed": changed}
+    if draining:
+        diff["draining"] = draining
+    return diff
 
 
 def cmd_fleet_render_lanes(args):
