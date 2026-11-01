@@ -303,8 +303,80 @@ class DistRootServeTests(unittest.TestCase):
     def test_unlisted_files_are_not_found(self):
         for path in ('/build-report.json', '/secret.txt', '/app.js', '/README.md', '/data', '/data/'):
             with self.subTest(path=path):
-                status, _ = self.request(path)
+                status, body = self.request(path)
                 self.assertEqual(status, 404)
+                self.assertNotIn(b'Directory listing', body)
+                self.assertNotIn(b'build-report.json', body)
+                self.assertNotIn(b'secret.txt', body)
+
+    def test_dist_nonexistent_paths_return_404_without_directory_listing(self):
+        """临时静态根目录下请求不存在路径：返回稳定 404、正文非空且不列出目录内容。"""
+        for path in ('/nonexistent', '/missing.html', '/not_found', '/data/missing.json', '/missing_dir/file.txt'):
+            with self.subTest(path=path):
+                status, body = self.request(path)
+                self.assertEqual(status, 404)
+                self.assertTrue(body)
+                self.assertGreater(len(body), 0)
+                self.assertNotIn(b'Directory listing', body)
+                self.assertNotIn(b'build-report.json', body)
+                self.assertNotIn(b'secret.txt', body)
+                self.assertNotIn(b'index.html', body)
+
+    def test_dist_server_thread_shuts_down_cleanly_after_nonexistent_path_request(self):
+        """请求不存在路径后，服务线程可正常关闭。"""
+        server = serve.create_server(0, root=self.dist)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+            try:
+                conn.request('GET', '/missing_target_file')
+                response = conn.getresponse()
+                body = response.read()
+                self.assertEqual(response.status, 404)
+                self.assertNotIn(b'Directory listing', body)
+                self.assertNotIn(b'build-report.json', body)
+                self.assertNotIn(b'secret.txt', body)
+            finally:
+                conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
+
+    def test_empty_dist_root_returns_404_without_listing_and_thread_shuts_down(self):
+        """临时静态根目录为空时，请求白名单路径亦稳定返回 404、不列出目录内容且服务线程可正常关闭。"""
+        empty_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(empty_tmp.cleanup)
+        empty_dist = Path(empty_tmp.name) / 'empty_dist'
+        empty_dist.mkdir()
+        (empty_dist / 'hidden_secret.txt').write_text('hidden-content', encoding='utf-8')
+
+        server = serve.create_server(0, root=empty_dist)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+            try:
+                for path in ('/', '/index.html', '/styles.css', '/data/diagnosis.json', '/nonexistent'):
+                    with self.subTest(path=path):
+                        conn.request('GET', path)
+                        response = conn.getresponse()
+                        body = response.read()
+                        self.assertEqual(response.status, 404)
+                        self.assertNotIn(b'Directory listing', body)
+                        self.assertNotIn(b'hidden_secret.txt', body)
+                        self.assertNotIn(b'hidden-content', body)
+            finally:
+                conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
 
     def test_dist_query_string_on_allowed_paths_is_served(self):
         cases = (
