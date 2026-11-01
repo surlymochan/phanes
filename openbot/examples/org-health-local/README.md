@@ -232,7 +232,7 @@ cd openbot/examples/org-health-local && python3 run_tests.py
 
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。角色脚本、原始数据和 bundle 的相对路径以示例目录为基准，绝对路径原样使用，因此在仓库外的临时目录里调用时也不依赖 cwd；默认值是示例目录内的绝对路径。无论从哪个目录调用，产物都写入 `--workdir`（相对 `--workdir` 仍以调用时的 cwd 为基准）。
 
-`--workdir` 是本次运行的产物目录：`brief.json` 是 Boss 生成的任务书，`diagnosis.json` 是 DA 根据任务书和 `--raw` 生成的诊断快照，`dist/` 是 Builder 生成并由站点检查器校验的静态站点。指定 `--review` 且前置步骤成功时，交叉审查命令会核对这三者并将报告写入 `<workdir>/review.md`；报告包含逐条 PASS/FAIL，审查失败时也会保留。运行器还会写 `<workdir>/timings.json` 和 `status.json`，用于定位失败步骤。真实原始数据只能通过仓库外的绝对路径传给 `--raw`，真实数据和由它生成的产物都不要放进或提交到仓库。
+`--workdir` 是本次运行的产物目录：`brief.json` 是 Boss 生成的任务书，`diagnosis.json` 是 DA 根据任务书和 `--raw` 生成的诊断快照，`dist/` 是 Builder 生成并由站点检查器校验的静态站点。指定 `--review` 且前置步骤成功时，交叉审查命令会核对这三者并将报告写入 `<workdir>/review.md`；报告包含逐条 PASS/FAIL，审查失败时也会保留。运行器还会写 `<workdir>/timings.json` 和 `status.json`，用于定位失败步骤；步骤失败时还会在 `<workdir>/step-errors/<角色名>.json` 写下该步的命令、退出码和 stdout/stderr 尾部（角色输出损坏 JSON 时据此核对现场）。真实原始数据只能通过仓库外的绝对路径传给 `--raw`，真实数据和由它生成的产物都不要放进或提交到仓库。
 
 最小复现只使用仓库内的合成 CSV 和预构建的合成示例 bundle；把产物写到仓库外的临时目录，不修改 `demo/`：
 
@@ -245,8 +245,10 @@ ls "$workdir/brief.json" "$workdir/diagnosis.json" "$workdir/dist" \
   "$workdir/review.md" "$workdir/status.json" "$workdir/timings.json"
 ```
 
-失败时先查看 `$workdir/status.json` 的 `failed_step`、`error` 和 `steps`，再查看
-`$workdir/timings.json` 中对应步骤的命令、退出码和耗时；按失败角色检查上游
+失败时先查看 `$workdir/status.json` 的 `failed_step`、`error`、`error_file` 和 `steps`，再查看
+`$workdir/timings.json` 中对应步骤的命令、退出码和耗时；角色输出损坏 JSON 时再看
+`$workdir/step-errors/` 里对应角色的 `command`、`exit_code`、`stdout_tail` 和 `stderr_tail`。
+按失败角色检查上游
 `brief.json`/`diagnosis.json`、`--raw` 目录、bundle 或 `dist/`。若已进入审查，查看
 `$workdir/review.md` 中的 FAIL 条目；上游失败时不会调用审查角色，也不会生成该报告。
 

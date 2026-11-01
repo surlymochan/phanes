@@ -2,7 +2,8 @@
 """Run the synthetic Boss to DA to Builder pipeline.
 
 失败时保留上游产物，并写出 timings.json 与 status.json 供核对：
-status.json 记录每步状态、失败步骤及其错误输出。
+status.json 记录每步状态、失败步骤及其错误输出；
+步骤失败时另在 step-errors/ 写出该步的命令、退出码与 stdout/stderr 尾部。
 """
 import argparse
 import json
@@ -19,6 +20,8 @@ ROOT = Path(__file__).resolve().parent
 REVIEW_REPORT = 'review.md'
 # 步骤状态文件：写出每步状态、失败步骤与错误，不必翻日志也能定位失败原因。
 STATUS_FILE = 'status.json'
+# 失败步骤的原始输出快照目录：便于诊断角色输出损坏 JSON 时仍能核对现场。
+STEP_ERROR_DIR = 'step-errors'
 # 步骤名到稳定角色名的映射：状态文件用稳定的英文角色名，
 # 调用方不依赖本地化的步骤名定位失败步骤。
 STEP_ROLES = {
@@ -28,7 +31,7 @@ STEP_ROLES = {
     '检查': 'checker',
     '审查': 'review',
 }
-# 状态文件里保留的子进程 stderr 字节上限：只留最近的一段，避免输出过大撑爆产物。
+# 错误文件里保留的子进程输出字节上限：只留最近的一段，避免输出过大撑爆产物。
 CAPTURE_LIMIT = 8192
 
 
@@ -170,10 +173,10 @@ def resolve_example_path(path):
     return path if path.is_absolute() else ROOT / path
 
 
-def forward_stderr(source, sink, buffer):
-    """转发子进程 stderr：一边写回当前 stderr 保持实时输出，一边留副本。
+def forward_output(source, sink, buffer):
+    """转发子进程输出：一边写回当前流，一边留最近的一段副本。
 
-    副本供状态文件记录失败步骤的错误输出；管道被关闭时安静退出，
+    副本供失败步骤错误文件记录；管道被关闭时安静退出，
     转发失败不该盖掉真正的步骤失败原因。
     """
     size = 0
@@ -194,9 +197,14 @@ def forward_stderr(source, sink, buffer):
         pass
 
 
+def output_text(captured):
+    """把捕获的输出按 UTF-8 替换解码，并去掉首尾空白。"""
+    return b''.join(captured).decode('utf-8', 'replace').strip()
+
+
 def failure_reason(text, captured):
     """拼出失败步骤的原因文本：步骤自身的原因加上子进程 stderr 副本。"""
-    detail = b''.join(captured).decode('utf-8', 'replace').strip()
+    detail = output_text(captured)
     return f'{text}\n{detail}' if detail else text
 
 
@@ -212,17 +220,35 @@ def exit_reason(exit_code):
     return f'退出码 {exit_code}'
 
 
-def run_step(name, command, timings, stdout=None, stderr=None, output_path=None, timeout=None):
+def write_step_error(path, command, exit_code, stdout_capture, stderr_capture):
+    """写出失败步骤的命令、退出码及 stdout/stderr 尾部。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            'command': list(map(str, command)),
+            'exit_code': exit_code,
+            'stdout_tail': output_text(stdout_capture),
+            'stderr_tail': output_text(stderr_capture),
+        }, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    except OSError as error:
+        print(f'步骤错误文件写入失败: {path} ({error.strerror or str(error)})',
+              file=sys.stderr, flush=True)
+
+
+def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
+             timeout=None, error_path=None):
     """运行一个角色步骤；返回 (成功与否, 失败原因, 子进程是否启动)。
 
-    stderr 未指定时，子进程 stderr 一边转发到当前 stderr（保持实时输出），
-    一边留存副本，失败时写进状态文件；已指定 stderr（审查步骤写进报告）时不重复捕获。
+    未指定的 stdout/stderr 一边转发到当前流（保持实时输出），一边留存尾部副本。
+    失败时副本写入步骤错误文件；已指定流（审查步骤写进报告）时不重复捕获。
     """
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
-    capture = stderr is None
-    captured = []
-    pump = None
+    capture_stdout = stdout is None
+    capture_stderr = stderr is None
+    stdout_capture = []
+    stderr_capture = []
+    pumps = []
     try:
         # Python 将缺失的脚本作为退出码报告，而不是抛出异常；先检查本地角色脚本，
         # 这样错误能归属到具体步骤，避免只留下子进程的错误输出。
@@ -233,14 +259,17 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
             resolved = resolve_script(script)
             if not resolved.is_file():
                 raise FileNotFoundError(2, 'No such file or directory', str(resolved))
-        process = subprocess.Popen(command, stdout=stdout,
-                                   stderr=(subprocess.PIPE if capture else stderr),
+        process = subprocess.Popen(command,
+                                   stdout=(subprocess.PIPE if capture_stdout else stdout),
+                                   stderr=(subprocess.PIPE if capture_stderr else stderr),
                                    start_new_session=True)
-        if capture:
-            # 子进程 stderr 走管道：转发线程负责实时输出与留存副本。
-            pump = threading.Thread(target=forward_stderr,
-                                    args=(process.stderr, sys.stderr, captured), daemon=True)
-            pump.start()
+        for stream, sink, buffer in ((process.stdout, sys.stdout, stdout_capture),
+                                     (process.stderr, sys.stderr, stderr_capture)):
+            if stream is not None:
+                pump = threading.Thread(target=forward_output,
+                                        args=(stream, sink, buffer), daemon=True)
+                pump.start()
+                pumps.append(pump)
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -266,14 +295,19 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
             print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
             print(f'步骤失败: {name} (超过 {timeout:g} 秒，已回收进程组)',
                   file=sys.stderr, flush=True)
+            if error_path is not None:
+                write_step_error(error_path, command, process.returncode,
+                                 stdout_capture, stderr_capture)
             return False, failure_reason(
-                f'步骤失败: {name} (超过 {timeout:g} 秒，已回收进程组)', captured), True
+                f'步骤失败: {name} (超过 {timeout:g} 秒，已回收进程组)', stderr_capture), True
         finally:
-            if pump is not None:
+            for pump in pumps:
                 # 子进程退出后管道写端关闭，转发线程自行结束。
                 pump.join(timeout=2)
+            for stream in (process.stdout, process.stderr):
                 try:
-                    process.stderr.close()
+                    if stream is not None:
+                        stream.close()
                 except OSError:
                     pass
         result = process
@@ -283,8 +317,10 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
                         'duration_seconds': elapsed, 'exit_code': 2})
         print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
         print(f'步骤失败: {name} (文件不存在: {error.filename})', file=sys.stderr, flush=True)
+        if error_path is not None:
+            write_step_error(error_path, command, 2, stdout_capture, stderr_capture)
         return False, failure_reason(
-            f'步骤失败: {name} (文件不存在: {error.filename})', captured), False
+            f'步骤失败: {name} (文件不存在: {error.filename})', stderr_capture), False
     elapsed = time.monotonic() - started
     # 步骤输出写进报告时校验编码：审查器输出不可解码时也算这一步失败，
     # 免得报告已损坏却仍然报成功。
@@ -310,7 +346,9 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
         text = f'步骤失败: {name} ({exit_reason(exit_code)})'
     else:
         text = None
-    error_text = failure_reason(text, captured) if text is not None else None
+    if text is not None and error_path is not None:
+        write_step_error(error_path, command, exit_code, stdout_capture, stderr_capture)
+    error_text = failure_reason(text, stderr_capture) if text is not None else None
     return result.returncode == 0 and reason is None, error_text, True
 
 
@@ -376,14 +414,18 @@ def main(argv=None):
     status = 0
     failed = []
     step_errors = []
+    step_error_files = []
     problems = []
     reviewer_called = False
     try:
         for name, command in commands:
-            ok, error, _started = run_step(name, command, timings, timeout=args.timeout)
+            error_path = workdir / STEP_ERROR_DIR / f'{STEP_ROLES.get(name, name)}.json'
+            ok, error, _started = run_step(name, command, timings, timeout=args.timeout,
+                                           error_path=error_path)
             if not ok:
                 failed.append(name)
                 step_errors.append(error)
+                step_error_files.append(str(error_path))
                 status = 1
                 break
         if status == 0 and args.review:
@@ -395,13 +437,16 @@ def main(argv=None):
             else:
                 with report:
                     # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
+                    error_path = workdir / STEP_ERROR_DIR / 'review.json'
                     ok, error, started = run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT,
-                                                 output_path=report_path, timeout=args.timeout)
+                                                 output_path=report_path, timeout=args.timeout,
+                                                 error_path=error_path)
                     # 审查进程真的起来了才算调用过审查角色。
                     reviewer_called = started
                     if not ok:
                         failed.append('审查')
                         step_errors.append(f'{error}\n审查报告: {report_path}'.strip())
+                        step_error_files.append(str(error_path))
                         status = 1
                         # 同时标出稳定的角色名，便于调用方不依赖本地化步骤名定位 review 失败。
                         print('review 角色失败：审查报告已保留，请检查该报告和 timings.json',
@@ -425,6 +470,7 @@ def main(argv=None):
             'status': 'ok' if status == 0 else 'failed',
             'failed_step': STEP_ROLES.get(failed[-1], failed[-1]) if failed else None,
             'error': step_errors[-1] if step_errors else None,
+            'error_file': step_error_files[-1] if step_error_files else None,
             'steps': status_steps(timings),
             'review_requested': bool(args.review),
             'reviewer_called': reviewer_called,
