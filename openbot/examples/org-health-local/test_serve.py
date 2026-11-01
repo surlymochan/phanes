@@ -213,6 +213,7 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 self.assertEqual(status, 404)
                 self.assertTrue(body)
                 self.assertGreater(len(body), 0)
+                self.assertIn(b'Not Found', body)
 
     def test_path_traversal_is_not_found(self):
         for path in ('/../serve.py', '/%2e%2e/serve.py', '/..%2fserve.py', '/data/../serve.py'):
