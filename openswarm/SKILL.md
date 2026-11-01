@@ -115,6 +115,18 @@ $XS lane launchd-plist C1                  # print only; install the plist yours
 $XS lane systemd-unit K1                   # print a system unit only; install it yourself if wanted
 ```
 
+`doctor` is the read-only preflight of a lane: the executor binary must exist and be executable, a Codex lane on
+Linux needs `bwrap`, `slirp4netns`, and `iptables` on `PATH`, a lane `env_file` must exist with mode `600` or
+stricter, the lane environment's `HTTPS_PROXY` must accept a TCP connection, and the worktree disk needs free space.
+Every item is `ok`, `warn`, or `fail` with a fix hint, and any `fail` exits non-zero. It only reads, so nothing is
+installed or changed on the host.
+
+```bash
+$XS doctor                                # every configured lane
+$XS doctor --lane C1                      # one lane, text report with fix hints
+$XS doctor --json                         # machine-readable report
+```
+
 `lane assign` refuses a non-idle lane and immediately returns the normal run id. A provider cap in
 `policy.local.json` can keep an accepted assignment queued until a slot frees. Use
 `fleet exec <host> -- lane assign <lane> --task-file <path>` for an explicit remote lane; it observes that
@@ -316,6 +328,7 @@ and exits `1` when it rejects the card or the diff.
 | `fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `$XS fleet exec worker -- lane status` |
 | `fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `$XS fleet ledger pull --hosts worker,sandbox` |
 | `fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `$XS fleet render-lanes --inventory fleet-inventory.json --check` |
+| `doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk); installs nothing. | `$XS doctor --lane C1 --json` |
 
 ### Learn
 
