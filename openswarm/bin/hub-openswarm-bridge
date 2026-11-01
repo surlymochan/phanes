@@ -37,6 +37,26 @@ def worker_state_path(name):
         raise ValueError('unknown control-plane worker')
     return ctl_state_dir() / f'{name}.pid'
 
+def process_start_time(pid):
+    """Process start time in epoch seconds: /proc on Linux, `ps -o lstart=` elsewhere (macOS has no /proc)."""
+    try:
+        with open(f"/proc/{pid}/stat") as stream:
+            stat = stream.read()
+        fields = stat[stat.rfind(")") + 2:].split()
+        with open("/proc/stat") as stream:
+            boot_time = float(stream.read().split("btime ", 1)[1].split()[0])
+        return boot_time + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except FileNotFoundError:
+        import subprocess, time
+        try:
+            out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                                 env={**os.environ, "LC_ALL": "C"}, timeout=10).stdout.strip()
+        except subprocess.SubprocessError as error:
+            raise OSError(str(error)) from error
+        if not out:
+            raise ProcessLookupError(pid)
+        return time.mktime(time.strptime(" ".join(out.split()), "%a %b %d %H:%M:%S %Y"))
+
 def worker_alive(pid, started_at):
     try:
         if isinstance(pid, bool) or not re.fullmatch(r'[0-9]+', str(pid)):
@@ -45,9 +65,7 @@ def worker_alive(pid, started_at):
         if pid <= 1:
             return False
         os.kill(pid, 0)
-        stat = Path(f'/proc/{pid}/stat').read_text()
-        fields = stat[stat.rfind(')') + 2:].split()
-        process_started_at = float(Path('/proc/stat').read_text().split('btime ', 1)[1].split()[0]) + int(fields[19]) / os.sysconf('SC_CLK_TCK')
+        process_started_at = process_start_time(pid)
         age = float(started_at) - process_started_at
         return 0 <= age <= 5
     except PermissionError:

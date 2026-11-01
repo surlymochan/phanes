@@ -63,6 +63,20 @@ class HubBridgeTests(unittest.TestCase):
             self.assertGreater(first['started_at'], 1)
             self.assertEqual(MOD['start_bus_worker'](command)['pid'], first['pid'])
 
+    def test_worker_alive_without_proc_uses_ps_start_time(self):
+        """macOS has no /proc: the start-time check falls back to `ps -o lstart=`."""
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        started_at = __import__('time').time()
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        real_open = open
+        def no_proc(path, *args, **kwargs):
+            if str(path).startswith('/proc'):
+                raise FileNotFoundError(path)
+            return real_open(path, *args, **kwargs)
+        with mock.patch('builtins.open', no_proc):
+            self.assertTrue(MOD['worker_alive'](child.pid, started_at))
+            self.assertFalse(MOD['worker_alive'](child.pid, started_at + 3600))
+
     def test_bus_worker_clears_nonpositive_pid_and_starts_worker(self):
         command = [sys.executable, '-c', 'import time; time.sleep(30)']
         with mock.patch.dict(os.environ, {'OPENSWARM_CTL_STATE_DIR': str(self.path / 'ctl-state')}):
