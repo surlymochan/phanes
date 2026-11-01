@@ -1,6 +1,7 @@
 """Lease state-machine and offline result parsing coverage for the GitHub issue bus."""
 import json
 import unittest
+from unittest import mock
 
 try:
     import _load
@@ -27,6 +28,20 @@ def result_comment(payload):
 
 
 class GitHubIssueBusLeaseTests(unittest.TestCase):
+    def test_unadvertised_base_is_classified_before_checkout(self):
+        task = {"repo": "org/target", "base": "a" * 40}
+        with mock.patch.object(xs, "sh", return_value=(0, "b" * 40 + "\trefs/heads/main\n", "")) as run:
+            self.assertFalse(xs.bus_worker_base_available(task, "target.git"))
+        run.assert_called_once()
+        self.assertEqual(xs.bus_error_class(xs.BaseUnavailableError("push the base first")),
+                         "base_unavailable")
+
+    def test_reachable_base_is_advertised_by_branch_or_tag(self):
+        base = "a" * 40
+        task = {"repo": "org/target", "base": base}
+        with mock.patch.object(xs, "sh", return_value=(0, base + "\trefs/tags/release\n", "")):
+            self.assertTrue(xs.bus_worker_base_available(task, "target.git"))
+
     def test_result_comment_sample_parses_to_dict_without_github(self):
         comment = """```openswarm-result
 {"status":"ok","run_id":"offline-run-1","pr_url":null}

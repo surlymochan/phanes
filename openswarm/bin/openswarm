@@ -5198,16 +5198,17 @@ def cmd_run(args, policy):
                                      "planner encountered a bus error")
                 except Exception:
                     pass
-            output = {"id": rid, "status": "failed", "error_class": "bus_error", "error": bus_redact(str(error)),
+            error_class = bus_error_class(error)
+            output = {"id": rid, "status": "failed", "error_class": error_class, "error": bus_redact(str(error)),
                       "title": title, "backend": "github-issue", "result": None, "branch": None,
                       "commit": None, "bus": {"issue_url": state.get("bus_issue_url"), "executor": None,
                                                 "pr_url": None}, "run_dir": rdir}
             jsave(f"{rdir}/result.json", output)
             append_ledger({"id": rid, "ts": NOW(), "title": title, "status": "failed",
-                           "backend": "github-issue", "error_class": "bus_error", "summary": bus_redact(str(error))[:300],
+                           "backend": "github-issue", "error_class": error_class, "summary": bus_redact(str(error))[:300],
                            "card_type": card_type, "rework_of": rework_of,
                            **exec_pass_fields(False, False, bool(args.verify), None)})
-            set_status(rdir, state="finished", status="failed", finished=NOW(), error_class="bus_error")
+            set_status(rdir, state="finished", status="failed", finished=NOW(), error_class=error_class)
             print(json.dumps(output, indent=2, ensure_ascii=False), file=sys.stderr)
             raise SystemExit(2)
         return
@@ -5999,6 +6000,10 @@ class BusError(RuntimeError):
     pass
 
 
+class BaseUnavailableError(BusError):
+    """The task base is not advertised by the target repository remote."""
+
+
 def bus_redact(value):
     """Remove common credential formats before issue-bus data reaches disk or logs."""
     return BUS_SECRET_RE.sub("[REDACTED]", str(value))
@@ -6006,6 +6011,8 @@ def bus_redact(value):
 
 def bus_error_class(value):
     """Classify common non-interactive GitHub push/PR failures without exposing secrets."""
+    if isinstance(value, BaseUnavailableError) or "base_unavailable" in str(value).lower():
+        return "base_unavailable"
     text = bus_redact(value).lower()
     if re.search(r"(?:authentication|unauthori[sz]ed|bad credentials|invalid (?:credential|username|token)|password authentication|permission denied|publickey|access denied|http 401|http 403|not authorized)", text):
         return "auth"
@@ -6151,11 +6158,11 @@ def bus_remote(cwd):
 def bus_base_commit(root, remote, requested):
     code, base, _ = git(["rev-parse", "--verify", "--end-of-options", f"{requested or 'HEAD'}^{{commit}}"], root)
     if code:
-        raise BusError("base commit is unavailable locally")
+        raise BaseUnavailableError("base commit is unavailable locally")
     base = base.strip()
     code, refs, _ = git(["ls-remote", "--heads", "--tags", remote], root, timeout=60)
     if code or base not in {line.split()[0] for line in refs.splitlines() if line.split()}:
-        raise BusError("push the base first")
+        raise BaseUnavailableError("push the base first")
     return base
 
 
@@ -6435,13 +6442,7 @@ def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, stat
 def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
     cfg = bus_config(policy)
     root, remote, target_repo = bus_remote(os.path.abspath(args.cwd))
-    code, base, _ = git(["rev-parse", "--verify", "--end-of-options", f"{getattr(args, 'base', None) or 'HEAD'}^{{commit}}"], root)
-    if code:
-        raise BusError("base commit is unavailable locally")
-    base = base.strip()
-    code, remote_refs, _ = git(["ls-remote", "--heads", "--tags", remote], root, timeout=60)
-    if code or base not in {line.split()[0] for line in remote_refs.splitlines() if line.split()}:
-        raise BusError("push the base first")
+    base = bus_base_commit(root, remote, getattr(args, "base", None))
     metadata = {"run_id": rid, "repo": target_repo, "base": base,
                 "branch_hint": f"openswarm/{rid}", "budget_minutes": budget_min,
                 "report_schema": RESULT_SCHEMA}
@@ -6630,10 +6631,18 @@ def bus_worker_clone(task, workdir, allowed_repos=None):
         raise BusError(f"target clone failed: {error.strip()[:300]}")
     code, _, error = sh(["git", "fetch", "origin", task["base"]], cwd=workdir, timeout=300)
     if code:
-        raise BusError(f"could not fetch task base: {error.strip()[:300]}")
+        raise BaseUnavailableError(f"could not fetch task base: {error.strip()[:300]}")
     code, _, error = sh(["git", "checkout", "--detach", task["base"]], cwd=workdir, timeout=60)
     if code:
         raise BusError(f"could not check out task base: {error.strip()[:300]}")
+
+
+def bus_worker_base_available(task, url):
+    """Check the advertised remote refs before a worker claims or executes a task."""
+    if not BUS_SHA_RE.fullmatch(str(task.get("base") or "")):
+        return False
+    code, refs, _ = sh(["git", "ls-remote", "--heads", "--tags", url], timeout=60)
+    return not code and task["base"] in {line.split()[0] for line in refs.splitlines() if line.split()}
 
 
 def bus_worker_open_pr(repo, branch, title, task):
@@ -6678,6 +6687,17 @@ def bus_worker_run(issue, cfg, args, policy):
     comments = bus_comments(cfg["repo"], issue["number"])
     if not bus_worker_task_is_trusted(issue, task, comments, cfg["allowed_planners"]):
         return False
+    target_url = envvar("BUS_TARGET_URL") or f"https://github.com/{task['repo']}.git"
+    if not bus_worker_base_available(task, target_url):
+        report = {"status": "failed", "run_id": task["run_id"],
+                  "summary": "base_unavailable: task base is not advertised by the target remote",
+                  "files_changed": [], "tests": "not run: base unavailable", "followups": [],
+                  "branch": None, "commit": None, "pr_url": None, "error_class": "base_unavailable"}
+        bus_comment(cfg["repo"], issue["number"], "```openswarm-result\n" +
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n```")
+        bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels["failed"]],
+                             remove=[labels["queued"], labels["claimed"]])
+        return True
     existing_claim = bus_winning_claim(comments, cfg["allowed_executors"], cfg["claim_lease_seconds"])
     if existing_claim and bus_claim(existing_claim).casefold() != str(args.name).casefold():
         return False
