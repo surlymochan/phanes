@@ -144,8 +144,19 @@ class LocalServeBoundaryTests(unittest.TestCase):
     def test_path_traversal_is_not_found(self):
         for path in ('/../serve.py', '/%2e%2e/serve.py', '/..%2fserve.py', '/data/../serve.py'):
             with self.subTest(path=path):
-                status, _ = self.request(path)
+                status, body = self.request(path)
                 self.assertEqual(status, 404)
+                self.assertNotIn(str(serve.ROOT).encode(), body)
+                self.assertNotIn(str(self.data).encode(), body)
+
+    def test_translate_path_does_not_resolve_traversal(self):
+        handler = object.__new__(serve.LocalOnlyHandler)
+        handler.directory = str(serve.ROOT)
+        for path in ('/../serve.py', '/%2e%2e/serve.py', '/data/../serve.py'):
+            with self.subTest(path=path):
+                resolved = Path(handler.translate_path(path))
+                self.assertNotEqual(resolved, serve.ROOT / 'serve.py')
+                self.assertFalse(resolved.is_file())
 
     def test_directory_request_is_not_found(self):
         for path in ('/data/', '/styles.css/'):
