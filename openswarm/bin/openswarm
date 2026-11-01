@@ -3411,8 +3411,36 @@ def fleet_recovery_poll_seconds(policy):
     return value
 
 
+# A resident lane keeps one executor child alive between turns, so a live child
+# never proves that the reservation of a finished run is still in use.
+FLEET_TERMINAL_RUN_STATES = ("finished", "failed", "unroutable", "dry-run", "dead")
+
+
+def fleet_run_terminal_result(rdir, status):
+    """Whether the run already published its terminal result/summary."""
+    if status.get("state") not in FLEET_TERMINAL_RUN_STATES:
+        return False
+    return any(os.path.exists(os.path.join(rdir, name)) for name in ("result.json", "summary.json"))
+
+
+def fleet_lane_moved_on(lane_name, run_id):
+    """Whether the resident lane already started another run than this one."""
+    if not isinstance(lane_name, str) or not LANE_NAME_RE.fullmatch(lane_name):
+        return False
+    current = (jload(lane_state_path(lane_name), {}) or {}).get("current_run")
+    return isinstance(current, str) and bool(current) and current != run_id
+
+
+def fleet_run_terminal_expired(status, now, ttl):
+    """Whether the terminal state of the run is older than the recovery TTL."""
+    finished = status.get("finished")
+    if not isinstance(finished, (int, float)) or isinstance(finished, bool):
+        return False
+    return now - finished >= ttl
+
+
 def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeout=15):
-    """Recover dead local runners only after their executor process tree is gone."""
+    """Recover expired reservations of dead runners and of finished resident runs."""
     owner = fleet_guard_host(command)
     if not owner:
         return []
@@ -3448,11 +3476,25 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
             if not recorded_executor_records(rdir):
                 candidates.append((reserved_at, path, status, rdir, run_id, "acquire-pending"))
             continue
-        if pid_alive(status.get("runner_pid")):
-            continue
+        # A candidate which was already checked waits for the others, so one
+        # stuck record cannot starve the remaining reservations.
         checked = status.get("fleet_recovery_checked_at", reserved_at)
-        candidates.append((checked if isinstance(checked, (int, float)) else reserved_at, path, status, rdir, run_id,
-                           "dead-runner"))
+        checked = checked if isinstance(checked, (int, float)) else reserved_at
+        if pid_alive(status.get("runner_pid")):
+            # A resident lane keeps its executor child alive across turns, so a
+            # live runner proves nothing about this reservation.  Only a run
+            # which already wrote its terminal result may release it: either
+            # because the lane moved on to another run, or because the terminal
+            # state is older than the TTL.  A run without a persisted token was
+            # already released and must not be reported as recovered again.
+            token = status.get("fleet_reservation_token")
+            if (isinstance(token, str) and token
+                    and fleet_run_terminal_result(rdir, status)
+                    and (fleet_lane_moved_on(status.get("lane"), run_id)
+                         or fleet_run_terminal_expired(status, now, ttl))):
+                candidates.append((checked, path, status, rdir, run_id, "run-finished"))
+            continue
+        candidates.append((checked, path, status, rdir, run_id, "dead-runner"))
     for _, path, status, rdir, run_id, recovery_kind in sorted(candidates, key=lambda row: row[0])[:max_candidates]:
         set_status(rdir, fleet_recovery_checked_at=now)
         if recovery_kind == "release-pending":
@@ -3468,6 +3510,15 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
         if recovery_kind == "acquire-pending":
             if release_fleet_slot(rdir, confirmed=True, guard_command=command):
                 set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="acquire-reconciled")
+                recovered.append(run_id)
+            continue
+        if recovery_kind == "run-finished":
+            # The run published its terminal result and the resident child is
+            # reused by later turns.  Release this reservation without touching
+            # that child: it belongs to the lane, not to the finished run.
+            if release_fleet_slot(rdir, confirmed=True, guard_command=command):
+                set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="run-finished",
+                           recovered_reason="run_finished_child_resident", fleet_reservation_error=None)
                 recovered.append(run_id)
             continue
         if not executor_stopped(rdir):
