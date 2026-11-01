@@ -2,11 +2,73 @@
 """Return a completed run's Git branch as a bundle."""
 import base64
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+
+
+def push_result(source, target, replace=False):
+    """Install one result.json without silently replacing another run."""
+    source = Path(source)
+    source = source / 'result.json' if source.is_dir() else source
+    if not source.is_file() or source.stat().st_size == 0:
+        raise ValueError('result source is missing or empty')
+    try:
+        payload = json.loads(source.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ValueError(f'invalid result source: {error}') from None
+    run_id = payload.get('id') if isinstance(payload, dict) else None
+    if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id):
+        raise ValueError('result has no valid run id')
+    target = Path(target)
+    target.mkdir(parents=True, exist_ok=True)
+    destination = target / 'result.json'
+    content = source.read_bytes()
+    if destination.exists():
+        if not destination.is_file():
+            raise ValueError('target result.json is not a file')
+        existing = destination.read_bytes()
+        if existing == content:
+            print(json.dumps({'status': 'confirmed', 'run': run_id, 'path': str(destination)}))
+            return
+        try:
+            existing_id = json.loads(existing.decode('utf-8')).get('id')
+        except (UnicodeError, ValueError, AttributeError):
+            existing_id = None
+        if not replace:
+            raise ValueError(f'target result.json belongs to run {existing_id or "another run"}; use --replace')
+    fd, temporary = tempfile.mkstemp(prefix='.openswarm-result-', dir=str(target))
+    try:
+        with open(fd, 'wb', closefd=True) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    print(json.dumps({'status': 'replaced' if destination.exists() and replace else 'uploaded',
+                      'run': run_id, 'path': str(destination)}))
+
+
+if sys.argv[1:2] == ['push']:
+    import argparse
+    parser = argparse.ArgumentParser(description='push a result bundle safely')
+    parser.add_argument('source', help='result.json or a bundle directory')
+    parser.add_argument('target', help='destination bundle directory')
+    parser.add_argument('--replace', action='store_true', help='replace a different existing result')
+    args = parser.parse_args(sys.argv[2:])
+    try:
+        push_result(args.source, args.target, args.replace)
+    except (OSError, ValueError) as error:
+        print(json.dumps({'status': 'conflict', 'error': str(error)}))
+        sys.exit(2)
+    sys.exit(0)
 
 try:
     info = json.load(sys.stdin)
