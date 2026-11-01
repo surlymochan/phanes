@@ -417,6 +417,152 @@ class Assign(Base):
         self.assertNotIn("--idempotency-key", self.runner.called("lane assign")[0])
 
 
+class LanePickingAndBurn(Base):
+    def lanes(self):
+        return {"P1": {"host": "far", "backend": "pi"},
+                "C1": {"host": "far", "backend": "codex"},
+                "A1": {"host": "far", "backend": "agy"}}
+
+    def history(self, d, value):
+        os.makedirs(d.D, exist_ok=True)
+        with open(d.path("lane-lru.json"), "w") as stream:
+            json.dump(value, stream)
+
+    def order(self, d):
+        return [name for name, _ in d.lane_order(self.lanes())]
+
+    def timed_burn(self):
+        self.cfg["burn"] = {"backend": "pi", "window": {"resets_at": 10000},
+                            "burn_before_reset_h": 1, "factor": 2}
+
+    def test_legacy_lru_orders_oldest_lane_and_breaks_ties_by_name(self):
+        d = self.make()
+        self.history(d, {"P1": "2026-11-01 12:03:00", "C1": "2026-11-01 12:01:00",
+                         "A1": "2026-11-01 12:02:00"})
+        self.assertEqual(self.order(d), ["C1", "A1", "P1"])
+        self.history(d, {"P1": "2026-11-01 12:03:00", "C1": "2026-11-01 12:01:00",
+                         "A1": "2026-11-01 12:01:00"})
+        self.assertEqual(self.order(d), ["A1", "C1", "P1"])
+
+    def test_native_picker_state_preserves_dispatch_counter_order(self):
+        d = self.make()
+        self.history(d, {"version": 1, "counter": 10, "lanes": {"P1": 10, "C1": 1, "A1": 2}})
+        self.assertEqual(self.order(d), ["C1", "A1", "P1"])
+
+    def test_corrupt_lru_falls_back_as_a_whole_to_name_order(self):
+        d = self.make()
+        bad_states = ('{"P1":', '["P1"]',
+                      '{"version":1,"counter":2,"lanes":{"C1":1,"P1":"bad"}}',
+                      '{"P1":"2026-11-01 12:00:00","C1":null}')
+        for text in bad_states:
+            with self.subTest(text=text):
+                with open(d.path("lane-lru.json"), "w") as stream:
+                    stream.write(text)
+                self.assertEqual(self.order(d), ["A1", "C1", "P1"])
+
+    def test_dry_run_reads_legacy_history_without_migrating_or_touching_it(self):
+        d = self.make(dry_run=True)
+        self.history(d, {"P1": "2026-11-01 12:00:00", "C1": "2026-11-01 13:00:00"})
+        with open(d.path("lane-lru.json"), "rb") as stream:
+            before = stream.read()
+        self.assertEqual(self.order(d), ["A1", "P1", "C1"])
+        with open(d.path("lane-lru.json"), "rb") as stream:
+            self.assertEqual(stream.read(), before)
+
+    def test_burn_window_prioritizes_configured_backend_over_lru(self):
+        self.timed_burn()
+        d = self.make()
+        d.clock = lambda: 9000
+        self.history(d, {"version": 1, "counter": 10, "lanes": {"C1": 1, "A1": 2, "P1": 10}})
+        self.assertEqual(self.order(d), ["P1", "C1", "A1"])
+        self.assertEqual(d.review_max(), 12)  # factor 2 is capped by review.burn_max
+
+    def test_outside_burn_window_preserves_lru_and_review_limit(self):
+        self.timed_burn()
+        d = self.make()
+        self.history(d, {"version": 1, "counter": 10, "lanes": {"C1": 1, "A1": 2, "P1": 10}})
+        for now in (6399, 10001):
+            with self.subTest(now=now):
+                d.clock = lambda now=now: now
+                self.assertEqual(self.order(d), ["C1", "A1", "P1"])
+                self.assertEqual(d.review_max(), 8)
+
+    def test_burn_scaling_is_not_always_the_legacy_fixed_burn_max(self):
+        self.timed_burn()
+        self.cfg["burn"]["factor"] = 1.25
+        d = self.make()
+        d.clock = lambda: 9000
+        self.assertEqual(d.review_max(), 10)
+
+    def test_missing_burn_config_keeps_normal_order_and_limit(self):
+        self.cfg["burn"] = {}
+        d = self.make()
+        self.history(d, {"version": 1, "counter": 10, "lanes": {"C1": 1, "A1": 2, "P1": 10}})
+        self.assertEqual(self.order(d), ["C1", "A1", "P1"])
+        self.assertEqual(d.review_max(), 8)
+
+    def test_legacy_marker_can_enable_review_capacity_from_zero(self):
+        self.cfg["review"]["max"] = 0
+        d = self.make()
+        self.assertEqual(d.review_max(), 0)
+        with open(d.path("BURN-X"), "w"):
+            pass
+        self.assertEqual(d.review_max(), 12)
+
+    def task_dispatch(self, d, fail=False):
+        lanes = {"P1": self.lanes()["P1"]}
+        d.main_sha = lambda: SHA
+        d.label_state = lambda n: "fresh"
+        calls = []
+
+        def dispatch(*args):
+            calls.append(args[0])
+            if fail:
+                raise RuntimeError("fixture assignment failed")
+            return "run-1", "verify"
+
+        d.dispatch = dispatch
+        state = {}
+        queue = [{"n": 1, "title": "task", "body": "", "backend": None, "strict": False, "prio": 2}]
+        d.assign_issues(lanes, {"P1": {"lane": "idle"}}, state, queue)
+        return calls, state
+
+    def test_successful_task_assignment_migrates_legacy_and_touches_picker(self):
+        d = self.make()
+        self.history(d, {"P1": "2026-11-01 12:00:00", "C1": "2026-11-01 13:00:00"})
+        calls, state = self.task_dispatch(d)
+        self.assertEqual(calls, ["P1"])
+        self.assertEqual(state["P1"]["run"], "run-1")
+        with open(d.path("lane-lru.json")) as stream:
+            history = json.load(stream)
+        self.assertEqual(history["version"], 1)
+        self.assertGreater(history["lanes"]["P1"], history["lanes"]["C1"])
+        self.assertEqual(history["counter"], history["lanes"]["P1"])
+
+    def test_failed_or_dry_run_assignment_does_not_touch_lru(self):
+        for dry_run, fail in ((False, True), (True, False)):
+            with self.subTest(dry_run=dry_run, fail=fail):
+                self.cfg["state_dir"] = os.path.join(self.tmp, f"state-{dry_run}-{fail}")
+                d = self.make(dry_run=dry_run)
+                self.task_dispatch(d, fail=fail)
+                self.assertFalse(os.path.exists(d.path("lane-lru.json")))
+
+    def test_successful_review_assignment_touches_same_picker_history(self):
+        d = self.make()
+        lanes = {"P1": self.lanes()["P1"]}
+        d.main_sha = lambda: SHA
+        d.review_candidates = lambda *args: [pr(11, 101)]
+        d.review_item = lambda item: {"n": "PR11", "title": "review", "body": ""}
+        d.dispatch = lambda *args: ("review-run", "verify")
+        state = {}
+        d.dispatch_reviews(lanes, {"P1": {"lane": "idle"}}, state, [])
+        self.assertEqual(state["P1"]["review_pr"], 11)
+        with open(d.path("lane-lru.json")) as stream:
+            history = json.load(stream)
+        self.assertEqual(history["version"], 1)
+        self.assertEqual(history["lanes"]["P1"], history["counter"])
+
+
 class Defaults(unittest.TestCase):
     def test_remote_home_matches_fleet_wrapper(self):
         with open(os.path.join(os.path.dirname(HERE), "bin", "openswarm-fleet")) as f:
