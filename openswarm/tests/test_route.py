@@ -165,6 +165,25 @@ class RoutingScenarios(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "CoDeX"):
             xs.route(prof(d=3, backend="CoDeX"), scenario(), POLICY)
 
+    def test_27_unknown_or_empty_type_uses_normal_default_bucket(self):
+        for type_ in ("mystery", "", None):
+            with self.subTest(type=type_):
+                decision = xs.route(prof(type_=type_, d=3), scenario(), POLICY)
+                self.assertEqual(decision["backend"], "codex")
+                self.assertEqual(decision["effort"], "medium")
+                self.assertEqual(CODEX_MODELS[decision["model"]]["tier"], "balanced")
+
+        missing_type = prof(d=3)
+        missing_type.pop("type")
+        decision = xs.route(missing_type, scenario(), POLICY)
+        self.assertEqual(decision["backend"], "codex")
+
+    def test_28_explicit_backend_and_model_override_unknown_type_defaults(self):
+        decision = xs.route(prof(type_="mystery", d=1, backend="deepseek", model="deepseek-flash"),
+                            scenario(), POLICY)
+        self.assertEqual(decision["backend"], "deepseek")
+        self.assertEqual(decision["model"], "deepseek-flash")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
