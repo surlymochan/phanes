@@ -159,7 +159,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
 - `python3 tools/check-ctl-hb-refresh.py` — offline #1007 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
-- `python3 tools/check-ad-ready-target.py` — offline #1040 AD ready-queue contract. When `ready < LOW`, the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects cards without a substantive body and `验收：` line. It uses only a local fixture and never calls `gh`.
+- `python3 tools/check-ad-ready-target.py` — offline #1061 AD ready-queue contract. When `ready < LOW`, the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects cards without a substantive body and `验收：` line. It uses only a local fixture and never calls `gh`.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 - `python3 tools/check-ad-fetch-transient-class.py` — offline #986 contract check. It asserts `bad pack header` and `fetch-pack: unexpected disconnect` stderr samples remain transient and retryable within the harvest bound.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
@@ -212,7 +212,7 @@ failure/success sequence and does not touch the real backoff state:
 python3 tools/check-ad-host-backoff.py
 ```
 
-### AD ready queue target refill (Refs #1040)
+### AD ready queue target refill (Refs #1061)
 
 When `lane-autodispatch` ready queue drops below `LOW` (`AD_LOW`, default 10), the refill
 loop must request enough candidate cards to refill up to `TARGET` (`TARGET = 20`) rather than
