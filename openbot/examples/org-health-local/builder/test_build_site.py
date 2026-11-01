@@ -3,7 +3,9 @@
 只用标准库，不调用 bun：单测一律传入假的 bundle 文件，构建目录为 TMPDIR 下的临时目录。
 覆盖：示例数据构建出齐全的站点文件；坏数据退出码非 0 且不生成 dist；
 结构定义文件缺失时给出可读错误（含路径）且不生成 dist；
-同一份 brief 与诊断快照连续构建两次时，第二次仍成功，报告与站点关键文件依旧齐全可读。
+同一份 brief 与诊断快照连续构建两次时，第二次仍成功，报告与站点关键文件依旧齐全可读；
+Boss+Builder 管道：合法 brief 配合非空诊断样本生成可通过 check_site 的站点（零缺陷），
+注入 brief 逻辑错误确认 check_site 失败。
 """
 from __future__ import annotations
 
@@ -21,13 +23,21 @@ from pathlib import Path
 EX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(EX_ROOT))
 
+import boss.make_brief as make_brief  # noqa: E402
 import builder.build_site as build_site  # noqa: E402  (需要先让示例目录可被导入)
+import builder.check_site as check_site  # noqa: E402
+import da.build_diagnosis as build_diagnosis  # noqa: E402
 
 EXAMPLE_PATH = EX_ROOT / "data" / "diagnosis.json"
 # 仓库里同一对 brief → 诊断快照：重复构建场景用这同一份输入。
 DEMO_BRIEF_PATH = EX_ROOT / "demo" / "brief.json"
 DEMO_DIAGNOSIS_PATH = EX_ROOT / "demo" / "diagnosis.json"
 FAKE_BUNDLE = "/* fake bundle */\nconsole.log('fake');\n"
+BOSS_SCRIPT = EX_ROOT / "boss" / "make_brief.py"
+DA_SCRIPT = EX_ROOT / "da" / "build_diagnosis.py"
+BUILDER_SCRIPT = EX_ROOT / "builder" / "build_site.py"
+CHECKER_SCRIPT = EX_ROOT / "builder" / "check_site.py"
+SAMPLE_RAW_DIR = EX_ROOT / "da" / "sample-raw"
 
 
 def temporary_directory() -> tempfile.TemporaryDirectory:
@@ -535,6 +545,261 @@ class BuildSiteTest(unittest.TestCase):
         self.assertFalse((out_dir / "app.bundle.js").exists(), "已有输出目录中不应创建不完整的 app.bundle.js")
         self.assertEqual(unrelated.read_bytes(), b"existing output file\n", "已有输出目录的既有文件应保持原样")
         self.assertEqual(EXAMPLE_PATH.read_bytes(), snapshot_content, "输入快照文件应保持原样")
+
+
+class BossBuilderPipelineTest(unittest.TestCase):
+    """Boss+Builder 管道集成测试：合法 brief 生成可通过 check_site 的站点，注入 brief 逻辑错误确认失败。"""
+
+    def setUp(self) -> None:
+        self.temp = temporary_directory()
+        self.addCleanup(self.temp.cleanup)
+        self.workdir = Path(self.temp.name)
+        self.brief_path = self.workdir / "brief.json"
+        self.diag_path = self.workdir / "diagnosis.json"
+        self.dist_path = self.workdir / "dist"
+        self.bundle_path = self.workdir / "fake.bundle.js"
+        self.bundle_path.write_text(FAKE_BUNDLE, encoding="utf-8")
+
+    def test_pipeline_with_legal_brief_passes_check_site_with_zero_defects(self) -> None:
+        """合法 brief 经 DA 归并样本后由 Builder 构建，check_site 断言站点零缺陷且退出码为 0。"""
+        # 1. 调用 boss/make_brief.py 生成合法任务书
+        boss_res = subprocess.run(
+            [sys.executable, str(BOSS_SCRIPT), "--out", str(self.brief_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(boss_res.returncode, 0, boss_res.stderr)
+        self.assertTrue(self.brief_path.is_file(), "任务书 brief.json 未生成")
+
+        # 校验生成的 brief 符合 brief.schema.json
+        brief_data = json.loads(self.brief_path.read_text(encoding="utf-8"))
+        self.assertEqual(make_brief.validate_brief(brief_data), [])
+
+        # 2. 调用 da/build_diagnosis.py 结合非空诊断样本生成诊断快照
+        da_res = subprocess.run(
+            [
+                sys.executable,
+                str(DA_SCRIPT),
+                "--brief",
+                str(self.brief_path),
+                "--raw",
+                str(SAMPLE_RAW_DIR),
+                "--out",
+                str(self.diag_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(da_res.returncode, 0, da_res.stderr)
+        self.assertTrue(self.diag_path.is_file(), "诊断快照 diagnosis.json 未生成")
+        self.assertGreater(self.diag_path.stat().st_size, 0, "诊断快照 diagnosis.json 为空")
+
+        # 3. 调用 builder/build_site.py 构建静态站点
+        builder_res = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER_SCRIPT),
+                "--data",
+                str(self.diag_path),
+                "--out",
+                str(self.dist_path),
+                "--bundle",
+                str(self.bundle_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(builder_res.returncode, 0, builder_res.stderr)
+        for relative in build_site.SITE_FILES:
+            self.assertTrue((self.dist_path / relative).is_file(), f"缺少站点产物 {relative}")
+
+        # 4. 调用 builder/check_site.py 进行站点验收
+        checker_res = subprocess.run(
+            [sys.executable, str(CHECKER_SCRIPT), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(checker_res.returncode, 0, checker_res.stderr)
+        self.assertIn("站点检查通过", checker_res.stdout)
+
+        # Python API 检查并断言站点零缺陷（failures 列表为空）
+        failures = check_site.check_site(self.dist_path)
+        self.assertEqual(failures, [], f"站点存在非预期缺陷：{failures}")
+
+    def test_pipeline_with_injected_brief_period_logic_error_fails_check_site(self) -> None:
+        """注入 brief 期次逆序逻辑错误后，管道中断且 check_site 确认失败并报告缺陷。"""
+        # 1. 生成初始 brief
+        boss_res = subprocess.run(
+            [sys.executable, str(BOSS_SCRIPT), "--out", str(self.brief_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(boss_res.returncode, 0, boss_res.stderr)
+
+        # 2. 注入 brief 逻辑错误：期次时间逆序（9月在前，1月在后）
+        brief_data = json.loads(self.brief_path.read_text(encoding="utf-8"))
+        brief_data["观察期间"]["期次"] = [
+            "2026-09实际",
+            "2026-01实际",
+            "2026-05H1参考",
+            "年末测算",
+            "年末目标",
+        ]
+        self.brief_path.write_text(json.dumps(brief_data, ensure_ascii=False), encoding="utf-8")
+
+        # 验证 make_brief.py --check 可检出该逻辑错误
+        check_brief_res = subprocess.run(
+            [sys.executable, str(BOSS_SCRIPT), "--check", str(self.brief_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(check_brief_res.returncode, 0)
+        self.assertIn("必须按时间升序排列", check_brief_res.stdout + check_brief_res.stderr)
+
+        # 3. DA 消费坏 brief 时报错中断，不生成诊断快照
+        da_res = subprocess.run(
+            [
+                sys.executable,
+                str(DA_SCRIPT),
+                "--brief",
+                str(self.brief_path),
+                "--raw",
+                str(SAMPLE_RAW_DIR),
+                "--out",
+                str(self.diag_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(da_res.returncode, 0)
+        self.assertFalse(self.diag_path.exists(), "逻辑错误的任务书不应产出诊断快照")
+
+        # 4. Builder 无法从缺失的快照构建站点
+        builder_res = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER_SCRIPT),
+                "--data",
+                str(self.diag_path),
+                "--out",
+                str(self.dist_path),
+                "--bundle",
+                str(self.bundle_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(builder_res.returncode, 0)
+        self.assertFalse(self.dist_path.exists(), "诊断快照缺失时不应生成 dist")
+
+        # 5. check_site 确认检查失败并报告具体错误
+        checker_res = subprocess.run(
+            [sys.executable, str(CHECKER_SCRIPT), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(checker_res.returncode, 0)
+        self.assertIn("站点检查失败", checker_res.stdout)
+
+        failures = check_site.check_site(self.dist_path)
+        self.assertGreater(len(failures), 0)
+        self.assertTrue(any("站点路径不存在" in f for f in failures))
+
+    def test_pipeline_with_injected_brief_schema_version_error_fails_check_site(self) -> None:
+        """注入 brief schema版本逻辑错误（如版本篡改为过时版本 3），Builder 与 check_site 确认失败。"""
+        # 生成初始 brief 并篡改 schema 版本为不兼容的旧版本
+        brief_data = make_brief.build_brief()
+        brief_data["schema版本"] = 3
+        make_brief.write_brief(brief_data, self.brief_path)
+
+        # DA 解析阶段直接拒绝旧 schema 版本的 brief
+        da_res = subprocess.run(
+            [
+                sys.executable,
+                str(DA_SCRIPT),
+                "--brief",
+                str(self.brief_path),
+                "--raw",
+                str(SAMPLE_RAW_DIR),
+                "--out",
+                str(self.diag_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(da_res.returncode, 0)
+        self.assertIn("schema版本", da_res.stderr)
+        self.assertFalse(self.diag_path.exists())
+
+        # 若将携带该版本错误的诊断快照交付 Builder，build_site 拒绝构建且不产出 dist
+        corrupted_diag = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+        corrupted_diag["scope"]["schema版本"] = 3
+        self.diag_path.write_text(json.dumps(corrupted_diag, ensure_ascii=False), encoding="utf-8")
+
+        builder_res = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER_SCRIPT),
+                "--data",
+                str(self.diag_path),
+                "--out",
+                str(self.dist_path),
+                "--bundle",
+                str(self.bundle_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(builder_res.returncode, 0)
+        self.assertIn("校验失败", builder_res.stderr)
+        self.assertFalse(self.dist_path.exists())
+
+        # check_site 确认站点不存在并报告失败
+        checker_res = subprocess.run(
+            [sys.executable, str(CHECKER_SCRIPT), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(checker_res.returncode, 0)
+        self.assertIn("站点检查失败", checker_res.stdout)
+
+    def test_pipeline_with_injected_defective_diagnosis_fails_check_site(self) -> None:
+        """站点若包含由坏 brief 产生的坏数据快照，check_site 检出缺陷并精准定位。"""
+        # 1. 正常构建出站点骨架
+        self.assertEqual(
+            build_site.main(
+                [
+                    "--data",
+                    str(EXAMPLE_PATH),
+                    "--out",
+                    str(self.dist_path),
+                    "--bundle",
+                    str(self.bundle_path),
+                ]
+            ),
+            build_site.EXIT_OK,
+        )
+
+        # 2. 注入坏 brief 导致的缺陷（如 scope.schema版本 被篡改为 3）并更新 build-report 摘要
+        dist_diag_path = self.dist_path / "data" / "diagnosis.json"
+        dist_data = json.loads(dist_diag_path.read_text(encoding="utf-8"))
+        dist_data["scope"]["schema版本"] = 3
+        dist_diag_path.write_text(json.dumps(dist_data, ensure_ascii=False), encoding="utf-8")
+        build_site.write_report(self.dist_path, dist_diag_path)
+
+        # 3. 运行 check_site 断言失败并定位到具体缺陷
+        failures = check_site.check_site(self.dist_path)
+        self.assertGreater(len(failures), 0)
+        self.assertTrue(any("未通过 validate.py" in f for f in failures), failures)
+
+        checker_res = subprocess.run(
+            [sys.executable, str(CHECKER_SCRIPT), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(checker_res.returncode, 0)
+        self.assertIn("未通过 validate.py", checker_res.stdout)
+        self.assertIn("站点检查失败", checker_res.stdout)
 
 
 if __name__ == "__main__":
