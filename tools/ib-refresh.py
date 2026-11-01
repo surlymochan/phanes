@@ -12,6 +12,27 @@ import sys
 import tempfile
 
 
+DEFAULT_CERT_REUSE_TTL = 1500
+
+
+def cert_reuse_ttl(value=None):
+    """Return the reuse window, allowing operators to force earlier renewal."""
+    raw = (os.environ.get("IB_CERT_REUSE_TTL", str(DEFAULT_CERT_REUSE_TTL))
+           if value is None else value)
+    try:
+        ttl = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("IB_CERT_REUSE_TTL must be an integer") from exc
+    if ttl < 0:
+        raise ValueError("IB_CERT_REUSE_TTL must be non-negative")
+    return ttl
+
+
+def need_renew(ttl, reuse_ttl=None):
+    """Renew only when the remaining TTL is below the configured reuse window."""
+    return ttl < cert_reuse_ttl(reuse_ttl)
+
+
 def _expiry(cert):
     result = subprocess.run(
         ["openssl", "x509", "-in", str(cert), "-noout", "-enddate"],
@@ -35,7 +56,7 @@ def _state(cert, now, threshold):
     remaining = (expiry - now).total_seconds()
     if remaining <= 0:
         return "expired"
-    if remaining <= threshold:
+    if need_renew(remaining, threshold):
         return "expiring"
     return "valid"
 
@@ -134,11 +155,13 @@ def main(argv=None):
     parser.add_argument("--fleet-config", required=True)
     parser.add_argument("--renew-command", required=True,
                         help="command receiving the host name and writing a certificate to stdout")
-    parser.add_argument("--threshold-seconds", type=int, default=86400)
+    parser.add_argument("--threshold-seconds", type=int,
+                        help="override IB_CERT_REUSE_TTL for this run")
     parser.add_argument("--output-fleet-config")
     parser.add_argument("--status-file")
     args = parser.parse_args(argv)
-    result = refresh(args.fleet_config, args.renew_command, args.threshold_seconds,
+    threshold = cert_reuse_ttl(args.threshold_seconds)
+    result = refresh(args.fleet_config, args.renew_command, threshold,
                      args.output_fleet_config)
     payload = json.dumps(result, sort_keys=True)
     print(payload)
