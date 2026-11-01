@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -44,6 +45,8 @@ EXIT_OK = 0
 EXIT_INVALID = 1
 EXIT_USAGE = 2
 EXIT_BUILD = 3
+DIAGNOSTIC_DIR_NAME = ".build-diagnostics"
+FAILURE_REPORT_NAME = "build-failure.json"
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -70,9 +73,25 @@ def bun_command(outfile: Path) -> list[str]:
     return ["bun", "build", "app.js", "--target=browser", f"--outfile={outfile}"]
 
 
+class BundleBuildError(RuntimeError):
+    """bundle 命令无法产出可用文件时的结构化错误。"""
+
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+
+
 def build_bundle(outfile: Path) -> None:
     """调用 bun 打包浏览器端脚本，产物直接写入 outfile。"""
-    subprocess.run(bun_command(outfile.resolve()), check=True, cwd=str(EX_ROOT))
+    command = bun_command(outfile.resolve())
+    try:
+        subprocess.run(command, check=True, cwd=str(EX_ROOT))
+    except FileNotFoundError as cause:
+        raise BundleBuildError(f"构建命令不存在：{command[0]}") from cause
+    except subprocess.CalledProcessError as cause:
+        raise BundleBuildError(f"构建命令返回非零退出码：{cause.returncode}", cause.returncode) from cause
+    if not outfile.is_file():
+        raise BundleBuildError(f"构建命令输出不是文件：{outfile}")
 
 
 def copy_static_files(out_dir: Path) -> None:
@@ -154,6 +173,31 @@ def write_report(
     return report
 
 
+def write_failure_report(
+    out_dir: Path,
+    stage: str,
+    command: list[str],
+    exit_code: int,
+    command_exit_code: int | None,
+    error: str,
+) -> Path:
+    """将失败信息写到 dist 外，避免诊断文件伪装成可用站点报告。"""
+    diagnostic_dir = out_dir.parent / DIAGNOSTIC_DIR_NAME
+    diagnostic_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "状态": "失败",
+        "阶段": stage,
+        "命令": command,
+        "退出码": exit_code,
+        "命令退出码": command_exit_code,
+        "错误": error,
+        "生成时间": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    report_path = diagnostic_dir / FAILURE_REPORT_NAME
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return report_path
+
+
 def build_site(
     data_path: Path,
     out_dir: Path,
@@ -172,15 +216,26 @@ def build_site(
         brief_path = candidate if candidate.is_file() else None
     elif not brief_path.is_file():
         raise FileNotFoundError(f"brief 文件不存在或不是有效文件：{brief_path}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "data").mkdir(parents=True, exist_ok=True)
-    copy_static_files(out_dir)
-    shutil.copyfile(data_path, out_dir / DATA_RELATIVE)
-    if bundle_path is None:
-        build_bundle(out_dir / BUNDLE_NAME)
-    else:
-        shutil.copyfile(bundle_path, out_dir / BUNDLE_NAME)
-    return write_report(out_dir, data_path, source_commit, brief_path)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.build-", dir=str(out_dir.parent)))
+    try:
+        (staging / "data").mkdir(parents=True, exist_ok=True)
+        copy_static_files(staging)
+        shutil.copyfile(data_path, staging / DATA_RELATIVE)
+        if bundle_path is None:
+            build_bundle(staging / BUNDLE_NAME)
+        else:
+            shutil.copyfile(bundle_path, staging / BUNDLE_NAME)
+        report = write_report(staging, data_path, source_commit, brief_path)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for relative in (*SITE_FILES, REPORT_NAME):
+            target = out_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(staging / relative, target)
+        return report
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -240,13 +295,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {message}", file=sys.stderr)
         return EXIT_INVALID
 
-    created = not out_dir.exists()
+    build_command = bun_command((out_dir / BUNDLE_NAME).resolve()) if bundle_path is None else []
     try:
         report = build_site(data_path, out_dir, bundle_path, source_commit, brief_path)
+    except BundleBuildError as cause:
+        diagnostic_path = write_failure_report(
+            out_dir,
+            "bundle",
+            build_command,
+            EXIT_BUILD,
+            cause.returncode,
+            str(cause),
+        )
+        print(f"构建失败：{cause}；诊断报告：{diagnostic_path}", file=sys.stderr)
+        return EXIT_BUILD
     except (OSError, subprocess.CalledProcessError) as cause:
         print(f"构建失败：{cause}", file=sys.stderr)
-        if created and out_dir.exists():
-            shutil.rmtree(out_dir, ignore_errors=True)
         return EXIT_BUILD
 
     print(f"已生成站点：{out_dir}")

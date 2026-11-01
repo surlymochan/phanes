@@ -466,11 +466,53 @@ class BuildSiteTest(unittest.TestCase):
             code = self.build()
         self.assertEqual(code, build_site.EXIT_OK)
         self.assertEqual(recorded["command"][:4], ["bun", "build", "app.js", "--target=browser"])
-        self.assertEqual(
-            recorded["command"][4],
-            f"--outfile={(self.out / 'app.bundle.js').resolve()}",
-        )
+        self.assertTrue(recorded["command"][4].startswith("--outfile="))
+        self.assertEqual(Path(recorded["command"][4][len("--outfile=") :]).name, "app.bundle.js")
         self.assertEqual((self.out / "app.bundle.js").read_text(encoding="utf-8"), FAKE_BUNDLE)
+
+    def test_bun_missing_command_writes_failure_diagnostics_and_preserves_dist(self) -> None:
+        """bun 不存在时保留旧站点，并在 dist 外写出完整失败诊断。"""
+        self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
+        old_bundle = (self.out / "app.bundle.js").read_bytes()
+        diagnostics = self.out.parent / build_site.DIAGNOSTIC_DIR_NAME
+        with unittest.mock.patch.object(
+            build_site, "build_bundle", side_effect=build_site.BundleBuildError("bun 不存在")
+        ):
+            code = self.build()
+        self.assertEqual(code, build_site.EXIT_BUILD)
+        self.assertEqual((self.out / "app.bundle.js").read_bytes(), old_bundle)
+        report = json.loads((diagnostics / build_site.FAILURE_REPORT_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(report["阶段"], "bundle")
+        self.assertEqual(report["退出码"], build_site.EXIT_BUILD)
+        self.assertTrue(report["命令"])
+
+    def test_bun_nonzero_writes_failure_diagnostics_and_preserves_dist(self) -> None:
+        """bun 返回非零时记录命令退出码，旧站点保持可用。"""
+        self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
+        old_report = (self.out / "build-report.json").read_bytes()
+        failure = build_site.BundleBuildError("bun 返回非零退出码", 17)
+        with unittest.mock.patch.object(build_site, "build_bundle", side_effect=failure):
+            code = self.build()
+        self.assertEqual(code, build_site.EXIT_BUILD)
+        self.assertEqual((self.out / "build-report.json").read_bytes(), old_report)
+        report = json.loads((self.out.parent / build_site.DIAGNOSTIC_DIR_NAME / build_site.FAILURE_REPORT_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(report["命令退出码"], 17)
+
+    def test_bun_directory_output_writes_failure_diagnostics_and_preserves_dist(self) -> None:
+        """bun 将输出写成目录时视为构建失败，不污染旧站点。"""
+        self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
+        old_bundle = (self.out / "app.bundle.js").read_bytes()
+
+        def write_directory(command: list[str], **kwargs: object) -> None:
+            outfile = Path(next(part for part in command if part.startswith("--outfile="))[len("--outfile=") :])
+            outfile.mkdir()
+
+        with unittest.mock.patch.object(build_site.subprocess, "run", side_effect=write_directory):
+            code = self.build()
+        self.assertEqual(code, build_site.EXIT_BUILD)
+        self.assertEqual((self.out / "app.bundle.js").read_bytes(), old_bundle)
+        report = json.loads((self.out.parent / build_site.DIAGNOSTIC_DIR_NAME / build_site.FAILURE_REPORT_NAME).read_text(encoding="utf-8"))
+        self.assertIn("输出不是文件", report["错误"])
 
     def test_command_line_exit_codes(self) -> None:
         """命令行入口：好数据退出码为 0，坏数据退出码非 0 且不生成 dist。"""
