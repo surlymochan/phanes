@@ -6067,6 +6067,12 @@ def bus_config(policy, repo=None):
         raise BusError("policy.bus.allowed_planners must be a list of GitHub logins")
     cfg["allowed_planners"] = [login.strip().casefold() for login in planners]
     cfg["poll_seconds"] = max(0.01, float(cfg.get("poll_seconds", 60)))
+    try:
+        cfg["claim_lease_seconds"] = float(cfg.get("claim_lease_seconds", 300))
+    except (TypeError, ValueError):
+        raise BusError("policy.bus.claim_lease_seconds must be a positive finite number")
+    if not math.isfinite(cfg["claim_lease_seconds"]) or cfg["claim_lease_seconds"] <= 0:
+        raise BusError("policy.bus.claim_lease_seconds must be a positive finite number")
     prefix = str(cfg.get("labels_prefix") or "openswarm").strip().rstrip(":")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", prefix):
         raise BusError("policy.bus.labels_prefix must be a simple label prefix")
@@ -6217,10 +6223,30 @@ def bus_claim(comment):
     return match.group(1) if match else None
 
 
-def bus_winning_claim(comments, allowed):
+def bus_claim_expiry(comment, lease_seconds=300):
+    created = to_epoch(comment.get("created_at"))
+    return (created if created is not None else NOW()) + float(lease_seconds)
+
+
+def bus_claim_state(comments, allowed, lease_seconds=300, now=None):
+    """Return the active claim, applying expiry and same-worker renewal in comment order."""
+    if now is None:
+        # The offline GitHub fixture pins its remote clock for deterministic comment order.
+        now = to_epoch(os.environ["OPENSWARM_FAKE_GH_NOW"]) if os.environ.get("OPENSWARM_FAKE_GH_NOW") else NOW()
     claims = [comment for comment in comments
               if str((comment.get("user") or {}).get("login") or "").casefold() in allowed and bus_claim(comment)]
-    return min(claims, key=lambda c: (to_epoch(c.get("created_at")) or 0, int(c.get("id") or 0))) if claims else None
+    claims.sort(key=lambda c: (to_epoch(c.get("created_at")) or 0, int(c.get("id") or 0)))
+    active = None
+    for claim in claims:
+        if active is None or now >= bus_claim_expiry(active, lease_seconds):
+            active = claim
+        elif bus_claim(claim).casefold() == bus_claim(active).casefold():
+            active = claim
+    return active
+
+
+def bus_winning_claim(comments, allowed, lease_seconds=300, now=None):
+    return bus_claim_state(comments, allowed, lease_seconds, now)
 
 
 def bus_parse_result(body):
@@ -6465,7 +6491,7 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
         if states["cancelled"] in names:
             final_status = "stopped"
             break
-        claim = bus_winning_claim(comments, cfg["allowed_executors"])
+        claim = bus_winning_claim(comments, cfg["allowed_executors"], cfg["claim_lease_seconds"])
         if claim:
             claim_login = str((claim.get("user") or {}).get("login") or "")
             claim_index = comments.index(claim)
@@ -6542,7 +6568,7 @@ def cmd_bus_status(args, policy):
         if not any(states[value] in names for value in BUS_STATES) and not str(issue.get("title") or "").startswith("[openswarm]"):
             continue
         comments = bus_comments(cfg["repo"], issue["number"])
-        claim = bus_winning_claim(comments, cfg["allowed_executors"])
+        claim = bus_winning_claim(comments, cfg["allowed_executors"], cfg["claim_lease_seconds"])
         created = to_epoch(issue.get("created_at"))
         state = next((value for value in BUS_STATES if states[value] in names), "open")
         rows.append({"number": issue.get("number"), "title": issue.get("title"), "url": issue.get("html_url"),
@@ -6612,7 +6638,7 @@ def bus_worker_run(issue, cfg, args, policy):
         return False
     labels = {state: bus_label(cfg, state) for state in BUS_STATES}
     names = issue_label_names(issue)
-    if labels["queued"] not in names or labels["cancelled"] in names:
+    if (labels["queued"] not in names and labels["claimed"] not in names) or labels["cancelled"] in names:
         return False
     executor_labels = [value for value in names if value.startswith("executor:")]
     if executor_labels and f"executor:{args.name}" not in executor_labels:
@@ -6623,9 +6649,13 @@ def bus_worker_run(issue, cfg, args, policy):
     comments = bus_comments(cfg["repo"], issue["number"])
     if not bus_worker_task_is_trusted(issue, task, comments, cfg["allowed_planners"]):
         return False
+    existing_claim = bus_winning_claim(comments, cfg["allowed_executors"], cfg["claim_lease_seconds"])
+    if existing_claim and bus_claim(existing_claim).casefold() != str(args.name).casefold():
+        return False
     bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels["claimed"]], remove=[labels["queued"]])
     own_claim = bus_comment(cfg["repo"], issue["number"], f"/claim {args.name}")
-    winner = bus_winning_claim(bus_comments(cfg["repo"], issue["number"]), cfg["allowed_executors"])
+    winner = bus_winning_claim(bus_comments(cfg["repo"], issue["number"]), cfg["allowed_executors"],
+                               cfg["claim_lease_seconds"])
     if not winner or str(winner.get("id")) != str(own_claim.get("id")):
         return False
     base_dir = os.path.join(DATA, "bus-worker", task["run_id"])
@@ -6665,6 +6695,7 @@ def bus_worker_run(issue, cfg, args, policy):
             command += ["--verify", effective_verify]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
+        next_renewal = NOW() + max(1.0, cfg["claim_lease_seconds"] / 2)
         while process.poll() is None:
             current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
             if labels["cancelled"] in issue_label_names(current):
@@ -6672,6 +6703,9 @@ def bus_worker_run(issue, cfg, args, policy):
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
                 process.wait(timeout=60)
                 return False
+            if NOW() >= next_renewal:
+                bus_comment(cfg["repo"], issue["number"], f"/claim {args.name}")
+                next_renewal = NOW() + max(1.0, cfg["claim_lease_seconds"] / 2)
             time.sleep(min(cfg["poll_seconds"], 2))
         process.communicate()
         if labels["cancelled"] in issue_label_names(gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")):

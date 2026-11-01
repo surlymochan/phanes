@@ -283,6 +283,7 @@
     "allowed_executors": [],
     "allowed_planners": [],
     "poll_seconds": 60,
+    "claim_lease_seconds": 300,
     "labels_prefix": "openswarm",
     "open_pr": false
   },
