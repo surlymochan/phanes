@@ -296,12 +296,12 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
         proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "openswarm"), "batch",
                                "--repo", "project", "--cards", str(self.cards), "--hosts", "b1,b2", "--detach",
-                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=10,
+                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=30,
                               env={**os.environ, "OPENSWARM_HOME": str(self.data)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         reply = json.loads(proc.stdout)
         path = self.data / "batches" / reply["id"] / "summary.json"
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 30
         summary = None
         while time.monotonic() < deadline:
             try:
@@ -309,8 +309,16 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
             except (OSError, json.JSONDecodeError):
                 # detached worker 可能正在原子替换 summary 文件。
                 summary = None
-            if summary and summary["state"] in ("finished", "failed"):
+            if summary and summary["state"] == "failed":
                 break
+            if summary and summary["state"] == "finished":
+                card = summary["cards"][0]
+                if card.get("branch") and card.get("commit"):
+                    try:
+                        if self.git(self.repo, "rev-parse", card["branch"]) == card["commit"]:
+                            break
+                    except subprocess.CalledProcessError:
+                        pass
             time.sleep(0.05)
         else:
             self.fail("detached batch did not finish")

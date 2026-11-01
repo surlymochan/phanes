@@ -416,9 +416,10 @@ class LaneTests(unittest.TestCase):
                           description="recorded executor to exit after TTL recovery")
             self.assertIn(executor.returncode, (-signal.SIGTERM, -signal.SIGKILL))
             executor.wait()
-            self.wait_for(lambda: not self.fleet_reservations(), timeout=15,
-                          description="resident lane to recover a dead runner")
-            status = self.run_state(run_id)
+            status = self.wait_for(
+                lambda: (s if (s := self.run_state(run_id)).get("fleet_recovered_at")
+                         and not self.fleet_reservations() else None),
+                timeout=15, description="resident lane to recover a dead runner")
             self.assertIn("fleet_recovered_at", status)
             self.assertIsNone(status.get("fleet_reservation_error"))
         finally:
