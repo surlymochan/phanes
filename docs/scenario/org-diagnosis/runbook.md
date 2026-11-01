@@ -75,6 +75,8 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 - 站点自检失败时流水线在第 4 步中断，**不会**执行审查步骤，也不会生成 `<workdir>/review.md`。
 - 审查不通过时 `<workdir>/review.md` **仍然写出**（内含 `FAIL` 行），`run_e2e.py` 返回非 0，并且不再打印成功路径才有的预览命令（`run_e2e.py:70-73`）。
 
+DA、Builder、Checker（站点自检）或 Review（审查）失败时，`run_e2e.py` 会保留截至失败步骤已经生成的上游产物，不会回滚或清理工作目录；失败排查应先查看 `<workdir>/timings.json`，再结合失败步骤对应的终端日志，Review 失败另查看仍会写出的 `<workdir>/review.md`（`openbot/examples/org-health-local/run_e2e.py:141-157`）。
+
 ### 步骤 1：Boss 任务书生成
 - **命令**：`python3 boss/make_brief.py --out <workdir>/brief.json`
 - **产物路径**：`<workdir>/brief.json`
