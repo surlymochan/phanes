@@ -6,6 +6,7 @@
 import copy
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -163,8 +164,17 @@ elif role == 'reviewer':
         source = source.replace('RAW_OUTPUT', repr(raw_output))
         path.write_text(source, encoding='utf-8')
 
-    def command(self):
-        return [sys.executable, str(RUNNER), '--workdir', str(self.workdir), '--raw', str(self.raw),
+    def write_signal_stub(self, path, signal_name):
+        """写一个自发被信号终止的桩脚本：只用 Python，不依赖 shell。"""
+        path.write_text(
+            'import os, signal\n'
+            f'os.kill(os.getpid(), signal.{signal_name})\n',
+            encoding='utf-8',
+        )
+
+    def command(self, workdir=None):
+        """编排命令；workdir 可覆盖，默认用用例自己的工作目录。"""
+        return [sys.executable, str(RUNNER), '--workdir', str(workdir or self.workdir), '--raw', str(self.raw),
                 '--bundle', str(self.bundle), '--boss', str(self.scripts[0]), '--da', str(self.scripts[1]),
                 '--builder', str(self.scripts[2]), '--checker', str(self.scripts[3])]
 
@@ -291,6 +301,39 @@ time.sleep(30)
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
         self.assertEqual(timings[-1]['exit_code'], -9)
         self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
+
+    def test_role_script_terminated_by_signal_is_recorded_in_timings(self):
+        """角色脚本被信号终止时：失败步骤仍写入 timings.json 且退出码非零，stderr 点名角色。
+
+        桩脚本用 Python 自发被信号终止（不依赖 shell），退出状态稳定可复现。
+        """
+        for signal_name in ('SIGKILL', 'SIGTERM'):
+            with self.subTest(signal=signal_name):
+                workdir = self.root / f'out-{signal_name}'
+                for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+                    self.write_stub(path, role)
+                self.write_signal_stub(self.scripts[1], signal_name)
+
+                result = subprocess.run(self.command(workdir), capture_output=True, text=True)
+
+                # 整体失败：stderr 点名失败角色与信号。
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('步骤失败: DA', result.stderr)
+                self.assertIn(signal_name, result.stderr)
+                # 失败步骤仍写入 timings.json：退出码非零，并记下稳定的信号名。
+                timings = json.loads((workdir / 'timings.json').read_text(encoding='utf-8'))
+                self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
+                self.assertNotEqual(timings[-1]['exit_code'], 0)
+                self.assertEqual(timings[-1]['exit_code'], -int(signal.Signals[signal_name]))
+                self.assertIn(signal_name, timings[-1]['reason'])
+                self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
+                # 失败归属到稳定角色名，失败步骤之后的角色不再执行。
+                status = json.loads((workdir / STATUS_FILE).read_text(encoding='utf-8'))
+                self.assertEqual(status['failed_step'], 'da')
+                self.assertIn('步骤失败: DA', status['error'])
+                called = [call[0] for call in self.calls()]
+                self.assertNotIn('builder', called)
+                self.assertNotIn('checker', called)
 
     def test_failed_step_is_named_when_timings_cannot_be_written(self):
         """步骤失败且耗时记录写不出来时仍非零退出，并在输出里点名失败步骤。"""
