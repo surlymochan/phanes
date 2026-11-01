@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 
-from run_e2e import REVIEW_REPORT, STATUS_FILE, STEP_ERROR_DIR, parse_args, source_commit  # noqa: E402  (需要先让示例目录可被导入)
+from run_e2e import (REVIEW_REPORT, REVIEW_RESULTS, STATUS_FILE, STEP_ERROR_DIR, parse_args,  # noqa: E402  (需要先让示例目录可被导入)
+                     source_commit)
 
 RUNNER = ROOT / 'run_e2e.py'
 REVIEWER = ROOT / 'review' / 'cross_check.py'
@@ -642,7 +643,8 @@ time.sleep(30)
                         '--source-commit', SOURCE_COMMIT, '--bundle', str(self.bundle)],
             'checker': [str(self.workdir / 'dist')],
             'reviewer': ['--brief', str(self.workdir / 'brief.json'), '--data',
-                         str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')],
+                         str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist'),
+                         '--json-out', str(self.workdir / REVIEW_RESULTS)],
         }
         for role, args in calls:
             self.assertEqual(args, expected[role])
@@ -677,7 +679,8 @@ time.sleep(30)
         self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
         self.assertEqual(calls['reviewer'], ['--brief', str(self.workdir / 'brief.json'),
                                              '--data', str(self.workdir / 'diagnosis.json'),
-                                             '--dist', str(self.workdir / 'dist')])
+                                             '--dist', str(self.workdir / 'dist'),
+                                             '--json-out', str(self.workdir / REVIEW_RESULTS)])
         # 关键上游 JSON 存在且可解析
         self.assertTrue((self.workdir / 'brief.json').is_file())
         brief = json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
@@ -860,7 +863,8 @@ time.sleep(30)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker', 'reviewer'])
         review_call = self.calls()[-1][1]
         self.assertEqual(review_call, ['--brief', str(self.workdir / 'brief.json'), '--data',
-                                       str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')])
+                                       str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist'),
+                                       '--json-out', str(self.workdir / REVIEW_RESULTS)])
         self.assertTrue((self.workdir / 'review.md').is_file())
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
@@ -1251,6 +1255,119 @@ class RunE2EReviewContractTest(unittest.TestCase):
         content = self.record()
         self.assertIn('PASS 期间一致', content)
         self.assertIn('共 5 项检查：5 项通过，0 项失败', content)
+
+
+class RunE2EReviewSummaryTest(unittest.TestCase):
+    """审查结论汇总：发现数、各严重级计数与是否阻断写进结果 JSON 的 review 字段。
+
+    审查角色用假 cross_check 输出：桩脚本按 --json-out 写出结论 JSON 自身返回 0，
+    其余角色是临时桩，不依赖真实实现。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.workdir = self.root / 'out'
+        self.raw = self.root / 'raw'
+        self.raw.mkdir()
+        self.bundle = self.root / 'fake.bundle.js'
+        self.bundle.write_text('fake', encoding='utf-8')
+        self.scripts = {role: self.root / f'{role}.py'
+                        for role in ('boss', 'da', 'builder', 'checker', 'reviewer')}
+
+    def write_role_stubs(self):
+        """写出四个上游角色的最小桩：产物齐全，站点自检恒成功。"""
+        for role in ('boss', 'da'):
+            self.scripts[role].write_text(
+                'import pathlib, sys\n'
+                "pathlib.Path(sys.argv[sys.argv.index('--out') + 1]).write_text('{}', encoding='utf-8')\n",
+                encoding='utf-8')
+        self.scripts['builder'].write_text(
+            'import pathlib, sys\n'
+            "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+            'out.mkdir(parents=True, exist_ok=True)\n'
+            "(out / 'index.html').write_text('ok', encoding='utf-8')\n",
+            encoding='utf-8')
+        self.scripts['checker'].write_text('import sys\nsys.exit(0)\n', encoding='utf-8')
+
+    def write_fake_reviewer(self, payload):
+        """写一个假 cross_check：按 --json-out 写出结论 JSON，自身返回 0。"""
+        body = repr(json.dumps(payload, ensure_ascii=False))
+        self.scripts['reviewer'].write_text(
+            'import json, pathlib, sys\n'
+            'args = sys.argv[1:]\n'
+            f'payload = json.loads({body})\n'
+            "out = pathlib.Path(args[args.index('--json-out') + 1])\n"
+            'out.parent.mkdir(parents=True, exist_ok=True)\n'
+            "out.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')\n"
+            "print('# 组织诊断交叉审查报告', flush=True)\n",
+            encoding='utf-8')
+
+    def command(self):
+        return [sys.executable, str(RUNNER), '--workdir', str(self.workdir), '--raw', str(self.raw),
+                '--bundle', str(self.bundle), '--boss', str(self.scripts['boss']), '--da', str(self.scripts['da']),
+                '--builder', str(self.scripts['builder']), '--checker', str(self.scripts['checker']),
+                '--review', '--reviewer', str(self.scripts['reviewer'])]
+
+    def status(self):
+        """返回写出的步骤状态文件内容。"""
+        path = self.workdir / STATUS_FILE
+        self.assertTrue(path.is_file(), '步骤状态文件未写出')
+        return json.loads(path.read_text(encoding='utf-8'))
+
+    def test_review_summary_without_findings_passes_and_is_not_blocking(self):
+        """审查无发现时整体通过，review 字段记录 0 项发现且 blocking 为 false。"""
+        self.write_role_stubs()
+        self.write_fake_reviewer({
+            'ok': True,
+            'findings': [],
+            'checks': [{'name': '期间一致', 'ok': True, 'detail': '一致'}],
+            'summary': {'total': 1, 'passed': 1, 'failed': 0},
+        })
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.workdir / REVIEW_RESULTS).is_file(), '审查结论 JSON 未写出')
+        review = self.status()['review']
+        self.assertTrue(review['requested'])
+        self.assertTrue(review['called'])
+        self.assertTrue(review['summarized'])
+        self.assertEqual(review['findings'], 0)
+        self.assertEqual(review['by_severity'], {})
+        self.assertFalse(review['blocking'])
+        self.assertEqual(self.status()['status'], 'ok')
+
+    def test_review_summary_with_blocking_finding_returns_nonzero(self):
+        """审查结论含阻断级发现时整体非零退出，stderr 说明原因且 review.blocking 为 true。"""
+        self.write_role_stubs()
+        self.write_fake_reviewer({
+            'ok': False,
+            'findings': [{
+                'severity': 'error',
+                'path': '/观察期间',
+                'message': '任务书 `观察期间.截止期次`=2026-12 与 `scope.观察月份`=2026-09 不一致',
+            }],
+            'checks': [{'name': '期间一致', 'ok': False, 'detail': '不一致'}],
+            'summary': {'total': 1, 'passed': 0, 'failed': 1},
+        })
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        # 阻断级发现即使审查脚本自身返回 0，整体也必须非零退出。
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('审查发现阻断级问题', result.stderr)
+        self.assertIn('/观察期间', result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        status = self.status()
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'review')
+        review = status['review']
+        self.assertTrue(review['blocking'])
+        self.assertEqual(review['findings'], 1)
+        self.assertEqual(review['blocking_findings'], 1)
+        self.assertEqual(review['by_severity'], {'error': 1})
 
 
 class RunE2ERoleScriptTest(unittest.TestCase):

@@ -4,6 +4,8 @@
 失败时保留上游产物，并写出 timings.json 与 status.json 供核对：
 status.json 记录每步状态、失败步骤及其错误输出；
 步骤失败时另在 step-errors/ 写出该步的命令、退出码与 stdout/stderr 尾部。
+审查步骤的结论汇总写入 status.json 的 review 字段：发现数、各严重级计数与是否阻断；
+存在阻断级发现时整体非零退出。
 """
 import argparse
 import json
@@ -18,6 +20,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 # 交叉审查产物路径：审查失败时同样写出，便于核对失败原因。
 REVIEW_REPORT = 'review.md'
+# 交叉审查的 JSON 结果文件：审查结论的结构化来源，供运行器汇总发现数与严重级。
+REVIEW_RESULTS = 'review-results.json'
+# 审查结论的严重级：error 阻断流水线，其余级别只记录不阻断。
+BLOCKING_SEVERITIES = frozenset({'error'})
+# 审查结论缺少严重级时按阻断级处理：结论不明时不放过。
+DEFAULT_SEVERITY = 'error'
+# stderr 里最多列出的阻断级发现条数：只给要点，明细留在审查报告与结果文件里。
+BLOCKING_DETAIL_LIMIT = 3
+# 单条阻断级发现说明的长度上限：避免长文本淹没提示。
+BLOCKING_DETAIL_LENGTH = 120
 # 步骤状态文件：写出每步状态、失败步骤与错误，不必翻日志也能定位失败原因。
 STATUS_FILE = 'status.json'
 # 失败步骤的原始输出快照目录：便于诊断角色输出损坏 JSON 时仍能核对现场。
@@ -64,7 +76,8 @@ def parse_args(argv=None):
     parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py',
                         help='站点自检脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py',
-                        help='审查脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
+                        help='审查脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径；'
+                             '脚本需支持 --json-out 写出 JSON 结论供运行器汇总）')
     parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
     parser.add_argument(
         '--timeout',
@@ -157,6 +170,96 @@ def status_steps(timings):
         'exit_code': item['exit_code'],
         'duration_seconds': item['duration_seconds'],
     } for item in timings]
+
+
+def finding_severity(finding):
+    """返回一条审查发现的严重级；缺少或非法时按阻断级处理。"""
+    if isinstance(finding, dict) and isinstance(finding.get('severity'), str):
+        severity = finding['severity'].strip()
+        if severity:
+            return severity
+    return DEFAULT_SEVERITY
+
+
+def finding_detail(finding):
+    """返回一条审查发现的简短说明：路径与消息。"""
+    if not isinstance(finding, dict):
+        return str(finding)
+    path = finding.get('path')
+    message = finding.get('message')
+    parts = [str(part) for part in (path, message) if part]
+    text = '：'.join(parts) if parts else str(finding)
+    if len(text) > BLOCKING_DETAIL_LENGTH:
+        text = text[:BLOCKING_DETAIL_LENGTH] + '…'
+    return text
+
+
+def summarize_review(path):
+    """汇总交叉审查结论：发现数、各严重级计数与是否阻断。
+
+    结果文件不可读或结构不符时返回 None：审查步骤本身的成败已由退出码判定，
+    汇总读不出来只说明结论无法结构化，不改写步骤结果。
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    findings = data.get('findings')
+    if not isinstance(findings, list):
+        return None
+    by_severity: dict[str, int] = {}
+    blocking_findings = 0
+    details = []
+    for finding in findings:
+        severity = finding_severity(finding)
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        if severity in BLOCKING_SEVERITIES:
+            blocking_findings += 1
+            if len(details) < BLOCKING_DETAIL_LIMIT:
+                details.append(finding_detail(finding))
+    return {
+        'findings': len(findings),
+        'blocking_findings': blocking_findings,
+        'by_severity': {key: by_severity[key] for key in sorted(by_severity)},
+        'blocking': blocking_findings > 0,
+        'details': details,
+    }
+
+
+def describe_blocking(summary):
+    """拼出阻断级发现的说明文本：数量、严重级计数与前几条明细。"""
+    counts = '、'.join(f'{key} {value}' for key, value in summary['by_severity'].items())
+    text = (f'审查发现阻断级问题：{summary["blocking_findings"]} 项'
+            f'（共 {summary["findings"]} 项发现')
+    if counts:
+        text += f'；严重级计数：{counts}'
+    text += '）'
+    if summary['details']:
+        text += '：' + '；'.join(summary['details'])
+    return text
+
+
+def review_status(requested, called, results_path, summary):
+    """整理审查结论字段：请求与调用状态、发现数、各严重级计数与是否阻断。"""
+    payload = {
+        'requested': bool(requested),
+        'called': bool(called),
+        'results_path': str(results_path) if requested else None,
+        # 汇总是否真的读到了：读不到时下面几项只是缺省值，不代表没有发现。
+        'summarized': summary is not None,
+        'findings': None,
+        'blocking_findings': 0,
+        'by_severity': {},
+        'blocking': False,
+    }
+    if summary is not None:
+        payload['findings'] = summary['findings']
+        payload['blocking_findings'] = summary['blocking_findings']
+        payload['by_severity'] = summary['by_severity']
+        payload['blocking'] = summary['blocking']
+    return payload
 
 
 def resolve_script(script):
@@ -393,6 +496,8 @@ def main(argv=None):
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
     dist = workdir / 'dist'
+    # 审查结论的结构化结果文件：审查脚本按 --json-out 写出，运行器据此汇总。
+    review_results = workdir / REVIEW_RESULTS
     # 角色脚本与原始数据路径按示例目录解析，避免依赖调用时的 cwd；
     # 绝对路径（含默认值）原样使用；
     # boss/da/builder/checker/reviewer 共用这条解析规则；
@@ -417,6 +522,7 @@ def main(argv=None):
     step_error_files = []
     problems = []
     reviewer_called = False
+    review_summary = None
     try:
         for name, command in commands:
             error_path = workdir / STEP_ERROR_DIR / f'{STEP_ROLES.get(name, name)}.json'
@@ -429,7 +535,13 @@ def main(argv=None):
                 status = 1
                 break
         if status == 0 and args.review:
-            review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
+            review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist),
+                      '--json-out', str(review_results)]
+            # 上一次运行留下的结论不能当成本次的：先清掉结果文件。
+            try:
+                review_results.unlink(missing_ok=True)
+            except OSError:
+                pass
             report = open_report(report_path)
             if report is None:
                 status = 1
@@ -452,6 +564,18 @@ def main(argv=None):
                         print('review 角色失败：审查报告已保留，请检查该报告和 timings.json',
                               file=sys.stderr, flush=True)
                         print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
+                # 审查结论汇总：发现数、各严重级计数与是否阻断写进结果 JSON。
+                review_summary = summarize_review(review_results)
+                if review_summary is not None and review_summary['blocking']:
+                    message = describe_blocking(review_summary)
+                    print(message, file=sys.stderr, flush=True)
+                    print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
+                    print(f'审查结果: {review_results}', file=sys.stderr, flush=True)
+                    if status == 0:
+                        # 审查角色自身返回 0 但结论里有阻断级发现：同样判失败，不误报成功。
+                        status = 1
+                        failed.append('审查')
+                        step_errors.append(message)
     finally:
         if failed:
             # 每步耗时可能缺失（耗时记录写不出来），先点名失败步骤，
@@ -474,6 +598,8 @@ def main(argv=None):
             'steps': status_steps(timings),
             'review_requested': bool(args.review),
             'reviewer_called': reviewer_called,
+            # 审查结论汇总：发现数、各严重级计数与是否阻断。
+            'review': review_status(bool(args.review), reviewer_called, review_results, review_summary),
             'problems': problems,
             'timings': timings,
         }
