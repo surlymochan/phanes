@@ -6667,11 +6667,13 @@ def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, stat
         raise SystemExit(0 if previous.get("status") == "done" else 1)
     now = NOW()
     elapsed = round(now - started, 3)
-    verify = None
+    result = bus_sanitize(result) if result else None
+    # A worker reports its own verify evidence with the result comment; keep it until the
+    # planner verifies the pushed commit again below.
+    verify = result.get("verify") if result and isinstance(result.get("verify"), dict) else None
     branch = commit = None
     diffstat = ""
     verify_note = None
-    result = bus_sanitize(result) if result else None
     task = bus_extract_task((issue or {}).get("body", "")) or {}
     error = None
     if result and result.get("branch") and result.get("commit"):
@@ -6694,7 +6696,8 @@ def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, stat
         "id": rid, "status": status, "error_class": (bus_error_class(error) if error else result_error_class), "title": title,
         "backend": "github-issue", "model": None, "effort": None, "usage": None,
         "seconds": elapsed, "verify": verify, "verify_note": verify_note,
-        "result": {key: result.get(key) for key in ("status", "summary", "files_changed", "tests", "followups")}
+        "result": {key: result.get(key) for key in ("status", "summary", "files_changed", "tests", "followups", "verify")
+                   if key in result and result.get(key) is not None}
                   if result else None,
         "branch": branch, "commit": commit, "diffstat": diffstat, "patch": None,
         "worktree": None, "merge_hint": f"git merge --no-ff {branch}" if branch else None,
@@ -6988,6 +6991,62 @@ def bus_worker_repos(args, policy):
     return set(values)
 
 
+def bus_sync_terminal_status(rdir, rid, status, error_class=None):
+    """Align the local run result and ledger row with the worker's terminal status.
+
+    The worker host verify decides the terminal state, so the local artefacts must not
+    keep the executor's optimistic status next to a failed result comment.
+    """
+    result_path = os.path.join(rdir, "result.json")
+    if os.path.exists(result_path):
+        local = jload(result_path, {}) or {}
+        changed = False
+        if local.get("status") != status:
+            local["status"] = status
+            changed = True
+        if error_class and error_class != "none" and not local.get("error_class"):
+            local["error_class"] = error_class
+            changed = True
+        if changed:
+            jsave(result_path, local)
+    if not os.path.exists(LEDGER):
+        return
+    os.makedirs(DATA, exist_ok=True)
+    lock_path = os.path.join(DATA, "budget.lock")
+    with open(lock_path, "a") as lock, open(LEDGER + ".lock", "a") as ledger_lock:
+        for held in sorted((lock, ledger_lock), key=lambda item: item.name):
+            fcntl.flock(held, fcntl.LOCK_EX)
+        with open(LEDGER, encoding="utf-8") as stream:
+            lines = stream.readlines()
+        updated = []
+        ledger_changed = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                updated.append(line)
+                continue
+            try:
+                row = json.loads(stripped)
+            except ValueError:
+                updated.append(line)
+                continue
+            if isinstance(row, dict) and row.get("id") == rid:
+                if row.get("status") != status:
+                    row["status"] = status
+                    ledger_changed = True
+                if error_class and error_class != "none" and not row.get("error_class"):
+                    row["error_class"] = error_class
+                    ledger_changed = True
+                line = json.dumps(row, ensure_ascii=False) + "\n"
+            updated.append(line)
+        if not ledger_changed:
+            return
+        temporary = f"{LEDGER}.tmp{os.getpid()}"
+        with open(temporary, "w", encoding="utf-8") as stream:
+            stream.writelines(updated)
+        os.replace(temporary, LEDGER)
+
+
 def bus_worker_run(issue, cfg, args, policy):
     task, task_card = bus_issue_task(issue)
     if not task:
@@ -7110,9 +7169,21 @@ def bus_worker_run(issue, cfg, args, policy):
         local = jload(os.path.join(rdir, "result.json"), {}) or {}
         nested = local.get("result") or {}
         branch, commit = f"openswarm/{task['run_id']}", local.get("commit")
-        report_status = nested.get("status") or local.get("status") or "failed"
-        summary = nested.get("summary") or local.get("error") or f"worker run ended with {report_status}"
+        verify = local.get("verify") if isinstance(local.get("verify"), dict) else None
         error_class = nested.get("error_class") or local.get("error_class")
+        if verify is not None and verify.get("rc") != 0:
+            # Host verification is the authority for the terminal state: a non-zero exit
+            # fails the run, while the command, exit code, and output stay in the report.
+            report_status = "failed"
+            error_class = "verify_failed"
+        elif verify is not None:
+            report_status = "done" if (local.get("status") == "done" or nested.get("status") == "done") \
+                else (nested.get("status") or local.get("status") or "failed")
+        else:
+            report_status = nested.get("status") or local.get("status") or "failed"
+        summary = nested.get("summary") or local.get("error") or f"worker run ended with {report_status}"
+        if verify is not None and verify.get("rc") != 0 and "verify" not in summary.lower():
+            summary += f"; verify failed (exit {verify.get('rc')})"
         pr_url = None
         if labels["cancelled"] in issue_label_names(gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")):
             return False
@@ -7134,12 +7205,30 @@ def bus_worker_run(issue, cfg, args, policy):
         followups = nested.get("followups") or []
         if ignored_verify:
             followups = [*followups, "Ignored task verify because it is not in the worker verify allowlist or worker --verify."]
-        report = bus_sanitize({"status": report_status if report_status in ("done", "partial", "failed") else "failed",
-                  "run_id": task["run_id"],
-                  "summary": summary, "files_changed": nested.get("files_changed") or [],
-                  "tests": nested.get("tests") or "not run: executor did not return a test report",
-                  "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url,
-                  "error_class": error_class})
+        tests = nested.get("tests") or ""
+        if verify is not None:
+            verify_report = (f"verify command: {verify.get('cmd')}\nexit code: {verify.get('rc')}\n"
+                             f"output:\n{(verify.get('tail') or '').strip()}").strip()
+            tests = f"{tests}\n{verify_report}" if tests else verify_report
+        if not tests:
+            tests = "not run: executor did not return a test report"
+        if report_status == "done":
+            # The bus contract pairs a done result with the "none" error class; a report that
+            # follows RESULT_SCHEMA carries no error_class at all.
+            error_class = "none"
+        elif error_class in (None, "", "none"):
+            # A failure without a machine-readable class is rejected by the bus contract.
+            error_class = "executor_failed"
+        report_data = {"status": report_status if report_status in ("done", "partial", "failed") else "failed",
+                       "run_id": task["run_id"],
+                       "summary": summary, "files_changed": nested.get("files_changed") or [],
+                       "tests": tests,
+                       "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url,
+                       "error_class": error_class}
+        if verify is not None:
+            report_data["verify"] = verify
+        report = bus_sanitize(report_data)
+        bus_sync_terminal_status(rdir, task["run_id"], report["status"], report["error_class"])
         terminal = "failed" if report["status"] == "failed" else "done"
         body = "```openswarm-result\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```"
         bus_comment(cfg["repo"], issue["number"], body)
