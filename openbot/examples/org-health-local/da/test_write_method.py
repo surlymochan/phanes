@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -8,8 +9,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "write_method.py"
+BUILD_SCRIPT = HERE / "build_diagnosis.py"
+SCHEMA_PATH = HERE.parent / "schema" / "diagnosis.schema.json"
+SAMPLE_RAW = HERE / "sample-raw"
 sys.path.insert(0, str(HERE))
 import write_method
+
+sys.path.insert(0, str(HERE.parent))
+import validate
 
 BRIEF = {
     "目标": "检查趋势",
@@ -24,6 +31,21 @@ DIAGNOSIS = {
         }
     ],
     "conclusion": {"判断": "需补证据", "趋势": {"一月": 8, "二月": None}},
+}
+
+PIPELINE_BRIEF = {
+    "目标": ["复核技术人力成本趋势"],
+    "观察期间": {
+        "起始期次": "2026-01",
+        "参考期次": "2026-05",
+        "截止期次": "2026-09",
+        "数据截止": "2026-09-30",
+    },
+    "口径": {"成本": "按月汇总"},
+    "必答问题": ["整体技术人力成本如何变化？"],
+    "数据需求": ["四张 CSV"],
+    "禁止事项": ["禁止编造数字"],
+    "schema版本": 4,
 }
 
 
@@ -60,6 +82,63 @@ def run_write_method(brief, diagnosis, raw_files=None, raw_dir=None):
 
 
 class WriteMethodTest(unittest.TestCase):
+    def run_pipeline(self, mutate_raw):
+        """用真实非空 CSV 先构建诊断，再写方法说明。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            raw_dir = folder / "raw"
+            shutil.copytree(SAMPLE_RAW, raw_dir)
+            mutate_raw(raw_dir)
+            brief_path = folder / "brief.json"
+            diagnosis_path = folder / "diagnosis.json"
+            method_path = folder / "method.md"
+            brief_path.write_text(json.dumps(PIPELINE_BRIEF, ensure_ascii=False), encoding="utf-8")
+
+            built = subprocess.run(
+                [sys.executable, str(BUILD_SCRIPT), "--brief", str(brief_path), "--raw", str(raw_dir), "--out", str(diagnosis_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if built.returncode:
+                return built, None
+            diagnosis = json.loads(diagnosis_path.read_text(encoding="utf-8"))
+            schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+            self.assertEqual(validate.validate_data(diagnosis, schema), [])
+            written = subprocess.run(
+                [sys.executable, str(SCRIPT), "--brief", str(brief_path), "--data", str(diagnosis_path), "--raw", str(raw_dir), "--out", str(method_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return written, method_path.read_text(encoding="utf-8") if method_path.exists() else None
+
+    def test_nonempty_dirty_pipeline_recovers_missing_period(self):
+        """非空 CSV 缺一期时保留 null，并仍能产出可校验诊断与方法说明。"""
+        def remove_period(raw_dir):
+            revenue = raw_dir / "revenue.csv"
+            lines = revenue.read_text(encoding="utf-8").splitlines()
+            revenue.write_text("\n".join(line for line in lines if not line.startswith("2026-06,")) + "\n", encoding="utf-8")
+
+        result, content = self.run_pipeline(remove_period)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("已知缺口", content)
+        self.assertIn("`revenue.csv`：8 行数据", content)
+        self.assertIn("数据来源", content)
+
+    def test_nonempty_dirty_pipeline_hard_fails_on_negative_cost(self):
+        """非空 CSV 出现负数成本时非零退出，并点名文件与列。"""
+        def make_negative(raw_dir):
+            cost = raw_dir / "cost.csv"
+            lines = cost.read_text(encoding="utf-8").splitlines()
+            cost.write_text("\n".join(line.replace("2026-01,10.4", "2026-01,-10.4") for line in lines) + "\n", encoding="utf-8")
+
+        result, content = self.run_pipeline(make_negative)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cost.csv", result.stderr)
+        self.assertIn("整体技术人力成本万元", result.stderr)
+        self.assertIsNone(content)
+
     def test_preserves_missing_metric_period_as_gap(self):
         diagnosis = {
             "metrics": [

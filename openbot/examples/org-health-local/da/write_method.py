@@ -84,6 +84,37 @@ def periods_for(value: Any) -> List[str]:
     return [str(key) for key, child in value.items() if child is None]
 
 
+def period_labels(value: Any) -> List[str]:
+    """Collect textual period labels from the brief, including nested objects."""
+    if isinstance(value, dict):
+        labels: List[str] = []
+        for key, child in value.items():
+            labels.extend(period_labels(key))
+            labels.extend(period_labels(child))
+        return labels
+    if isinstance(value, list):
+        labels = []
+        for child in value:
+            labels.extend(period_labels(child))
+        return labels
+    if not isinstance(value, str):
+        return []
+    # Date strings are structural labels; also exclude their year token because
+    # the numeric self-check intentionally tokenizes strings such as 2026-09-30.
+    return [value, *re.findall(r"\d{4}|-\d{2}", value)]
+
+
+def render_period_text(value: Any) -> str:
+    """Render common brief period shapes without exposing a Python dict repr."""
+    if isinstance(value, dict):
+        return "、".join(
+            f"{key}：{child}" for key, child in value.items() if not isinstance(child, (dict, list))
+        ) or "未提供"
+    if isinstance(value, list):
+        return "、".join(str(item) for item in value)
+    return str(value)
+
+
 def metric_sections(diagnosis: dict) -> Iterable[Tuple[str, str, Any, List[str]]]:
     def walk(value: Any, path: str, title: str) -> Iterable[Tuple[str, str, Any, List[str]]]:
         if isinstance(value, dict) and value and all(
@@ -132,10 +163,7 @@ def conclusion_sections(diagnosis: dict) -> Iterable[Tuple[str, str, Any, List[s
 def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]] = None) -> str:
     method = brief_method(brief)
     periods = brief.get("观察期间", "未提供")
-    if isinstance(periods, list):
-        period_text = "、".join(str(period) for period in periods)
-    else:
-        period_text = str(periods)
+    period_text = render_period_text(periods)
 
     if sources is None:
         source_lines = ["未提供原始数据目录（`--raw`），无法列出数据来源文件。"]
@@ -231,11 +259,8 @@ def main(argv: List[str] = None) -> int:
     # 数据来源小节里的行数是原始 CSV 的行数，不是诊断数值，同样排除。
     check_output = re.sub(r"`[^`]*`", "", strip_data_source(output))
     periods = brief.get("观察期间", []) if isinstance(brief, dict) else []
-    if isinstance(periods, list):
-        for period in periods:
-            check_output = check_output.replace(str(period), "")
-    elif periods:
-        check_output = check_output.replace(str(periods), "")
+    for period in period_labels(periods):
+        check_output = check_output.replace(period, "")
     leaked = sorted(
         set(
             token
