@@ -257,6 +257,50 @@ class ControlPlaneSupervisorTests(unittest.TestCase):
         services = controlplane.load_services([self.service])
         self.assertEqual(services, [self.service])
 
+    def test_standby_validation_and_legacy_render_are_unchanged(self):
+        base = controlplane.load_services([self.service])
+        self.assertEqual(
+            controlplane.render_supervisor(base, self.state),
+            controlplane.render_supervisor([self.service], self.state),
+        )
+        for standby in [None, {}, {"check": []}, {"check": [""]}, {"check": [1]},
+                        {"check": ["true"], "interval_s": 0},
+                        {"check": ["true"], "interval_s": True},
+                        {"check": ["true"], "other": 1}]:
+            with self.subTest(standby=standby):
+                with self.assertRaises(ValueError):
+                    controlplane.load_services([{**self.service, "standby": standby}])
+        accepted = controlplane.load_services([{
+            **self.service, "standby": {"check": ["/bin/true"], "interval_s": 0.1}
+        }])
+        self.assertEqual(accepted[0]["standby"]["check"], ["/bin/true"])
+
+    def test_standby_waits_for_lease_then_stops_after_two_failed_checks(self):
+        ready = self.root / "lease"
+        starts = self.root / "starts.txt"
+        check = self.write_runner("check.sh", "#!/bin/sh\ntest -f '%s'\n" % ready)
+        runner = self.write_runner("standby-service.sh", "#!/bin/sh\necho start >> '%s'\nexec sleep 30\n" % starts)
+        services = [{**self.service, "cmd": str(runner), "standby": {
+            "check": [str(check)], "interval_s": 0.1,
+        }}]
+        script = self.write_script(services, "standby.sh")
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("_sup_misses", text)
+        self.assertIn("standby-waiting", text)
+        subprocess.run(["sh", "-n", str(script)], check=True)
+        self.assertEqual(self.run_script("start", script=script).returncode, 0)
+        self.assertTrue(self.wait_for(lambda: self.run_script("status", script=script).stdout.strip()
+                                      == "sleeper:standby-waiting"))
+        self.assertEqual(controlplane.status(services, self.state)["sleeper"]["state"], "standby-waiting")
+        self.assertFalse(starts.exists())
+        ready.touch()
+        self.assertTrue(self.wait_for(starts.exists), "service did not start when lease became available")
+        ready.unlink()
+        self.assertTrue(self.wait_for(lambda: not (self.state / "sleeper.pid").exists(), timeout=8),
+                        "service was not stopped after two failed checks")
+        self.assertEqual(len(self.lines(starts)), 1)
+        self.assertEqual(self.run_script("stop", script=script).returncode, 0)
+
     def test_backoff_is_capped_at_60_seconds(self):
         services = [{**self.service, "restart_backoff_max": 3600}]
         script = self.write_script(services, "backoff.sh")
