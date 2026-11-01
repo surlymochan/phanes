@@ -55,6 +55,29 @@ jobs:
               exit 1
             fi
           done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
+  upstream-drift:
+    name: Check upstream drift
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check PR drift marking
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: python3 tools/upstream_drift.py --fail-on-unmarked
+      - name: Write drift report to job summary
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -o pipefail
+          status=0
+          output="$(python3 tools/upstream_drift.py --json)" || status=$?
+          printf '## Upstream drift\n\n```json\n%s\n```\n' "$output" >> "$GITHUB_STEP_SUMMARY"
+          [ "$status" -eq 0 ] || echo "upstream_drift.py exited with $status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
   openswarm:
     name: OpenSwarm tests (${{ matrix.os }}, Python ${{ matrix.python }})
     needs: changes
