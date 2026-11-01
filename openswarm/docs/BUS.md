@@ -23,6 +23,8 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
     "worker_repos": ["<target-owner>/<target-repo>"],
     "worker_verify_allow": ["<exact-verify-command>"],
     "poll_seconds": 60,
+    "poll_retries": 5,
+    "max_backoff_seconds": 60,
     "claim_lease_seconds": 300,
     "labels_prefix": "openswarm",
     "open_pr": false
@@ -36,7 +38,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
 openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
 ```
 
-Pass `--repos owner/repo[,owner/repo]` to set a worker-local target repository allowlist, or configure `bus.worker_repos`; with neither configured the worker refuses every task. Use `--once` to claim at most one queued issue and exit; omit it to keep the worker in its resident polling loop. `--backend` may be `codex`, `ocgo`, `deepseek`, `cursor`, `agy`, or `pi`; `--model` is optional. A task's `verify` command runs only when it exactly matches `worker_verify_allow` or the worker's own `--verify`; other task commands are ignored and reported in the result followups. Set `open_pr` to `true` to have the worker open a draft PR after pushing its branch.
+Pass `--repos owner/repo[,owner/repo]` to set a worker-local target repository allowlist, or configure `bus.worker_repos`; with neither configured the worker refuses every task. Use `--once` to claim at most one queued issue and exit; omit it to keep the worker in its resident polling loop. In resident mode the worker stops gracefully on SIGTERM or SIGINT: it finishes the task it is running, writes that task's result back to the bus and exits without claiming another card. Polling continues with capped exponential backoff on transient GitHub 429/5xx errors and fails with an explicit error after `bus.poll_retries` consecutive failures (default 5); the backoff never waits longer than `bus.max_backoff_seconds` (default 60). `--backend` may be `codex`, `ocgo`, `deepseek`, `cursor`, `agy`, or `pi`; `--model` is optional. A task's `verify` command runs only when it exactly matches `worker_verify_allow` or the worker's own `--verify`; other task commands are ignored and reported in the result followups. Set `open_pr` to `true` to have the worker open a draft PR after pushing its branch.
 
 Dispatch a task from a target repository whose `origin` is its GitHub remote. The selected base commit must already be advertised by a remote branch or tag; push it first if necessary:
 

@@ -42,6 +42,18 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         with open(state_path) as stream:
             state = json.load(stream)
+        pending_errors = state.get("pending_errors")
+        if isinstance(pending_errors, list) and pending_errors:
+            for idx, item in enumerate(pending_errors):
+                target = item.get("endpoint")
+                if not target or target in endpoint:
+                    err = pending_errors.pop(idx)
+                    status_code = err.get("status", 429)
+                    with open(state_path + ".tmp", "w") as stream:
+                        json.dump(state, stream)
+                    os.replace(state_path + ".tmp", state_path)
+                    print(err.get("message", f"HTTP {status_code} Error"), file=sys.stderr)
+                    return 1
         parsed = urllib.parse.urlsplit(endpoint)
         parts = [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/") if part]
         query = urllib.parse.parse_qs(parsed.query)

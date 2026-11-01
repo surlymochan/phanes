@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -135,7 +137,8 @@ class BusTests(unittest.TestCase):
         self.env_names = ("OPENSWARM_HOME", "OPENSWARM_GH_BIN", "OPENSWARM_FAKE_GH_STATE",
                           "OPENSWARM_FAKE_GH_LOGIN", "OPENSWARM_FAKE_GH_ISSUE_LOGIN",
                           "OPENSWARM_FAKE_GH_NOW", "OPENSWARM_BUS_TARGET_URL", "OPENSWARM_STATE_FILE",
-                          "OPENSWARM_PI_BIN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                          "OPENSWARM_PI_BIN", "OPENSWARM_FLEET_GUARD_CONFIG", "OPENSWARM_FLEET_GUARD_REQUIRED",
+                          "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
                           "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1")
         self.old_env = {key: os.environ.get(key) for key in self.env_names}
         self.addCleanup(self.restore_env)
@@ -272,6 +275,15 @@ class BusTests(unittest.TestCase):
             "print(json.dumps({'type':'message_end','message':message}), flush=True)\n")
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
         return path
+
+    def disable_fleet_guard(self):
+        """Keep the resident worker off the host's fleet capacity guard.
+
+        The worker spawns `openswarm run` as a child process; that child would
+        otherwise reserve a fleet slot through the host configuration.
+        """
+        os.environ["OPENSWARM_FLEET_GUARD_CONFIG"] = str(self.root / "no-fleet-capacity.json")
+        os.environ["OPENSWARM_FLEET_GUARD_REQUIRED"] = "0"
 
     def wait_for(self, predicate, timeout=60, message="condition"):
         deadline = time.time() + timeout
@@ -931,6 +943,146 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
             with self.assertRaises(xs.BusError) as error:
                 xs.gh_transport("repos/org/bus/issues")
         self.assertNotIn("github_pat_", str(error.exception))
+
+    def test_resident_worker_claims_one_card_reports_the_result_and_keeps_polling(self):
+        """A resident worker claims a card once, writes the result back and stops on request."""
+        self.disable_fleet_guard()
+        os.environ["OPENSWARM_PI_BIN"] = str(self.write_fake_pi("fake-pi"))
+        local_policy = {"pi": {"require_isolation": False},
+                        "bus": {"repo": "org/bus", "allowed_executors": ["executor"], "poll_seconds": 0.02}}
+        (self.data / "policy.local.json").write_text(json.dumps(local_policy))
+        self.policy = xs.deep_merge(self.policy, local_policy)
+        run_id = "resident-success-792"
+        metadata = {"run_id": run_id, "repo": "org/target", "base": self.base,
+                    "branch_hint": "openswarm/resident-success", "budget_minutes": 1,
+                    "report_schema": xs.RESULT_SCHEMA}
+        issue = xs.bus_create_issue("org/bus", self.cfg, "resident worker success", "write worker.txt", metadata)
+        stop_event = threading.Event()
+        worker_args = argparse.Namespace(bus="org/bus", name="external-agent", backend="pi", model=None,
+                                         budget_minutes=1, once=False, repos="org/target", verify=None,
+                                         card_type=None, paths=None, rework_of=None, stop_event=stop_event)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        thread = threading.Thread(target=lambda: xs.cmd_bus_worker(worker_args, self.policy), daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (stop_event.set(), thread.join(timeout=5)))
+        self.wait_for(lambda: "openswarm:done" in {label["name"] for label in self.issue(issue["number"])["labels"]},
+                      message="resident worker to finish and set openswarm:done label")
+        stop_event.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "resident worker did not stop after the stop event was set")
+        current = self.issue(issue["number"])
+        names = {label["name"] for label in current["labels"]}
+        self.assertIn("openswarm:done", names)
+        self.assertNotIn("openswarm:queued", names)
+        self.assertNotIn("openswarm:claimed", names)
+        results = [parsed for parsed in
+                   (xs.bus_parse_result(comment["body"]) for comment in current["comments"]) if parsed]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "done")
+        self.assertEqual(results[0]["branch"], f"openswarm/{run_id}")
+        claims = [comment for comment in current["comments"] if xs.bus_claim(comment)]
+        self.assertEqual(len(claims), 1, "the card must be claimed exactly once")
+
+    def test_resident_worker_backs_off_after_a_transient_error_and_recovers(self):
+        """One temporary GitHub 429 is retried with backoff; the worker then claims the card once."""
+        self.disable_fleet_guard()
+        os.environ["OPENSWARM_PI_BIN"] = str(self.write_fake_pi("fake-pi"))
+        local_policy = {"pi": {"require_isolation": False},
+                        "bus": {"repo": "org/bus", "allowed_executors": ["executor"], "poll_seconds": 0.02}}
+        (self.data / "policy.local.json").write_text(json.dumps(local_policy))
+        self.policy = xs.deep_merge(self.policy, local_policy)
+        run_id = "resident-retry-792"
+        metadata = {"run_id": run_id, "repo": "org/target", "base": self.base,
+                    "branch_hint": "openswarm/resident-retry", "budget_minutes": 1,
+                    "report_schema": xs.RESULT_SCHEMA}
+        issue = xs.bus_create_issue("org/bus", self.cfg, "resident retry", "write worker.txt", metadata)
+        state = self.state()
+        state["pending_errors"] = [{"status": 429, "message": "HTTP 429: Rate limit exceeded",
+                                    "endpoint": "issues"}]
+        self.state_path.write_text(json.dumps(state))
+        stop_event = threading.Event()
+        worker_args = argparse.Namespace(bus="org/bus", name="external-agent", backend="pi", model=None,
+                                         budget_minutes=1, once=False, repos="org/target", verify=None,
+                                         card_type=None, paths=None, rework_of=None, stop_event=stop_event)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        thread = threading.Thread(target=lambda: xs.cmd_bus_worker(worker_args, self.policy), daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (stop_event.set(), thread.join(timeout=5)))
+        self.wait_for(lambda: "openswarm:done" in {label["name"] for label in self.issue(issue["number"])["labels"]},
+                      message="resident worker to recover from the 429 and set openswarm:done label")
+        stop_event.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "resident worker did not stop after the stop event was set")
+        current = self.issue(issue["number"])
+        self.assertIn("openswarm:done", {label["name"] for label in current["labels"]})
+        results = [parsed for parsed in
+                   (xs.bus_parse_result(comment["body"]) for comment in current["comments"]) if parsed]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "done")
+        claims = [comment for comment in current["comments"] if xs.bus_claim(comment)]
+        self.assertEqual(len(claims), 1, "the card must not be claimed twice after the transient error")
+
+    def test_resident_worker_stop_signal_finishes_the_running_task_and_claims_no_other_card(self):
+        """SIGTERM ends the resident loop after the running task reported its result."""
+        self.disable_fleet_guard()
+        (self.data / "policy.local.json").write_text(json.dumps({
+            "pi": {"require_isolation": False},
+            "bus": {"repo": "org/bus", "allowed_executors": ["executor"], "allowed_planners": ["planner"],
+                    "worker_repos": ["org/target"], "poll_seconds": 0.02, "labels_prefix": "openswarm"}}))
+        os.environ["OPENSWARM_PI_BIN"] = str(self.write_fake_pi("fake-pi-signal-worker", sleep=1))
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "planner"
+        first = {"run_id": "signal-task-1", "repo": "org/target", "base": self.base,
+                 "branch_hint": "openswarm/signal-task-1", "budget_minutes": 2,
+                 "report_schema": xs.RESULT_SCHEMA}
+        issue1 = xs.bus_create_issue("org/bus", self.cfg, "task 1", "write worker.txt", first)
+        second = {"run_id": "signal-task-2", "repo": "org/target", "base": self.base,
+                  "branch_hint": "openswarm/signal-task-2", "budget_minutes": 2,
+                  "report_schema": xs.RESULT_SCHEMA}
+        issue2 = xs.bus_create_issue("org/bus", self.cfg, "task 2", "write worker.txt", second)
+        env = dict(os.environ, OPENSWARM_FAKE_GH_LOGIN="executor")
+        command = [sys.executable, str(Path(_load.ROOT) / "bin" / "openswarm"), "bus-worker",
+                   "--bus", "org/bus", "--name", "external-agent", "--backend", "pi",
+                   "--budget-minutes", "2", "--repos", "org/target"]
+        proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and (proc.terminate(), proc.wait()))
+        self.wait_for(lambda: (self.root / "fake-pi-signal-worker.started").exists(),
+                      message="the executor of task 1 to start")
+        proc.send_signal(signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, f"worker stdout: {stdout}\nstderr: {stderr}")
+        self.assertTrue((self.root / "fake-pi-signal-worker.finished").exists())
+        saved1 = self.issue(issue1["number"])
+        self.assertIn("openswarm:done", {label["name"] for label in saved1["labels"]})
+        results1 = [parsed for parsed in
+                    (xs.bus_parse_result(comment["body"]) for comment in saved1["comments"]) if parsed]
+        self.assertEqual(len(results1), 1, "task 1 must have written back its result")
+        claims1 = [comment for comment in saved1["comments"] if xs.bus_claim(comment)]
+        self.assertEqual(len(claims1), 1, "task 1 must not be claimed twice")
+        saved2 = self.issue(issue2["number"])
+        self.assertIn("openswarm:queued", {label["name"] for label in saved2["labels"]})
+        self.assertNotIn("openswarm:claimed", {label["name"] for label in saved2["labels"]})
+        self.assertNotIn("openswarm:done", {label["name"] for label in saved2["labels"]})
+        claims2 = [comment for comment in saved2["comments"] if xs.bus_claim(comment)]
+        self.assertEqual(len(claims2), 0, "task 2 must not be claimed after the stop signal")
+
+    def test_resident_worker_fails_after_consecutive_transient_errors(self):
+        """Repeated temporary GitHub errors end the worker with an explicit failure."""
+        self.disable_fleet_guard()
+        local_policy = {"bus": {"repo": "org/bus", "allowed_executors": ["executor"],
+                                "poll_seconds": 0.01, "poll_retries": 3}}
+        (self.data / "policy.local.json").write_text(json.dumps(local_policy))
+        policy = xs.deep_merge(self.policy, local_policy)
+        state = self.state()
+        state["pending_errors"] = [{"status": 503, "message": "HTTP 503: Service Unavailable",
+                                    "endpoint": "issues"}] * 3
+        self.state_path.write_text(json.dumps(state))
+        worker_args = argparse.Namespace(bus="org/bus", name="external-agent", backend="pi", model=None,
+                                         budget_minutes=1, once=False, repos="org/target", verify=None,
+                                         card_type=None, paths=None, rework_of=None)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        with self.assertRaises(xs.BusError) as error:
+            xs.cmd_bus_worker(worker_args, policy)
+        self.assertIn("consecutive transient errors", str(error.exception))
 
 
 if __name__ == "__main__":
