@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for ib-refresh cooldown status accounting."""
+"""Offline contract for ib-refresh cooldown status accounting (Refs #1126)."""
 
 import datetime as dt
 import importlib.util
@@ -32,6 +32,9 @@ def main():
     )
     assert result["ok"] is True
     assert result["start_lane_autodispatch"] is True
+    assert [row["host"] for row in IB_REFRESH._usable_hosts(rows, {host["name"] for host in hosts})] == [
+        "ib3", "ib4", "ib5"
+    ]
     fields = dict(field.split("=", 1) for field in result["status_line"].split())
     assert fields["ok"] == "1"
     assert fields["hosts_ok"] == "3"
