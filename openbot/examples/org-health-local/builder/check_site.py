@@ -120,6 +120,7 @@ def check_site(dist: Path) -> list[str]:
         parser = LocalReferences()
         parser.feed(index_path.read_text(encoding="utf-8", errors="replace"))
         for reference in parser.references:
+            # urlsplit 剥离 query 与 fragment，保留并校验本地文件路径（无路径仅含片段时跳过）
             parsed = urlsplit(reference)
             if parsed.scheme or parsed.netloc or reference.startswith("/"):
                 continue

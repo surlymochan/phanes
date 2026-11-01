@@ -307,6 +307,43 @@ class CheckSiteTest(unittest.TestCase):
         self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js 不存在", result.stdout)
         self.assertIn("站点检查失败：2 项", result.stdout)
 
+    def test_local_reference_with_fragment_passes(self) -> None:
+        """带 #fragment（及片段与查询串共存）的本地引用在剥离后校验真实文件存在。"""
+        dist = self.make_dist()
+        (dist / "app bundle.js").write_text("console.log('encoded');", encoding="utf-8")
+        (dist / "index.html").write_text(
+            '<link rel="stylesheet" href="./styles.css#theme">\n'
+            '<script src="./app.bundle.js?v=2024#main"></script>\n'
+            '<script src="./app%20bundle.js#section"></script>\n'
+            '<link rel="stylesheet" href="#pure-hash">',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist, "app bundle.js")
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("通过：index.html 引用的本地文件 ./styles.css 存在", result.stdout)
+        self.assertIn("通过：index.html 引用的本地文件 ./app.bundle.js 存在", result.stdout)
+        self.assertIn("通过：index.html 引用的本地文件 ./app%20bundle.js 存在", result.stdout)
+        self.assertNotIn("未在 build-report 中登记", result.stdout)
+        self.assertIn("站点检查通过", result.stdout)
+
+    def test_missing_local_reference_with_fragment_fails(self) -> None:
+        """带 #fragment 的缺失本地引用仍必须失败并定位缺失文件。"""
+        dist = self.make_dist()
+        (dist / "index.html").write_text(
+            '<link rel="stylesheet" href="./missing.css#theme">\n'
+            '<script src="./missing.js?v=1#section"></script>\n'
+            '<script src="./missing%20bundle.js#frag"></script>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.css 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.js 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js 不存在", result.stdout)
+        self.assertIn("站点检查失败：3 项", result.stdout)
+
     def test_build_site_manifest_passes(self) -> None:
         """build_site.py 写出的 文件清单 报告必须能被 check_site.py 接受（Builder→检查 契约）。"""
         bundle = Path(self.tmp.name) / "app.bundle.js"
