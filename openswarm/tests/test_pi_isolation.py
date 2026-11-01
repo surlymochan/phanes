@@ -99,6 +99,50 @@ class PiIsolationTests(unittest.TestCase):
             finally:
                 sock.close()
 
+    def test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            work = root / 'work'
+            work.mkdir()
+            base = root / 'sandbox-tmp'
+            (base / 'openswarm-pi-tmp').mkdir(parents=True)
+            (base / 'openswarm-pi-tmp' / 'stale').write_text('old turn')
+            (base / 'keep').write_text('not owned by the wrapper')
+            runtime = root / 'runtime'
+            binary = runtime / 'node_modules' / '.bin' / 'pi'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('#!/usr/bin/python3\nimport json,os\n'
+                              'open("/tmp/written","w").write("from sandbox")\n'
+                              'print(json.dumps(sorted(os.listdir("/tmp"))))\n')
+            binary.chmod(0o755)
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                path = str(root / 'broker.sock')
+                sock.bind(path)
+                sock.listen()
+                env = dict(os.environ, OPENSWARM_PI_RUNTIME=str(runtime), OPENSWARM_PI_BROKER_SOCKET=path,
+                           OPENSWARM_PI_SANDBOX_TMP=str(base))
+                base_args = ['--provider', 'minimax-cn', '--model', 'MiniMax-M3.1-Flash',
+                             '--tools', 'read,bash,edit,write,grep,find,ls']
+                one_shot = [str(WRAPPER), '-p', '--mode', 'json', *base_args, 'synthetic']
+                result = subprocess.run(one_shot, cwd=work, env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue({'stale', 'written'} <= set(json.loads(result.stdout)), result.stdout)
+                rpc = [str(WRAPPER), '--mode', 'rpc', *base_args]
+                result = subprocess.run(rpc, cwd=work, env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                listing = set(json.loads(result.stdout))
+                self.assertIn('written', listing)
+                self.assertNotIn('stale', listing)
+                self.assertEqual((base / 'openswarm-pi-tmp' / 'written').read_text(), 'from sandbox')
+                self.assertEqual((base / 'keep').read_text(), 'not owned by the wrapper')
+                result = subprocess.run(one_shot, cwd=work, capture_output=True, text=True, timeout=15,
+                                        env=dict(env, OPENSWARM_PI_SANDBOX_TMP='relative/tmp'))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('absolute path', result.stderr)
+            finally:
+                sock.close()
+
 
 if __name__ == '__main__':
     unittest.main()

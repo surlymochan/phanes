@@ -20,6 +20,27 @@ parser.add_argument('--model', required=True)
 parser.add_argument('--tools', default='read,bash,edit,write,grep,find,ls')
 parser.add_argument('prompt', nargs='?')
 args = parser.parse_args()
+
+
+def sandbox_tmp_dir(base, fresh):
+    """OPENSWARM_PI_SANDBOX_TMP=<dir>: a disk-backed /tmp for the sandbox instead of a tmpfs.
+
+    A tmpfs /tmp is charged to the lane cgroup as shmem, so a PR checkout there can pin a small lane
+    at memory.high. The wrapper owns only <dir>/openswarm-pi-tmp: an RPC session (one per lane turn
+    loop) starts it empty, and nothing else under <dir> is ever removed."""
+    if not base:
+        return None
+    if not os.path.isabs(base):
+        sys.exit('OPENSWARM_PI_SANDBOX_TMP must be an absolute path')
+    base = os.path.realpath(base)
+    if base == '/':
+        sys.exit('OPENSWARM_PI_SANDBOX_TMP must not be /')
+    path = os.path.join(base, 'openswarm-pi-tmp')
+    if fresh and os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
 model = os.environ.get('OPENSWARM_PI_ISOLATED_MODEL', 'MiniMax-M3.1-Flash')
 runtime = os.path.realpath(os.environ.get('OPENSWARM_PI_RUNTIME', ''))
 broker = os.path.realpath(os.environ.get('OPENSWARM_PI_BROKER_SOCKET', ''))
@@ -73,6 +94,11 @@ fi
            '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
            '--tmpfs', '/home', '--dir', '/run', '--ro-bind', runtime, '/runtime',
            '--ro-bind', config_dir, '/config', '--ro-bind', broker, '/run/broker.sock']
+    sandbox_tmp = sandbox_tmp_dir(os.environ.get('OPENSWARM_PI_SANDBOX_TMP'), fresh=args.mode == 'rpc')
+    if sandbox_tmp:
+        i = cmd.index('--tmpfs')
+        assert cmd[i + 1] == '/tmp'
+        cmd[i:i + 2] = ['--bind', sandbox_tmp, '/tmp']
     deps_root = os.environ.get('OPENSWARM_PI_DEPS_ROOT')
     git = subprocess.run(['git', '-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
                          capture_output=True, text=True, timeout=10)
