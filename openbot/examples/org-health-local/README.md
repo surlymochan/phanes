@@ -29,6 +29,8 @@ python3 serve.py
 python3 run_e2e.py --workdir demo --review
 ```
 
+如需直接预览已构建的静态站点，可使用 `python3 serve.py --root demo/site`。
+
 本地 e2e 非零退出时，先查看工作目录中的步骤输出和 `timings.json`，再按其中标出的失败角色定位问题。
 
 ## 三 Bot demo：一分钟查看
