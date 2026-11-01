@@ -80,7 +80,7 @@ config, so three reachable hosts can keep `ok=1` while two hosts cool down
 Hosts absent from the configured topology are errors and are excluded from
 `hosts_ok` (Refs #1164); exercise this invariant with
 `python3 tools/check-fleet-unknown-host.py`.
-For the ib1/ib2 cooldown case, exercise this accounting with the fake-input check
+For the ib1/ib2 cooldown case (Refs #1206), exercise this accounting with the fake-input check
 `python3 tools/check-ib-cooldown-status.py`.
 Check the parser contract offline with
 `python3 tools/check-ib-status-line.py`.
