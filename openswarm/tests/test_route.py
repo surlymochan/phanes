@@ -145,6 +145,22 @@ class RoutingScenarios(unittest.TestCase):
         self.assertIsNone(xs.routing_outcome(entry))
         self.assertEqual(xs.outcome_label(entry), "unknown")
 
+    def test_24_exact_soft_limit_spills_easy_work(self):
+        result = self.check(prof(d=3), scenario(codex_week=0.85),
+                            {"backend": "ocgo", "reasons": lambda reasons: any("spill" in reason for reason in reasons)},
+                            OPT_IN_POLICY)
+        self.assertTrue(result["ok"])
+
+    def test_25_empty_model_catalog_is_unroutable(self):
+        st = scenario()
+        st["codex"]["models"] = []
+        self.check(prof(d=3), st, {"ok": False, "skipped": lambda skipped: "codex" in skipped})
+
+    def test_26_forced_unknown_model_fails_explicitly(self):
+        result = self.check(prof(d=3, backend="codex", model="missing-model"), scenario(),
+                            {"ok": False, "skipped": lambda skipped: "requested Codex model missing-model" in skipped["codex"]})
+        self.assertNotIn("backend", result)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

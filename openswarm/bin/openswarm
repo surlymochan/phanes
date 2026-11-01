@@ -2858,6 +2858,8 @@ def plan_codex(prof, st, policy, forced, notes):
     th = policy["thresholds"]
     if not cx.get("binary"):
         return None, "no working codex binary"
+    if prof.get("model") and prof["model"] not in {m.get("id") for m in cx.get("models", [])}:
+        return None, f"requested Codex model {prof['model']} is unavailable for this account"
     want = policy["difficulty_map"][str(prof["difficulty"])]
     tier, effort = want["tier"], want["effort"]
     config = policy.get("codex") or {}
