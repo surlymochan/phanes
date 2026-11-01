@@ -96,7 +96,10 @@ class RunE2ETest(unittest.TestCase):
         self.bundle.write_text('fake', encoding='utf-8')
         self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
-    def write_stub(self, path, role, failing=False, probe=False, exit_code=7, echo=None):
+    def write_stub(self, path, role, failing=False, probe=False, exit_code=7, echo=None,
+                   report_path=None, report_body=None, error_text=None):
+        if report_path is not None and report_body is None:
+            report_body = '{}'
         source = '''import json, pathlib, sys
 role = ROLE
 args = sys.argv[1:]
@@ -104,6 +107,10 @@ with open(LOG, 'a', encoding='utf-8') as stream:
     stream.write(json.dumps([role, args]) + "\\n")
 if ECHO is not None:
     print(ECHO, flush=True)
+if RPT_PATH is not None:
+    pathlib.Path(RPT_PATH).write_text(RPT_BODY, encoding='utf-8')
+if ERR_TEXT is not None:
+    print(ERR_TEXT, file=sys.stderr, flush=True)
 if FAIL:
     raise SystemExit(EXIT_CODE)
 if role == 'boss':
@@ -125,6 +132,9 @@ elif role == 'builder':
         source = source.replace('FAIL', repr(failing)).replace('PROBE', repr(probe))
         source = source.replace('EXIT_CODE', repr(exit_code))
         source = source.replace('ECHO', repr(echo))
+        source = source.replace('RPT_PATH', repr(report_path))
+        source = source.replace('RPT_BODY', repr(report_body))
+        source = source.replace('ERR_TEXT', repr(error_text))
         path.write_text(source, encoding='utf-8')
 
     def command(self):
@@ -489,6 +499,54 @@ elif role == 'builder':
         self.assertIn('审查桩输出', report.read_text(encoding='utf-8'))
         # 失败不误报为成功：不再打印成功路径才有的预览命令
         self.assertNotIn('预览命令', result.stdout)
+
+    def test_review_report_kept_when_reviewer_fails_after_writing_report(self):
+        """审查脚本写出报告后返回非零：运行器非零退出，报告保留，不误报成功。
+
+        报告写到临时路径（--review-report），角色全是临时桩，不依赖真实实现。
+        """
+        report = self.root / 'review.json'
+        body = json.dumps({'结论': '不通过', 'findings': ['期间一致']}, ensure_ascii=False)
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 4), exit_code=2,
+                            report_path=(str(report) if role == 'reviewer' else None),
+                            report_body=(body if role == 'reviewer' else None))
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4]),
+                                    '--review-report', str(report)]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # 失败结果明确：退出码非 0，并报出失败步骤与审查脚本的退出码
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        self.assertIn('退出码 2', result.stderr)
+        # 失败不误报为成功：不再打印成功路径才有的预览命令
+        self.assertNotIn('预览命令', result.stdout)
+        # 审查脚本写出的报告保留在临时报告路径上，内容不被清空
+        self.assertTrue(report.is_file(), '审查失败时报告被删除')
+        self.assertEqual(json.loads(report.read_text(encoding='utf-8')), json.loads(body))
+        # 耗时记录结构不变：审查步骤在列，退出码与审查脚本一致
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertEqual(set(timings[-1]), {'name', 'command', 'duration_seconds', 'exit_code'})
+        self.assertEqual(timings[-1]['exit_code'], 2)
+
+    def test_review_failure_keeps_reviewer_error_in_default_report(self):
+        """审查脚本参数失败时，默认报告里保留脚本的错误输出，不留下空报告。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 4), exit_code=2,
+                            error_text='审查参数错误：缺少 --data')
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 失败原因留在报告产物里，便于事后核对
+        report = self.workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file(), '审查失败时未写出审查记录')
+        self.assertIn('审查参数错误', report.read_text(encoding='utf-8'))
 
     def test_workdir_occupied_by_file_reports_readable_error(self):
         """工作目录被同名文件占用时给出可读提示并非零退出，不裸抛 Traceback。"""
