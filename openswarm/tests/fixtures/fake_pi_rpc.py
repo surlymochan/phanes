@@ -62,6 +62,31 @@ for line in sys.stdin:
                 f.write("private session")
             os.system("git add -- *.jsonl")
         response(req, kind)
+        if "LANE_TEST_AUTO_RETRY" in prompt:
+            # pi reports a transient provider error, then retries on its own.
+            message = {"role": "assistant", "content": [], "usage": {"input": 1, "output": 0},
+                       "stopReason": "error", "errorMessage": "529 overloaded_error: Overloaded"}
+            delay_ms = 3000 if "LANE_TEST_AUTO_RETRY_SLOW" in prompt else 100
+            if "LANE_TEST_AUTO_RETRY_REVERSED" in prompt:
+                send({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": delay_ms})
+                send({"type": "message_end", "message": message})
+                send({"type": "agent_end", "messages": [message]})
+            else:
+                send({"type": "message_end", "message": message})
+                send({"type": "agent_end", "messages": [message]})
+                time.sleep(0.5)
+                send({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": delay_ms})
+            if "LANE_TEST_AUTO_RETRY_STALL" in prompt:
+                time.sleep(30)  # pi never resumes; the lane must end the turn on its own
+                continue
+            time.sleep(delay_ms / 1000.0)
+            send({"type": "agent_start"})
+            if "LANE_TEST_AUTO_RETRY_EXHAUSTED" in prompt:
+                send({"type": "message_end", "message": message})
+                send({"type": "agent_end", "messages": [message]})
+                send({"type": "auto_retry_end", "success": False, "attempt": 3, "finalError": "529 overloaded_error: Overloaded"})
+                continue
+            send({"type": "auto_retry_end", "success": True, "attempt": 1})
         steered = ""
         aborted = False
         if "LANE_TEST_RISK" in prompt:

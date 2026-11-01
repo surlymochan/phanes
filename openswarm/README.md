@@ -513,6 +513,12 @@ follows the lane and the host policy: set `memory_max` in `lanes.json` (for exam
 `lane launchd-plist` writes the closest launchd equivalent (`SoftResourceLimits`/`HardResourceLimits` with `Memory`
 in bytes) only when a ceiling is configured.
 
+A pi lane follows pi's own auto-retry of transient provider errors (429/5xx/overloaded): after a retryable
+`agent_end` it waits for `auto_retry_start`, then for pi's `delayMs` plus a grace window for the retry to show activity,
+and ends the turn with the original error if pi never resumes. The grace is `OPENSWARM_PI_RETRY_WAIT_SECONDS`
+(default `8`). The pi broker appends one JSON line per request (lane, sizes, tokens, HTTP/stream status, latency; no
+prompt text or keys) to `PI_BROKER_LOG` (default `<socket>.requests.jsonl`); rotate it with logrotate.
+
 For automated queue dispatch, label issues with `lane-ready` and an optional backend pin (`backend:pi|agy|codex`) to prioritize matching lane workers.
 
 ## Fleet and batch dispatch

@@ -85,6 +85,13 @@ class LanePureFunctionTests(unittest.TestCase):
         self.assertEqual(row["uptime_seconds"], 10.0)
         self.assertNotIn("unknown_metadata", row)
 
+    def test_pi_retryable_errors_need_whole_status_codes(self):
+        for text in ("529 overloaded_error: Overloaded", "HTTP 503 Service Unavailable", "429 Too Many Requests",
+                     "fetch failed", "socket hang up", "request timed out"):
+            self.assertTrue(xs.PI_RETRYABLE_RE.search(text), text)
+        for text in ("tool exceeded 15003 ms budget", "request id 4291838 rejected", "invalid_request_error: bad schema"):
+            self.assertFalse(xs.PI_RETRYABLE_RE.search(text), text)
+
     def test_systemd_quote_plain_string(self):
         self.assertEqual(xs.systemd_quote("plain"), '"plain"')
         self.assertEqual(xs.systemd_quote("lane_worker_1"), '"lane_worker_1"')
@@ -240,6 +247,7 @@ class LaneTests(unittest.TestCase):
         for path in FIXTURES.glob("fake_*py"):
             path.chmod(0o755)
         self.env = dict(os.environ, OPENSWARM_HOME=str(self.data))
+        self.env["OPENSWARM_PI_RETRY_WAIT_SECONDS"] = "2"  # keep retryable-error tests fast
         self.env["FAKE_PI_RPC_LOG"] = str(self.root / "fake-pi-rpc.jsonl")
         self.lane_name = "L1"
         self.backend = "codex"
@@ -542,6 +550,51 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
+
+    def test_pi_auto_retry_after_transient_error_finishes_the_turn(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_AUTO_RETRY transient overload")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIsNone(result.get("error_class"))
+        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"), "completed")
+        messages = [json.loads(line) for line in pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text().splitlines()]
+        self.assertEqual(sum(row.get("type") == "prompt" for row in messages), 1)
+
+    def test_pi_auto_retry_exhausted_fails_with_final_error(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_AUTO_RETRY LANE_TEST_AUTO_RETRY_EXHAUSTED transient overload")
+        state = self.wait_run(run_id)
+        self.assertNotEqual(state["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIn("overloaded", json.dumps(result))
+
+    def assert_auto_retry_done(self, markers):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign(f"LANE_TEST_AUTO_RETRY {markers} transient overload")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIsNone(result.get("error_class"))
+
+    def test_pi_auto_retry_follows_a_pi_delay_longer_than_the_grace(self):
+        self.assert_auto_retry_done("LANE_TEST_AUTO_RETRY_SLOW")
+
+    def test_pi_auto_retry_start_before_the_failed_agent_end(self):
+        self.assert_auto_retry_done("LANE_TEST_AUTO_RETRY_REVERSED LANE_TEST_AUTO_RETRY_SLOW")
+
+    def test_pi_auto_retry_that_never_resumes_ends_the_turn(self):
+        self.set_config("pi")
+        self.start_lane()
+        started = time.time()
+        run_id = self.assign("LANE_TEST_AUTO_RETRY LANE_TEST_AUTO_RETRY_STALL transient overload")
+        state = self.wait_run(run_id)
+        self.assertNotEqual(state["status"], "done")
+        self.assertLess(time.time() - started, 25)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIn("overloaded", json.dumps(result))
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
@@ -1203,6 +1256,17 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(state["status"], "failed")
         self.assertEqual(self.fleet_reservations(), [])
 
+    def test_late_crash_without_descendants_releases_shared_fleet_slot(self):
+        """A crash long after the last descendant scan with nothing left behind frees the slot."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_CRASH LANE_TEST_LATE_FORK")
+        state = self.wait_run(run_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(self.fleet_reservations(), [])
+        self.assertFalse(state.get("executor_descendants"), state)
+
     def test_signal_terminated_lane_child_retains_shared_fleet_slot(self):
         """Do not reuse a lane slot while a SIGKILLed parent's child is still alive."""
         self.set_config("cursor")
@@ -1265,6 +1329,31 @@ class LaneTests(unittest.TestCase):
             reservations = self.fleet_reservations()
             self.assertEqual(len(reservations), 1)
             self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the lane supervisor is a subreaper on Linux only")
+    def test_detached_child_forked_late_and_left_at_once_retains_shared_fleet_slot(self):
+        """Fork after the eager scan window and exit immediately: no scan can see the child while
+        its parent lives, so the adopted orphan must be what keeps the slot."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "late-detached-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_DETACHED_CHILD LANE_TEST_LATE_FORK LANE_TEST_NO_GRACE")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            child_pid = int(child_marker.read_text())
+            self.assertTrue(process_alive(child_pid))
+            self.assertIn(child_pid, [row.get("pid") for row in state.get("executor_descendants") or []], state)
+            reservations = self.fleet_reservations()
+            self.assertEqual([row["run_id"] for row in reservations], [run_id])
         finally:
             if child_marker.exists():
                 try:

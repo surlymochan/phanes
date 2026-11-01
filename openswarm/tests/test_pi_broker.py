@@ -67,6 +67,138 @@ https.request = (options, callback) => {
                 proc.terminate()
                 proc.wait(timeout=5)
 
+    def test_request_log_records_lane_tokens_and_stream_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {'content-type': 'text/event-stream'}; upstream.complete = true;
+    callback(upstream);
+    upstream.write('event: message_start\\ndata: {"type":"message_start","message":{"usage":{"input_tokens":42,"output_tokens":1}}}\\n\\n');
+    upstream.end('event: error\\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\\n\\n');
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            log = pathlib.Path(root, 'requests.jsonl')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), PI_BROKER_LOG=str(log))
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                client = UnixHTTP(path)
+                body = json.dumps({'model': 'allowed-model', 'messages': [
+                    {'role': 'user', 'content': 'work in /home/x/.claude/openswarm/lanes/M7/wt now'}]})
+                client.request('POST', '/v1/messages', body)
+                response = client.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+                client.close()
+                deadline = time.monotonic() + 3
+                while not log.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                row = json.loads(log.read_text().splitlines()[0])
+                self.assertEqual(row['lane'], 'M7')
+                self.assertEqual(row['req_bytes'], len(body))
+                self.assertEqual(row['in_tok'], 42)
+                self.assertEqual(row['http_status'], 200)
+                self.assertEqual(row['status'], 529)
+                self.assertEqual(row['stream_err'], 'overloaded_error')
+                self.assertEqual(row['err'], 'Overloaded')
+                self.assertNotIn('fake-key', log.read_text())
+                self.assertNotIn('work in', log.read_text())
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+
+    def test_model_text_mentioning_errors_is_not_a_stream_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const upstream = new PassThrough(); upstream.statusCode = 200; upstream.headers = {'content-type': 'text/event-stream'}; upstream.complete = true;
+    callback(upstream);
+    upstream.write('event: message_start\\ndata: {"type":"message_start","message":{"usage":{"input_tokens":42,"output_tokens":1}}}\\n\\n');
+    upstream.end('event: content_block_delta\\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"see event: error and \\\\"type\\\\":\\\\"error\\\\" docs"}}\\n\\n');
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            log = pathlib.Path(root, 'requests.jsonl')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), PI_BROKER_LOG=str(log))
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                client = UnixHTTP(path)
+                body = json.dumps({'model': 'allowed-model', 'messages': [
+                    {'role': 'user', 'content': 'work in /home/x/.claude/openswarm/lanes/M7/wt now'}]})
+                client.request('POST', '/v1/messages', body)
+                response = client.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+                client.close()
+                deadline = time.monotonic() + 3
+                while not log.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                row = json.loads(log.read_text().splitlines()[0])
+                self.assertEqual(row['lane'], 'M7')
+                self.assertEqual(row['req_bytes'], len(body))
+                self.assertEqual(row['in_tok'], 42)
+                self.assertEqual(row['status'], 200)
+                self.assertNotIn('stream_err', row)
+                self.assertNotIn('fake-key', log.read_text())
+                self.assertNotIn('work in', log.read_text())
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+
+    def test_refused_request_is_logged_next_to_the_socket(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            path = os.path.join(root, 'broker.sock')
+            env = {k: v for k, v in os.environ.items() if k != 'PI_BROKER_LOG'}
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                client = UnixHTTP(path)
+                client.request('GET', '/other')
+                self.assertEqual(client.getresponse().status, 403)
+                client.close()
+                log = pathlib.Path(path + '.requests.jsonl')
+                deadline = time.monotonic() + 3
+                while not log.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                row = json.loads(log.read_text().splitlines()[0])
+                self.assertEqual((row['status'], row['err']), (403, 'request refused'))
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+
     def test_aborted_upstream_releases_in_flight_slot(self):
         with tempfile.TemporaryDirectory() as root:
             module = pathlib.Path(root, 'auth.mjs')

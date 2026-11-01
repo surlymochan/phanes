@@ -2,7 +2,7 @@
 // A private, single-model Anthropic proxy. The Pi credential stays in this process.
 import { createServer } from 'node:http';
 import https from 'node:https';
-import { chmodSync, lstatSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, unlinkSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const [socket, authModule, model] = process.argv.slice(2);
@@ -27,9 +27,21 @@ const uploadTimeoutMs = Number.isFinite(uploadTimeout) && uploadTimeout > 0 ? up
 // fleet coordinator remains responsible for the cross-host/global limit.
 const maxInFlight = 4;
 let inFlight = 0;
+// Per-request audit log (JSON lines, no credentials or prompt text): time, lane, sizes, tokens,
+// status and latency. Lane is taken from the worktree path in the prompt (".../lanes/<L>/wt").
+const logPath = process.env.PI_BROKER_LOG || (socket + '.requests.jsonl');
+let seq = 0;
+const audit = (row) => { try { appendFileSync(logPath, JSON.stringify(row) + '\n'); } catch {} };
+const laneOf = (text) => { const m = /\/lanes\/([A-Za-z0-9_-]{1,16})\/wt\b/.exec(text); return m ? m[1] : '?'; };
 
 const server = createServer((req, res) => {
-  const fail = (status, message) => { if (!res.headersSent) res.writeHead(status, {'content-type': 'text/plain'}); res.end(message); };
+  const t0 = Date.now(); const id = ++seq;
+  const row = {ts: new Date(t0).toISOString(), id, lane: '?', req_bytes: 0, resp_bytes: 0, status: 0,
+               in_tok: null, out_tok: null, in_flight: inFlight + 1};
+  let logged = false;
+  const done = (extra) => { if (logged) return; logged = true; Object.assign(row, extra || {}); row.ms = Date.now() - t0; audit(row); };
+  res.on('close', () => done({client_closed: !res.writableEnded}));
+  const fail = (status, message) => { row.status = status; row.err = message; if (!res.headersSent) res.writeHead(status, {'content-type': 'text/plain'}); res.end(message); done(); };
   if (inFlight >= maxInFlight) return fail(503, 'broker temporarily unavailable');
   if (req.method !== 'POST' || !['/v1/messages', '/v1/messages?beta=true'].includes(req.url)) return fail(403, 'request refused');
   const beta = req.headers['anthropic-beta'];
@@ -51,7 +63,9 @@ const server = createServer((req, res) => {
   req.on('end', () => {
     req.setTimeout(0);
     let parsed;
-    try { parsed = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { release(); return fail(400, 'invalid JSON'); }
+    const bodyText = Buffer.concat(parts).toString('utf8');
+    row.req_bytes = size; row.lane = laneOf(bodyText);
+    try { parsed = JSON.parse(bodyText); } catch { release(); return fail(400, 'invalid JSON'); }
     if (size !== length || !parsed || parsed.model !== model || !Array.isArray(parsed.messages)) {
       release(); return fail(403, 'model or request refused');
     }
@@ -65,6 +79,24 @@ const server = createServer((req, res) => {
       if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
         upstream.resume(); release(); return fail(upstream.statusCode || 502, 'provider request failed');
       }
+      row.status = upstream.statusCode; row.ttfb_ms = Date.now() - t0;
+      let tail = '';
+      upstream.on('data', chunk => {
+        row.resp_bytes += chunk.length;
+        tail = (tail + chunk.toString('utf8')).slice(-4096);
+        let m; const re = /"(input_tokens|output_tokens)"\s*:\s*(\d+)/g;
+        while ((m = re.exec(tail))) { const k = m[1] === 'input_tokens' ? 'in_tok' : 'out_tok'; row[k] = Math.max(row[k] || 0, Number(m[2])); }
+        // Only a real SSE error event counts (line-start `event: error` or an error `data:` frame);
+        // model text is JSON-escaped inside deltas, so it cannot forge either form.
+        if (!row.stream_err && /(?:^|\n)event:\s*error\b|(?:^|\n)data:\s*\{"type"\s*:\s*"error"|(?:^|\n)data:\s*\{[^\n]*"http_code"\s*:\s*"?[45]\d\d/.test(tail)) {
+          const t = /"error"\s*:\s*\{[^}]*?"type"\s*:\s*"([a-z_]+)"/.exec(tail); const h = /"http_code"\s*:\s*"?([45]\d\d)/.exec(tail);
+          const map = {rate_limit_error: 429, overloaded_error: 529, api_error: 500, invalid_request_error: 400, authentication_error: 401, permission_error: 403, not_found_error: 404, request_too_large: 413};
+          row.http_status = row.status; row.status = h ? Number(h[1]) : (map[t && t[1]] || 500);
+          row.stream_err = (t && t[1]) || 'sse_error';
+          const mm = /"message"\s*:\s*"([^"]{0,160})/.exec(tail); if (mm) row.err = mm[1];
+        }
+      });
+      upstream.on('end', () => done());
       res.writeHead(upstream.statusCode, {'content-type': upstream.headers['content-type'] || 'application/json',
                                          'cache-control': 'no-store'});
       upstream.on('error', () => { release(); res.destroy(); });
@@ -72,7 +104,7 @@ const server = createServer((req, res) => {
       upstream.on('close', () => { release(); if (!upstream.complete) res.destroy(); });
       upstream.pipe(res);
     });
-    outgoing.on('timeout', () => outgoing.destroy());
+    outgoing.on('timeout', () => { row.err = 'upstream timeout'; outgoing.destroy(); });
     outgoing.on('error', () => { release(); fail(502, 'provider unavailable'); });
     res.on('close', () => { if (!res.writableEnded) outgoing.destroy(); release(); });
     outgoing.end(payload);

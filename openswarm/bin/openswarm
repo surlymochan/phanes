@@ -4159,6 +4159,68 @@ def record_executor_descendants(rdir, pid):
     set_status(rdir, executor_descendants=list(merged.values()))
 
 
+_SUBREAPER = False
+
+
+def lane_become_subreaper():
+    """Linux: adopt orphaned descendants, so a detached child the executor left behind (even one
+    forked and abandoned between two descendant scans) is still found after the executor exits."""
+    global _SUBREAPER
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        _SUBREAPER = libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        _SUBREAPER = False
+    return _SUBREAPER
+
+
+def adopted_orphans(exclude=()):
+    """Live processes reparented to this subreaper supervisor (pid -> stat state), excluding known children."""
+    me, out = os.getpid(), {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return out
+    for name in names:
+        if not name.isdigit() or int(name) in exclude:
+            continue
+        try:
+            with open(f"/proc/{name}/stat") as handle:
+                fields = handle.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 1 and fields[1] == str(me):
+            out[int(name)] = fields[0]
+    return out
+
+
+def record_adopted_orphans(rdir, exclude=()):
+    """Record orphans adopted after the executor exited as executor descendants; reap adopted zombies."""
+    found = []
+    for pid, state in adopted_orphans(exclude).items():
+        if state == "Z":
+            try:
+                os.waitpid(pid, os.WNOHANG)  # an adopted orphan that already died
+            except OSError:
+                pass
+            continue
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            continue
+        identity = process_identity(pid)
+        if identity:
+            found.append({"pid": pid, "pgid": pgid, "identity": identity, "adopted": True})
+    if found:
+        known = jload(os.path.join(rdir, "status.json"), {}) or {}
+        old = known.get("executor_descendants") if isinstance(known.get("executor_descendants"), list) else []
+        set_status(rdir, executor_descendants=old + found)
+    return found
+
+
 def recorded_executor_records(rdir):
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
     records = [{"pid": status.get("executor_pid"), "pgid": status.get("executor_pgid"),
@@ -8090,6 +8152,27 @@ def pi_compact_event(msg):
     return out
 
 
+PI_RETRYABLE_RE = re.compile(r"overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504|529)\b|"
+                             r"service.?unavailable|server.?error|internal.?error|network.?error|connection.?(?:error|refused|lost)|"
+                             r"fetch failed|socket hang up|ended without|timed? out|timeout|terminated", re.I)
+
+
+def lane_note_executor_exit(rdir, desc_recorded_at):
+    """Without a subreaper, an executor seen exiting long after the last descendant scan may have
+    left an unrecorded detached child: mark the run so its fleet slot is kept for TTL recovery."""
+    if not _SUBREAPER and time.monotonic() - desc_recorded_at > 1.0:
+        set_status(rdir, executor_scan_stale=True)
+
+
+def pi_retry_wait_seconds():
+    """Grace for pi's auto-retry: how long a retryable error waits for auto_retry_start, and how
+    long after auto_retry_start's own delayMs the retry may stay silent before the turn ends."""
+    try:
+        return max(0.0, float(os.environ.get("OPENSWARM_PI_RETRY_WAIT_SECONDS") or 8))
+    except ValueError:
+        return 8.0
+
+
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -8535,9 +8618,22 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     elif spec.get("abort_requested"):
         lane_abort_child(lane, child, turn)
         abort_deadline = NOW() + 30
+    desc_recorded_at = 0.0
+    desc_eager_until = time.monotonic() + 3.0
+    idle_tick = True
+    # pi auto-retry: a deadline (monotonic seconds) by which pi must show the retry progressing.
+    pi_retry_wait = None
+    pi_retry_started = False
     while not ended:
-        if child.pid and pid_alive(child.pid):
+        # Scanning descendants costs one pgrep per process plus a status.json rewrite; doing it
+        # for every streamed event throttled pi/codex lanes and left the model idle while the
+        # event queue backed up (box 2026-11-01). While events stream, record at most every 5
+        # seconds; on every quiet tick (no event for 0.15s, which is when tools run and fork)
+        # and during the first seconds of a turn, record as before.
+        mono = time.monotonic()
+        if child.pid and (idle_tick or mono < desc_eager_until or mono - desc_recorded_at >= 5.0) and pid_alive(child.pid):
             record_executor_descendants(rdir, child.pid)
+            desc_recorded_at = time.monotonic()
         lane_control_messages(server, lane, spec, child, turn, pending)
         now = NOW()
         if not budget_hit and now >= deadline:
@@ -8556,9 +8652,16 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after abort"})
             child.close()
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "stopped", 130, event_file, "executor did not stop within 30s after abort"
+        if pi_retry_wait is not None and time.monotonic() >= pi_retry_wait:
+            if not errors:
+                errors.append("pi auto-retry did not resume after a transient provider error")
+            ended = True
+            continue
         msg = child.next_event(0.15)
+        idle_tick = msg is False
         if msg is False:
             if not child.alive():
+                lane_note_executor_exit(rdir, desc_recorded_at)
                 if lane_headless(lane):
                     msg = child.next_event(1.0)  # a finished process may still have events in its pipe
                     if msg is False:
@@ -8570,6 +8673,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor process exited"
             continue
         if msg is None:
+            lane_note_executor_exit(rdir, desc_recorded_at)
             if lane_headless(lane):
                 if agy_resume_steer():
                     continue
@@ -8648,14 +8752,43 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     if message.get("errorMessage") or message.get("stopReason") == "error":
                         errors.append(short(message.get("errorMessage") or "provider returned stopReason=error", 400))
             if msg.get("type") == "agent_end":
+                last_err = ""
                 for message in msg.get("messages") or []:
                     if message.get("role") == "assistant":
                         text = "".join(b.get("text", "") for b in message.get("content") or []
                                        if isinstance(b, dict) and b.get("type") == "text")
                         final = extract_json(text) or final
+                        last_err = (message.get("errorMessage") or "") if message.get("stopReason") == "error" else ""
                 if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
                     continue
-                ended = True
+                if last_err and PI_RETRYABLE_RE.search(last_err):
+                    # pi may auto-retry a transient provider error: wait for auto_retry_start (or,
+                    # if it already arrived, keep its longer deadline) instead of ending now.
+                    wait_until = time.monotonic() + pi_retry_wait_seconds()
+                    pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
+                else:
+                    if pi_retry_started and not last_err:
+                        errors.clear()  # a failed attempt was superseded by the successful retry
+                    ended = True
+            elif msg.get("type") == "auto_retry_start":
+                # Follow pi's own backoff, then allow the retry a grace window to show activity.
+                try:
+                    delay = max(0.0, float(msg.get("delayMs") or 0) / 1000.0)
+                except (TypeError, ValueError):
+                    delay = 0.0
+                wait_until = time.monotonic() + delay + pi_retry_wait_seconds()
+                pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
+                pi_retry_started = True
+            elif msg.get("type") == "auto_retry_end":
+                pi_retry_wait = None
+                if msg.get("success"):
+                    errors.clear()
+                else:
+                    errors.append(short(msg.get("finalError") or "pi auto-retry exhausted", 400))
+                    ended = True
+            elif pi_retry_started and pi_retry_wait is not None and msg.get("type") in (
+                    "agent_start", "turn_start", "message_start", "message_update", "tool_execution_start"):
+                pi_retry_wait = None  # the retry is running; the turn budget bounds it from here
         elif lane_headless(lane):
             lane_record_event(event_file, msg)
             kind, payload = agy_event(msg)
@@ -8981,8 +9114,16 @@ def lane_do_run(lane, spec, child, server, current):
                 # while its dedicated group still contains a descendant,
                 # including after a normal wrapper exit or SIGKILL/OOM.
                 child_returncode = child.proc.returncode if not child.alive() else None
+                # An executor that exited long after the last descendant scan may have left an
+                # unrecorded detached child: keep the slot for the TTL recovery path instead.
+                # Exact on Linux (the supervisor is a subreaper): any descendant the exited
+                # executor left behind is now our child and is recorded, which keeps the slot.
+                # Elsewhere, an exit seen long after the last scan keeps the slot for TTL recovery.
+                if child_returncode is not None and _SUBREAPER:
+                    record_adopted_orphans(rdir, exclude={child.pid})
+                scan_stale = not _SUBREAPER and (jload(os.path.join(rdir, "status.json"), {}) or {}).get("executor_scan_stale")
                 normal_child_exit = (error_class == "exec_error" and child_returncode is not None
-                                     and child_returncode >= 0 and executor_stopped(rdir))
+                                     and child_returncode >= 0 and not scan_stale and executor_stopped(rdir))
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
                         or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
                                                            and lane["backend"] == "agy" and not child.alive())
@@ -9095,6 +9236,7 @@ def agy_quota_available(lane, child):
 
 def cmd_lane_serve(lane, policy):
     name = lane["name"]
+    lane_become_subreaper()
     server = lane_ctl_listener(name)
     current, child = {}, None
     started, backoff, next_start = NOW(), 1, 0
