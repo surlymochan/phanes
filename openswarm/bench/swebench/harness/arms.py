@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -127,7 +128,7 @@ def run_pi(task_id: str, workdir: Path, prompt: str, events: Path, timeout: int,
     return out
 
 
-def path_env(venv: Path, *extra: str) -> dict:
+def path_env(venv: Path, *extra: str, cache_root: Path | None = None) -> dict:
     """PATH for the agent's shell plus NO_NET_ENV.
 
     The agent must work fully offline: it must not download newer upstream releases (which may
@@ -136,13 +137,22 @@ def path_env(venv: Path, *extra: str) -> dict:
     """
     env = {"PATH": ":".join([f"{venv}/bin", *extra, os.environ["PATH"]])}
     env.update(NO_NET_ENV)
+    root = Path(cache_root) if cache_root is not None else Path(tempfile.mkdtemp(prefix="swebench-cache-"))
+    root.mkdir(parents=True, exist_ok=True)
+    run_cache = Path(tempfile.mkdtemp(prefix="agent-", dir=root))
+    for name, variable in (("uv", "UV_CACHE_DIR"), ("pip", "PIP_CACHE_DIR"), ("xdg", "XDG_CACHE_HOME")):
+        directory = run_cache / name
+        directory.mkdir()
+        env[variable] = str(directory)
+    env["UV_OFFLINE"] = "1"
+    env["PIP_NO_INDEX"] = "1"
     return env
 
 
 # ---------------------------------------------------------------- arms
 
 def arm_baseline(inst, repo, venv, events, tid):
-    return [run_pi(tid, repo, base_prompt(inst, repo, venv), events, CAP_S, path_env(venv))]
+    return [run_pi(tid, repo, base_prompt(inst, repo, venv), events, CAP_S, path_env(venv, cache_root=events / "cache"))]
 
 
 def _frontmatter(text):
@@ -189,7 +199,7 @@ def superpowers_context() -> str:
 
 def arm_superpowers(inst, repo, venv, events, tid):
     prompt = superpowers_context() + "\n\n" + base_prompt(inst, repo, venv) + "\nUse the installed skills for this change."
-    return [run_pi(tid, repo, prompt, events, CAP_S, path_env(venv))]
+    return [run_pi(tid, repo, prompt, events, CAP_S, path_env(venv, cache_root=events / "cache"))]
 
 
 AGENTS_MD = """# OpenFlow project entry
@@ -212,7 +222,7 @@ def arm_openflow(inst, repo, venv, events, tid):
     version = json.loads((pkg / "package.json").read_text())["version"]
     if version != "0.2.1":
         raise SystemExit(f"openflow install is {version}, expected 0.2.1")
-    env = path_env(venv, f"{OPENFLOW_PREFIX}/bin", NODE22_BIN)
+    env = path_env(venv, f"{OPENFLOW_PREFIX}/bin", NODE22_BIN, cache_root=events / "cache")
     full_env = dict(os.environ, **env)
     E.sh(["xflow", "init", "--project-root", str(repo)], env=full_env)
     (repo / "AGENTS.md").write_text(AGENTS_MD.format(matrix=pkg / "docs" / "tooling-matrix.md", skills=pkg / "xflow"))
@@ -261,7 +271,8 @@ def arm_openswarm(inst, repo, venv, events, tid):
     skill = full_skill if skill_mode == "full" else routing_summary(full_skill)
     plan = PLANNER.format(task_file=task_file, verify_file=verify_file, python=f"{venv}/bin/python", repo=repo,
                           skill=skill, task=base_prompt(inst, repo, venv))
-    calls = [run_pi(tid + "-plan", rundir, plan, events, 120, path_env(venv), label="planner")]
+    calls = [run_pi(tid + "-plan", rundir, plan, events, 120,
+                    path_env(venv, cache_root=events / "cache"), label="planner")]
     calls[0]["prompt_chars"] = len(plan)
     calls[0]["skill_mode"] = skill_mode
     if task_file.exists():
@@ -278,7 +289,7 @@ def arm_openswarm(inst, repo, venv, events, tid):
     home = events / "openswarm-home"
     home.mkdir(exist_ok=True)
     shim = Path(__file__).resolve().parent / "pi_shim.sh"
-    env = dict(os.environ, **path_env(venv), OPENSWARM_HOME=str(home), OPENSWARM_PI_BIN=str(shim),
+    env = dict(os.environ, **path_env(venv, cache_root=events / "cache"), OPENSWARM_HOME=str(home), OPENSWARM_PI_BIN=str(shim),
                SHIM_TASK_ID=tid + "-exec", SHIM_EVENTS=str(events), SHIM_TIMEOUT=str(budget_min * 60 + 30))
     # Keep DEEPSEEK_API_KEY: openswarm is forced to --backend pi, so the Pi wrapper run_pi.sh it calls through the shim needs it and cannot route to its own deepseek backend.
     for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"):

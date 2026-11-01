@@ -59,8 +59,9 @@ def cost(tok, row):
 LEAK_MARKERS = ("bench-swe/repos", "bench-swe/data", "verified.parquet", "bench-swe/results", "SWE-bench_Verified",
                 "huggingface.co", "github.com/sympy", "github.com/pytest-dev", "github.com/pylint-dev", "pip download",
                 "pypi.org", "files.pythonhosted.org", "pip install sympy", "pip install pytest", "pip install pylint",
-                "site-packages/sympy", "site-packages/_pytest", "site-packages/pylint", ".cache/pip", ".cache/uv",
+                "site-packages/sympy", "site-packages/_pytest", "site-packages/pylint",
                 "git clone", "raw.githubusercontent.com", "api.github.com")
+CACHE_MARKERS = (".cache/uv", ".cache/pip")
 
 
 def rate_limit_stats(raw_dir, arm, instance_id, rep):
@@ -97,17 +98,21 @@ def rate_limit_stats(raw_dir, arm, instance_id, rep):
 
 
 def leak_scan(raw_root):
-    """Tool calls that touched the upstream mirrors, the dataset or other runs' results."""
+    """Tool calls touching upstream mirrors, datasets, other results, or shared caches."""
     hits = {}
+    cache_reads = 0
     for f in Path(raw_root).glob("*/*/r*/*-events.jsonl"):
-        for line in f.open(errors="replace"):
-            if '"tool_execution_start"' not in line:
-                continue
-            for m in LEAK_MARKERS:
-                if m in line:
-                    key = "/".join(f.parts[-4:-1])
-                    hits.setdefault(key, set()).add(m)
-    return {k: sorted(v) for k, v in hits.items()}
+        with f.open(errors="replace") as stream:
+            for line in stream:
+                if '"tool_execution_start"' not in line:
+                    continue
+                if any(marker in line for marker in CACHE_MARKERS):
+                    cache_reads += 1
+                for m in LEAK_MARKERS:
+                    if m in line:
+                        key = "/".join(f.parts[-4:-1])
+                        hits.setdefault(key, set()).add(m)
+    return {"hits": {k: sorted(v) for k, v in hits.items()}, "cache_reads": cache_reads}
 
 
 def main():
@@ -228,7 +233,9 @@ def main():
           "Runs whose last model call ended in an error: " + "; ".join(
               f"{a} {summary['arms'][a]['runs_ended_in_error']}" for a in arms),
           f"Harness errors excluded from n: {summary['harness_errors']}",
-          f"Leak scan (tool calls touching upstream mirrors, dataset or other results): {summary['leak_scan'] or 'none'}"]
+          f"Leak scan (tool calls touching upstream mirrors, dataset or other results): "
+          f"{summary['leak_scan']['hits'] or 'none'}",
+          f"Shared package cache reads: {summary['leak_scan']['cache_reads']}"]
     if args.model_label:
         L = [f"Model: {args.model_label}", ""] + L
     if args.exclude:
