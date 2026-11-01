@@ -676,6 +676,11 @@ Failed runs with commits are collected too. The batch exits nonzero if any card 
 branch, commit, seconds and a one-line summary. Review branches before integrating; run a combined test suite
 after integration. One-shot `run --base REV` is also supported.
 
+A release deploys one commit to the box and to every remote. Each host can leave a small version
+record (`host`, `sha`, `ts`) outside the repository, conventionally in `~/.phanes/deploy-version.json`,
+and `lib/deploy/version_record.py` writes and compares those records; see
+[docs/deploy-version-record.md](docs/deploy-version-record.md).
+
 ## Verify a remote run elsewhere
 
 ```bash
