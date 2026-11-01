@@ -144,12 +144,19 @@ def parse_periods(brief: dict) -> dict:
     window = brief.get("观察期间")
     start = reference = end = as_of = None
     if isinstance(window, dict):
+        raw_anchors = window.get("期次")
+        if isinstance(raw_anchors, list):
+            anchors = [item.strip() for item in raw_anchors if isinstance(item, str) and item.strip()]
+            counts = Counter(anchors)
+            duplicated = [anchor for anchor in anchors if counts[anchor] > 1]
+            if duplicated:
+                duplicate_text = "、".join(dict.fromkeys(duplicated))
+                raise BriefError(f"任务书 `观察期间.期次` 包含重复 period 键：{duplicate_text}")
         start = first_text(window, "起始期次", "起始", "start")
         reference = first_text(window, "参考期次", "参考", "reference")
         end = first_text(window, "截止期次", "截止", "end")
         as_of = first_text(window, "数据截止", "数据截止日期", "asOf")
-        if not start and isinstance(window.get("期次"), list):
-            anchors = [item.strip() for item in window["期次"] if isinstance(item, str) and item.strip()]
+        if not start and isinstance(raw_anchors, list):
             # Boss 格式按期次顺序映射：首个“实际”为起始，含“参考”为参考，观察月份对应的“实际”为截止。
             actuals = [item for item in anchors if item.endswith(ACTUAL_SUFFIX)]
             references = [item for item in anchors if "参考" in item]

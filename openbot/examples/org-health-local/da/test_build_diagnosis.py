@@ -218,6 +218,17 @@ class ParsePeriodsTest(unittest.TestCase):
             {"start": "2026-01", "reference": "2026-05", "end": "2026-09", "as_of": "2026-09-30"},
         )
 
+    def test_boss_period_list_rejects_duplicate_period_key(self) -> None:
+        """观察期间期次列表含重复键时明确失败并指出重复键。"""
+        brief = {
+            "观察期间": {
+                "观察月份": "2026-09",
+                "期次": ["2026-01实际", "2026-05H1参考", "2026-09实际", "2026-09实际"],
+            }
+        }
+        with self.assertRaisesRegex(build_diagnosis.BriefError, r"重复 period 键.*2026-09实际"):
+            build_diagnosis.parse_periods(brief)
+
     def test_string_periods_use_first_middle_and_last_month(self) -> None:
         """字符串中的三个期次依次作为起始、参考和截止。"""
         self.assertEqual(
@@ -1314,6 +1325,22 @@ class MinimalRawInputErrorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         data = json.loads(self.out_path.read_text(encoding="utf-8"))
         self.assertEqual(validate.validate_data(data, self.schema), [])
+
+    def test_duplicate_period_key_in_nonempty_brief_exits_nonzero(self) -> None:
+        """非空原始数据配合重复 period 键时退出非 0，并指出该键。"""
+        brief = dict(BRIEF)
+        brief["观察期间"] = {
+            "观察月份": "2026-09",
+            "期次": ["2026-01实际", "2026-05H1参考", "2026-09实际", "2026-09实际"],
+        }
+        brief_path = write_brief(self.folder, brief)
+        raw_dir = self.write_minimal_raw("raw-duplicate-period-key")
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("重复 period 键", message)
+        self.assertIn("2026-09实际", message)
+        self.assertFalse(self.out_path.exists())
 
     def test_required_numeric_column_empty_exits_nonzero(self) -> None:
         """必需数字列为空时退出码非 0，并指出文件与列名。
