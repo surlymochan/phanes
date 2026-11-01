@@ -110,7 +110,8 @@ class RunE2ETest(unittest.TestCase):
         self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
     def write_stub(self, path, role, failing=False, probe=False, exit_code=7, echo=None,
-                   report_path=None, report_body=None, error_text=None, raw_output=None):
+                   report_path=None, report_body=None, error_text=None, raw_output=None,
+                   fail_after_output=False):
         if report_path is not None and report_body is None:
             report_body = '{}'
         source = '''import json, pathlib, sys
@@ -124,7 +125,7 @@ if RPT_PATH is not None:
     pathlib.Path(RPT_PATH).write_text(RPT_BODY, encoding='utf-8')
 if ERR_TEXT is not None:
     print(ERR_TEXT, file=sys.stderr, flush=True)
-if FAIL:
+if FAIL and not FAIL_AFTER_OUTPUT:
     raise SystemExit(EXIT_CODE)
 if role == 'boss':
     pathlib.Path(args[args.index('--out') + 1]).write_text('{}', encoding='utf-8')
@@ -153,7 +154,10 @@ elif role == 'reviewer':
         print(f"# 组织诊断交叉审查报告\\n- brief: {brief.name}\\n- data: {data.name}\\n- dist: {dist.name}\\nPASS", flush=True)
     else:
         print("# 组织诊断交叉审查报告\\nPASS", flush=True)
+if FAIL:
+    raise SystemExit(EXIT_CODE)
 '''.replace('ROLE', repr(role)).replace('LOG', repr(str(self.log)))
+        source = source.replace('FAIL_AFTER_OUTPUT', repr(fail_after_output))
         source = source.replace('FAIL', repr(failing)).replace('PROBE', repr(probe))
         source = source.replace('EXIT_CODE', repr(exit_code))
         source = source.replace('ECHO', repr(echo))
@@ -630,6 +634,37 @@ time.sleep(30)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('步骤失败: DA', result.stderr)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+
+    def test_da_failure_preserves_completed_artifacts_and_timings(self):
+        """DA 写出诊断后失败时，任务书、诊断快照和失败步骤耗时都保留。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 1), fail_after_output=(index == 1))
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('失败步骤: DA', result.stderr)
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
+        self.assertEqual([item['exit_code'] for item in timings], [0, 7])
+
+    def test_builder_failure_preserves_completed_artifacts_and_timings(self):
+        """Builder 写出站点后失败时，上游 JSON 和已执行步骤耗时都保留。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 2), fail_after_output=(index == 2))
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('失败步骤: Builder', result.stderr)
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder'])
+        self.assertEqual([item['exit_code'] for item in timings], [0, 0, 7])
 
     def test_missing_role_script_reports_step_and_stops_pipeline(self):
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
