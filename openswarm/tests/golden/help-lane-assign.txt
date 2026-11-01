@@ -2,6 +2,7 @@ usage: openswarm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
                              [--title TITLE] [--verify VERIFY]
                              [--verify-baseline]
                              [--budget-minutes BUDGET_MINUTES] [--base BASE]
+                             [--idempotency-key IDEMPOTENCY_KEY]
                              [--card-type CARD_TYPE] [--rework-of REWORK_OF]
                              [--paths PATHS [PATHS ...]] [--read-only]
                              name
@@ -18,6 +19,9 @@ options:
   --verify-baseline
   --budget-minutes BUDGET_MINUTES
   --base BASE
+  --idempotency-key IDEMPOTENCY_KEY
+                        retry-safe key: repeating it returns the existing run
+                        instead of creating a second one
   --card-type CARD_TYPE
                         optional task card type from knowledge/card-types.yaml
   --rework-of REWORK_OF

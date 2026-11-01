@@ -120,6 +120,9 @@ $XS lane systemd-unit K1                   # print a system unit only; install i
 `fleet exec <host> -- lane assign <lane> --task-file <path>` for an explicit remote lane; it observes that
 host's local cap. Check `fleet status` for current runs, and use `batch` for planner-coordinated provider and
 total caps across hosts sharing an account.
+`lane assign --idempotency-key KEY` makes a retry after a broken transport safe: the lane keeps the most
+recent 200 keys and the run each key created, so the same key returns that run with `"reused": true` instead of
+starting a second one, even while the lane is still busy with it.
 Review the run through `watch`,
 `runs`, `report`, and `runs/<id>/result.json` as usual. Each lane has a persistent `$OPENSWARM_HOME/lanes/<name>/wt`;
 assignments reset it to the requested `--base` (default: repo `HEAD`) and commit edits on `openswarm/<run-id>`.

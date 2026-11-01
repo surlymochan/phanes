@@ -451,6 +451,10 @@ openswarm lane systemd-unit K1             # prints a system systemd unit; does 
 
 Lane runs use the normal `runs/<id>` files, `openswarm/<id>` commit branch, host verification, ledger, `watch`,
 `runs`, and `report` paths. `--base REV` selects the commit used to reset a lane worktree for one assignment.
+`lane assign --idempotency-key KEY` makes a retry safe: the lane remembers the most recent 200 keys and the run
+each key created, so repeating a key returns that run (with `"reused": true`) instead of starting a second one,
+even while the lane is still busy with it. A different key assigns the lane again as usual, and
+`fleet exec <host> -- lane assign ... --idempotency-key KEY` forwards the key to the remote lane.
 An optional lane `binary` absolute path overrides the detected executable, which is useful for wrappers and offline
 protocol testing. Cursor defaults to model `composer-2.5`; its binary is `cursor-agent` on `PATH`, then
 `~/.local/bin/cursor-agent`. ACP model selection first tries the exact configured value, then matches the part before
