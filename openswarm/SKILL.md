@@ -269,6 +269,7 @@ Override anything in `~/.claude/openswarm/policy.local.json`, deep-merged over `
   See README "What openswarm reads on your machine".
 
 - Controlled local executors get `workspace-write` sandbox (Codex) or edit/bash permission scoped to the worktree (opencode, `external_directory: deny`). The local runner commits on `openswarm/<id>` and does not push. The GitHub bus worker is the only path that pushes, and only to the target task repository.
+- `merge-gate` is the only path that merges a pull request. It is an explicit command, not a loop: it merges only when the reviewed head sha is still the head sha, the CI is green, and no needs-changes label is set.
 - Do not put secrets in task prompts. Prompts and diffs go to the executor's model provider. Each backend's data boundary is listed in `backends/*.json`.
 - `$XS stop <id>` kills the executor's process tree. The runner still finalizes, so partial work is committed and can be inspected.
 
@@ -363,6 +364,18 @@ A ledger record carries the outcome and what the next run learns from it: `exec_
 | `consult` | Ask several executors the same question in read-only mode and compare the answers. | `$XS consult --question "Which parser change is safest?" --ask codex --ask pi --json` |
 | `review` | Review a finished run's branch with a read-only executor from another model family. | `$XS review <run-id> --by codex --json` |
 | `compare` | Run one card on two executor families and record the best-of-two comparison. | `$XS compare --task-file /tmp/task.md --title "Parser fix" --a codex --b pi --verify 'pytest -q'` |
+
+### Merge
+
+| Command | Purpose | Example |
+|---|---|---|
+| `merge-gate` | Merge a pull request only when the reviewed head sha is still the head sha, the CI is green, and no needs-changes label is set. | `$XS merge-gate --repo acme/project --pr 42 --dry-run` |
+
+`merge-gate` judges every open pull request of the repository (or `--pr N` only) and reports one verdict per PR:
+`mergeable` or `blocked:<reason>` (`no_head_sha`, `label`, `ci`, `ci_pending`, `conflict`, `no_checks`, `no_review`,
+`verdict`, `stale_review`, `gh_error`). The reviewed head sha and the review verdict come from
+`$OPENSWARM_HOME/reviews.json`; without `--dry-run` a `mergeable` PR is squash merged with
+`gh pr merge --squash --match-head-commit <sha>`. It is an explicit command: openswarm runs no merge loop.
 
 ## 10. Learning loop
 
