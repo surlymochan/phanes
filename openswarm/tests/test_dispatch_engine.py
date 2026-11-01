@@ -167,6 +167,7 @@ class ReviewGate(Base):
         edits = self.runner.called("issue edit 100")
         self.assertEqual(len(edits), 1)
         self.assertIn("Rebase-PR: #10 fleet/M5-issue100-r1", edits[0])
+        self.assertIn("--remove-label in-progress", edits[0])
         self.assertEqual(d.load_reviews()["10"]["rebase_sha"], SHA)
         # once per head sha
         self.runner.calls.clear()
@@ -234,6 +235,91 @@ class ReviewGate(Base):
         self.assertEqual(self.runner.called("statuses/"), [])
 
 
+class RebaseHarvest(Base):
+    ST = {"issue": 7, "run": "r1", "base": SHA, "rebase_pr": 70, "rebase_branch": "fleet/M5-issue7-r0"}
+    INFO = {"branch": "lane/x", "commit": "c", "status": "done", "repo": "/w"}
+
+    def harvest(self, rules, st=None):
+        d = self.make(rules)
+        st = dict(st or self.ST)
+        state = {"M5": st}
+        return d, d.finish("M5", {"host": "box", "backend": "pi"}, st, dict(self.INFO), state), state
+
+    def test_nothing_to_push_is_lane_failed_not_lane_pr(self):
+        d, done, state = self.harvest([("merge-base", (1, "", "")), ("diff --stat", (0, " a | 1\n", ""))])
+        self.assertTrue(done)
+        self.assertEqual(self.runner.called(" push -q"), [])
+        edits = " ".join(self.runner.called("issue edit 7"))
+        self.assertIn("--add-label lane-failed", edits)
+        self.assertNotIn("--add-label lane-pr", edits)
+        self.assertIn(7, state["_done"])
+
+    def test_push_always_uses_lease(self):
+        ok = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", ""))]
+        _, done, _ = self.harvest(ok, dict(self.ST, rebase_head=SHA2))
+        push = self.runner.called(" push -q")
+        self.assertTrue(done)
+        self.assertEqual(len(push), 1)
+        self.assertIn(f"--force-with-lease=refs/heads/fleet/M5-issue7-r0:{SHA2}", push[0])
+        # no recorded head: read it now and lease against it, never a bare --force
+        _, done, _ = self.harvest(ok + [("ls-remote", (0, SHA + "\trefs/heads/x\n", ""))])
+        push = self.runner.called(" push -q")
+        self.assertIn(f"--force-with-lease=refs/heads/fleet/M5-issue7-r0:{SHA}", push[0])
+        self.assertFalse(any(c.split().count("--force") for c in push))
+        # head unreadable: do not push at all, retry next tick
+        _, done, _ = self.harvest(ok + [("ls-remote", (2, "", "boom"))])
+        self.assertFalse(done)
+        self.assertEqual(self.runner.called(" push -q"), [])
+
+    def test_moved_head_keeps_newer_head(self):
+        rules = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
+                 (" push -q", (1, "", "! [rejected] (stale info)"))]
+        _, done, _ = self.harvest(rules, dict(self.ST, rebase_head=SHA2))
+        self.assertTrue(done)
+        self.assertIn("--add-label lane-pr", " ".join(self.runner.called("issue edit 7")))
+
+
+class FreshReads(Base):
+    def test_read_failure_is_not_stale_and_budget_caps_reads(self):
+        self.cfg["fresh_read_budget"] = 2
+        d = self.make([("issue view 1 ", (1, "", "HTTP 502")),
+                       ("issue view", (0, json.dumps({"state": "OPEN", "labels": [{"name": "lane-pr"}]}), ""))])
+        self.assertEqual(d.label_state(1), "unknown")
+        self.assertEqual(d.label_state(2), "stale")
+        self.assertEqual(d.label_state(3), "unknown")       # budget spent
+        self.assertEqual(d.label_state(2), "stale")         # cached, no extra read
+        self.assertEqual(len(self.runner.called("issue view")), 2)
+
+
+class Assign(Base):
+    def test_idempotency_key_reused_on_transport_retry(self):
+        calls = {"n": 0}
+
+        def ssh(text):
+            calls["n"] += 1
+            return (255, "", "Connection reset") if calls["n"] == 1 else (0, '{"id": "run-1"}', "")
+        d = self.make([("cat > /tmp/task", (0, "", "")), ("lane assign", ssh)])
+        item = {"n": 5, "title": "t", "body": "", "backend": None}
+        run, _ = d.dispatch("M8", {"host": "far", "backend": "pi"}, item, SHA)
+        self.assertEqual(run, "run-1")
+        keys = [c.split("--idempotency-key ")[1].split()[0] for c in self.runner.called("lane assign")]
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(keys[0], keys[1])
+
+    def test_key_can_be_disabled_for_old_fleet_releases(self):
+        self.cfg["assign_idempotency_key"] = False
+        d = self.make([("cat > /tmp/task", (0, "", "")), ("lane assign", (0, '{"id": "run-2"}', ""))])
+        d.dispatch("M8", {"host": "far", "backend": "pi"}, {"n": 5, "title": "t", "body": "", "backend": None}, SHA)
+        self.assertNotIn("--idempotency-key", self.runner.called("lane assign")[0])
+
+
+class Defaults(unittest.TestCase):
+    def test_remote_home_matches_fleet_wrapper(self):
+        with open(os.path.join(os.path.dirname(HERE), "bin", "openswarm-fleet")) as f:
+            m = __import__("re").search(r'OPENSWARM_HOME="\$HOME/([^"]+)"', f.read())
+        self.assertEqual(E.DEFAULTS["remote_home"], "~/" + m.group(1))
+
+
 class DryRunTick(Base):
     def test_dry_run_decides_without_writes(self):
         lanes = {"M5": {"host": "box", "backend": "pi"}, "CX1": {"host": "box", "backend": "codex"}}
@@ -255,6 +341,13 @@ class DryRunTick(Base):
         self.assertEqual(self.runner.called("lane assign"), [])
         for name in ("state.json", "lanes-status.json", "lane-lru.json", "heartbeat"):
             self.assertFalse(os.path.exists(d.path(name)), name)
+
+    def test_dry_run_creates_no_state_dir(self):
+        self.cfg["state_dir"] = os.path.join(self.tmp, "fresh-state")
+        d = self.make([("python3 -", (0, json.dumps({"lane": "idle", "run": None}), "")), ("issue list", (0, "[]", "")),
+                       ("pr list", (0, "[]", ""))], dry_run=True)
+        d.tick({"M5": {"host": "box", "backend": "pi"}}, {})
+        self.assertFalse(os.path.exists(self.cfg["state_dir"]))
 
 
 class Cli(Base):

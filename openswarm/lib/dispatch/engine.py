@@ -64,6 +64,8 @@ DEFAULTS = {
     "hot_files": {"line_re": r"^\s*(?:热文件|Hot-files)\s*[:：](.*)$", "union": [], "limits": {}, "default_limit": 1},
     "leak_grace_s": 900,
     "stale_strip_after": 5,
+    "fresh_read_budget": 60,              # authoritative `gh issue view` reads per tick (1 GraphQL point each)
+    "assign_idempotency_key": True,       # pass `lane assign --idempotency-key` (needs a fleet release with #1388)
     "status_tick_cap_s": 55,
     "harvest_cap_s": 100,
     "review": {
@@ -89,7 +91,7 @@ DEFAULTS = {
         "jump": {},                       # host -> ProxyCommand (ProxyJump=none is added)
         "status_timeout_s": 30, "jump_status_timeout_s": 45,
     },
-    "remote_home": "~/.claude/openswarm",
+    "remote_home": "~/.claude/openswarm-executor-candidate",   # = OPENSWARM_HOME forced by bin/openswarm-fleet
     "default_fleet_bin": "~/.local/bin/openswarm-fleet",
     "default_repo_path": "~/work/repo",
     "watchdog_requeue_file": "",
@@ -253,9 +255,11 @@ class Dispatcher:
     def __init__(self, cfg, runner=None, dry_run=False, clock=time.time, out=None):
         self.cfg = cfg
         self.D = cfg["state_dir"]
-        os.makedirs(self.D, exist_ok=True)
+        if not dry_run:                       # shadow mode creates nothing
+            os.makedirs(self.D, exist_ok=True)
         self.runner = runner or run_cmd
         self.dry_run = dry_run
+        self.label_cache, self.label_reads = {}, 0
         self.clock = clock
         self.out = out or sys.stdout
         self.L = cfg["labels"]
@@ -529,11 +533,28 @@ class Dispatcher:
         j = json.loads(out)
         return j["state"], {l["name"] for l in j["labels"]}
 
-    def fresh_ready(self, n):
-        """The search index behind `issue list --label` lags label edits; re-read the issue directly."""
+    def label_state(self, n):
+        """The search index behind `issue list --label` lags label edits; re-read the issue directly.
+        Returns "fresh" (dispatchable), "stale" (labels say no) or "unknown" (read failed or the per-tick read budget
+        is spent). Only "stale" counts towards the stale-skip strip; "unknown" just waits for the next tick."""
+        if n in self.label_cache:
+            return self.label_cache[n]
+        if self.label_reads >= int(self.cfg["fresh_read_budget"]):
+            return "unknown"
+        self.label_reads += 1
         st, labels = self.issue_labels(n)
-        return st == "OPEN" and self.L["ready"] in labels and \
-            not labels & ({self.L["in_progress"], self.L["pr"], self.L["failed"]} | self.skip_labels())
+        if st is None:
+            res = "unknown"
+        elif st == "OPEN" and self.L["ready"] in labels and \
+                not labels & ({self.L["in_progress"], self.L["pr"], self.L["failed"]} | self.skip_labels()):
+            res = "fresh"
+        else:
+            res = "stale"
+        self.label_cache[n] = res
+        return res
+
+    def fresh_ready(self, n):
+        return self.label_state(n) == "fresh"
 
     def note_stale_skip(self, n, state):
         key = str(n)
@@ -648,20 +669,28 @@ class Dispatcher:
         cmd = (pre + fetch_main + f"git -C {R} cat-file -e {base}^{{commit}} && "
                f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes "
                f"{self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
-        out = err = ""
-        rc = 124
-        try:
-            if h in self.local_hosts:
-                env = os.environ.copy()
-                for k, v in (self.cfg.get("local_env") or {}).items():
-                    env.setdefault(k, os.path.expanduser(v))
-                rc, out, err = self.sh(["bash", "-lc", cmd], timeout=90, env=env)
-            else:
-                rc, out, err = self.sh(["ssh"] + self.ssh_opts(h) + [h, cmd], timeout=150 if rb else 140)
-        except subprocess.TimeoutExpired as e:
-            out, err = (getattr(e, "stdout", None) or ""), (getattr(e, "stderr", None) or "")
-            rc = 124
-            self.log(f"{lane} assign wall-timeout on {h}; trying adopt", brain=False)
+        key = None
+        if self.cfg.get("assign_idempotency_key"):
+            # one key per dispatch attempt: a retry after a dropped transport returns the run that already landed
+            key = f"{lane}-{n}-{base[:12]}-{int(self.clock())}"
+            cmd += f" --idempotency-key {shlex.quote(key)}"
+
+        def run_assign():
+            try:
+                if h in self.local_hosts:
+                    env = os.environ.copy()
+                    for k, v in (self.cfg.get("local_env") or {}).items():
+                        env.setdefault(k, os.path.expanduser(v))
+                    return self.sh(["bash", "-lc", cmd], timeout=90, env=env)
+                return self.sh(["ssh"] + self.ssh_opts(h) + [h, cmd], timeout=150 if rb else 140)
+            except subprocess.TimeoutExpired as e:
+                self.log(f"{lane} assign wall-timeout on {h}", brain=False)
+                return 124, (getattr(e, "stdout", None) or ""), (getattr(e, "stderr", None) or "")
+
+        rc, out, err = run_assign()
+        if key and rc in (124, 255) and h not in self.local_hosts:
+            self.log(f"{lane} assign transport rc={rc} on {h}; retrying with the same idempotency key", brain=False)
+            rc, out, err = run_assign()
         m = re.search(r'"id":\s*"([^"]+)"', out or "")
         if (rc or not m) and h not in self.local_hosts:
             # The transport may drop after the assign landed: adopt the new run instead of re-dispatching.
@@ -845,9 +874,26 @@ class Dispatcher:
                 anc = self.git("merge-base", "--is-ancestor", st["base"], f"refs/fleet/{lane}")[0]
                 df = self.git("diff", "--stat", st["base"], f"refs/fleet/{lane}")[1]
                 if anc != 0 or not df.strip():
-                    self.log(f"{lane} rebase #{n} PR#{pr}: result empty vs {self.cfg['base_branch']}; not pushing")
+                    # nothing usable to push: the PR is still conflicting, so do not report it as rebased
+                    why = (f"not based on {self.cfg['base_branch']} {st['base'][:8]}" if anc != 0
+                           else f"empty diff vs {self.cfg['base_branch']}")
+                    self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
+                    self.gh_write(["issue", "comment", str(n), "--body",
+                                   f"Lane {lane} rebase of PR #{pr} (run `{run}`) produced nothing to push ({why}). "
+                                   f"Labelled `{L['failed']}`; re-add `{L['ready']}` to retry."])
+                    self.log(f"{lane} rebase #{n} PR#{pr}: {why}; not pushing → {L['failed']}")
+                    self.mark_done(state, n)
+                    return True
                 else:
-                    lease = f"--force-with-lease=refs/heads/{ob}:{st['rebase_head']}" if st.get("rebase_head") else "--force"
+                    expect = st.get("rebase_head")
+                    if not expect:      # never force blindly: lease against the head as it is now
+                        ls = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git", f"refs/heads/{ob}"], timeout=30)
+                        expect = ls[1].split()[0] if not ls[0] and ls[1].split() else ""
+                        if not expect:
+                            self.log(f"{lane} rebase #{n} PR#{pr}: cannot read head of {ob}; retry next tick", brain=False)
+                            return False
+                        st["rebase_head"] = expect
+                    lease = f"--force-with-lease=refs/heads/{ob}:{expect}"
                     try:
                         rc, _, err = self.git("push", "-q", lease, "origin", f"refs/fleet/{lane}:refs/heads/{ob}", timeout=60)
                     except subprocess.TimeoutExpired:
@@ -863,7 +909,7 @@ class Dispatcher:
                     if rc:
                         self.log(f"{lane} rebase #{n} PR#{pr} push failed: {(err or '').strip()[-160:]}")
                         return False
-                    self.gh(["pr", "comment", str(pr), "--body",
+                    self.gh_write(["pr", "comment", str(pr), "--body",
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
                              f"Force-pushed to `{ob}`; it is merged after a fresh lane review and green CI."])
@@ -1060,7 +1106,8 @@ class Dispatcher:
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
         ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
         L = self.L
-        self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
+        self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
+                       "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
         r = revs.get(str(pr)) or {}
         r["rebase_sha" if kind == "rebase" else "cifix_sha"] = p["headRefOid"]
         revs[str(pr)] = r
@@ -1311,10 +1358,13 @@ class Dispatcher:
                             key=lambda i: self.rank(lc["backend"], i)):
                 if self.hot_blocked(self.hot_of(c["body"]), held):
                     continue
-                if self.fresh_ready(c["n"]):
+                ls = self.label_state(c["n"])
+                if ls == "fresh":
                     pick = c
                     break
                 q.remove(c)
+                if ls == "unknown":       # read failed / budget spent: not evidence of staleness
+                    continue
                 self.log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)
                 self.note_stale_skip(c["n"], state)
             if not pick:
@@ -1376,6 +1426,7 @@ class Dispatcher:
     def tick(self, lanes, state):
         if os.path.exists(self.path("PAUSE")):
             return
+        self.label_cache, self.label_reads = {}, 0
         os.makedirs(os.path.expanduser(self.cfg["ssh"]["control_dir"]), exist_ok=True)
         self.heartbeat()
         try:
