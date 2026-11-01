@@ -112,7 +112,7 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             self._send_json(payload, status, head=head)
             return
         self.send_response(200)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if not head:
@@ -122,7 +122,7 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         """发送 API JSON；HEAD 与 GET 保持状态和头部契约但不发送正文。"""
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if not head:
