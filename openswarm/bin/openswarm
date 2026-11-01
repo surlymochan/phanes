@@ -7306,6 +7306,8 @@ def lane_config():
         error = lane_env_config_error(lane)
         if error:
             raise ValueError(f"invalid lane config {where}: {error}")
+        if lane.get("drain") is not None and not isinstance(lane["drain"], bool):
+            raise ValueError(f"invalid lane config {where}: drain must be true or false")
         out.append(dict(lane))
     return out
 
@@ -8045,6 +8047,9 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                     answer = {"ok": True, "id": existing, "reused": True, "state": lane_run_state(existing)}
                 elif state.get("state") != "idle" or current.get("run_id"):
                     answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
+                elif lane_draining(lane["name"]):
+                    answer = {"ok": False, "draining": True,
+                              "error": f"lane {lane['name']} is draining (lanes.json drain: true); not taking new work"}
                 else:
                     rid = req.get("run_id")
                     if not rid or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", rid):
@@ -9295,6 +9300,16 @@ def cmd_lane_down(args):
     print(json.dumps({"lanes": results}, indent=2, ensure_ascii=False))
 
 
+def lane_draining(name):
+    """lanes.json "drain": true keeps a lane running (its current turn finishes) but refuses new work.
+
+    Read fresh on every assignment, so draining or undraining a lane needs no restart."""
+    try:
+        return any(lane["name"] == name and lane.get("drain") is True for lane in lane_config())
+    except ValueError:
+        return False
+
+
 def lane_status_rows():
     rows = []
     for lane in lane_config():
@@ -9318,6 +9333,8 @@ def lane_status_rows():
                      "provider": execution_provider(lane["backend"], policy=load_policy(), lane=lane),
                      "uptime_seconds": round(NOW() - state["started"], 1) if state.get("started") else None,
                      "last_error": state.get("last_error")})
+        if lane.get("drain") is True:
+            rows[-1]["drain"] = True
     return rows
 
 

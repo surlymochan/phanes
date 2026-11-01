@@ -470,6 +470,9 @@ generated systemd unit and launchd plist carry `env` but never the `env_file` co
 systemd would let it override `Environment=`). `pi` lanes reject both fields because `pi-isolated` clears the
 environment; their egress is the broker's.
 
+`"drain": true` on a lane keeps it running (a turn in progress finishes) but makes it refuse new assignments; `lane
+status` shows `"drain": true`. It is read on every assignment, so draining or undraining needs no restart.
+
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
 ```bash
