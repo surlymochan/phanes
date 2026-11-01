@@ -321,6 +321,28 @@ class ValidatePeerReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             xs.validate_peer_review({"findings": {}, "verdict": "approve"})
 
+    def test_missing_required_fields_raise_readable_error_with_field_names(self):
+        cases = (
+            ({"verdict": "approve"}, "findings"),
+            ({"findings": []}, "verdict"),
+            ({}, "findings"),
+            ({}, "verdict"),
+        )
+        for payload, missing_field in cases:
+            with self.subTest(payload=payload, missing_field=missing_field):
+                with self.assertRaisesRegex(ValueError, rf"\b{missing_field}\b"):
+                    xs.validate_peer_review(payload)
+
+        for field in ("severity", "path", "line", "title", "body"):
+            with self.subTest(missing_finding_field=field):
+                finding = self.finding()
+                del finding[field]
+                with self.assertRaisesRegex(ValueError, rf"\b{field}\b"):
+                    xs.validate_peer_review({"findings": [finding], "verdict": "approve"})
+
+        with self.assertRaisesRegex(ValueError, r"\b(severity|path|line|title|body)\b"):
+            xs.validate_peer_review({"findings": [{}], "verdict": "approve"})
+
     def test_invalid_findings_are_rejected(self):
         cases = (
             ("module.py", "finding is not an object"),

@@ -5692,13 +5692,23 @@ def review_payload_from_text(text):
 
 
 def validate_peer_review(payload):
-    if not isinstance(payload, dict) or set(payload) != {"findings", "verdict"}:
+    if not isinstance(payload, dict):
+        raise ValueError("reviewer output keys do not match the findings schema")
+    missing_payload = {"findings", "verdict"} - payload.keys()
+    if missing_payload:
+        raise ValueError("reviewer output missing required field(s): " + ", ".join(sorted(missing_payload)))
+    if set(payload) != {"findings", "verdict"}:
         raise ValueError("reviewer output keys do not match the findings schema")
     if not isinstance(payload.get("findings"), list):
         raise ValueError("reviewer output must include a findings list")
     findings = []
     for item in payload["findings"]:
-        if not isinstance(item, dict) or set(item) != {"severity", "path", "line", "title", "body"}:
+        if not isinstance(item, dict):
+            raise ValueError("review finding must be an object")
+        missing_item = {"severity", "path", "line", "title", "body"} - item.keys()
+        if missing_item:
+            raise ValueError("review finding missing required field(s): " + ", ".join(sorted(missing_item)))
+        if set(item) != {"severity", "path", "line", "title", "body"}:
             raise ValueError("review finding must be an object")
         severity = item.get("severity")
         path, line, title, body = item.get("path"), item.get("line"), item.get("title"), item.get("body")
