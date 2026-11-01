@@ -228,7 +228,7 @@ openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backe
 cd openbot/examples/org-health-local && python3 run_tests.py
 ```
 
-运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。这些路径按调用时的当前工作目录解析：相对路径以 cwd 为基准，绝对路径原样使用；默认值是示例目录内的绝对路径，不随 cwd 变化。角色脚本（含 `--reviewer`）用同一条规则解析，所以在仓库外的临时目录里调用时，相对路径同样按调用时的 cwd 找到脚本。无论从哪个目录调用，产物都写入 `--workdir`。
+运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。角色脚本、原始数据和 bundle 的相对路径以示例目录为基准，绝对路径原样使用，因此在仓库外的临时目录里调用时也不依赖 cwd；默认值是示例目录内的绝对路径。无论从哪个目录调用，产物都写入 `--workdir`（相对 `--workdir` 仍以调用时的 cwd 为基准）。
 
 从仓库根目录运行、只使用 Python 标准库的测试命令：
 

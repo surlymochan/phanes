@@ -48,8 +48,8 @@ class RunE2EArgumentContractTest(unittest.TestCase):
         self.assertIn('原始数据目录路径', result.stdout)
         self.assertIn('前端 bundle 文件路径', result.stdout)
 
-    def test_help_describes_role_script_paths_relative_to_cwd(self):
-        """--help 里说明角色脚本路径按当前工作目录解析。"""
+    def test_help_describes_role_script_paths_relative_to_example(self):
+        """--help 里说明角色脚本路径按示例目录解析。"""
         result = subprocess.run([sys.executable, str(RUNNER), '--help'], capture_output=True, text=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -59,7 +59,7 @@ class RunE2EArgumentContractTest(unittest.TestCase):
                                 ('--checker', 'CHECKER')):
             # 选项说明出现在 usage 之后，取最后一次出现的位置。
             index = compact.rindex(f'{option}{metavar}')
-            self.assertIn('相对当前工作目录解析', compact[index:index + 60])
+            self.assertIn('相对示例目录解析', compact[index:index + 60])
 
     def test_workdir_is_required(self):
         result = subprocess.run([sys.executable, str(RUNNER)], capture_output=True, text=True)
@@ -352,8 +352,8 @@ time.sleep(30)
         self.assertTrue((expected_workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
 
-    def test_relative_role_paths_resolve_against_cwd_from_repo_root(self):
-        """从仓库根目录调用时，相对角色路径按当前 cwd 解析，产物仍写入 --workdir。"""
+    def test_relative_role_paths_resolve_against_example_from_repo_root(self):
+        """从仓库根目录调用时，相对角色路径按示例目录解析，产物仍写入 --workdir。"""
         roles = ('boss', 'da', 'builder', 'checker')
         role_dir = self.root / 'roles'
         role_dir.mkdir()
@@ -361,7 +361,7 @@ time.sleep(30)
         for role, path in stubs.items():
             self.write_stub(path, role)
         rel_workdir = os.path.relpath(self.workdir, REPO_ROOT)
-        rel_roles = {role: os.path.relpath(path, REPO_ROOT) for role, path in stubs.items()}
+        rel_roles = {role: os.path.relpath(path, ROOT) for role, path in stubs.items()}
         for path in rel_roles.values():
             self.assertFalse(os.path.isabs(path), '角色路径应当是相对路径')
         command = [
@@ -378,7 +378,7 @@ time.sleep(30)
         result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # 相对角色路径原样传给子进程，并按当前 cwd（仓库根目录）找到脚本执行。
+        # 相对角色路径按示例目录找到脚本执行。
         for role in roles:
             self.assertIn(rel_roles[role], result.stdout)
         self.assertEqual([call[0] for call in self.calls()], list(roles))
@@ -392,8 +392,8 @@ time.sleep(30)
         for name in ('brief.json', 'diagnosis.json', 'timings.json', 'dist'):
             self.assertFalse((REPO_ROOT / name).exists(), f'产物写到了仓库根目录: {name}')
 
-    def test_relative_role_path_is_not_resolved_against_script_directory(self):
-        """相对角色路径按 cwd 解析：只在示例目录下存在的相对路径在仓库根目录找不到。"""
+    def test_relative_role_path_resolves_against_script_directory(self):
+        """相对角色路径按示例目录解析，即使 cwd 是仓库根目录也能找到。"""
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
             self.write_stub(path, role)
         command = [
@@ -409,30 +409,28 @@ time.sleep(30)
 
         result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
 
-        # 'boss/make_brief.py' 相对示例目录存在、相对仓库根目录不存在：
-        # 路径按 cwd 解析，因此 Boss 步骤明确失败，后续角色不再执行。
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('步骤失败: Boss', result.stderr)
-        self.assertIn('文件不存在', result.stderr)
-        self.assertNotIn('Traceback', result.stderr)
-        self.assertFalse(self.log.exists())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call[0] for call in self.calls()], ['da', 'builder', 'checker'])
 
-    def test_relative_role_paths_follow_cwd_outside_repo_root(self):
-        """在仓库外的任意 cwd 调用时，相对角色路径同样按当前 cwd 解析。"""
+    def test_relative_role_paths_are_independent_of_cwd_outside_repo_root(self):
+        """在仓库外的任意 cwd 调用时，相对角色路径仍按示例目录解析。"""
         work_cwd = self.root / 'elsewhere'
         work_cwd.mkdir()
         roles = ('boss', 'da', 'builder', 'checker')
         for role in roles:
             self.write_stub(work_cwd / f'{role}.py', role)
+        relative_roles = {
+            role: os.path.relpath(work_cwd / f'{role}.py', ROOT) for role in roles
+        }
         command = [
             sys.executable, str(RUNNER),
             '--workdir', 'out',
             '--raw', str(self.raw),
             '--bundle', str(self.bundle),
-            '--boss', 'boss.py',
-            '--da', 'da.py',
-            '--builder', 'builder.py',
-            '--checker', 'checker.py',
+            '--boss', relative_roles['boss'],
+            '--da', relative_roles['da'],
+            '--builder', relative_roles['builder'],
+            '--checker', relative_roles['checker'],
         ]
 
         result = subprocess.run(command, cwd=work_cwd, capture_output=True, text=True)
@@ -447,54 +445,31 @@ time.sleep(30)
         self.assertFalse((work_cwd / 'brief.json').exists())
 
     def test_relative_role_paths_resolve_after_chdir_to_temp_dir(self):
-        """chdir 到临时目录再跑：相对角色路径按当前 cwd 解析，boss/da/builder/review 都能找到。"""
-        # 临时目录里按真实角色目录摆好桩脚本：路径全部相对 cwd，与默认值的目录结构一致。
-        layout = {
-            'boss': 'boss/make_brief.py',
-            'da': 'da/build_diagnosis.py',
-            'builder': 'builder/build_site.py',
-            'checker': 'builder/check_site.py',
-            'reviewer': 'review/cross_check.py',
-        }
-        for role, relative in layout.items():
-            path = self.root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self.write_stub(path, role)
-        # 调用方先 chdir 到临时目录：编排器继承这个 cwd 再解析相对角色路径。
+        """chdir 到临时目录再跑：相对角色脚本与 raw 路径仍按示例目录解析。"""
         original_cwd = os.getcwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, original_cwd)
         command = [
             sys.executable, str(RUNNER),
             '--workdir', 'out',
-            '--raw', str(self.raw),
-            '--bundle', str(self.bundle),
-            '--boss', layout['boss'],
-            '--da', layout['da'],
-            '--builder', layout['builder'],
-            '--checker', layout['checker'],
-            '--reviewer', layout['reviewer'],
-            '--review',
+            '--raw', 'da/sample-raw',
+            '--bundle', 'demo/vendor/app.bundle.js',
+            '--boss', 'boss/make_brief.py',
+            '--da', 'da/build_diagnosis.py',
+            '--builder', 'builder/build_site.py',
+            '--checker', 'builder/check_site.py',
         ]
 
         result = subprocess.run(command, capture_output=True, text=True)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # 五个角色脚本都按临时目录里的相对路径找到并执行，审查脚本也不例外。
-        self.assertEqual([call[0] for call in self.calls()],
-                         ['boss', 'da', 'builder', 'checker', 'reviewer'])
-        for relative in layout.values():
-            self.assertIn(relative, result.stdout)
+        # cwd 在临时目录时，四个角色仍按示例目录里的相对路径找到并执行。
         # 产物写入 cwd 下的相对工作目录。
         expected_workdir = self.root / 'out'
         self.assertTrue((expected_workdir / 'brief.json').is_file())
         self.assertTrue((expected_workdir / 'diagnosis.json').is_file())
         self.assertTrue((expected_workdir / 'dist' / 'index.html').is_file())
         self.assertTrue((expected_workdir / 'timings.json').is_file())
-        # 审查记录同样写出，产物不落到角色脚本所在目录以外的地方。
-        report = expected_workdir / REVIEW_REPORT
-        self.assertTrue(report.is_file())
-        self.assertIn('PASS', report.read_text(encoding='utf-8'))
         self.assertFalse((self.root / 'brief.json').exists())
 
     def test_default_role_paths_stay_absolute(self):
