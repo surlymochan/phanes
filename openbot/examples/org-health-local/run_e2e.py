@@ -432,6 +432,9 @@ def main(argv=None):
             review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
             report = open_report(report_path)
             if report is None:
+                # 报告目标不可写或被占用时审查步骤没跑成：整体判失败并点名该步骤，
+                # 上游产物（任务书、诊断快照、站点）保持原样，便于事后核对。
+                failed.append('审查')
                 status = 1
                 problems.append(f'审查报告无法写入: {report_path}')
             else:

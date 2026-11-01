@@ -1153,10 +1153,39 @@ time.sleep(30)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('审查报告无法写入', result.stderr)
         self.assertIn(str((self.workdir / REVIEW_REPORT).resolve()), result.stderr)
+        self.assertIn('失败步骤: 审查', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
         # 审查记录写不出来时不再调用审查者，也不误报成功
         self.assertNotIn('reviewer', [call[0] for call in self.calls()])
         self.assertNotIn('预览命令', result.stdout)
+        # 上游产物保留，便于报告目标修复后继续核对本次运行。
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+
+    def test_review_report_target_cannot_be_created_returns_nonzero(self):
+        """审查报告父目录无法创建时非零退出并保留上游产物。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role)
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        missing_parent = self.workdir / 'missing-parent'
+        report = missing_parent / REVIEW_REPORT
+        # 父目录下放置普通文件，确保报告目标不可创建；root 用户也能稳定复现。
+        missing_parent.write_text('占位文件', encoding='utf-8')
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4]),
+                                    '--review-report', str(report)]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('审查报告无法写入', result.stderr)
+        self.assertIn(str(report.resolve()), result.stderr)
+        self.assertIn('失败步骤: 审查', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertNotIn('reviewer', [call[0] for call in self.calls()])
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
 
 
 class RunE2EReviewContractTest(unittest.TestCase):
