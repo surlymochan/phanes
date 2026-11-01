@@ -557,11 +557,68 @@ def check_dist(data_path: Path, dist: Path) -> Result:
         return Result(False, name, f"无法读取站点数据文件：{cause}")
     if site_bytes == data_bytes:
         return Result(True, name, f"`data/diagnosis.json` 与 `--data` 字节相同（sha256={digest(site_bytes)}）")
+    finding: dict[str, object] = {
+        "diagnosis_path": "/dist/data/diagnosis.json",
+        "expected": digest(data_bytes),
+        "actual": digest(site_bytes),
+    }
+    try:
+        expected_json = json.loads(data_bytes)
+        actual_json = json.loads(site_bytes)
+    except json.JSONDecodeError:
+        pass
+    else:
+        difference = first_difference(expected_json, actual_json)
+        if difference is not None:
+            path, expected, actual = difference
+            finding.update(
+                {
+                    "diagnosis_path": f"/dist/data/diagnosis.json{path}",
+                    "expected": expected,
+                    "actual": actual,
+                }
+            )
     return Result(
         False,
         name,
         f"`data/diagnosis.json` 与 `--data` 字节不同（sha256={digest(site_bytes)} vs {digest(data_bytes)}）",
+        finding=finding,
     )
+
+
+def first_difference(
+    expected: object, actual: object, path: str = ""
+) -> tuple[str, object, object] | None:
+    """返回两个 JSON 值的第一个差异及其路径。"""
+    if type(expected) is not type(actual):
+        return path or "/", expected, actual
+    if isinstance(expected, dict):
+        keys = list(expected)
+        for key in actual:
+            if key not in expected:
+                keys.append(key)
+        for key in keys:
+            child = f"{path}/{key}"
+            if key not in expected:
+                return child, None, actual[key]
+            if key not in actual:
+                return child, expected[key], None
+            difference = first_difference(expected[key], actual[key], child)
+            if difference is not None:
+                return difference
+        return None
+    if isinstance(expected, list):
+        for index in range(max(len(expected), len(actual))):
+            child = f"{path}/{index}"
+            if index >= len(expected):
+                return child, None, actual[index]
+            if index >= len(actual):
+                return child, expected[index], None
+            difference = first_difference(expected[index], actual[index], child)
+            if difference is not None:
+                return difference
+        return None
+    return None if expected == actual else (path or "/", expected, actual)
 
 
 def forbidden_paths(node: object, path: str = "") -> list[str]:

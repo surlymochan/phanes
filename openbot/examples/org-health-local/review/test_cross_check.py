@@ -631,6 +631,54 @@ class CrossCheckTest(unittest.TestCase):
             self.assertTrue(finding["message"])
         self.assertTrue(any(finding["severity"] == "error" for finding in payload["findings"]))
 
+    def test_numeric_conflict_has_structured_finding(self) -> None:
+        """站点数值不一致时 findings 包含可定位的结构化冲突。"""
+        stale = copy.deepcopy(self.diagnosis)
+        stale["metrics"][0]["数值"]["2026-09实际"] = 99
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "dist"
+            (dist / "data").mkdir(parents=True)
+            write_json(dist / "data" / "diagnosis.json", stale)
+            json_out = base / "review.json"
+            result = run_script(brief, data, dist, json_out=json_out)
+            payload = json.loads(json_out.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL)
+        finding = next(
+            item for item in payload["findings"] if item["path"].endswith("/2026-09实际")
+        )
+        self.assertEqual(finding["severity"], "error")
+        self.assertTrue(finding["path"])
+        self.assertTrue(finding["message"])
+        self.assertEqual(finding["context"]["expected"], 12)
+        self.assertEqual(finding["context"]["actual"], 99)
+
+    def test_missing_recommendation_has_structured_finding(self) -> None:
+        """缺失建议项导致必答问题未覆盖时输出结构化 finding。"""
+        diagnosis = copy.deepcopy(self.diagnosis)
+        diagnosis["recommendations"] = []
+        diagnosis["insights"] = diagnosis["insights"][:1]
+        results = self.check(diagnosis=diagnosis)
+        findings = cross_check.findings_report(results)
+        question_findings = [item for item in findings if item["path"] == "/必答问题"]
+        self.assertEqual(len(question_findings), 1)
+        self.assertEqual(question_findings[0]["severity"], "error")
+        self.assertTrue(question_findings[0]["message"])
+
+    def test_no_conflict_has_empty_findings_and_zero_exit(self) -> None:
+        """无冲突样本 findings 为空且命令行退出 0。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            json_out = base / "review.json"
+            result = run_script(brief, data, json_out=json_out)
+            payload = json.loads(json_out.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, cross_check.EXIT_OK)
+        self.assertEqual(payload["findings"], [])
+
     def test_finding_without_severity_uses_default_and_path(self) -> None:
         """缺少 severity 的非空失败 finding 使用默认枚举并保留告警路径。"""
         result = cross_check.Result(False, "版本一致", "schema 版本不一致")
