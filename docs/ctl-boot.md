@@ -172,6 +172,7 @@ Check scripts (no SSH):
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1243 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
+- `python3 tools/check-health-pause-ttl.py` — offline #1261 auto-PAUSE TTL contract. In a temporary fixture directory it asserts that every `PAUSE-*` file whose body starts with the exact `auto:` prefix is cleared once it is older than the TTL, while manual bodies (`operator hold`, `automatic: ...`, an indented or inline `auto:`, or an unreadable body) are never cleared. It never touches the live `~/phanes-ctl` state.
 
 ### Roll back a failed assign (Refs #968)
 
@@ -288,6 +289,17 @@ Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft ale
 (`disk_soft`/`mem_soft`) stay in `health.alert` with `level=soft` and never create a
 `PAUSE-HOST-*` file. The disk boundary contract is checked offline with
 `python3 tools/check-health-disk-soft.py`.
+
+An automatic pause expires on its own (Refs #1261): a `PAUSE-*` file whose body
+starts with `auto:` is removed once it is older than the TTL (1 hour), while a
+manual body is kept forever. The `auto:` marker must be the first characters of
+the body — an indented or inline `auto:` is still a manual pause, and a body that
+cannot be read is treated as manual. The offline TTL contract uses a temporary
+fixture directory and never touches the live state:
+
+```bash
+python3 tools/check-health-pause-ttl.py
+```
 
 During dual-mode cooldown, the production pause set is restricted to
 `PAUSE-HOST-ib1`, `PAUSE-HOST-ib2`, `PAUSE-M1`, and `PAUSE-M2`. The offline
