@@ -270,5 +270,91 @@ class PeerReviewTests(unittest.TestCase):
         self.assertIn("permission denied", raw)
 
 
+class ParseReviewByTests(unittest.TestCase):
+    """`--by` parsing is pure: no reviewer process is started and nothing is fetched."""
+
+    def test_plain_backend_parses_without_a_model(self):
+        self.assertEqual(xs.parse_review_by("codex"), ("codex", None))
+
+    def test_backend_with_model_is_split_on_the_separator(self):
+        self.assertEqual(xs.parse_review_by("agy:gpt-5"), ("agy", "gpt-5"))
+
+    def test_unknown_backend_empty_model_and_blank_value_are_rejected(self):
+        for value in ("nope", "agy:", "agy:   ", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    xs.parse_review_by(value)
+
+
+class ValidatePeerReviewTests(unittest.TestCase):
+    """Peer review payload validation is pure: it only inspects the given dict."""
+
+    def finding(self, **overrides):
+        item = {"severity": "P2", "path": "module.py", "line": 3,
+                "title": "Off by one", "body": "The loop skips the last element."}
+        item.update(overrides)
+        return item
+
+    def test_payload_keys_must_match_the_findings_schema(self):
+        for payload in ({}, {"findings": []}, {"verdict": "approve"},
+                         {"findings": [], "verdict": "approve", "extra": 1}, []):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    xs.validate_peer_review(payload)
+
+    def test_findings_must_be_a_list(self):
+        with self.assertRaises(ValueError):
+            xs.validate_peer_review({"findings": {}, "verdict": "approve"})
+
+    def test_invalid_findings_are_rejected(self):
+        cases = (
+            ("module.py", "finding is not an object"),
+            ({"severity": "P2", "path": "module.py", "line": 3, "title": "t"}, "missing body"),
+            (self.finding(severity="P3"), "unknown severity"),
+            (self.finding(severity="p1"), "lower case severity"),
+            (self.finding(path=""), "empty path"),
+            (self.finding(line=0), "line is zero"),
+            (self.finding(line=-1), "line is negative"),
+            (self.finding(line=True), "line is a bool"),
+            (self.finding(line="3"), "line is a string"),
+            (self.finding(title=1), "title is not a string"),
+            (self.finding(body=None), "body is not a string"),
+        )
+        for item, label in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError):
+                    xs.validate_peer_review({"findings": [item], "verdict": "approve"})
+
+    def test_verdict_must_be_approve_or_changes(self):
+        for verdict in ("maybe", "", None, "APPROVE"):
+            with self.subTest(verdict=verdict):
+                with self.assertRaises(ValueError):
+                    xs.validate_peer_review({"findings": [], "verdict": verdict})
+
+    def test_p0_or_p1_findings_force_the_changes_verdict(self):
+        for severity in ("P0", "P1"):
+            with self.subTest(severity=severity):
+                result = xs.validate_peer_review({"findings": [self.finding(severity=severity)],
+                                                 "verdict": "approve"})
+                self.assertEqual(result["verdict"], "changes")
+
+    def test_p2_findings_keep_the_requested_verdict(self):
+        result = xs.validate_peer_review({"findings": [self.finding()], "verdict": "approve"})
+        self.assertEqual(result["verdict"], "approve")
+        self.assertEqual(result["findings"][0]["severity"], "P2")
+
+    def test_credentials_in_findings_are_redacted(self):
+        result = xs.validate_peer_review({"findings": [self.finding(
+            path="src/ghp_1234567890abcdef.py",
+            title="Leaked ghp_1234567890abcdef token",
+            body="Authorization: Bearer abcdef123456")],
+            "verdict": "approve"})
+        finding = result["findings"][0]
+        self.assertEqual(finding["path"], "src/[REDACTED].py")
+        self.assertEqual(finding["title"], "Leaked [REDACTED] token")
+        self.assertEqual(finding["body"], "Authorization: [REDACTED]")
+        self.assertEqual(finding["line"], 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
