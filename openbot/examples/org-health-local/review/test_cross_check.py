@@ -746,6 +746,49 @@ class CrossCheckTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FAIL 站点数据一致", result.stdout)
 
+    def test_dist_missing_diagnosis_artifact_reports_specific_path(self) -> None:
+        """dist 目录存在但缺少 data/diagnosis.json 时报出具体产物并以退出码 1 结束。"""
+        for make_data_dir in (False, True):
+            with self.subTest(data_dir=make_data_dir):
+                with temporary_directory() as folder:
+                    base = Path(folder)
+                    brief = write_json(base / "brief.json", self.brief)
+                    data = write_json(base / "diagnosis.json", self.diagnosis)
+                    dist = base / "dist"
+                    if make_data_dir:
+                        (dist / "data").mkdir(parents=True)
+                    else:
+                        dist.mkdir()
+                    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+                    report = base / "report.md"
+                    result = run_script(brief, data, dist, out=report)
+                    content = report.read_text(encoding="utf-8")
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("FAIL 站点数据一致", result.stdout)
+                # 报告明确指出缺失的具体产物：dist/data/diagnosis.json
+                self.assertIn("dist/data/diagnosis.json", result.stdout)
+                self.assertIn(str(dist / "data" / "diagnosis.json"), result.stdout)
+                self.assertIn("- **FAIL 站点数据一致**", content)
+                self.assertIn(str(dist / "data" / "diagnosis.json"), content)
+
+                # 产物缺失不得误报成隐私或期间错误
+                self.assertNotIn("FAIL 隐私边界", result.stdout)
+                self.assertNotIn("FAIL 期间一致", result.stdout)
+                self.assertIn("PASS 期间一致", result.stdout)
+                self.assertIn("PASS 隐私边界", result.stdout)
+
+    def test_dist_omitted_keeps_contract(self) -> None:
+        """省略 --dist 时不做站点核对，其余检查与退出码不变。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            result = run_script(brief, data)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("站点数据一致", result.stdout)
+        self.assertIn("共 5 项检查：5 项通过，0 项失败", result.stdout)
+
     def test_unreadable_brief_exits_non_zero(self) -> None:
         """任务书不可读时退出码非 0。"""
         with temporary_directory() as folder:
