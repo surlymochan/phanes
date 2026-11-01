@@ -81,5 +81,17 @@ elif sys.argv[1:2] == ["run"]:
     save(home / "runs" / rid / "status.json", {"id": rid, "state": "running", "backend": backend,
                                                  "concurrency_keys": [backend, "total"] if backend else ["total"]})
     print(json.dumps({"id": rid, "state": "started"}))
+elif sys.argv[1:3] == ["lane", "assign"]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("name")
+    parser.add_argument("--task-file", required=True)
+    parser.add_argument("--run-id", required=True)
+    args, _ = parser.parse_known_args(sys.argv[3:])
+    if os.environ.get("FAKE_FLEET_LANE_BUSY") == "1":
+        print(json.dumps({"ok": False, "error": "lane %s is busy (busy)" % args.name}))
+        raise SystemExit(1)
+    card = Path(args.task_file).read_text()
+    record({"event": "lane_assign", "lane": args.name, "id": args.run_id, "card": card})
+    print(json.dumps({"ok": True, "id": args.run_id, "state": "queued"}))
 else:
     sys.exit(2)
