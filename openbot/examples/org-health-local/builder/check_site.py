@@ -190,7 +190,7 @@ def check_site(dist: Path) -> list[str]:
                 continue
             target = index_path.parent / unquote(parsed.path)
             if not target.is_file():
-                failures.append(f"失败：index.html 引用的本地文件 {parsed.path} 不存在")
+                failures.append(f"失败：index.html 引用的本地文件 {reference} 不存在")
             else:
                 print(f"通过：index.html 引用的本地文件 {parsed.path} 存在")
 

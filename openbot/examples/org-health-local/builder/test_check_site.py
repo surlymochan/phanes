@@ -342,8 +342,8 @@ class CheckSiteTest(unittest.TestCase):
         self.refresh_report(dist)
         result = self.run_checker(dist)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("失败：index.html 引用的本地文件 ./missing.js 不存在", result.stdout)
-        self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.js?v=1 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js?v=2 不存在", result.stdout)
         self.assertIn("站点检查失败：2 项", result.stdout)
 
     def test_local_reference_with_fragment_passes(self) -> None:
@@ -378,9 +378,9 @@ class CheckSiteTest(unittest.TestCase):
         self.refresh_report(dist)
         result = self.run_checker(dist)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("失败：index.html 引用的本地文件 ./missing.css 不存在", result.stdout)
-        self.assertIn("失败：index.html 引用的本地文件 ./missing.js 不存在", result.stdout)
-        self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.css#theme 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.js?v=1#section 不存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing%20bundle.js#frag 不存在", result.stdout)
         self.assertIn("站点检查失败：3 项", result.stdout)
 
     def test_build_site_manifest_passes(self) -> None:
@@ -649,6 +649,35 @@ class MinimalBriefPipelineCheckSiteTest(unittest.TestCase):
         self.assertIn("站点检查通过", cli_result.stdout)
         self.assertIn("通过：data/diagnosis.json 通过 validate.py", cli_result.stdout)
         self.assertNotIn("Traceback", cli_result.stderr)
+
+    def test_real_build_query_references_pass_and_missing_original_urls_fail(self) -> None:
+        """真实 Builder 产物注入带 query/fragment 的资源引用后，检查真实文件并保留原始 URL。"""
+        self._build_pipeline_site()
+        index_path = self.dist_path / "index.html"
+        original = index_path.read_text(encoding="utf-8")
+        index_path.write_text(
+            original.replace(
+                '<link rel="stylesheet" href="./styles.css">',
+                '<link rel="stylesheet" href="./styles.css?v=20261101#theme">\n'
+                '<script src="./app.bundle.js?cache=1#main"></script>\n'
+                '<script src="./data/diagnosis.json?format=json#data"></script>\n'
+                '<script src="./missing.js?v=1#broken"></script>',
+            ),
+            encoding="utf-8",
+        )
+        build_site.write_report(self.dist_path, self.diag_path)
+
+        result = subprocess.run(
+            [sys.executable, str(CHECKER), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("./styles.css 存在", result.stdout)
+        self.assertIn("./app.bundle.js 存在", result.stdout)
+        self.assertIn("./data/diagnosis.json 存在", result.stdout)
+        self.assertIn("失败：index.html 引用的本地文件 ./missing.js?v=1#broken 不存在", result.stdout)
+        self.assertNotIn("./styles.css?v=20261101#theme 不存在", result.stdout)
 
     def test_real_build_rejects_extra_tampered_and_duplicate_manifest_paths(self) -> None:
         """真实 Builder 产物覆盖新增、篡改、重复登记三条清单失败路径。"""
