@@ -111,6 +111,11 @@ class MakeBriefTest(unittest.TestCase):
         self.assertIsInstance(self.brief["summary"], str)
         self.assertTrue(self.brief["summary"].strip())
 
+    def test_schema_requires_period_and_summary(self) -> None:
+        """schema 明确要求 period 与 summary。"""
+        self.assertIn("period", self.schema["required"])
+        self.assertIn("summary", self.schema["required"])
+
     def test_顶层字段序列化顺序稳定(self) -> None:
         """任务书 JSON 序列化为文本后顶层字段按 schema/实现稳定顺序输出且无漂移。"""
         # 使用仓库内示例输入（scope.观察月份）生成任务书
