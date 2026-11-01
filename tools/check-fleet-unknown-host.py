@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for rejecting hosts outside the configured topology (Refs #1110)."""
+"""Offline contract for rejecting hosts outside the configured topology (Refs #1164)."""
 
 import importlib.util
 from datetime import datetime, timezone
@@ -59,6 +59,27 @@ def main() -> None:
     assert cd_fields["hosts_ok"] == "1"
     assert cd_fields["skipped_cooldown"] == "0"
     assert any(error["host"] == "mystery_cd" for error in result_cooldown["errors"])
+
+    # Unknown-only hosts must yield hosts_ok=0 and fail validation
+    result_unknown_only = IB_REFRESH._status_for(
+        {
+            "ok": True,
+            "start_lane_autodispatch": True,
+            "hosts": [
+                {"host": "mystery_only", "status": "valid", "final_status": "valid"},
+            ],
+        },
+        topology,
+        ROOT / "fleet.json",
+        datetime.now(timezone.utc),
+        need_ok=1,
+    )
+    assert result_unknown_only["ok"] is False
+    assert result_unknown_only["start_lane_autodispatch"] is False
+    unk_fields = dict(field.split("=", 1) for field in result_unknown_only["status_line"].split())
+    assert unk_fields["ok"] == "0"
+    assert unk_fields["hosts_ok"] == "0"
+    assert any(error["host"] == "mystery_only" and error.get("status") == "unknown" for error in result_unknown_only["errors"])
 
     print("fleet unknown host topology: OK")
 
