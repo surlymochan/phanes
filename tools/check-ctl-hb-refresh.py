@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1068).
+"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1090).
 
 对照 37min 静默课（brain/lessons-37min-silence.md）：
 `ctl-loop` 在执行 `ib-refresh` 续签 instabox 证书期间，墙钟等待循环（受 REFRESH_CAP 约束，默认 420s）
@@ -22,53 +22,101 @@ REFRESH_CAP_DEFAULT = 420
 HEARTBEAT_FILE = "ctl-loop.heartbeat"
 
 
+def sanitize_shell_line(line: str) -> str:
+    """Mask quoted strings and comments to whitespace for precise shell keyword extraction."""
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    state = "normal"
+    while i < n:
+        c = line[i]
+        if state == "normal":
+            if c == '"':
+                state = "double"
+                out.append(" ")
+            elif c == "'":
+                state = "single"
+                out.append(" ")
+            elif c == "#":
+                break
+            else:
+                out.append(c)
+        elif state == "single":
+            if c == "'":
+                state = "normal"
+            out.append(" ")
+        elif state == "double":
+            if c == "\\":
+                i += 1
+                out.append(" ")
+            elif c == '"':
+                state = "normal"
+            out.append(" ")
+        i += 1
+    return "".join(out)
+
+
 def extract_loops(source: str) -> list[tuple[str, str]]:
     """Extract (header, body) for while/until loops in shell script."""
     loops: list[tuple[str, str]] = []
     lines = source.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        # Ignore full comment lines
-        if line.strip().startswith("#"):
-            i += 1
-            continue
-        match = re.search(r"\b(while|until)\b", line)
-        if match:
+    for start_idx in range(len(lines)):
+        line_clean = sanitize_shell_line(lines[start_idx])
+        if re.search(r"\b(while|until)\b", line_clean):
             header_parts: list[str] = []
             depth = 0
             body_lines: list[str] = []
             found_do = False
+            i = start_idx
             while i < len(lines):
                 cur = lines[i]
-                cur_stripped = cur.strip()
+                cur_clean = sanitize_shell_line(cur)
                 if not found_do:
-                    if re.search(r"\bdo\b", cur) and not cur_stripped.startswith("#"):
+                    do_match = re.search(r"\bdo\b", cur_clean)
+                    if do_match:
                         found_do = True
-                        parts = re.split(r"\bdo\b", cur, maxsplit=1)
-                        header_parts.append(parts[0])
+                        header_parts.append(cur[:do_match.start()])
                         depth = 1
-                        if parts[1].strip():
-                            body_lines.append(parts[1])
-                    else:
-                        header_parts.append(cur)
-                else:
-                    if not cur_stripped.startswith("#"):
-                        for word in re.findall(r"\b(do|done)\b", cur):
+                        rest = cur[do_match.end():]
+                        rest_clean = cur_clean[do_match.end():]
+                        words = list(re.finditer(r"\b(do|done)\b", rest_clean))
+                        hit_done = False
+                        for w in words:
+                            word = w.group(1)
                             if word == "do":
                                 depth += 1
                             elif word == "done":
                                 depth -= 1
-                    if depth == 0:
-                        parts = re.split(r"\bdone\b", cur, maxsplit=1)
-                        if parts[0].strip():
-                            body_lines.append(parts[0])
+                                if depth == 0:
+                                    body_lines.append(rest[:w.start()])
+                                    hit_done = True
+                                    break
+                        if hit_done:
+                            break
+                        if rest.strip() and not words:
+                            body_lines.append(rest)
+                    else:
+                        header_parts.append(cur)
+                else:
+                    words = list(re.finditer(r"\b(do|done)\b", cur_clean))
+                    hit_done = False
+                    for w in words:
+                        word = w.group(1)
+                        if word == "do":
+                            depth += 1
+                        elif word == "done":
+                            depth -= 1
+                            if depth == 0:
+                                body_lines.append(cur[:w.start()])
+                                hit_done = True
+                                break
+                    if hit_done:
                         break
                     else:
                         body_lines.append(cur)
                 i += 1
-            loops.append(("\n".join(header_parts), "\n".join(body_lines)))
-        i += 1
+            if found_do and depth == 0:
+                loops.append(("\n".join(header_parts), "\n".join(body_lines)))
     return loops
 
 
@@ -197,6 +245,23 @@ while kill -0 "$refresh_pid" 2>/dev/null; do
 done
 """
     scan_ctl_loop_source(valid_with_comments)
+
+    # 正例 3: 含有行内注释和含关键字字符串的脚本能精准识别边界
+    valid_with_inline_comments = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+while kill -0 "$refresh_pid" 2>/dev/null; do # wait loop
+    echo "waiting until done..."
+    date +%s > "$HEARTBEAT_PATH"
+    now=$(date +%s)
+    if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+        break # break when done
+    fi
+    sleep 5 # sleep done
+done # finished
+"""
+    scan_ctl_loop_source(valid_with_inline_comments)
 
 
 def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
