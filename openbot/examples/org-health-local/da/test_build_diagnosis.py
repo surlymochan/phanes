@@ -930,6 +930,39 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertIn("整体技术人力成本率 约12.9% → 约12.7%", content)
         self.assertIn("营收业务技术人力成本率 约10.3% → 约10.1%", content)
 
+    def test_answer_question_full_scope_lists_coverage_and_gaps(self) -> None:
+        """全口径问题按期次列出已有值与 null 缺口，不复读其它口径数值。"""
+        facts = {
+            "labels": {
+                "start": "2026-01实际",
+                "reference": "2026-05H1参考",
+                "end": "2026-09实际",
+                "forecast": "年末测算",
+            },
+            "overall_cost": {},
+            "overall_heads": {},
+            "revops_cost": {},
+            "revops_heads": {},
+            "income": {},
+            "ratios": {
+                "overall": {},
+                "revops": {},
+                "full": {"start": 0.155, "reference": None, "end": 0.152, "forecast": None},
+            },
+        }
+        kind, content = build_diagnosis.answer_question(
+            "全口径技术成本率（含运维与设施）在哪些期次有同口径值？缺同口径值的期次如何呈现？",
+            facts,
+        )
+        self.assertEqual(kind, "事实")
+        self.assertIn("2026-01实际", content)
+        self.assertIn("2026-09实际", content)
+        self.assertIn("2026-05H1参考", content)
+        self.assertIn("年末测算", content)
+        self.assertIn("null", content)
+        self.assertNotIn("0.155", content)
+        self.assertNotIn("0.152", content)
+
 
 class AbnormalRawDataTest(unittest.TestCase):
     """异常原始数据：缺期次、负数、重复行、CSV 多余列与重复列名。"""
