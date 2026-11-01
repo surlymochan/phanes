@@ -219,6 +219,35 @@ class BuildSiteTest(unittest.TestCase):
         self.assertEqual(listed["sha256"], sha256_of(input_path))
         self.assertEqual(listed["字节数"], input_path.stat().st_size)
 
+    def test_site_summary_carries_role_metadata(self) -> None:
+        """站点摘要交接文件带角色元数据：产出方与期次，供 Reviewer 核对交接链。"""
+        data = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+        data["producer"] = "da"
+        data["periods"] = ["2026-01", "2026-05", "2026-09"]
+        data_path = self.root / "diagnosis.json"
+        data_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        self.assertEqual(self.build(data=data_path, bundle=self.bundle), build_site.EXIT_OK)
+
+        summary = json.loads((self.out / "site-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["producer"], "builder")
+        self.assertEqual(summary["periods"], ["2026-01", "2026-05", "2026-09"])
+        self.assertEqual(summary["观察月份"], data["scope"]["观察月份"])
+        self.assertEqual(summary["指标标题"], [metric["标题"] for metric in data["metrics"]])
+        self.assertTrue(summary["摘要"].strip())
+
+    def test_site_summary_periods_fall_back_to_snapshot_period_keys(self) -> None:
+        """快照没声明 periods 时，站点摘要按观察月份与期次键回落，字段不缺。"""
+        data = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+        data.pop("periods", None)
+        data_path = self.root / "diagnosis.json"
+        data_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        self.assertEqual(self.build(data=data_path, bundle=self.bundle), build_site.EXIT_OK)
+
+        summary = json.loads((self.out / "site-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["periods"], ["2026-01", "2026-05", "2026-09"])
+
     def test_report_records_input_and_files(self) -> None:
         """构建报告记录输入路径、输入 sha256、文件清单与生成时间。"""
         self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
@@ -228,7 +257,8 @@ class BuildSiteTest(unittest.TestCase):
         self.assertRegex(report["生成时间"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         listed = {entry["路径"]: entry for entry in report["文件清单"]}
         self.assertEqual(
-            sorted(listed), sorted(["index.html", "app.bundle.js", "styles.css", "data/diagnosis.json"])
+            sorted(listed),
+            sorted(["index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "site-summary.json"]),
         )
         for relative, entry in listed.items():
             with self.subTest(relative=relative):

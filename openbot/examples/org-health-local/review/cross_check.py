@@ -3,6 +3,7 @@
 
 用法：
     python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>]
+                                    [--summary <site-summary.json>]
                                     [--out <report.md>]
                                     [--json-out <results.json>]
 
@@ -17,6 +18,7 @@
 3. 必答问题覆盖：任务书 `必答问题` 每条在快照的 insights/recommendations 中至少被引用一次。
 4. 站点数据一致：给了 `--dist` 时 `dist/data/diagnosis.json` 与 `--data` 字节相同。
 5. 隐私边界：快照不含个人/薪酬/编制粒度的字段名。
+6. 角色元数据：交接文件（任务书、诊断快照与站点摘要）有非空业务内容时必须带 producer 与 periods 元数据，且各文件的 periods 一致。
 
 【期间一致规则】
     任务书 `观察期间` 可为对象、字符串或字符串数组：对象里的期次按 `YYYY-MM` 提取，
@@ -47,6 +49,14 @@
 【隐私边界规则】
     快照所有键名（含嵌套）都不含黑名单词条时通过；黑名单见 FORBIDDEN_FIELD_TOKENS。
     本项只检查字段名，不检查字段值。
+
+【角色元数据规则】
+    交接文件（任务书、诊断快照与站点摘要）有非空业务内容但缺少 producer 或 periods 元数据时，
+    逐个缺失字段生成带文件路径与字段名的结构化 finding，并以失败退出；
+    元数据齐全且各文件 periods 一致时通过。
+    缺字段的交接文件不会被当成空报告静默跳过。
+    站点摘要交接文件只认 Builder 产出的 `site-summary.json`；给了 `--dist` 却找不到该文件时，
+    结果里显式说明「未找到站点摘要」，不整环跳过。
 """
 from __future__ import annotations
 
@@ -128,6 +138,12 @@ QUESTION_MARKERS = (
 
 # 关键词最短长度：太短的片段（如“口径”）不做匹配，避免误判为已引用。
 MIN_KEYWORD_LENGTH = 3
+
+# 交接文件里承载角色元数据的字段名：这些字段本身不算业务内容。
+METADATA_KEYS = ("producer", "periods", "metadata")
+
+# 站点目录里站点摘要交接文件名：只认 Builder 实际产出的那一个。
+SITE_SUMMARY_NAME = "site-summary.json"
 
 # 隐私边界黑名单：命中即视为出现个人/薪酬/编制粒度字段名。
 FORBIDDEN_FIELD_TOKENS = (
@@ -763,18 +779,198 @@ def check_forbidden_fields(diagnosis: dict) -> Result:
     return Result(True, name, "未出现个人/薪酬/编制粒度字段名")
 
 
+def extract_metadata(doc: dict) -> tuple[str | None, list[str] | None]:
+    """提取交接文件的 producer 与 periods 元数据。
+
+    元数据写在顶层或 `metadata` 对象里都认，顶层优先；
+    periods 可以是字符串数组、对象（按键取期次）或单个字符串。
+    """
+    if not isinstance(doc, dict):
+        return None, None
+    meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    producer_value = doc.get("producer")
+    if producer_value is None:
+        producer_value = meta.get("producer")
+    if isinstance(producer_value, dict):
+        producer = first_text(producer_value, "role", "name", "producer")
+    elif isinstance(producer_value, str):
+        producer = producer_value.strip() or None
+    elif producer_value is None:
+        producer = None
+    else:
+        producer = str(producer_value).strip() or None
+
+    periods_value = doc.get("periods")
+    if periods_value is None:
+        periods_value = meta.get("periods")
+    periods: list[str] | None = None
+    if isinstance(periods_value, (list, tuple, set)):
+        cleaned = [str(item).strip() for item in periods_value if str(item).strip()]
+        periods = cleaned or None
+    elif isinstance(periods_value, dict):
+        cleaned = [str(key).strip() for key in periods_value if str(key).strip()]
+        periods = cleaned or None
+    elif isinstance(periods_value, str) and periods_value.strip():
+        periods = [periods_value.strip()]
+    return producer, periods
+
+
+def has_business_content(doc: dict) -> bool:
+    """判断交接文件是否含非空业务内容：只有角色元数据字段不算业务内容。"""
+    if not isinstance(doc, dict):
+        return False
+    for key, value in doc.items():
+        if key in METADATA_KEYS:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, (str, list, tuple, set, dict)) and len(value) == 0:
+            continue
+        return True
+    return False
+
+
+def check_metadata(
+    brief: dict,
+    diagnosis: dict,
+    brief_path: Path | str | None = None,
+    data_path: Path | str | None = None,
+    site_summary: dict | None = None,
+    site_summary_path: Path | str | None = None,
+    missing_site_summary_path: Path | str | None = None,
+) -> list[Result]:
+    """核对交接文件是否带角色元数据，且各文件的 periods 一致。
+
+    有非空业务内容却缺少 producer 或 periods 时，逐个缺失字段给出带文件路径与
+    字段名的 finding；缺字段的文件不会被当成空报告静默跳过。
+    missing_site_summary_path 给出「本该有站点摘要却没找到」的路径：这种情况在
+    结果里显式说明，不整环跳过。
+    """
+    name = "角色元数据"
+    documents: list[tuple[str, dict, Path | str]] = [
+        ("任务书", brief, brief_path if brief_path is not None else Path("brief.json")),
+        ("诊断快照", diagnosis, data_path if data_path is not None else Path("diagnosis.json")),
+    ]
+    if site_summary is not None:
+        documents.append(
+            (
+                "站点摘要",
+                site_summary,
+                site_summary_path if site_summary_path is not None else Path(SITE_SUMMARY_NAME),
+            )
+        )
+
+    note: list[Result] = []
+    if missing_site_summary_path is not None:
+        note.append(
+            Result(
+                True,
+                name,
+                f"站点目录内未找到站点摘要交接文件 {missing_site_summary_path}，"
+                "未核对站点摘要的角色元数据",
+            )
+        )
+
+    results: list[Result] = []
+    declared: list[tuple[str, Path | str, list[str]]] = []
+    for label, doc, path in documents:
+        path_text = str(path)
+        if not has_business_content(doc):
+            continue
+        producer, periods = extract_metadata(doc)
+        missing = [field for field, value in (("producer", producer), ("periods", periods)) if not value]
+        for field in missing:
+            detail = f"交接文件 {path_text} 缺少角色元数据字段 `{field}`"
+            finding = {
+                "path": path_text,
+                "file": path_text,
+                "field": field,
+                "missing": field,
+                "fields": list(missing),
+                "document": label,
+            }
+            results.append(Result(False, name, detail, finding=finding, severity="error"))
+        if periods:
+            declared.append((label, path, periods))
+
+    if results:
+        return results + note
+
+    if len(declared) > 1:
+        _, base_path, base_periods = declared[0]
+        base_set = set(base_periods)
+        for label, path, periods in declared[1:]:
+            if set(periods) != base_set:
+                path_text = str(path)
+                detail = (
+                    f"交接文件期次元数据不一致：{base_path}（{'/'.join(sorted(base_set))}）"
+                    f" 与 {path_text}（{'/'.join(sorted(set(periods)))}）"
+                )
+                finding = {
+                    "path": path_text,
+                    "file": path_text,
+                    "field": "periods",
+                    "expected": sorted(base_set),
+                    "actual": sorted(set(periods)),
+                    "document": label,
+                }
+                results.append(Result(False, name, detail, finding=finding, severity="error"))
+    if results:
+        return results + note
+
+    all_periods = sorted({period for _, _, periods in declared for period in periods})
+    suffix = f"（periods={'/'.join(all_periods)}）" if all_periods else ""
+    if not declared:
+        return [Result(True, name, "交接文件没有业务内容，角色元数据无需核对" + suffix)] + note
+    return [Result(True, name, f"交接文件角色元数据齐全且期次一致{suffix}")] + note
+
+
+def discover_site_summary(dist: Path | None) -> tuple[dict | None, Path | None]:
+    """在站点目录里找站点摘要交接文件。
+
+    目录里没有摘要文件时返回 (None, None)；文件在但读不出来时抛 CheckError，
+    不把坏掉的交接文件当成没有交接文件。
+    """
+    if dist is None:
+        return None, None
+    candidate = Path(dist) / SITE_SUMMARY_NAME
+    if candidate.is_file():
+        return load_json(candidate), candidate
+    return None, None
+
+
 def run_checks(
     brief: dict,
     diagnosis: dict,
     data_path: Path | None = None,
     dist: Path | None = None,
+    brief_path: Path | None = None,
+    site_summary: dict | None = None,
+    site_summary_path: Path | None = None,
 ) -> list[Result]:
     """执行全部检查并返回逐条结果。"""
+    missing_site_summary_path: Path | None = None
+    if site_summary is None and dist is not None:
+        site_summary, site_summary_path = discover_site_summary(dist)
+        if site_summary is None:
+            # 站点目录里没有站点摘要交接文件：显式说明，不整环跳过。
+            missing_site_summary_path = Path(dist) / SITE_SUMMARY_NAME
     results = [check_period(brief, diagnosis), check_version(brief, diagnosis)]
     results.extend(check_questions(brief, diagnosis))
     if dist is not None and data_path is not None:
         results.append(check_dist(data_path, dist))
     results.append(check_forbidden_fields(diagnosis))
+    results.extend(
+        check_metadata(
+            brief,
+            diagnosis,
+            brief_path=brief_path,
+            data_path=data_path,
+            site_summary=site_summary,
+            site_summary_path=site_summary_path,
+            missing_site_summary_path=missing_site_summary_path,
+        )
+    )
     return results
 
 
@@ -806,6 +1002,8 @@ def finding_path(result: Result) -> str:
         match = re.search(r"(/[^（、]+)", result.detail)
         if match:
             return match.group(1)
+    if result.finding and isinstance(result.finding.get("path"), str):
+        return result.finding["path"]
     if result.finding and isinstance(result.finding.get("diagnosis_path"), str):
         return result.finding["diagnosis_path"]
     return paths.get(result.name, f"/{result.name}")
@@ -865,6 +1063,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="站点产物目录；给出时核对 `data/diagnosis.json` 与 `--data` 是否字节相同。",
     )
+    parser.add_argument(
+        "--summary",
+        "--site-summary",
+        dest="summary",
+        type=Path,
+        default=None,
+        help="可选的站点摘要 JSON 路径；不给时从 `--dist` 目录里找。",
+    )
     parser.add_argument("--out", type=Path, default=None, help="可选的 Markdown 报告输出路径。")
     parser.add_argument(
         "--json-out",
@@ -879,7 +1085,25 @@ def main(argv: list[str] | None = None) -> int:
     except CheckError as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
-    results = run_checks(brief, diagnosis, args.data, args.dist)
+    summary_data = None
+    summary_path = args.summary
+    try:
+        if summary_path is not None:
+            summary_data = load_json(summary_path)
+        elif args.dist is not None:
+            summary_data, summary_path = discover_site_summary(args.dist)
+    except CheckError as cause:
+        print(str(cause), file=sys.stderr)
+        return EXIT_USAGE
+    results = run_checks(
+        brief,
+        diagnosis,
+        data_path=args.data,
+        dist=args.dist,
+        brief_path=args.brief,
+        site_summary=summary_data,
+        site_summary_path=summary_path,
+    )
     if args.out is not None:
         try:
             args.out.parent.mkdir(parents=True, exist_ok=True)

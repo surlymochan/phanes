@@ -10,7 +10,12 @@
     <dist>/app.bundle.js
     <dist>/styles.css
     <dist>/data/diagnosis.json
+    <dist>/site-summary.json
     <dist>/build-report.json
+
+site-summary.json 是 Builder 交给 Reviewer 的站点内容摘要，带角色元数据
+（producer 与 periods），期次沿用诊断快照声明的 periods；快照没声明 periods 时
+按快照 `scope.观察月份` 与指标期次键回落推导。
 
 不带 --bundle 时，用与 serve.py 的 build_bundle() 相同的 bun 命令打包，输出直接写到 dist。
 只使用 Python 3.9+ 标准库。
@@ -22,6 +27,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,11 +41,17 @@ VALIDATE_PATH = EX_ROOT / "validate.py"
 SCHEMA_PATH = EX_ROOT / "schema" / "diagnosis.schema.json"
 
 # dist 内相对 dist 根的固定路径；顺序即 build-report.json 里的文件清单顺序。
-SITE_FILES = ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json")
+SITE_FILES = ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "site-summary.json")
 STATIC_FILES = ("index.html", "styles.css")
 BUNDLE_NAME = "app.bundle.js"
 DATA_RELATIVE = Path("data") / "diagnosis.json"
 REPORT_NAME = "build-report.json"
+# 站点摘要交接文件名：Builder 交给 Reviewer 的站点内容摘要。
+SUMMARY_NAME = "site-summary.json"
+# 交接文件里的角色元数据：产出方写进站点摘要，供 Reviewer 核对。
+PRODUCER = "builder"
+# 期次键的月份前缀：形如 `2026-01实际` 的键取 `2026-01`。
+MONTH_PATTERN = re.compile(r"\A([0-9]{4}-(0[1-9]|1[0-2]))")
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -103,6 +115,96 @@ def copy_static_files(out_dir: Path) -> None:
 def report_relative_path(path: Path, out_dir: Path) -> str:
     """返回相对于构建工作目录（dist 的父目录）的稳定 POSIX 路径。"""
     return Path(os.path.relpath(path.resolve(), out_dir.parent.resolve())).as_posix()
+
+
+def load_diagnosis(path: Path) -> dict:
+    """读取诊断快照内容，用于整理站点摘要交接文件。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as cause:
+        raise ValueError(f"无法读取诊断快照 {path}：{cause}") from cause
+    if not isinstance(data, dict):
+        raise ValueError(f"诊断快照 {path} 必须是 JSON 对象")
+    return data
+
+
+def site_periods(data: dict) -> list[str]:
+    """站点摘要的期次元数据：沿用快照声明的 periods，快照没声明时按期次锚点回落。
+
+    回落口径：快照 `scope.观察月份` 与 `metrics[*].数值` 里的期次键月份（YYYY-MM），
+    保证站点摘要总有 periods，不因快照漏写元数据而缺字段。
+    """
+    declared = data.get("periods")
+    if isinstance(declared, list):
+        cleaned = [str(item).strip() for item in declared if str(item).strip()]
+        if cleaned:
+            return cleaned
+    return snapshot_period_months(data)
+
+
+def snapshot_period_months(data: dict) -> list[str]:
+    """从快照里取期次月份：观察月份加上指标数值里的期次键月份，按时间升序去重。"""
+    months: list[str] = []
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    observed = scope.get("观察月份")
+    if isinstance(observed, str):
+        match = MONTH_PATTERN.match(observed.strip())
+        if match:
+            months.append(match.group(1))
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), list) else []
+    for metric in metrics:
+        if isinstance(metric, dict):
+            collect_period_months(metric.get("数值"), months)
+    return sorted(set(months))
+
+
+def collect_period_months(node: object, months: list[str]) -> None:
+    """递归收集数值节点里的期次键月份（期次键形如 `2026-01实际`）。"""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            match = MONTH_PATTERN.match(key.strip()) if isinstance(key, str) else None
+            if match:
+                if match.group(1) not in months:
+                    months.append(match.group(1))
+                continue
+            collect_period_months(value, months)
+    elif isinstance(node, list):
+        for item in node:
+            collect_period_months(item, months)
+
+
+def build_site_summary(data: dict) -> dict:
+    """按诊断快照整理站点内容摘要：角色元数据加页面展示的条目清单。"""
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), list) else []
+    insights = data.get("insights") if isinstance(data.get("insights"), list) else []
+    recommendations = data.get("recommendations") if isinstance(data.get("recommendations"), list) else []
+    titles = [
+        metric.get("标题")
+        for metric in metrics
+        if isinstance(metric, dict) and isinstance(metric.get("标题"), str)
+    ]
+    observed = scope.get("观察月份") if isinstance(scope.get("观察月份"), str) else ""
+    summary: dict[str, object] = {"producer": PRODUCER}
+    periods = site_periods(data)
+    if periods:
+        summary["periods"] = periods
+    summary["观察月份"] = observed
+    summary["指标标题"] = titles
+    summary["洞察条数"] = len(insights)
+    summary["建议条数"] = len(recommendations)
+    summary["摘要"] = (
+        f"站点已生成：{len(titles)} 个指标、{len(insights)} 条洞察、{len(recommendations)} 条建议"
+        + (f"；观察月份 {observed}。" if observed else "。")
+    )
+    return summary
+
+
+def write_site_summary(path: Path, data: dict) -> dict:
+    """写出站点内容摘要交接文件，返回摘要内容。"""
+    summary = build_site_summary(data)
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
 
 
 def write_report(
@@ -204,10 +306,12 @@ def build_site(
     bundle_path: Path | None = None,
     source_commit: str | None = None,
     brief_path: Path | None = None,
+    data: dict | None = None,
 ) -> dict:
     """把已校验的数据构建成 dist 目录，返回 build-report 的内容。
 
     data_path 是诊断快照；bundle_path 是已编译好的浏览器包，给 None 时调用 bun 打包。
+    data 给出已读入的快照内容，给 None 时从 data_path 读。
     """
     if bundle_path is not None and not bundle_path.is_file():
         raise FileNotFoundError(f"bundle 文件不存在或不是有效文件：{bundle_path}")
@@ -222,6 +326,8 @@ def build_site(
         (staging / "data").mkdir(parents=True, exist_ok=True)
         copy_static_files(staging)
         shutil.copyfile(data_path, staging / DATA_RELATIVE)
+        # 站点摘要交接文件：角色元数据与页面条目清单，供 Reviewer 核对。
+        write_site_summary(staging / SUMMARY_NAME, data if data is not None else load_diagnosis(data_path))
         if bundle_path is None:
             build_bundle(staging / BUNDLE_NAME)
         else:
@@ -297,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
 
     build_command = bun_command((out_dir / BUNDLE_NAME).resolve()) if bundle_path is None else []
     try:
-        report = build_site(data_path, out_dir, bundle_path, source_commit, brief_path)
+        report = build_site(data_path, out_dir, bundle_path, source_commit, brief_path, data)
     except BundleBuildError as cause:
         diagnostic_path = write_failure_report(
             out_dir,

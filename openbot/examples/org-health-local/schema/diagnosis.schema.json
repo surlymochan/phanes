@@ -67,6 +67,19 @@
     },
     "stage": {
       "$ref": "#/$defs/stage"
+    },
+    "producer": {
+      "description": "产出该交接文件的角色名，供下游与 Reviewer 核对角色元数据。",
+      "type": "string",
+      "minLength": 1
+    },
+    "periods": {
+      "description": "交接文件覆盖的观察期次（YYYY-MM），按时间升序。",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+      }
     }
   },
   "$defs": {

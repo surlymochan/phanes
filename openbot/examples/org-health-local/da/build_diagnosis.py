@@ -13,6 +13,7 @@
         forecast.csv 年末测算与年末目标（`期次` 列为 `年末测算` / `年末目标`）
 
 输出：schema v4 诊断快照，结构见 `schema/diagnosis.schema.json`。
+快照带角色元数据（`producer` 与 `periods`）：期次沿用任务书声明的 periods，供下游与 Reviewer 核对交接链。
 只使用 Python 3.9+ 标准库。输出确定性：同一份任务书与原始数据得到同一份 JSON，键序固定。
 缺数据的期次写 null，不填估算值；整体口径的参考期次按 schema v4 固定为 null。
 
@@ -48,6 +49,8 @@ import validate  # noqa: E402
 SCHEMA_PATH = ROOT / "schema" / "diagnosis.schema.json"
 SAMPLE_RAW_DIR = Path(__file__).resolve().parent / "sample-raw"
 SCHEMA_VERSION = 4
+# 交接文件里的角色元数据：产出方写进快照，供下游与 Reviewer 核对。
+PRODUCER = "da"
 
 EXIT_OK = 0
 EXIT_DATA = 1
@@ -276,6 +279,16 @@ def detect_nature(brief: dict, raw_dir: Path) -> str:
     return "未标注"
 
 
+def brief_periods(brief: dict, periods: dict) -> list[str]:
+    """交接用的期次元数据：沿用任务书声明的 periods，缺失时按起止参考期次推导。"""
+    declared = brief.get("periods")
+    if isinstance(declared, list):
+        cleaned = [item.strip() for item in declared if isinstance(item, str) and item.strip()]
+        if cleaned:
+            return cleaned
+    return [periods["start"], periods["reference"], periods["end"]]
+
+
 def parse_plan(brief: dict, raw_dir: Path) -> dict:
     """把任务书解析成计算用的口径计划。"""
     version = brief.get("schema版本")
@@ -292,6 +305,7 @@ def parse_plan(brief: dict, raw_dir: Path) -> dict:
     }
     return {
         "periods": periods,
+        "period_metadata": brief_periods(brief, periods),
         "labels": labels,
         "rate": rate,
         "definitions": definitions,
@@ -1270,6 +1284,8 @@ def build_snapshot(plan: dict, raw: dict) -> dict:
         "definitions": build_definitions(plan),
         "risks": build_risks(plan, facts, raw) + warning_risks(warnings),
         "recommendations": build_recommendations(plan, facts, raw) + warning_recommendations(warnings),
+        "producer": PRODUCER,
+        "periods": list(plan["period_metadata"]),
     }
     return snapshot
 
