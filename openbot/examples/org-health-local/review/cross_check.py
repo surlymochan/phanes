@@ -26,6 +26,13 @@
     - 任务书若显式给出 `截止期次`，必须等于 `scope.观察月份`；
     - 任务书若显式给出 `数据截止`，必须等于 `scope.数据截止`。
 
+【期次键规则】
+    快照 `metrics[*].数值` 里的期次键（全口径成本率的键去掉「整体」前缀）与任务书期次锚点比对：
+    - 任务书给出 `观察期间.期次`（Boss 格式）时按整键比对；
+    - 只给起止/参考/截止期次锚点时按期次所属月份比对，`年末测算`/`年末目标` 不参与；
+    - 快照没有期次键或任务书没有期次锚点时不做比对；
+    - 键集合不一致时在本项 detail 里说明缺少哪些键、多出哪些键，不新增检查项。
+
 【必答问题引用规则】
     快照 insights 与 recommendations 的每个条目分别作为答案单元（键名与值均可检索）。
     每个答案只归属一个问题，按下列顺序判定，命中其一即算被引用：
@@ -69,6 +76,15 @@ AS_OF_KEYS = ("数据截止", "数据截止日期", "asOf")
 
 # 任务书 `观察期间` 里表示观察月份（Boss 格式）的键名。
 OBSERVED_KEYS = ("观察月份",)
+
+# 任务书 `观察期间` 里表示起止/参考期次的键名。
+ANCHOR_KEYS = ("起始期次", "参考期次", "截止期次")
+
+# 全口径成本率的期次键带「整体」前缀，比对期次键时去掉前缀。
+FULL_RATE_PREFIX = "整体"
+
+# 不带月份的期次键：年末测算与年末目标。
+FORECAST_KEYS = frozenset({"年末测算", "年末目标"})
 
 # 任务书 `必答问题` 条目里表示 id 与问题正文的键名。
 QUESTION_ID_KEYS = ("id", "ID", "编号", "题号", "问题编号", "序号")
@@ -161,6 +177,27 @@ class Result:
     severity: str | None = None
 
 
+@dataclass
+class PeriodKeyDiff:
+    """快照期次键与任务书期次锚点的差异。"""
+
+    missing: list[str]  # 任务书有、快照缺的期次键
+    extra: list[str]  # 快照有、任务书没有的期次键
+    brief_path: str  # 任务书期次锚点的路径
+    expected: list[str]  # 任务书给出的期次锚点
+    paths: dict[str, list[str]]  # 快照期次键到路径的映射
+    label: str = "期次键"  # 比对单位：整键或期次月份
+
+    def detail(self) -> str:
+        """说明缺少哪些键、多出哪些键。"""
+        parts: list[str] = []
+        if self.missing:
+            parts.append("缺少 " + "、".join(self.missing))
+        if self.extra:
+            parts.append("多出 " + "、".join(self.extra))
+        return f"诊断快照{self.label}与任务书期次锚点不一致：" + "；".join(parts)
+
+
 def first_text(source: dict, *names: str) -> str | None:
     """按顺序取第一个非空字符串字段。"""
     for name in names:
@@ -219,27 +256,6 @@ def brief_period_anchors(brief: dict) -> set[str]:
     return {value.strip() for value in values if isinstance(value, str) and value.strip()}
 
 
-def diagnosis_period_paths(diagnosis: dict) -> dict[str, list[str]]:
-    """收集指标中的期次键及路径，日期前的口径前缀不参与比较。"""
-    paths: dict[str, list[str]] = {}
-
-    def visit(node: object, path: str) -> None:
-        if isinstance(node, dict):
-            for key, value in node.items():
-                key_text = str(key)
-                match = DATE_PATTERN.search(key_text)
-                canonical = key_text[match.start() :] if match else key_text
-                if match or canonical in {"年末测算", "年末目标"}:
-                    paths.setdefault(canonical, []).append(f"{path}/{key_text}")
-                visit(value, f"{path}/{key_text}")
-        elif isinstance(node, list):
-            for index, item in enumerate(node):
-                visit(item, f"{path}/{index}")
-
-    visit(diagnosis.get("metrics"), "/metrics")
-    return paths
-
-
 def check_period(brief: dict, diagnosis: dict) -> Result:
     """核对任务书观察期间与快照 scope 是否一致。"""
     name = "期间一致"
@@ -265,28 +281,116 @@ def check_period(brief: dict, diagnosis: dict) -> Result:
     cutoff = scope.get("数据截止")
     if as_of and isinstance(cutoff, str) and as_of != cutoff:
         problems.append(f"任务书 `观察期间.数据截止`={as_of} 与 `scope.数据截止`={cutoff} 不一致")
-    anchors = brief_period_anchors(brief)
-    period_paths = diagnosis_period_paths(diagnosis)
-    unexpected = sorted(set(period_paths) - anchors) if anchors and period_paths else []
-    if unexpected:
-        conflict_paths = [path for item in unexpected for path in period_paths[item]]
-        problems.append("诊断快照期次锚点与任务书不一致：" + "、".join(unexpected))
-        return Result(
-            False,
-            name,
-            "；".join(problems),
-            finding={
-                "field": "期次",
-                "brief_path": "/观察期间/期次",
-                "diagnosis_path": conflict_paths[0],
-                "expected": sorted(anchors),
-                "actual": unexpected,
-            },
-            severity="error",
-        )
+    diff = period_key_diff(brief, diagnosis)
+    if diff.missing or diff.extra:
+        problems.append(diff.detail())
+        conflict_paths = [path for item in diff.extra for path in diff.paths.get(item, [])]
+        finding = {
+            "field": "期次",
+            "brief_path": diff.brief_path,
+            "expected": diff.expected,
+            "actual": diff.extra,
+            "missing": diff.missing,
+        }
+        if conflict_paths:
+            finding["diagnosis_path"] = conflict_paths[0]
+        return Result(False, name, "；".join(problems), finding=finding, severity="error")
     if problems:
         return Result(False, name, "；".join(problems))
     return Result(True, name, f"`scope.观察月份`={observed} 在任务书观察期间（{listed}）内")
+
+
+def period_month(key: str) -> str | None:
+    """返回期次键所属的月份（YYYY-MM）；没有月份时返回 None。"""
+    match = MONTH_PATTERN.match(key)
+    return match.group(0) if match else None
+
+
+def is_period_key(key: str) -> bool:
+    """判断键名是否是期次键：`YYYY-MM` 开头，或年末测算/年末目标。"""
+    return bool(MONTH_PATTERN.match(key)) or key in FORECAST_KEYS
+
+
+def diagnosis_period_keys(diagnosis: dict) -> dict[str, list[str]]:
+    """收集快照 `metrics[*].数值` 的期次键与路径。
+
+    全口径成本率的期次键带「整体」前缀，比对时去掉前缀；
+    只有 `YYYY-MM` 开头的键与 `年末测算`/`年末目标` 算期次键。
+    """
+    paths: dict[str, list[str]] = {}
+
+    def visit(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_text = str(key)
+                canonical = key_text.removeprefix(FULL_RATE_PREFIX)
+                if is_period_key(canonical):
+                    paths.setdefault(canonical, []).append(f"{path}/{key_text}")
+                visit(value, f"{path}/{key_text}")
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                visit(item, f"{path}/{index}")
+
+    metrics = diagnosis.get("metrics")
+    if isinstance(metrics, list):
+        for index, metric in enumerate(metrics):
+            if isinstance(metric, dict):
+                visit(metric.get("数值"), f"/metrics/{index}/数值")
+    return paths
+
+
+def brief_period_anchor_months(brief: dict) -> set[str]:
+    """返回任务书起止/参考期次锚点里的月份集合。"""
+    window = brief.get("观察期间")
+    if not isinstance(window, dict):
+        return set()
+    months: set[str] = set()
+    for name in ANCHOR_KEYS:
+        value = window.get(name)
+        if not isinstance(value, str):
+            continue
+        month = period_month(value.strip())
+        if month:
+            months.add(month)
+    return months
+
+
+def period_key_diff(brief: dict, diagnosis: dict) -> PeriodKeyDiff:
+    """比对快照期次键与任务书期次锚点。
+
+    任务书给出 `观察期间.期次`（Boss 格式）时按整键比对；
+    只给起止/参考/截止期次锚点时按期次所属月份比对，`年末测算`/`年末目标` 不参与。
+    快照没有期次键或任务书没有期次锚点时不做比对。
+    """
+    paths = diagnosis_period_keys(diagnosis)
+    keys = set(paths)
+    if not keys:
+        return PeriodKeyDiff([], [], "/观察期间", [], paths)
+    anchors = brief_period_anchors(brief)
+    if anchors:
+        return PeriodKeyDiff(
+            missing=sorted(anchors - keys),
+            extra=sorted(keys - anchors),
+            brief_path="/观察期间/期次",
+            expected=sorted(anchors),
+            paths=paths,
+        )
+    months = brief_period_anchor_months(brief)
+    if not months:
+        return PeriodKeyDiff([], [], "/观察期间", [], paths, label="期次月份")
+    snapshot_months: set[str] = set()
+    for key in keys:
+        month = period_month(key)
+        if month:
+            snapshot_months.add(month)
+    return PeriodKeyDiff(
+        missing=sorted(months - snapshot_months),
+        extra=sorted(snapshot_months - months),
+        brief_path="/观察期间",
+        expected=sorted(months),
+        paths=paths,
+        label="期次月份",
+    )
 
 
 def check_version(brief: dict, diagnosis: dict) -> Result:

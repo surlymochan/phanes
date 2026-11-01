@@ -259,7 +259,7 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 
 | 检查 | 规则 | 引用 |
 | --- | --- | --- |
-| 期间一致 | `scope.观察月份` 必须落在任务书 `观察期间` 的 `YYYY-MM` 集合内；显式 `截止期次`/`数据截止` 必须与 `scope` 相同 | `review/cross_check.py:200-224`、`:179-198` |
+| 期间一致 | `scope.观察月份` 必须落在任务书 `观察期间` 的 `YYYY-MM` 集合内；显式 `截止期次`/`数据截止` 必须与 `scope` 相同；快照 `metrics[*].数值` 的期次键（全口径成本率的键去掉「整体」前缀）必须与任务书期次锚点（Boss 格式的 `期次` 列表，或起止/参考期次）一致，缺哪些键、多哪些键在本项里说明 | `review/cross_check.py:259-300`、`:358-393`、`:227-247` |
 | 版本一致 | 任务书 `schema版本` == `scope.schema版本` == 4 | `review/cross_check.py:226-243` |
 | 必答问题覆盖 | 每条必答问题按 id / 原文 / 关键词命中 `insights`+`recommendations` 的全部字符串即算覆盖 | `review/cross_check.py:249-363`、`:365-378` |
 | 站点数据一致 | `dist/data/diagnosis.json` 与 `--data` 字节相同（打印 sha256 前 12 位） | `review/cross_check.py:380-397` |

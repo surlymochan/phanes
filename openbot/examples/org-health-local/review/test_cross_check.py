@@ -166,6 +166,15 @@ def rename_period_key(node: dict, old: str, new: str) -> None:
             rename_period_key(node[key], old, new)
 
 
+def drop_period_key(node: dict, key: str) -> None:
+    """把字典里的期次键删掉（就地修改，嵌套字典一并处理）。"""
+    for name in list(node.keys()):
+        if name == key:
+            node.pop(name)
+        elif isinstance(node[name], dict):
+            drop_period_key(node[name], key)
+
+
 def run_script(
     brief: Path,
     data: Path,
@@ -279,6 +288,55 @@ class CrossCheckTest(unittest.TestCase):
         """任务书期次锚点与快照数值序列对齐时通过。"""
         self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
         self.assertEqual(self.failing(self.check()), [])
+
+    def test_brief_period_keys_missing_fails(self) -> None:
+        """快照数值序列缺少任务书期次锚点时必须报出缺哪些键。"""
+        self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
+        for metric in self.diagnosis["metrics"]:
+            drop_period_key(metric["数值"], "年末目标")
+        failures = self.failing(self.check())
+        self.assertTrue(failures, "快照期次键缺任务书锚点时未报出")
+        period = failures[0]
+        self.assertEqual(period.name, "期间一致")
+        self.assertIn("缺少", period.detail)
+        self.assertIn("年末目标", period.detail)
+        self.assertEqual(period.finding["missing"], ["年末目标"])
+        self.assertEqual(period.finding["actual"], [])
+
+    def test_brief_anchor_period_keys_mismatch_fails(self) -> None:
+        """任务书只给起止/参考期次时，快照期次月份不一致必须报出缺哪些、多哪些。"""
+        for metric in self.diagnosis["metrics"]:
+            drop_period_key(metric["数值"], "2026-05H1参考")
+        self.diagnosis["metrics"][0]["数值"]["2026-08实际"] = 1
+        failures = self.failing(self.check())
+        self.assertTrue(failures, "快照期次月份与任务书锚点不一致时未报出")
+        period = failures[0]
+        self.assertEqual(period.name, "期间一致")
+        self.assertIn("缺少", period.detail)
+        self.assertIn("2026-05", period.detail)
+        self.assertIn("多出", period.detail)
+        self.assertIn("2026-08", period.detail)
+        self.assertEqual(period.finding["expected"], ["2026-01", "2026-05", "2026-09"])
+
+    def test_period_key_diff_compares_brief_anchors_and_snapshot_keys(self) -> None:
+        """期次键比对纯函数：全口径的「整体」前缀去掉后与任务书期次锚点比对。"""
+        keys = cross_check.diagnosis_period_keys(self.diagnosis)
+        self.assertIn("2026-01实际", keys)
+        self.assertIn("2026-09实际", keys)
+        self.assertNotIn("整体2026-09实际", keys)
+
+        diff = cross_check.period_key_diff(self.brief, self.diagnosis)
+        self.assertEqual(diff.missing, [])
+        self.assertEqual(diff.extra, [])
+        self.assertEqual(diff.expected, ["2026-01", "2026-05", "2026-09"])
+
+        boss = copy.deepcopy(self.brief)
+        boss["观察期间"] = copy.deepcopy(BOSS_PERIOD)
+        diff = cross_check.period_key_diff(boss, self.diagnosis)
+        self.assertEqual(diff.missing, [])
+        self.assertEqual(diff.extra, [])
+        self.assertEqual(diff.brief_path, "/观察期间/期次")
+        self.assertIn("2026-09实际", diff.expected)
 
     def test_version_mismatch_fails(self) -> None:
         """任务书与快照的 schema版本 不一致时失败。"""
