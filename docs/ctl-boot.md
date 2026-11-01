@@ -34,11 +34,20 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      It contains `_busy` (lanes currently assigned work), `_ready` (open GH
      `lane-ready` issues not marked `in-progress`, `lane-pr`, or
      `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
-     is the dispatchable count after `_blocked` is removed. `_stale_stripped_n`
-     (also exposed as `_stale_search_skips`) is the non-negative count of
-     stale-search-index entries stripped by the current autodispatch process;
-     `_stale_lane_failed_skips` counts the subset of those stale hits whose
-     issue still carries both `lane-failed` and `lane-ready` (Refs #985).
+     is the dispatchable count after `_blocked` is removed. `_ready` follows the
+     authoritative issue labels (the bool `fresh_ready` check), not the lagging search index:
+     a stale search row (e.g. an issue that really carries `lane-failed`) is
+     skipped and logged as `skip #<n>: stale search index (already claimed/done)`,
+     never counted as dispatchable. A failed authoritative read is NOT stale:
+     the row is kept and logged as `skip #<n>: label read failed (...)`, so a
+     transient `gh` error can neither drive `_ready` to a false 0 nor trigger a
+     needless refill. Each issue is read authoritatively at most once per tick
+     (`AD_FRESH_BUDGET`, default 60 reads/tick, keeps the GraphQL quota safe).
+     `_stale_stripped_n` (also exposed as `_stale_search_skips`) is the
+     non-negative count of stale-search-index entries stripped by the current
+     autodispatch process; `_stale_lane_failed_skips` counts the subset of those
+     stale hits whose issue still carries both `lane-failed` and `lane-ready`
+     (Refs #985).
    - Failed work is not retried by leaving a stale `lane-ready` label: after a
      failure, an operator must manually re-add `lane-ready` and remove
      `lane-failed` (and `lane-pr`, if present) before it can be dispatched again.
@@ -172,6 +181,15 @@ Check scripts (no SSH):
   read, compare the live snapshot with the filtered GH list (dependency
   blockers are shown separately as `_blocked`):
   `watch -n 30 "jq -c '{busy:._busy,ready:._ready,blocked:._blocked,at:._at}' ~/phanes-ctl/autodispatch/lanes-status.json; gh issue list --state open --label lane-ready --limit 100 --json number,labels --jq '[.[] | select(([.labels[].name] | index(\"in-progress\") | not) and ([.labels[].name] | index(\"lane-pr\") | not) and ([.labels[].name] | index(\"lane-failed\") | not))] | length'"`.
+  That `gh issue list` is a search-index view while `_ready` follows the
+  authoritative labels: in a stale scenario (an issue that really carries
+  `lane-failed`) the two numbers differ on purpose.
+- `python3 tools/check-ad-ready-count.py` — offline #950 contract check. It
+  drives the shipped dispatcher with fake search results plus authoritative
+  issue labels: a stale `lane-failed` search row is skipped and `_ready`
+  matches the fresh count, a failed authoritative read keeps the row instead of
+  shrinking `_ready`, and every issue is read at most once per tick;
+  it never calls `gh`.
 - `python3 tools/check-soak-summary.py` — offline dual-mode soak summary
   contract. It reads fake `lanes-status` and `ib-refresh.status` rows and
   prints the `busy`, `ready`, `hosts_ok`, and `min_exp` values for polling.
