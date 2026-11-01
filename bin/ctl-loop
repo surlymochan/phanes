@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -u
+
+# ctl-loop ib-refresh supervisor (Refs #1246)
+BASE_DIR="${CTL_HOME:-$HOME/phanes-ctl}"
+REFRESH_CAP="${REFRESH_CAP:-420}"
+HEARTBEAT_PATH="${HEARTBEAT_PATH:-$BASE_DIR/ctl-loop.heartbeat}"
+IB_REFRESH="${IB_REFRESH:-$BASE_DIR/bin/ib-refresh}"
+
+mkdir -p "$(dirname "$HEARTBEAT_PATH")"
+
+while :; do
+    "$IB_REFRESH" &
+    refresh_pid=$!
+    refresh_started=$(date +%s)
+
+    # Keep the supervisor heartbeat fresh while ib-refresh is still running.
+    while kill -0 "$refresh_pid" 2>/dev/null; do
+        date +%s > "$HEARTBEAT_PATH"
+        now=$(date +%s)
+        if [ $((now - refresh_started)) -ge "$REFRESH_CAP" ]; then
+            kill "$refresh_pid" 2>/dev/null || true
+            break
+        fi
+        sleep 5
+    done
+    wait "$refresh_pid" 2>/dev/null || true
+    date +%s > "$HEARTBEAT_PATH"
+    sleep 5
+done
