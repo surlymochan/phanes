@@ -229,6 +229,37 @@ time.sleep(30)
         self.assertIn('超时', timings[-1]['reason'])
         self.assertNotIn('[审查] 命令', result.stdout)
 
+    def test_timeout_stops_following_roles_and_records_failed_role(self):
+        """中间角色超时后不启动后续角色，并在 timings/status 中记录失败角色与耗时。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        slow_da = self.scripts[1]
+        slow_da.write_text(f'''import json, pathlib, sys, time
+with open({str(self.log)!r}, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["da", sys.argv[1:]]) + "\\n")
+pathlib.Path(sys.argv[sys.argv.index("--out") + 1]).write_text("partial", encoding="utf-8")
+time.sleep(30)
+''', encoding='utf-8')
+
+        result = subprocess.run(self.command() + ['--timeout', '0.2'],
+                                capture_output=True, text=True, timeout=10)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
+        self.assertNotIn('[Builder] 命令', result.stdout)
+        self.assertNotIn('[检查] 命令', result.stdout)
+
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
+        self.assertTrue(timings[-1]['timeout'])
+        self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
+        self.assertIn('超时', timings[-1]['reason'])
+
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['failed_step'], 'da')
+        self.assertEqual([item['name'] for item in status['timings']], ['Boss', 'DA'])
+        self.assertEqual(status['timings'][-1]['duration_seconds'], timings[-1]['duration_seconds'])
+
     def test_timings_are_written_when_a_step_fails(self):
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
             self.write_stub(path, role, failing=(index == 1), exit_code=9)
