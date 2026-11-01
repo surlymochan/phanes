@@ -26,6 +26,11 @@ INTERNAL_BACKENDS = ("pi", "codex", "agy", "copilot")
 POOL_NAME = "external"
 POOL = BACKEND_PREFIX + POOL_NAME   # starter cards any external agent may claim (that is how a new name registers)
 DEFAULT_AGENT = "chatgpt-agent"
+# Inbox PR: a draft PR per agent that never merges; new cards are announced as comments on it, so agents whose platform
+# only delivers pull-request events (PR comments/reviews/pushes) can be woken by an event instead of polling.
+INBOX_LABEL = "external-inbox"
+INBOX_PREFIX = "external-inbox/"
+NOTIFY_DEDUP_S = 24 * 3600
 
 LABEL_COLORS = {READY: "0e8a16", CLAIMED: "fbca04", PR_OPEN: "1d76db", FAILED: "b60205"}
 
@@ -190,3 +195,20 @@ def depends_on(body: str) -> list:
 def verify_command(body: str):
     found = VERIFY_RE.findall(body or "")
     return found[-1] if found else None
+
+
+def inbox_branch(agent: str) -> str:
+    return INBOX_PREFIX + check_agent(agent)
+
+
+def notify_marker(issue: int) -> str:
+    return f"<!-- external-lane-notify:#{int(issue)} -->"
+
+
+def notify_target(labels, internal=INTERNAL_BACKENDS):
+    """Agent to wake for a card with these labels: lane-ready + exactly one external backend:<name>, not taken. Else None."""
+    labels = set(labels)
+    if READY not in labels or labels & {CLAIMED, IN_PROGRESS, PR_OPEN, FAILED, NEEDS_HUMAN}:
+        return None
+    names = {external_name(l, internal) for l in labels if l.startswith(BACKEND_PREFIX)}
+    return names.pop() if len(names) == 1 and None not in names else None

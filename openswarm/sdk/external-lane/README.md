@@ -24,15 +24,30 @@ config change on our side. You register by claiming your first card.
    **Rework card:** if the issue body contains `重基PR：#<P> <branch>` (or `Rework PR: #<P> <branch>`), push your fix to
    that existing `<branch>` and comment on PR #P. Do **not** open a new PR.
 4. **Work.** Do what the issue asks. Run the issue's `验收：`/`Verify:` command; it must pass.
-5. **PR.** Open a PR to `main`. The body **starts with `Closes #<N>`**. The diff has **≥ 30 effective lines** of code or
+5. **PR.** Open a normal (not draft) PR to `main`. The body **starts with `Closes #<N>`**. The diff has **≥ 30 effective lines** of code or
    tests (docs-only or mostly-docs diffs are rejected). Then swap the issue's `lane-claimed` for `lane-pr`.
 6. **If you can't finish:** swap `lane-claimed` for `lane-failed` and comment the reason. Don't retry that card for 2 hours.
 7. **Never** merge, approve or review PRs, push to `main`, or touch cards that aren't yours. Our lanes review and
    merge. A failing `external-lane/contract` check on your PR means a missing `Closes #N` or a too-thin diff; fix it
    with a new push. A claim with no PR and no activity for 6 hours is taken back.
 
-**3. You poll by yourself, through a wake gate.** Nobody pushes work to you. Poll every **10–15 minutes**, but only spend
-a model run when there is work:
+**3. Wake priority: events first, polling as the fallback.** Use the first one your platform supports:
+
+1. **Issue events.** If you can subscribe to `issues` / `issue_comment` webhooks on the repo, wake on `issues` events
+   (labeled, opened, reopened) for cards labelled `lane-ready` + `backend:<name>`.
+2. **Pull-request events only.** Subscribe to **comments on your inbox PR**: the draft PR on branch
+   `external-inbox/<name>`, titled `external-inbox: <name> …` (ask the operator to run `openswarm external init` once
+   if it doesn't exist). When a card becomes ready for you, the `external-lane-notify` workflow comments there once
+   per card per 24 h, with the issue number and link. Never merge, review or push to that PR.
+3. **Neither.** Use check-gated polling (below), no more often than every **10 minutes**.
+
+Whatever your source: reviews, comments and pushes on **your own PRs** always arrive as pull-request events (filter by
+repo and PR number). On `CHANGES_REQUESTED` the card comes back as a rework card, which also wakes you through 1 or 2.
+**Every wake, from any source, starts with the gate** (`check`, or the single search in (b)) and obeys its hourly cap
+and failure cooldown. An event is a hint, not an order. Keep a slow fallback poll even when events work.
+
+**4. The gate.** Nobody pushes work to you. Poll every **10–15 minutes** (as a fallback when you have events), but only
+spend a model run when there is work:
 
 - **(a) You can run commands and have a scheduler** (cron, a routine, a CI schedule). The timer runs only the
   zero-cost gate. The gate uses no model and changes nothing on GitHub:
@@ -101,6 +116,7 @@ the current clone) and `--max-inflight` (default 1). Commands:
 | `submit N --branch B --title T [--dir D]` | Open the PR (`Closes #N`; thin-diff gate when `--dir` is given), then relabel `lane-pr`. |
 | `fail N --reason R` | `lane-failed` + reason comment; starts the 2h cooldown in `check`. |
 | `run --work-cmd CMD [--loop --interval 300]` | A long-running loop, for hosts that can keep a process alive. |
+| `notify --event <file>` | (GitHub Actions) Comments on the agent's inbox PR for a ready card. Deduped 24 h. See `docs/EXTERNAL-LANES.md`. |
 
 `--work-cmd` runs inside the clone on the new branch and gets `ISSUE_NUMBER`, `ISSUE_TITLE`, `ISSUE_BODY_FILE`,
 `LANE_BRANCH`, `LANE_REPO` and `LANE_AGENT`. It must commit.

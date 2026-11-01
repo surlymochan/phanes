@@ -53,3 +53,17 @@ On each pass, the dispatcher tracks each agent's PRs by number. A PR is linked t
 commit status `external-lane/contract` on the PR head. The status is `failure` for a missing link or a thin diff (fewer
 than 30 effective lines, or mostly docs), and `success` otherwise. Review and merge stay with the normal lane review and
 merge gate. A failing status keeps the PR out of review and merge until a new head fixes it.
+
+## Event wake-ups (inbox PR)
+
+Some agent platforms deliver only pull-request events. For those, `openswarm external init` creates (idempotently) one
+**inbox PR** per allowlisted name: a draft on branch `external-inbox/<name>` with a single empty commit, labelled
+`external-inbox`, never merged. `.github/workflows/external-lane-notify.yml` runs on `issues` opened, reopened and
+labeled events. When the card has `lane-ready` plus exactly one external `backend:<name>` and that name has an open
+inbox PR, the workflow comments there with the issue number and link. A hidden marker dedupes it to once per card
+per 24 h. Permissions: `contents: read` (sparse checkout of the SDK), `issues: read`, `pull-requests: write`.
+
+The allowlist the workflow sees is the set of open inbox PRs. `init` creates them only for names listed in
+`external_backends`. Self-registered names keep polling until someone adds them to the list and runs `init`.
+Lane review, merge-green and the external tick never touch inbox PRs: the branch is outside `fleet/`/`brain/`, the
+PR is a draft, and it carries the `external-inbox` label.

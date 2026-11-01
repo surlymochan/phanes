@@ -255,7 +255,7 @@ def apply(host, repo, act):
 
 def ensure_labels(host, cfg):
     made = []
-    for name, color in ((cfg["label"], "5319e7"), (C.CLAIMED, C.LABEL_COLORS[C.CLAIMED])):  # idempotent
+    for name, color in ((cfg["label"], "5319e7"), (C.CLAIMED, C.LABEL_COLORS[C.CLAIMED])):
         if host.gh_transport(f"repos/{cfg['repo']}/labels/{urllib.parse.quote(name, safe='')}", allow_not_found=True) is None:
             host.gh_transport(f"repos/{cfg['repo']}/labels", "POST",
                               {"name": name, "color": color, "description": f"openswarm external lane ({cfg['name']})"})
@@ -265,6 +265,36 @@ def ensure_labels(host, cfg):
 
 def ensure_label(host, repo, name, color, description):
     host.gh_transport(f"repos/{repo}/labels", "POST", {"name": name, "color": color, "description": description[:100]})
+
+
+INBOX_BODY = """Inbox for external lane **{name}**. **Never merge** (draft, empty commit).
+
+When a card becomes `lane-ready` for `backend:{name}`, the `external-lane-notify` workflow comments here
+(once per card per 24 h). Agents whose platform delivers only pull-request events subscribe to comments on this PR,
+then run `openswarm external check --agent {name}` and, on rc 0, one round. Guide: openswarm/sdk/external-lane/README.md.
+Lane review, merge-green and the external tick ignore it (branch `{prefix}*`, label `{label}`, draft)."""
+
+
+def ensure_inbox(host, repo, name):
+    """Idempotently create the agent's inbox PR (draft, empty commit on top of main, label external-inbox). -> PR number."""
+    branch, owner = C.inbox_branch(name), repo.split("/")[0]
+    found = host.gh_pages(f"repos/{repo}/pulls?state=open&head={urllib.parse.quote(owner + ':' + branch, safe=':')}")
+    if found:
+        return found[0]["number"], False
+    if host.gh_transport(f"repos/{repo}/git/ref/heads/{branch}", allow_not_found=True) is None:
+        head = host.gh_transport(f"repos/{repo}/commits/main")
+        commit = host.gh_transport(f"repos/{repo}/git/commits", "POST", {
+            "message": f"external-inbox: {name} (empty commit; never merge)",
+            "tree": head["commit"]["tree"]["sha"], "parents": [head["sha"]]})
+        host.gh_transport(f"repos/{repo}/git/refs", "POST", {"ref": f"refs/heads/{branch}", "sha": commit["sha"]})
+    if host.gh_transport(f"repos/{repo}/labels/{C.INBOX_LABEL}", allow_not_found=True) is None:
+        host.gh_transport(f"repos/{repo}/labels", "POST", {"name": C.INBOX_LABEL, "color": "c5def5",
+                                                           "description": "external lane inbox PR: never merge, never review"})
+    pr = host.gh_transport(f"repos/{repo}/pulls", "POST", {
+        "head": branch, "base": "main", "draft": True, "title": f"external-inbox: {name} (wake-up notices; never merge)",
+        "body": INBOX_BODY.format(name=name, prefix=C.INBOX_PREFIX, label=C.INBOX_LABEL)})
+    host.gh_transport(f"repos/{repo}/issues/{pr['number']}/labels", "POST", {"labels": [C.INBOX_LABEL]})
+    return pr["number"], True
 
 
 def tick(host, cfg, dry_run=False, now=None, ready=None, prs=None):
@@ -363,11 +393,14 @@ def cmd_external(args, host, policy):
             raise ExternalError(f"no policy.external_backends.{args.name}")
         cfgs = {args.name: cfgs[args.name]}
     out = []
+    if args.external_cmd == "init":  # inbox PRs only for allowlisted (policy-listed) names
+        cfgs = {k: v for k, v in cfgs.items() if v.get("allowlisted")}
     for cfg in cfgs.values():
         if not cfg["enabled"]:
             continue
         if args.external_cmd == "init":
-            out.append({"backend": cfg["name"], "created": ensure_labels(host, cfg)})
+            inbox, made = ensure_inbox(host, cfg["repo"], cfg["name"])
+            out.append({"backend": cfg["name"], "created": ensure_labels(host, cfg), "inbox_pr": inbox, "inbox_created": made})
         else:
             own = _issues(host, cfg["repo"], [cfg["label"]])
             out.append({"backend": cfg["name"], "repo": cfg["repo"], "max_inflight": cfg["max_inflight"],

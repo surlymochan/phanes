@@ -228,6 +228,61 @@ class SelfRegistrationTest(unittest.TestCase):
         self.assertEqual(assigned, {"chatgpt-agent": [7, 8], "fresh": [], "external": []})  # each card goes to one place
 
 
+class InboxTest(unittest.TestCase):
+    def host(self, existing_pr=False, branch=False):
+        calls = []
+
+        def transport(e, m="GET", p=None, allow_not_found=False):
+            calls.append((m, e, p))
+            if e.endswith("/git/ref/heads/external-inbox/dot"):
+                return {"ref": "x"} if branch else None
+            if e.endswith("/labels/external-inbox"):
+                return None
+            if e.endswith("/commits/main"):
+                return {"sha": "m1", "commit": {"tree": {"sha": "t1"}}}
+            if e.endswith("/git/commits"):
+                return {"sha": "e1"}
+            if e.endswith("/pulls") and m == "POST":
+                return {"number": 1500}
+            return {}
+        pages = lambda e: [{"number": 1499}] if existing_pr else []
+        return calls, types.SimpleNamespace(gh_pages=pages, gh_transport=transport)
+
+    def test_creates_draft_inbox_with_empty_commit_and_label(self):
+        calls, host = self.host()
+        self.assertEqual(X.ensure_inbox(host, "o/r", "dot"), (1500, True))
+        commit = next(p for m, e, p in calls if e.endswith("/git/commits"))
+        self.assertEqual((commit["tree"], commit["parents"]), ("t1", ["m1"]))  # same tree as main = empty commit
+        pr = next(p for m, e, p in calls if e.endswith("/pulls") and m == "POST")
+        self.assertTrue(pr["draft"])
+        self.assertEqual(pr["head"], "external-inbox/dot")
+        self.assertIn(("POST", "repos/o/r/issues/1500/labels", {"labels": ["external-inbox"]}), calls)
+
+    def test_idempotent(self):
+        calls, host = self.host(existing_pr=True)
+        self.assertEqual(X.ensure_inbox(host, "o/r", "dot"), (1499, False))
+        self.assertEqual(calls, [])
+        calls, host = self.host(branch=True)
+        X.ensure_inbox(host, "o/r", "dot")
+        self.assertFalse(any(e.endswith("/git/commits") for _, e, _ in calls))  # branch reused
+
+    def test_inbox_prs_are_not_lane_prs(self):
+        cfg_ = cfg(auto_assign=False, branch_prefixes=[])
+        acts = X.plan(cfg_, [], [], [pr(1500, "external-inbox/chatgpt-agent")], lambda n: [], {}, NOW)
+        self.assertEqual(acts, [])  # no contract status, no linking
+        self.assertFalse(any(C.inbox_branch("chatgpt-agent").startswith(p) for p in ("fleet/", "brain/")))  # AD/merge skip
+
+    def test_workflow_least_privilege(self):
+        wf = open(os.path.join(os.path.dirname(ROOT), ".github", "workflows", "external-lane-notify.yml")).read()
+        perms = wf.split("permissions:", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("issues: read", perms)
+        self.assertIn("pull-requests: write", perms)
+        self.assertNotIn("issues: write", perms)
+        self.assertNotIn("write-all", wf)
+        self.assertIn("types: [opened, reopened, labeled]", wf)
+        self.assertIn("python3 -m external_lane notify", wf)
+
+
 def load_tests(loader, tests, pattern):
     """Also run sdk/external-lane/tests in the OpenSwarm CI job. Modules are loaded by path: a nested
     loader.discover() would clobber the outer discovery's top-level dir on Python < 3.12."""

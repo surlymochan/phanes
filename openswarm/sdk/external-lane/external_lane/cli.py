@@ -33,6 +33,8 @@ def build_parser():
     ap.add_argument("--max-inflight", type=int, default=int(os.environ.get("EXTERNAL_LANE_MAX_INFLIGHT") or 1))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("contract", help="print the contract (labels, branch format) as JSON")
+    sp = sub.add_parser("notify", help="(GitHub Actions) announce a ready card on its agent's inbox PR")
+    sp.add_argument("--event", default=os.environ.get("GITHUB_EVENT_PATH"), help="issues event payload (JSON file)")
     sp = sub.add_parser("check", help="wake gate: rc 0 = a card to take, 1 = nothing to do, 2 = error; read-only, one JSON line")
     sp.add_argument("--max-wakes-per-hour", type=int,
                     default=int(os.environ.get("EXTERNAL_LANE_MAX_WAKES_PER_HOUR") or gate.MAX_WAKES_PER_HOUR))
@@ -112,6 +114,16 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.cmd == "contract":
         print(json.dumps(contract_info(a.agent), ensure_ascii=False, indent=1))
+        return 0
+    if a.cmd == "notify":
+        from . import notify
+        from .github import GitHub
+        repo = a.repo or os.environ.get("GITHUB_REPOSITORY") or repo_from_git()
+        if not repo or not a.event:
+            print("notify needs --repo (or GITHUB_REPOSITORY) and --event (or GITHUB_EVENT_PATH)", file=sys.stderr)
+            return 2
+        with open(a.event) as fh:
+            notify.run(GitHub(repo), json.load(fh))
         return 0
     a.repo = a.repo or repo_from_git()
     if not a.repo or not a.agent:
