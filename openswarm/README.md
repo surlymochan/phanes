@@ -462,9 +462,15 @@ openswarm lane systemd-unit K1             # prints a system systemd unit; does 
 Lane runs use the normal `runs/<id>` files, `openswarm/<id>` commit branch, host verification, ledger, `watch`,
 `runs`, and `report` paths. `--base REV` selects the commit used to reset a lane worktree for one assignment.
 An optional lane `binary` absolute path overrides the detected executable, which is useful for wrappers and offline
-protocol testing. Cursor defaults to model `composer-2.5`; its binary is `cursor-agent` on `PATH`, then
-`~/.local/bin/cursor-agent`. ACP model selection first tries the exact configured value, then matches the part before
-`[` (for example `composer-2.5` resolves to `composer-2.5[fast=true]`). A unique base-name match is accepted;
+protocol testing. A Codex lane can also require a minimum CLI version: set `codex.min_cli_version` (for example
+`"0.166.0"`) in `policy.json` or `policy.local.json`; the default `""` disables the check. A Codex lane whose CLI is
+older refuses to serve: `lane up` reports `blocked: cli_too_old (have 0.165.0, need 0.166.0)`, `lane status` shows
+the same state, and the lane takes no new work. A run that was already accepted ends with `error_class: cli_too_old`
+instead of a generic `exec_error`. The `codex-code-mode-host` binary must report the same version as the CLI;
+`OPENSWARM_CODEX_CODE_MODE_HOST_BIN` overrides where that binary is looked up. Cursor defaults to model
+`composer-2.5`; its binary is `cursor-agent` on `PATH`, then `~/.local/bin/cursor-agent`. ACP model selection first
+tries the exact configured value, then matches the part before `[` (for example `composer-2.5` resolves to
+`composer-2.5[fast=true]`). A unique base-name match is accepted;
 multiple matches fail with the candidate list. Lane state and the run result record the resolved value as `model`
 and `resolved_model`. Codex app-server approval prompts receive a decline response. Cursor permission requests
 receive the offered `allow_always` choice, falling back to `allow_once`. Cursor `lane steer` cancels the active prompt,
@@ -685,6 +691,7 @@ link behavior.
 | `OPENSWARM_CODEX_PLAN`, `OPENSWARM_CLAUDE_PLAN` | Declare your plans explicitly (recommended) |
 | `DEEPSEEK_API_KEY` | DeepSeek key, used only for the balance and model-list API |
 | `OPENSWARM_OPENCODE_BIN`, `OPENSWARM_OPENCODE_DB` | Non-standard OpenCode install locations |
+| `OPENSWARM_CODEX_CODE_MODE_HOST_BIN` | Codex code-mode-host binary. Otherwise `codex-code-mode-host` on `PATH` |
 | `OPENSWARM_CURSOR_BIN` | Cursor CLI binary. Otherwise `cursor-agent` on `PATH`, then `~/.local/bin/cursor-agent` |
 | `OPENSWARM_STATE_FILE` | Offline mode: route against a saved or synthetic state; nothing is probed |
 | `XSWARM_*` | Legacy names from before the rename (formerly *xswarm*); still honoured, `OPENSWARM_*` wins |
