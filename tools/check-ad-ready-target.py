@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for refilling AD's ready queue to TARGET.
+"""Offline contract for refilling AD's ready queue to TARGET (Refs #1040).
 
 The fixture is entirely local: this check must not invoke gh, git, SSH, or
 any other network-backed command.
@@ -40,20 +40,34 @@ def local_candidates(directory: Path) -> list[str]:
 
 
 def main() -> None:
+    assert refill_need(0) == 20
     assert refill_need(9) == 11
     assert refill_need(3) == 17
     assert refill_need(10) == 0
     assert refill_need(10, starved=3) == 3
     assert refill_need(12, starved=3) == 3
+    assert refill_need(5, starved=18) == 18
+    assert refill_need(5, starved=12) == 15
 
-    thin = "# Too thin\nlabels: p1\n"
+    thin_short = "# Too thin\nlabels: p1\n"
+    thin_empty = ""
+    thin_no_title = "No title\nlabels: p1\nImplement the path.\n验收：python3 check.py\n"
+    thin_no_labels = "# Title\nNo labels line\nImplement the path.\n验收：python3 check.py\n"
+    thin_no_acceptance = "# Useful card\nlabels: p1\nImplement the bounded refill path.\nNo acceptance.\n"
+    thin_one_body = "# Useful card\nlabels: p1\n验收：python3 check.py\n"
     good = "# Useful card\nlabels: p1\nImplement the bounded refill path.\n验收：python3 check.py\n"
-    assert is_thin_card(thin)
+
+    assert is_thin_card(thin_short)
+    assert is_thin_card(thin_empty)
+    assert is_thin_card(thin_no_title)
+    assert is_thin_card(thin_no_labels)
+    assert is_thin_card(thin_no_acceptance)
+    assert is_thin_card(thin_one_body)
     assert not is_thin_card(good)
 
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
-        (directory / "thin.md").write_text(thin, encoding="utf-8")
+        (directory / "thin.md").write_text(thin_short, encoding="utf-8")
         (directory / "good.md").write_text(good, encoding="utf-8")
         assert local_candidates(directory) == [good]
 
