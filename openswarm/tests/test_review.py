@@ -195,12 +195,27 @@ class PeerReviewTests(unittest.TestCase):
         encoded = json.dumps(payload)
         cases = (
             json.dumps({"response": encoded, "model": "agy-test"}),
-            f"```json\n{encoded}\n```",
+            f"  \n```json\n{encoded}\n```\n  ",
             f"Review complete. {{\"note\": \"not a findings object\"}}\n{encoded}",
         )
         for raw in cases:
             with self.subTest(raw=raw):
                 self.assertEqual(xs.review_payload_from_text(raw), payload)
+
+    def test_review_parser_rejects_unclosed_fences_and_conflicting_json(self):
+        first = json.dumps({"findings": [], "verdict": "approve"})
+        second = json.dumps({"findings": [], "verdict": "changes"})
+        self.assertIsNone(xs.review_payload_from_text(f"```json\n{first}\n"))
+        self.assertIsNone(xs.review_payload_from_text(f"```json\n{first}\n```\n```json\n{second}\n```"))
+
+    def test_rejected_fenced_review_keeps_auditable_raw_response(self):
+        raw_response = "  ```json\n{" + '"findings": [], "verdict": "approve"' + "}\n"
+        completed = [subprocess.CompletedProcess([], 0, raw_response, "")]
+        with mock.patch.object(xs, "run_peer_reviewer", side_effect=completed):
+            with self.assertRaisesRegex(RuntimeError, "no findings JSON"):
+                xs.invoke_reviewer({"backend": "agy", "binary": "/fake/agy"}, "review",
+                                   str(self.repo), str(self.run_dir), {"review": {"max_retries": 0}})
+        self.assertIn(raw_response, (self.run_dir / "review.raw.txt").read_text(encoding="utf-8"))
 
     def test_invalid_review_response_retries_and_saves_redacted_raw_output(self):
         invalid = "I could not format JSON. ghp_12345678901234567890"
