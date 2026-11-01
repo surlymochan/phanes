@@ -247,11 +247,16 @@ class BusTests(unittest.TestCase):
         return argparse.Namespace(bus="org/bus", name=name, backend="pi", model=None, budget_minutes=budget,
                                   once=True, repos=repos, verify=None, card_type=None, paths=None, rework_of=None)
 
-    def write_fake_pi(self, name="fake-pi", sleep=0):
-        """Write an offline Pi stand-in that reports a done result, optionally after a long sleep."""
+    def write_fake_pi(self, name="fake-pi", sleep=0, error_class="none"):
+        """Write an offline Pi stand-in that reports a done result, optionally after a long sleep.
+
+        ``error_class=None`` emits a report that follows RESULT_SCHEMA, which has no
+        ``error_class`` property at all.
+        """
         started = self.root / (name + ".started")
         finished = self.root / (name + ".finished")
         path = self.root / name
+        extra = "" if error_class is None else f",'error_class':{error_class!r}"
         path.write_text(
             "#!/usr/bin/env python3\n"
             "import json, time\n"
@@ -261,7 +266,7 @@ class BusTests(unittest.TestCase):
             "with open('worker.txt', 'w') as stream:\n"
             "    stream.write('worker result\\n')\n"
             "report = {'status':'done','summary':'worker completed','files_changed':['worker.txt'],"
-            "'tests':'fake executor','followups':[],'error_class':'none'}\n"
+            f"'tests':'fake executor','followups':[]{extra}}}\n"
             "message = {'role':'assistant','content':[{'type':'text','text':json.dumps(report)}], "
             "'usage':{'input':2,'output':3}}\n"
             "print(json.dumps({'type':'message_end','message':message}), flush=True)\n")
@@ -560,6 +565,158 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         self.assertTrue(any("Ignored task verify" in note for note in report["followups"]))
         self.assertTrue(report["commit"])
         self.assertIn("worker.txt", self.git(None, "--git-dir", str(self.bare), "ls-tree", "-r", "--name-only", report["commit"]))
+
+    def test_worker_verify_allowlist_success_and_failure_archiving(self):
+        """An allowed verify command keeps its evidence: done on success, failed on non-zero exit."""
+        fake_pi = self.write_fake_pi("fake-pi-verify")
+        os.environ["OPENSWARM_PI_BIN"] = str(fake_pi)
+
+        verify_pass_cmd = "test -f worker.txt"
+        verify_fail_cmd = "python3 -c \"import sys; sys.stderr.write('acceptance check failed\\n'); sys.exit(42)\""
+
+        self.policy = xs.deep_merge(self.policy, {
+            "pi": {"require_isolation": False},
+            "bus": {
+                "worker_verify_allow": [verify_pass_cmd, verify_fail_cmd],
+                "allowed_executors": ["executor"],
+                "allowed_planners": ["planner"],
+                "worker_repos": ["org/target"],
+                "poll_seconds": 0.02,
+            },
+        })
+        (self.data / "policy.local.json").write_text(json.dumps({
+            "pi": {"require_isolation": False},
+            "bus": {
+                "repo": "org/bus",
+                "worker_verify_allow": [verify_pass_cmd, verify_fail_cmd],
+                "allowed_executors": ["executor"],
+                "allowed_planners": ["planner"],
+                "worker_repos": ["org/target"],
+                "poll_seconds": 0.02,
+            },
+        }))
+        self.cfg = xs.bus_config(self.policy)
+
+        cases = (
+            ("run-verify-pass", verify_pass_cmd, "done", 0, "openswarm:done"),
+            ("run-verify-fail", verify_fail_cmd, "failed", 42, "openswarm:failed"),
+        )
+
+        for run_id, verify_cmd, expected_status, expected_rc, expected_label in cases:
+            with self.subTest(run_id=run_id, status=expected_status):
+                os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "planner"
+                metadata = {
+                    "run_id": run_id, "repo": "org/target", "base": self.base,
+                    "branch_hint": f"openswarm/{run_id}", "verify": verify_cmd,
+                    "budget_minutes": 1, "report_schema": xs.RESULT_SCHEMA,
+                }
+                issue = xs.bus_create_issue("org/bus", self.cfg, f"task {run_id}", "write worker.txt", metadata)
+                worker_args = argparse.Namespace(bus="org/bus", name="external-agent", backend="pi", model=None,
+                                                 budget_minutes=1, once=True, repos="org/target", verify=None,
+                                                 card_type=None, paths=None, rework_of=None)
+                os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+                xs.cmd_bus_worker(worker_args, self.policy)
+
+                current = self.issue(issue["number"])
+                names = {label["name"] for label in current["labels"]}
+                self.assertIn(expected_label, names)
+
+                result_comments = [xs.bus_parse_result(comment["body"], run_id) for comment in current["comments"]]
+                report = next(report for report in result_comments if report)
+                self.assertEqual(report["status"], expected_status)
+                self.assertEqual(report["branch"], f"openswarm/{run_id}")
+                self.assertTrue(report["commit"])
+
+                pushed_commit = self.git(None, "--git-dir", str(self.bare), "rev-parse", f"refs/heads/openswarm/{run_id}")
+                self.assertEqual(pushed_commit, report["commit"])
+
+                self.assertIn(verify_cmd, report["tests"])
+                self.assertIn(str(expected_rc), report["tests"])
+                self.assertIsNotNone(report.get("verify"))
+                self.assertEqual(report["verify"]["cmd"], verify_cmd)
+                self.assertEqual(report["verify"]["rc"], expected_rc)
+
+                if expected_status == "failed":
+                    self.assertEqual(report["error_class"], "verify_failed")
+                    self.assertIn("acceptance check failed", report["tests"])
+                    self.assertIn("acceptance check failed", report["verify"]["tail"])
+                else:
+                    self.assertEqual(report["error_class"], "none")
+
+                result_obj = json.loads((Path(xs.RUNS) / run_id / "result.json").read_text())
+                ledger = [json.loads(line) for line in (self.data / "ledger.jsonl").read_text().splitlines()]
+                entry = next(row for row in ledger if row["id"] == run_id)
+
+                self.assertEqual(result_obj["status"], expected_status)
+                self.assertEqual(entry["status"], expected_status)
+                self.assertEqual(entry["commit"], report["commit"])
+                self.assertEqual(result_obj["commit"], report["commit"])
+                self.assertEqual(entry["verify"]["rc"], expected_rc)
+                self.assertEqual(result_obj["verify"]["rc"], expected_rc)
+                self.assertEqual(entry["verify"]["cmd"], verify_cmd)
+                self.assertEqual(result_obj["verify"]["cmd"], verify_cmd)
+
+                if expected_status == "failed":
+                    self.assertEqual(entry["error_class"], "verify_failed")
+                    self.assertEqual(result_obj["error_class"], "verify_failed")
+                else:
+                    self.assertEqual(entry["error_class"], "none")
+                    self.assertEqual(result_obj["error_class"], "none")
+
+    def test_worker_verify_success_with_schema_report_stays_done(self):
+        """A RESULT_SCHEMA shaped executor report still yields a parseable done result."""
+        fake_pi = self.write_fake_pi("fake-pi-schema", error_class=None)
+        os.environ["OPENSWARM_PI_BIN"] = str(fake_pi)
+
+        verify_cmd = "test -f worker.txt"
+        bus_policy = {
+            "repo": "org/bus",
+            "worker_verify_allow": [verify_cmd],
+            "allowed_executors": ["executor"],
+            "allowed_planners": ["planner"],
+            "worker_repos": ["org/target"],
+            "poll_seconds": 0.02,
+        }
+        self.policy = xs.deep_merge(self.policy, {"pi": {"require_isolation": False},
+                                                 "bus": dict(bus_policy)})
+        (self.data / "policy.local.json").write_text(json.dumps({
+            "pi": {"require_isolation": False}, "bus": dict(bus_policy)}))
+        self.cfg = xs.bus_config(self.policy)
+
+        run_id = "run-verify-schema"
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "planner"
+        metadata = {
+            "run_id": run_id, "repo": "org/target", "base": self.base,
+            "branch_hint": f"openswarm/{run_id}", "verify": verify_cmd,
+            "budget_minutes": 1, "report_schema": xs.RESULT_SCHEMA,
+        }
+        issue = xs.bus_create_issue("org/bus", self.cfg, f"task {run_id}", "write worker.txt", metadata)
+        worker_args = argparse.Namespace(bus="org/bus", name="external-agent", backend="pi", model=None,
+                                         budget_minutes=1, once=True, repos="org/target", verify=None,
+                                         card_type=None, paths=None, rework_of=None)
+        os.environ["OPENSWARM_FAKE_GH_LOGIN"] = "executor"
+        xs.cmd_bus_worker(worker_args, self.policy)
+
+        current = self.issue(issue["number"])
+        names = {label["name"] for label in current["labels"]}
+        self.assertIn("openswarm:done", names)
+
+        parsed = [report for report in
+                  (xs.bus_parse_result(comment["body"], run_id) for comment in current["comments"]) if report]
+        self.assertTrue(parsed, "worker result comment was rejected by the bus result contract")
+        report = parsed[0]
+        self.assertEqual(report["status"], "done")
+        self.assertEqual(report["error_class"], "none")
+        self.assertEqual(report["verify"]["rc"], 0)
+        self.assertEqual(report["verify"]["cmd"], verify_cmd)
+
+        result_obj = json.loads((Path(xs.RUNS) / run_id / "result.json").read_text())
+        ledger = [json.loads(line) for line in (self.data / "ledger.jsonl").read_text().splitlines()]
+        entry = next(row for row in ledger if row["id"] == run_id)
+        self.assertEqual(result_obj["status"], "done")
+        self.assertEqual(entry["status"], "done")
+        self.assertEqual(result_obj["verify"]["rc"], 0)
+        self.assertEqual(entry["verify"]["rc"], 0)
 
     def test_setup_failure_restores_git_environment(self):
         saved = {key: os.environ.get(key) for key in self.env_names}
