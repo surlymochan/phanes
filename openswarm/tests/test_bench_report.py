@@ -123,6 +123,21 @@ class EmptyResultSetTests(unittest.TestCase):
         summary = (out / "summary.md").read_text(encoding="utf-8")
         self.assertRegex(summary, r"\| baseline \| 1/2 \(50\.0%\) \|")
 
+    def test_mixed_blank_trailing_and_malformed_lines_keep_valid_run(self):
+        src = self.root / "mixed.jsonl"
+        src.write_text(
+            '\n  \n{"type":"run","task":"one-task","arm":"baseline","success":true,"wall_s":1.0}  \n'
+            "not valid json\n\t\n",
+            encoding="utf-8",
+        )
+        out = self.root / "out"
+        proc = self.report(src, out)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("malformed JSONL line 4", proc.stderr)
+        summary = (out / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("| baseline | 1/1 (100.0%) |", summary)
+        self.assertIn("| one-task | 1/1 (100.0%) |", summary)
+
     def test_missing_input_is_reported_without_a_traceback(self):
         out = self.root / "out"
         proc = self.report(self.root / "does-not-exist.jsonl", out)
