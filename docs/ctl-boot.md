@@ -73,6 +73,29 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/health.heartbeat`
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
 
+### Reboot pid-state helper scope (Refs #887)
+
+The functions `start_bus_worker` in `openswarm/bin/hub-openswarm-bridge` and
+`start_autodispatch` in `openswarm/bin/openswarm-auto` and
+`tools/lane-autodispatch/autodispatch.py` persist JSON `{pid, started_at}` state
+under `OPENSWARM_CTL_STATE_DIR` (default `~/phanes-ctl/state`). They clear
+malformed, non-positive, exited, or PID-reused records; a matching live process
+is reused. Process identity is checked against `/proc` start time.
+
+These are library helpers with no caller in `start-control-plane` today. The
+example `tools/lane-autodispatch/start-control-plane.example` does not read these
+variables, so setting them while invoking `~/phanes-ctl/bin/start-control-plane`
+does not enable this behavior. Unit tests invoke the helpers directly with fake
+worker commands.
+
+For production supervision, the authoritative contract remains `ctl-loop`'s
+plain-text positive PID files at `~/phanes-ctl/autodispatch/autodispatch.pid`,
+`autodispatch/health.pid`, and `ib-refresh.pid` (see below and
+`tools/check-ctl-loop-reap.py`). It terminates and reaps a live old child before
+restarting it. The JSON helper state is isolated fixture/library state; do not
+run it as a second supervisor for a ctl-loop child or treat it as authoritative
+production state. The offline ctl-loop contract checker is unchanged.
+
 `ib-refresh` must run its renewal preflight before starting `lane-autodispatch`.
 The repository implementation is `tools/ib-refresh.py`; it reads a temporary
 fleet JSON (`--fleet-config`), classifies each certificate as `valid`,
