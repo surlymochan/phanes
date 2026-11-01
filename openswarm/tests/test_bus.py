@@ -259,7 +259,7 @@ class BusTests(unittest.TestCase):
     def report(status, branch=None, commit=None):
         return {"status": status, "summary": "external work", "files_changed": ["worker.txt"],
                 "tests": "fake verify", "followups": [], "branch": branch, "commit": commit,
-                "pr_url": None, "error_class": "executor_failed" if status == "failed" else None}
+                "pr_url": None, "error_class": "executor_failed" if status == "failed" else "none"}
 
     def send_result(self, number, report, label="done", login="executor"):
         report.setdefault("run_id", xs.bus_extract_task(self.issue(number)["body"])["run_id"])
