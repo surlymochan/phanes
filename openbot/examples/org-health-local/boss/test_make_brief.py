@@ -1153,7 +1153,8 @@ class DiagnosisPeriodsAlignmentTest(unittest.TestCase):
             brief_path = Path(folder) / "brief.json"
             diagnosis_path = Path(folder) / "diagnosis-empty.json"
             empty_diagnosis = copy.deepcopy(self.example)
-            empty_diagnosis["metrics"] = []
+            # 保留非空 metrics，明确覆盖“诊断期次为空”的路径，而不是空文件/空 metrics。
+            empty_diagnosis["metrics"] = [{"数值": {}}]
             diagnosis_path.write_text(
                 json.dumps(empty_diagnosis, ensure_ascii=False), encoding="utf-8"
             )
