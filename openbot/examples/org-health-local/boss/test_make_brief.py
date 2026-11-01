@@ -219,6 +219,11 @@ class MakeBriefTest(unittest.TestCase):
         self.assertEqual(brief["目标"], ["只回答成本与人头"])
         self.assertEqual(self.errors(brief), [])
 
+    def test_goal_string_is_rejected_without_character_split(self) -> None:
+        """目标字符串不能被 list() 拆成字符数组。"""
+        with self.assertRaisesRegex(ValueError, "目标必须是字符串数组"):
+            make_brief.build_brief(goals="只回答成本与人头")  # type: ignore[arg-type]
+
     def test_month_override(self) -> None:
         """--month 覆盖观察期间，并推算数据截止与期次锚点。"""
         brief = make_brief.build_brief(month="2026-12")
@@ -870,6 +875,20 @@ class NonEmptyBriefSchemaViolationTest(unittest.TestCase):
                 lambda b: b["观察期间"].update({"期次": 12345}),
                 "/观察期间/期次",
                 "期次",
+                "期望类型 array",
+            ),
+            (
+                "观察期间为字符串而非对象",
+                lambda b: b.update({"观察期间": "2026-09"}),
+                "/观察期间",
+                "观察期间",
+                "期望类型 object",
+            ),
+            (
+                "必答问题为字符串而非数组",
+                lambda b: b.update({"必答问题": "只回答成本"}),
+                "/必答问题",
+                "必答问题",
                 "期望类型 array",
             ),
             (
