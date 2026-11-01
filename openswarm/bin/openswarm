@@ -6351,6 +6351,21 @@ def bus_parse_result(body, expected_run_id=None):
     return result
 
 
+def bus_result_conflict(results):
+    """Return whether terminal results for one winning claim disagree.
+
+    A webhook may deliver the same comment more than once.  Once a result has
+    been observed, its complete payload is the terminal value for the run;
+    another payload (in particular a different branch/commit) must not be
+    allowed to race it into a second planner transition.
+    """
+    if not results:
+        return False
+    canonical = json.dumps(results[0], sort_keys=True, ensure_ascii=False)
+    return any(json.dumps(result, sort_keys=True, ensure_ascii=False) != canonical
+               for result in results[1:])
+
+
 def bus_create_issue(repo, cfg, title, task, metadata, executor=None):
     task_fence = json.dumps(metadata, ensure_ascii=False, indent=2)
     body = task.rstrip() + "\n\n```openswarm-task\n" + task_fence + "\n```\n"
@@ -6414,6 +6429,14 @@ def bus_verify(root, commit, command, timeout):
 
 def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, status, started,
                    verify_command=None, card_type=None, rework_of=None):
+    # A restarted poller can re-enter finalization after the same terminal
+    # comment was already handled.  The run id is the ledger's idempotency key
+    # for the bus backend; do not append a second terminal record.
+    previous = next((entry for entry in ledger_entries()
+                     if entry.get("id") == rid and entry.get("backend") == "github-issue"), None)
+    if previous:
+        print(json.dumps(previous, indent=2, ensure_ascii=False))
+        raise SystemExit(0 if previous.get("status") == "done" else 1)
     now = NOW()
     elapsed = round(now - started, 3)
     verify = None
@@ -6558,16 +6581,33 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
         if claim:
             claim_login = str((claim.get("user") or {}).get("login") or "")
             claim_index = comments.index(claim)
-            for comment in reversed(comments[claim_index + 1:]):
+            claim_results = []
+            for comment in comments[claim_index + 1:]:
                 if str((comment.get("user") or {}).get("login") or "").casefold() != claim_login.casefold():
                     continue
                 parsed = bus_parse_result(comment.get("body") or "", metadata.get("run_id"))
                 if not parsed:
                     bus_event(event_path, f"ignored invalid result comment from {claim_login}")
                     continue
-                result, final_status = parsed, {"ok": "done", "error": "failed"}.get(parsed["status"], parsed["status"])
+                if not any(parsed == previous for previous in claim_results):
+                    claim_results.append(parsed)
+            if claim_results:
                 executor = bus_claim(claim)
-                break
+                if bus_result_conflict(claim_results):
+                    result = {"status": "failed", "run_id": metadata["run_id"],
+                              "summary": "conflicting openswarm-result comments; automatic progression stopped",
+                              "files_changed": [], "tests": "not run: conflicting result comments",
+                              "followups": ["inspect the winning claim's result comments"],
+                              "branch": None, "commit": None, "pr_url": None,
+                              "error_class": "protocol_error"}
+                    bus_event(event_path, f"conflicting result comments from {claim_login}; stopped automatic progression")
+                    conflict_marker = "openswarm: result conflict; automatic progression stopped"
+                    if not any(conflict_marker in (item.get("body") or "") for item in comments):
+                        bus_comment(cfg["repo"], number, conflict_marker)
+                    final_status = "failed"
+                else:
+                    result = claim_results[0]
+                    final_status = {"done": "done", "partial": "partial", "failed": "failed"}[result["status"]]
         if final_status:
             break
         if NOW() >= deadline:
