@@ -455,8 +455,10 @@ class DistRootServeTests(unittest.TestCase):
         for path in ('/../index.html', '/%2e%2e/index.html', '/..%2findex.html',
                      '/data/../index.html', '/data/../data/diagnosis.json', '/../build-report.json'):
             with self.subTest(path=path):
-                status, _ = self.request(path)
+                status, body = self.request(path)
                 self.assertEqual(status, 404)
+                self.assertNotIn(str(self.dist).encode(), body)
+                self.assertNotIn(str(self.tmp.name).encode(), body)
 
     def test_root_option_does_not_call_build_bundle(self):
         mock_server = MagicMock()
