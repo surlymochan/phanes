@@ -38,6 +38,12 @@ def parse_args(argv=None):
     parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py')
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py')
     parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
+    parser.add_argument(
+        '--review-report',
+        type=Path,
+        default=None,
+        help=f'审查报告路径（相对当前工作目录解析；默认写到 <workdir>/{REVIEW_REPORT}）',
+    )
     return parser.parse_args(argv)
 
 
@@ -58,6 +64,8 @@ def prepare_workdir(workdir):
 def open_report(path):
     """打开审查报告文件；被占用或不可写时给出可读提示并返回 None。"""
     try:
+        # 报告路径可以指到临时目录，父目录不存在时先建出来。
+        path.parent.mkdir(parents=True, exist_ok=True)
         return path.open('w', encoding='utf-8')
     except OSError as error:
         print(f'审查报告无法写入: {path} ({error.strerror or str(error)})', file=sys.stderr, flush=True)
@@ -75,7 +83,7 @@ def write_timings(workdir, timings):
     return True
 
 
-def run_step(name, command, timings, stdout=None):
+def run_step(name, command, timings, stdout=None, stderr=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
     try:
@@ -84,7 +92,7 @@ def run_step(name, command, timings, stdout=None):
         script = Path(command[1]) if command[0] == sys.executable and len(command) > 1 else None
         if script is not None and not script.is_file():
             raise FileNotFoundError(2, 'No such file or directory', str(script))
-        result = subprocess.run(command, stdout=stdout)
+        result = subprocess.run(command, stdout=stdout, stderr=stderr)
     except FileNotFoundError as error:
         elapsed = time.monotonic() - started
         timings.append({'name': name, 'command': list(map(str, command)),
@@ -127,6 +135,8 @@ def main(argv=None):
     if bundle is not None:
         print(f'使用 bundle: {bundle}', flush=True)
     workdir = args.workdir.resolve()
+    # 审查报告默认落在工作目录，产物命名不变；可显式指到别的路径（如临时目录）。
+    report_path = args.review_report.resolve() if args.review_report is not None else workdir / REVIEW_REPORT
     # 工作目录被占用或不可写时先给出可读提示，避免只留下裸 Traceback。
     problem = prepare_workdir(workdir)
     if problem is not None:
@@ -160,14 +170,16 @@ def main(argv=None):
                 break
         if status == 0 and args.review:
             review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
-            report = open_report(workdir / REVIEW_REPORT)
+            report = open_report(report_path)
             if report is None:
                 status = 1
             else:
                 with report:
-                    if not run_step('审查', review, timings, stdout=report):
+                    # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
+                    if not run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT):
                         failed.append('审查')
                         status = 1
+                        print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
     finally:
         if failed:
             # 每步耗时可能缺失（耗时记录写不出来），先点名失败步骤，

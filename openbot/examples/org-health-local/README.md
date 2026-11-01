@@ -241,7 +241,9 @@ python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'
 `<workdir>/dist`，而预览命令中 `demo/site` 与 `demo/dist` 的用途保持不变。
 
 加 `--review` 时审查记录写到 `<workdir>/review.md`：审查通过写 PASS 行，审查失败仍写 FAIL 行并让整体返回非 0，
-即失败路径也留有产物可查。
+即失败路径也留有产物可查。可用 `--review-report <路径>` 把审查记录写到别处（如临时目录），
+默认仍是 `<workdir>/review.md`，产物命名不变；审查脚本返回非 0 时报告保留不删除，
+脚本的 stdout 与 stderr（含参数失败信息）都留在报告里，运行器非 0 退出且不打印预览命令。
 
 `openbot/` 目录下运行 `bun run test:org-health-demo` 可启动隔离服务，以浏览器检查中英文、回退语言、无效数据和请求边界，并将结果写入 `openbot/.openbot-build/org-health-demo-e2e/`（仓库根目录没有 `package.json`，这条命令要在 `openbot/` 里跑）。
 
