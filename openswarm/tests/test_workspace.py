@@ -1,5 +1,6 @@
 """Regression tests for worktrees, dependency links, host-side verification, risk rules and credential opt-ins."""
-import base64, json, os, shlex, shutil, subprocess, sys, tempfile, threading, unittest
+import base64, json, os, re, shlex, shutil, subprocess, sys, tempfile, threading, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -315,6 +316,37 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(xs.adjust_status_for_change_evidence(
             "done", None, commit=None, workspace_changed=False, changed=False, read_only=False, verify=verify),
             ("done", None))
+
+
+class WorkspacePathTest(unittest.TestCase):
+    def test_workspace_record_json_round_trip_preserves_control_characters(self):
+        path = "/repo/work space\twith\nnewline"
+        record = {"workspace": {"mode": "in-place", "path": path}}
+        handle = mock.mock_open()
+        with mock.patch("builtins.open", handle), mock.patch.object(xs.os, "makedirs"), \
+                mock.patch.object(xs.os, "replace"):
+            xs.jsave("/unused/status.json", record)
+        serialized = "".join(call.args[0] for call in handle().write.call_args_list)
+        self.assertIn(json.dumps(path), serialized)
+
+        with mock.patch("builtins.open", mock.mock_open(read_data=serialized)):
+            self.assertEqual(xs.jload("/unused/status.json"), record)
+
+    def test_lane_config_error_repr_keeps_whitespace_path_readable(self):
+        path = "/tmp/lane config\twith\nnewline.json"
+        with mock.patch.object(xs, "envvar", return_value=path), \
+                mock.patch("builtins.open", side_effect=ValueError("bad json")):
+            with self.assertRaisesRegex(ValueError, re.escape(repr(path))):
+                xs.lane_config()
+
+    def test_lane_config_missing_repo_error_repr_keeps_whitespace_path_readable(self):
+        path = "/repo/work space\twith\nnewline"
+        config = json.dumps({"lanes": [{"name": "L1", "backend": "cursor", "repo": path}]})
+        with mock.patch.object(xs, "envvar", return_value="/unused/lanes.json"), \
+                mock.patch("builtins.open", mock.mock_open(read_data=config)), \
+                mock.patch.object(xs.os.path, "isdir", return_value=False):
+            with self.assertRaisesRegex(ValueError, re.escape(repr(path))):
+                xs.lane_config()
 
 
 class CredentialOptInTest(unittest.TestCase):

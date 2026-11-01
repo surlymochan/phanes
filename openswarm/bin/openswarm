@@ -6948,12 +6948,12 @@ def lane_config():
         with open(path, encoding="utf-8") as stream:
             cfg = json.load(stream)
     except (OSError, ValueError, UnicodeError) as error:
-        raise ValueError(f"invalid lane config {path}: {error}") from error
+        raise ValueError(f"invalid lane config {path!r}: {error}") from error
     if not isinstance(cfg, dict) or not isinstance(cfg.get("lanes"), list):
-        raise ValueError(f"invalid lane config {path}: expected {{\"lanes\":[...]}}")
+        raise ValueError(f"invalid lane config {path!r}: expected {{\"lanes\":[...]}}")
     names, out = set(), []
     for i, lane in enumerate(cfg["lanes"]):
-        where = f"{path}: lanes[{i}]"
+        where = f"{path!r}: lanes[{i}]"
         if not isinstance(lane, dict):
             raise ValueError(f"invalid lane config {where}: expected an object")
         name, backend = lane.get("name"), lane.get("backend")
@@ -6977,7 +6977,7 @@ def lane_config():
         if not isinstance(repo, str) or not os.path.isabs(repo):
             raise ValueError(f"invalid lane config {where}: repo must be an absolute path")
         if not os.path.isdir(repo):
-            raise ValueError(f"invalid lane config {where}: repo directory does not exist: {repo}")
+            raise ValueError(f"invalid lane config {where}: repo directory does not exist: {repo!r}")
         if backend == "cursor" and lane.get("model") is None:
             lane["model"] = "composer-2.5"
         if backend == "copilot" and lane.get("model") is None:
