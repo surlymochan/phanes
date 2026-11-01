@@ -266,6 +266,19 @@ class ConsultTests(unittest.TestCase):
         self.assertEqual(result["answers"][1]["error"], "deadline exceeded")
         self.assertEqual(self.ledger()[0]["exec_pass"], False)
 
+    def test_valid_and_malformed_answers_are_partial_with_both_raw_responses(self):
+        os.environ["FAKE_CONSULT_MALFORMED_BACKEND"] = "agy"
+        code, result = self.run_consult(["codex", "agy"])
+        answers = {row["backend"]: row for row in result["answers"]}
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "partial")
+        self.assertNotEqual(result["status"], "done")
+        self.assertTrue(answers["codex"]["valid"])
+        self.assertIn("Keep the current contract", answers["codex"]["raw"])
+        self.assertFalse(answers["agy"]["valid"])
+        self.assertIn("opinion", answers["agy"]["raw"])
+        self.assertEqual(self.ledger()[0]["exec_pass"], False)
+
     def test_default_selection_uses_distinct_available_families(self):
         rows = consult.default_profiles(xs, self.state, self.policy)
         self.assertEqual(len(rows), 2)
