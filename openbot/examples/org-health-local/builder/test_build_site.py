@@ -10,6 +10,7 @@ Boss+Builder 管道：合法 brief 配合非空诊断样本生成可通过 check
 from __future__ import annotations
 
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 import shutil
@@ -257,6 +258,66 @@ class BuildSiteTest(unittest.TestCase):
         self.assertEqual(report["bundle"]["路径"], "app.bundle.js")
         self.assertEqual(report["bundle"]["sha256"], sha256_of(self.bundle))
         self.assertEqual(report["复制文件"], list(build_site.SITE_FILES))
+
+    def test_oversized_chapter_brief_keeps_site_complete_and_summary_visible(self) -> None:
+        """超长章节 brief 不应阻断真实构建，诊断摘要与 HTML 骨架仍完整。"""
+        brief = json.loads(DEMO_BRIEF_PATH.read_text(encoding="utf-8"))
+        key_summary = "关键摘要：超长章节构建回归仍需保留这段内容。"
+        brief["章节"] = [
+            {
+                "标题": "组织诊断摘要",
+                "摘要": key_summary,
+                "正文": key_summary + "\n" + ("章节正文。" * 250_000),
+            }
+        ]
+        long_brief = self.root / "long-brief.json"
+        long_brief.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+        self.assertGreater(long_brief.stat().st_size, 1_000_000, "测试 brief 应为非空超长输入")
+
+        report = build_site.build_site(
+            DEMO_DIAGNOSIS_PATH,
+            self.out,
+            self.bundle,
+            brief_path=long_brief,
+        )
+
+        for relative in (*build_site.SITE_FILES, "build-report.json"):
+            with self.subTest(relative=relative):
+                self.assertTrue((self.out / relative).is_file(), f"缺少 {relative}")
+                self.assertGreater((self.out / relative).stat().st_size, 0, f"{relative} 为空")
+
+        copied_diagnosis = json.loads(
+            (self.out / "data/diagnosis.json").read_text(encoding="utf-8")
+        )
+        source_diagnosis = json.loads(DEMO_DIAGNOSIS_PATH.read_text(encoding="utf-8"))
+        self.assertTrue(copied_diagnosis["conclusion"])
+        self.assertEqual(copied_diagnosis["conclusion"], source_diagnosis["conclusion"])
+        self.assertEqual(report["输入摘要"]["brief"]["sha256"], sha256_of(long_brief))
+
+        class StructureParser(HTMLParser):
+            """记录 HTML 骨架标签，避免把完整性检查绑定到浏览器环境。"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.opened: list[str] = []
+                self.closed: list[str] = []
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                self.opened.append(tag)
+
+            def handle_endtag(self, tag: str) -> None:
+                self.closed.append(tag)
+
+        html = (self.out / "index.html").read_text(encoding="utf-8")
+        parser = StructureParser()
+        parser.feed(html)
+        parser.close()
+        for tag in ("html", "head", "body", "main", "footer"):
+            with self.subTest(tag=tag):
+                self.assertIn(tag, parser.opened)
+                self.assertIn(tag, parser.closed)
+        self.assertTrue(html.lstrip().lower().startswith("<!doctype html>"))
+        self.assertIn('id="conclusion"', html, "HTML 应保留关键摘要的渲染位置")
 
     def test_report_omits_source_commit_when_not_provided(self) -> None:
         """未指定来源提交时保持既有报告字段。"""
