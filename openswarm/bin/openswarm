@@ -5991,6 +5991,11 @@ BUS_EXECUTOR_BACKENDS = ("codex", "ocgo", "deepseek", "cursor", "agy", "pi")
 BUS_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BUS_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 BUS_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+BUS_RESULT_ERROR_CLASSES = frozenset({
+    "none", "base_unavailable", "auth", "non-fast-forward", "repo-missing", "network",
+    "bus_error", "claim_task_mutated", "worker_crashed", "verify_failed", "executor_failed",
+    "executor_io_lost", "push_failed", "protocol_error",
+})
 BUS_SECRET_RE = re.compile(
     r"(?i)(?:\bgh[pousr]_[A-Za-z0-9_]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|\bsk-[A-Za-z0-9_-]{8,}|\bBearer\s+[^\s\"']+)"
 )
@@ -6305,7 +6310,8 @@ def bus_parse_result(body, expected_run_id=None):
         result = json.loads(match.group(1))
     except ValueError:
         return None
-    required = ("status", "run_id", "summary", "files_changed", "tests", "followups", "branch", "commit")
+    required = ("status", "run_id", "summary", "files_changed", "tests", "followups", "branch", "commit",
+                "error_class")
     if not isinstance(result, dict) or any(key not in result for key in required):
         return None
     if result.get("status") not in ("ok", "error", "done", "partial", "failed") or not isinstance(result.get("summary"), str):
@@ -6315,8 +6321,11 @@ def bus_parse_result(body, expected_run_id=None):
         return None
     if expected_run_id is not None and run_id != expected_run_id:
         return None
-    if result.get("status") == "error" and (not isinstance(result.get("error_class"), str)
-                                              or not result["error_class"].strip()):
+    if result.get("error_class") not in BUS_RESULT_ERROR_CLASSES:
+        return None
+    if result.get("status") in ("done", "partial") and result["error_class"] != "none":
+        return None
+    if result.get("status") in ("error", "failed") and result["error_class"] == "none":
         return None
     if not isinstance(result.get("files_changed"), list) or not all(isinstance(x, str) for x in result["files_changed"]):
         return None
@@ -6336,8 +6345,6 @@ def bus_parse_result(body, expected_run_id=None):
     if not all(isinstance(value, str) for value in result["followups"]):
         return None
     if result.get("pr_url") is not None and not isinstance(result["pr_url"], str):
-        return None
-    if result.get("error_class") is not None and not isinstance(result["error_class"], str):
         return None
     return result
 
@@ -6829,12 +6836,15 @@ def bus_worker_run(issue, cfg, args, policy):
         followups = nested.get("followups") or []
         if ignored_verify:
             followups = [*followups, "Ignored task verify because it is not in the worker verify allowlist or worker --verify."]
-        report = bus_sanitize({"status": report_status if report_status in ("done", "partial", "failed") else "failed",
+        report_status = report_status if report_status in ("done", "partial", "failed") else "failed"
+        report_error_class = error_class if error_class in BUS_RESULT_ERROR_CLASSES else (
+            "executor_failed" if report_status == "failed" else "none")
+        report = bus_sanitize({"status": report_status,
                   "run_id": task["run_id"],
                   "summary": summary, "files_changed": nested.get("files_changed") or [],
                   "tests": nested.get("tests") or "not run: executor did not return a test report",
                   "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url,
-                  "error_class": error_class})
+                  "error_class": report_error_class})
         terminal = "failed" if report["status"] == "failed" else "done"
         body = "```openswarm-result\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```"
         bus_comment(cfg["repo"], issue["number"], body)
