@@ -1,0 +1,535 @@
+From 7a2da4defd3208a1d9d5163bd2912ecd5f100c1a Mon Sep 17 00:00:00 2001
+From: Chao Chen <209239467+surlymochan@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 00:45:46 +0800
+Subject: [PATCH] fix(dev): bind the dev stack to loopback unless --lan is
+ passed
+
+bun run dev bound the local Auth API and Signal service to 0.0.0.0 whenever
+the desktop app was part of the stack. The development Auth API returns
+sign-in codes in its response (AUTH_EXPOSE_DEVELOPMENT_CODE=true), so anyone
+on the same network could sign in to the local stack.
+
+- The stack now binds 127.0.0.1 by default. --lan opts in to 0.0.0.0 for a
+  physical phone.
+- --lan refuses to start while AUTH_EXPOSE_DEVELOPMENT_CODE is on, both on
+  the command line and where the bind is configured.
+- A LAN stack skips the throwaway development account role, which needs an
+  exposed sign-in code; setting OPENBOT_DEV_REMOTE_ROLE still wins.
+- scripts/dev-lan-guard-smoke.ts (bun run test:dev-lan-guard) covers the
+  defaults and refusals and writes .openbot-build/dev-lan-guard.json.
+---
+ README.md                               |   9 +-
+ apps/auth-api/src/server/runtime-env.ts |   2 +-
+ changelog.d/fix-dev-lan-opt-in.md       |   5 +
+ package.json                            |   1 +
+ scripts/dev-lan-guard-smoke.ts          | 185 ++++++++++++++++++++++++
+ scripts/dev-mobile.ts                   |   9 +-
+ scripts/dev-services.ts                 |  74 +++++++++-
+ scripts/development-environment.ts      |   5 +-
+ scripts/development-secrets.ts          |  10 +-
+ 9 files changed, 281 insertions(+), 19 deletions(-)
+ create mode 100644 changelog.d/fix-dev-lan-opt-in.md
+ create mode 100644 scripts/dev-lan-guard-smoke.ts
+
+diff --git a/README.md b/README.md
+index 290be7a0..9f464a22 100644
+--- a/README.md
++++ b/README.md
+@@ -321,10 +321,11 @@ See [web client delivery](docs/web-client.md) for the release gate and focused c
+ | Command | Purpose |
+ | --- | --- |
+ | `bun run dev` | Start the local Auth API, Signal service, and Electron client with renderer HMR on its app profile. Ports are allocated through the dev registry, so a sibling worktree never takes one this stack won. It refuses a second stack in the same worktree unless you pass `--force`. Each worktree opens a profile of its own, keyed to its path; `--shared` opens the shared `OpenBot Dev` profile instead. `--isolated` is still accepted and changes nothing. A profile that you used before stays on disk unchanged. `--hosting=test` signs the app in to the `test` account Worker, on a profile that all worktrees share, so that a hosted server is a real VM; see [docs/hosted-servers.md](docs/hosted-servers.md#real-servers-from-a-development-build). A profile that does not exist yet is seeded with the showcase data of `bun run dev:seed` before the client starts, so a first start never opens an empty app; an existing profile is left as it is. An isolated profile still shares the computer's provider CLI store, so it does not download the pinned CLIs again. Before it starts, it runs `bun install --frozen-lockfile` and `bun run api:migrate:local` only when `bun.lock`, a workspace `package.json`, a patch, or a migration changed since their last successful run. The stamps are in `node_modules` and `apps/auth-api/.wrangler/state/v3/d1`, and each `bun install` writes the install stamp too; delete one to run its step again. |
++| `bun run dev --lan` | Bind the local Auth API and Signal service to all network interfaces for phone clients. The default is `127.0.0.1`. Set `AUTH_EXPOSE_DEVELOPMENT_CODE=false` and configure email delivery before you use `--lan`; the command refuses to start on a LAN while the API returns sign-in codes. With `--lan` the desktop skips the throwaway development account (`OPENBOT_DEV_REMOTE_ROLE=none`) and shows the normal sign-in screen; set the variable yourself to choose a role. |
+ | `bun run preview` | Preview the built Electron client with the green preview icon. |
+ | `bun run mobile:go` | Start the mobile app in Expo Go and clear the Metro cache. |
+ | `bun mobile:ios` | Build and launch the iOS simulator app without RocketSim. |
+-| `bun run dev:mobile` | Start or reuse this worktree's `bun run dev` stack, build and launch the iOS simulator app, and pair them without a QR scan. The desktop issues a Mobile Connect ticket over CDP, and `simctl openurl` opens the link in the development build, which accepts only loopback or private-network account services. Other arguments go to `bun mobile:ios`. `--pair-only` pairs an app that already runs; `--simulator=<udid>` chooses one of several booted simulators. It stops when the Metro port is already in use, because another worktree's Metro would serve the same app id; pass `--port=<n>` then. |
++| `bun run dev:mobile` | Start or reuse this worktree's `bun run dev` stack, build and launch the iOS simulator app, and pair them without a QR scan. For phone access, start `bun run dev --lan` first. The desktop issues a Mobile Connect ticket over CDP, and `simctl openurl` opens the link in the development build, which accepts only loopback or private-network account services. Other arguments go to `bun mobile:ios`. `--pair-only` pairs an app that already runs; `--simulator=<udid>` chooses one of several booted simulators. It stops when the Metro port is already in use, because another worktree's Metro would serve the same app id; pass `--port=<n>` then. |
+ | `bun run mobile:ios:build:local` | Build a production iOS `.ipa` locally for upload with Transporter. See [TestFlight setup](apps/mobile/README.md#local-testflight-build). |
+ | `bun run mobile:ios:release:testflight` | Start the GitHub Actions iOS build from `main` and upload to TestFlight. Requires authenticated GitHub CLI. See [iOS release setup](apps/mobile/README.md#github-actions-testflight-release). |
+ | `bun mobile:ios:rocketsim` | Start RocketSim and build and launch the iOS simulator app with RocketSim Connect. See [mobile setup](apps/mobile/README.md#development). |
+@@ -414,9 +415,9 @@ setup messages. Team data uses direct DataChannels when possible and the project
+ direct ICE fails. Cloudflare stores accounts, configuration, memberships, invitations, logical session
+ records, and public assets. It does not carry chats, files, commands, or remote desktop media.
+ 
+-The development runner advertises both Mobile Connect and its Signal service on the preferred private
+-LAN interface. Restart the runner after changing networks so newly generated QR codes contain the
+-current address.
++The development runner binds the Auth API and Signal to loopback by default. For a physical phone,
++start it with `bun run dev --lan`; Mobile Connect then advertises the preferred private LAN address.
++Restart the runner after changing networks so new QR codes contain the current address.
+ 
+ Production mobile analytics setup and required OpenPanel credentials are documented in
+ [OpenBot Mobile](apps/mobile/README.md#openpanel-product-analytics).
+diff --git a/apps/auth-api/src/server/runtime-env.ts b/apps/auth-api/src/server/runtime-env.ts
+index 77260842..bb8fa8ff 100644
+--- a/apps/auth-api/src/server/runtime-env.ts
++++ b/apps/auth-api/src/server/runtime-env.ts
+@@ -70,6 +70,6 @@ export function readLocalRuntimeVars(environment: NodeJS.ProcessEnv): Record<str
+   return result;
+ }
+ 
+-function normalizeBooleanFlag(value: string): boolean {
++export function normalizeBooleanFlag(value: string): boolean {
+   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+ }
+diff --git a/changelog.d/fix-dev-lan-opt-in.md b/changelog.d/fix-dev-lan-opt-in.md
+new file mode 100644
+index 00000000..deb1b219
+--- /dev/null
++++ b/changelog.d/fix-dev-lan-opt-in.md
+@@ -0,0 +1,5 @@
++### Fixed
++
++- `bun run dev` now binds the local Auth API and Signal service to `127.0.0.1`. Pass `--lan` to
++  reach them from a phone on the local network. A LAN start refuses to run while the Auth API
++  returns development sign-in codes, because anyone on the network could then sign in.
+diff --git a/package.json b/package.json
+index 7c4a8085..19142bba 100644
+--- a/package.json
++++ b/package.json
+@@ -295,6 +295,7 @@
+     "test:imagegen": "bun scripts/filesystem-smoke.ts --provider codex --imagegen",
+     "test:workspace-only": "bun scripts/filesystem-smoke.ts --workspace-only",
+     "test:provider-detection": "bun scripts/provider-detection-e2e.ts",
++    "test:dev-lan-guard": "bun scripts/dev-lan-guard-smoke.ts",
+     "test:storage-live": "bun scripts/provider-storage-smoke.ts",
+     "test:grok-live": "bun scripts/provider-storage-smoke.ts --grok-only",
+     "test:team-live": "electron scripts/team-webrtc-live-smoke-app",
+diff --git a/scripts/dev-lan-guard-smoke.ts b/scripts/dev-lan-guard-smoke.ts
+new file mode 100644
+index 00000000..768c6f14
+--- /dev/null
++++ b/scripts/dev-lan-guard-smoke.ts
+@@ -0,0 +1,185 @@
++// Checks dev-service bind selection and the LAN login-code guard without starting services.
++// Run: bun scripts/dev-lan-guard-smoke.ts
++// It writes .openbot-build/dev-lan-guard.json and exits non-zero on a failure.
++
++import assert from "node:assert/strict";
++import { spawnSync } from "node:child_process";
++import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
++import { dirname, join } from "node:path";
++import {
++  applyLanSignInPolicy,
++  assertSafeDevelopmentNetwork,
++  configureMobileConnectDevelopmentNetwork,
++  developmentBindHost,
++  parseDevelopmentTarget,
++  servicesForTarget,
++} from "./dev-services";
++
++const outputPath = join(import.meta.dirname, "..", ".openbot-build", "dev-lan-guard.json");
++const projectRoot = join(import.meta.dirname, "..");
++const devServicesPath = join(import.meta.dirname, "dev-services.ts");
++await mkdir(dirname(outputPath), { recursive: true });
++const registryPath = await mkdtemp(join(dirname(outputPath), "dev-lan-guard-registry-"));
++const checks: { name: string; passed: boolean; detail?: unknown }[] = [];
++const interfaces = {
++  en0: [{ address: "192.168.1.24", family: "IPv4" as const, internal: false }],
++};
++
++function check(name: string, run: () => unknown): void {
++  try {
++    checks.push({ name, passed: true, detail: run() });
++  } catch (error) {
++    checks.push({ name, passed: false, detail: error instanceof Error ? error.message : String(error) });
++  }
++}
++
++check("default binds the API and Signal to loopback", () => {
++  const invocation = parseDevelopmentTarget(["app"]);
++  const environment: NodeJS.ProcessEnv = {
++    OPENBOT_API_PORT: "3100",
++    REMOTE_SIGNAL_PORT: "3101",
++  };
++  configureMobileConnectDevelopmentNetwork(
++    servicesForTarget(invocation.target),
++    environment,
++    interfaces,
++    invocation.lan,
++  );
++  assert.equal(environment.OPENBOT_API_HOST, "127.0.0.1");
++  assert.equal(environment.REMOTE_SIGNAL_HOST, "127.0.0.1");
++  assert.equal(environment.REMOTE_SIGNAL_URL, "ws://127.0.0.1:3101/v1/signal");
++  return { apiHost: environment.OPENBOT_API_HOST, signalHost: environment.REMOTE_SIGNAL_HOST };
++});
++
++check("--lan skips the development account role that needs an exposed sign-in code", () => {
++  const lan: NodeJS.ProcessEnv = {};
++  applyLanSignInPolicy(true, lan);
++  assert.equal(lan.OPENBOT_DEV_REMOTE_ROLE, "none");
++  const chosen: NodeJS.ProcessEnv = { OPENBOT_DEV_REMOTE_ROLE: "host" };
++  applyLanSignInPolicy(true, chosen);
++  assert.equal(chosen.OPENBOT_DEV_REMOTE_ROLE, "host");
++  const loopback: NodeJS.ProcessEnv = {};
++  applyLanSignInPolicy(false, loopback);
++  assert.equal(loopback.OPENBOT_DEV_REMOTE_ROLE, undefined);
++  return { lan: "none", chosen: "host", loopback: null };
++});
++
++check("--lan refuses normalized development sign-in-code flags", () => {
++  const invocation = parseDevelopmentTarget(["app", "--lan"]);
++  const values = ["true", "1", "TRUE", "yes", "on"];
++  for (const value of values) {
++    assert.throws(
++      () => assertSafeDevelopmentNetwork(invocation.lan, { AUTH_EXPOSE_DEVELOPMENT_CODE: value }),
++      /Cannot use --lan while AUTH_EXPOSE_DEVELOPMENT_CODE=true/u,
++    );
++  }
++  return { lan: invocation.lan, values, developmentCode: "refused" };
++});
++
++check("--lan is the only way to open the LAN", () => {
++  assert.equal(developmentBindHost(false), "127.0.0.1");
++  assert.equal(developmentBindHost(true), "0.0.0.0");
++  const environment: NodeJS.ProcessEnv = {
++    OPENBOT_API_PORT: "3100",
++    REMOTE_SIGNAL_PORT: "3101",
++  };
++  configureMobileConnectDevelopmentNetwork(servicesForTarget("app"), environment, interfaces, false);
++  assert.equal(environment.OPENBOT_API_HOST, "127.0.0.1");
++  assert.equal(environment.REMOTE_SIGNAL_HOST, "127.0.0.1");
++  return { loopback: developmentBindHost(false), lan: developmentBindHost(true) };
++});
++
++check("the LAN bind refuses an exposed sign-in code", () => {
++  assert.throws(
++    () =>
++      configureMobileConnectDevelopmentNetwork(
++        servicesForTarget("app"),
++        { OPENBOT_API_PORT: "3100", REMOTE_SIGNAL_PORT: "3101" },
++        interfaces,
++        true,
++        { AUTH_EXPOSE_DEVELOPMENT_CODE: "true" },
++      ),
++    /Cannot use --lan while AUTH_EXPOSE_DEVELOPMENT_CODE=true/u,
++  );
++  // The loopback start keeps the code: nobody on the network can reach it.
++  assert.doesNotThrow(() => assertSafeDevelopmentNetwork(false, { AUTH_EXPOSE_DEVELOPMENT_CODE: "true" }));
++  return { lan: true, developmentCode: "refused" };
++});
++
++check("--lan keeps the phone flow with normal code delivery", () => {
++  const invocation = parseDevelopmentTarget(["app", "--lan"]);
++  const environment: NodeJS.ProcessEnv = {
++    AUTH_EXPOSE_DEVELOPMENT_CODE: "false",
++    OPENBOT_API_PORT: "3100",
++    REMOTE_SIGNAL_PORT: "3101",
++  };
++  assert.doesNotThrow(() => assertSafeDevelopmentNetwork(invocation.lan, environment));
++  configureMobileConnectDevelopmentNetwork(
++    servicesForTarget(invocation.target),
++    environment,
++    interfaces,
++    invocation.lan,
++  );
++  assert.equal(environment.OPENBOT_API_HOST, "0.0.0.0");
++  assert.equal(environment.REMOTE_SIGNAL_HOST, "0.0.0.0");
++  assert.equal(environment.OPENBOT_MOBILE_AUTH_API_URL, "http://192.168.1.24:3100");
++  assert.equal(environment.REMOTE_SIGNAL_URL, "ws://192.168.1.24:3101/v1/signal");
++  return {
++    apiHost: environment.OPENBOT_API_HOST,
++    signalHost: environment.REMOTE_SIGNAL_HOST,
++    mobileApiUrl: environment.OPENBOT_MOBILE_AUTH_API_URL,
++    signalUrl: environment.REMOTE_SIGNAL_URL,
++    developmentCode: environment.AUTH_EXPOSE_DEVELOPMENT_CODE,
++  };
++});
++
++check("--lan requires a private IPv4 address for Mobile Connect", () => {
++  const invocation = parseDevelopmentTarget(["app", "--lan"]);
++  const environment: NodeJS.ProcessEnv = { OPENBOT_API_PORT: "3100" };
++  assert.throws(
++    () =>
++      configureMobileConnectDevelopmentNetwork(servicesForTarget(invocation.target), environment, {}, invocation.lan),
++    /Cannot use --lan: no private IPv4 address was found for Mobile Connect/u,
++  );
++  return { lan: invocation.lan, address: "missing", refused: true };
++});
++
++check("CLI dry run refuses LAN when development sign-in codes are enabled", () => {
++  const result = runDevServicesDryRun(["--lan"], "true");
++  assert.ok(result.status !== null);
++  assert.notEqual(result.status, 0);
++  assert.match(result.output, /Cannot use --lan while AUTH_EXPOSE_DEVELOPMENT_CODE=true/u);
++  return { status: result.status, refusal: true };
++});
++
++check("CLI loopback dry run passes the LAN guard", () => {
++  const result = runDevServicesDryRun([], "true");
++  assert.ok(result.status !== null);
++  assert.doesNotMatch(result.output, /Cannot use --lan while AUTH_EXPOSE_DEVELOPMENT_CODE=true/u);
++  if (result.status !== 0) assert.match(result.output, /Failed to listen at 127\.0\.0\.1/u);
++  return { status: result.status, lan: false, guardRefusal: false };
++});
++
++function runDevServicesDryRun(args: string[], exposeCode: string): { status: number | null; output: string } {
++  const result = spawnSync(process.execPath, [devServicesPath, "app", ...args, "--dry-run"], {
++    cwd: projectRoot,
++    env: {
++      ...process.env,
++      AUTH_EXPOSE_DEVELOPMENT_CODE: exposeCode,
++      OPENBOT_DEV_REGISTRY_DIR: registryPath,
++    },
++    encoding: "utf8",
++  });
++  if (result.error) throw result.error;
++  return { status: result.status, output: `${result.stdout}${result.stderr}` };
++}
++
++const report = {
++  generatedAt: new Date().toISOString(),
++  checks,
++  passed: checks.every((item) => item.passed),
++};
++await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
++await rm(registryPath, { recursive: true, force: true });
++process.stdout.write(`Dev LAN guard report: ${outputPath}\n`);
++if (!report.passed) process.exitCode = 1;
+diff --git a/scripts/dev-mobile.ts b/scripts/dev-mobile.ts
+index b39b5ba5..4598b60b 100644
+--- a/scripts/dev-mobile.ts
++++ b/scripts/dev-mobile.ts
+@@ -250,8 +250,13 @@ async function main(): Promise<void> {
+   }
+   let desktop = findWorktreeDesktop();
+   if (!desktop && options.pairOnly) throw new Error("No dev app runs in this worktree. Run without --pair-only.");
+-  if (desktop) logger.info("Reusing this worktree's dev app.");
+-  else startChild("bun run dev", "bun", ["scripts/dev-services.ts", "app"], "ignore");
++  if (desktop) {
++    logger.info("Reusing this worktree's dev app.");
++    logger.info("For a physical phone, this stack must have been started with `bun run dev --lan`.");
++  } else {
++    logger.info("This stack uses loopback. Stop it and start `bun run dev --lan` for a physical phone.");
++    startChild("bun run dev", "bun", ["scripts/dev-services.ts", "app"], "ignore");
++  }
+   if (!options.pairOnly) {
+     // Metro reads keyboard shortcuts, so it owns the terminal input.
+     startChild("bun mobile:ios", "bun", ["scripts/mobile-ios.ts", ...options.mobileArgs], "inherit");
+diff --git a/scripts/dev-services.ts b/scripts/dev-services.ts
+index e34018b4..d985cd46 100644
+--- a/scripts/dev-services.ts
++++ b/scripts/dev-services.ts
+@@ -6,6 +6,7 @@ import { type NetworkInterfaceInfo, networkInterfaces } from "node:os";
+ import { dirname, join, resolve } from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { createOpenBotLogger, toLogValue } from "@openbot/logging";
++import { normalizeBooleanFlag } from "../apps/auth-api/src/server/runtime-env";
+ import { cliSpawnTarget } from "../src/backend/cli";
+ import {
+   developmentInstanceIdForWorktree,
+@@ -229,7 +230,15 @@ function seedDevelopmentProfile(profile: string, environment: NodeJS.ProcessEnv)
+   });
+ }
+ 
+-const DEVELOPMENT_OPTIONS = ["--dry-run", "--force", "--shared", "--isolated", "--hosting=test", "--slack"] as const;
++const DEVELOPMENT_OPTIONS = [
++  "--dry-run",
++  "--force",
++  "--shared",
++  "--isolated",
++  "--hosting=test",
++  "--slack",
++  "--lan",
++] as const;
+ /** The deployed `test` account Worker. It creates real hosted server VMs for the accounts on its allow list. */
+ const TEST_ACCOUNT_API_URL = "https://openbot-auth-api-test.internal9671.workers.dev";
+ 
+@@ -253,6 +262,8 @@ export interface DevelopmentInvocation {
+   // Open a public HTTPS tunnel to Signal and to the account API, so that Slack can reach a managed
+   // Slack app's host. See `dev-slack-tunnels.ts`.
+   slack: boolean;
++  // Bind the local Auth API and Signal listeners to all network interfaces for phone clients.
++  lan: boolean;
+ }
+ 
+ export function parseDevelopmentTarget(args: string[]): DevelopmentInvocation {
+@@ -274,9 +285,35 @@ export function parseDevelopmentTarget(args: string[]): DevelopmentInvocation {
+     shared: args.includes("--shared"),
+     hostingTest: args.includes("--hosting=test"),
+     slack: args.includes("--slack"),
++    lan: args.includes("--lan"),
+   };
+ }
+ 
++// A LAN stack cannot return sign-in codes, so the throwaway dev account of a "host" or "client" role cannot
++// sign in. The desktop then uses the normal sign-in screen, unless the caller chose a role.
++export function applyLanSignInPolicy(lan: boolean, environment: NodeJS.ProcessEnv): void {
++  if (lan) environment.OPENBOT_DEV_REMOTE_ROLE ??= "none";
++}
++
++// The LAN is opened only when the caller asks for it by name. Every other
++// start binds the loopback interface, so a development stack is not reachable
++// from the local network by accident.
++export function developmentBindHost(lan: boolean): "127.0.0.1" | "0.0.0.0" {
++  return lan ? "0.0.0.0" : "127.0.0.1";
++}
++
++// A LAN stack that returns sign-in codes is an open login on the local
++// network: everyone who can reach the API signs in as the account. The
++// command line refuses the pair before anything starts, and the bind refuses
++// it again, so no other caller opens the LAN while the code is readable.
++export function assertSafeDevelopmentNetwork(lan: boolean, environment: NodeJS.ProcessEnv): void {
++  if (lan && normalizeBooleanFlag(environment.AUTH_EXPOSE_DEVELOPMENT_CODE ?? "")) {
++    throw new Error(
++      "Cannot use --lan while AUTH_EXPOSE_DEVELOPMENT_CODE=true. Set it to false and configure SMTP to send sign-in codes.",
++    );
++  }
++}
++
+ /**
+  * The test Worker lets an account create servers when the app sends this key. It is in the encrypted
+  * `.env.dev`, so only a developer with `DOTENV_PRIVATE_KEY_DEV` can read it. Never log it.
+@@ -289,13 +326,16 @@ async function readHostingDeveloperKey(): Promise<string> {
+ }
+ 
+ async function main(): Promise<void> {
+-  const { target, dryRun, force, shared, hostingTest, slack } = parseDevelopmentTarget(process.argv.slice(2));
++  const { target, dryRun, force, shared, hostingTest, slack, lan } = parseDevelopmentTarget(process.argv.slice(2));
+   if (!dryRun && prepareDevelopmentEnvironment() === "created") {
+     logger.info("Prepared local development state.");
+   }
+   const services = servicesForTarget(target);
+-  const developmentEnvironment = dryRun ? {} : await loadDevelopmentEnvironment(projectRoot);
++  const guardEnvironment = await loadDevelopmentEnvironment(projectRoot, process.env, { readOnly: dryRun });
++  assertSafeDevelopmentNetwork(lan, guardEnvironment);
++  const developmentEnvironment = dryRun ? {} : guardEnvironment;
+   const sharedEnvironment = developmentEnvironmentForTarget(target);
++  applyLanSignInPolicy(lan, sharedEnvironment);
+   if (hostingTest) {
+     sharedEnvironment.OPENBOT_AUTH_API_URL = TEST_ACCOUNT_API_URL;
+     sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL = TEST_ACCOUNT_API_URL;
+@@ -339,6 +379,7 @@ async function main(): Promise<void> {
+       sharedEnvironment,
+       heldDevStackPorts(records),
+       developmentEnvironment,
++      lan,
+     );
+     validateServiceSpecs(allocated);
+     if (dryRun) return { specs: allocated, stack: null };
+@@ -427,6 +468,7 @@ async function allocateDevelopmentPorts(
+   sharedEnvironment: NodeJS.ProcessEnv,
+   heldPorts: Set<number>,
+   developmentEnvironment: NodeJS.ProcessEnv,
++  lan: boolean,
+ ): Promise<DevelopmentServiceSpec[]> {
+   const reservedPorts = new Set<number>();
+ 
+@@ -467,7 +509,13 @@ async function allocateDevelopmentPorts(
+         logger.info(`Signal health port ${DEFAULT_REMOTE_HEALTH_PORT} is busy. Using ${healthPort}.`);
+       }
+     }
+-    configureMobileConnectDevelopmentNetwork(services, sharedEnvironment, networkInterfaces());
++    // The bind reads the account settings, so an exposed development sign-in
++    // code is refused where the LAN is opened and not only on the command
++    // line.
++    configureMobileConnectDevelopmentNetwork(services, sharedEnvironment, networkInterfaces(), lan, {
++      ...developmentEnvironment,
++      ...sharedEnvironment,
++    });
+     if (sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL) {
+       logger.info(`Mobile Connect API: ${sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL}`);
+     }
+@@ -641,17 +689,28 @@ export function configureMobileConnectDevelopmentNetwork(
+   services: DevelopmentService[],
+   environment: NodeJS.ProcessEnv,
+   interfaces: DevelopmentNetworkInterfaces,
++  lan: boolean,
++  // The account settings the bind reads: the development sign-in code lives
++  // with the API configuration, not with the bind addresses.
++  accountEnvironment: NodeJS.ProcessEnv = environment,
+ ): void {
+   const hasMobileClient = services.some((service) => service === "app" || service === "test-client");
+   const apiPort = readPort(environment.OPENBOT_API_PORT);
+   if (!apiPort) return;
+-  const exposeToLan = hasMobileClient && environment.OPENBOT_API_HOST !== "127.0.0.1";
+-  const address = exposeToLan ? selectMobileConnectLanAddress(interfaces) : null;
++  // The LAN bind and an exposed sign-in code must not meet here either, so
++  // the refusal holds for every caller and not only for the command line.
++  assertSafeDevelopmentNetwork(lan, accountEnvironment);
++  const address = lan && hasMobileClient ? selectMobileConnectLanAddress(interfaces) : null;
++  if (lan && hasMobileClient && !address) {
++    throw new Error("Cannot use --lan: no private IPv4 address was found for Mobile Connect.");
++  }
++  const bindHost = developmentBindHost(lan);
++  environment.OPENBOT_API_HOST = bindHost;
+ 
+   if (services.includes("remote")) {
+     const signalPort = readPort(environment.REMOTE_SIGNAL_PORT) ?? DEFAULT_REMOTE_SIGNAL_PORT;
+     environment.REMOTE_SIGNAL_PORT ??= String(signalPort);
+-    environment.REMOTE_SIGNAL_HOST ??= "0.0.0.0";
++    environment.REMOTE_SIGNAL_HOST = bindHost;
+     environment.REMOTE_TLS_DISABLED ??= "true";
+     environment.REMOTE_CONTROL_PLANE_URL ??= `http://127.0.0.1:${apiPort}`;
+     environment.REMOTE_AUTH_WEBHOOK_URL ??= `http://127.0.0.1:${signalPort}/internal/auth-events`;
+@@ -660,7 +719,6 @@ export function configureMobileConnectDevelopmentNetwork(
+   }
+ 
+   if (!address) return;
+-  environment.OPENBOT_API_HOST ??= "0.0.0.0";
+   environment.OPENBOT_MOBILE_AUTH_API_URL ??= `http://${address}:${apiPort}`;
+ }
+ 
+diff --git a/scripts/development-environment.ts b/scripts/development-environment.ts
+index d90bd848..074ef2e1 100644
+--- a/scripts/development-environment.ts
++++ b/scripts/development-environment.ts
+@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
+ import { devNull } from "node:os";
+ import { join } from "node:path";
+ import { config } from "@dotenvx/dotenvx";
+-import { readDevelopmentState } from "./development-secrets";
++import { readDevelopmentState, readDevelopmentStateForDryRun } from "./development-secrets";
+ 
+ const LOCAL_IDENTITY_KEYS = [
+   "REMOTE_TICKET_PRIVATE_JWK",
+@@ -58,8 +58,9 @@ async function decryptEnvironment(
+ export async function loadDevelopmentEnvironment(
+   projectRoot: string,
+   environment: NodeJS.ProcessEnv = process.env,
++  options: { readOnly?: boolean } = {},
+ ): Promise<NodeJS.ProcessEnv> {
+-  const state = readDevelopmentState(projectRoot);
++  const state = options.readOnly ? readDevelopmentStateForDryRun(projectRoot) : readDevelopmentState(projectRoot);
+   const shared = await loadSharedDevelopmentEnvironment(projectRoot, environment);
+   // Shared service credentials must not change the identity of an existing local instance.
+   for (const key of LOCAL_IDENTITY_KEYS) delete shared[key];
+diff --git a/scripts/development-secrets.ts b/scripts/development-secrets.ts
+index 3b856ad9..b644fcf6 100644
+--- a/scripts/development-secrets.ts
++++ b/scripts/development-secrets.ts
+@@ -111,6 +111,12 @@ export function readDevelopmentState(projectRoot: string): DevelopmentState {
+   }
+ }
+ 
++/** Reads the effective default state for a dry run without creating or changing files. */
++export function readDevelopmentStateForDryRun(projectRoot: string): DevelopmentState {
++  const paths = developmentStatePaths(projectRoot);
++  return readStateIfPresent(paths.state, false) ?? createInitialState();
++}
++
+ /**
+  * Applies explicit local development overrides and publishes them as one atomic state update.
+  * `undefined` and `null` remove an override. The writer takes an exclusive lock and therefore
+@@ -169,7 +175,7 @@ function createInitialState(): DevelopmentState {
+   };
+ }
+ 
+-function readStateIfPresent(path: string): DevelopmentState | undefined {
++function readStateIfPresent(path: string, repairPermissions = true): DevelopmentState | undefined {
+   if (!existsSync(path)) return undefined;
+   assertRegularPrivateFile(path, "development state");
+   let parsed: unknown;
+@@ -183,7 +189,7 @@ function readStateIfPresent(path: string): DevelopmentState | undefined {
+       "The development state file has an invalid format. Restore .openbot/dev-state.json before continuing.",
+     );
+   }
+-  chmodSync(path, 0o600);
++  if (repairPermissions) chmodSync(path, 0o600);
+   return parsed;
+ }
+ 
+-- 
+2.47.3
+

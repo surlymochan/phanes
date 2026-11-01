@@ -1,0 +1,170 @@
+From c84e9cdab812841a6fba4cfc3ef49de10a2ca2dc Mon Sep 17 00:00:00 2001
+From: Chao Chen <209239467+surlymochan@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 00:48:03 +0800
+Subject: [PATCH] test(auth-api): refuse two account migrations with the same
+ number
+
+Wrangler applies apps/auth-api/migrations in name order and records each
+applied name. Two pull requests that each add the next number pass review on
+their own; after both merge, the order of the pair depends on the rest of the
+file name, and the one that merges second may run before a migration it
+depends on. 0034 already has two files for this reason.
+
+- apps/auth-api/scripts/migration-numbers.ts refuses a reused number and a
+  name that is not NNNN_lowercase_name.sql. Gaps stay allowed. The applied
+  0034 pair stays allowed by name, so a third 0034 is refused.
+- scripts/auth-migration-numbers-smoke.ts (bun run
+  test:api-migration-numbers) checks the repository migrations and the rules,
+  and writes .openbot-build/auth-migration-numbers.json.
+
+No migration is renamed or changed, and CI is not changed.
+---
+ apps/auth-api/scripts/migration-numbers.ts | 47 +++++++++++++++
+ package.json                               |  1 +
+ scripts/auth-migration-numbers-smoke.ts    | 68 ++++++++++++++++++++++
+ 3 files changed, 116 insertions(+)
+ create mode 100644 apps/auth-api/scripts/migration-numbers.ts
+ create mode 100644 scripts/auth-migration-numbers-smoke.ts
+
+diff --git a/apps/auth-api/scripts/migration-numbers.ts b/apps/auth-api/scripts/migration-numbers.ts
+new file mode 100644
+index 00000000..7b396d25
+--- /dev/null
++++ b/apps/auth-api/scripts/migration-numbers.ts
+@@ -0,0 +1,47 @@
++// Checks the file names of the account database migrations before Wrangler applies them.
++// Run: bun apps/auth-api/scripts/migration-numbers.ts
++//
++// Wrangler applies `migrations/*.sql` in name order and records each applied name. Two pull
++// requests that pick the same next number both pass review, and after both merge the order of the
++// pair depends on the rest of the name. Gaps are allowed: a closed pull request can leave one.
++
++import { readdirSync } from "node:fs";
++import { join } from "node:path";
++
++const MIGRATION_NAME = /^(\d{4})_[a-z0-9_]+\.sql$/u;
++
++// Both 0034 migrations are applied in production. An applied migration keeps its name, so this
++// pair stays allowed, and only this pair.
++const APPLIED_DUPLICATES: ReadonlyMap<string, readonly string[]> = new Map([
++  ["0034", ["0034_account_attribution.sql", "0034_server_claims.sql"]],
++]);
++
++export function migrationNumberProblems(names: readonly string[]): string[] {
++  const problems: string[] = [];
++  const byNumber = new Map<string, string[]>();
++  for (const name of [...names].sort()) {
++    const number = MIGRATION_NAME.exec(name)?.[1];
++    if (!number) {
++      problems.push(`${name}: expected four digits, an underscore, a lowercase name, and .sql`);
++      continue;
++    }
++    byNumber.set(number, [...(byNumber.get(number) ?? []), name]);
++  }
++  for (const [number, sameNumber] of byNumber) {
++    if (sameNumber.length < 2) continue;
++    const allowed = APPLIED_DUPLICATES.get(number);
++    if (allowed && sameNumber.length === allowed.length && sameNumber.every((name) => allowed.includes(name))) continue;
++    problems.push(`${number}: used by ${sameNumber.join(", ")}. Give the newer migration the next free number.`);
++  }
++  return problems;
++}
++
++export const migrationsDirectory = join(import.meta.dirname, "..", "migrations");
++
++if (import.meta.main) {
++  const problems = migrationNumberProblems(readdirSync(migrationsDirectory));
++  if (problems.length > 0) {
++    process.stderr.write(`Migration names in ${migrationsDirectory}:\n${problems.map((p) => `- ${p}`).join("\n")}\n`);
++    process.exit(1);
++  }
++}
+diff --git a/package.json b/package.json
+index 7c4a8085..22a443c2 100644
+--- a/package.json
++++ b/package.json
+@@ -192,6 +192,7 @@
+     "test:related": "vitest related --run --maxWorkers=1",
+     "test:durations": "bun scripts/test-durations.ts",
+     "test:api": "bun run --cwd apps/auth-api test",
++    "test:api-migration-numbers": "bun scripts/auth-migration-numbers-smoke.ts",
+     "test:backend": "vitest run src/backend",
+     "test:browser": "bun scripts/browser-smoke.ts",
+     "test:browser-agent-session": "bun scripts/browser-agent-session-e2e.ts",
+diff --git a/scripts/auth-migration-numbers-smoke.ts b/scripts/auth-migration-numbers-smoke.ts
+new file mode 100644
+index 00000000..24983856
+--- /dev/null
++++ b/scripts/auth-migration-numbers-smoke.ts
+@@ -0,0 +1,68 @@
++// Checks the account database migration names and the rules of the checker.
++// Run: bun scripts/auth-migration-numbers-smoke.ts
++// It writes .openbot-build/auth-migration-numbers.json and exits non-zero on a failure.
++
++import assert from "node:assert/strict";
++import { readdirSync } from "node:fs";
++import { mkdir, writeFile } from "node:fs/promises";
++import { dirname, join } from "node:path";
++import { migrationNumberProblems, migrationsDirectory } from "../apps/auth-api/scripts/migration-numbers";
++
++const outputPath = join(import.meta.dirname, "..", ".openbot-build", "auth-migration-numbers.json");
++const checks: { name: string; passed: boolean; detail?: unknown }[] = [];
++
++function check(name: string, run: () => unknown): void {
++  try {
++    checks.push({ name, passed: true, detail: run() });
++  } catch (error) {
++    checks.push({ name, passed: false, detail: error instanceof Error ? error.message : String(error) });
++  }
++}
++
++check("the repository migrations have unique numbers", () => {
++  const names = readdirSync(migrationsDirectory);
++  assert.deepEqual(migrationNumberProblems(names), []);
++  return { migrations: names.length, latest: [...names].sort().at(-1) };
++});
++
++check("the applied 0034 pair stays allowed", () => {
++  assert.deepEqual(
++    migrationNumberProblems(["0033_a.sql", "0034_server_claims.sql", "0034_account_attribution.sql"]),
++    [],
++  );
++  return { allowed: "0034" };
++});
++
++check("a third 0034 migration is refused", () => {
++  const problems = migrationNumberProblems([
++    "0034_account_attribution.sql",
++    "0034_server_claims.sql",
++    "0034_new_table.sql",
++  ]);
++  assert.equal(problems.length, 1);
++  assert.match(problems[0] ?? "", /^0034: used by /u);
++  return problems;
++});
++
++check("two new migrations with one number are refused", () => {
++  const problems = migrationNumberProblems(["0046_remote_session_indexes.sql", "0047_a.sql", "0047_b.sql"]);
++  assert.deepEqual(problems, ["0047: used by 0047_a.sql, 0047_b.sql. Give the newer migration the next free number."]);
++  return problems;
++});
++
++check("a malformed name is refused", () => {
++  const problems = migrationNumberProblems(["47_short.sql", "0048_Upper.sql", "0049_notes.txt"]);
++  assert.equal(problems.length, 3);
++  return problems;
++});
++
++check("a gap is allowed", () => {
++  assert.deepEqual(migrationNumberProblems(["0001_first.sql", "0003_third.sql"]), []);
++  return { gap: "0002" };
++});
++
++const report = { generatedAt: new Date().toISOString(), checks, passed: checks.every((item) => item.passed) };
++await mkdir(dirname(outputPath), { recursive: true });
++await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
++process.stdout.write(`Auth migration numbers report: ${outputPath}\n`);
++if (!report.passed) process.exitCode = 1;
+-- 
+2.47.3
+
