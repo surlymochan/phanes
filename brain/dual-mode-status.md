@@ -1,41 +1,43 @@
-# 双模式盘点（2026-11-01 03:00 UTC+8）
+# Dual-mode status (2026-11-01 11:43 +08 Asia/Singapore)
 
-Project：https://github.com/users/surlymochan/projects/6
+Project: https://github.com/users/surlymochan/projects/6  
+Epic: https://github.com/surlymochan/phanes/issues/223
 
-## 模式 A — SSH fleet（受控主机）
+## Mode A — Hub/SSH (Mac-independent from box)
+- Status: **OPERATIONAL** (11 lanes configured; health-loop guards hosts)
+- SSH: `id_ed25519_phanes_ctl` + ControlMaster; hosts ib1–5 / gocc / gorelay / govpn / govpn2
+- Dispatch: `~/phanes-ctl/bin/lane-autodispatch` reading `lane-ready` issues
+- Boot: `~/phanes-ctl/bin/start-control-plane` (see [`docs/ctl-boot.md`](../docs/ctl-boot.md))
+- Status paths: `~/.claude/openswarm-executor-candidate/lanes/<L>/state.json` (see `tools/check-lane-status-paths.sh`)
+- Proof (earlier): run `20261101-031136-7a2856` → gorelay/agy
 
-| 项 | 状态 |
-|---|---|
-| box → 远程 SSH（phanes_ctl key + ControlMaster） | ✅ 已通 ib1–5 / gocc / gorelay / govpn / govpn2 |
-| openswarm-fleet lane assign / status | ✅ lane-autodispatch 在用 |
-| 10+ 路真实并行 | ✅ 02:59 起 11/11 busy（含 CX5 govpn） |
-| Hub App ↔ bridge ↔ fleet（Mac 无关） | ❌ Hub bridge 仍默认 `~/.claude/openswarm-hub-bridge` + `openswarm-hub`→gores1；文档/配置迁移见 #224 #226 #230 |
-| coordinator 在 gocc | ⚠️ 可用；gorelay↔gocc 高峰 banner timeout 有退避（#233） |
+## Mode B — GitHub issue bus
+- Status: **RESIDENT, zero-manual PASS**
+- Bus: https://github.com/surlymochan/phanes-bus
+- Proof: bus issue #9 → claim `surlymochan-phanes-box` → PR https://github.com/surlymochan/phanes/pull/354
+- Earlier: issue #7 → PR #297 (merged)
+- Resident: `~/phanes-ctl/bin/bus-worker-loop` (included in `start-control-plane`)
+- Credential: box `gh` only; no token copied to fleet hosts
 
-入口：`openswarm-fleet lane assign <L> --task-file …`（经 box SSH），或本机 `lane-autodispatch` 读 `lane-ready` issue。
+## Stability guards (2026-11-01)
+- `health-loop` probes disk/mem/ssh jitter on box+ib*+govpn*+gocc+gorelay every ~60s
+- Hard degrade → `PAUSE-HOST-*` / `PAUSE-<LANE>` / `PAUSE-BACKEND-*` (auto: bodies); autodispatch skips them; other backends keep running
+- Quota/429 on harvest also sets `PAUSE-BACKEND-*`; health-loop clears after hold if no fresh signal
+- 37-minute tick silence: structural fix (wall-kill process trees, parallel probes, early heartbeat) — soak in progress; see `brain/lessons-37min-silence.md` if present
+- ib-refresh: reuse cert when TTL ≥25m (no force renew every tick); wall cap 420s
 
-## 模式 B — GitHub issue bus（非受控执行器）
+## Remaining gaps (Epic #223)
+1. Box reboot still needs manual `start-control-plane` (documented; no systemd on box).
+2. Hub App UI bridge may still default to Mac paths for interactive Hub — fleet SSH path from box is fine (#224 docs Done).
+3. gocc Data volume often ≥96% used — health soft-alerts; free space recovered by clearing retired codex/copilot caches (~4GiB on 2026-11-01). Keep watching.
+4. GH token rotation (user action; not automated).
+5. Soak: confirm ≥30–60 min without autodispatch heartbeat gaps after stallfix.
+6. #226 lane status path check script now in repo; mark Done when merged.
 
-| 项 | 状态 |
-|---|---|
-| 协议与代码（`openswarm bus` / `bus-worker` / `run --backend github-issue`） | ✅ 在仓库 `openswarm/docs/BUS.md` |
-| bus 仓 init + policy.local 落地 | ❌ 未在本环境跑通（#225） |
-| claim/digest/cancel 回归 | 🔧 #227 |
-| 与 phanes Project / lane-ready 标签体系衔接说明 | 🔧 backlog rsi-08 / #238 一带；标签↔看板 Status 对应建议见 [`docs/project-phanes-rsi.md`](../docs/project-phanes-rsi.md) |
-
-说明：当前 **lane-ready → autodispatch → PR** 是「用 GitHub issue 做任务队列」的受控闭环，**不是** openswarm 的 `github-issue` bus 协议。两者都要稳定：前者喂受控 SSH lane；后者给外部/他人 agent。
-
-## RSI / 异构路由
-
-| 项 | 状态 |
-|---|---|
-| 多 backend（pi/agy/codex）同池 | ✅ |
-| 权重路由默认只记录、对比后启用 | 文档+门控 #228 |
-| Copilot | 🚫 已禁用 |
-
-## 阻塞
-
-1. Hub 正式 UI 派发仍绑 Mac 路径（#224）——控制面已在 box，缺 bridge 配置与文档落地。
-2. Issue bus 未做真实 init/冒烟（#225）。
-3. A1/A2 共用 nicknight0616 额度；429 时 PAUSE，找主理人换号。
-4. govpn CX5 内存紧（2G），可跑但需盯 swap（#229）。
+## Milestone checklist
+- [x] M1 SSH path from box (smoke + resident dispatch)
+- [x] M2 Issue bus e2e + resident worker
+- [x] M3 Fleet 10+ lanes (11 configured; CX5 up)
+- [x] M4 RSI routing record-only gate (#228)
+- [x] M5 org-health demo contract tests (#231) — ongoing hardening via high-bar queue
+- [ ] Stability soak + reboot story closed enough to mark Epic Done
