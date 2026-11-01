@@ -14072,11 +14072,13 @@ def merge_gate_reviews_path():
     return os.path.join(DATA, MERGE_GATE_REVIEW_FILE)
 
 
-def merge_gate_gh_runner(argv):
-    """The default gh runner: one gh call, returns (returncode, stdout, stderr)."""
-    command = [envvar("GH_BIN", "gh"), *argv]
+def merge_gate_gh_runner(argv, **kwargs):
+    """Dispatch gh and git commands, returning (returncode, stdout, stderr)."""
+    binary = envvar("GIT_BIN", "git") if argv and argv[0] == "git" else envvar("GH_BIN", "gh")
+    command = [binary, *argv[1:]] if argv and argv[0] == "git" else [binary, *argv]
+    options = {"capture_output": True, "text": True, "timeout": 60, **kwargs}
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(command, **options)
     except (OSError, subprocess.TimeoutExpired) as error:
         return 127, "", str(error)
     return proc.returncode, proc.stdout, proc.stderr
@@ -14239,7 +14241,7 @@ def merge_gate_check_counts(rollup):
 
 def merge_gate_pr_view(runner, repo, number):
     """Read the head sha, labels, mergeability, and CI status of one PR."""
-    fields = "number,headRefOid,labels,mergeable,statusCheckRollup"
+    fields = "number,headRefOid,headRefName,baseRefName,labels,mergeable,mergeStateStatus,statusCheckRollup"
     data = merge_gate_gh_json(runner, ["pr", "view", str(number), "--repo", repo, "--json", fields])
     if not isinstance(data, dict):
         raise MergeGateError(f"gh pr view {number} returned no PR data")
@@ -14247,7 +14249,54 @@ def merge_gate_pr_view(runner, repo, number):
               for label in data.get("labels") or []]
     return {"pr": int(number), "head_sha": data.get("headRefOid") or "", "labels": labels,
             "mergeable": data.get("mergeable"),
+            "head_ref": data.get("headRefName") or "", "base_ref": data.get("baseRefName") or "",
+            "merge_state": data.get("mergeStateStatus") or "",
             "checks": merge_gate_check_counts(data.get("statusCheckRollup"))}
+
+
+def merge_gate_union(runner, repo, number, pr_view, patterns, dry_run):
+    """Attempt an opted-in documentation union and publish it with a head lease."""
+    if not patterns:
+        return None
+    if pr_view.get("merge_state", "").upper() != "DIRTY":
+        return None
+    try:
+        from pathlib import Path
+        import importlib.util
+        module_path = Path(__file__).resolve().parent.parent / "lib" / "merge" / "union.py"
+        spec = importlib.util.spec_from_file_location("openswarm_merge_union", str(module_path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="openswarm-merge-gate-") as temp:
+            def git(argv, **kwargs):
+                code, out, err = runner(argv, **kwargs)
+                return subprocess.CompletedProcess(argv, code, out, err)
+            remote = pr_view.get("remote_url") or f"https://github.com/{repo}.git"
+            code, out, err = runner(["git", "clone", "--no-checkout", remote, temp])
+            if code:
+                return {"status": "blocked:conflict", "action": "none"}
+            head_ref = f"refs/remotes/origin/{pr_view['head_ref']}"
+            base_ref = f"refs/remotes/origin/{pr_view['base_ref']}"
+            for ref, source in ((head_ref, f"refs/heads/{pr_view['head_ref']}"),
+                                (base_ref, f"refs/heads/{pr_view['base_ref']}")):
+                code, out, err = runner(["git", "-C", temp, "fetch", "origin", f"{source}:{ref}"])
+                if code:
+                    return {"status": "blocked:conflict", "action": "none"}
+            merged = module.union_merge(temp, pr_view["head_sha"], base_ref, patterns, runner=git)
+            if merged.get("status") == "mixed":
+                return {"status": "blocked:conflict", "action": "none"}
+            if merged.get("status") != "merged":
+                return {"status": "blocked:conflict", "action": "none"}
+            if dry_run:
+                return {"status": "blocked:union_merged", "action": "dry_run", "union_sha": merged["sha"]}
+            code, out, err = runner(["git", "-C", temp, "push", "origin",
+                                     f"{merged['sha']}:refs/heads/{pr_view['head_ref']}",
+                                     f"--force-with-lease=refs/heads/{pr_view['head_ref']}:{pr_view['head_sha']}"])
+            if code:
+                return {"status": "blocked:union_lease", "action": "none"}
+            return {"status": f"blocked:union_merged(pushed {merged['sha']})", "action": "union_merged"}
+    except (OSError, RuntimeError, ImportError, AttributeError):
+        return {"status": "blocked:conflict", "action": "none"}
 
 
 def merge_gate_open_prs(runner, repo):
@@ -14292,7 +14341,8 @@ def merge_gate_evaluate(pr_view, review):
         reasons.append("ci")
     if checks.get("pending"):
         reasons.append("ci_pending")
-    if str(pr_view.get("mergeable") or "").upper() == "CONFLICTING":
+    if (str(pr_view.get("mergeable") or "").upper() == "CONFLICTING"
+            or str(pr_view.get("merge_state") or "").upper() == "DIRTY"):
         reasons.append("conflict")
     if not checks.get("total"):
         reasons.append("no_checks")
@@ -14340,8 +14390,13 @@ def cmd_merge_gate(args, policy=None, runner=None):
         review = merge_gate_find_review(records, repo, number)
         status, detail = merge_gate_evaluate(pr_view, review)
         record = {"pr": number, "repo": repo, "status": status, **detail}
+        if status == "blocked:conflict":
+            union_result = merge_gate_union(runner, repo, number, pr_view,
+                                            getattr(args, "union_files", "").split(","), dry_run)
+            if union_result:
+                record.update(union_result)
         if status != "mergeable":
-            record["action"] = "none"
+            record.setdefault("action", "none")
         elif dry_run:
             record["action"] = "dry_run"
         else:
@@ -14717,6 +14772,7 @@ def main():
     sp.add_argument("--repo", required=True, help="GitHub repository owner/name")
     sp.add_argument("--pr", type=int, help="only judge this pull request number")
     sp.add_argument("--dry-run", action="store_true", help="report the gate verdict without merging")
+    sp.add_argument("--union-files", default="", help="comma-separated globs eligible for append-only conflict union")
     sp.add_argument("--json", action="store_true", help="print the gate results as JSON")
 
     a = ap.parse_args()
