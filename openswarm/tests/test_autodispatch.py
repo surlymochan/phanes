@@ -10,8 +10,8 @@ autodispatch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(autodispatch)
 
 
-class GitFetchCommandTests(unittest.TestCase):
-    def test_quotes_proxy_command_as_one_ssh_option(self):
+class GitSSHCommandTests(unittest.TestCase):
+    def test_ssh_command_quotes_proxy_command_as_one_option(self):
         options = ["-o", "ConnectTimeout=20", "-o", "ProxyCommand=ssh -W %h:%p bastion"]
 
         command = autodispatch.git_fetch_command(options, "/repo", "host:repo", "refs/heads/main", "lane")
@@ -22,7 +22,7 @@ class GitFetchCommandTests(unittest.TestCase):
         )
         self.assertIn("'ProxyCommand=ssh -W %h:%p bastion'", command[2])
 
-    def test_unquoted_proxy_command_is_split_and_can_trigger_destination_usage(self):
+    def test_unquoted_ssh_proxy_command_is_split_and_can_trigger_destination_usage(self):
         options = ["-o", "ProxyCommand=ssh -W %h:%p bastion"]
 
         broken = shlex.split("ssh " + " ".join(options))
