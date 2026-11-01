@@ -373,6 +373,64 @@ class BuildDiagnosisTest(unittest.TestCase):
             ["收入 缺 2026-06 数据，按 null 处理"],
         )
 
+    def test_copied_raw_with_two_real_csv_changes_still_validates(self) -> None:
+        """复制样例并修改两张真实业务 CSV，完整覆盖仍生成可校验的 v4 快照。"""
+        raw_dir = copy_raw(self.folder, "raw-complete-copy")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(
+            cost,
+            [line.replace("2026-06,11.5,9.2,2.3", "2026-06,11.6,9.3,2.3") for line in csv_lines(cost)],
+        )
+        revenue = raw_dir / "revenue.csv"
+        write_csv_lines(
+            revenue,
+            [line.replace("2026-07,13.0", "2026-07,13.1") for line in csv_lines(revenue)],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+        self.assertEqual(data["scope"]["schema版本"], 4)
+        self.assertFalse(any("cost.csv 缺" in note for note in data["口径说明"]))
+        self.assertFalse(any("revenue.csv 缺" in note for note in data["口径说明"]))
+
+    def test_one_csv_missing_period_keeps_gap_fact_and_valid_snapshot(self) -> None:
+        """单个业务 CSV 缺一个观察月份时保留 null 缺口事实并继续生成。"""
+        raw_dir = copy_raw(self.folder, "raw-single-file-gap")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, [line for line in csv_lines(cost) if not line.startswith("2026-06,")])
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+        self.assertIn("整体技术人力成本 缺 2026-05、2026-06 数据，按 null 处理", data["口径说明"])
+        self.assertIn("cost.csv 缺 2026-06 数据，相关指标按 null 处理", data["口径说明"])
+
+    def test_duplicate_period_reports_filename_and_row(self) -> None:
+        """业务 CSV 重复期次必须失败，并指出来源文件与行号。"""
+        raw_dir = copy_raw(self.folder, "raw-duplicate-business-period")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, csv_lines(cost) + ["2026-06,11.5,9.2,2.3"])
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        message = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv", message)
+        self.assertIn("月份 2026-06 重复", message)
+        self.assertIn("第 10 行", message)
+        self.assertFalse(self.out_path.exists())
+
+    def test_period_outside_brief_range_reports_filename_and_row(self) -> None:
+        """观察范围外的业务期次不得混入指标，且报告文件名与行号。"""
+        raw_dir = copy_raw(self.folder, "raw-out-of-range-period")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, csv_lines(cost) + ["2026-10,12.5,10.0,2.5"])
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        message = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv 第 10 行", message)
+        self.assertIn("2026-10 超出任务书观察范围", message)
+        self.assertFalse(self.out_path.exists())
+
     def test_zero_revenue_makes_cost_rate_null_without_changing_scope(self) -> None:
         """收入全为 0 时成本率为 null，且不影响其它指标与观察范围。"""
         baseline = self.build()
