@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,7 @@ EXAMPLE_PATH = EX / "data" / "diagnosis.json"
 SCHEMA_PATH = ROOT / "brief.schema.json"
 
 BRIEF_KEYS = {"目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"}
+ORDERED_BRIEF_KEYS = ["目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"]
 REQUIRED_FORBIDS = ("不得写入真实组织数据", "不作个人/薪酬/编制判断")
 
 # 期次锚点的期望顺序：2026-01实际 → 2026-05H1参考 → 2026-09实际 → 年末测算 → 年末目标。
@@ -95,6 +97,42 @@ class MakeBriefTest(unittest.TestCase):
     def test_brief_has_all_fields(self) -> None:
         """任务书字段齐全，且没有多余字段。"""
         self.assertEqual(set(self.brief), BRIEF_KEYS)
+
+    def test_顶层字段序列化顺序稳定(self) -> None:
+        """任务书 JSON 序列化为文本后顶层字段按 schema/实现稳定顺序输出且无漂移。"""
+        # 使用仓库内示例输入（scope.观察月份）生成任务书
+        observed_month = self.example["scope"]["观察月份"]
+        expected_keys = list(self.schema["properties"].keys())
+        self.assertEqual(expected_keys, ORDERED_BRIEF_KEYS)
+
+        brief = make_brief.build_brief(month=observed_month)
+        self.assertEqual(list(brief.keys()), expected_keys)
+
+        # 序列化为 JSON 文本并断言顶层字段按稳定顺序输出
+        serialized = json.dumps(brief, ensure_ascii=False, indent=2)
+        top_level_matches = re.findall(r'^[ ]{2}"([^"]+)":', serialized, re.MULTILINE)
+        self.assertEqual(top_level_matches, expected_keys)
+
+        parsed_pairs = json.loads(serialized, object_pairs_hook=list)
+        self.assertEqual([key for key, _ in parsed_pairs], expected_keys)
+
+        positions = [serialized.index(f'"{k}"') for k in expected_keys]
+        self.assertEqual(positions, sorted(positions))
+
+        # 通过 write_brief 写出文件后验证文本字段顺序与多次重复无漂移
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            make_brief.write_brief(brief, path)
+            written_text = path.read_text(encoding="utf-8")
+            written_keys = re.findall(r'^[ ]{2}"([^"]+)":', written_text, re.MULTILINE)
+            self.assertEqual(written_keys, expected_keys)
+
+            for _ in range(5):
+                repeated = make_brief.build_brief(month=observed_month)
+                self.assertEqual(
+                    json.dumps(repeated, ensure_ascii=False, indent=2) + "\n",
+                    written_text,
+                )
 
     def test_schema_version_is_four(self) -> None:
         """schema版本 固定为 4。"""
