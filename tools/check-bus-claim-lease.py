@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable contract check for issue bus claim lease expiry and takeover (Refs #1008).
+"""Executable contract check for issue bus claim lease expiry and takeover (Refs #1128).
 
 对齐 BUS.md：过期 claim 不永久锁死。
 使用假时钟（fake clock）+ 假评论（fake comments）验证：
@@ -108,7 +108,9 @@ def bus_winning_claim(
 
 def main() -> None:
     clock = FakeClock("2026-01-01T00:00:00+00:00")
-    allowed_executors = {"worker-a", "worker-b", "worker-c"}
+    # GitHub login matching is case-insensitive; use mixed casing here so the
+    # lease checks also exercise the production allowlist normalization.
+    allowed_executors = {"WORKER-A", "WORKER-B", "WORKER-C"}
     lease_seconds = 300.0  # 默认 300 秒租约
 
     comments: list[dict[str, Any]] = []

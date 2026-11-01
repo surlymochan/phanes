@@ -6280,8 +6280,10 @@ def bus_claim_state(comments, allowed, lease_seconds=300, now=None):
     if now is None:
         # The offline GitHub fixture pins its remote clock for deterministic comment order.
         now = to_epoch(os.environ["OPENSWARM_FAKE_GH_NOW"]) if os.environ.get("OPENSWARM_FAKE_GH_NOW") else NOW()
+    allowed_norm = {str(worker).casefold() for worker in allowed}
     claims = [comment for comment in comments
-              if str((comment.get("user") or {}).get("login") or "").casefold() in allowed and bus_claim(comment)]
+              if str((comment.get("user") or {}).get("login") or "").casefold() in allowed_norm
+              and bus_claim(comment)]
     claims.sort(key=lambda c: (to_epoch(c.get("created_at")) or 0, int(c.get("id") or 0)))
     active = None
     for claim in claims:
