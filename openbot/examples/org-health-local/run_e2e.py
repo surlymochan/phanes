@@ -190,6 +190,18 @@ def failure_reason(text, captured):
     return f'{text}\n{detail}' if detail else text
 
 
+def exit_reason(exit_code):
+    """返回子进程退出原因；被信号终止时同时给出稳定的信号名。"""
+    if exit_code is not None and exit_code < 0:
+        signal_number = -exit_code
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f'SIG{signal_number}'
+        return f'被信号终止 ({signal_name}, 信号 {signal_number})'
+    return f'退出码 {exit_code}'
+
+
 def run_step(name, command, timings, stdout=None, stderr=None, output_path=None, timeout=None):
     """运行一个角色步骤；返回 (成功与否, 失败原因, 子进程是否启动)。
 
@@ -275,12 +287,12 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
                     'duration_seconds': elapsed, 'exit_code': exit_code})
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
-        print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr, flush=True)
+        print(f'步骤失败: {name} ({exit_reason(result.returncode)})', file=sys.stderr, flush=True)
     if reason is not None:
         print(f'步骤失败: {name} (输出含非 UTF-8 字节: {output_path}, {reason})', file=sys.stderr, flush=True)
         text = f'步骤失败: {name} (输出含非 UTF-8 字节: {output_path}, {reason})'
     elif exit_code:
-        text = f'步骤失败: {name} (退出码 {exit_code})'
+        text = f'步骤失败: {name} ({exit_reason(exit_code)})'
     else:
         text = None
     error_text = failure_reason(text, captured) if text is not None else None
