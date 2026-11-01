@@ -8405,9 +8405,15 @@ def pi_compact_event(msg):
     return out
 
 
+PI_QUOTA_EXHAUSTED_RE = re.compile(r"Token Plan|用量上限|usage limit|\(2056\)|insufficient.?quota|quota.?(?:exceeded|exhausted)", re.I)
 PI_RETRYABLE_RE = re.compile(r"overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504|529)\b|"
                              r"service.?unavailable|server.?error|internal.?error|network.?error|connection.?(?:error|refused|lost)|"
                              r"fetch failed|socket hang up|ended without|timed? out|timeout|terminated", re.I)
+
+
+def pi_error_is_retryable(text):
+    """Quota exhaustion is terminal even when the provider also reports HTTP 429."""
+    return bool(text and not PI_QUOTA_EXHAUSTED_RE.search(text) and PI_RETRYABLE_RE.search(text))
 
 
 def lane_note_executor_exit(rdir, desc_recorded_at):
@@ -9061,7 +9067,12 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                         last_err = (message.get("errorMessage") or "") if message.get("stopReason") == "error" else ""
                 if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
                     continue
-                if last_err and PI_RETRYABLE_RE.search(last_err):
+                if last_err and PI_QUOTA_EXHAUSTED_RE.search(last_err):
+                    # Window quotas will not recover during pi's auto-retry cycle; preserve the
+                    # provider message in the terminal failed run summary.
+                    errors[:] = [short(last_err, 200)]
+                    ended = True
+                elif last_err and pi_error_is_retryable(last_err):
                     # pi may auto-retry a transient provider error: wait for auto_retry_start (or,
                     # if it already arrived, keep its longer deadline) instead of ending now.
                     wait_until = time.monotonic() + pi_retry_wait_seconds()
