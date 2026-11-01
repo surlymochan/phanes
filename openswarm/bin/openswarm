@@ -9000,6 +9000,94 @@ def cmd_lane_systemd(args):
 
 # ---------------------------------------------------------------- fleet
 
+# One SSH option vector for every fleet command: the same multiplexing, jump chain,
+# handshake timeout and ProxyCommand quoting for status, exec, harvest and lane assign.
+FLEET_SSH_OPTION_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+FLEET_SSH_DURATION = re.compile(r"[0-9]+[smhd]?")
+
+
+def fleet_ssh_control_path():
+    """Return the default ControlPath of the multiplexed fleet connection."""
+    return os.path.join(os.path.expanduser("~"), ".ssh", "openswarm", "cm-%C")
+
+
+def fleet_ssh_validate(host, name, kind):
+    """Validate the optional SSH transport fields of one fleet host.
+
+    `jump` (a hop chain), `ssh_options` (a key/value table), `connect_timeout` and
+    `control_persist` only reach an `ssh` host, so a host of another kind that declares
+    them is a configuration error instead of a silently ignored setting.
+    """
+    jump = host.get("jump")
+    hops = [jump] if isinstance(jump, str) else (jump if isinstance(jump, list) else [])
+    if jump is not None and (not hops or any(not isinstance(hop, str) or not hop or hop.startswith("-")
+                                              for hop in hops)):
+        raise ValueError(f"invalid jump for fleet host {name}")
+    options = host.get("ssh_options")
+    if options is not None and (not isinstance(options, dict) or any(
+            not isinstance(key, str) or not FLEET_SSH_OPTION_NAME.fullmatch(key) or
+            not isinstance(value, (str, int, float)) or isinstance(value, bool) or
+            "\n" in str(value) or "\r" in str(value) for key, value in options.items())):
+        raise ValueError(f"invalid ssh_options for fleet host {name}")
+    timeout = host.get("connect_timeout")
+    if timeout is not None and (not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0):
+        raise ValueError(f"invalid connect_timeout for fleet host {name}")
+    persist = host.get("control_persist")
+    if persist is not None and not (isinstance(persist, int) and not isinstance(persist, bool) and persist > 0
+                                    or isinstance(persist, str) and FLEET_SSH_DURATION.fullmatch(persist)):
+        raise ValueError(f"invalid control_persist for fleet host {name}")
+    if kind != "ssh" and (jump or options or timeout is not None or persist is not None):
+        raise ValueError(f"fleet host {name}: ssh options require an ssh host")
+
+
+def fleet_ssh_option_pairs(host):
+    """Return the SSH options of one fleet host as ordered (key, value) pairs.
+
+    `connect_timeout` bounds the handshake, `control_persist` turns on the ControlMaster
+    reuse, `jump` becomes a ProxyJump chain and `ssh_options` carries everything else
+    (a space-bearing ProxyCommand among them). The explicit table is applied last, so an
+    operator can always override a derived option.
+    """
+    pairs = {}
+    timeout = host.get("connect_timeout")
+    if timeout is not None:
+        pairs["ConnectTimeout"] = str(timeout)
+    persist = host.get("control_persist")
+    if persist is not None:
+        pairs["ControlMaster"] = "auto"
+        pairs["ControlPath"] = fleet_ssh_control_path()
+        pairs["ControlPersist"] = str(persist)
+    jump = host.get("jump")
+    if jump:
+        hops = [jump] if isinstance(jump, str) else list(jump)
+        pairs["ProxyJump"] = ",".join(hops)
+    for key, value in (host.get("ssh_options") or {}).items():
+        pairs[key] = str(value)
+    return list(pairs.items())
+
+
+def fleet_ssh_options(host):
+    """Return the SSH option items (`-o Key=Value`) of one fleet host."""
+    options = []
+    for key, value in fleet_ssh_option_pairs(host):
+        options += ["-o", f"{key}={value}"]
+    return options
+
+
+def fleet_ssh_argv(host, *args):
+    """Return the ssh argv of one fleet host: the options, the destination, then the command."""
+    return ["ssh", *fleet_ssh_options(host), host["ssh"], *args]
+
+
+def fleet_ssh_command(host):
+    """Return the GIT_SSH_COMMAND value of one fleet host.
+
+    Git parses this string with the shell, so every item is quoted: a ProxyCommand with
+    spaces stays one argument instead of breaking the command (Refs #907).
+    """
+    return shlex.join(["ssh", *fleet_ssh_options(host)])
+
+
 def fleet_config():
     path = os.path.join(DATA, "fleet.json")
     cfg = jload(path, {"hosts": [{"name": "local", "kind": "local"}]} if not os.path.exists(path) else None)
@@ -9020,6 +9108,7 @@ def fleet_config():
             raise ValueError(f"invalid repos for fleet host {name}")
         if "openswarm" in host and (not isinstance(host["openswarm"], str) or not host["openswarm"]):
             raise ValueError(f"invalid openswarm path for fleet host {name}")
+        fleet_ssh_validate(host, name, kind)
         hosts[name] = host
     return hosts
 
@@ -9043,7 +9132,7 @@ def host_run(host, command, timeout=60, input=None):
     if host["kind"] == "local":
         argv = ["sh", "-c", command]
     elif host["kind"] == "ssh":
-        argv = ["ssh", host["ssh"], "--", command]
+        argv = fleet_ssh_argv(host, "--", command)
     else:
         argv = ["instabox", "ssh", host["box"], "--", command]
     try:
