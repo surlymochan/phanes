@@ -619,5 +619,109 @@ class MissingBunTests(unittest.TestCase):
         self.assertNotIn('预览地址', result.stdout)
 
 
+class MissingDiagnosisDataTests(unittest.TestCase):
+    """--root 指向存在但缺少 data/diagnosis.json 的静态目录时：
+
+    - 服务初始化（main / CLI）给出明确错误并以非 0 退出，不抛 traceback；
+    - 运行中请求缺失的诊断数据时返回明确 404 错误，不崩溃或抛 traceback；
+    - 通过 --data 显式指定合法数据文件时仍可正常启动。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dist = Path(self.tmp.name) / 'empty_dist'
+        self.dist.mkdir()
+        self.index = self.dist / 'index.html'
+        self.index.write_bytes(b'<!doctype html><title>empty dist index</title>')
+        self.expected_data = (self.dist / 'data' / 'diagnosis.json').resolve()
+
+    def run_main(self, argv):
+        """运行 main 并捕获输出，返回 (退出码, stdout, stderr)。"""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serve.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_main_exits_nonzero_when_root_missing_diagnosis_data(self):
+        with patch.object(serve, 'create_server') as mock_create:
+            code, out, err = self.run_main(['--port', '0', '--root', str(self.dist)])
+        self.assertEqual(code, 1)
+        self.assertIn('错误: 诊断数据文件不存在', err)
+        self.assertIn(str(self.expected_data), err)
+        self.assertNotIn('Traceback', err)
+        self.assertNotIn('Traceback', out)
+        self.assertNotIn('预览地址', out)
+        mock_create.assert_not_called()
+
+    def test_cli_exits_nonzero_when_root_missing_diagnosis_data(self):
+        result = subprocess.run(
+            [sys.executable, str(serve.ROOT / 'serve.py'), '--port', '0', '--root', str(self.dist)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('错误: 诊断数据文件不存在', result.stderr)
+        self.assertIn(str(self.expected_data), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertNotIn('预览地址', result.stdout)
+
+    def test_main_exits_nonzero_when_root_directory_does_not_exist(self):
+        nonexistent = Path(self.tmp.name) / 'nonexistent'
+        with patch.object(serve, 'create_server') as mock_create:
+            code, out, err = self.run_main(['--port', '0', '--root', str(nonexistent)])
+        self.assertEqual(code, 1)
+        self.assertIn('错误: 静态站点根目录不存在', err)
+        self.assertIn(str(nonexistent.resolve()), err)
+        self.assertNotIn('Traceback', err)
+        self.assertNotIn('预览地址', out)
+        mock_create.assert_not_called()
+
+    def test_request_missing_diagnosis_file_returns_404_not_traceback(self):
+        args = serve.parse_args(['--port', '0', '--root', str(self.dist)])
+        server = serve.create_server(args.port, args.data, root=args.root)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            conn.request('GET', '/data/diagnosis.json')
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 404)
+            body = resp.read()
+            self.assertTrue(body)
+            self.assertIn(b'404', body)
+
+            conn.request('HEAD', '/data/diagnosis.json')
+            head_resp = conn.getresponse()
+            self.assertEqual(head_resp.status, 404)
+            self.assertEqual(head_resp.read(), b'')
+
+            # 其他已存在的静态文件仍正常服务
+            conn.request('GET', '/index.html')
+            index_resp = conn.getresponse()
+            self.assertEqual(index_resp.status, 200)
+            self.assertEqual(index_resp.read(), self.index.read_bytes())
+        finally:
+            conn.close()
+
+    def test_root_missing_diagnosis_data_succeeds_with_explicit_data_option(self):
+        override_data = Path(self.tmp.name) / 'custom.json'
+        override_data.write_bytes(b'{"source": "custom"}')
+
+        mock_server = MagicMock()
+        mock_server.server_address = ('127.0.0.1', 8888)
+        mock_server.serve_forever.return_value = None
+        with patch.object(serve, 'create_server', return_value=mock_server) as mock_create, \
+             patch('builtins.print'):
+            code = serve.main(['--port', '0', '--root', str(self.dist), '--data', str(override_data)])
+        self.assertEqual(code, 0)
+        mock_create.assert_called_once_with(0, override_data.resolve(), root=self.dist.resolve())
+
+
 if __name__ == '__main__':
     unittest.main()
