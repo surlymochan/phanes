@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline path check for box control-plane boot docs. No SSH.
+# Offline path check for box control-plane boot docs (Refs #777). No SSH.
 # Usage:
 #   bash tools/check-ctl-boot.sh [ctl-bin-dir]   # default ctl-bin-dir: $HOME/phanes-ctl/bin
 #   bash tools/check-ctl-boot.sh --gate-only     # only the offline PAUSE-BACKEND gate replay
