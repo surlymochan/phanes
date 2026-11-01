@@ -55,6 +55,7 @@ HEADS_FILE = "heads.csv"
 REVENUE_FILE = "revenue.csv"
 FORECAST_FILE = "forecast.csv"
 FX_FILE = "fx.csv"
+CURRENCY_FIELDS = {"币种", "货币", "币别", "currency", "currency_code", "currencycode"}
 
 REQUIRED_COLUMNS = {
     COST_FILE: ("月份", "整体技术人力成本万元", "营收业务技术人力成本万元", "运维设施成本万元"),
@@ -305,6 +306,35 @@ def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
         line = getattr(reader, "line_num", "未知")
         raise RawDataError(f"原始数据 {path.name} 第 {line} 行不是合法 CSV：{cause}") from cause
     return rows
+
+
+def validate_currencies(raw_dir: Path) -> None:
+    """无 FX 表时拒绝金额数据中的多个币种，避免跨币种直接计算。"""
+    if (raw_dir / FX_FILE).is_file():
+        return
+    currencies: dict[str, set[str]] = {}
+    for path in sorted(raw_dir.glob("*.csv")):
+        if path.name == FX_FILE:
+            continue
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fields = [field for field in (reader.fieldnames or []) if field and field.casefold() in CURRENCY_FIELDS]
+                rows = list(reader)
+                for field in fields:
+                    values = currencies.setdefault(f"{path.name}.{field}", set())
+                    for row in rows:
+                        value = (row.get(field) or "").strip()
+                        if value:
+                            values.add(value)
+        except (OSError, csv.Error) as cause:
+            raise RawDataError(f"无法读取币种字段 {path.name}：{cause}") from cause
+    populated = {field: values for field, values in currencies.items() if values}
+    all_values = {value for values in populated.values() for value in values}
+    if len(all_values) > 1:
+        fields = "、".join(sorted(populated))
+        values = "、".join(sorted(all_values))
+        raise RawDataError(f"缺少 FX 表，不能混用多个币种（币种字段：{fields}；值：{values}）")
 
 
 def parse_number(value: str | None, path: Path, column: str, number: int) -> float | None:
@@ -1115,6 +1145,7 @@ def ensure_finite_snapshot(value: object, path: str = "快照") -> None:
 def build_from_files(brief_path: Path, raw_dir: Path) -> dict:
     """按任务书与原始数据生成快照，并自检结构。"""
     brief = load_brief(brief_path)
+    validate_currencies(raw_dir)
     plan = parse_plan(brief, raw_dir)
     periods = plan["periods"]
     raw = load_raw(raw_dir, (periods["start"], periods["end"]))
