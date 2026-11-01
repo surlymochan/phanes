@@ -24,10 +24,58 @@ NUMBER_RE = re.compile(r"(?<![A-Za-z])[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d
 PERIOD_SUFFIXES = ("实际", "参考", "测算", "目标")
 
 DATA_SOURCE_HEADING = "## 数据来源"
+CURRENCY_FIELDS = {"币种", "货币", "币别", "currency", "currency_code", "currencycode"}
 
 
 class MethodError(Exception):
     """输入数据不可用。"""
+
+
+def validate_currencies(diagnosis: Any, raw_dir: Optional[Path]) -> None:
+    """无 FX 表时拒绝诊断或原始 CSV 中的多个币种。"""
+    if raw_dir is not None and (raw_dir / "fx.csv").is_file():
+        return
+    values_by_field: dict[str, set[str]] = {}
+    if raw_dir is not None:
+        if not raw_dir.is_dir():
+            raise MethodError(f"原始数据目录不存在：{raw_dir}")
+        for path in sorted(raw_dir.glob("*.csv")):
+            if path.name == "fx.csv":
+                continue
+            try:
+                with path.open(encoding="utf-8-sig", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    rows = list(reader)
+                    for field in (reader.fieldnames or []):
+                        if field and field.casefold() in CURRENCY_FIELDS:
+                            bucket = values_by_field.setdefault(f"{path.name}.{field}", set())
+                            for row in rows:
+                                value = (row.get(field) or "").strip()
+                                if value:
+                                    bucket.add(value)
+            except (OSError, csv.Error) as cause:
+                raise MethodError(f"无法读取币种字段 {path.name}：{cause}") from cause
+    else:
+        def walk(value: Any, path: str) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if str(key).casefold() in CURRENCY_FIELDS:
+                        bucket = values_by_field.setdefault(path + "." + str(key), set())
+                        if isinstance(child, list):
+                            bucket.update(str(item).strip() for item in child if str(item).strip())
+                        elif child is not None and str(child).strip():
+                            bucket.add(str(child).strip())
+                    walk(child, path + "." + str(key))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    walk(child, f"{path}[{index}]")
+        walk(diagnosis, "diagnosis")
+    populated = {field: values for field, values in values_by_field.items() if values}
+    all_values = {value for values in populated.values() for value in values}
+    if len(all_values) > 1:
+        fields = "、".join(sorted(populated))
+        currencies = "、".join(sorted(all_values))
+        raise MethodError(f"缺少 FX 表，不能混用多个币种（币种字段：{fields}；值：{currencies}）")
 
 
 def validate_diagnosis(diagnosis: Any) -> None:
@@ -372,6 +420,7 @@ def main(argv: List[str] = None) -> int:
         brief = load_json(args.brief)
         diagnosis = load_json(args.data)
         validate_diagnosis(diagnosis)
+        validate_currencies(diagnosis, args.raw)
         validate_numeric_references(diagnosis)
         sources = None
         if args.raw is not None:
