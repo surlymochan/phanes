@@ -145,6 +145,26 @@ class RoutingScenarios(unittest.TestCase):
         self.assertIsNone(xs.routing_outcome(entry))
         self.assertEqual(xs.outcome_label(entry), "unknown")
 
+    def test_24_empty_backend_uses_stable_default_decision(self):
+        decision = xs.route(prof(d=3, backend=""), scenario(), POLICY)
+        self.assertEqual(
+            set(decision),
+            {"ok", "backend", "model", "effort", "tier", "limit_id", "fallbacks",
+             "claude_review", "reasons", "skipped", "concurrency", "profile"},
+        )
+        self.assertEqual(decision["backend"], "codex")
+        self.assertEqual(decision["claude_review"], "light")
+        self.assertEqual(decision["reasons"], ["claude pro at 30%"])
+        self.assertEqual(decision["skipped"], {})
+
+    def test_25_unknown_backend_is_not_silently_rerouted(self):
+        with self.assertRaisesRegex(KeyError, "mystery"):
+            xs.route(prof(d=3, backend="mystery"), scenario(), POLICY)
+
+    def test_26_mixed_case_backend_is_not_silently_normalized(self):
+        with self.assertRaisesRegex(KeyError, "CoDeX"):
+            xs.route(prof(d=3, backend="CoDeX"), scenario(), POLICY)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
