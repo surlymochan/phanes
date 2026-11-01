@@ -313,6 +313,15 @@ def numeric_literals(value: Any) -> List[str]:
     return found
 
 
+def metric_numeric_literals(diagnosis: dict) -> List[str]:
+    """Collect numeric values only from metrics[].数值 for the output self-check."""
+    found: List[str] = []
+    for metric in diagnosis.get("metrics", []):
+        if isinstance(metric, dict):
+            found.extend(numeric_literals(metric.get("数值")))
+    return found
+
+
 def _number_key(value: Any) -> Optional[Decimal]:
     if isinstance(value, bool) or value is None:
         return None
@@ -439,7 +448,7 @@ def main(argv: List[str] = None) -> int:
     leaked = sorted(
         set(
             token
-            for token in numeric_literals(diagnosis)
+            for token in metric_numeric_literals(diagnosis)
             if token and re.search(r"(?<![\d.])" + re.escape(token) + r"(?![\d.])", check_output)
         )
     )

@@ -245,6 +245,35 @@ class WriteMethodTest(unittest.TestCase):
         self.assertIn("生成文档包含诊断数值：12", stderr)
         self.assertEqual(content, "")
 
+    def test_demo_artifacts_write_method_without_textual_number_false_positive(self):
+        brief_path = HERE.parent / "demo" / "brief.json"
+        diagnosis_path = HERE.parent / "demo" / "diagnosis.json"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_path = Path(temp_dir) / "da-method.md"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--brief",
+                    str(brief_path),
+                    "--data",
+                    str(diagnosis_path),
+                    "--out",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(out_path.is_file())
+            content = out_path.read_text(encoding="utf-8")
+
+        self.assertIn("## 观察期间", content)
+        self.assertIn("## 数据来源", content)
+        self.assertIn("## 指标与结论字段", content)
+
     def test_lists_raw_csv_files_and_row_counts(self):
         raw_files = {
             "heads.csv": "月份,整体折算人头\n2026-01,10\n2026-02,11\n2026-03,12\n",
