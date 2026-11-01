@@ -79,6 +79,7 @@
     "weighted": false
   },
   "codex": {
+    "min_cli_version": "",
     "default_model": "gpt-6-luna",
     "default_effort": "high",
     "require_default_model": true,

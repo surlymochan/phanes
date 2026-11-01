@@ -1640,6 +1640,98 @@ def find_codex(policy):
     return good[0][2], good[0][1]
 
 
+CODEX_TOO_OLD_ERROR_CLASS = "cli_too_old"
+CODEX_UNAVAILABLE_ERROR_CLASS = "cli_unavailable"
+CODEX_BLOCKED_PREFIX = "blocked: "
+
+
+class CodexVersionBlockedError(RuntimeError):
+    """The lane may not serve: the Codex CLI misses the policy's version gate.
+
+    The reason doubles as the lane state, so `lane status` shows why the lane refuses work.
+    """
+
+    def __init__(self, reason, error_class=CODEX_TOO_OLD_ERROR_CLASS):
+        super().__init__(reason)
+        self.reason = reason
+        self.error_class = error_class
+
+
+def semver_key(version):
+    match = re.fullmatch(r"\s*v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?\s*", version or "")
+    if not match:
+        raise ValueError(f"invalid semantic version: {version}")
+    major, minor, patch, prerelease = match.groups()
+    if prerelease is None:
+        pre = (1,)
+    else:
+        pre = (0, *((0, int(part)) if part.isdigit() else (1, part) for part in prerelease.split(".")))
+    return int(major), int(minor), int(patch), pre
+
+
+def codex_version_from_output(text):
+    """Pick the semantic version out of a `codex --version` banner, if it carries one."""
+    match = re.search(r"v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)", text or "")
+    return match.group(1) if match else None
+
+
+def codex_versions_match(left, right):
+    """Whether two version banners denote the same release (`v0.166.0` equals `0.166.0`)."""
+    if not left or not right:
+        return False
+    try:
+        return semver_key(left) == semver_key(right)
+    except ValueError:
+        return left == right
+
+
+def codex_version_gate(policy, lane=None, binary=None, version=None):
+    """Check the policy's codex.min_cli_version against the installed CLI and code-mode host.
+
+    Returns (reason, error_class); reason is None when the lane may serve.
+    """
+    need = str((policy.get("codex") or {}).get("min_cli_version") or "").strip()
+    if not need:
+        return None, None
+    if binary is None:
+        binary = codex_resolved_binary(policy, lane)
+    if not binary:
+        return f"{CODEX_BLOCKED_PREFIX}cli_unavailable (codex binary not found, need {need})", CODEX_UNAVAILABLE_ERROR_CLASS
+    have = version
+    if not have:
+        rc, out, _ = sh([binary, "--version"], timeout=15)
+        have = codex_version_from_output(out) if rc == 0 else None
+    if not have:
+        return f"{CODEX_BLOCKED_PREFIX}cli_unavailable (codex --version failed, need {need})", CODEX_UNAVAILABLE_ERROR_CLASS
+    try:
+        too_old = semver_key(have) < semver_key(need)
+    except ValueError:
+        return f"{CODEX_BLOCKED_PREFIX}cli_unavailable (unreadable codex version {have}, need {need})", CODEX_UNAVAILABLE_ERROR_CLASS
+    if too_old:
+        return f"{CODEX_BLOCKED_PREFIX}cli_too_old (have {have}, need {need})", CODEX_TOO_OLD_ERROR_CLASS
+    host = envvar("CODEX_CODE_MODE_HOST_BIN") or shutil.which("codex-code-mode-host")
+    if not host:
+        return (f"{CODEX_BLOCKED_PREFIX}cli_unavailable (have {have}, code-mode-host not found, need {need})",
+                CODEX_UNAVAILABLE_ERROR_CLASS)
+    rc, host_out, _ = sh([host, "--version"], timeout=15)
+    host_version = codex_version_from_output(host_out) if rc == 0 else None
+    if not codex_versions_match(have, host_version):
+        return (f"{CODEX_BLOCKED_PREFIX}cli_too_old (have {have}, code-mode-host {host_version or 'unavailable'}, "
+                f"need matching versions)", CODEX_TOO_OLD_ERROR_CLASS)
+    return None, None
+
+
+def codex_min_version_error(policy, lane=None, binary=None, version=None):
+    """Return a blocking reason when CLI or its code-mode host misses policy's minimum."""
+    return codex_version_gate(policy, lane, binary, version)[0]
+
+
+def codex_min_version_block(policy, lane=None, binary=None, version=None):
+    """Return the blocking error when the Codex version gate refuses the lane."""
+    reason, error_class = codex_version_gate(policy, lane, binary, version)
+    return CodexVersionBlockedError(reason, error_class) if reason else None
+
+
 CODEX_IO_LOST_STREAK = 3
 
 
@@ -1665,8 +1757,7 @@ def codex_install_fingerprint(policy, lane=None):
     version = None
     if os.path.basename(binary) == "codex":
         rc, out, _ = sh([binary, "--version"], timeout=15)
-        if rc == 0 and out.strip():
-            version = out.strip().split()[-1]
+        version = codex_version_from_output(out) if rc == 0 else None
     try:
         mtime = os.path.getmtime(binary)
     except OSError:
@@ -7280,6 +7371,10 @@ class LaneChild:
             binary = envvar("CODEX_APP_SERVER_BIN") or lane.get("binary") or find_codex(policy)[0]
             if not binary:
                 raise RuntimeError("codex binary not found; set lane binary or install Codex")
+            # The live policy gates the very binary this child runs.
+            block = codex_min_version_block(load_policy(), lane, binary=binary)
+            if block:
+                raise block
             cmd = [binary, *codex_executor_flags(), "app-server"]
         elif backend == "pi":
             binary = envvar("PI_RPC_BIN") or lane.get("binary") or pi_bin()
@@ -7605,6 +7700,12 @@ def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
         return child, False
     configured = next((row for row in lane_config() if row.get("name") == lane["name"]), lane)
     current = codex_install_fingerprint(policy, configured)
+    # The live policy is the single source of truth for the version gate.  The fingerprint already
+    # knows the binary and its version, so the gate does not probe the CLI a second time.
+    reason = codex_min_version_error(load_policy(), configured, binary=(current or {}).get("binary"),
+                                     version=(current or {}).get("version"))
+    if reason:
+        return child, False
     previous = getattr(child, "codex_fingerprint", None)
     if not current or current == previous:
         return child, False
@@ -8424,6 +8525,10 @@ def lane_do_run(lane, spec, child, server, current):
     ws = None
     turn, pending = {}, []
     try:
+        if lane["backend"] == "codex":
+            block = codex_min_version_block(load_policy(), lane)
+            if block:
+                raise block
         ws = lane_prepare_workspace(lane, rid, spec.get("base"))
         if ws.get("workspace_note"):
             set_status(rdir, workspace_note=ws["workspace_note"])
@@ -8583,7 +8688,7 @@ def lane_do_run(lane, spec, child, server, current):
                                 attempts=attempts)
         return out
     except Exception as e:
-        error_class = "exec_error"
+        error_class = e.error_class if isinstance(e, CodexVersionBlockedError) else "exec_error"
         evp = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
         if not os.path.exists(evp):
             open(evp, "w").close()
@@ -8592,6 +8697,7 @@ def lane_do_run(lane, spec, child, server, current):
             # Preserve a visible failed run even if lane worktree preparation was rejected.
             status = {"id": rid, "status": "failed", "title": spec.get("title"), "lane": lane["name"],
                       "backend": lane["backend"], "model": lane["model"], "result": None,
+                      "error_class": error_class,
                       "attempts": [{"backend": lane["backend"], "model": lane["model"], "rc": 1,
                                     "error_class": error_class, "error_tail": short(e, 500)}], "run_dir": rdir}
             jsave(os.path.join(rdir, "result.json"), status)
@@ -8632,6 +8738,7 @@ def cmd_lane_serve(lane, policy):
     server = lane_ctl_listener(name)
     current, child = {}, None
     started, backoff, next_start = NOW(), 1, 0
+    next_codex_check = NOW()
     next_fleet_recovery = NOW()
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
@@ -8661,10 +8768,25 @@ def cmd_lane_serve(lane, policy):
                          turn_state=None, concurrency_keys=[])
     except Exception as e:
         traceback.print_exc()
-        lane_write_state(name, state="crashed", last_error=short(e, 500), child_pid=None)
-        next_start = NOW() + backoff
+        reason = short(e, 500)
+        blocked = isinstance(e, CodexVersionBlockedError)
+        lane_write_state(name, state=reason if blocked else "crashed", last_error=reason, child_pid=None)
+        # A blocked lane retries the version gate on a fixed interval, other crashes keep the main backoff.
+        next_start = NOW() + (15 if blocked else backoff)
     shutdown = False
     while not shutdown:
+        if lane["backend"] == "codex" and not current.get("run_id") and NOW() >= next_codex_check:
+            next_codex_check = NOW() + 15
+            reason = codex_min_version_error(load_policy(), lane)
+            if reason:
+                if child:
+                    try:
+                        child.close()
+                    except Exception:
+                        pass
+                    child = None
+                lane_write_state(name, state=reason, child_pid=None, last_error=reason, current_run=None)
+                next_start = max(next_start, next_codex_check)
         # This is the existing resident lane polling loop, not a second daemon.
         # A killed runner otherwise cannot release its host capacity until a later admission.
         if NOW() >= next_fleet_recovery:
@@ -8700,9 +8822,15 @@ def cmd_lane_serve(lane, policy):
                                  turn_state=None, concurrency_keys=[])
             except Exception as e:
                 traceback.print_exc()
-                lane_write_state(name, state="crashed", child_pid=None, last_error=short(e, 500))
-                next_start = NOW() + backoff
-                backoff = min(backoff * 2, 60)
+                reason = short(e, 500)
+                blocked = isinstance(e, CodexVersionBlockedError)
+                lane_write_state(name, state=reason if blocked else "crashed", child_pid=None, last_error=reason)
+                if blocked:
+                    # The version gate is re-checked on a fixed interval, without growing the crash backoff.
+                    next_start = NOW() + 15
+                else:
+                    next_start = NOW() + backoff
+                    backoff = min(backoff * 2, 60)
         pending = []
         down = lane_control_messages(server, lane, current, child, {}, pending)
         if down or current.get("down_requested"):
@@ -8722,7 +8850,17 @@ def cmd_lane_serve(lane, policy):
             finally:
                 down_after = bool(spec.get("down_requested"))
                 current.clear()
-            if child and child.alive():
+            reason = codex_min_version_error(load_policy(), lane) if lane["backend"] == "codex" else None
+            if reason:
+                try:
+                    child.close()
+                except Exception:
+                    pass
+                child = None
+                lane_write_state(name, state=reason, child_pid=None, current_run=None, last_error=reason)
+                next_start = NOW() + 15
+                next_codex_check = next_start
+            elif child and child.alive():
                 lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None)
             else:
                 lane_write_state(name, state="crashed", child_pid=None, current_run=None,
@@ -8764,6 +8902,22 @@ def cmd_lane_serve(lane, policy):
         pass
 
 
+def lane_state_blocked(state):
+    """Whether a lane state reports a version-gate block instead of a normal lane state."""
+    return str(state or "").startswith(CODEX_BLOCKED_PREFIX)
+
+
+def lane_state_error(state):
+    """The error a non-idle lane state reports, if it reports one."""
+    if not isinstance(state, dict):
+        return None
+    if state.get("state") == "crashed":
+        return state.get("last_error") or "lane child is crashed"
+    if lane_state_blocked(state.get("state")):
+        return state.get("last_error") or state.get("state")
+    return None
+
+
 def cmd_lane_up(args, policy):
     results = []
     for lane in lanes_by_name(args.names):
@@ -8778,20 +8932,20 @@ def cmd_lane_up(args, policy):
                     ping = lane_call(name, {"op": "ping"}, timeout=0.3)
                     if ping.get("ok"):
                         break
-                elif state.get("state") == "crashed":
+                elif state.get("state") == "crashed" or lane_state_blocked(state.get("state")):
                     break
                 time.sleep(0.1)
             if ping.get("ok"):
                 lane_state = ping.get("state") or {}
-                if lane_state.get("state") == "crashed":
-                    results.append({"name": name, "started": False, "ok": False,
-                                    "error": lane_state.get("last_error") or "lane child is crashed"})
+                error = lane_state_error(lane_state)
+                if error:
+                    results.append({"name": name, "started": False, "ok": False, "error": error})
                 else:
                     results.append({"name": name, "started": False, "state": lane_state.get("state")})
                 continue
+            error = lane_state_error(state)
             results.append({"name": name, "started": False,
-                            **({"ok": False, "error": state.get("last_error") or "lane child is crashed"}
-                               if state.get("state") == "crashed" else
+                            **({"ok": False, "error": error} if error else
                                {"ok": False, "error": f"lane supervisor pid {state['supervisor_pid']} is alive but its control socket is not responding"})})
             continue
         os.makedirs(lane_root(name), exist_ok=True)
@@ -8802,6 +8956,7 @@ def cmd_lane_up(args, policy):
                                  start_new_session=True, close_fds=True)
         ready = False
         startup_error = None
+        startup_blocked = False
         for _ in range(300):
             if p.poll() is not None:
                 break
@@ -8814,16 +8969,22 @@ def cmd_lane_up(args, policy):
             elif state.get("supervisor_pid") == p.pid and state.get("state") == "crashed":
                 startup_error = state.get("last_error")
                 break
+            elif state.get("supervisor_pid") == p.pid and lane_state_blocked(state.get("state")):
+                startup_error = state.get("last_error") or state.get("state")
+                startup_blocked = True
+                break
             time.sleep(0.1)
         if not ready:
             log_error = lane_last_log_error(name)
+            error = startup_error if startup_blocked else (log_error or startup_error)
             results.append({"name": name, "started": False, "ok": False,
-                            "error": log_error or startup_error or "supervisor did not start"})
+                            "error": error or "supervisor did not start"})
         else:
             lane_state = ping.get("state") or {}
-            if lane_state.get("state") == "crashed":
+            error = lane_state_error(lane_state)
+            if error:
                 results.append({"name": name, "started": True, "ok": False, "supervisor_pid": p.pid,
-                                "error": lane_state.get("last_error") or "lane child is crashed"})
+                                "error": error})
             else:
                 results.append({"name": name, "started": True, "supervisor_pid": p.pid,
                                 "state": lane_state.get("state")})
