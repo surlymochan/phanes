@@ -9190,6 +9190,45 @@ def lane_wait_rate_limit(seconds, lane, spec, child, server, turn, pending):
     return NOW() < budget_deadline
 
 
+LANE_PROVIDER_CODE_RES = (
+    re.compile(r"\((\d{4,6})\)"),
+    re.compile(r"\b(RESOURCE_EXHAUSTED)\b"),
+)
+
+
+def dispatch_quota_module():
+    """The quota parser (lib/dispatch/quota.py), loaded by path like dispatch_engine_module()."""
+    name = "openswarm_dispatch_quota"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "quota.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def lane_quota_fields(error_class, attempts):
+    """resets_at (ISO8601Z) and provider_code from the last provider error of a rate-limited lane run."""
+    if error_class != "rate_limit":
+        return {}
+    text = next((attempt.get("error_tail") for attempt in reversed(attempts or [])
+                 if isinstance(attempt, dict) and attempt.get("error_tail")), None)
+    if not text:
+        return {}
+    fields = {}
+    cooldown = dispatch_quota_module().extract_cooldown(text)
+    if cooldown is not None:
+        fields["resets_at"] = dt.datetime.fromtimestamp(NOW() + cooldown, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for pattern in LANE_PROVIDER_CODE_RES:
+        match = pattern.search(text)
+        if match:
+            fields["provider_code"] = match.group(1)
+            break
+    return fields
+
+
 def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None):
     rid, rdir = spec["run_id"], os.path.join(RUNS, spec["run_id"])
     title = spec.get("title") or spec["task"].strip().splitlines()[0][:72]
@@ -9283,6 +9322,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     if ws.get("mode") == "worktree" and not read_only:
         detach_at = fin.get("commit") or ws["base"]
         lane_git(["checkout", "--detach", detach_at], ws["root"])
+    quota = lane_quota_fields(error_class, attempts)
+    lane_write_state(lane["name"], last_quota=quota or None)
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
            "prepare": ws.get("prepare", []), "workspace_note": ws.get("workspace_note"), "verify": verify,
            "verify_note": verify_note, "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
@@ -9291,7 +9332,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
            "risk_blocks": spec.get("risk_blocks", []), "review_changes_discarded": bool(read_only and changed),
            "usage": usage, "seconds": round(sum(attempt["seconds"] for attempt in attempts), 3), "result": final, "workspace":
            {k: v for k, v in ws.items() if k in ("mode", "path", "repo", "base", "note", "lane")},
-           **fin, "attempts": attempts, "run_dir": rdir}
+           **fin, "attempts": attempts, "run_dir": rdir, **quota}
     jsave(os.path.join(rdir, "result.json"), out)
     changed = changed_paths(ws.get("repo") or ws.get("root"), ws.get("base"), fin.get("commit"),
                             (final or {}).get("files_changed"))
@@ -9873,6 +9914,8 @@ def lane_status_rows():
                      "last_error": state.get("last_error")})
         if lane.get("drain") is True:
             rows[-1]["drain"] = True
+        last_quota = state.get("last_quota") or {}
+        rows[-1].update({key: last_quota[key] for key in ("resets_at", "provider_code") if key in last_quota})
     return rows
 
 
@@ -14739,7 +14782,8 @@ def main():
     lp.add_argument("names", nargs="*", help="lane names; default starts all configured lanes")
     lp = lane_sub.add_parser("down", help="stop lane turns, children, and supervisors")
     lp.add_argument("names", nargs="*", help="lane names; default stops all configured lanes")
-    lane_sub.add_parser("status", help="show configured lane state")
+    lp = lane_sub.add_parser("status", help="show configured lane state")
+    lp.add_argument("--json", action="store_true", help="print lane state as JSON (the default output)")
     lp = lane_sub.add_parser("assign", help="assign one task to an idle lane")
     lp.add_argument("name")
     add_dispatch_arguments(lp, "task-source", "title", "verify", "verify-baseline", "budget",
