@@ -107,6 +107,9 @@ class MakeBriefTest(unittest.TestCase):
     def test_brief_has_all_fields(self) -> None:
         """任务书字段齐全，且没有多余字段。"""
         self.assertEqual(set(self.brief), BRIEF_KEYS)
+        self.assertRegex(self.brief["period"], r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+        self.assertIsInstance(self.brief["summary"], str)
+        self.assertTrue(self.brief["summary"].strip())
 
     def test_顶层字段序列化顺序稳定(self) -> None:
         """任务书 JSON 序列化为文本后顶层字段按 schema/实现稳定顺序输出且无漂移。"""
