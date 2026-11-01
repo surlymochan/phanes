@@ -241,6 +241,26 @@ time.sleep(30)
         self.assertEqual(timings[-1]['exit_code'], 9)
         self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
 
+    def test_signal_killed_role_is_named_and_written_to_timings(self):
+        """角色被 kill -9 终止时，失败角色、SIGKILL 和 timings 都必须可核对。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        killer = self.scripts[1]
+        killer.write_text(
+            "import os\nos.execl('/bin/sh', 'sh', '-c', 'kill -9 $$')\n",
+            encoding='utf-8',
+        )
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: DA', result.stderr)
+        self.assertIn('SIGKILL', result.stderr)
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
+        self.assertEqual(timings[-1]['exit_code'], -9)
+        self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
+
     def test_failed_step_is_named_when_timings_cannot_be_written(self):
         """步骤失败且耗时记录写不出来时仍非零退出，并在输出里点名失败步骤。"""
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
