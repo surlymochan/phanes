@@ -1002,6 +1002,27 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(base / "missing.json", data)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_missing_working_directory_diagnosis_exits_non_zero(self) -> None:
+        """工作目录缺少 data/diagnosis.json 时退出码非 0 并明确报出缺失文件。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--brief",
+                    str(brief),
+                    "--data",
+                    "data/diagnosis.json",
+                ],
+                cwd=base,
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("无法读取 data/diagnosis.json", result.stderr)
+
     def test_corrupt_brief_json_fails(self) -> None:
         """brief.json 损坏时命令行非零退出且 stderr 输出包含可读错误。"""
         with temporary_directory() as folder:
