@@ -1118,12 +1118,19 @@ class LaneTests(unittest.TestCase):
         original_head = self.git("rev-parse", "HEAD")
         first = self.assign("LANE_TEST_WAIT keep busy")
         self.wait_running(first)
+        original_state = self.lane_state()
         (self.repo / "later-commit.txt").write_text("must not enter the running turn\n")
         self.git("add", "later-commit.txt")
         self.git("commit", "-q", "-m", "advance repo while lane is busy")
         second = self.cli("lane", "assign", self.lane_name, "--prompt", "should be rejected", check=False)
         self.assertNotEqual(second.returncode, 0)
-        self.assertIn("busy", json.loads(second.stdout)["error"])
+        error = json.loads(second.stdout)["error"]
+        self.assertIn(self.lane_name, error)
+        self.assertRegex(error, r"busy|active")
+        unchanged_state = self.lane_state()
+        for key in ("state", "current_run", "supervisor_pid", "child_pid"):
+            with self.subTest(state_key=key):
+                self.assertEqual(unchanged_state.get(key), original_state.get(key))
         wt = self.data / "lanes" / self.lane_name / "wt"
         self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True,
                                         capture_output=True, text=True).stdout.strip(), original_head)
