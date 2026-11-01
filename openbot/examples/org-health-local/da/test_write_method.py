@@ -233,17 +233,34 @@ class WriteMethodTest(unittest.TestCase):
         self.assertIn("# 数据口径说明", content)
         self.assertIn("活跃度", content)
 
-    def test_brief_method_numeric_leak_fails_without_writing(self):
-        brief = {**BRIEF, "口径": ["按任务书定义计算", "12 万元/月"]}
+    def test_brief_method_keeps_ordinary_numbers_without_leak_check(self):
+        brief = {**BRIEF, "口径": ["按任务书定义计算", "第 12 版方法，按 12 个月滚动"]}
         diagnosis = {
             "metrics": [{"标题": "成本", "数值": {"月度": {"一月": 12}}}]
         }
 
         code, stderr, content = run_write_method(brief, diagnosis)
 
-        self.assertEqual(code, 1)
-        self.assertIn("生成文档包含诊断数值：12", stderr)
-        self.assertEqual(content, "")
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("第 12 版方法，按 12 个月滚动", content)
+
+    def test_special_method_text_is_one_safe_code_block(self):
+        brief = {
+            **BRIEF,
+            "口径": "第一行 **加粗**\n第二行含 `反引号` 和 ``` 代码标记\n### 不应成为标题",
+        }
+        code, stderr, content = run_write_method(brief, DIAGNOSIS)
+
+        self.assertEqual(code, 0, stderr)
+        method_start = content.index("## 统一口径")
+        method_end = content.index("## 观察期间")
+        method_section = content[method_start:method_end]
+        self.assertIn("第一行 **加粗**", method_section)
+        self.assertIn("第二行含 `反引号` 和 ``` 代码标记", method_section)
+        self.assertIn("### 不应成为标题", method_section)
+        self.assertEqual(method_section.count("## 观察期间"), 0)
+        self.assertEqual(method_section.count("````"), 2)
+        self.assertIn("\n### 不应成为标题\n````", method_section)
 
     def test_demo_artifacts_write_method_without_textual_number_false_positive(self):
         brief_path = HERE.parent / "demo" / "brief.json"

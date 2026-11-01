@@ -176,6 +176,22 @@ def render_period_text(value: Any) -> str:
     return str(value)
 
 
+def markdown_code_block(value: Any) -> str:
+    """Render arbitrary block text without allowing it to change Markdown structure."""
+    text = str(value).rstrip("\n")
+    longest_run = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}\n{text}\n{fence}"
+
+
+def markdown_escape_text(value: Any) -> str:
+    """Keep diagnosis prose readable while preventing Markdown injection."""
+    text = str(value).replace("\\", "\\\\")
+    for marker in ("`", "*", "_", "[", "]", "(", ")", "#", ">", "|", "~"):
+        text = text.replace(marker, "\\" + marker)
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "  \n")
+
+
 def metric_sections(diagnosis: dict) -> Iterable[Tuple[str, str, Any, List[str]]]:
     def walk(value: Any, path: str, title: str) -> Iterable[Tuple[str, str, Any, List[str]]]:
         if isinstance(value, dict) and value and all(
@@ -239,7 +255,7 @@ def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]
         "",
         "本文只说明字段来源、计算口径、期间和缺口，不复述诊断数值。",
         "",
-        f"## 统一口径\n\n{method}",
+        f"## 统一口径\n\n{markdown_code_block(method)}",
         "",
         f"## 观察期间\n\n{period_text}",
         "",
@@ -255,10 +271,11 @@ def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]
     for title, path, value, missing in sections:
         lines.extend(
             [
-                f"### {title}",
+                f"### {markdown_escape_text(title)}",
                 "",
                 f"- 数据来源（字段路径）：`{path}`",
-                f"- 计算口径：引用任务书“口径”：{method}",
+                "- 计算口径：引用任务书“口径”：",
+                markdown_code_block(method),
                 f"- 期间：{period_text}",
                 "- 已知缺口："
                 + ("；".join(f"{period} 为 null" for period in missing) if missing else "未发现明确的 null 期次"),
@@ -269,7 +286,7 @@ def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]
     insights = diagnosis.get("insights", [])
     if insights:
         lines.extend(
-            f"- {redacted_text(item.get('标题', '未命名问题'))}"
+            f"- {redacted_text(markdown_escape_text(item.get('标题', '未命名问题')))}"
             for item in insights
             if isinstance(item, dict)
         )
@@ -278,7 +295,7 @@ def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]
     lines.extend(["", "## 定义", ""])
     definitions = diagnosis.get("definitions", [])
     if definitions:
-        lines.extend(f"- {redacted_text(item)}" for item in definitions)
+        lines.extend(f"- {redacted_text(markdown_escape_text(item))}" for item in definitions)
     else:
         lines.append("未提供指标定义。")
     return "\n".join(lines).rstrip() + "\n"
@@ -291,6 +308,14 @@ def strip_data_source(text: str) -> str:
     """
     pattern = re.compile(
         r"^" + re.escape(DATA_SOURCE_HEADING) + r"\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL
+    )
+    return pattern.sub("", text)
+
+
+def strip_method_section(text: str) -> str:
+    """Exclude task-book prose from the diagnosis-value leak check."""
+    pattern = re.compile(
+        r"^## 统一口径\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL
     )
     return pattern.sub("", text)
 
@@ -438,10 +463,16 @@ def main(argv: List[str] = None) -> int:
         print(str(cause), file=sys.stderr)
         return 1
     output = render(brief, diagnosis, sources)
+    method = brief_method(brief)
     # Period labels and array indexes are deliberately present in source paths;
     # exclude those structural strings from the value-only leak check.
     # 数据来源小节里的行数是原始 CSV 的行数，不是诊断数值，同样排除。
-    check_output = re.sub(r"`[^`]*`", "", strip_data_source(output))
+    # 方法说明来自 brief，不是诊断数据字段；其中的普通数字和 Markdown
+    # 示例必须原样保留，不应被诊断数值泄露检查误判。
+    check_output = strip_method_section(strip_data_source(output))
+    # 口径也会在每个字段条目中重复展示；全部移除后再检查诊断字段。
+    check_output = check_output.replace(method, "")
+    check_output = re.sub(r"`[^`]*`", "", check_output)
     periods = brief.get("观察期间", []) if isinstance(brief, dict) else []
     for period in period_labels(periods):
         check_output = check_output.replace(period, "")
