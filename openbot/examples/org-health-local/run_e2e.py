@@ -32,11 +32,18 @@ def parse_args(argv=None):
         type=Path,
         help='前端 bundle 文件路径（相对当前工作目录解析，透传给 Builder；默认优先使用 demo bundle）',
     )
-    parser.add_argument('--boss', type=Path, default=ROOT / 'boss' / 'make_brief.py')
-    parser.add_argument('--da', type=Path, default=ROOT / 'da' / 'build_diagnosis.py')
-    parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py')
-    parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py')
-    parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py')
+    # 角色脚本路径按当前工作目录解析：相对路径以调用时的 cwd 为基准，
+    # 默认值是示例目录内的绝对路径，不随 cwd 变化。
+    parser.add_argument('--boss', type=Path, default=ROOT / 'boss' / 'make_brief.py',
+                        help='Boss 角色脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+    parser.add_argument('--da', type=Path, default=ROOT / 'da' / 'build_diagnosis.py',
+                        help='DA 角色脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+    parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py',
+                        help='Builder 角色脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+    parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py',
+                        help='站点自检脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+    parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py',
+                        help='审查脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
     parser.add_argument(
         '--review-report',
@@ -146,6 +153,8 @@ def main(argv=None):
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
     dist = workdir / 'dist'
+    # 角色脚本路径原样传给子进程：相对路径按调用时的 cwd 解析，绝对路径（含默认值）原样使用；
+    # 产物一律写到工作目录，与角色脚本路径所在目录无关。
     commands = [
         ('Boss', [sys.executable, str(args.boss), '--out', str(brief)]),
         ('DA', [sys.executable, str(args.da), '--brief', str(brief), '--raw', str(args.raw), '--out', str(diagnosis)]),
