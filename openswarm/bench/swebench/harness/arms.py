@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import swe_env as E
+from routing_summary import routing_summary
 
 RUN_PI = os.environ.get("RUN_PI", "<pi>/run_pi.sh")
 DEPS = Path(os.environ.get("BENCH_DEPS", "<agents>/gity/bench-deps"))
@@ -255,9 +256,14 @@ def arm_openswarm(inst, repo, venv, events, tid):
     commit = E.sh(["git", "-C", str(OPENSWARM_DIR), "rev-parse", "HEAD"]).stdout.strip()
     (events / "tool-version.json").write_text(json.dumps({"name": "openswarm", "commit": commit, "backend": "pi"}))
     t0 = time.time()
+    full_skill = (OPENSWARM_DIR / "SKILL.md").read_text()
+    skill_mode = "full" if os.environ.get("SWEBENCH_PLANNER_SKILL") == "full" else "summary"
+    skill = full_skill if skill_mode == "full" else routing_summary(full_skill)
     plan = PLANNER.format(task_file=task_file, verify_file=verify_file, python=f"{venv}/bin/python", repo=repo,
-                          skill=(OPENSWARM_DIR / "SKILL.md").read_text(), task=base_prompt(inst, repo, venv))
-    calls = [run_pi(tid + "-plan", rundir, plan, events, 300, path_env(venv), label="planner")]
+                          skill=skill, task=base_prompt(inst, repo, venv))
+    calls = [run_pi(tid + "-plan", rundir, plan, events, 120, path_env(venv), label="planner")]
+    calls[0]["prompt_chars"] = len(plan)
+    calls[0]["skill_mode"] = skill_mode
     if task_file.exists():
         shutil.copy(task_file, events / "executor-task.md")
     if verify_file.exists():
