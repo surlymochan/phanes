@@ -22,6 +22,8 @@ class PortInUseError(RuntimeError):
 class LocalOnlyHandler(SimpleHTTPRequestHandler):
     """只允许本地 loopback 访问与白名单路径；请求不存在路径返回稳定 404 且不列出目录内容。"""
 
+    NOT_FOUND_BODY = b'Not Found\n'
+
     def handle_one_request(self):
         """客户端提前断开时结束当前请求，不让 ThreadingHTTPServer 线程报错退出。"""
         try:
@@ -36,7 +38,16 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             pass
 
     def send_error(self, code, message=None, explain=None):
-        """所有未实现方法都返回稳定 405，并声明允许的方法。"""
+        """返回可读的错误正文；未实现方法稳定返回 405。"""
+        if code == 404:
+            body = self.NOT_FOUND_BODY
+            self.send_response(404, 'Not Found')
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if self.command != 'HEAD':
+                self.wfile.write(body)
+            return
         if code == 501:
             body = b'Method Not Allowed\n'
             self.send_response(405, 'Method Not Allowed')
