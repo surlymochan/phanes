@@ -326,6 +326,40 @@ class CrossCheckTest(unittest.TestCase):
         self.diagnosis["recommendations"] = []
         self.assertEqual(self.failing(self.check()), [])
 
+    def test_missing_recommendations_section_passes(self) -> None:
+        """诊断快照缺少可选 recommendations 段时交叉审查仍能通过并输出稳定结果。"""
+        self.diagnosis["insights"].append(
+            {
+                "类型": "事实",
+                "标题": "收入与成本率的口径是什么？",
+                "内容": "收入与成本率的口径按部门统计。",
+            }
+        )
+        del self.diagnosis["recommendations"]
+        results = self.check()
+        self.assertEqual(self.failing(results), [])
+
+    def test_null_recommendations_section_passes(self) -> None:
+        """诊断快照 recommendations 为 None 时交叉审查仍能通过。"""
+        self.diagnosis["insights"].append(
+            {
+                "类型": "事实",
+                "标题": "收入与成本率的口径是什么？",
+                "内容": "收入与成本率的口径按部门统计。",
+            }
+        )
+        self.diagnosis["recommendations"] = None
+        results = self.check()
+        self.assertEqual(self.failing(results), [])
+
+    def test_missing_recommendations_with_unreferenced_question_fails_cleanly(self) -> None:
+        """缺少 recommendations 且必答问题未在 insights 覆盖时稳定报出失败而不崩溃。"""
+        del self.diagnosis["recommendations"]
+        failures = self.failing(self.check())
+        self.assertTrue(failures)
+        self.assertEqual(failures[0].name, "必答问题覆盖")
+        self.assertIn("未在 insights/recommendations 中被引用", failures[0].detail)
+
     def test_forbidden_field_name_fails(self) -> None:
         """出现个人/薪酬/编制粒度字段名时失败。"""
         self.diagnosis["risks"][0]["个人薪酬"] = "张三 10 万"
@@ -442,6 +476,28 @@ class CrossCheckTest(unittest.TestCase):
         self.assertIn("**汇总：共 5 项检查，5 项通过，0 项失败。**", content)
         self.assertIn("- **PASS 期间一致**", content)
         self.assertIn("- **PASS 隐私边界**", content)
+        self.assertNotIn("- **FAIL ", content)
+
+    def test_command_line_missing_recommendations_passes_and_writes_markdown_report(self) -> None:
+        """快照缺少可选 recommendations 段时命令行正常退出并写出完整 Markdown 报告。"""
+        self.diagnosis["insights"].append(
+            {
+                "类型": "事实",
+                "标题": "收入与成本率的口径是什么？",
+                "内容": "收入与成本率的口径按部门统计。",
+            }
+        )
+        del self.diagnosis["recommendations"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            report = base / "report.md"
+            result = run_script(brief, data, out=report)
+            content = report.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("**汇总：共 5 项检查，5 项通过，0 项失败。**", content)
+        self.assertIn("- **PASS 必答问题覆盖**", content)
         self.assertNotIn("- **FAIL ", content)
 
     def test_command_line_reports_failure(self) -> None:
