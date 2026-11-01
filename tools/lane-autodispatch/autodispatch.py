@@ -34,6 +34,12 @@ HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
+LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
+LABEL_READS_N = 0  # authoritative `gh issue view` reads issued during the current tick
+READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in this tick
+# GitHub charges one GraphQL point per `gh issue view`: cap the authoritative reads of one
+# tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
+FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
@@ -196,12 +202,82 @@ def verify_of(body):
             if cmds: return " && ".join(cmds) if len(cmds) > 1 and all(not c.startswith("cd ") for c in cmds[1:]) else cmds[0]
     return None
 
-def fresh_ready(n, state):
-    """`gh issue list --label` goes through the search index, which lags label edits; re-read the issue directly."""
+def read_issue(n):
+    """One authoritative read of an issue; returns (status, payload).
+
+    `status` is "fresh" (labels read, still dispatchable), "stale" (labels read, no longer
+    dispatchable) or "error" (the read failed). A failed read is NOT stale: the caller must
+    keep the row, otherwise a transient `gh` error shrinks `_ready` to a false 0."""
+    try:
+        rc, out, err = gh(["issue", "view", str(n), "--json", "state,labels"])
+    except Exception as e:
+        return "error", f"gh raised {e!r}"
+    if rc: return "error", f"gh rc={rc}: {(err or out).strip()[-100:]}"
+    try:
+        issue = json.loads(out)
+        fresh = dispatchable_issue(issue)
+    except Exception: return "error", "unparsable `gh issue view` output"
     # labels from `gh issue view` are authoritative; `_done` alone no longer blocks (a re-labelled lane-ready issue is retried)
-    rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
-    if rc: return False
-    return dispatchable_issue(json.loads(out))
+    return ("fresh" if fresh else "stale"), issue
+
+def label_cache_reset():
+    """Forget the authoritative reads of the previous tick (one read per issue per tick)."""
+    global LABEL_READS_N
+    LABEL_CACHE.clear(); LABEL_READS_N = 0; READ_ERROR_LOGGED.clear()
+
+def label_state(n, cache=None):
+    """Authoritative readiness of one issue, cached per tick by issue number.
+
+    Returns (status, payload): "fresh" (dispatchable), "stale" (claimed/done), "error" (the
+    authoritative read failed — the issue is NOT stale) or "budget" (the per-tick read budget
+    was exhausted, so the issue was not read at all)."""
+    cache = LABEL_CACHE if cache is None else cache
+    if n in cache: return cache[n]
+    global LABEL_READS_N
+    if LABEL_READS_N >= FRESH_READ_BUDGET:
+        res = ("budget", f"per-tick read budget ({FRESH_READ_BUDGET}) exhausted")
+    else:
+        LABEL_READS_N += 1
+        res = read_issue(n)
+    cache[n] = res
+    return res
+
+def prefetch_labels(numbers, cache=None):
+    """Read the authoritative labels of `numbers` in parallel and cache them for this tick.
+
+    The budget is reserved before the parallel reads start, so the reads of one tick can
+    never exceed it, and the same issue is never read twice in a tick."""
+    cache = LABEL_CACHE if cache is None else cache
+    todo = []
+    for n in numbers:
+        if n in cache or n in todo: continue
+        todo.append(n)
+    if not todo: return
+    global LABEL_READS_N
+    room = max(0, FRESH_READ_BUDGET - LABEL_READS_N)
+    LABEL_READS_N += min(room, len(todo))
+    todo = todo[:room]
+    if not todo: return
+    with cf.ThreadPoolExecutor(4) as ex:
+        for n, res in zip(todo, ex.map(read_issue, todo)): cache[n] = res
+
+def fresh_ready(n, state=None):
+    """`gh issue list --label` goes through the search index, which lags label edits; re-read the issue directly.
+
+    True only when the authoritative labels say dispatchable; a stale or unreadable issue is False."""
+    return label_state(n)[0] == "fresh"
+
+def unverified_reason(status, detail):
+    """Log wording for a row that could not be verified authoritatively (never "stale search index")."""
+    if status == "error": return f"label read failed ({detail})"
+    if status == "budget": return f"label read skipped ({detail})"
+    return f"label read problem ({status}: {detail})"
+
+def log_unverified(n, status, detail, suffix):
+    """Log an unverifiable row once per issue and tick (several lanes may retry the same issue)."""
+    if n in READ_ERROR_LOGGED: return
+    READ_ERROR_LOGGED.add(n)
+    log(f"skip #{n}: {unverified_reason(status, detail)}; {suffix}", brain=False)
 
 def issue_labels(n):
     """Authoritative labels of an issue as re-read by `gh issue view` (empty set when unreadable)."""
@@ -215,6 +291,41 @@ def note_stale_skip(lane_failed_residual=False):
     global STALE_STRIPPED_N, STALE_LANE_FAILED_N
     STALE_STRIPPED_N += 1
     if lane_failed_residual: STALE_LANE_FAILED_N += 1
+
+def skip_stale(n, payload):
+    """Count and log a stale search row; `payload` is the authoritative issue that proved it stale."""
+    labels = label_names(payload) if isinstance(payload, dict) else set()
+    residual = "lane-failed" in labels and "lane-ready" in labels
+    note_stale_skip(residual)
+    if residual:
+        log(f"skip #{n}: stale search hit lane-failed + lane-ready; remove lane-ready label to clear the residual", brain=False)
+    else:
+        log(f"skip #{n}: stale search index (already claimed/done)", brain=False)
+
+def freshen_queue(q, state, cache=None):
+    """Drop search-index rows that are no longer dispatchable before counting them.
+
+    `gh issue list --label lane-ready` answers from the search index, so a row can still
+    look `lane-ready` while the issue itself carries `lane-failed`/`lane-pr`/`in-progress`.
+    Every row is re-read authoritatively (once per tick, shared with the dispatch
+    candidates); stale rows are skipped (and logged) so that the `_ready` count in
+    lanes-status.json matches the really dispatchable issues. A row whose read failed is
+    KEPT and logged as a read error: it may still be dispatchable, and a transient `gh`
+    error must never shrink `_ready` to a false 0 (nor trigger a needless refill).
+
+    `state` is accepted for call-site compatibility; the authoritative labels decide."""
+    cache = LABEL_CACHE if cache is None else cache
+    prefetch_labels([item["n"] for item in q], cache)
+    fresh = []
+    for item in q:
+        status, detail = label_state(item["n"], cache)
+        if status == "fresh": fresh.append(item)
+        elif status == "stale":
+            skip_stale(item["n"], detail)
+        else:
+            log_unverified(item["n"], status, detail, "kept in queue (not counted as stale)")
+            fresh.append(item)
+    return fresh
 
 def status_snapshot(lanes, state, res, ready, blocked):
     """Build the observable lane status row, including this process's stale skips."""
@@ -304,6 +415,7 @@ def finish(lane, cfg, st, info, state):
 
 def tick(lanes, state, last_warn):
     if os.path.exists(f"{D}/PAUSE"): return last_warn
+    label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
@@ -326,21 +438,22 @@ def tick(lanes, state, last_warn):
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
-    blocked = sum(not i["deps_ok"] for i in q)
+    # one authoritative read per issue per tick, shared by the dispatch candidates and the count
+    prefetch_labels([i["n"] for i in q])
     base = None
     for L, cfg in lanes.items():
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
-            if fresh_ready(c["n"], state): pick = c; break
-            q.remove(c); labels = issue_labels(c["n"])
-            residual = "lane-failed" in labels and "lane-ready" in labels
-            note_stale_skip(residual)
-            if residual:
-                log(f"skip #{c['n']}: stale search hit lane-failed + lane-ready; remove lane-ready label to clear the residual", brain=False)
-            else:
-                log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
+            status, detail = label_state(c["n"])
+            if status == "fresh": pick = c; break
+            if status == "stale":
+                q.remove(c); skip_stale(c["n"], detail)  # try the next one this tick
+                continue
+            # the authoritative read failed: keep the row (it may still be dispatchable),
+            # never count it as a stale skip and never dispatch on unverified labels
+            log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
@@ -350,6 +463,9 @@ def tick(lanes, state, last_warn):
             gh(["issue", "edit", str(pick["n"]), "--remove-label", "in-progress"]); host_fail(cfg["host"], f"dispatch #{pick['n']}: {e}"); continue
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
+    # stale search rows are not dispatchable: drop them (and log the skip) before counting
+    q = freshen_queue(q, state)
+    blocked = sum(not i["deps_ok"] for i in q)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
