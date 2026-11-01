@@ -14215,9 +14215,59 @@ def merge_gate_verdict_approved(verdict):
     return str(verdict or "").strip().lower() in MERGE_GATE_APPROVED_VERDICTS
 
 
-def merge_gate_check_counts(rollup):
-    """Count the CI checks of a PR and name the failing ones."""
-    counts = {"failed": 0, "pending": 0, "passed": 0, "total": 0, "failed_names": []}
+def merge_gate_check_counts(rollup, policy=None):
+    """Count CI checks using the shared dispatch/rerun classification policy."""
+    counts = {"failed": 0, "pending": 0, "passed": 0, "total": 0,
+              "failed_names": [], "ignored_names": []}
+    try:
+        checks_path = os.path.join(SKILL_DIR, "lib", "ci", "checks.py")
+        spec = importlib.util.spec_from_file_location("openswarm_ci_checks", checks_path)
+        checks = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checks)
+        ci_cfg = (policy if isinstance(policy, dict) else load_policy()).get("ci") or {}
+        ignore_cfg = {key: ci_cfg[key] for key in
+                      ("ignore_red_re", "ignore_red_when_file") if key in ci_cfg}
+        # Advisory entries are optional additions to the shared ignore policy.
+        advisory = ci_cfg.get("advisory_checks") or []
+        if isinstance(advisory, str):
+            advisory = [advisory]
+        patterns = [str(pattern) for pattern in advisory if pattern]
+        if patterns:
+            existing = ignore_cfg.get("ignore_red_re")
+            ignore_cfg["ignore_red_re"] = "|".join(
+                ([f"(?:{existing})"] if existing else []) + [f"(?:{pattern})" for pattern in patterns])
+        advisory_file = ci_cfg.get("advisory_file")
+        if advisory_file:
+            file_rules = ignore_cfg.get("ignore_red_when_file") or []
+            file_rules = [file_rules] if isinstance(file_rules, dict) else list(file_rules)
+            advisory_file = [advisory_file] if isinstance(advisory_file, dict) else list(advisory_file)
+            ignore_cfg["ignore_red_when_file"] = file_rules + advisory_file
+        ci_policy = checks.IgnorePolicy.from_cfg(ignore_cfg)
+        candidates, advisory_ignored = [], []
+        for item in rollup or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("context") or item.get("name") or item.get("workflowName") or "")
+            if name.lower() == "lane-review":
+                continue
+            if ci_policy.ignores(name) and checks._bucket(item)[1] == checks.PENDING:
+                advisory_ignored.append(name)
+            else:
+                candidates.append(item)
+        classified = checks.classify(candidates, ci_policy)
+        counts["ignored_names"] = advisory_ignored + classified["ignored"]
+        counts["failed_names"] = classified["red"]
+        counts["failed"] = len(classified["red"])
+        counts["pending"] = len(classified["pending"])
+        counts["total"] = len(candidates)
+        counts["passed"] = max(0, len(candidates) - counts["failed"] - counts["pending"]
+                               - len(classified["ignored"]))
+        return counts
+    except Exception as error:
+        print(f"WARN: shared CI classification unavailable ({error}); using legacy merge-gate counts",
+              file=sys.stderr)
+    counts = {"failed": 0, "pending": 0, "passed": 0, "total": 0,
+              "failed_names": [], "ignored_names": []}
     for check in rollup or []:
         if not isinstance(check, dict):
             continue
@@ -14237,7 +14287,7 @@ def merge_gate_check_counts(rollup):
     return counts
 
 
-def merge_gate_pr_view(runner, repo, number):
+def merge_gate_pr_view(runner, repo, number, policy=None):
     """Read the head sha, labels, mergeability, and CI status of one PR."""
     fields = "number,headRefOid,labels,mergeable,statusCheckRollup"
     data = merge_gate_gh_json(runner, ["pr", "view", str(number), "--repo", repo, "--json", fields])
@@ -14247,7 +14297,7 @@ def merge_gate_pr_view(runner, repo, number):
               for label in data.get("labels") or []]
     return {"pr": int(number), "head_sha": data.get("headRefOid") or "", "labels": labels,
             "mergeable": data.get("mergeable"),
-            "checks": merge_gate_check_counts(data.get("statusCheckRollup"))}
+            "checks": merge_gate_check_counts(data.get("statusCheckRollup"), policy)}
 
 
 def merge_gate_open_prs(runner, repo):
@@ -14330,7 +14380,7 @@ def cmd_merge_gate(args, policy=None, runner=None):
     results = []
     for number in numbers:
         try:
-            pr_view = merge_gate_pr_view(runner, repo, number)
+            pr_view = merge_gate_pr_view(runner, repo, number, policy)
         except MergeGateError as error:
             # One unreadable PR must not hide the verdicts of the other PRs.
             results.append({"pr": number, "repo": repo, "status": "blocked:gh_error",
@@ -14359,7 +14409,7 @@ def cmd_merge_gate(args, policy=None, runner=None):
             print(f"#{record['pr']}  {record['status']}  {record.get('action') or '-'}  "
                   f"head={(record.get('head_sha') or '-')[:12]}  "
                   f"reviewed={(record.get('reviewed_sha') or '-')[:12]}  "
-                  f"checks={checks.get('passed', 0)}/{total}")
+                  f"checks={checks.get('passed', 0)}/{total}  ignored={len(checks.get('ignored_names', []))}")
     return 1 if blocked else 0
 
 
