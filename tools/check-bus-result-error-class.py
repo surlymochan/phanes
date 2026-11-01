@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that issue-bus result comments use the stable error_class enum (Refs #1228)."""
+"""Check that issue-bus result comments use the stable error_class enum (Refs #1265)."""
 
 import json
 import re
