@@ -479,6 +479,22 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(first, other.read_bytes())
 
+    def test_non_csv_files_are_ignored_without_changing_snapshot(self) -> None:
+        """原始目录中的 README 与临时文本文件不参与构建，快照字节保持一致。"""
+        plain = copy_raw(self.folder, "raw-plain")
+        noisy = copy_raw(self.folder, "raw-with-non-csv-files")
+        (noisy / "README.md").write_text("这不是原始数据表。\n", encoding="utf-8")
+        (noisy / "~tmp.txt").write_text("临时文本，不应被当作 CSV。\n", encoding="utf-8")
+
+        plain_out = self.folder / "plain.json"
+        noisy_out = self.folder / "noisy.json"
+        plain_result = run_cli(self.brief_path, plain, plain_out)
+        noisy_result = run_cli(self.brief_path, noisy, noisy_out)
+        self.assertEqual(plain_result.returncode, 0, plain_result.stdout + plain_result.stderr)
+        self.assertEqual(noisy_result.returncode, 0, noisy_result.stdout + noisy_result.stderr)
+
+        self.assertEqual(noisy_out.read_bytes(), plain_out.read_bytes())
+
     def test_missing_column_exits_nonzero(self) -> None:
         """原始数据缺列时退出码非 0，并指出缺哪一列。"""
         raw_dir = self.folder / "raw"
