@@ -7,7 +7,7 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 - Status: **OPERATIONAL** (11 lanes configured; health-loop guards hosts)
 - SSH: `id_ed25519_phanes_ctl` + ControlMaster; hosts ib1–5 / gocc / gorelay / govpn / govpn2
 - Dispatch: `~/phanes-ctl/bin/lane-autodispatch` reading `lane-ready` issues
-- Boot: `~/phanes-ctl/bin/start-control-plane` (see [`docs/ctl-boot.md`](../docs/ctl-boot.md))
+- Boot: `~/phanes-ctl/bin/start-control-plane` (see [`docs/ctl-boot.md`](../docs/ctl-boot.md); reboot drill + runbook: [`docs/fusion-box-boot-recovery.md`](../docs/fusion-box-boot-recovery.md), Refs #1478)
 - Status paths: `~/.claude/openswarm-executor-candidate/lanes/<L>/state.json` (see `tools/check-lane-status-paths.sh`)
 - Proof (earlier): run `20261101-031136-7a2856` → gorelay/agy
 
@@ -27,7 +27,9 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 - ib-refresh: reuse cert when TTL ≥25m (no force renew every tick); wall cap 420s
 
 ## Remaining gaps (Epic #223)
-1. Box reboot still needs manual `start-control-plane` (documented; no systemd on box).
+1. Box reboot still needs manual `start-control-plane` (documented; no systemd on box). The
+   self-recovery path is drilled offline in `tools/check-box-boot-recovery.py` (Refs #1478);
+   a real box reboot is still pending.
 2. Hub App UI bridge may still default to Mac paths for interactive Hub — fleet SSH path from box is fine (#224 docs Done).
 3. gocc Data volume often ≥96% used — health soft-alerts; free space recovered by clearing retired codex/copilot caches (~4GiB on 2026-11-01). Keep watching.
 4. GH token rotation (user action; not automated).

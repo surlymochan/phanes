@@ -12,10 +12,15 @@ start_one() {
     setsid nohup bash -c "$cmd" >/dev/null 2>&1 &
   fi
 }
+# 五件套（Refs #1478）：ib-refresh-loop / lane-autodispatch / lane-merge /
+# bus-worker-loop / health-loop —— 少一个 health-loop，重启后过期的 auto: 暂停
+# 就没人清，已 claim 的 lane 会被错误冻结（契约见 docs/ctl-boot.md 与
+# tools/check-ctl-boot.sh）。
 start_one ib-refresh-loop   "$HOME/phanes-ctl/bin/ctl-loop"
 start_one lane-autodispatch "$HOME/phanes-ctl/bin/lane-autodispatch"
 start_one lane-merge        "$HOME/phanes-ctl/bin/lane-merge"
 start_one bus-worker-loop   "$HOME/phanes-ctl/bin/bus-worker-loop"
+start_one health-loop       "$HOME/phanes-ctl/bin/health-loop"
 echo "status:"
 ~/phanes-ctl/bin/lane-autodispatch-status 2>/dev/null | head -5 || true
-pgrep -af 'lane-autodispatch|bus-worker-loop|lane-merge|ctl-loop' | head -20 || true
+pgrep -af 'lane-autodispatch|bus-worker-loop|lane-merge|ctl-loop|health-loop' | head -20 || true
