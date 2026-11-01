@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 
-from run_e2e import REVIEW_REPORT, STATUS_FILE, parse_args, source_commit  # noqa: E402  (需要先让示例目录可被导入)
+from run_e2e import REVIEW_REPORT, STATUS_FILE, STEP_ERROR_DIR, parse_args, source_commit  # noqa: E402  (需要先让示例目录可被导入)
 
 RUNNER = ROOT / 'run_e2e.py'
 REVIEWER = ROOT / 'review' / 'cross_check.py'
@@ -878,6 +878,34 @@ time.sleep(30)
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
         self.assertEqual(timings[-1]['exit_code'], 6)
 
+    def test_failed_role_keeps_output_tails_in_step_error_file(self):
+        """角色输出损坏 JSON 时保留诊断尾部、命令和退出码，不误报成功。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 2), exit_code=9,
+                            echo='{"损坏": true,', error_text='stderr: JSONDecodeError')
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 已完成的 brief/diagnosis 仍可读取：失败步骤之前的产物没被清理。
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
+        json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        error_path = self.workdir / STEP_ERROR_DIR / 'builder.json'
+        self.assertTrue(error_path.is_file())
+        error = json.loads(error_path.read_text(encoding='utf-8'))
+        self.assertEqual(error['exit_code'], 9)
+        self.assertIn('{"损坏": true,', error['stdout_tail'])
+        self.assertIn('stderr: JSONDecodeError', error['stderr_tail'])
+        self.assertEqual(error['command'][:2], [sys.executable, str(self.scripts[2])])
+        # 失败不伪造成功：状态文件记录失败步骤、错误与错误文件路径。
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'builder')
+        self.assertEqual(status['error_file'], str(error_path))
+
     def test_review_failure_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
             self.write_stub(path, role, failing=(index == 4))
@@ -1282,6 +1310,15 @@ class RunE2ERoleScriptTest(unittest.TestCase):
         self.assertEqual([item['name'] for item in status['timings']],
                          ['Boss', 'DA', 'Builder', '检查', '审查'])
         self.assertEqual(status['timings'][-1]['exit_code'], 0)
+        # 正常 JSON 不被过度截断：任务书与诊断快照仍是完整可解析的 JSON。
+        brief = json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
+        self.assertTrue(brief['目标'], '任务书被截断')
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertTrue(diagnosis['insights'], '诊断快照被截断')
+        self.assertTrue(diagnosis['recommendations'], '诊断快照被截断')
+        # 成功路径不误判：没有步骤错误文件，状态文件也不指向错误文件。
+        self.assertFalse((self.workdir / STEP_ERROR_DIR).exists())
+        self.assertIsNone(status['error_file'])
 
 
 if __name__ == '__main__':
