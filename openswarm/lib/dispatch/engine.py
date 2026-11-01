@@ -20,8 +20,16 @@ State, pause markers and logs live in `state_dir`:
   PAUSE (whole loop), PAUSE-<lane>, PAUSE-HOST-<host>, PAUSE-BACKEND-<backend>, NO-LANE-REVIEW,
   and an optional burn marker (config burn.file) that gives burn.backend lanes first pick.
 """
-import argparse
-import calendar
+import os
+import sys
+
+# Run as a script, Python puts this directory first on sys.path, where sibling modules (queue.py, ...) would
+# shadow the standard library (concurrent.futures needs the real `queue`). Drop it before any other import.
+if sys.path and os.path.abspath(sys.path[0] or ".") == os.path.dirname(os.path.abspath(__file__)):
+    del sys.path[0]
+
+import argparse  # noqa: E402
+import calendar  # noqa: E402
 import concurrent.futures as cf
 import copy
 import fnmatch

@@ -364,6 +364,26 @@ class Cli(Base):
         self.assertEqual(merged["hot_files"]["limits"], {"bin/big": 2})
 
 
+class ScriptRun(unittest.TestCase):
+    def test_sibling_modules_do_not_shadow_stdlib_when_run_as_script(self):
+        # lib/dispatch/queue.py once shadowed the stdlib queue that concurrent.futures needs
+        import subprocess
+        import sys
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for mod in ("queue", "json"):
+            with open(os.path.join(tmp, f"{mod}.py"), "w") as f:
+                f.write(f"raise ImportError('sibling {mod}.py shadowed the stdlib')\n")
+        shutil.copy(os.path.join(os.path.dirname(HERE), "lib", "dispatch", "engine.py"), os.path.join(tmp, "engine.py"))
+        cfg = os.path.join(tmp, "c.txt")
+        with open(cfg, "w") as f:
+            f.write('{"repo": "a/b", "state_dir": "%s"}' % tmp)
+        r = subprocess.run([sys.executable, os.path.join(tmp, "engine.py"), "dispatch", "check-config", "--config", cfg],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn('"repo": "a/b"', r.stdout)
+
+
 class ThinDiff(unittest.TestCase):
     def test_classify(self):
         f = lambda s: E.classify_numstat(s, 30, (".md",), (".py",), ("tests/", "bin/"))
