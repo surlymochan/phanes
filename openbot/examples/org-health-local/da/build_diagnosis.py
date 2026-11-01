@@ -313,6 +313,7 @@ def load_table(
     columns: tuple[str, ...],
     non_negative: bool = False,
     non_negative_columns: tuple[str, ...] = (),
+    observation_range: tuple[str, str] | None = None,
 ) -> dict[str, dict[str, float | None]]:
     """读取一张 CSV，按期次索引各列数值。
 
@@ -321,12 +322,23 @@ def load_table(
     """
     rows = read_table(path, (key_column,) + columns)
     table: dict[str, dict[str, float | None]] = {}
+    row_numbers: dict[str, int] = {}
     for number, row in enumerate(rows, start=2):
         key = (row.get(key_column) or "").strip()
         if not key:
             raise RawDataError(f"原始数据 {path.name} 第 {number} 行缺少 {key_column}")
         if key in table:
-            raise RawDataError(f"原始数据 {path.name} 中 {key_column} {key} 重复")
+            raise RawDataError(
+                f"原始数据 {path.name} 中 {key_column} {key} 重复：第 {number} 行"
+                f"（首次出现于第 {row_numbers[key]} 行）"
+            )
+        if observation_range is not None:
+            start, end = observation_range
+            if not MONTH_PATTERN.match(key) or not start <= key <= end:
+                raise RawDataError(
+                    f"原始数据 {path.name} 第 {number} 行的 {key_column} {key} 超出任务书观察范围"
+                    f"（{start} 至 {end}，应为 YYYY-MM）"
+                )
         values: dict[str, float | None] = {}
         for name in columns:
             value = parse_number(row.get(name), path, name, number)
@@ -334,10 +346,13 @@ def load_table(
                 raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {name} 必须是非负数：{value}")
             values[name] = value
         table[key] = values
+        row_numbers[key] = number
     return table
 
 
-def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
+def load_raw(
+    raw_dir: Path, observation_range: tuple[str, str] | None = None
+) -> dict[str, dict[str, dict[str, float | None]]]:
     """读取四张原始数据 CSV。"""
     if not raw_dir.is_dir():
         raise RawDataError(f"原始数据目录不存在：{raw_dir}")
@@ -345,9 +360,15 @@ def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
     heads_columns = (OVERALL_HEADS, REVOPS_HEADS)
     forecast_columns = cost_columns + heads_columns + (REVENUE,)
     return {
-        "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns, non_negative=True),
-        "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True),
-        "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True),
+        "cost": load_table(
+            raw_dir / COST_FILE, "月份", cost_columns, non_negative=True, observation_range=observation_range
+        ),
+        "heads": load_table(
+            raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True, observation_range=observation_range
+        ),
+        "revenue": load_table(
+            raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True, observation_range=observation_range
+        ),
         "forecast": load_table(raw_dir / FORECAST_FILE, "期次", forecast_columns, non_negative=True),
     }
 
@@ -597,6 +618,18 @@ def missing_observation_notes(plan: dict, raw: dict) -> list[str]:
             ]
             if missing:
                 notes.append(f"{COLUMN_NAMES[column]} 缺 {'、'.join(missing)} 数据，按 null 处理")
+    return notes
+
+
+def missing_file_period_notes(plan: dict, raw: dict) -> list[str]:
+    """按业务 CSV 汇总缺口，便于继续使用快照时追溯来源文件。"""
+    reference = plan["periods"]["reference"]
+    expected = [month for month in observation_months(plan) if month != reference]
+    notes = []
+    for filename, table_name in ((COST_FILE, "cost"), (HEADS_FILE, "heads"), (REVENUE_FILE, "revenue")):
+        missing = [month for month in expected if month not in raw[table_name]]
+        if missing:
+            notes.append(f"{filename} 缺 {'、'.join(missing)} 数据，相关指标按 null 处理")
     return notes
 
 
@@ -1000,6 +1033,7 @@ def build_snapshot(plan: dict, raw: dict) -> dict:
         "不以 0 或其他推测值替代。"
     )
     notes.extend(missing_observation_notes(plan, raw))
+    notes.extend(missing_file_period_notes(plan, raw))
     snapshot = {
         "口径说明": notes,
         "scope": {
@@ -1066,7 +1100,8 @@ def build_from_files(brief_path: Path, raw_dir: Path) -> dict:
     """按任务书与原始数据生成快照，并自检结构。"""
     brief = load_brief(brief_path)
     plan = parse_plan(brief, raw_dir)
-    raw = load_raw(raw_dir)
+    periods = plan["periods"]
+    raw = load_raw(raw_dir, (periods["start"], periods["end"]))
     snapshot = build_snapshot(plan, raw)
     ensure_finite_snapshot(snapshot)
     errors = validate_snapshot(snapshot)
