@@ -498,6 +498,23 @@ and an authenticated executor on each host. `repos` maps the same logical repo n
 Local hosts use subprocesses; remote commands use `ssh <alias> --` or `instabox ssh <box> --`, with timeouts.
 Without a local repo mapping, the planner uses its current checkout. A missing fleet config defaults to local only.
 
+An `ssh` host may carry its own transport options; `fleet status`, `fleet exec`, `fleet harvest` and
+`fleet exec ... lane assign` all build the same ssh argv from them:
+
+```json
+{"name":"worker","kind":"ssh","ssh":"worker-alias","jump":["gorelay-root","ctl@127.0.0.1:22029"],
+ "connect_timeout":20,"control_persist":600,
+ "ssh_options":{"ProxyCommand":"ssh -W %h:%p bastion","ServerAliveInterval":15},
+ "repos":{"project":"~/work/project"}}
+```
+
+`jump` is one hop or a chain and becomes `ProxyJump`; `control_persist` turns on the `ControlMaster`
+reuse (`ControlPath` defaults to `~/.ssh/openswarm/cm-%C`); `connect_timeout` bounds the handshake;
+`ssh_options` carries any other option. A `ProxyCommand` with spaces stays one argument, also in the
+quoted `GIT_SSH_COMMAND` value that a planner-side git can use for the same host. These fields belong
+to `ssh` hosts only; a host of another kind that declares them is rejected. A host without them keeps
+the plain `ssh <alias> --` transport.
+
 ```bash
 openswarm fleet status                   # reachability, paused hosts, lanes and active runs
 openswarm fleet status --json
