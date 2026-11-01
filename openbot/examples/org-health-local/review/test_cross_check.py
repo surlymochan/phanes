@@ -360,6 +360,19 @@ class CrossCheckTest(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_command_line_without_dist_outputs_each_pass(self) -> None:
+        """命令行省略可选 --dist 时成功并逐项输出全部 PASS。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            result = run_script(brief, data)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ("期间一致", "版本一致", "必答问题覆盖", "隐私边界"):
+            self.assertIn(f"PASS {name}：", result.stdout)
+        self.assertNotIn("FAIL", result.stdout)
+
     def test_temp_files_exact_id_match_passes(self) -> None:
         """真实临时文件中 id 精确命中时通过，且不把 Q1 当成 Q10。"""
         brief_data = copy.deepcopy(self.brief)
