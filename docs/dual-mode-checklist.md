@@ -60,7 +60,7 @@
 
 - [ ] **1. bus repo**：
   - 命令：`openswarm bus status --repo surlymochan/phanes-bus`
-  - 判定：成功列出 open issues 及其状态标签（`openswarm:queued`、`claimed`、`done` 等）；若未初始化需先执行 `openswarm bus init`。
+  - 判定：成功列出 open issues 及其状态标签（`openswarm:queued`、`openswarm:claimed`、`openswarm:done` 等）；若未初始化需先执行 `openswarm bus init surlymochan/phanes-bus`。
 - [ ] **2. gh auth**：
   - 命令：`gh auth status`
   - 判定：当前登录用户需在 `policy.local.json` 的 `allowed_planners` 或 `allowed_executors` 白名单中。

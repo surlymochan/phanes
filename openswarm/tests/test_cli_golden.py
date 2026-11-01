@@ -6,6 +6,7 @@ from pathlib import Path
 import pwd
 import subprocess
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -15,11 +16,33 @@ import _load
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "openswarm"
+CLI_CONTRACT = ROOT.parent / "tools" / "check-dual-mode-cli.py"
 GOLDEN = Path(__file__).with_name("golden")
 xs = _load.load()
 
 
 class CliGoldenTests(unittest.TestCase):
+    def test_dual_mode_cli_contract_uses_nonempty_command_set(self):
+        result = subprocess.run([sys.executable, str(CLI_CONTRACT)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK", result.stdout)
+
+    def test_dual_mode_cli_contract_reports_document_drift(self):
+        with tempfile.TemporaryDirectory(prefix="dual-mode-docs-") as tmp:
+            docs = Path(tmp)
+            source = ROOT.parent / "docs"
+            for name in ("dual-mode-checklist.md", "dual-mode-ssh.md", "dual-mode-issue-bus.md"):
+                (docs / name).write_text((source / name).read_text(encoding="utf-8"), encoding="utf-8")
+            checklist = docs / "dual-mode-checklist.md"
+            checklist.write_text(checklist.read_text(encoding="utf-8").replace(
+                "openswarm bus status --repo surlymochan/phanes-bus",
+                "openswarm bus inspect --repo surlymochan/phanes-bus", 1), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(CLI_CONTRACT), "--docs-dir", str(docs)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("dual-mode-checklist.md:53", result.stderr)
+            self.assertIn("unknown command", result.stderr)
+
     def test_help_output_matches_goldens(self):
         commands = {
             "help-run.txt": ("run", "--help"),
