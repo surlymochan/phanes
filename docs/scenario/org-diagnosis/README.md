@@ -2,7 +2,7 @@
 
 本文对应 Phanes #51，是 #6（Boss/DA/Builder 组织诊断网站场景）中 Boss 侧的角色契约。它规定三个角色的职责、输入、输出，交接工件清单与路径约定，以及统一验收清单。
 
-仓库内只允许出现人工构造的合成示例数据。真实诊断数据必须留在仓库之外，不得进入仓库、Issue 或 PR，依据 `openbot/examples/org-health-local/README.md:5`。
+仓库内只允许出现人工构造的合成示例数据。真实诊断数据必须留在仓库之外，不得进入仓库、Issue 或 PR，依据 `openbot/examples/org-health-local/README.md:115`。
 
 ## 1. 场景边界
 
@@ -36,7 +36,7 @@
 ### 2.3 Builder（建站）
 
 - 站点结构以合成示例为准：`openbot/examples/org-health-local/index.html` 页面骨架、`openbot/examples/org-health-local/app.js` 渲染与校验、`openbot/examples/org-health-local/styles.css` 样式、`openbot/examples/org-health-local/serve.py` 本机服务。
-- 真实数据只通过 `--data /absolute/path/to/diagnosis.json` 注入（`openbot/examples/org-health-local/serve.py:53`、`openbot/examples/org-health-local/README.md:5`），不复制进站点目录。
+- 真实数据只通过 `--data /absolute/path/to/diagnosis.json` 注入（`openbot/examples/org-health-local/serve.py:53`、`openbot/examples/org-health-local/README.md:115`），不复制进站点目录。
 - 验证报告须记录访问 URL、启动命令、端口、实际检查项与失败项，便于他人复现。
 
 ## 3. 交接工件清单与路径约定
@@ -69,7 +69,7 @@
 | 站点工作副本 | Builder | Builder | `<scenario-workdir>/site/` | 仅当内容全部为合成示例时，才可放回仓库的 `openbot/examples/` |
 | 本机访问验证报告 | Builder | Boss、交叉审查者 | `<scenario-workdir>/verification/` | 否。含本机路径与运行细节；仓库内只留结论摘要 |
 | 独立交叉审查记录 | 交叉审查者 | Boss | `<scenario-workdir>/verification/review.md` | 否 |
-| 合成示例站点与合成快照 | 仓库维护者 | 全部角色 | `openbot/examples/org-health-local/` | 是。仅限人工构造数据（`openbot/examples/org-health-local/README.md:3`） |
+| 合成示例站点与合成快照 | 仓库维护者 | 全部角色 | `openbot/examples/org-health-local/` | 是。仅限人工构造数据（`openbot/examples/org-health-local/README.md:36-44`） |
 
 ### 3.3 路径与命名规则
 
@@ -131,9 +131,9 @@
 
 | 路径 | 行号 | 内容 |
 | --- | --- | --- |
-| `openbot/examples/org-health-local/README.md` | 3 | 合成示例说明、本机启动方式与端口 8765 |
-| `openbot/examples/org-health-local/README.md` | 5 | 真实数据必须存仓库外、`--data` 用法 |
-| `openbot/examples/org-health-local/README.md` | 7 | `bun run test:org-health-demo` 回归脚本与输出目录 `.openbot-build/` |
+| `openbot/examples/org-health-local/README.md` | 19-29 | 合成示例常用校验、预览与端到端命令 |
+| `openbot/examples/org-health-local/README.md` | 36-44 | Boss → DA → Builder → Review 的合成交接链 |
+| `openbot/examples/org-health-local/README.md` | 115-117 | 真实数据必须存仓库外、`--data` 用法与站点路径边界 |
 | `openbot/examples/org-health-local/serve.py` | 26-34 | Host 校验 403 与路径白名单 404 |
 | `openbot/examples/org-health-local/serve.py` | 36-39 | `/data/diagnosis.json` 到真实数据文件的映射 |
 | `openbot/examples/org-health-local/serve.py` | 41-47 | 关闭目录列表、不写请求日志 |
@@ -163,5 +163,5 @@
 ## 7. 未决事项
 
 - DA 证据包与 Builder 本机访问验证报告的具体模板由对应角色任务定义，本文只固定路径与必填项。
-- 真实数据接入流程尚未演练；`openbot/examples/org-health-local/README.md:5` 只给出 `--data` 用法，实际演练前需先确认期间、指标定义与结构一致。
+- 真实数据接入流程尚未演练；`openbot/examples/org-health-local/README.md:115-117` 只给出 `--data` 用法，实际演练前需先确认期间、指标定义与结构一致。
 - 站点样式与页面文案的最终口径由 Builder 按任务书落定，本文不预先固定视觉稿。
