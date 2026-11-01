@@ -6264,7 +6264,7 @@ def bus_winning_claim(comments, allowed, lease_seconds=300, now=None):
     return bus_claim_state(comments, allowed, lease_seconds, now)
 
 
-def bus_parse_result(body):
+def bus_parse_result(body, expected_run_id=None):
     matches = list(re.finditer(r"```openswarm-result\s*\n(.*?)\n```", body or "", re.S))
     if not matches or (body or "")[matches[-1].end():].strip():
         return None
@@ -6273,10 +6273,18 @@ def bus_parse_result(body):
         result = json.loads(match.group(1))
     except ValueError:
         return None
-    required = ("status", "summary", "files_changed", "tests", "followups", "branch", "commit")
+    required = ("status", "run_id", "summary", "files_changed", "tests", "followups", "branch", "commit")
     if not isinstance(result, dict) or any(key not in result for key in required):
         return None
-    if result.get("status") not in ("done", "partial", "failed") or not isinstance(result.get("summary"), str):
+    if result.get("status") not in ("ok", "error", "done", "partial", "failed") or not isinstance(result.get("summary"), str):
+        return None
+    run_id = result.get("run_id")
+    if not isinstance(run_id, str) or not BUS_RUN_ID_RE.fullmatch(run_id):
+        return None
+    if expected_run_id is not None and run_id != expected_run_id:
+        return None
+    if result.get("status") == "error" and (not isinstance(result.get("error_class"), str)
+                                              or not result["error_class"].strip()):
         return None
     if not isinstance(result.get("files_changed"), list) or not all(isinstance(x, str) for x in result["files_changed"]):
         return None
@@ -6287,6 +6295,8 @@ def bus_parse_result(body):
     if result.get("branch") is not None and result["branch"] != result["branch"].strip():
         return None
     if result.get("branch") is not None and not re.fullmatch(r"openswarm/[A-Za-z0-9][A-Za-z0-9_-]{0,99}", result["branch"]):
+        return None
+    if result.get("branch") is not None and result["branch"] != f"openswarm/{run_id}":
         return None
     if result.get("commit") is not None and (not isinstance(result["commit"], str)
                                                or not BUS_SHA_RE.fullmatch(result["commit"])):
@@ -6516,10 +6526,11 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
             for comment in reversed(comments[claim_index + 1:]):
                 if str((comment.get("user") or {}).get("login") or "").casefold() != claim_login.casefold():
                     continue
-                parsed = bus_parse_result(comment.get("body") or "")
+                parsed = bus_parse_result(comment.get("body") or "", metadata.get("run_id"))
                 if not parsed:
+                    bus_event(event_path, f"ignored invalid result comment from {claim_login}")
                     continue
-                result, final_status = parsed, parsed["status"]
+                result, final_status = parsed, {"ok": "done", "error": "failed"}.get(parsed["status"], parsed["status"])
                 executor = bus_claim(claim)
                 break
         if final_status:
@@ -6756,6 +6767,7 @@ def bus_worker_run(issue, cfg, args, policy):
         if ignored_verify:
             followups = [*followups, "Ignored task verify because it is not in the worker verify allowlist or worker --verify."]
         report = bus_sanitize({"status": report_status if report_status in ("done", "partial", "failed") else "failed",
+                  "run_id": task["run_id"],
                   "summary": summary, "files_changed": nested.get("files_changed") or [],
                   "tests": nested.get("tests") or "not run: executor did not return a test report",
                   "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url,
@@ -6770,7 +6782,7 @@ def bus_worker_run(issue, cfg, args, policy):
         current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
         if labels["cancelled"] in issue_label_names(current):
             return False
-        report = {"status": "failed", "summary": bus_redact(str(error))[:500], "files_changed": [],
+        report = {"status": "failed", "run_id": task["run_id"], "summary": bus_redact(str(error))[:500], "files_changed": [],
                   "tests": "not run: worker failed before verification", "followups": [], "branch": None,
                   "commit": None, "pr_url": None, "error_class": bus_error_class(error)}
         bus_comment(cfg["repo"], issue["number"], "```openswarm-result\n" + json.dumps(report, indent=2) + "\n```")
