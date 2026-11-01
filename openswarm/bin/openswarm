@@ -23,6 +23,7 @@ Subcommands:
   verify-remote    verify a fleet run on another host in a temporary worktree
   bus              initialize or inspect a GitHub issue bus repository
   bus-worker       run the reference GitHub issue bus executor
+  card-lint        reject thin cards and thin PRs, with reason codes
   watch            stream actionable events (progress, risk, stalls) for one or more runs
   runs / report    snapshot of recent runs / compact scheduled check-in
   resume           recover active runs and recent results after planner restart
@@ -11790,6 +11791,238 @@ def append_ledger(entry):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# ---------------------------------------------------------------- card lint
+
+# The autodispatch used to keep a private copy of these rules to reject thin
+# cards and thin PRs.  They live in openswarm now so the planner and the
+# dispatch pipeline share one definition; policy["acceptance"] tunes them.
+CARD_LINT_DEFAULTS = {
+    "min_effective_diff": 30,
+    "thin_keywords": [
+        "fix", "fixes", "fixed", "update", "updated", "improve", "improvement",
+        "cleanup", "clean", "refactor", "refactoring", "optimize", "optimization",
+        "todo", "tbd", "fixme", "wip",
+        "修复", "修正", "更新", "优化", "改进", "重构", "清理", "待补充", "待定", "同上", "略", "等等",
+    ],
+    "weak_acceptance_re": r"^\s*(rg|grep|head|tail)\b",
+}
+
+# Only source files count towards an effective diff; docs, data and lock files do not.
+CARD_LINT_CODE_SUFFIXES = (
+    ".bash", ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".java", ".js",
+    ".jsx", ".kt", ".kts", ".less", ".mjs", ".cjs", ".php", ".py", ".pyi", ".rb",
+    ".rs", ".scala", ".scss", ".sh", ".sql", ".svelte", ".swift", ".ts", ".tsx", ".vue",
+)
+
+CARD_LINT_ACCEPTANCE_PREFIXES = ("验收：", "验收:", "acceptance:", "Acceptance:")
+# A keyword line is a bare list of at most this many identifier-like tokens.
+CARD_LINT_KEYWORD_TOKENS = 3
+CARD_LINT_KEYWORD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def card_lint_rules(policy):
+    """Return the acceptance rules, with the autodispatch defaults filled in."""
+    rules = dict(CARD_LINT_DEFAULTS)
+    for key, value in (policy.get("acceptance") or {}).items():
+        if key.startswith("_") or value is None:
+            continue
+        rules[key] = value
+    try:
+        rules["min_effective_diff"] = max(0, int(rules["min_effective_diff"]))
+    except (TypeError, ValueError):
+        rules["min_effective_diff"] = CARD_LINT_DEFAULTS["min_effective_diff"]
+    rules["thin_keywords"] = [str(word).strip() for word in (rules.get("thin_keywords") or [])
+                              if str(word).strip()]
+    return rules
+
+
+def card_lint_acceptance_commands(text):
+    """Return the acceptance commands a card declares."""
+    commands = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        for prefix in CARD_LINT_ACCEPTANCE_PREFIXES:
+            if line.lower().startswith(prefix.lower()):
+                command = line[len(prefix):].strip()
+                if command:
+                    commands.append(command)
+                break
+    return commands
+
+
+def card_lint_body_lines(text):
+    """Return the substantive body lines of a card.
+
+    The title, the labels declaration, the acceptance line, the section headings
+    and the rules are card scaffolding; what is left describes the change itself.
+    """
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.lower().startswith("labels:"):
+            continue
+        if any(line.lower().startswith(prefix.lower()) for prefix in CARD_LINT_ACCEPTANCE_PREFIXES):
+            continue
+        if set(line) <= set("-*_ "):
+            continue
+        lines.append(line)
+    return lines
+
+
+def card_lint_has_title(text):
+    """A card starts with a markdown title line."""
+    for raw in text.splitlines():
+        if raw.strip():
+            return raw.strip().startswith("# ")
+    return False
+
+
+def card_lint_has_labels(text):
+    """A card declares the labels the dispatch pipeline routes it by."""
+    return any(raw.strip().lower().startswith("labels:") for raw in text.splitlines())
+
+
+def card_lint_keyword_line(line, keywords):
+    """A line that only lists bare keywords says nothing about the change."""
+    tokens = [token for token in re.split(r"[\s,，、;；:：/|()（）\[\]【】]+", line.strip(" -*+•")) if token]
+    if not tokens:
+        return False
+    allowed = {str(word).lower() for word in keywords}
+    if all(token.lower() in allowed for token in tokens):
+        return True
+    return len(tokens) <= CARD_LINT_KEYWORD_TOKENS and all(
+        CARD_LINT_KEYWORD_TOKEN_RE.match(token) for token in tokens)
+
+
+def card_lint_keyword_only(body_lines, keywords):
+    """A body made of nothing but keyword lines carries no actionable detail."""
+    if not body_lines:
+        return False
+    return all(card_lint_keyword_line(line, keywords) for line in body_lines)
+
+
+def card_lint_weak_acceptance(commands, pattern):
+    """Acceptance that only reads the tree proves nothing about the change."""
+    if not commands:
+        return False
+    try:
+        matcher = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return False
+    parts = []
+    for command in commands:
+        for part in re.split(r"&&|\|\||;|\n", command):
+            part = part.strip().strip("`").strip()
+            if part:
+                parts.append(part)
+    if not parts:
+        return False
+    return all(matcher.match(part) for part in parts)
+
+
+def card_lint_card(text, rules):
+    """Lint one card; return the reasons it is rejected and its effective diff estimate."""
+    body = card_lint_body_lines(text)
+    commands = card_lint_acceptance_commands(text)
+    reasons = []
+    if not card_lint_has_title(text):
+        reasons.append({"code": "missing_title", "detail": "the card has no '# ' title line"})
+    if not card_lint_has_labels(text):
+        reasons.append({"code": "missing_labels", "detail": "the card has no 'labels:' declaration"})
+    if not commands:
+        reasons.append({"code": "missing_acceptance", "detail": "the card has no '验收：' acceptance line"})
+    if card_lint_keyword_only(body, rules["thin_keywords"]):
+        reasons.append({"code": "thin_keywords", "detail": "the body only lists keywords"})
+    if card_lint_weak_acceptance(commands, rules["weak_acceptance_re"]):
+        reasons.append({"code": "weak_acceptance", "detail": "the acceptance command only reads the tree"})
+    # Every substantive body line describes one change site, so the body length is
+    # the effective diff the card can promise.
+    estimate = len(body)
+    if estimate < rules["min_effective_diff"]:
+        reasons.append({"code": "thin_effective_diff",
+                        "detail": f"estimated effective diff {estimate} < {rules['min_effective_diff']}"})
+    return reasons, estimate
+
+
+def card_lint_is_code(path):
+    """Only source files count towards an effective diff."""
+    name = path
+    if "=>" in name:
+        name = name.split("=>")[-1]
+    name = os.path.basename(name.strip().strip("{} "))
+    return name.endswith(CARD_LINT_CODE_SUFFIXES)
+
+
+def card_lint_numstat(repo, base, ref):
+    """Return the numstat rows between base and ref."""
+    command = ["git", "-C", str(repo), "diff", "--numstat", f"{base}...{ref}"]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        # No merge base (unrelated histories): fall back to the plain tree diff.
+        result = subprocess.run(["git", "-C", str(repo), "diff", "--numstat", str(base), str(ref)],
+                                capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "git diff failed")
+    rows = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        added, deleted = parts[0], parts[1]
+        rows.append({"path": parts[2],
+                     "added": int(added) if added.isdigit() else 0,
+                     "deleted": int(deleted) if deleted.isdigit() else 0,
+                     "binary": not (added.isdigit() and deleted.isdigit())})
+    return rows
+
+
+def card_lint_pr_diff(repo, base, ref, rules):
+    """Lint the diff between two refs; return the reasons it is rejected."""
+    files = card_lint_numstat(repo, base, ref)
+    effective = 0
+    for row in files:
+        row["code"] = card_lint_is_code(row["path"])
+        if row["code"] and not row["binary"]:
+            effective += row["added"] + row["deleted"]
+    reasons = []
+    if effective < rules["min_effective_diff"]:
+        reasons.append({"code": "thin_pr_diff",
+                        "detail": f"effective code lines {effective} < {rules['min_effective_diff']}"})
+    return reasons, effective, files
+
+
+def cmd_card_lint(args, policy):
+    """Lint a card or a PR diff and report the reason codes."""
+    rules = card_lint_rules(policy)
+    if args.pr_diff:
+        if args.card:
+            raise ValueError("card-lint takes a card file or --pr-diff BASE REF, not both")
+        base, ref = args.pr_diff
+        repo = args.repo or os.getcwd()
+        reasons, effective, files = card_lint_pr_diff(repo, base, ref, rules)
+        report = {"ok": not reasons, "target": "pr-diff", "base": base, "ref": ref,
+                  "effective_diff": effective, "min_effective_diff": rules["min_effective_diff"],
+                  "files": files, "reasons": reasons}
+    else:
+        source = args.card
+        if not source:
+            raise ValueError("card-lint needs a card file or --pr-diff BASE REF")
+        if source == "-":
+            text, source = sys.stdin.read(), "stdin"
+        else:
+            with open(source, encoding="utf-8") as stream:
+                text = stream.read()
+        reasons, estimate = card_lint_card(text, rules)
+        report = {"ok": not reasons, "target": "card", "source": source,
+                  "effective_diff": estimate, "min_effective_diff": rules["min_effective_diff"],
+                  "reasons": reasons}
+    report["codes"] = [reason["code"] for reason in reasons]
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    print(f"card-lint: {'rejected' if reasons else 'accepted'} {','.join(report['codes'])}".rstrip(),
+          file=sys.stderr)
+    return 1 if reasons else 0
+
+
 # ---------------------------------------------------------------- CLI
 
 def profile_from_args(a):
@@ -12950,6 +13183,12 @@ def main():
                            rework_of_help="run id this task reworks")
     sp.add_argument("--once", action="store_true", help="claim at most one queued issue, then exit")
 
+    sp = sub.add_parser("card-lint", help="reject thin cards and thin PRs with reason codes")
+    sp.add_argument("card", nargs="?", help="card file to lint, or - to read the card from stdin")
+    sp.add_argument("--pr-diff", nargs=2, metavar=("BASE", "REF"),
+                    help="lint the effective diff between two git refs instead of a card")
+    sp.add_argument("--repo", help="git repository to inspect for --pr-diff (default: current directory)")
+
     sp = sub.add_parser("lane", help="manage resident executor lanes")
     lane_sub = sp.add_subparsers(dest="lane_cmd", required=True)
     lp = lane_sub.add_parser("up", help="start configured lane supervisors")
@@ -13141,6 +13380,12 @@ def main():
                 print(json.dumps({"ok": False, **e.report}, ensure_ascii=False), file=sys.stderr)
             else:
                 print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+    elif a.cmd == "card-lint":
+        try:
+            sys.exit(cmd_card_lint(a, policy))
+        except (OSError, ValueError) as error:
+            print(json.dumps({"ok": False, "error": bus_redact(str(error))}, ensure_ascii=False), file=sys.stderr)
             sys.exit(2)
     elif a.cmd == "lane":
         try:

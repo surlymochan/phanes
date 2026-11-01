@@ -195,6 +195,30 @@ Every subcommand, grouped by what it does. `openswarm <command> --help` lists al
 | `openswarm bus-worker` | Run the reference bus executor; `--once` claims at most one queued issue. | `openswarm bus-worker --bus acme/openswarm-bus --name runner-1 --backend codex --once` |
 | `openswarm verify-remote` | Verify a fleet run's commit in a temporary worktree on another host. | `openswarm verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'` |
 
+### Gate
+
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `openswarm card-lint <file>` | Reject a card that promises too little: no title, labels or acceptance, a keyword-only body, grep-only acceptance, or an effective diff below the floor. | `openswarm card-lint card.md` |
+| `openswarm card-lint --pr-diff <base> <ref>` | Reject a pull request whose effective code lines are below the floor. | `openswarm card-lint --pr-diff main HEAD` |
+
+`card-lint` prints a JSON report with a `reasons` list and exits `1` when the card or the diff is
+rejected, `0` when it passes, and `2` when the input cannot be read. The reason codes are stable:
+`missing_title`, `missing_labels`, `missing_acceptance`, `thin_keywords`, `weak_acceptance` and
+`thin_effective_diff` for a card, `thin_pr_diff` for a pull request.
+
+The rules live in `policy.json` under `acceptance` and can be overridden in `policy.local.json`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `min_effective_diff` | `30` | The smallest effective diff a card must promise and a pull request must deliver. |
+| `thin_keywords` | see `policy.json` | Placeholder words; a body that lists nothing but keywords (or nothing but bare tokens) carries no actionable detail. |
+| `weak_acceptance_re` | `^\s*(rg\|grep\|head\|tail)\b` | Acceptance commands that only read the tree prove nothing about the change. |
+
+A card's effective diff is estimated from its substantive body lines: the title, the `labels:` line,
+the `验收：` line and the section headings do not count. A pull request's effective diff is the
+`git diff --numstat` churn of source files; docs, data and lock files do not count.
+
 ### Observe
 
 | Command | Purpose | Example |

@@ -279,6 +279,17 @@ Grouped by what the command does. `openswarm <command> --help` lists every flag.
 | `bus-worker` | Run the reference bus executor; `--once` claims at most one queued issue. | `$XS bus-worker --bus acme/openswarm-bus --name runner-1 --backend codex --once` |
 | `verify-remote` | Verify a fleet run's commit in a temporary worktree on another host. | `$XS verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'` |
 
+### Gate
+
+| Command | Purpose | Example |
+|---|---|---|
+| `card-lint` | Reject a card that promises too little: no title, labels or acceptance, a keyword-only body, grep-only acceptance, or an effective diff below the floor. | `$XS card-lint card.md` |
+| `card-lint --pr-diff` | Reject a pull request whose effective code lines are below the floor. | `$XS card-lint --pr-diff main HEAD` |
+
+The rules live in `policy.json` under `acceptance`: `min_effective_diff` (default `30`),
+`thin_keywords` and `weak_acceptance_re`. The command prints a JSON report with stable reason codes
+and exits `1` when it rejects the card or the diff.
+
 ### Observe
 
 | Command | Purpose | Example |
