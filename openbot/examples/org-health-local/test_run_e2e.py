@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 
-from run_e2e import REVIEW_REPORT, parse_args, source_commit  # noqa: E402  (需要先让示例目录可被导入)
+from run_e2e import REVIEW_REPORT, STATUS_FILE, parse_args, source_commit  # noqa: E402  (需要先让示例目录可被导入)
 
 RUNNER = ROOT / 'run_e2e.py'
 REVIEWER = ROOT / 'review' / 'cross_check.py'
@@ -1054,6 +1054,99 @@ class RunE2EReviewContractTest(unittest.TestCase):
         content = self.record()
         self.assertIn('PASS 期间一致', content)
         self.assertIn('共 5 项检查：5 项通过，0 项失败', content)
+
+
+class RunE2ERoleScriptTest(unittest.TestCase):
+    """真实角色脚本回归：用真实子进程跑完整流水线，不靠空桩绕过角色脚本。
+
+    两条路径都覆盖：Builder 失败时保留上游产物、写出步骤状态且不调用 Reviewer；
+    Builder 成功时进入 Reviewer 并生成最终报告。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.workdir = self.root / 'out'
+
+    def command(self, bundle):
+        """真实角色脚本的调用命令：只换 bundle，其余角色都用示例目录里的真实脚本。"""
+        return [
+            sys.executable, str(RUNNER),
+            '--workdir', str(self.workdir),
+            '--raw', str(ROOT / 'da' / 'sample-raw'),
+            '--bundle', str(bundle),
+            '--boss', str(ROOT / 'boss' / 'make_brief.py'),
+            '--da', str(ROOT / 'da' / 'build_diagnosis.py'),
+            '--builder', str(ROOT / 'builder' / 'build_site.py'),
+            '--checker', str(ROOT / 'builder' / 'check_site.py'),
+            '--reviewer', str(REVIEWER),
+            '--review',
+        ]
+
+    def status(self):
+        """读出步骤状态文件。"""
+        path = self.workdir / STATUS_FILE
+        self.assertTrue(path.is_file(), '步骤状态文件未写出')
+        return json.loads(path.read_text(encoding='utf-8'))
+
+    def test_builder_failure_keeps_upstream_artifacts_and_skips_reviewer(self):
+        """真实 Builder 失败：保留 Boss/DA 产物，写出状态文件，Reviewer 不被调用。"""
+        missing_bundle = self.root / 'missing.bundle.js'
+
+        result = subprocess.run(self.command(missing_bundle), capture_output=True, text=True, timeout=120)
+
+        # 失败结果明确：非零退出并点名失败步骤
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: Builder', result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # Boss/DA 已完成产物保留在工作目录，任务书不是空的
+        brief = json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
+        self.assertTrue(brief['目标'], '任务书为空：不能只测空输入')
+        self.assertTrue(brief['必答问题'], '任务书为空：不能只测空输入')
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file(), '诊断快照被删除')
+        # Builder 失败时不生成站点产物
+        self.assertFalse((self.workdir / 'dist').exists(), 'Builder 失败后仍生成了站点产物')
+        # 状态文件写出失败步骤、错误与耗时
+        status = self.status()
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'builder')
+        self.assertIn('bundle 文件不存在或不是有效文件', status['error'])
+        self.assertEqual([item['name'] for item in status['timings']], ['Boss', 'DA', 'Builder'])
+        self.assertNotEqual(status['timings'][-1]['exit_code'], 0)
+        self.assertEqual([item['role'] for item in status['steps']], ['boss', 'da', 'builder'])
+        # Boss/DA 两步在状态文件里都是完成状态
+        self.assertEqual([item['exit_code'] for item in status['steps'][:2]], [0, 0])
+        # Reviewer 未被调用：没有审查产物，也没有审查步骤
+        self.assertFalse(status['reviewer_called'])
+        self.assertFalse((self.workdir / REVIEW_REPORT).exists())
+        self.assertNotIn('[审查] 命令', result.stdout)
+        self.assertIn('审查角色未调用', result.stderr)
+
+    def test_builder_success_runs_reviewer_and_writes_final_report(self):
+        """真实 Builder 成功后进入 Reviewer，生成最终报告并写出成功状态。"""
+        bundle = ROOT / 'demo' / 'vendor' / 'app.bundle.js'
+
+        result = subprocess.run(self.command(bundle), capture_output=True, text=True, timeout=120)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 站点产物与最终审查报告都在
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+        self.assertTrue((self.workdir / 'dist' / 'build-report.json').is_file())
+        report = self.workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file(), '最终报告未生成')
+        content = report.read_text(encoding='utf-8')
+        self.assertIn('PASS', content)
+        self.assertIn('PASS 站点数据一致', content)
+        self.assertIn('项通过，0 项失败', content)
+        # 状态文件记录成功与审查已调用
+        status = self.status()
+        self.assertEqual(status['status'], 'ok')
+        self.assertIsNone(status['failed_step'])
+        self.assertTrue(status['reviewer_called'])
+        self.assertEqual([item['name'] for item in status['timings']],
+                         ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertEqual(status['timings'][-1]['exit_code'], 0)
 
 
 if __name__ == '__main__':
