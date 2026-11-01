@@ -136,6 +136,7 @@ DEFAULTS = {
     "rebase_line_re": r"^\s*(?:重基PR|Rebase-PR)\s*[:：]\s*#(\d+)\s+(\S+)",
     "hot_files": {"line_re": r"^\s*(?:热文件|Hot-files)\s*[:：](.*)$", "union": [], "limits": {}, "default_limit": 1},
     "leak_grace_s": 900,
+    "resume_grace_s": 120,
     "stale_strip_after": 5,
     "fresh_read_budget": 60,              # authoritative `gh issue view` reads per tick (1 GraphQL point each)
     "assign_idempotency_key": True,       # pass `lane assign --idempotency-key` (needs a fleet release with #1388)
@@ -470,11 +471,26 @@ class Dispatcher:
     def host_ok(self, h):
         return self.clock() >= self.backoff.get(h, {}).get("until", 0)
 
-    def host_fail(self, h, why):
+    def host_fail(self, h, why, started_at=None, timeout_s=None):
+        now = self.clock()
+        # A command that ran far past its own deadline commonly crossed a VM suspend.
+        if (started_at is not None and timeout_s is not None
+                and now - started_at > float(timeout_s) + 30):
+            self.log(f"{h} ssh transient error ignored after long call ({str(why)[-80:]})", brain=False)
+            return
+        try:
+            with open(self.path("box-resume"), encoding="utf-8") as stream:
+                resumed_at = float(stream.read().strip())
+        except (OSError, ValueError):
+            resumed_at = None
+        grace = float(self.cfg.get("resume_grace_s", 120))
+        if resumed_at is not None and 0 <= now - resumed_at < grace:
+            self.log(f"{h} ssh transient error ignored during VM resume grace ({str(why)[-80:]})", brain=False)
+            return
         b = self.backoff.setdefault(h, {"n": 0, "until": 0})
         b["n"] += 1
         wait = min(600, 30 * 2 ** (b["n"] - 1))
-        b["until"] = self.clock() + wait
+        b["until"] = now + wait
         self.log(f"{h} ssh transient error #{b['n']} ({str(why)[-80:]}); backing off {wait}s", brain=(b["n"] == 4))
 
     def host_good(self, h):
@@ -1459,11 +1475,12 @@ class Dispatcher:
                 L = self.pick_reviewer(alternatives, lanes, self.author_lane(p["headRefName"]))
             if not L:
                 continue
+            host_started = self.clock()
             try:
                 base = self.main_sha()
                 run, ver = self.dispatch(L, lanes[L], self.review_item(p), base)
             except Exception as e:
-                self.host_fail(lanes[L]["host"], f"review dispatch PR#{p['number']}: {e}")
+                self.host_fail(lanes[L]["host"], f"review dispatch PR#{p['number']}: {e}", host_started, 120)
                 idle.remove(L)
                 continue
             idle.remove(L)
@@ -1480,6 +1497,7 @@ class Dispatcher:
 
     # ------------------------------------------------------------ tick
     def probe(self, lanes, state):
+        probe_started = self.clock()
         live = [L for L in lanes if self.host_ok(lanes[L]["host"]) and not self.paused_lane(L, lanes[L])]
         res = {}
         ex = cf.ThreadPoolExecutor(max_workers=min(24, max(1, len(live))))
@@ -1521,7 +1539,7 @@ class Dispatcher:
             seen.add(h)
             errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
             if errs:
-                self.host_fail(h, errs[0]["error"])
+                self.host_fail(h, errs[0]["error"], probe_started, int(self.cfg["status_tick_cap_s"]))
             else:
                 self.host_good(h)
         return res
@@ -1622,11 +1640,12 @@ class Dispatcher:
                     break
             self.heartbeat()
             self.gh_write(["issue", "edit", str(pick["n"]), "--add-label", self.L["in_progress"]])
+            host_started = self.clock()
             try:
                 run, ver = self.dispatch(L, lc, pick, base)
             except Exception as e:
                 self.gh_write(["issue", "edit", str(pick["n"]), "--remove-label", self.L["in_progress"]])
-                self.host_fail(lc["host"], f"dispatch #{pick['n']}: {e}")
+                self.host_fail(lc["host"], f"dispatch #{pick['n']}: {e}", host_started, 120)
                 continue
             q.remove(pick)
             hot = self.hot_of(pick["body"])

@@ -148,6 +148,47 @@ class Pauses(Base):
         self.assertFalse(d.inode_decide(91.9))
 
 
+class HostHealth(Base):
+    def dispatcher(self, now=1000):
+        d = self.make()
+        d.clock = lambda: now[0] if isinstance(now, list) else now
+        return d
+
+    def test_resume_grace_failures_do_not_accumulate(self):
+        now = [1060]
+        d = self.dispatcher(now)
+        os.makedirs(d.D, exist_ok=True)
+        with open(d.path("box-resume"), "w") as stream:
+            stream.write("1000\n")
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+        self.assertTrue(d.host_ok("h1"))
+        self.assertNotIn("h1", d.backoff)
+
+    def test_failures_after_grace_still_back_off(self):
+        now = [1121]
+        d = self.dispatcher(now)
+        os.makedirs(d.D, exist_ok=True)
+        with open(d.path("box-resume"), "w") as stream:
+            stream.write("1000\n")
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+        self.assertFalse(d.host_ok("h1"))
+        self.assertEqual(d.backoff["h1"]["n"], 3)
+
+    def test_long_wall_clock_call_failure_is_ignored(self):
+        d = self.dispatcher(1101)
+        d.host_fail("h1", "ssh timeout", started_at=1000, timeout_s=60)
+        self.assertNotIn("h1", d.backoff)
+
+    def test_missing_resume_marker_preserves_old_backoff_behavior(self):
+        d = self.dispatcher(1000)
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+        self.assertEqual(d.backoff["h1"]["n"], 3)
+        self.assertFalse(d.host_ok("h1"))
+
+
 class QuotaGuards(Base):
     """The quota guards classify with the pure module lib/dispatch/quota.py (Refs #1499)."""
 
