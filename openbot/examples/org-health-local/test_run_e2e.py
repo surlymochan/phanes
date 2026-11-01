@@ -156,6 +156,8 @@ elif role == 'builder':
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
         for item in timings:
+            # 成功流水线的耗时记录结构固定：每步四个字段都不缺。
+            self.assertEqual(set(item), {'name', 'command', 'duration_seconds', 'exit_code'})
             self.assertIsInstance(item['command'], list)
             self.assertGreaterEqual(item['duration_seconds'], 0)
             self.assertEqual(item['exit_code'], 0)
@@ -171,6 +173,28 @@ elif role == 'builder':
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
         self.assertEqual(timings[-1]['exit_code'], 9)
         self.assertGreaterEqual(timings[-1]['duration_seconds'], 0)
+
+    def test_failed_step_is_named_when_timings_cannot_be_written(self):
+        """步骤失败且耗时记录写不出来时仍非零退出，并在输出里点名失败步骤。"""
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 1), exit_code=8)
+        # 耗时记录路径被目录占用：每步耗时写不出来。
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        (self.workdir / 'timings.json').mkdir()
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        # 整体判失败，不因耗时记录缺失而误报成功。
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 失败步骤仍然被点名，即使每步耗时没写出来。
+        output = result.stdout + result.stderr
+        self.assertIn('步骤失败: DA', output)
+        self.assertIn('失败步骤: DA', output)
+        self.assertIn('耗时记录写入失败', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 阶段顺序不变：DA 失败后 Builder 与站点自检不再执行。
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
 
     def test_runs_from_repo_root_with_relative_workdir_and_default_raw(self):
         """以仓库根为 cwd、相对路径为 --workdir 运行，产物落在相对工作目录且默认 raw 路径仍指向示例目录。"""
