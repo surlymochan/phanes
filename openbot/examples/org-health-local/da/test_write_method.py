@@ -193,6 +193,13 @@ class WriteMethodTest(unittest.TestCase):
         self.assertEqual(error["details"][0]["path"], "insights[0].内容")
         self.assertEqual(content, "")
 
+    def test_empty_diagnosis_fails_instead_of_writing_empty_method(self):
+        code, stderr, content = run_write_method(BRIEF, {})
+
+        self.assertEqual(code, 1)
+        self.assertIn("empty_diagnosis", stderr)
+        self.assertEqual(content, "")
+
     def test_creates_missing_output_parent_directories(self):
         """--out 的父目录不存在时自动创建多层目录，并正常写出方法说明。"""
         with tempfile.TemporaryDirectory() as temp_dir:

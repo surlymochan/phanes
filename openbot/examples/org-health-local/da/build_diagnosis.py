@@ -269,8 +269,11 @@ def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
         text = path.read_text(encoding="utf-8-sig")
     except OSError as cause:
         raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
-    reader = csv.DictReader(io.StringIO(text, newline=""))
-    fieldnames = reader.fieldnames or []
+    reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
+    try:
+        fieldnames = reader.fieldnames or []
+    except csv.Error as cause:
+        raise RawDataError(f"原始数据 {path.name} 表头不是合法 CSV：{cause}") from cause
     missing = [name for name in required if name not in fieldnames]
     if missing:
         raise RawDataError(f"原始数据 {path.name} 缺少必需列：{'、'.join(missing)}")
@@ -278,16 +281,20 @@ def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
     if duplicated:
         raise RawDataError(f"原始数据 {path.name} 表头出现重复列：{'、'.join(duplicated)}")
     rows: list[dict[str, str]] = []
-    for number, row in enumerate(reader, start=2):
-        if None in row:
-            raise RawDataError(f"原始数据 {path.name} 第 {number} 行的字段数多于表头")
-        # 字段数少于表头时 DictReader 把缺的取值写成 None：该列在这行里是空的。
-        empty = [name for name in required if row.get(name) is None]
-        if empty:
-            raise RawDataError(
-                f"原始数据 {path.name} 第 {number} 行缺少 {'、'.join(empty)} 的取值（字段数少于表头）"
-            )
-        rows.append(row)
+    try:
+        for number, row in enumerate(reader, start=2):
+            if None in row:
+                raise RawDataError(f"原始数据 {path.name} 第 {number} 行的字段数多于表头")
+            # 字段数少于表头时 DictReader 把缺的取值写成 None：该列在这行里是空的。
+            empty = [name for name in required if row.get(name) is None]
+            if empty:
+                raise RawDataError(
+                    f"原始数据 {path.name} 第 {number} 行缺少 {'、'.join(empty)} 的取值（字段数少于表头）"
+                )
+            rows.append(row)
+    except csv.Error as cause:
+        line = getattr(reader, "line_num", "未知")
+        raise RawDataError(f"原始数据 {path.name} 第 {line} 行不是合法 CSV：{cause}") from cause
     return rows
 
 

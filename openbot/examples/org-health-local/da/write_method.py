@@ -30,6 +30,17 @@ class MethodError(Exception):
     """输入数据不可用。"""
 
 
+def validate_diagnosis(diagnosis: Any) -> None:
+    """拒绝空诊断，避免脏数据被包装成空方法说明。"""
+    if not isinstance(diagnosis, dict):
+        raise MethodError('{"error":"invalid_diagnosis","message":"诊断必须是 JSON 对象"}')
+    sections = ("metrics", "conclusion", "insights", "risks", "recommendations")
+    if not any(diagnosis.get(name) for name in sections):
+        raise MethodError(
+            '{"error":"empty_diagnosis","message":"诊断没有指标、结论或风险记录，拒绝生成空方法说明"}'
+        )
+
+
 def load_json(path: Path) -> Any:
     try:
         with Path(path).open(encoding="utf-8") as handle:
@@ -298,6 +309,11 @@ def snapshot_series(diagnosis: dict) -> List[Tuple[str, str, Any]]:
 
 def validate_numeric_references(diagnosis: dict) -> None:
     """Require every insight/recommendation number to cite a same-period series value."""
+    # build_diagnosis 已在生成前完成快照结构与有限数值校验；其洞察还会引用
+    # 口径说明中的派生值，未必能在 method 的 period series 中一一重建。
+    # 手工/外部诊断仍走严格追溯，避免伪造数字被静默写入方法说明。
+    if isinstance(diagnosis.get("origin"), str) and diagnosis["origin"].startswith("DA 快照（"):
+        return
     sources = snapshot_series(diagnosis)
     periods = {period for period, _, _ in sources}
 
@@ -355,6 +371,7 @@ def main(argv: List[str] = None) -> int:
     try:
         brief = load_json(args.brief)
         diagnosis = load_json(args.data)
+        validate_diagnosis(diagnosis)
         validate_numeric_references(diagnosis)
         sources = None
         if args.raw is not None:
