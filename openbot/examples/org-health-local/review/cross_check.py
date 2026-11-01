@@ -26,11 +26,11 @@
     - 任务书若显式给出 `数据截止`，必须等于 `scope.数据截止`。
 
 【必答问题引用规则】
-    可搜索文本 = 快照 insights 与 recommendations 里的全部字符串（键名与值）。
-    每条必答问题按下列顺序判定，命中其一即算被引用：
+    快照 insights 与 recommendations 的每个条目分别作为答案单元（键名与值均可检索）。
+    每个答案只归属一个问题，按下列顺序判定，命中其一即算被引用：
     1. id 命中：问题对象带 id/编号（至少 2 个字符）时，该 id 出现在可搜索文本里；
-    2. 原文命中：问题原文出现在可搜索文本里；
-    3. 关键词命中：问题原文按下列规则提取的关键词，任一出现在可搜索文本里。
+    2. 原文命中：忽略大小写、空白和标点后，问题原文出现在答案里；
+    3. 关键词命中：问题原文按下列规则提取的关键词，且只允许唯一关键词；共享关键词形成冲突。
     关键词提取：先取出 `YYYY-MM`/`YYYY-MM-DD` 片段；其余按空白与标点切段，取片段里第一个疑问词
     标记（怎么、如何、什么、哪里、哪些、哪个、是否、多少、有没有、吗、呢）之前的部分，去掉首尾助词
     （的、在、与、和、对、为、有、是、了）；之前的部分太短时改取之后的部分；再用“的”切成更短的片段；
@@ -154,6 +154,7 @@ class Result:
     ok: bool
     name: str
     detail: str
+    finding: dict[str, object] | None = None
 
 
 def first_text(source: dict, *names: str) -> str | None:
@@ -336,6 +337,38 @@ def searchable_text(diagnosis: dict) -> str:
     return "\n".join(parts)
 
 
+def answer_units(diagnosis: dict) -> list[str]:
+    """按 insight/recommendation 条目返回可归属的答案文本，去掉纯重复项。"""
+    units: list[str] = []
+    seen: set[str] = set()
+    for name in ("insights", "recommendations"):
+        section = diagnosis.get(name)
+        values = section if isinstance(section, list) else [section]
+        for value in values:
+            if value is None:
+                continue
+            text = "\n".join(collect_strings(value))
+            key = normalize_match_text(text)
+            if text and key and key not in seen:
+                seen.add(key)
+                units.append(text)
+    return units
+
+
+def normalize_match_text(value: str) -> str:
+    """统一大小写、空白及常见标点，支持问题文本的格式变体。"""
+    return re.sub(r"[\W_]+", "", value.casefold(), flags=re.UNICODE)
+
+
+def exact_id_in_text(identifier: str, text: str) -> bool:
+    """匹配完整 id，避免 Q1 误命中 Q10。"""
+    if not identifier or len(identifier) < 2:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_-]+", identifier):
+        return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(identifier)}(?![A-Za-z0-9_-])", text) is not None
+    return identifier in text
+
+
 def question_entries(brief: dict) -> list[tuple[str, str | None]]:
     """从 `必答问题` 取出 (问题原文, id) 列表。"""
     raw = brief.get("必答问题")
@@ -360,13 +393,13 @@ def check_question(question: str, identifier: str | None, text: str) -> Result:
     label = identifier or question
     if len(label) > 24:
         label = label[:24] + "…"
-    if identifier and len(identifier) >= 2 and identifier in text:
+    if identifier and exact_id_in_text(identifier, text):
         return Result(True, name, f"必答问题「{label}」按 id 被引用")
-    if question and question in text:
+    if question and normalize_match_text(question) in normalize_match_text(text):
         return Result(True, name, f"必答问题「{label}」按原文被引用")
     keywords = extract_keywords(question)
     for keyword in keywords:
-        if keyword in text:
+        if normalize_match_text(keyword) in normalize_match_text(text):
             return Result(True, name, f"必答问题「{label}」按关键词「{keyword}」被引用")
     detail = f"必答问题「{label}」未在 insights/recommendations 中被引用"
     if keywords:
@@ -385,8 +418,72 @@ def check_questions(brief: dict, diagnosis: dict) -> list[Result]:
     entries = question_entries(brief)
     if not entries:
         return [Result(False, name, "任务书 `必答问题` 为空，没有可核对的问题")]
-    text = searchable_text(diagnosis)
-    return [check_question(question, identifier, text) for question, identifier in entries]
+    units = answer_units(diagnosis)
+    normalized_units = [normalize_match_text(unit) for unit in units]
+    keyword_sets = [extract_keywords(question) for question, _ in entries]
+    # 每个答案只归属一个问题：id > 全文 > 唯一关键词；同级多候选则形成冲突。
+    assignments: dict[int, tuple[str, int, str]] = {}
+    conflicts: dict[int, list[tuple[int, str]]] = {}
+    for answer_index, (unit, normalized) in enumerate(zip(units, normalized_units)):
+        candidates: dict[str, set[int]] = {"id": set(), "全文": set(), "关键词": set()}
+        evidence: dict[tuple[str, int], str] = {}
+        for question_index, ((question, identifier), keywords) in enumerate(zip(entries, keyword_sets)):
+            if identifier and exact_id_in_text(identifier, unit):
+                candidates["id"].add(question_index)
+                evidence[("id", question_index)] = identifier
+            elif question and normalize_match_text(question) in normalized:
+                candidates["全文"].add(question_index)
+                evidence[("全文", question_index)] = question
+            else:
+                for keyword in keywords:
+                    normalized_keyword = normalize_match_text(keyword)
+                    if normalized_keyword in normalized:
+                        candidates["关键词"].add(question_index)
+                        evidence[("关键词", question_index)] = keyword
+                        break
+        for match_type in ("id", "全文", "关键词"):
+            matched = candidates[match_type]
+            if not matched:
+                continue
+            if len(matched) > 1:
+                for question_index in matched:
+                    conflicts.setdefault(question_index, []).extend(
+                        (other, evidence[(match_type, other)])
+                        for other in sorted(matched - {question_index})
+                    )
+            else:
+                question_index = next(iter(matched))
+                assignments.setdefault(question_index, (match_type, answer_index, evidence[(match_type, question_index)]))
+            break
+
+    findings: list[Result] = []
+    for index, (question, identifier) in enumerate(entries):
+        label = identifier or question
+        if len(label) > 24:
+            label = label[:24] + "…"
+        conflict_items = conflicts.get(index, [])
+        conflict_indexes = sorted({item[0] for item in conflict_items})
+        if index in assignments:
+            match_type, _, evidence = assignments[index]
+            finding = {"question": {"id": identifier, "text": question}, "match": match_type, "evidence": evidence}
+            findings.append(Result(True, name, f"必答问题「{label}」按{match_type}被引用；证据：{evidence}", finding))
+            continue
+        if conflict_indexes:
+            conflict_labels = [entries[item][1] or entries[item][0] for item in conflict_indexes]
+            finding = {
+                "question": {"id": identifier, "text": question},
+                "match": None,
+                "evidence": sorted({item[1] for item in conflict_items}),
+                "conflicts": [{"id": entries[item][1], "text": entries[item][0]} for item in conflict_indexes],
+            }
+            findings.append(Result(False, name, f"必答问题「{label}」命中冲突：{ '、'.join(conflict_labels) }；答案不能同时覆盖两个问题", finding))
+            continue
+        keywords = keyword_sets[index]
+        detail = f"必答问题「{label}」未在 insights/recommendations 中被引用"
+        if keywords:
+            detail += f"（关键词：{'、'.join(keywords)}）"
+        findings.append(Result(False, name, detail, {"question": {"id": identifier, "text": question}, "match": None, "evidence": None}))
+    return findings
 
 
 def digest(data: bytes) -> str:

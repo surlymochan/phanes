@@ -326,6 +326,59 @@ class CrossCheckTest(unittest.TestCase):
         self.diagnosis["recommendations"] = []
         self.assertEqual(self.failing(self.check()), [])
 
+    def test_temp_files_full_text_cover_all_questions(self) -> None:
+        """真实 brief/diagnosis 临时文件中的全文变体可覆盖全部问题。"""
+        brief_data = copy.deepcopy(self.brief)
+        brief_data["必答问题"] = ["收入与成本率的口径是什么？", "整体技术人力成本在 2026-09 的实际值是多少？"]
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+        diagnosis_data["insights"] = [
+            {"标题": "收入与成本率的口径是什么？", "内容": "按部门统计。"},
+            {"标题": "整体技术人力成本在2026-09的实际值是多少?", "内容": "12 万元/月。"},
+        ]
+        diagnosis_data["recommendations"] = []
+        with temporary_directory() as folder:
+            base = Path(folder)
+            result = run_script(
+                write_json(base / "brief.json", brief_data),
+                write_json(base / "diagnosis.json", diagnosis_data),
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_temp_files_exact_id_match_passes(self) -> None:
+        """真实临时文件中 id 精确命中时通过，且不把 Q1 当成 Q10。"""
+        brief_data = copy.deepcopy(self.brief)
+        brief_data["必答问题"] = [{"id": "Q1", "问题": "成本走势如何？"}]
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+        diagnosis_data["insights"] = [{"标题": "Q1", "内容": "见成本趋势。"}]
+        diagnosis_data["recommendations"] = []
+        with temporary_directory() as folder:
+            base = Path(folder)
+            result = run_script(
+                write_json(base / "brief.json", brief_data),
+                write_json(base / "diagnosis.json", diagnosis_data),
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_temp_files_shared_keyword_reports_structured_conflict(self) -> None:
+        """真实临时文件中共享关键词不能让一个答案覆盖两个问题。"""
+        brief_data = copy.deepcopy(self.brief)
+        brief_data["必答问题"] = ["整体成本如何？", "整体成本是多少？"]
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+        diagnosis_data["insights"] = [{"标题": "整体成本分析", "内容": "等待补充证据。"}]
+        diagnosis_data["recommendations"] = []
+        with temporary_directory() as folder:
+            base = Path(folder)
+            result = run_script(
+                write_json(base / "brief.json", brief_data),
+                write_json(base / "diagnosis.json", diagnosis_data),
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        findings = self.failing(cross_check.run_checks(brief_data, diagnosis_data))
+        question_findings = [item for item in findings if item.name == "必答问题覆盖"]
+        self.assertEqual(len(question_findings), 2)
+        self.assertTrue(all(item.finding and item.finding["conflicts"] for item in question_findings))
+        self.assertIn("整体成本", result.stdout)
+
     def test_missing_recommendations_section_passes(self) -> None:
         """诊断快照缺少可选 recommendations 段时交叉审查仍能通过并输出稳定结果。"""
         self.diagnosis["insights"].append(
