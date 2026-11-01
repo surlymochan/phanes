@@ -85,7 +85,12 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         return True
 
     def translate_path(self, path):
-        if path.split('?', 1)[0] == '/data/diagnosis.json':
+        clean_path = path.split('?', 1)[0]
+        # Keep the path guard effective even if this method is called directly;
+        # SimpleHTTPRequestHandler otherwise resolves ../ against its directory.
+        if clean_path not in ALLOWED_PATHS:
+            return str(Path(self.directory) / '__forbidden_path__')
+        if clean_path == '/data/diagnosis.json':
             return str(self.data_file)
         return super().translate_path(path)
 
@@ -94,7 +99,7 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         return None
 
     def log_message(self, format, *args):
-        # Keep requests local and avoid writing request details to a log.
+        # Keep requests local and avoid writing request details (or disk paths) to a log.
         pass
 
 def parse_args(argv=None):
