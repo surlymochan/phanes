@@ -298,3 +298,33 @@ PY
   （`openswarm ledger accept <run-id> --reason "..."` 可记录该决定）。
 - `WORKSPACE` 里的真实数据不进版本库，也不进 `$OPENSWARM_HOME` 的运行记录；流水线结束后按数据提供方的
   保留策略清理该目录。
+
+## 10. 交接产物最小验收表
+
+本节由 #707 新增。上面第 3 节的三阶段编排用 OpenSwarm 交接产物；同一场景还有「仓库内一键跑通」这一个入口
+（`contract.md:33-39`）：`python3 openbot/examples/org-health-local/run_e2e.py --workdir <workdir> --review`
+一次跑完 Boss → DA → Builder → 站点自检 → Reviewer，产物全部落在 `<workdir>` 下
+（`openbot/examples/org-health-local/run_e2e.py:13`、`:146-148`、`:161`、`:173-179`）。
+下表按交接顺序列出每个产物的生成者、输入，以及一条**可直接运行**的校验命令。
+
+| 产物 | 生成者 | 输入 | 可直接运行的校验命令 |
+| --- | --- | --- | --- |
+| `<workdir>/brief.json` | Boss：`boss/make_brief.py`（`run_e2e.py:35`、`:150`） | 无文件输入；口径、问题与字段映射内置在脚本里 | `python3 openbot/examples/org-health-local/boss/make_brief.py --check <workdir>/brief.json` |
+| `<workdir>/diagnosis.json` | DA：`da/build_diagnosis.py`（`run_e2e.py:36`、`:151`） | `<workdir>/brief.json` + `--raw` 目录里的四张 CSV（合成样本 `openbot/examples/org-health-local/da/sample-raw/`） | `python3 openbot/examples/org-health-local/validate.py <workdir>/diagnosis.json` |
+| `<workdir>/dist/` | Builder：`builder/build_site.py`（`run_e2e.py:37`、`:160`） | `<workdir>/diagnosis.json`（+ `--bundle` 预构建包；不指定时依赖 Bun 打包） | `python3 openbot/examples/org-health-local/builder/check_site.py <workdir>/dist` |
+| `<workdir>/review.md` | Reviewer：`review/cross_check.py`（`run_e2e.py:39`、`:173-179`） | `<workdir>/brief.json` + `<workdir>/diagnosis.json`（+ `<workdir>/dist/`） | `python3 openbot/examples/org-health-local/review/cross_check.py --brief <workdir>/brief.json --data <workdir>/diagnosis.json --dist <workdir>/dist` |
+
+说明：
+
+- 表中命令从仓库根目录执行，只需 Python 标准库，可离线运行；`<workdir>` 换成实际目录的绝对路径
+  （按第 6 节，真实数据不进仓库，`<workdir>` 必须在仓库之外）。各脚本的参数与退出码契约见
+  `contract.md:278-295`（编排层）与 `contract.md` 第 2-5 节（角色层）。
+- 退出码即结论：四条命令都是 `0` 表示该产物的检查项全部通过，非 `0` 表示不通过
+  （`make_brief.py --check` 失败为 `1`；`validate.py` 为 `1`/输入不可读 `2`；`check_site.py` 为 `1`；
+  `cross_check.py` 为 `1`/输入不可读 `2`）。
+- `review.md` 记录的是 Reviewer 的 stdout 与 stderr，失败路径同样落盘（`run_e2e.py:173-179`），
+  所以「有报告」不等于「通过」；判定以重跑上面第四条命令的退出码为准。
+- `dist/` 的自检在 `run_e2e.py` 里由 Builder 之后紧跟着执行（`run_e2e.py:161`）；
+  角色脚本可用 `--boss` / `--da` / `--builder` / `--checker` / `--reviewer` 替换
+  （`run_e2e.py:35-39`），替换后上表校验命令需按新脚本调整。
+- 本节只补验收口径，不改动第 3、7 节已有的命令示例。
