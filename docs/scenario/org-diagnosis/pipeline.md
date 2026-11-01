@@ -4,7 +4,7 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
 
 本文给出用 OpenSwarm 编排「组织健康诊断」三阶段流水线的做法：每个阶段的角色、任务提示、产物路径和
 `--verify` 门禁；阶段之间用上一阶段的提交作为下一阶段的 `--base`；每阶段结束后做一次跨执行器交叉审查。
-真实组织数据不进入仓库，只经仓库外的绝对路径传入（DA `--raw <dir>`，Builder `--data <diagnosis.json>`，预览 `serve.py --root <dist>`）。
+真实组织数据不进入仓库：DA 读取仓库外的 `${DATA}`，Builder/预览只通过 `serve.py --data <diagnosis.json>` 接收仓库外的绝对路径。
 
 配套的可执行示例编排：[`openswarm/examples/org-diagnosis-pipeline.json`](../../../openswarm/examples/org-diagnosis-pipeline.json)
 （`python3 -m json.tool openswarm/examples/org-diagnosis-pipeline.json` 可解析）。
@@ -22,7 +22,7 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
 |---|---|---|---|---|
 | 1 | Boss | 把诊断目标变成口径与问题清单（任务书） | `docs/scenario/org-diagnosis/out/boss-brief.json`（仓库内） | 否 |
 | 2 | DA | 按任务书口径把真实数据归并成结构化诊断 | `${DIAGNOSIS}`（仓库外）+ `docs/scenario/org-diagnosis/out/da-method.md`（仓库内） | 是（仅仓库外那份） |
-| 3 | Builder | 基于诊断快照构建静态分发包并执行静态检查 | `${DIST}`（仓库外）+ `openbot/examples/org-health-local/` 改动（可选）+ `docs/scenario/org-diagnosis/out/builder-notes.md`（仓库内） | 是（仅仓库外 dist 中的 diagnosis.json） |
+| 3 | Builder | 让站点通过外部数据参数加载并正确渲染诊断快照 | `openbot/examples/org-health-local/` 改动（可选）+ `docs/scenario/org-diagnosis/out/builder-notes.md`（仓库内） | 是（仅外部 `${DIAGNOSIS}`） |
 
 ```
                  提交/分支交接（下一阶段 --base = 上一阶段 commit）
@@ -32,7 +32,7 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
         │                 │                  │
         └──── 交叉审查 ────┴──── 交叉审查 ────┘   （openswarm review，跨执行器族）
 
-   真实数据：${RAW_DIR} ──DA──► ${DIAGNOSIS} ──Builder──► ${DIST} ──预览──► serve.py --root （全程在仓库外）
+   真实数据：${DATA} ──DA──► ${DIAGNOSIS} ──Builder/预览──► serve.py --data （全程在仓库外）
 ```
 
 三个阶段都由 `openswarm run` 执行：每次运行在独立 worktree 里进行，分支名 `openswarm/<run-id>`
@@ -310,7 +310,7 @@ PY
 | 产物 | 生成者 | 输入 | 可直接运行的校验命令 |
 | --- | --- | --- | --- |
 | `<workdir>/brief.json` | Boss：`boss/make_brief.py`（`run_e2e.py:35`、`:150`） | 无文件输入；口径、问题与字段映射内置在脚本里 | `python3 openbot/examples/org-health-local/boss/make_brief.py --check <workdir>/brief.json` |
-| `<workdir>/diagnosis.json` | DA：`da/build_diagnosis.py`（`run_e2e.py:36`、`:151`） | `<workdir>/brief.json` + `--raw` 目录里的四张 CSV（合成样本 `openbot/examples/org-health-local/da/sample-raw/`） | `python3 openbot/examples/org-health-local/validate.py <workdir>/diagnosis.json` |
+| `<workdir>/diagnosis.json` | DA：`da/build_diagnosis.py`（`run_e2e.py:36`、`:151`） | `<workdir>/brief.json` + 合成样本 `openbot/examples/org-health-local/da/sample-raw/` | `python3 openbot/examples/org-health-local/validate.py <workdir>/diagnosis.json` |
 | `<workdir>/dist/` | Builder：`builder/build_site.py`（`run_e2e.py:37`、`:160`） | `<workdir>/diagnosis.json`（+ `--bundle` 预构建包；不指定时依赖 Bun 打包） | `python3 openbot/examples/org-health-local/builder/check_site.py <workdir>/dist` |
 | `<workdir>/review.md` | Reviewer：`review/cross_check.py`（`run_e2e.py:39`、`:173-179`） | `<workdir>/brief.json` + `<workdir>/diagnosis.json`（+ `<workdir>/dist/`） | `python3 openbot/examples/org-health-local/review/cross_check.py --brief <workdir>/brief.json --data <workdir>/diagnosis.json --dist <workdir>/dist` |
 
