@@ -2,7 +2,7 @@
 """生成组织健康诊断任务书 brief.json。
 
 用法：
-    python3 make_brief.py --out brief.json [--goal 文本] [--month YYYY-MM]
+    python3 make_brief.py --out brief.json [--goal 文本] [--month YYYY-MM] [--diagnosis diagnosis.json]
     python3 make_brief.py --check brief.json
 
 任务书只写口径、问题与字段映射，不含真实组织数据或真实数字。
@@ -163,7 +163,7 @@ def check_periods_alignment(brief: dict, diagnosis: dict) -> list[str]:
     brief_keys = set(raw_keys)
     diag_keys = extract_diagnosis_periods(diagnosis)
     if not diag_keys:
-        return ["诊断快照 metrics 中未发现期次数值序列"]
+        return ["诊断快照 `metrics` 的 diagnosis periods 为空，不能生成任务书"]
 
     missing_in_diag = [k for k in raw_keys if k not in diag_keys]
     if missing_in_diag:
@@ -414,6 +414,23 @@ def load_brief(path: Path) -> object:
         ) from cause
 
 
+def load_diagnosis(path: Path) -> dict:
+    """读取并确认诊断快照是 JSON 对象。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as cause:
+        raise ValueError(f"无法读取诊断快照 {path}：{cause}") from cause
+    try:
+        diagnosis = json.loads(text)
+    except json.JSONDecodeError as cause:
+        raise ValueError(
+            f"诊断快照 {path} 不是合法 JSON：第 {cause.lineno} 行第 {cause.colno} 列 {cause.msg}"
+        ) from cause
+    if not isinstance(diagnosis, dict):
+        raise ValueError(f"诊断快照 {path} 必须是 JSON 对象")
+    return diagnosis
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数。"""
     parser = argparse.ArgumentParser(description="生成组织健康诊断任务书 brief.json。")
@@ -432,6 +449,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"覆盖观察月份，格式 YYYY-MM。默认 {DEFAULT_MONTH}。",
     )
     parser.add_argument("--fx", type=float, default=None, help="汇率，人民币/美元；默认不写入任务书。")
+    parser.add_argument(
+        "--diagnosis",
+        type=Path,
+        help="可选诊断快照；生成前核对其 metrics 期次，空 periods 时拒绝写出任务书。",
+    )
     return parser.parse_args(argv)
 
 
@@ -467,6 +489,13 @@ def main(argv: list[str] | None = None) -> int:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
     errors = validate_brief(brief)
+    if args.diagnosis is not None:
+        try:
+            diagnosis = load_diagnosis(args.diagnosis)
+        except ValueError as cause:
+            print(str(cause), file=sys.stderr)
+            return EXIT_INVALID
+        errors.extend(check_periods_alignment(brief, diagnosis))
     if errors:
         print(f"生成的任务书不符合 {SCHEMA_PATH.name}：", file=sys.stderr)
         for message in errors:
