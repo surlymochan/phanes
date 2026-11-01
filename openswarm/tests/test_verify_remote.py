@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import _load
 from test_batch import FakeFleetFixture, xs
@@ -66,6 +67,19 @@ class VerifyRemoteTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(self.git(target, "worktree", "list", "--porcelain"), before)
         self.assertEqual(self.git(target, "for-each-ref", "refs/openswarm-verify"), "")
         self.assertEqual(xs.sh.call_count, 0)
+
+    def test_empty_verify_output_is_a_readable_failure_result(self):
+        for output in ("", " \t ", "\n"):
+            with self.subTest(output=repr(output)), mock.patch.object(
+                    xs.subprocess, "run",
+                    return_value=mock.Mock(returncode=1, stdout=output, stderr="")):
+                result = xs.run_verify("check", str(self.repo), 10)
+
+            self.assertEqual(result["cmd"], "check")
+            self.assertEqual(result["rc"], 1)
+            self.assertEqual(result["tail"], output)
+            self.assertEqual(result["failing"], [])
+            self.assertNotEqual(result["rc"], 0)
 
     def test_branchless_run_is_rejected_without_creating_result(self):
         rid, _ = self.start_source_run()
