@@ -653,15 +653,16 @@ def pattern_report_for_proposal(path):
 
 
 def pattern_apply_paths(paths):
-    values = set()
+    values, seen = [], set()
     for path in paths:
         if not isinstance(path, str) or not path.strip():
             continue
         value = path.strip().replace("\\", "/")
-        if value.startswith("./"):
+        while value.startswith("./"):
             value = value[2:]
-        if value:
-            values.add(value)
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
     values = sorted(values)
     if not values:
         return []
