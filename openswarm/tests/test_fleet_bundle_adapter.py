@@ -144,6 +144,33 @@ class FleetBundleEndToEndTests(unittest.TestCase):
                                             'refs/openswarm/' + self.run_id], text=True).strip()
         self.assertEqual(resolved, self.commit)
 
+    def test_push_rejects_different_run_without_damaging_bundle_and_is_idempotent(self):
+        source = Path(self.temp.name) / 'source'
+        target = Path(self.temp.name) / 'target'
+        source.mkdir()
+        target.mkdir()
+        first = source / 'first.json'
+        second = source / 'second.json'
+        first.write_text(json.dumps({'id': 'run-one', 'result': 'first'}))
+        second.write_text(json.dumps({'id': 'run-two', 'result': 'second'}))
+        cli = Path(__file__).resolve().parents[1] / 'bin' / 'openswarm-fleet'
+        env = {**os.environ, 'HOME': self.temp.name}
+        command = [str(cli), 'push', str(first), str(target)]
+        result = subprocess.run(command, text=True, capture_output=True, timeout=15, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = (target / 'result.json').read_bytes()
+        conflict = subprocess.run([str(cli), 'push', str(second), str(target)], text=True,
+                                  capture_output=True, timeout=15, env=env)
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn('conflict', conflict.stdout)
+        self.assertEqual((target / 'result.json').read_bytes(), original)
+        retry = subprocess.run(command, text=True, capture_output=True, timeout=15, env=env)
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        replaced = subprocess.run([str(cli), 'push', '--replace', str(second), str(target)], text=True,
+                                  capture_output=True, timeout=15, env=env)
+        self.assertEqual(replaced.returncode, 0, replaced.stderr)
+        self.assertEqual(json.loads((target / 'result.json').read_text())['id'], 'run-two')
+
 
 if __name__ == '__main__':
     unittest.main()
