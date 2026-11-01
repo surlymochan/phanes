@@ -242,13 +242,14 @@ def validate_brief(brief: object) -> list[str]:
         return ["任务书必须是 JSON 对象"]
     errors = Validator(load_schema(SCHEMA_PATH)).errors(brief)
     period = brief.get("观察期间", {})
-    keys = period.get("期次", []) if isinstance(period, dict) else []
+    raw_keys = period.get("期次") if isinstance(period, dict) else None
+    keys = raw_keys if isinstance(raw_keys, list) else []
     if isinstance(period, dict):
         for name in ("起始期次", "参考期次", "截止期次"):
             if name in period and period[name] not in keys:
                 errors.append(f"/观察期间/{name}: 必须是期次列表中的值")
 
-        if isinstance(keys, list):
+        if isinstance(raw_keys, list):
             # 重复期次会让同一期次被取两次数或被静默覆盖，必须报出。
             try:
                 has_duplicate = len(keys) != len(set(keys))
@@ -350,10 +351,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             brief = load_brief(args.check)
         except ValueError as cause:
+            print(str(cause), file=sys.stderr)
             print(str(cause))
             return EXIT_INVALID
         errors = validate_brief(brief)
         if errors:
+            print("任务书校验失败：", file=sys.stderr)
+            for message in errors:
+                print(f"  {message}", file=sys.stderr)
             print("任务书校验失败：")
             for message in errors:
                 print(f"  {message}")

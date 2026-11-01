@@ -9,9 +9,13 @@
 观察期间的期次顺序、重复期次与起止倒置按当前行为断言：已支持的情形直接断言。
 另含观察月份的命令行回归：00 月、13 月与非法日期格式都应退出码非 0、
 stderr 指出观察月份或 YYYY-MM 约束，且失败时不留下伪造任务书。
+
+非空诊断样本违约（缺少必填区块、错误类型字段）时 make_brief 非零退出并指出
+JSON pointer 与字段名；合法样本仍写出通过 schema 的 brief，禁止只测空文件。
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -543,14 +547,8 @@ class MissingRequiredFieldTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
-    @unittest.expectedFailure
     def test_check_missing_goal_names_field_on_stderr(self) -> None:
-        """--check 缺“目标”时错误信息应写在 stderr 上。
-
-        已知缺口：main 的 --check 分支把校验错误写到 stdout
-        （boss/make_brief.py:334-336），stderr 为空；实现改为写 stderr 后，
-        删掉 expectedFailure 标记。
-        """
+        """--check 缺“目标”时错误信息写在 stderr 上，指出字段名且不打印 traceback。"""
         with temporary_directory() as folder:
             path = Path(folder) / "brief.json"
             path.write_text(
@@ -727,6 +725,275 @@ class PeriodOrderTest(unittest.TestCase):
                 code = make_brief.main(["--check", str(path)])
         self.assertEqual(code, 1)
         self.assertIn("期次", output.getvalue())
+
+
+class NonEmptyBriefSchemaViolationTest(unittest.TestCase):
+    """非空诊断样本违约（缺少必填区块、错误类型字段）时的校验与命令行回归。
+
+    覆盖：
+    1. 缺少必填区块：顶层或嵌套缺少必填区块时，make_brief 非零退出（EXIT_INVALID=1），
+       并在错误输出中明确指出 JSON pointer 与字段名；
+    2. 错误类型字段：字段取值类型不符合 brief.schema.json 约束时，make_brief 非零退出，
+       并指出 JSON pointer 与字段名；
+    3. 合法样本验证：合法非空样本仍能通过 schema 校验，且 --out 与 --check 正常输出/验证；
+    4. 禁止只测空文件：所有样本均采用完整业务结构的非空诊断任务书。
+    """
+
+    def valid_sample(self) -> dict:
+        """返回一个非空且结构完整的组织诊断任务书样本。"""
+        return make_brief.build_brief(
+            goals=["评估整体技术人力成本与人头变化", "复核营收业务成本匹配情况"],
+            month="2026-09",
+            fx=7.2,
+        )
+
+    def test_缺少必填区块_非零退出且指出路径与字段名(self) -> None:
+        """非空样本缺少必填区块时，make_brief 以非 0 退出并指出 JSON pointer 与字段名。"""
+        cases = [
+            ("缺少顶层口径区块", lambda b: b.pop("口径"), "/口径", "口径"),
+            ("缺少顶层观察期间区块", lambda b: b.pop("观察期间"), "/观察期间", "观察期间"),
+            ("缺少顶层数据需求区块", lambda b: b.pop("数据需求"), "/数据需求", "数据需求"),
+            ("缺少顶层必答问题区块", lambda b: b.pop("必答问题"), "/必答问题", "必答问题"),
+            ("缺少顶层禁止事项区块", lambda b: b.pop("禁止事项"), "/禁止事项", "禁止事项"),
+            (
+                "缺少观察期间观察月份",
+                lambda b: b["观察期间"].pop("观察月份"),
+                "/观察期间/观察月份",
+                "观察月份",
+            ),
+            (
+                "缺少观察期间期次",
+                lambda b: b["观察期间"].pop("期次"),
+                "/观察期间/期次",
+                "期次",
+            ),
+            (
+                "缺少口径整体技术人力成本区块",
+                lambda b: b["口径"].pop("整体技术人力成本"),
+                "/口径/整体技术人力成本",
+                "整体技术人力成本",
+            ),
+            (
+                "缺少口径项单位字段",
+                lambda b: b["口径"]["整体技术人力成本"].pop("单位"),
+                "/口径/整体技术人力成本/单位",
+                "单位",
+            ),
+            (
+                "缺少数据需求字段路径",
+                lambda b: b["数据需求"][0].pop("字段路径"),
+                "/数据需求/0/字段路径",
+                "字段路径",
+            ),
+        ]
+
+        for desc, mutator, pointer, field_name in cases:
+            with self.subTest(scenario=desc), temporary_directory() as folder:
+                sample = copy.deepcopy(self.valid_sample())
+                mutator(sample)
+                # 禁止只测空文件：断言样本是非空的业务对象
+                self.assertGreater(len(sample), 0)
+                self.assertGreater(len(json.dumps(sample, ensure_ascii=False)), 200)
+
+                # 1. 结构校验层面断言指出 JSON pointer 与字段名
+                errors = make_brief.validate_brief(sample)
+                self.assertTrue(errors, f"{desc} 未报出校验错误")
+                self.assertTrue(
+                    any(pointer in err and "缺少必需字段" in err for err in errors),
+                    f"{desc} 校验错误中未包含预期的 JSON pointer {pointer}: {errors}",
+                )
+
+                # 2. main(["--check", path]) 函数入口返回 EXIT_INVALID
+                path = Path(folder) / "brief.json"
+                path.write_text(json.dumps(sample, ensure_ascii=False), encoding="utf-8")
+                output = StringIO()
+                with redirect_stdout(output), redirect_stderr(output):
+                    code = make_brief.main(["--check", str(path)])
+                self.assertEqual(code, make_brief.EXIT_INVALID)
+                self.assertIn(pointer, output.getvalue())
+                self.assertIn(field_name, output.getvalue())
+                self.assertIn("缺少必需字段", output.getvalue())
+
+                # 3. 命令行进程入口非零退出且无 traceback
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                    capture_output=True,
+                    text=True,
+                )
+                output_text = result.stdout + result.stderr
+                self.assertEqual(result.returncode, make_brief.EXIT_INVALID, output_text)
+                self.assertIn(pointer, output_text)
+                self.assertIn(field_name, output_text)
+                self.assertIn("缺少必需字段", output_text)
+                self.assertNotIn("Traceback", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_错误类型字段_非零退出且指出路径与字段名(self) -> None:
+        """非空样本包含错误类型字段时，make_brief 以非 0 退出并指出 JSON pointer 与字段名。"""
+        cases = [
+            (
+                "schema版本为字符串",
+                lambda b: b.update({"schema版本": "4"}),
+                "/schema版本",
+                "schema版本",
+                "期望值 4",
+            ),
+            (
+                "schema版本为错误数字",
+                lambda b: b.update({"schema版本": 99}),
+                "/schema版本",
+                "schema版本",
+                "期望值 4",
+            ),
+            (
+                "观察期间观察月份为整数类型",
+                lambda b: b["观察期间"].update({"观察月份": 202609}),
+                "/观察期间/观察月份",
+                "观察月份",
+                "期望类型 string",
+            ),
+            (
+                "目标为字符串而非数组",
+                lambda b: b.update({"目标": "整体技术人力成本评估目标"}),
+                "/目标",
+                "目标",
+                "期望类型 array",
+            ),
+            (
+                "期次为整数而非数组",
+                lambda b: b["观察期间"].update({"期次": 12345}),
+                "/观察期间/期次",
+                "期次",
+                "期望类型 array",
+            ),
+            (
+                "口径项单位为整数类型",
+                lambda b: b["口径"]["整体技术人力成本"].update({"单位": 1000}),
+                "/口径/整体技术人力成本/单位",
+                "单位",
+                "期望类型 string",
+            ),
+            (
+                "汇率为字符串类型",
+                lambda b: b["口径"].update({"汇率": "7.2"}),
+                "/口径/汇率",
+                "汇率",
+                "期望类型 number",
+            ),
+            (
+                "数据需求对应指标不在枚举中",
+                lambda b: b["数据需求"][0].update({"对应指标": "未定义的指标"}),
+                "/数据需求/0/对应指标",
+                "对应指标",
+                "取值不在允许的列表内",
+            ),
+            (
+                "禁止事项少于2条",
+                lambda b: b.update({"禁止事项": ["只有一条禁止事项"]}),
+                "/禁止事项",
+                "禁止事项",
+                "元素数量不足 2",
+            ),
+        ]
+
+        for desc, mutator, pointer, field_name, expected_hint in cases:
+            with self.subTest(scenario=desc), temporary_directory() as folder:
+                sample = copy.deepcopy(self.valid_sample())
+                mutator(sample)
+                # 禁止只测空文件：断言样本非空
+                self.assertGreater(len(sample), 0)
+                self.assertGreater(len(json.dumps(sample, ensure_ascii=False)), 200)
+
+                # 1. 结构校验层面断言指出 JSON pointer 与预期提示
+                errors = make_brief.validate_brief(sample)
+                self.assertTrue(errors, f"{desc} 未报出校验错误")
+                self.assertTrue(
+                    any(pointer in err and expected_hint in err for err in errors),
+                    f"{desc} 校验错误中未包含预期 pointer {pointer} 或提示 {expected_hint}: {errors}",
+                )
+
+                # 2. main(["--check", path]) 返回 EXIT_INVALID
+                path = Path(folder) / "brief.json"
+                path.write_text(json.dumps(sample, ensure_ascii=False), encoding="utf-8")
+                output = StringIO()
+                with redirect_stdout(output), redirect_stderr(output):
+                    code = make_brief.main(["--check", str(path)])
+                self.assertEqual(code, make_brief.EXIT_INVALID)
+                self.assertIn(pointer, output.getvalue())
+                self.assertIn(expected_hint, output.getvalue())
+
+                # 3. 命令行进程非 0 退出且无 traceback
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                    capture_output=True,
+                    text=True,
+                )
+                output_text = result.stdout + result.stderr
+                self.assertEqual(result.returncode, make_brief.EXIT_INVALID, output_text)
+                self.assertIn(pointer, output_text)
+                self.assertIn(expected_hint, output_text)
+                self.assertNotIn("Traceback", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_合法非空样本通过schema并写出brief(self) -> None:
+        """合法非空样本顺利通过 schema 校验，且 --out 与 --check 正常输出与验证。"""
+        sample = self.valid_sample()
+        # 禁止只测空文件
+        self.assertGreater(len(sample), 0)
+        self.assertGreater(len(json.dumps(sample, ensure_ascii=False)), 500)
+        self.assertEqual(make_brief.validate_brief(sample), [])
+
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            path.write_text(json.dumps(sample, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            # 校验合法样本退出码为 0
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("任务书校验通过", result.stdout)
+
+            # 使用 --out 重新写出合法样本
+            out_path = Path(folder) / "generated_brief.json"
+            gen_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "make_brief.py"),
+                    "--out",
+                    str(out_path),
+                    "--goal",
+                    "评估整体技术人力成本",
+                    "--month",
+                    "2026-09",
+                    "--fx",
+                    "7.2",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(gen_result.returncode, 0, gen_result.stdout + gen_result.stderr)
+            self.assertTrue(out_path.exists())
+            written = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertGreater(len(written), 0)
+            self.assertEqual(make_brief.validate_brief(written), [])
+
+    def test_禁止只测空文件(self) -> None:
+        """空文件不是合法诊断任务书，会被拒绝；单测必须使用非空结构化样本。"""
+        with temporary_directory() as folder:
+            empty_path = Path(folder) / "empty.json"
+            empty_path.write_text("", encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--check", str(empty_path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, make_brief.EXIT_INVALID)
+            self.assertIn("不是合法 JSON", result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":
