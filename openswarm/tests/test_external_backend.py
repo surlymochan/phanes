@@ -52,7 +52,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_reserved_labels_for_fleet_dispatchers(self):
         cfgs = X.backend_configs({"external_backends": {"dot": {"repo": "o/r"}, "off": {"repo": "o/r", "enabled": False}}})
-        self.assertEqual(X.reserved_labels(cfgs), ["backend:dot", "lane-claimed"])
+        self.assertEqual(X.reserved_labels(cfgs), ["backend:dot", "backend:external", "lane-claimed"])
 
 
 class AssignTest(unittest.TestCase):
@@ -156,13 +156,88 @@ class TickTest(unittest.TestCase):
     def test_cli_reserved(self):
         args = argparse.Namespace(external_cmd="reserved", name=None)
         out = X.cmd_external(args, None, {"external_backends": {"dot": {"repo": "o/r"}}})
-        self.assertEqual(out["skip_labels"], ["backend:dot", "lane-claimed"])
+        self.assertEqual(out["skip_labels"], ["backend:dot", "backend:external", "lane-claimed"])
         self.assertEqual(C.CLAIMED, "lane-claimed")
 
 
+class SelfRegistrationTest(unittest.TestCase):
+    POLICY = {"external_backends": {"_defaults": {"repo": "o/r", "assign_exclude_hot": ["openswarm/bin/openswarm"]},
+                                    "chatgpt-agent": {"max_inflight": 2}}}
+
+    def test_discovery_from_labels_and_claims(self):
+        labels = [{"name": n} for n in ("backend:pi", "backend:codex", "backend:external", "backend:newbot", "p1")]
+        claimed = [issue(3, ["lane-claimed", "backend:fresh"])]
+        names, claim_only = X.discover(labels, claimed, C.INTERNAL_BACKENDS)
+        self.assertEqual((names, claim_only), ({"newbot", "fresh"}, {"fresh"}))
+        cfgs = X.backend_configs(self.POLICY, names)
+        self.assertTrue(cfgs["chatgpt-agent"]["allowlisted"])
+        self.assertFalse(cfgs["newbot"]["allowlisted"])
+        self.assertEqual(cfgs["newbot"]["max_inflight"], 1)  # dynamic names get the defaults
+        self.assertEqual(cfgs["newbot"]["branch_prefixes"], ["fleet/newbot-"])
+
+    def test_unproven_name_gets_no_refill_until_it_claims(self):
+        cfg = X.backend_configs(self.POLICY, {"typo-bot"})["typo-bot"]
+        ready = [issue(7, ["lane-ready", "p1"], READY_BODY)]
+        mem = {}
+        self.assertEqual(X.plan(cfg, [], ready, [], lambda n: FAT, mem, NOW), [])
+        own = [issue(4, ["lane-pr", "backend:typo-bot"])]  # it claimed a pool card and opened a PR
+        acts = X.plan(cfg, own, ready, [], lambda n: FAT, mem, NOW)
+        self.assertTrue(mem["claimed_before"])
+        self.assertEqual([a["n"] for a in acts], [7])
+        self.assertEqual(X.plan(cfg, [], ready, [], lambda n: FAT, mem, NOW)[0]["n"], 7)  # remembered
+
+    def test_pool_keeps_starter_cards_and_dispatcher_needs_repo(self):
+        pool = X.pool_config(self.POLICY)
+        self.assertEqual((pool["label"], pool["max_inflight"]), ("backend:external", 1))
+        ready = [issue(7, ["lane-ready", "p1"], READY_BODY), issue(8, ["lane-ready", "p1"], READY_BODY)]
+        acts = X.plan(pool, [], ready, [], lambda n: FAT, {}, NOW)
+        self.assertEqual([(a["n"], "backend:external" in a["labels"]) for a in acts], [(7, True)])
+        self.assertEqual(X.plan(pool, [issue(7, ["lane-ready", "backend:external"])], ready, [], lambda n: FAT, {}, NOW), [])
+        with self.assertRaises(X.ExternalError):
+            X.tick_all(None, {"external_backends": {}})
+
+    def test_internal_names_cannot_be_external(self):
+        with self.assertRaises(X.ExternalError):
+            X.backend_configs({"external_backends": {"_defaults": {"repo": "o/r"}, "pi": {}}})
+        for name in ("pi", "codex", "agy", "copilot", "external"):
+            with self.assertRaises(ValueError):
+                C.check_agent(name)
+
+    def test_fleet_skip_rule_covers_dynamic_names(self):
+        self.assertTrue(C.fleet_must_skip({"lane-ready", "backend:anything-new"}))
+        self.assertTrue(C.fleet_must_skip({"lane-ready", "backend:external"}))
+        self.assertTrue(C.fleet_must_skip({"lane-claimed"}))
+        self.assertFalse(C.fleet_must_skip({"lane-ready", "backend:codex", "p1"}))
+        self.assertFalse(C.fleet_must_skip({"lane-ready"}))
+
+    def test_tick_all_creates_label_for_claim_only_name_and_shares_ready_set(self):
+        calls = []
+        ready = [issue(7, ["lane-ready", "p1"], READY_BODY), issue(8, ["lane-ready", "p2"], READY_BODY)]
+        pages = {"repos/o/r/labels": [{"name": "backend:chatgpt-agent"}],
+                 "repos/o/r/issues?state=open&labels=lane-claimed": [issue(3, ["lane-claimed", "backend:fresh"], updated_at=iso(NOW))],
+                 "repos/o/r/issues?state=open&labels=backend%3Achatgpt-agent": [],
+                 "repos/o/r/issues?state=open&labels=backend%3Afresh": [issue(3, ["lane-claimed", "backend:fresh"], updated_at=iso(NOW))],
+                 "repos/o/r/issues?state=open&labels=backend%3Aexternal": [],
+                 "repos/o/r/issues?state=open&labels=lane-ready": ready, "repos/o/r/pulls?state=open": []}
+        host = types.SimpleNamespace(DATA=tempfile.mkdtemp(), gh_pages=lambda e: pages[e],
+                                     gh_transport=lambda e, m="GET", p=None, allow_not_found=False: calls.append((m, e, p)))
+        out = X.tick_all(host, self.POLICY, now=NOW)
+        self.assertEqual(calls[0][:2], ("POST", "repos/o/r/labels"))
+        self.assertEqual(calls[0][2]["name"], "backend:fresh")
+        assigned = {r["backend"]: [a["n"] for a in r.get("actions", [])] for r in out if "actions" in r}
+        self.assertEqual(assigned, {"chatgpt-agent": [7, 8], "fresh": [], "external": []})  # each card goes to one place
+
+
 def load_tests(loader, tests, pattern):
-    """Also run sdk/external-lane/tests so the agent-side SDK is covered by the OpenSwarm CI job."""
-    tests.addTests(loader.discover(os.path.join(SDK, "tests"), top_level_dir=os.path.join(SDK, "tests")))
+    """Also run sdk/external-lane/tests in the OpenSwarm CI job. Modules are loaded by path: a nested
+    loader.discover() would clobber the outer discovery's top-level dir on Python < 3.12."""
+    import importlib.util
+    for fn in sorted(os.listdir(os.path.join(SDK, "tests"))):
+        if fn.startswith("test_") and fn.endswith(".py"):
+            spec = importlib.util.spec_from_file_location(f"external_lane_sdk_{fn[:-3]}", os.path.join(SDK, "tests", fn))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            tests.addTests(loader.loadTestsFromModule(mod))
     return tests
 
 

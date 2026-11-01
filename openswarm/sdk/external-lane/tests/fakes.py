@@ -3,6 +3,13 @@ import copy
 import itertools
 
 
+import os as _os
+import tempfile as _tempfile
+
+# keep the wake-gate state of tests out of ~/.cache
+_os.environ["EXTERNAL_LANE_STATE_DIR"] = _tempfile.mkdtemp(prefix="external-lane-test-")
+
+
 def issue(n, labels, body="", title=None, updated_at="2026-11-01T00:00:00Z", state="open"):
     return {"number": n, "title": title or f"issue {n}", "body": body, "state": state, "updated_at": updated_at,
             "labels": [{"name": l} for l in labels]}

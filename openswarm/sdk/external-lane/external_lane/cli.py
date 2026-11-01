@@ -5,20 +5,44 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 
 from . import contract as C
+from . import gate
 from .agent import ExternalLane
+
+
+def repo_from_git(cwd=None):
+    """owner/name from the `origin` remote of the current clone, else None."""
+    try:
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    return m.group(1) if m else None
 
 
 def build_parser():
     ap = argparse.ArgumentParser(prog="external_lane", description=__doc__)
-    ap.add_argument("--repo", default=os.environ.get("EXTERNAL_LANE_REPO"), help="owner/name")
+    ap.add_argument("--repo", default=os.environ.get("EXTERNAL_LANE_REPO"), help="owner/name (default: origin of the current clone)")
     ap.add_argument("--agent", default=os.environ.get("EXTERNAL_LANE_AGENT"), help="agent name; label is backend:<agent>")
     ap.add_argument("--max-inflight", type=int, default=int(os.environ.get("EXTERNAL_LANE_MAX_INFLIGHT") or 1))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("contract", help="print the contract (labels, branch format) as JSON")
+    sp = sub.add_parser("check", help="wake gate: rc 0 = a card to take, 1 = nothing to do, 2 = error; read-only, one JSON line")
+    sp.add_argument("--max-wakes-per-hour", type=int,
+                    default=int(os.environ.get("EXTERNAL_LANE_MAX_WAKES_PER_HOUR") or gate.MAX_WAKES_PER_HOUR))
+    sp.add_argument("--fail-cooldown", type=int, metavar="SECONDS",
+                    default=int(os.environ.get("EXTERNAL_LANE_FAIL_COOLDOWN_S") or gate.FAIL_COOLDOWN_S))
+    sp.add_argument("--state-file", default=os.environ.get("EXTERNAL_LANE_STATE_FILE"))
+    sp = sub.add_parser("tick", help="one idempotent pass: resume your claim or claim 1 card; with --work-cmd also do it")
+    sp.add_argument("--work-cmd", help="optional: shell command that edits + commits (then verify, push, PR happen here)")
+    sp.add_argument("--dir", default="./lane-work", help="clone location for --work-cmd (reused between runs)")
+    sp.add_argument("--no-verify", action="store_true")
     sub.add_parser("status", help="claimed (in flight) and claimable issues")
     sub.add_parser("poll", help="claimable issues, best first")
     sp = sub.add_parser("claim", help="claim issue N, or the best claimable one")
@@ -56,15 +80,59 @@ def brief(i):
     return {"number": i["number"], "title": i.get("title"), "labels": sorted(C.label_names(i))}
 
 
+def work_brief(lane, issue):
+    n = issue["number"]
+    branch, rework_pr = lane.branch_for(issue)
+    steps = ([f"git fetch origin {branch} && git checkout {branch}  # rework: push to this branch, no new PR"] if rework_pr else
+             [f"git fetch origin main && git checkout -b {branch} origin/main"])
+    steps += [f"do the work in the issue body; run its acceptance command: {C.verify_command(issue.get('body') or '') or '(none given)'}",
+              "commit (>= 30 effective lines of code/tests), then git push origin " + branch,
+              f"python3 -m external_lane submit {n} --branch {branch} --title '<type>: <what> (#{n})' --dir .",
+              f"or if you cannot finish: python3 -m external_lane fail {n} --reason '<why>'"]
+    return {"issue": n, "title": issue.get("title"), "url": issue.get("html_url"), "branch": branch,
+            "rework_pr": rework_pr, "body": issue.get("body") or "", "next_steps": steps}
+
+
+def tick(lane, a):
+    """One pass, safe to repeat: at most 1 new claim; an unfinished claim is resumed instead of claiming another."""
+    if a.work_cmd:
+        url = lane.run_once(os.path.abspath(a.dir), a.work_cmd, run_verify=not a.no_verify)
+        print(json.dumps({"pr": url}) if url else json.dumps({"pr": None, "note": "nothing claimed, or failed (see issue comment)"}))
+        return 0 if url else 1
+    held = lane.inflight()
+    issue = held[0] if held else lane.claim_next()
+    if not issue:
+        print(json.dumps({"issue": None, "note": "nothing to take; end this round"}))
+        return 1
+    print(json.dumps(dict(work_brief(lane, lane.gh.get_issue(issue["number"])), resumed=bool(held)), ensure_ascii=False, indent=1))
+    return 0
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.cmd == "contract":
         print(json.dumps(contract_info(a.agent), ensure_ascii=False, indent=1))
         return 0
+    a.repo = a.repo or repo_from_git()
     if not a.repo or not a.agent:
-        print("need --repo and --agent (or EXTERNAL_LANE_REPO / EXTERNAL_LANE_AGENT)", file=sys.stderr)
+        msg = "need --agent and --repo (or EXTERNAL_LANE_AGENT / EXTERNAL_LANE_REPO, or run inside a clone)"
+        if a.cmd == "check":
+            print(json.dumps({"rc": gate.ERROR, "reason": "error", "error": msg}))
+        else:
+            print(msg, file=sys.stderr)
         return 2
-    lane = ExternalLane(a.repo, a.agent, a.max_inflight, log=lambda m: print(m, file=sys.stderr))
+    try:
+        lane = ExternalLane(a.repo, a.agent, a.max_inflight, log=lambda m: print(m, file=sys.stderr))
+    except ValueError as error:
+        print(json.dumps({"rc": gate.ERROR, "reason": "error", "error": str(error)}) if a.cmd == "check" else error,
+              file=sys.stdout if a.cmd == "check" else sys.stderr)
+        return 2
+    if a.cmd == "check":
+        rc, summary = gate.check(lane, a.state_file, max_wakes_per_hour=a.max_wakes_per_hour, fail_cooldown_s=a.fail_cooldown)
+        print(json.dumps(summary, ensure_ascii=False, separators=(",", ":")))
+        return rc
+    if a.cmd == "tick":
+        return tick(lane, a)
     if a.cmd == "status":
         print(json.dumps({"inflight": [brief(i) for i in lane.inflight()], "claimable": [brief(i) for i in lane.poll()],
                           "max_inflight": lane.max_inflight}, ensure_ascii=False, indent=1))

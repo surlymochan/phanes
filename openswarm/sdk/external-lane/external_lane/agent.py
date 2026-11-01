@@ -44,6 +44,7 @@ class ExternalLane:
         self.run = runner
         self.log = log
         self.remote_url = f"https://github.com/{repo}.git"
+        self.state_file = None  # wake-gate state; None -> gate.state_path(agent)
 
     # ---- queue -----------------------------------------------------------------------------------
     def inflight(self):
@@ -51,13 +52,15 @@ class ExternalLane:
         return sorted(self.gh.list_issues([self.label, C.CLAIMED]), key=_prio)
 
     def poll(self):
-        return sorted((i for i in self.gh.list_issues([self.label, C.READY]) if C.claimable(i, self.agent)), key=_prio)
+        own = [i for i in self.gh.list_issues([self.label, C.READY]) if C.claimable(i, self.agent)]
+        pool = [i for i in self.gh.list_issues([C.POOL, C.READY]) if C.claimable(i, self.agent)]
+        return sorted(own, key=_prio) + sorted(pool, key=_prio)   # own cards first, then starter cards from the pool
 
     def claim(self, n):
         issue = self.gh.get_issue(n)  # labels from the issue itself: list endpoints can lag label edits
         if not C.claimable(issue, self.agent):
             return None
-        self.gh.set_labels(n, C.claim_labels(C.label_names(issue)))
+        self.gh.set_labels(n, C.claim_labels(C.label_names(issue), self.agent))
         self.gh.comment(n, C.claim_comment(self.agent))
         self.log(f"claimed #{n}")
         return self.gh.get_issue(n)
@@ -77,6 +80,11 @@ class ExternalLane:
         self.gh.set_labels(n, C.failed_labels(C.label_names(issue)))
         self.gh.comment(n, f"external lane **{self.agent}** gave up: {str(reason).strip()[:3000]}")
         self.log(f"failed #{n}: {reason}")
+        try:  # wake-gate cooldown: do not wake again for this card for a while
+            from .gate import note_failure, state_path
+            note_failure(self.state_file or state_path(self.agent), n)
+        except (OSError, ValueError):
+            pass
 
     def branch_for(self, issue):
         """(branch, rework_pr). Rework issues (`重基PR：#P branch` / `Rework PR: #P branch`) reuse the PR branch."""

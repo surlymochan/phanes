@@ -21,6 +21,11 @@ PR_OPEN = "lane-pr"           # a PR exists; review/merge is the dispatcher's jo
 FAILED = "lane-failed"        # gave up; reason is in a comment
 NEEDS_HUMAN = "needs-human"
 BACKEND_PREFIX = "backend:"
+# Self-registration: any `backend:<name>` whose name is not an internal (SSH fleet) backend is an external lane.
+INTERNAL_BACKENDS = ("pi", "codex", "agy", "copilot")
+POOL_NAME = "external"
+POOL = BACKEND_PREFIX + POOL_NAME   # starter cards any external agent may claim (that is how a new name registers)
+DEFAULT_AGENT = "chatgpt-agent"
 
 LABEL_COLORS = {READY: "0e8a16", CLAIMED: "fbca04", PR_OPEN: "1d76db", FAILED: "b60205"}
 
@@ -41,7 +46,23 @@ def check_agent(agent: str) -> str:
     agent = str(agent or "").strip()
     if not AGENT_RE.fullmatch(agent):
         raise ValueError(f"agent name must match {AGENT_RE.pattern}: {agent!r}")
+    if agent in INTERNAL_BACKENDS or agent == POOL_NAME:
+        raise ValueError(f"agent name {agent!r} is reserved (internal backends: {', '.join(INTERNAL_BACKENDS)}; pool: {POOL_NAME})")
     return agent
+
+
+def external_name(label: str, internal=INTERNAL_BACKENDS):
+    """`backend:<name>` -> name when it is an external lane (not internal, not the pool), else None."""
+    if not isinstance(label, str) or not label.startswith(BACKEND_PREFIX):
+        return None
+    name = label[len(BACKEND_PREFIX):]
+    return name if name not in internal and name != POOL_NAME and AGENT_RE.fullmatch(name) else None
+
+
+def fleet_must_skip(labels, internal=INTERNAL_BACKENDS) -> bool:
+    """True when an SSH-fleet dispatcher must leave the card alone: claimed, pooled, or pinned to an external name."""
+    labels = set(labels)
+    return CLAIMED in labels or POOL in labels or any(external_name(l, internal) for l in labels)
 
 
 def backend_label(agent: str) -> str:
@@ -99,15 +120,22 @@ def label_names(issue) -> set:
 
 
 def claimable(issue, agent: str) -> bool:
-    """Open issue (not a PR) labelled lane-ready + backend:<agent>, not owned by anyone."""
+    """Open issue (not a PR) labelled lane-ready + (backend:<agent> or the shared pool backend:external), unowned."""
     if "pull_request" in (issue or {}) or (issue or {}).get("state", "open") != "open":
         return False
     labels = label_names(issue)
-    return {READY, backend_label(agent)} <= labels and not labels & {CLAIMED, IN_PROGRESS, PR_OPEN, FAILED}
+    if READY not in labels or labels & {CLAIMED, IN_PROGRESS, PR_OPEN, FAILED, NEEDS_HUMAN}:
+        return False
+    pins = {l for l in labels if l.startswith(BACKEND_PREFIX)}
+    return pins in ({backend_label(agent)}, {POOL})
 
 
-def claim_labels(labels) -> set:
-    return (set(labels) - {READY, FAILED}) | {CLAIMED}
+def claim_labels(labels, agent: str | None = None) -> set:
+    """Claiming swaps lane-ready for lane-claimed; a pool card is also re-pinned to backend:<agent>."""
+    out = (set(labels) - {READY, FAILED}) | {CLAIMED}
+    if agent:
+        out = (out - {POOL}) | {backend_label(agent)}
+    return out
 
 
 def pr_opened_labels(labels) -> set:
