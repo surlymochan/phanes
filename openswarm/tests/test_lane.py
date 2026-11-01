@@ -8,12 +8,117 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
-
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent
 CLI = ROOT / "bin" / "openswarm"
 FLEET_CAPACITY = ROOT / "bin" / "fleet-capacity"
 FIXTURES = ROOT / "tests" / "fixtures"
+
+sys.path.insert(0, str(HERE))
+import _load  # noqa: E402
+
+xs = _load.load()
+xs.__path__ = [str(ROOT)]
+sys.modules["openswarm"] = xs
+
+
+class LanePureFunctionTests(unittest.TestCase):
+    def test_systemd_quote_plain_string(self):
+        self.assertEqual(xs.systemd_quote("plain"), '"plain"')
+        self.assertEqual(xs.systemd_quote("lane_worker_1"), '"lane_worker_1"')
+        self.assertEqual(xs.systemd_quote(""), '""')
+
+    def test_systemd_quote_percent_doubled(self):
+        self.assertEqual(xs.systemd_quote("%"), '"%%"')
+        self.assertEqual(xs.systemd_quote("100%"), '"100%%"')
+        self.assertEqual(xs.systemd_quote("user%d@%h"), '"user%%d@%%h"')
+
+    def test_systemd_quote_backslash_escaped(self):
+        self.assertEqual(xs.systemd_quote(r"path\to\bin"), r'"path\\to\\bin"')
+        self.assertEqual(xs.systemd_quote(r"\n\t\\"), r'"\\n\\t\\\\"')
+
+    def test_systemd_quote_double_quote_escaped(self):
+        self.assertEqual(xs.systemd_quote('cmd "arg"'), r'"cmd \"arg\""')
+        self.assertEqual(xs.systemd_quote('"quoted"'), r'"\"quoted\""')
+
+    def test_systemd_quote_spaces_and_chinese_path(self):
+        self.assertEqual(
+            xs.systemd_quote("/home/user/lane dir/测试 路径/openswarm"),
+            '"/home/user/lane dir/测试 路径/openswarm"',
+        )
+        self.assertEqual(
+            xs.systemd_quote('/path with space/中文 目录/%lane%/"ctl.sock"\\sub'),
+            '"/path with space/中文 目录/%%lane%%/\\"ctl.sock\\"\\\\sub"',
+        )
+
+    def test_lane_validate_socket_path_normal(self):
+        normal_path = "/tmp/lanes/worker-1/ctl.sock"
+        with mock.patch("openswarm.lane_socket_path", return_value=normal_path) as mock_lsp:
+            self.assertEqual(xs.lane_validate_socket_path("worker-1"), normal_path)
+            mock_lsp.assert_called_once_with("worker-1")
+
+        with mock.patch.object(xs, "DATA", "/tmp/d"):
+            expected = xs.lane_socket_path("L1")
+            self.assertEqual(xs.lane_validate_socket_path("L1"), expected)
+
+    def test_lane_validate_socket_path_overlength_raises_with_mock(self):
+        long_path = "/tmp/" + ("x" * 120) + "/ctl.sock"
+        expected_capacity = 104 if sys.platform == "darwin" else 108
+        with mock.patch("openswarm.lane_socket_path", return_value=long_path):
+            with self.assertRaises(RuntimeError) as cm:
+                xs.lane_validate_socket_path("too_long")
+            msg = str(cm.exception)
+            self.assertIn("AF_UNIX", msg)
+            self.assertIn(f"{expected_capacity}-byte", msg)
+            self.assertIn(long_path, msg)
+
+    def test_lane_validate_socket_path_platform_limits(self):
+        for platform, capacity in [("darwin", 104), ("linux", 108)]:
+            limit = capacity - 1
+            boundary_ok = "/p/" + ("a" * (limit - 3))
+            self.assertEqual(len(os.fsencode(boundary_ok)), limit)
+
+            boundary_overflow = boundary_ok + "b"
+            self.assertEqual(len(os.fsencode(boundary_overflow)), capacity)
+
+            with mock.patch.object(sys, "platform", platform):
+                with mock.patch("openswarm.lane_socket_path", return_value=boundary_ok):
+                    self.assertEqual(xs.lane_validate_socket_path("ok_lane"), boundary_ok)
+
+                with mock.patch("openswarm.lane_socket_path", return_value=boundary_overflow):
+                    with self.assertRaises(RuntimeError) as cm:
+                        xs.lane_validate_socket_path("overflow_lane")
+                    msg = str(cm.exception)
+                    self.assertIn("AF_UNIX", msg)
+                    self.assertIn(f"{capacity}-byte", msg)
+                    self.assertIn(boundary_overflow, msg)
+
+    def test_lane_validate_socket_path_multibyte_utf8_overflow(self):
+        multibyte_path = "/tmp/" + ("测" * 40) + "/ctl.sock"
+        self.assertGreater(len(os.fsencode(multibyte_path)), 108)
+        expected_capacity = 104 if sys.platform == "darwin" else 108
+        with mock.patch("openswarm.lane_socket_path", return_value=multibyte_path):
+            with self.assertRaises(RuntimeError) as cm:
+                xs.lane_validate_socket_path("multibyte")
+            msg = str(cm.exception)
+            self.assertIn("AF_UNIX", msg)
+            self.assertIn(f"{expected_capacity}-byte", msg)
+            self.assertIn(multibyte_path, msg)
+
+    def test_lane_validate_socket_path_real_long_name_raises(self):
+        ultra_long_name = "lane_" + ("z" * 150)
+        expected_capacity = 104 if sys.platform == "darwin" else 108
+        full_path = xs.lane_socket_path(ultra_long_name)
+        with self.assertRaises(RuntimeError) as cm:
+            xs.lane_validate_socket_path(ultra_long_name)
+        msg = str(cm.exception)
+        self.assertIn("AF_UNIX", msg)
+        self.assertIn(f"{expected_capacity}-byte", msg)
+        self.assertIn(full_path, msg)
+
+
 # Running bin/openswarm as a script recompiles the whole ~600 KB source on every
 # invocation. Loading it as a module reuses the cached bytecode instead, the same
 # way tests/_load.py does; the command line, output and exit status are unchanged.
