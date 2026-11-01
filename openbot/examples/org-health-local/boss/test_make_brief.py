@@ -1152,6 +1152,60 @@ class DiagnosisPeriodsAlignmentTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertGreater(brief_path.stat().st_size, 0)
 
+    def test_cli_对齐成功使用非空诊断夹具(self) -> None:
+        """--check 搭配完整 diagnosis 夹具时，期次锚点对齐并返回零。"""
+        with temporary_directory() as folder:
+            brief_path = Path(folder) / "brief.json"
+            brief_path.write_text(
+                json.dumps(make_brief.build_brief(), ensure_ascii=False), encoding="utf-8"
+            )
+            diagnosis_path = Path(folder) / "diagnosis.json"
+            diagnosis_path.write_text(
+                json.dumps(self.example, ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "make_brief.py"),
+                    "--check",
+                    str(brief_path),
+                    "--diagnosis",
+                    str(diagnosis_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cli_错期失败并指出字段路径(self) -> None:
+        """非空 diagnosis 夹具错期时，CLI 非零退出并指出任务书字段路径。"""
+        with temporary_directory() as folder:
+            brief_path = Path(folder) / "brief.json"
+            brief = brief_with_period(
+                ["2026-01实际", "2026-05H1参考", "2026-08实际", "年末测算", "年末目标"]
+            )
+            brief_path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+            diagnosis_path = Path(folder) / "diagnosis.json"
+            diagnosis_path.write_text(
+                json.dumps(self.example, ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "make_brief.py"),
+                    "--check",
+                    str(brief_path),
+                    "--diagnosis",
+                    str(diagnosis_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("/观察期间/期次", result.stderr)
+        self.assertIn("2026-08实际", result.stderr)
+        self.assertIn("2026-09实际", result.stderr)
+
     def test_cli_空诊断夹具非零且不写出任务书(self) -> None:
         """diagnosis metrics 为空时指出 periods 字段并拒绝写出空 brief。"""
         with temporary_directory() as folder:

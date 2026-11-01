@@ -174,21 +174,27 @@ def check_periods_alignment(brief: dict, diagnosis: dict) -> list[str]:
     errors: list[str] = []
     period_info = brief.get("观察期间", {})
     if not isinstance(period_info, dict):
-        return ["任务书缺少合法的 `观察期间` 对象"]
+        return ["/观察期间: 任务书缺少合法对象"]
     raw_keys = period_info.get("期次")
     if not isinstance(raw_keys, list) or not raw_keys:
-        return ["任务书 `观察期间.期次` 缺失或为空"]
+        return ["/观察期间/期次: 任务书字段缺失或为空"]
     brief_keys = set(raw_keys)
     diag_keys = extract_diagnosis_periods(diagnosis)
     if not diag_keys:
-        return ["诊断快照 `metrics` 的 diagnosis periods 为空，不能生成任务书"]
+        return ["/metrics/*/数值: 诊断快照的 diagnosis periods 为空，未发现期次数值序列"]
 
     missing_in_diag = [k for k in raw_keys if k not in diag_keys]
     if missing_in_diag:
-        errors.append(f"任务书期次 {missing_in_diag} 未在诊断期次 ({sorted(diag_keys)}) 中找到")
+        errors.append(
+            f"/观察期间/期次: {missing_in_diag} 未在诊断期次 "
+            f"({sorted(diag_keys)}) 中找到"
+        )
     missing_in_brief = [k for k in sorted(diag_keys) if k not in brief_keys]
     if missing_in_brief:
-        errors.append(f"诊断期次 {missing_in_brief} 未在任务书期次 ({raw_keys}) 中找到")
+        errors.append(
+            f"/metrics/*/数值: 诊断期次 {missing_in_brief} 未在任务书期次 "
+            f"({raw_keys}) 中找到"
+        )
     return errors
 
 
@@ -553,6 +559,14 @@ def main(argv: list[str] | None = None) -> int:
             print(str(cause))
             return EXIT_INVALID
         errors = validate_brief(brief)
+        if not errors and args.diagnosis is not None:
+            try:
+                diagnosis = load_diagnosis(args.diagnosis)
+            except ValueError as cause:
+                print(str(cause), file=sys.stderr)
+                print(str(cause))
+                return EXIT_INVALID
+            errors.extend(check_periods_alignment(brief, diagnosis))
         if errors:
             print("任务书校验失败：", file=sys.stderr)
             for message in errors:
