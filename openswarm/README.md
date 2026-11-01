@@ -580,6 +580,10 @@ A pi lane follows pi's own auto-retry of transient provider errors (429/5xx/over
 and ends the turn with the original error if pi never resumes. The grace is `OPENSWARM_PI_RETRY_WAIT_SECONDS`
 (default `8`). The pi broker appends one JSON line per request (lane, sizes, tokens, HTTP/stream status, latency; no
 prompt text or keys) to `PI_BROKER_LOG` (default `<socket>.requests.jsonl`); rotate it with logrotate.
+The isolated pi sandbox mounts `/tmp` as a tmpfs, which the lane cgroup is charged for as shmem; on a small host a PR
+checkout there can pin the lane at `memory.high`. Set `OPENSWARM_PI_SANDBOX_TMP=<absolute dir>` (for example in the
+lane unit's `Environment=`) to bind a disk directory instead: the wrapper uses `<dir>/openswarm-pi-tmp` (mode 700),
+empties it when an RPC session starts, and never removes anything else under `<dir>`.
 
 For automated queue dispatch, label issues with `lane-ready` and an optional backend pin (`backend:pi|agy|codex`) to prioritize matching lane workers.
 
