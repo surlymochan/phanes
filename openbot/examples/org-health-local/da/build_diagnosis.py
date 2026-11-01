@@ -856,6 +856,17 @@ def answer_question(question: str, facts: dict) -> tuple[str, str]:
             f"营收业务折算人头 {fmt_number(revops_heads['start'])} → {fmt_number(revops_heads['end'])}；"
             f"成本占比 {cost_ratio_str}，人头占比 {heads_ratio_str}。",
         )
+    if "全口径" in question or "同口径" in question:
+        labels = facts["labels"]
+        full = ratios["full"]
+        period_keys = ("start", "reference", "end", "forecast")
+        covered = [labels[key] for key in period_keys if full[key] is not None]
+        missing = [labels[key] for key in period_keys if full[key] is None]
+        return (
+            "事实",
+            f"全口径技术成本率（含运维设施）有同口径值的期次：{'、'.join(covered) or '无'}；"
+            f"缺同口径值的期次按 null 呈现（界面显示为未提供）：{'、'.join(missing) or '无'}。",
+        )
     if "率" in question:
         return (
             "事实",
