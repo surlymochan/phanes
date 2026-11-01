@@ -181,6 +181,7 @@ Check scripts (no SSH):
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1260 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
+- `python3 tools/check-ghost-in-progress.py` — offline ghost in-progress check (Refs #922). Fake fixtures only: an open issue carrying `in-progress` with no lane entry in `state.json` counts as a ghost only when the label is older than **10 minutes** (a dispatch in flight still has no lane record), `lane-pr` issues are protected, and a `lane-failed` ghost is only re-labelled `lane-ready` when `state.json` has no lane occupancy and the issue body keeps its acceptance command (#960). It prints the recommended `gh issue edit` commands and never touches GitHub.
 
 ### Roll back a failed assign (Refs #968)
 
@@ -409,6 +410,63 @@ file makes the same backend dispatchable again.
 Mirror drift to fix separately: the repo mirror `tools/lane-autodispatch/autodispatch.py`
 only gates on `PAUSE` / `PAUSE-<LANE>` (lines 8 and 229); the `PAUSE-BACKEND-*` gate runs
 in the box runtime (`~/phanes-ctl/bin/autodispatch.py`) and is not mirrored yet.
+
+## 幽灵 in-progress 判定与重贴处置 (Refs #922)
+
+现场双模式运行中，常见 issue 带有 `in-progress` 标签但 `state.json` 无对应 lane 记录（如 runner 异常退出、lane state 被清理或调度中断）。`lane-autodispatch` 的 `DISPATCH_EXCLUDING_LABELS`（`tools/lane-autodispatch/autodispatch.py:20`）包含 `in-progress`，`dispatchable_issue`（`tools/lane-autodispatch/autodispatch.py:73-76`）因此跳过这类 issue：它既不会被再次调度，也没有 worker 在处理，沦为“幽灵 in-progress”（ghost in-progress）。
+
+### 判定原理 (offline detection)
+
+1. **提取活跃 issue**：解析 `~/phanes-ctl/autodispatch/state.json` 中各活跃 lane 的 issue 字段（lane 名为顶层键，`_done`/`_imported` 等下划线键只是簿记，不算 lane 占用）：
+   ```python
+   active_issues = {v["issue"] for k, v in state.items() if not k.startswith("_") and isinstance(v, dict) and "issue" in v}
+   ```
+2. **排除在途派发（必须先做）**：`tick()` 先在 `tools/lane-autodispatch/autodispatch.py:290` 打 `in-progress` 标签，直到 `:294` 才把 lane 写进 `state.json`；中间的 `dispatch()`（`:188`）含一次 SSH 任务上传（timeout 60s）与一次 `lane assign`（timeout 180s），最坏约 240s。该窗口内 issue 同样“有 `in-progress`、无 lane 记录”，外观与幽灵完全一致，**不能**按幽灵处理。
+   - 工具侧：只有 `in-progress` 标签陈旧超过 **600s（10 分钟）** 才判为幽灵；读不到 `updatedAt` 时一律按“在途/不确定”跳过，不给重贴建议。
+   - 运维侧：运行前确认没有在途派发（见下方“运行前的前置条件”）。
+3. **排除 lane-pr**：main 的孤儿回收显式保护带 `lane-pr` 的 issue（`tools/lane-autodispatch/autodispatch.py:145`），本判定同样跳过它们，不做重贴。
+4. **离线判定幽灵**：open 状态、标签含 `in-progress`、不在 `active_issues` 中、无 `lane-pr`、且 `updatedAt` 已超过阈值 → 判定为无 lane state 的幽灵 issue。
+
+### 运行前的前置条件
+
+先确认没有在途派发，避免把活跃派发误判为幽灵、并被另一条空闲 lane 重复接单：
+
+```bash
+ls ~/phanes-ctl/autodispatch/PAUSE ~/phanes-ctl/autodispatch/PAUSE-* 2>/dev/null  # 暂停整个 AD 或单条 lane
+jq -c '{busy:._busy,ready:._ready,at:._at}' ~/phanes-ctl/autodispatch/lanes-status.json  # 与远端 lane 状态比对 _busy
+```
+
+### 推荐处置 (remediation)
+
+对幽灵 issue 执行**去 IP 重贴 lane-ready**，把遗留的执行中标签收割并恢复为待调度任务：
+
+```bash
+# 普通幽灵（无 lane-failed）
+gh issue edit <issue-number> --remove-label in-progress --add-label lane-ready
+
+# 带 lane-failed 的幽灵：必须同时去掉 lane-failed，否则会造出 lane-failed + lane-ready 组合（#903 不可派）
+gh issue edit <issue-number> --remove-label in-progress --remove-label lane-failed --add-label lane-ready
+```
+
+`lane-failed` 的重贴沿用 #960 契约（`tools/check-lane-failed-requeue.py:36-43`）：`state.json` 里不得还有 lane 占用，issue 体内必须保留验收命令。任一条不满足时，工具只输出“去掉标签”的命令并提示先补齐条件，**不会**直接 `--add-label lane-ready`；带 `lane-pr` 的 issue 一律不判为幽灵、不重贴。
+
+### 离线验证
+
+```bash
+python3 tools/check-ghost-in-progress.py
+```
+
+该脚本内置假 `state.json` 与假 label 列表进行自测与契约验证，输出检测到的幽灵 issue 及推荐重贴命令，绝不修改真实 GitHub。
+
+用真实只读数据自检（先在 box 上取快照，再离线判定）：
+
+```bash
+gh issue list --state open --label in-progress --json number,title,labels,state,updatedAt,body > ~/ghost-check-issues.json
+cp ~/phanes-ctl/autodispatch/state.json ~/ghost-check-state.json
+python3 tools/check-ghost-in-progress.py --state-file ~/ghost-check-state.json --issues-file ~/ghost-check-issues.json
+```
+
+`--min-age-seconds` 可调陈旧度门槛（默认 600s），`--now` 可固定“现在”以复现判定结果。
 
 ## Manual one-shots
 
