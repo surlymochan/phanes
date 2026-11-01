@@ -193,13 +193,15 @@ if FAIL:
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
         self.assertEqual([call[0] for call in calls], ['boss', 'da', 'builder', 'checker'])
-        self.assertEqual(calls[0][1], ['--out', str(self.workdir / 'brief.json')])
+        self.assertRegex(calls[0][1][1], r'\.brief\.json\.boss\.[0-9a-f]+\.tmp$')
         self.assertEqual(calls[1][1], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
-                                       '--out', str(self.workdir / 'diagnosis.json')])
-        self.assertEqual(calls[2][1], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                                       '--out', calls[1][1][-1]])
+        self.assertRegex(calls[1][1][-1], r'\.diagnosis\.json\.da\.[0-9a-f]+\.tmp$')
+        self.assertEqual(calls[2][1], ['--data', str(self.workdir / 'diagnosis.json'), '--out', calls[2][1][3],
                                        '--source-commit', SOURCE_COMMIT,
                                        '--bundle', str(self.bundle)])
-        self.assertEqual(calls[3][1], [str(self.workdir / 'dist')])
+        self.assertRegex(calls[2][1][3], r'\.dist\.builder\.[0-9a-f]+\.tmp$')
+        self.assertEqual(calls[3][1], [calls[2][1][3]])
         self.assertTrue((self.workdir / 'brief.json').is_file())
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
@@ -257,8 +259,9 @@ time.sleep(30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertTrue((self.workdir / 'brief.json').is_file())
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
-        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
-        self.assertTrue((self.workdir / 'dist' / 'checker-started').is_file())
+        staged_site = next(self.workdir.glob('.dist.builder.*.tmp'))
+        self.assertTrue((staged_site / 'index.html').is_file())
+        self.assertTrue((staged_site / 'checker-started').is_file())
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
         self.assertTrue(timings[-1]['timeout'])
@@ -442,15 +445,16 @@ time.sleep(30)
         self.assertEqual([call[0] for call in calls], ['boss', 'da', 'builder', 'checker'])
         expected_workdir = (REPO_ROOT / rel_workdir).resolve()
         expected_raw = ROOT / 'da' / 'sample-raw'
-        self.assertEqual(calls[0][1], ['--out', str(expected_workdir / 'brief.json')])
+        self.assertRegex(calls[0][1][1], r'\.brief\.json\.boss\.[0-9a-f]+\.tmp$')
         self.assertEqual(calls[1][1], ['--brief', str(expected_workdir / 'brief.json'),
                                        '--raw', str(expected_raw),
-                                       '--out', str(expected_workdir / 'diagnosis.json')])
+                                       '--out', calls[1][1][-1]])
+        self.assertRegex(calls[1][1][-1], r'\.diagnosis\.json\.da\.[0-9a-f]+\.tmp$')
         self.assertEqual(calls[2][1], ['--data', str(expected_workdir / 'diagnosis.json'),
-                                       '--out', str(expected_workdir / 'dist'),
+                                       '--out', calls[2][1][3],
                                        '--source-commit', SOURCE_COMMIT,
                                        '--bundle', str(self.bundle)])
-        self.assertEqual(calls[3][1], [str(expected_workdir / 'dist')])
+        self.assertEqual(calls[3][1], [calls[2][1][3]])
         self.assertTrue((expected_workdir / 'brief.json').is_file())
         self.assertTrue((expected_workdir / 'diagnosis.json').is_file())
         self.assertTrue((expected_workdir / 'dist' / 'index.html').is_file())
@@ -646,13 +650,14 @@ time.sleep(30)
         result = subprocess.run(self.command(), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = dict(self.calls())
-        self.assertEqual(calls['boss'], ['--out', str(self.workdir / 'brief.json')])
+        self.assertRegex(calls['boss'][1], r'\.brief\.json\.boss\.[0-9a-f]+\.tmp$')
         self.assertEqual(calls['da'], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
-                                       '--out', str(self.workdir / 'diagnosis.json')])
-        self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                                       '--out', calls['da'][-1]])
+        self.assertRegex(calls['da'][-1], r'\.diagnosis\.json\.da\.[0-9a-f]+\.tmp$')
+        self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'), '--out', calls['builder'][3],
                                             '--source-commit', SOURCE_COMMIT,
                                             '--bundle', str(self.bundle)])
-        self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
+        self.assertEqual(calls['checker'], [calls['builder'][3]])
         # 自定义路径生效，不回退到默认 sample-raw 与 demo bundle
         self.assertNotIn(str(ROOT / 'da' / 'sample-raw'), result.stdout)
         self.assertNotIn(str(ROOT / 'demo' / 'vendor' / 'app.bundle.js'), result.stdout)
@@ -684,15 +689,15 @@ time.sleep(30)
         calls = self.calls()
         self.assertEqual([call[0] for call in calls], list(roles))
         expected = {
-            'boss': ['--out', str(self.workdir / 'brief.json')],
+            'boss': ['--out', calls[0][1][1]],
             'da': ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
-                   '--out', str(self.workdir / 'diagnosis.json')],
-            'builder': ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                   '--out', calls[1][1][-1]],
+            'builder': ['--data', str(self.workdir / 'diagnosis.json'), '--out', calls[2][1][3],
                         '--source-commit', SOURCE_COMMIT, '--bundle', str(self.bundle)],
-            'checker': [str(self.workdir / 'dist')],
+            'checker': [calls[3][1][0]],
             'reviewer': ['--brief', str(self.workdir / 'brief.json'), '--data',
                          str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist'),
-                         '--json-out', str(self.workdir / REVIEW_RESULTS)],
+                         '--json-out', calls[4][1][-1]],
         }
         for role, args in calls:
             self.assertEqual(args, expected[role])
@@ -718,17 +723,19 @@ time.sleep(30)
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = dict(self.calls())
-        self.assertEqual(calls['boss'], ['--out', str(self.workdir / 'brief.json')])
+        self.assertRegex(calls['boss'][1], r'\.brief\.json\.boss\.[0-9a-f]+\.tmp$')
         self.assertEqual(calls['da'], ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
-                                       '--out', str(self.workdir / 'diagnosis.json')])
+                                       '--out', calls['da'][-1]])
         self.assertEqual(calls['builder'], ['--data', str(self.workdir / 'diagnosis.json'),
-                                            '--out', str(self.workdir / 'dist'), '--source-commit', SOURCE_COMMIT,
+                                            '--out', calls['builder'][3], '--source-commit', SOURCE_COMMIT,
                                             '--bundle', str(self.bundle)])
-        self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
+        self.assertRegex(calls['builder'][3], r'\.dist\.builder\.[0-9a-f]+\.tmp$')
+        self.assertEqual(calls['checker'], [calls['builder'][3]])
         self.assertEqual(calls['reviewer'], ['--brief', str(self.workdir / 'brief.json'),
                                              '--data', str(self.workdir / 'diagnosis.json'),
                                              '--dist', str(self.workdir / 'dist'),
-                                             '--json-out', str(self.workdir / REVIEW_RESULTS)])
+                                             '--json-out', calls['reviewer'][-1]])
+        self.assertRegex(calls['reviewer'][-1], r'\.review-results\.json\.review\.[0-9a-f]+\.tmp$')
         # 关键上游 JSON 存在且可解析
         self.assertTrue((self.workdir / 'brief.json').is_file())
         brief = json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
@@ -804,7 +811,8 @@ time.sleep(30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('失败步骤: DA', result.stderr)
         self.assertTrue((self.workdir / 'brief.json').is_file())
-        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        stage = next(self.workdir.glob('.diagnosis.json.da.*.tmp'))
+        self.assertTrue(stage.is_file())
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
         self.assertEqual([item['exit_code'] for item in timings], [0, 7])
@@ -820,7 +828,8 @@ time.sleep(30)
         self.assertIn('失败步骤: Builder', result.stderr)
         self.assertTrue((self.workdir / 'brief.json').is_file())
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
-        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+        stage = next(self.workdir.glob('.dist.builder.*.tmp'))
+        self.assertTrue((stage / 'index.html').is_file())
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder'])
         self.assertEqual([item['exit_code'] for item in timings], [0, 0, 7])
@@ -912,7 +921,8 @@ time.sleep(30)
         review_call = self.calls()[-1][1]
         self.assertEqual(review_call, ['--brief', str(self.workdir / 'brief.json'), '--data',
                                        str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist'),
-                                       '--json-out', str(self.workdir / REVIEW_RESULTS)])
+                                       '--json-out', review_call[-1]])
+        self.assertRegex(review_call[-1], r'\.review-results\.json\.review\.[0-9a-f]+\.tmp$')
         self.assertTrue((self.workdir / 'review.md').is_file())
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
@@ -952,12 +962,13 @@ time.sleep(30)
         # 上游产物未被清理：任务书、诊断快照与站点仍在工作目录
         self.assertTrue((self.workdir / 'brief.json').is_file(), 'Checker 失败后任务书被删除')
         self.assertTrue((self.workdir / 'diagnosis.json').is_file(), 'Checker 失败后诊断快照被删除')
-        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file(), 'Checker 失败后站点产物被删除')
+        stage = next(self.workdir.glob('.dist.builder.*.tmp'))
+        self.assertTrue((stage / 'index.html').is_file(), 'Checker 失败后站点诊断产物被删除')
         # 产物内容保持原样，便于失败后核对
         self.assertEqual(json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8')), {})
         diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
         self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
-        self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
+        self.assertEqual((stage / 'index.html').read_text(encoding='utf-8'),
                          'checker-failure-bundle')
         # 失败原因仍可从 timings.json 核对
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
@@ -1001,7 +1012,11 @@ time.sleep(30)
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker', 'reviewer'])
 
     def test_review_failure_keeps_report_and_is_not_reported_as_success(self):
-        """审查失败时 e2e 以非零退出，review.md 仍写出审查者输出，失败不误报为成功。"""
+        """审查失败时保留本次暂存报告并保持旧 review.md 不变。"""
+        report = self.workdir / REVIEW_REPORT
+        old_report = '上一轮审查报告：通过\n'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(old_report, encoding='utf-8')
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
             self.write_stub(path, role, failing=(index == 4), exit_code=4, echo='审查桩输出')
         result = subprocess.run(self.command() + ['--review', '--reviewer', str(self.scripts[4])],
@@ -1010,10 +1025,24 @@ time.sleep(30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('步骤失败: 审查', result.stderr)
         self.assertIn('退出码 4', result.stderr)
-        # 审查记录仍被创建，并保留审查者的输出
-        report = self.workdir / REVIEW_REPORT
-        self.assertTrue(report.is_file(), '审查失败时未写出审查记录')
-        self.assertIn('审查桩输出', report.read_text(encoding='utf-8'))
+        # 失败报告路径明确可见，旧正式报告不会被覆盖
+        self.assertEqual(report.read_text(encoding='utf-8'), old_report)
+        staged_report = Path(result.stderr.split('审查报告: ', 1)[1].splitlines()[0])
+        self.assertTrue(staged_report.is_file())
+        self.assertIn('审查桩输出', staged_report.read_text(encoding='utf-8'))
+        # 状态文件保留本次审查失败原因与耗时，供调用方诊断。
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'review')
+        self.assertIn('退出码 4', status['error'])
+        self.assertIn(str(staged_report), status['error'])
+        review_step = next(step for step in status['steps'] if step['name'] == '审查')
+        self.assertEqual(review_step['exit_code'], 4)
+        self.assertGreaterEqual(review_step['duration_seconds'], 0)
+        timings = json.loads((self.workdir / TIMINGS_FILE).read_text(encoding='utf-8'))
+        review_timing = next(step for step in timings if step['name'] == '审查')
+        self.assertEqual(review_timing['exit_code'], 4)
+        self.assertGreaterEqual(review_timing['duration_seconds'], 0)
         # 失败不误报为成功：不再打印成功路径才有的预览命令
         self.assertNotIn('预览命令', result.stdout)
 
@@ -1059,7 +1088,7 @@ time.sleep(30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('review 角色失败', result.stderr)
         self.assertIn('步骤失败: 审查', result.stderr)
-        report = self.workdir / REVIEW_REPORT
+        report = Path(result.stderr.split('审查报告: ', 1)[1].splitlines()[0])
         self.assertTrue(report.is_file())
         self.assertIn('部分审查报告', report.read_text(encoding='utf-8'))
         timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
@@ -1080,8 +1109,8 @@ time.sleep(30)
         self.assertIn('步骤失败: 审查', result.stderr)
         self.assertNotIn('预览命令', result.stdout)
         # 失败原因留在报告产物里，便于事后核对
-        report = self.workdir / REVIEW_REPORT
-        self.assertTrue(report.is_file(), '审查失败时未写出审查记录')
+        report = Path(result.stderr.split('审查报告: ', 1)[1].splitlines()[0])
+        self.assertTrue(report.is_file(), '审查失败时未写出本次审查记录')
         self.assertIn('审查参数错误', report.read_text(encoding='utf-8'))
 
     def test_review_output_with_undecodable_bytes_reports_readable_failure(self):
@@ -1105,7 +1134,7 @@ time.sleep(30)
         # 失败不误报为成功：不再打印成功路径才有的预览命令
         self.assertNotIn('预览命令', result.stdout)
         # 审查记录仍写出，原始字节保留在报告里，便于事后核对
-        report = self.workdir / REVIEW_REPORT
+        report = next(self.workdir.glob('.review.md.review.*.tmp'))
         self.assertTrue(report.is_file(), '审查输出不可解码时未写出审查记录')
         self.assertIn(b'\xff', report.read_bytes())
         # 耗时记录写出失败步骤，退出码非 0
@@ -1296,9 +1325,10 @@ class RunE2EReviewContractTest(unittest.TestCase):
                 '--builder', str(self.scripts['builder']), '--checker', str(self.scripts['checker']),
                 '--review', '--reviewer', str(REVIEWER)]
 
-    def record(self):
-        """返回写出的审查记录内容。"""
-        path = self.workdir / REVIEW_REPORT
+    def record(self, result):
+        """返回本次运行写出的审查记录内容。"""
+        path = (self.workdir / REVIEW_REPORT if result.returncode == 0 else
+                Path(result.stderr.split('审查报告: ', 1)[1].splitlines()[0]))
         self.assertTrue(path.is_file(), '审查记录未写出')
         return path.read_text(encoding='utf-8')
 
@@ -1313,7 +1343,7 @@ class RunE2EReviewContractTest(unittest.TestCase):
         result = subprocess.run(self.command(), capture_output=True, text=True)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('步骤失败: 审查', result.stderr)
-        content = self.record()
+        content = self.record(result)
         self.assertIn('FAIL 站点数据一致', content)
         self.assertIn('共 5 项检查：4 项通过，1 项失败', content)
 
@@ -1328,7 +1358,7 @@ class RunE2EReviewContractTest(unittest.TestCase):
         result = subprocess.run(self.command(), capture_output=True, text=True)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('步骤失败: 审查', result.stderr)
-        content = self.record()
+        content = self.record(result)
         self.assertIn('FAIL 期间一致', content)
         self.assertIn('共 5 项检查：4 项通过，1 项失败', content)
 
@@ -1340,7 +1370,7 @@ class RunE2EReviewContractTest(unittest.TestCase):
         self.write_checker_stub()
         result = subprocess.run(self.command(), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        content = self.record()
+        content = self.record(result)
         self.assertIn('PASS 期间一致', content)
         self.assertIn('共 5 项检查：5 项通过，0 项失败', content)
 
@@ -1427,6 +1457,22 @@ class RunE2EReviewSummaryTest(unittest.TestCase):
         self.assertFalse(review['blocking'])
         self.assertEqual(self.status()['status'], 'ok')
 
+    def test_previous_review_json_is_not_used_when_current_reviewer_writes_none(self):
+        """审查者本次未写 JSON 时，旧结果文件不能被汇总。"""
+        self.write_role_stubs()
+        self.scripts['reviewer'].write_text("print('review without JSON')\n", encoding='utf-8')
+        self.workdir.mkdir(parents=True)
+        previous = {'findings': [{'severity': 'error', 'message': 'old finding'}]}
+        (self.workdir / REVIEW_RESULTS).write_text(json.dumps(previous), encoding='utf-8')
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        review = self.status()['review']
+        self.assertFalse(review['summarized'])
+        self.assertIsNone(review['findings'])
+        self.assertEqual(review['by_severity'], {})
+
     def test_review_summary_with_blocking_finding_returns_nonzero(self):
         """审查结论含阻断级发现时整体非零退出，stderr 说明原因且 review.blocking 为 true。"""
         self.write_role_stubs()
@@ -1497,6 +1543,9 @@ class RunE2ERoleScriptTest(unittest.TestCase):
     def test_builder_failure_keeps_upstream_artifacts_and_skips_reviewer(self):
         """真实 Builder 失败：保留 Boss/DA 产物，写出状态文件，Reviewer 不被调用。"""
         missing_bundle = self.root / 'missing.bundle.js'
+        old_site = self.workdir / 'dist'
+        old_site.mkdir(parents=True)
+        (old_site / 'index.html').write_text('previous site', encoding='utf-8')
 
         result = subprocess.run(self.command(missing_bundle), capture_output=True, text=True, timeout=120)
 
@@ -1509,8 +1558,8 @@ class RunE2ERoleScriptTest(unittest.TestCase):
         self.assertTrue(brief['目标'], '任务书为空：不能只测空输入')
         self.assertTrue(brief['必答问题'], '任务书为空：不能只测空输入')
         self.assertTrue((self.workdir / 'diagnosis.json').is_file(), '诊断快照被删除')
-        # Builder 失败时不生成站点产物
-        self.assertFalse((self.workdir / 'dist').exists(), 'Builder 失败后仍生成了站点产物')
+        # Builder 失败不截断上一次成功提交的站点
+        self.assertEqual((old_site / 'index.html').read_text(encoding='utf-8'), 'previous site')
         # 状态文件写出失败步骤、错误与耗时
         status = self.status()
         self.assertEqual(status['status'], 'failed')
@@ -1518,6 +1567,7 @@ class RunE2ERoleScriptTest(unittest.TestCase):
         self.assertIn('bundle 文件不存在或不是有效文件', status['error'])
         self.assertEqual([item['name'] for item in status['timings']], ['Boss', 'DA', 'Builder'])
         self.assertNotEqual(status['timings'][-1]['exit_code'], 0)
+        self.assertIsNotNone(status['error_file'])
         self.assertEqual([item['role'] for item in status['steps']], ['boss', 'da', 'builder'])
         # Boss/DA 两步在状态文件里都是完成状态
         self.assertEqual([item['exit_code'] for item in status['steps'][:2]], [0, 0])
@@ -1576,7 +1626,7 @@ out = Path(sys.argv[sys.argv.index('--out') + 1])
         self.assertIn('失败：index.html 的 sha256 与 build-report.json 不一致', result.stdout)
         # 中间诊断保留且可解析，站点里留着损坏后的页面作为证据。
         self.assert_intermediate_artifacts_kept()
-        site = self.workdir / 'dist' / 'index.html'
+        site = next(self.workdir.glob('.dist.builder.*.tmp')) / 'index.html'
         self.assertTrue(site.is_file(), '站点损坏证据未保留')
         self.assertIn('损坏的站点', site.read_text(encoding='utf-8'))
         status = self.status()
@@ -1596,8 +1646,9 @@ out = Path(sys.argv[sys.argv.index('--out') + 1])
         self.assertIn('失败：index.html 不存在', result.stdout)
         # 中间诊断保留且可解析，构建报告留着登记信息作为损坏证据。
         self.assert_intermediate_artifacts_kept()
-        self.assertTrue((self.workdir / 'dist' / 'build-report.json').is_file(), '站点损坏证据未保留')
-        self.assertFalse((self.workdir / 'dist' / 'index.html').exists(), '缺文件的站点仍有 index.html')
+        stage = next(self.workdir.glob('.dist.builder.*.tmp'))
+        self.assertTrue((stage / 'build-report.json').is_file(), '站点损坏证据未保留')
+        self.assertFalse((stage / 'index.html').exists(), '缺文件的站点仍有 index.html')
         status = self.status()
         self.assertEqual(status['failed_step'], 'checker')
         self.assertEqual(status['status'], 'failed')

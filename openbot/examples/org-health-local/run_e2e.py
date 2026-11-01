@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -122,6 +123,33 @@ def open_report(path):
     except OSError as error:
         print(f'审查报告无法写入: {path} ({error.strerror or str(error)})', file=sys.stderr, flush=True)
         return None
+
+
+def staged_path(path, label):
+    """返回与目标同目录、每次运行唯一的暂存路径。"""
+    return path.with_name(f'.{path.name}.{label}.{uuid.uuid4().hex}.tmp')
+
+
+def commit_artifact(source, target):
+    """以替换方式提交产物；替换失败时恢复原目标。"""
+    backup = staged_path(target, 'backup')
+    moved_old = False
+    try:
+        if target.exists():
+            os.replace(target, backup)
+            moved_old = True
+        os.replace(source, target)
+    except OSError:
+        if moved_old:
+            os.replace(backup, target)
+        raise
+    else:
+        if moved_old:
+            if backup.is_dir():
+                import shutil
+                shutil.rmtree(backup)
+            else:
+                backup.unlink()
 
 
 def undecodable_reason(path):
@@ -515,18 +543,22 @@ def main(argv=None):
     timings = []
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
+    brief_stage = staged_path(brief, 'boss')
+    diagnosis_stage = staged_path(diagnosis, 'da')
     dist = workdir / 'dist'
     # 审查结论的结构化结果文件：审查脚本按 --json-out 写出，运行器据此汇总。
     review_results = workdir / REVIEW_RESULTS
+    results_stage = staged_path(review_results, 'review')
     # 角色脚本与原始数据路径按示例目录解析，避免依赖调用时的 cwd；
     # 绝对路径（含默认值）原样使用；
     # boss/da/builder/checker/reviewer 共用这条解析规则；
     # 产物一律写到工作目录，与角色脚本路径所在目录无关。
     commands = [
-        ('Boss', [sys.executable, str(scripts['boss']), '--out', str(brief)]),
-        ('DA', [sys.executable, str(scripts['da']), '--brief', str(brief), '--raw', str(raw), '--out', str(diagnosis)]),
+        ('Boss', [sys.executable, str(scripts['boss']), '--out', str(brief_stage)]),
+        ('DA', [sys.executable, str(scripts['da']), '--brief', str(brief), '--raw', str(raw), '--out', str(diagnosis_stage)]),
     ]
-    build = [sys.executable, str(scripts['builder']), '--data', str(diagnosis), '--out', str(dist)]
+    dist_stage = staged_path(dist, 'builder')
+    build = [sys.executable, str(scripts['builder']), '--data', str(diagnosis), '--out', str(dist_stage)]
     commit = source_commit()
     if commit is not None:
         build.extend(['--source-commit', commit])
@@ -534,7 +566,7 @@ def main(argv=None):
         build.extend(['--bundle', str(bundle)])
     commands.extend([
         ('Builder', build),
-        ('检查', [sys.executable, str(scripts['checker']), str(dist)]),
+        ('检查', [sys.executable, str(scripts['checker']), str(dist_stage)]),
     ])
     status = 0
     failed = []
@@ -550,16 +582,30 @@ def main(argv=None):
                                            error_path=error_path)
             if not ok:
                 failed.append(name)
+                stage_path = {'Boss': brief_stage, 'DA': diagnosis_stage,
+                              'Builder': dist_stage, '检查': dist_stage}.get(name)
+                if stage_path is not None and stage_path.exists():
+                    error = f'{error}\n诊断产物暂存路径: {stage_path}'
                 step_errors.append(error)
                 step_error_files.append(str(error_path))
                 status = 1
                 break
+            if name in ('Boss', 'DA', '检查'):
+                try:
+                    stage, target = {'Boss': (brief_stage, brief), 'DA': (diagnosis_stage, diagnosis),
+                                     '检查': (dist_stage, dist)}[name]
+                    commit_artifact(stage, target)
+                except OSError as error:
+                    failed.append(name)
+                    step_errors.append(f'{name} 产物提交失败: {error}')
+                    status = 1
+                    break
         if status == 0 and args.review:
             review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist),
-                      '--json-out', str(review_results)]
+                      '--json-out', str(results_stage)]
             # 上一次运行留下的结论不能当成本次的：先清掉结果文件。
             try:
-                review_results.unlink(missing_ok=True)
+                results_stage.unlink(missing_ok=True)
             except OSError:
                 pass
             error_path = workdir / STEP_ERROR_DIR / 'review.json'
@@ -576,29 +622,53 @@ def main(argv=None):
                       file=sys.stderr, flush=True)
                 print(f'审查脚本: {missing}', file=sys.stderr, flush=True)
             else:
-                report = open_report(report_path)
+                if report_path.is_dir():
+                    status = 1
+                    problems.append(f'审查报告无法写入: {report_path} (路径被目录占用)')
+                    report_stage = None
+                else:
+                    report_stage = staged_path(report_path, 'review')
+                report = open_report(report_stage) if report_stage is not None else None
                 if report is None:
                     status = 1
-                    problems.append(f'审查报告无法写入: {report_path}')
+                    message = f'审查报告无法写入: {report_path}'
+                    problems.append(message)
+                    print(message, file=sys.stderr, flush=True)
                 else:
                     with report:
                         # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
                         ok, error, started = run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT,
-                                                     output_path=report_path, timeout=args.timeout,
+                                                     output_path=report_stage, timeout=args.timeout,
                                                      error_path=error_path)
                         # 审查进程真的起来了才算调用过审查角色。
                         reviewer_called = started
                         if not ok:
                             failed.append('审查')
-                            step_errors.append(f'{error}\n审查报告: {report_path}'.strip())
-                            step_error_files.append(str(error_path))
+                            step_errors.append(f'{error}\n审查报告: {report_stage}'.strip())
                             status = 1
                             # 同时标出稳定的角色名，便于调用方不依赖本地化步骤名定位 review 失败。
-                            print('review 角色失败：审查报告已保留，请检查该报告和 timings.json',
+                            print('review 角色失败：本次审查报告已保留，请检查报告路径和 timings.json',
                                   file=sys.stderr, flush=True)
-                            print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
-                    # 审查结论汇总：发现数、各严重级计数与是否阻断写进结果 JSON。
-                    review_summary = summarize_review(review_results)
+                            print(f'审查报告: {report_stage}', file=sys.stderr, flush=True)
+                        else:
+                            try:
+                                commit_artifact(report_stage, report_path)
+                            except OSError as error:
+                                status = 1
+                                failed.append('审查')
+                                step_errors.append(f'审查报告提交失败: {error}; 审查报告: {report_stage}')
+                        has_current_results = results_stage.is_file()
+                        current_results_path = results_stage if has_current_results else None
+                        if ok and has_current_results:
+                            try:
+                                commit_artifact(results_stage, review_results)
+                                current_results_path = review_results
+                            except OSError as error:
+                                status = 1
+                                problems.append(f'审查结果提交失败: {error}')
+                    # 只汇总本次审查生成的暂存或已提交结果，绝不读取旧 JSON。
+                    current_results = current_results_path if ok and has_current_results else None
+                    review_summary = summarize_review(current_results) if current_results else None
                     if review_summary is not None and review_summary['blocking']:
                         message = describe_blocking(review_summary)
                         print(message, file=sys.stderr, flush=True)
@@ -632,7 +702,8 @@ def main(argv=None):
             'review_requested': bool(args.review),
             'reviewer_called': reviewer_called,
             # 审查结论汇总：发现数、各严重级计数与是否阻断。
-            'review': review_status(bool(args.review), reviewer_called, review_results, review_summary),
+            'review': review_status(bool(args.review), reviewer_called,
+                                    review_results if review_summary is not None else None, review_summary),
             'problems': problems,
             'timings': timings,
         }

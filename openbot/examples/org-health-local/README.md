@@ -232,7 +232,7 @@ cd openbot/examples/org-health-local && python3 run_tests.py
 
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。角色脚本、原始数据和 bundle 的相对路径以示例目录为基准，绝对路径原样使用，因此在仓库外的临时目录里调用时也不依赖 cwd；默认值是示例目录内的绝对路径。无论从哪个目录调用，产物都写入 `--workdir`（相对 `--workdir` 仍以调用时的 cwd 为基准）。
 
-`--workdir` 是本次运行的产物目录：`brief.json` 是 Boss 生成的任务书，`diagnosis.json` 是 DA 根据任务书和 `--raw` 生成的诊断快照，`dist/` 是 Builder 生成并由站点检查器校验的静态站点。指定 `--review` 且前置步骤成功时，交叉审查命令会核对这三者并将报告写入 `<workdir>/review.md`；报告包含逐条 PASS/FAIL，审查失败时也会保留。运行器还会写 `<workdir>/timings.json` 和 `status.json`，用于定位失败步骤；步骤失败时还会在 `<workdir>/step-errors/<角色名>.json` 写下该步的命令、退出码和 stdout/stderr 尾部（角色输出损坏 JSON 时据此核对现场）。真实原始数据只能通过仓库外的绝对路径传给 `--raw`，真实数据和由它生成的产物都不要放进或提交到仓库。
+`--workdir` 是本次运行的产物目录：`brief.json` 是 Boss 生成的任务书，`diagnosis.json` 是 DA 根据任务书和 `--raw` 生成的诊断快照，`dist/` 是 Builder 生成并由站点检查器校验的静态站点。角色先写入同级唯一暂存路径，步骤成功后才替换正式产物。指定 `--review` 且前置步骤成功时，交叉审查命令会核对这三者并将成功报告原子提交到 `<workdir>/review.md`；报告包含逐条 PASS/FAIL。审查脚本失败时，本次报告留在 stderr 所列的暂存路径，旧 `review.md` 保持不变。运行器还会写 `<workdir>/timings.json` 和 `status.json`，用于定位失败步骤；步骤失败时还会在 `<workdir>/step-errors/<角色名>.json` 写下该步的命令、退出码和 stdout/stderr 尾部（角色输出损坏 JSON 时据此核对现场）。真实原始数据只能通过仓库外的绝对路径传给 `--raw`，真实数据和由它生成的产物都不要放进或提交到仓库。
 
 最小复现只使用仓库内的合成 CSV 和预构建的合成示例 bundle；把产物写到仓库外的临时目录，不修改 `demo/`：
 
@@ -250,7 +250,7 @@ ls "$workdir/brief.json" "$workdir/diagnosis.json" "$workdir/dist" \
 `$workdir/step-errors/` 里对应角色的 `command`、`exit_code`、`stdout_tail` 和 `stderr_tail`。
 按失败角色检查上游
 `brief.json`/`diagnosis.json`、`--raw` 目录、bundle 或 `dist/`。若已进入审查，查看
-`$workdir/review.md` 中的 FAIL 条目；上游失败时不会调用审查角色，也不会生成该报告。
+`$workdir/review.md` 中的 FAIL 条目；审查脚本失败时查看 stderr 列出的 `.review.md.review.<唯一值>.tmp`，旧 `review.md` 不是本次结论。上游失败时不会调用审查角色，也不会生成报告。
 
 角色脚本路径不存在时同样以非零退出，并在 stderr 点名角色与该路径（例如 `步骤失败: 审查 (Reviewer 脚本文件不存在: <path>)`）；失败步骤之前已生成的产物保留在工作目录，审查步骤未启动时不会写出空的 `review.md`。
 
@@ -264,9 +264,7 @@ python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'
 `demo/vendor/app.bundle.js` 时会依赖 Bun；指定预构建 bundle 则不需要 Bun。端到端产物仍写入
 `<workdir>/dist`，而预览命令中 `demo/site` 与 `demo/dist` 的用途保持不变。
 
-加 `--review` 时审查记录写到 `<workdir>/review.md`：审查通过写 PASS 行，审查失败仍写 FAIL 行并让整体返回非 0，
-即失败路径也留有产物可查。可用 `--review-report <路径>` 把审查记录写到别处（如临时目录），
-默认仍是 `<workdir>/review.md`，产物命名不变；审查脚本返回非 0 时报告保留不删除，
+加 `--review` 时审查记录成功后原子提交到 `<workdir>/review.md`：审查通过写 PASS 行。审查脚本失败仍让整体返回非 0，并把本次报告保留在 stderr 中明确列出的唯一暂存文件；旧 `review.md` 保持不变。可用 `--review-report <路径>` 把审查记录写到别处（如临时目录），默认仍是 `<workdir>/review.md`；审查脚本返回非 0 时暂存报告保留不删除，
 脚本的 stdout 与 stderr（含参数失败信息）都留在报告里，运行器非 0 退出且不打印预览命令。
 审查脚本输出含非 UTF-8 字节时同样判失败：运行器给出可读提示而不是裸 Traceback，
 报告保留原始字节不删除，`timings.json` 里审查步骤的退出码为非 0。
