@@ -51,6 +51,17 @@ class CompareScoreUnitTests(unittest.TestCase):
                                            xs.compare_candidate_score(right))
         self.assertIsNone(xs.choose_compare_winner(left, right))
 
+    def test_missing_optional_score_field_uses_remaining_criteria(self):
+        missing = self.candidate(changed_lines=8, seconds=1.0)
+        complete = self.candidate(changed_lines=12, seconds=2.0)
+        del missing["review"]["findings"]
+        del missing["score"]["diff_size"]
+        self.assertEqual(xs.choose_compare_winner(missing, complete), missing)
+
+        del complete["score"]["diff_size"]
+        missing["score"]["seconds"] = complete["score"]["seconds"]
+        self.assertIsNone(xs.choose_compare_winner(missing, complete))
+
 
 class CompareTests(unittest.TestCase):
     def setUp(self):
