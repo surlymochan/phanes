@@ -12,6 +12,10 @@ stderr 指出观察月份或 YYYY-MM 约束，且失败时不留下伪造任务�
 
 非空诊断样本违约（缺少必填区块、错误类型字段）时 make_brief 非零退出并指出
 JSON pointer 与字段名；合法样本仍写出通过 schema 的 brief，禁止只测空文件。
+
+另含输出文件一致性的命令行回归：--out 先写同目录临时文件再替换目标文件，
+父目录不存在/不可写、目标是目录时返回稳定错误且不损坏已有任务书；
+同样输入多次生成字节稳定；--check 的错误路径仍逐项指出 JSON 路径。
 """
 from __future__ import annotations
 
@@ -1079,6 +1083,185 @@ class DiagnosisPeriodsAlignmentTest(unittest.TestCase):
                 f"boss/make_brief.py 产出的期次字段 {mismatched_period} 必须能在 diagnosis periods 中找到",
             )
         self.assertIn(f"期次字段 {mismatched_period} 必须能在 diagnosis periods 中找到", str(ctx.exception))
+
+
+class OutputFileConsistencyTest(unittest.TestCase):
+    """--out 的输出文件一致性：先写临时文件再替换，失败时给出稳定错误。
+
+    用临时目录执行真实 CLI（子进程），覆盖四条路径：
+    1. 成功：写出合法非空任务书，同样输入多次生成字节稳定；
+    2. 已有文件替换失败保护：父目录不存在/不可写、目标是目录时退出码非 0，
+       已有任务书保持原样，且不残留临时文件；
+    3. 检查通过：--check 校验刚生成的任务书退出码为 0；
+    4. 非法非空 brief：--check 逐项指出 JSON 路径。
+    """
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        """在真实进程里执行 make_brief.py，返回进程结果。"""
+        return subprocess.run(
+            [sys.executable, str(ROOT / "make_brief.py"), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def listdir(self, folder: Path) -> list[str]:
+        """返回目录下的文件名（含隐藏文件），用于断言没有残留临时文件。"""
+        return sorted(os.listdir(folder))
+
+    def test_cli_成功路径_写出合法非空任务书(self) -> None:
+        """--out 成功时写出合法非空任务书，目录里不残留临时文件。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            result = self.run_cli("--out", str(path))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("已写出任务书", result.stdout)
+            self.assertTrue(path.exists())
+            written = load_json(path)
+            self.assertGreater(len(written), 0)
+            self.assertEqual(make_brief.validate_brief(written), [])
+            self.assertEqual(self.listdir(Path(folder)), ["brief.json"])
+
+    def test_cli_同样输入多次生成字节稳定(self) -> None:
+        """同样输入重复生成时字节一致：覆盖已有文件与另一个目录两种情形。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            first = self.run_cli("--out", str(path))
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            original = path.read_bytes()
+            self.assertGreater(len(original), 0)
+
+            second = self.run_cli("--out", str(path))
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertEqual(path.read_bytes(), original, "重复生成同一路径时字节漂移")
+
+            copy_dir = Path(folder) / "copy"
+            copy_dir.mkdir()
+            copy_path = copy_dir / "brief.json"
+            third = self.run_cli("--out", str(copy_path))
+            self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+            self.assertEqual(copy_path.read_bytes(), original, "同样输入写到别的路径时字节漂移")
+
+            # 输出里没有时间戳或随机名：与进程内序列化结果一致。
+            self.assertEqual(
+                original,
+                make_brief.serialize_brief(make_brief.build_brief()).encode("utf-8"),
+            )
+
+    def test_cli_父目录不存在_稳定错误且不留下文件(self) -> None:
+        """--out 的父目录不存在时退出码非 0、错误稳定，且不创建目录也不写文件。"""
+        with temporary_directory() as folder:
+            missing = Path(folder) / "missing"
+            path = missing / "brief.json"
+            result = self.run_cli("--out", str(path))
+            self.assertEqual(
+                result.returncode, make_brief.EXIT_USAGE, result.stdout + result.stderr
+            )
+            self.assertIn("无法写出", result.stderr)
+            self.assertIn(str(path), result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(missing.exists(), "父目录不存在时不应被自动创建")
+            self.assertEqual(self.listdir(Path(folder)), [])
+
+    def test_cli_父目录不可写_稳定错误且不损坏已有任务书(self) -> None:
+        """父目录不可写时退出码非 0，已有任务书保持原样且不残留临时文件。"""
+        if os.geteuid() == 0:
+            self.skipTest("root 会忽略目录权限，无法模拟不可写目录")
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            generated = self.run_cli("--out", str(path))
+            self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+            original = path.read_bytes()
+
+            os.chmod(folder, 0o555)
+            try:
+                result = self.run_cli("--out", str(path))
+            finally:
+                os.chmod(folder, 0o755)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("无法写出", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(path.read_bytes(), original, "写失败时旧任务书被改动")
+            self.assertEqual(self.listdir(Path(folder)), ["brief.json"])
+
+    def test_cli_目标是目录_稳定错误且不损坏目录内容(self) -> None:
+        """--out 指向已存在的目录时退出码非 0，目录及其内容保持原样。"""
+        with temporary_directory() as folder:
+            target = Path(folder) / "brief.json"
+            target.mkdir()
+            (target / "keep.txt").write_text("保留内容", encoding="utf-8")
+            result = self.run_cli("--out", str(target))
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("无法写出", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertTrue(target.is_dir())
+            self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "保留内容")
+            self.assertEqual(self.listdir(Path(folder)), ["brief.json"])
+
+    def test_替换失败时已有任务书保持原样(self) -> None:
+        """替换失败时旧任务书不被截断或覆盖，临时文件也被清理。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            path.write_text("旧任务书\n", encoding="utf-8")
+            original = path.read_bytes()
+            error = StringIO()
+            with patch("boss.make_brief.os.replace", side_effect=OSError("替换失败")), redirect_stderr(
+                error
+            ):
+                code = make_brief.main(["--out", str(path)])
+            self.assertEqual(code, make_brief.EXIT_USAGE)
+            self.assertIn("无法写出", error.getvalue())
+            self.assertEqual(path.read_bytes(), original, "替换失败时旧任务书被改动")
+            self.assertEqual(self.listdir(Path(folder)), ["brief.json"])
+
+    def test_写出先写同目录临时文件再替换(self) -> None:
+        """写出走“同目录临时文件 + 替换”：替换发生在临时文件写完之后。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            recorded: dict = {}
+            real_replace = os.replace
+
+            def fake_replace(src, dst):
+                recorded["src"] = Path(src)
+                recorded["dst"] = Path(dst)
+                recorded["temp_bytes"] = Path(src).read_bytes()
+                return real_replace(src, dst)
+
+            with patch("boss.make_brief.os.replace", side_effect=fake_replace):
+                make_brief.write_brief(make_brief.build_brief(), path)
+
+            self.assertEqual(recorded["dst"], path)
+            self.assertNotEqual(recorded["src"], path, "替换源不是临时文件")
+            self.assertEqual(recorded["src"].parent, path.parent, "临时文件必须与目标同目录")
+            self.assertEqual(recorded["temp_bytes"], path.read_bytes())
+            self.assertEqual(self.listdir(Path(folder)), ["brief.json"])
+
+    def test_cli_检查通过_刚生成的任务书校验通过(self) -> None:
+        """--check 校验刚生成的任务书时退出码为 0 并提示校验通过。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            generated = self.run_cli("--out", str(path))
+            self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+            checked = self.run_cli("--check", str(path))
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertIn("任务书校验通过", checked.stdout)
+
+    def test_cli_非法非空任务书_逐项指出JSON路径(self) -> None:
+        """--check 校验非法非空任务书时逐项指出 JSON 路径，退出码非 0。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            sample = make_brief.build_brief()
+            del sample["口径"]
+            sample["观察期间"]["期次"] = []
+            sample["schema版本"] = "4"
+            path.write_text(json.dumps(sample, ensure_ascii=False), encoding="utf-8")
+
+            result = self.run_cli("--check", str(path))
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, make_brief.EXIT_INVALID, output)
+            self.assertIn("/口径", output)
+            self.assertIn("/观察期间/期次", output)
+            self.assertIn("/schema版本", output)
+            self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":
