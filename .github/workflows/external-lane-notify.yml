@@ -1,0 +1,37 @@
+# Event-driven wake-ups for external lanes (openswarm/sdk/external-lane). When a card becomes `lane-ready` for an
+# external `backend:<name>` that has an inbox PR (draft, branch external-inbox/<name>, created by
+# `openswarm external init` for allowlisted names), comment once per card per 24h on that inbox PR. Agents whose
+# platform only delivers pull-request events subscribe to comments on their inbox PR instead of polling.
+name: External lane notify
+
+on:
+  issues:
+    types: [opened, reopened, labeled]
+
+permissions:
+  contents: read        # sparse checkout of the SDK (stdlib only)
+  issues: read
+  pull-requests: write  # comment on the inbox PR
+
+concurrency:
+  group: external-lane-notify-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    # cheap pre-filter: only ready cards that carry some backend:* label
+    if: >-
+      contains(toJSON(github.event.issue.labels.*.name), '"lane-ready"') &&
+      contains(toJSON(github.event.issue.labels.*.name), '"backend:')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: openswarm/sdk/external-lane
+          persist-credentials: false
+      - name: Announce on the agent's inbox PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: openswarm/sdk/external-lane
+        run: python3 -m external_lane notify --event "$GITHUB_EVENT_PATH"
