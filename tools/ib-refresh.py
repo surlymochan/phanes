@@ -6,12 +6,14 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 import tempfile
 
 STATUS_KEYS = ("ok", "hosts_ok", "skipped_cooldown", "min_ttl", "min_exp")
+COOLDOWN_RE = re.compile(r"^auto:cooldown:until=(\S+)", re.MULTILINE)
 
 
 def _status_line(ok, hosts_ok, skipped_cooldown, min_ttl, min_exp):
@@ -22,6 +24,40 @@ def _status_line(ok, hosts_ok, skipped_cooldown, min_ttl, min_exp):
 
 def _is_cooldown(row):
     return row.get("cooldown") is True or row.get("status") in {"cooldown", "skipped_cooldown"}
+
+
+def _cooldown_until(pause, now):
+    """Return an active ISO-8601 cooldown from a host pause file."""
+    try:
+        body = pause.read_text()
+    except OSError:
+        return None
+    match = COOLDOWN_RE.search(body)
+    if not match:
+        return None
+    try:
+        deadline = dt.datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=dt.timezone.utc)
+    return match.group(1) if deadline > now else None
+
+
+def _cooldown_hosts(pause_dir, now):
+    """Read active host cooldowns without modifying the pause directory."""
+    if pause_dir is None:
+        return {}
+    active = {}
+    try:
+        pauses = pause_dir.glob("PAUSE-HOST-*")
+    except OSError:
+        return active
+    for pause in pauses:
+        until = _cooldown_until(pause, now)
+        if until is not None:
+            active[pause.name.removeprefix("PAUSE-HOST-")] = until
+    return active
 
 
 def _usable_hosts(rows, known_hosts=None):
@@ -121,7 +157,7 @@ def _cert_path(config_path, value):
     return path if path.is_absolute() else config_path.parent / path
 
 
-def refresh(config_path, renew_command, threshold, output_path=None):
+def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=None):
     config_path = Path(config_path)
     output_path = Path(output_path or config_path)
     try:
@@ -135,12 +171,17 @@ def refresh(config_path, renew_command, threshold, output_path=None):
                 "status_line": _status_line(False, 0, 0, -1, -1)}
 
     now = dt.datetime.now(dt.timezone.utc)
+    pause_dir = Path(pause_dir) if pause_dir is not None else config_path.parent / "autodispatch"
+    cooldowns = _cooldown_hosts(pause_dir, now)
     rows, pending = [], []
     config_errors = []
     for host in hosts:
         name = host.get("name")
-        if _is_cooldown(host):
-            rows.append({"host": name, "status": "cooldown"})
+        if _is_cooldown(host) or name in cooldowns:
+            row = {"host": name, "status": "cooldown"}
+            if name in cooldowns:
+                row["cooldown_until"] = cooldowns[name]
+            rows.append(row)
             continue
         cert_name = host.get("cert") or host.get("certificate") or host.get("ssh_cert")
         if not name or not cert_name:
@@ -220,11 +261,12 @@ def main(argv=None):
     parser.add_argument("--threshold-seconds", type=int,
                         help="override IB_CERT_REUSE_TTL for this run")
     parser.add_argument("--output-fleet-config")
+    parser.add_argument("--pause-dir", help="read-only directory containing PAUSE-HOST-* files")
     parser.add_argument("--status-file")
     args = parser.parse_args(argv)
     threshold = cert_reuse_ttl(args.threshold_seconds)
     result = refresh(args.fleet_config, args.renew_command, threshold,
-                     args.output_fleet_config)
+                     args.output_fleet_config, args.pause_dir)
     payload = json.dumps(result, sort_keys=True)
     print(payload)
     if args.status_file:
