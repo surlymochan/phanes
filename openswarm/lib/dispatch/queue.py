@@ -19,6 +19,8 @@ offline.  The label names are configurable: the autodispatch labels (``lane-read
 ``in-progress``, ``lane-pr``, ``lane-failed``) are the defaults.
 """
 
+import time
+
 # The four labels the queue is filtered by; every one of them can be renamed in cfg.
 DEFAULT_LABELS = {
     "ready": "lane-ready",
@@ -43,6 +45,8 @@ __all__ = [
     "label_names",
     "issue_labels",
     "build_queue",
+    "StaleSkips",
+    "queue_stats",
     "shadow_plan",
 ]
 
@@ -102,7 +106,15 @@ def _backend_of(labels):
     return None
 
 
-def build_queue(issues, cfg=None):
+class Queue(list):
+    """List-compatible queue carrying rows dropped because the search index was stale."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dropped = []
+
+
+def build_queue(issues, cfg=None, authoritative=None):
     """Build the dispatch queue from the rows of ``gh issue list --json number,title,labels,body``.
 
     A row is kept when it carries the ready label and none of the in-progress / pr /
@@ -121,12 +133,20 @@ def build_queue(issues, cfg=None):
     names = label_names(cfg)
     ready = names["ready"].casefold()
     blockers = {names["in_progress"].casefold(), names["pr"].casefold(), names["failed"].casefold()}
-    entries = []
+    entries = Queue()
+    authoritative = authoritative or {}
     for issue in issues or []:
         if not isinstance(issue, dict):
             continue
-        labels = issue_labels(issue)
+        search_labels = issue_labels(issue)
+        number_key = str(issue.get("number"))
+        auth_labels = authoritative.get(number_key, authoritative.get(issue.get("number")))
+        labels = issue_labels({"labels": auth_labels}) if auth_labels is not None else search_labels
         folded = {name.casefold() for name in labels}
+        search_folded = {name.casefold() for name in search_labels}
+        stale = auth_labels is not None and ready in search_folded and not (search_folded & blockers) and bool(folded & blockers)
+        if stale:
+            entries.dropped.append({"number": issue.get("number"), "reason": "stale_index"})
         if ready not in folded or folded & blockers:
             continue
         if str(issue.get("state") or "OPEN").strip().upper() != "OPEN":
@@ -148,6 +168,45 @@ def build_queue(issues, cfg=None):
         })
     entries.sort(key=lambda entry: (entry["priority"], entry["number"]))
     return entries
+
+
+class StaleSkips:
+    """Count repeated stale skips and remember the first observation time per issue."""
+
+    def __init__(self, records=None):
+        self.records = dict(records or {})
+
+    def note(self, n, now):
+        key = str(n)
+        record = self.records.setdefault(key, {"count": 0, "first": now})
+        record["count"] = int(record.get("count", 0)) + 1
+        return record["count"]
+
+    def should_strip(self, n, max_skips=5, min_age_s=600):
+        record = self.records.get(str(n))
+        if not record or int(record.get("count", 0)) < max_skips:
+            return False
+        try:
+            return time.time() - float(record["first"]) >= min_age_s
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def to_json(self):
+        return {key: dict(value) for key, value in self.records.items()}
+
+    @classmethod
+    def from_json(cls, value):
+        return cls(value if isinstance(value, dict) else {})
+
+
+def queue_stats(queue, dropped=None):
+    """Summarize ready, truly dispatchable, stale-index and external-backend rows."""
+    entries = list(queue or [])
+    external = sum(1 for row in entries if row.get("backend"))
+    stale_rows = (dropped if dropped is not None else getattr(queue, "dropped", [])) or []
+    stale = sum(1 for row in stale_rows if row.get("reason") == "stale_index")
+    return {"ready": len(entries) + stale, "dispatchable": len(entries) - external,
+            "stale": stale, "external": external}
 
 
 def _lane_of(lane):
