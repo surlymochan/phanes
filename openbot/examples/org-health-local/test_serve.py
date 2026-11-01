@@ -258,6 +258,8 @@ class LocalServeBoundaryTests(unittest.TestCase):
 
     def test_query_string_on_allowed_paths_is_served(self):
         # 查询串不参与白名单判定：路径部分仍在 ALLOWED_PATHS 内即可照常服务。
+        # app.bundle.js 是 bun 构建产物（被 .gitignore 排除），仓库里并不存在，
+        # 它的查询串行为由 DistRootServeTests 用真实产物单独覆盖。
         cases = (
             ('/?x=1', INDEX.read_bytes()),
             ('/index.html?x=1', INDEX.read_bytes()),
@@ -269,6 +271,7 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 status, body = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertEqual(body, expected_body)
+                self.assertNotIn(b'Traceback', body)
 
     def test_query_string_on_unknown_paths_is_not_found(self):
         # 白名单外的路径即使带查询串依然 404。
@@ -673,9 +676,13 @@ class DistRootServeTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
     def test_dist_query_string_on_allowed_paths_is_served(self):
+        # 静态白名单路径附加无关查询串：仍是 200、正文原样，且响应里没有 traceback。
+        # app.bundle.js 只在这里覆盖，因为它是 bun 构建产物，仓库检出里并不存在。
         cases = (
             ('/?x=1', self.index.read_bytes()),
             ('/index.html?x=1', self.index.read_bytes()),
+            ('/app.bundle.js?x=1', self.bundle.read_bytes()),
+            ('/styles.css?x=1', self.styles.read_bytes()),
             ('/data/diagnosis.json?x=1', self.data.read_bytes()),
         )
         for path, expected_body in cases:
@@ -683,6 +690,7 @@ class DistRootServeTests(unittest.TestCase):
                 status, body = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertEqual(body, expected_body)
+                self.assertNotIn(b'Traceback', body)
 
     def test_dist_query_string_on_unknown_paths_is_not_found(self):
         for path in ('/build-report.json?x=1', '/secret.txt?x=1', '/app.js?x=1'):

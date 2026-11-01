@@ -34,11 +34,20 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      It contains `_busy` (lanes currently assigned work), `_ready` (open GH
      `lane-ready` issues not marked `in-progress`, `lane-pr`, or
      `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
-     is the dispatchable count after `_blocked` is removed. `_stale_stripped_n`
-     (also exposed as `_stale_search_skips`) is the non-negative count of
-     stale-search-index entries stripped by the current autodispatch process;
-     `_stale_lane_failed_skips` counts the subset of those stale hits whose
-     issue still carries both `lane-failed` and `lane-ready` (Refs #985).
+     is the dispatchable count after `_blocked` is removed. `_ready` follows the
+     authoritative issue labels (the bool `fresh_ready` check), not the lagging search index:
+     a stale search row (e.g. an issue that really carries `lane-failed`) is
+     skipped and logged as `skip #<n>: stale search index (already claimed/done)`,
+     never counted as dispatchable. A failed authoritative read is NOT stale:
+     the row is kept and logged as `skip #<n>: label read failed (...)`, so a
+     transient `gh` error can neither drive `_ready` to a false 0 nor trigger a
+     needless refill. Each issue is read authoritatively at most once per tick
+     (`AD_FRESH_BUDGET`, default 60 reads/tick, keeps the GraphQL quota safe).
+     `_stale_stripped_n` (also exposed as `_stale_search_skips`) is the
+     non-negative count of stale-search-index entries stripped by the current
+     autodispatch process; `_stale_lane_failed_skips` counts the subset of those
+     stale hits whose issue still carries both `lane-failed` and `lane-ready`
+     (Refs #985).
    - Failed work is not retried by leaving a stale `lane-ready` label: after a
      failure, an operator must manually re-add `lane-ready` and remove
      `lane-failed` (and `lane-pr`, if present) before it can be dispatched again.
@@ -68,6 +77,7 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &`; script: `merge-loop.sh`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/merge-heartbeat`
+   - **Idle heartbeat contract (Refs #955)**: when idle (no PR pending or no open PR in queue), `merge-loop.sh` skips the merge step (no `gh pr merge` call) but still updates the `merge-heartbeat` timestamp on each tick to prevent false-positive stall detection. Check with `python3 tools/check-merge-idle-heartbeat.py`.
 
 4. **`bus-worker-loop`** (GitHub issue bus executor loop):
    - **Startup command**: `~/phanes-ctl/bin/bus-worker-loop`  
@@ -133,6 +143,28 @@ contract check `python3 tools/check-ib-cert-reuse.py` uses fake TTLs and the
 environment variable to cover both branches, and never invokes a real renewal
 command or touches a machine certificate.
 
+### Merge loop idle heartbeat (Refs #955)
+
+When no open PR is waiting to merge (`idle`), the `lane-merge` loop (`merge-loop.sh`)
+must skip the merge step but still touch/refresh
+`~/phanes-ctl/autodispatch/merge-heartbeat`. Updating the heartbeat while idle prevents
+watchdog monitors from misinterpreting an idle period (no PR activity) as a wedged
+or stalled merge loop.
+
+`bin/merge-loop.sh` writes the heartbeat before the PR query and again on an idle
+tick (empty `gh pr list` result), so an empty queue never looks like a dead loop.
+The offline contract check replays that real script with a fake `gh` stub inside a
+fake directory: while the queue is empty no `gh pr merge` call may happen (the
+merge step is skipped), and `merge-heartbeat` must still be refreshed. The check
+does not model merge policy: `merge-loop.sh` delegates the merge decision to the
+host's `gh` configuration and branch protections.
+
+The contract is asserted offline with fake directory fixtures:
+
+```bash
+python3 tools/check-merge-idle-heartbeat.py
+```
+
 ## Smoke (safe, no restart) (Refs #777)
 
 ```bash
@@ -172,6 +204,15 @@ Check scripts (no SSH):
   read, compare the live snapshot with the filtered GH list (dependency
   blockers are shown separately as `_blocked`):
   `watch -n 30 "jq -c '{busy:._busy,ready:._ready,blocked:._blocked,at:._at}' ~/phanes-ctl/autodispatch/lanes-status.json; gh issue list --state open --label lane-ready --limit 100 --json number,labels --jq '[.[] | select(([.labels[].name] | index(\"in-progress\") | not) and ([.labels[].name] | index(\"lane-pr\") | not) and ([.labels[].name] | index(\"lane-failed\") | not))] | length'"`.
+  That `gh issue list` is a search-index view while `_ready` follows the
+  authoritative labels: in a stale scenario (an issue that really carries
+  `lane-failed`) the two numbers differ on purpose.
+- `python3 tools/check-ad-ready-count.py` — offline #950 contract check. It
+  drives the shipped dispatcher with fake search results plus authoritative
+  issue labels: a stale `lane-failed` search row is skipped and `_ready`
+  matches the fresh count, a failed authoritative read keeps the row instead of
+  shrinking `_ready`, and every issue is read at most once per tick;
+  it never calls `gh`.
 - `python3 tools/check-soak-summary.py` — offline dual-mode soak summary
   contract. It reads fake `lanes-status` and `ib-refresh.status` rows and
   prints the `busy`, `ready`, `hosts_ok`, and `min_exp` values for polling.
@@ -194,6 +235,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1260 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
 - `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
 - `python3 tools/check-health-hosts-ok-pause.py` — offline #948 contract check. It asserts that a host held by a `PAUSE-HOST-<host>` file is never counted in the `hosts_ok` summary, that it is reported in `skipped_cooldown`, that an expired automatic pause is released, and that a pause that has not expired yet — or a manual one — is never cleared.
+- `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
 ### Roll back a failed assign (Refs #968)
 
