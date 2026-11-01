@@ -9,6 +9,7 @@ import subprocess
 import argparse
 import json
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data' / 'diagnosis.json'
@@ -72,17 +73,46 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         payload, status = self._read_diagnosis()
         self._send_json(payload, status, head=head)
 
+    def _read_diagnosis_bytes(self):
+        """读取并校验完整快照，避免把写入中的文件发给客户端。"""
+        if not self.data_file.is_file():
+            return None, {'error': 'diagnosis data not found'}, 404
+        for attempt in range(3):
+            try:
+                expected_size = self.data_file.stat().st_size
+                body = self.data_file.read_bytes()
+                if len(body) != expected_size:
+                    raise OSError('diagnosis file changed during read')
+                payload = json.loads(body.decode('utf-8'))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                if attempt < 2:
+                    time.sleep(0.001)
+                    continue
+                return None, {'error': 'diagnosis data is unavailable'}, 503
+            if not isinstance(payload, dict):
+                return None, {'error': 'diagnosis data must be a JSON object'}, 422
+            return body, payload, 200
+        return None, {'error': 'diagnosis data is unavailable'}, 503
+
     def _read_diagnosis(self):
         """读取诊断快照，确保 API 错误是稳定 JSON 而不是请求线程 traceback。"""
-        if not self.data_file.is_file():
-            return {'error': 'diagnosis data not found'}, 404
-        try:
-            payload = json.loads(self.data_file.read_text(encoding='utf-8'))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return {'error': 'diagnosis data is invalid'}, 500
-        if not isinstance(payload, dict):
-            return {'error': 'diagnosis data must be a JSON object'}, 422
-        return payload, 200
+        _, payload, status = self._read_diagnosis_bytes()
+        return payload, status
+
+    def _serve_diagnosis_file(self, head=False):
+        body, payload, status = self._read_diagnosis_bytes()
+        if status != 200:
+            if status == 404:
+                self.send_error(404, 'File not found')
+                return
+            self._send_json(payload, status, head=head)
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if not head:
+            self.wfile.write(body)
 
     def _send_json(self, payload, status, head=False):
         """发送 API JSON；HEAD 与 GET 保持状态和头部契约但不发送正文。"""
@@ -95,18 +125,30 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.split('?', 1)[0] == '/api/diagnosis':
+        clean_path = self.path.split('?', 1)[0]
+        if clean_path == '/api/diagnosis':
             if not self._check_request():
                 return
             self._serve_diagnosis_api()
             return
+        if clean_path == '/data/diagnosis.json':
+            if not self._check_request():
+                return
+            self._serve_diagnosis_file()
+            return
         super().do_GET()
 
     def do_HEAD(self):
-        if self.path.split('?', 1)[0] == '/api/diagnosis':
+        clean_path = self.path.split('?', 1)[0]
+        if clean_path == '/api/diagnosis':
             if not self._check_request():
                 return
             self._serve_diagnosis_api(head=True)
+            return
+        if clean_path == '/data/diagnosis.json':
+            if not self._check_request():
+                return
+            self._serve_diagnosis_file(head=True)
             return
         super().do_HEAD()
 
