@@ -85,6 +85,13 @@ The result comment is a machine-readable contract: it must contain `status=<done
 
 After claiming, the worker snapshots the canonical task JSON and its planner digest on every poll. If the issue task JSON or planner digest changes, the worker aborts the child run, does not push a branch, and posts a failed result with `error_class: "claim_task_mutated"`.
 
+### Worker 崩溃与受控重启 / Worker crash and controlled restart
+
+常驻 worker 异常退出或崩溃后，受控重启必须保留未完成的 claim 状态，且不丢 in-flight claim 标记：
+- **In-flight claim marker / 运行中认领标记**: 任务认领与执行期间，worker 在本地 claim 目录（`DATA/bus-worker/<run_id>/claim.json`）维护 in-flight 状态。重启过程不得丢弃或丢失此 in-flight 标记。
+- **未完成 claim 处理 / Unfinished claim reconciliation**: 常驻 worker 重启后应扫描识别未完成的 in-flight claim。依据策略写 error（发表包含 `error_class: "worker_crashed"` 的失败结果评论并标记 failed）或续跑（复用未过期 lease 继续执行，避免丢弃已有工作进度）。
+- **不得双开同 claim / Prevent duplicate claim execution**: 重启或重入时严格禁止对同一 in-flight claim 并发拉起两个运行进程。未完成 claim 必须在受控恢复（写 error 或续跑）确认前拒绝重复认领与双开。
+
 ## Trust and cancellation
 
 Issue content and comments are untrusted input. The worker accepts a card only when its issue author and first digest comment are both from `bus.allowed_planners` and the digest matches the task JSON in the current body. Workers require a target repository in their worker-local `--repos` or `bus.worker_repos` allowlist. The planner accepts claims and results only from `bus.allowed_executors`; only the earliest allowed claimer's result is used. The planner treats comments as data, never runs comment text, validates the result fields and branch name, and checks the fetched commit against the reported SHA. Workers must stop when an issue is labelled `openswarm:cancelled`.
