@@ -15,11 +15,13 @@ import csv
 import json
 import re
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?%?")
+PERIOD_SUFFIXES = ("实际", "参考", "测算", "目标")
 
 DATA_SOURCE_HEADING = "## 数据来源"
 
@@ -176,6 +178,22 @@ def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]
                 "",
             ]
         )
+    lines.extend(["## 问题回答", ""])
+    insights = diagnosis.get("insights", [])
+    if insights:
+        lines.extend(
+            f"- {redacted_text(item.get('标题', '未命名问题'))}"
+            for item in insights
+            if isinstance(item, dict)
+        )
+    else:
+        lines.append("未提供问题回答。")
+    lines.extend(["", "## 定义", ""])
+    definitions = diagnosis.get("definitions", [])
+    if definitions:
+        lines.extend(f"- {redacted_text(item)}" for item in definitions)
+    else:
+        lines.append("未提供指标定义。")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -208,6 +226,96 @@ def numeric_literals(value: Any) -> List[str]:
     return found
 
 
+def _number_key(value: Any) -> Optional[Decimal]:
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).replace("%", "")
+    match = NUMBER_RE.search(text)
+    if not match:
+        return None
+    try:
+        return Decimal(match.group(0))
+    except InvalidOperation:
+        return None
+
+
+def _period_matches(text: str, period: str) -> bool:
+    if period in text:
+        return True
+    return any(period.endswith(suffix) and period[:-len(suffix)] in text for suffix in PERIOD_SUFFIXES)
+
+
+def snapshot_series(diagnosis: dict) -> List[Tuple[str, str, Any]]:
+    """Return period-keyed numeric leaves from facts/series and metrics."""
+    result: List[Tuple[str, str, Any]] = []
+
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            if value and all(not isinstance(child, (dict, list)) for child in value.values()):
+                for period, child in value.items():
+                    if child is not None and _number_key(child) is not None:
+                        result.append((str(period), path, child))
+            else:
+                for key, child in value.items():
+                    walk(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]")
+
+    for root in ("facts", "series", "metrics"):
+        if root in diagnosis:
+            walk(diagnosis[root], root)
+    return result
+
+
+def validate_numeric_references(diagnosis: dict) -> None:
+    """Require every insight/recommendation number to cite a same-period series value."""
+    sources = snapshot_series(diagnosis)
+    periods = {period for period, _, _ in sources}
+
+    def numeric_references(text: str) -> List[str]:
+        masked = text
+        for period in sorted(periods, key=len, reverse=True):
+            masked = masked.replace(period, "")
+            for suffix in PERIOD_SUFFIXES:
+                if period.endswith(suffix):
+                    masked = masked.replace(period[:-len(suffix)], "")
+        return NUMBER_RE.findall(masked)
+
+    errors = []
+    for section in ("insights", "recommendations"):
+        items = diagnosis.get(section)
+        if not isinstance(items, list):
+            continue
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            for field, value in item.items():
+                if section == "recommendations" and field == "优先级":
+                    continue
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                for token in numeric_references(value):
+                    number = _number_key(token)
+                    matches = [
+                        (period, path) for period, path, source_value in sources
+                        if _number_key(source_value) == number and _period_matches(value, period)
+                    ]
+                    if not matches:
+                        errors.append({
+                            "path": f"{section}[{index}].{field}",
+                            "number": token,
+                            "message": "数字引用无法回溯到快照 facts/series 中的同值指标和期间",
+                        })
+    if errors:
+        raise MethodError(json.dumps({"error": "untraceable_numeric_reference", "details": errors}, ensure_ascii=False))
+
+
+def redacted_text(value: Any) -> str:
+    """Keep chapter text without copying numeric diagnosis values."""
+    return NUMBER_RE.sub("[数值]", str(value))
+
+
 def main(argv: List[str] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--brief", required=True, type=Path)
@@ -219,6 +327,7 @@ def main(argv: List[str] = None) -> int:
     try:
         brief = load_json(args.brief)
         diagnosis = load_json(args.data)
+        validate_numeric_references(diagnosis)
         sources = None
         if args.raw is not None:
             sources = data_sources(args.raw)

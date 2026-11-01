@@ -86,6 +86,34 @@ class WriteMethodTest(unittest.TestCase):
         self.assertNotIn("120", content)
         self.assertNotIn("8", content)
 
+    def test_traceable_insight_number_writes_questions_and_definitions(self):
+        diagnosis = {
+            "metrics": [{"标题": "活跃度", "数值": {"一月": 120}}],
+            "insights": [{"类型": "事实", "标题": "一月活跃度", "内容": "一月为 120。"}],
+            "definitions": ["活跃度为当期聚合值。"],
+        }
+
+        code, stderr, content = run_write_method(BRIEF, diagnosis)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("## 问题回答", content)
+        self.assertIn("## 定义", content)
+        self.assertIn("一月活跃度", content)
+
+    def test_untraceable_insight_number_is_structured_error(self):
+        diagnosis = {
+            "metrics": [{"标题": "活跃度", "数值": {"一月": 120}}],
+            "insights": [{"类型": "事实", "标题": "伪造", "内容": "一月为 999。"}],
+        }
+
+        code, stderr, content = run_write_method(BRIEF, diagnosis)
+
+        self.assertEqual(code, 1)
+        error = json.loads(stderr)
+        self.assertEqual(error["error"], "untraceable_numeric_reference")
+        self.assertEqual(error["details"][0]["path"], "insights[0].内容")
+        self.assertEqual(content, "")
+
     def test_creates_missing_output_parent_directories(self):
         """--out 的父目录不存在时自动创建多层目录，并正常写出方法说明。"""
         with tempfile.TemporaryDirectory() as temp_dir:

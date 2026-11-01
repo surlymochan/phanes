@@ -30,6 +30,16 @@
     "metrics": {
       "$ref": "#/$defs/metrics"
     },
+    "facts": {
+      "description": "可选的事实来源快照；insights/recommendations 中的数字引用必须能按期间回溯到此对象或 series/metrics。",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "series": {
+      "description": "可选的期间序列来源快照；insights/recommendations 中的数字引用必须能按期间回溯到同值指标。",
+      "type": "object",
+      "additionalProperties": true
+    },
     "insights": {
       "type": "array",
       "items": {
