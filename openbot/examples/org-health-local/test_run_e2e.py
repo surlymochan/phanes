@@ -535,6 +535,37 @@ time.sleep(30)
         self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
                          'console.log("custom-bundle");')
 
+    def test_custom_role_scripts_receive_only_their_own_arguments(self):
+        """自定义五个角色脚本时，路径与参数分别透传且前四步不收到 Reviewer 参数。"""
+        roles = ('boss', 'da', 'builder', 'checker', 'reviewer')
+        for path, role in zip(self.scripts, roles):
+            self.write_stub(path, role)
+
+        command = [
+            sys.executable, str(RUNNER), '--workdir', str(self.workdir),
+            '--raw', str(self.raw), '--bundle', str(self.bundle),
+            '--boss', str(self.scripts[0]), '--da', str(self.scripts[1]),
+            '--builder', str(self.scripts[2]), '--checker', str(self.scripts[3]),
+            '--reviewer', str(self.scripts[4]), '--review',
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertEqual([call[0] for call in calls], list(roles))
+        expected = {
+            'boss': ['--out', str(self.workdir / 'brief.json')],
+            'da': ['--brief', str(self.workdir / 'brief.json'), '--raw', str(self.raw),
+                   '--out', str(self.workdir / 'diagnosis.json')],
+            'builder': ['--data', str(self.workdir / 'diagnosis.json'), '--out', str(self.workdir / 'dist'),
+                        '--source-commit', SOURCE_COMMIT, '--bundle', str(self.bundle)],
+            'checker': [str(self.workdir / 'dist')],
+            'reviewer': ['--brief', str(self.workdir / 'brief.json'), '--data',
+                         str(self.workdir / 'diagnosis.json'), '--dist', str(self.workdir / 'dist')],
+        }
+        for role, args in calls:
+            self.assertEqual(args, expected[role])
+
     def test_paths_with_spaces_are_forwarded_and_artifacts_are_preserved(self):
         """工作目录、raw 与脚本路径含空格时仍完整透传并保留产物。"""
         self.workdir = self.root / 'work dir' / 'output'
