@@ -134,6 +134,30 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         markdown = (directory / "summary.md").read_text()
         self.assertIn("| zero.md | b1 | done | 0 | branch | commit | 0 | ok |", markdown)
 
+    def test_empty_cards_create_zero_summary_without_runner_or_fleet_access(self):
+        with mock.patch.object(xs, "fleet_config", side_effect=AssertionError("fleet access")), \
+                mock.patch.object(xs, "execute_batch", side_effect=AssertionError("runner")):
+            rc, summary, _ = self.run_batch(base=self.initial)
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["base"], self.initial)
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["cards"], [])
+        markdown = (self.data / "batches" / summary["id"] / "summary.md").read_text()
+        self.assertIn("State: finished", markdown)
+        self.assertIn("| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |", markdown)
+        self.assertNotIn("runner_pid", summary)
+
+    def test_empty_result_finishes_without_fleet_access(self):
+        summary = {"id": "empty", "repo": "project", "base": self.initial,
+                   "state": "queued", "cards": []}
+        with mock.patch.object(xs, "fleet_config", side_effect=AssertionError("fleet access")), \
+                mock.patch.object(xs, "host_json", side_effect=AssertionError("fleet access")):
+            self.assertEqual(xs.execute_batch({"hosts": {}, "card_type": None}, summary), 0)
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["cards"], [])
+        markdown = (self.data / "batches" / "empty" / "summary.md").read_text()
+        self.assertIn("State: finished", markdown)
+
     def test_distribution_queueing_bundle_fetch_failure_and_summaries(self):
         for i, text in enumerate(("card zero", "FAIL card one", "card two", "card three", "card four")):
             (self.cards / f"{i}.md").write_text(text)
