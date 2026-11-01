@@ -21,13 +21,15 @@ PRIO = {"p0": 0, "p1": 1, "p2": 2}
 SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ControlMaster=auto",
         "-o", f"ControlPath={HOME}/.ssh/cm/%r@%h:%p", "-o", "ControlPersist=600"]
 BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
+HOST_BACKOFF_BASE = 30
+HOST_BACKOFF_MAX = 600
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
     b = BACKOFF.setdefault(h, {"n": 0, "until": 0}); b["n"] += 1
-    wait = min(600, 30 * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
+    wait = min(HOST_BACKOFF_MAX, HOST_BACKOFF_BASE * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
     log(f"{h} ssh transient error #{b['n']} ({why[-80:]}); backing off {wait}s", brain=(b["n"] == 4))
 def host_good(h):
     if BACKOFF.pop(h, None): log(f"{h} ssh recovered", brain=False)

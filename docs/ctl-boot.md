@@ -166,6 +166,18 @@ changes:
 python3 tools/check-orphan-runner-window.py
 ```
 
+### Host SSH transient backoff (Refs #967)
+
+`lane-autodispatch` keeps transient SSH failures at host scope.  Consecutive
+failures use exponential backoff of `30s → 60s → 120s → 240s → 480s`, capped
+at `600s`; any successful host probe calls `host_good` and clears that host's
+failure count and cooldown.  The offline contract uses a synthetic
+failure/success sequence and does not touch the real backoff state:
+
+```bash
+python3 tools/check-ad-host-backoff.py
+```
+
 Recommended heartbeat monitoring (no SSH and no restart): run this from the
 repository checkout every five minutes, for example with cron:
 
