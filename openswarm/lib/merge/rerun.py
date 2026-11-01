@@ -174,12 +174,19 @@ class RerunLedger:
 
 
 def _matcher(ignore_re: Any):
-    """The compiled ignore pattern; None disables the filter."""
+    """The compiled ignore pattern; None disables the filter.
+
+    A broken pattern is a user error: it is reported as a ``ValueError`` (with
+    the reason) instead of letting a raw ``re.error`` escape to the caller.
+    """
     if ignore_re is None:
         return None
     if hasattr(ignore_re, "search"):
         return ignore_re
-    return re.compile(ignore_re)
+    try:
+        return re.compile(ignore_re)
+    except re.error as error:
+        raise ValueError("invalid ignore pattern {!r}: {}".format(ignore_re, error)) from error
 
 
 def _candidates(runs: Any, ledger: Any, ignore_re: Any = DEFAULT_IGNORE_RE) -> List[Dict[str, Any]]:
@@ -295,6 +302,7 @@ def rerun_once(
     runner: Any = subprocess.run,
     now: Any = None,
     dry_run: bool = False,
+    ignore_re: Any = DEFAULT_IGNORE_RE,
 ) -> List[Dict[str, Any]]:
     """Rerun every failed run of `pr` that was not rerun yet, once.
 
@@ -309,13 +317,17 @@ def rerun_once(
     With ``dry_run=True`` nothing is executed and nothing is written: the
     returned rows are the plan.
 
+    `ignore_re` is the pattern of the run names that are never rerun
+    (:data:`DEFAULT_IGNORE_RE` by default); ``None`` disables the filter and a
+    broken pattern raises a ``ValueError``.
+
     Every row is ``{"run_id": ..., "action": "rerun"|"skip", "reason": ...}``.
     A run that was not selected is reported as skipped with the reason it was
     left alone, so the caller can tell "not failed" from "already rerun".
     """
     moment = time.time() if now is None else _number(now, "now")
     actions: List[Dict[str, Any]] = []
-    for candidate in _candidates(runs, ledger):
+    for candidate in _candidates(runs, ledger, ignore_re):
         if not candidate["selected"]:
             actions.append({
                 "run_id": candidate["run_id"],

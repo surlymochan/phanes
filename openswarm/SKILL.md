@@ -381,6 +381,13 @@ A ledger record carries the outcome and what the next run learns from it: `exec_
 `$OPENSWARM_HOME/reviews.json`; without `--dry-run` a `mergeable` PR is squash merged with
 `gh pr merge --squash --match-head-commit <sha>`. It is an explicit command: openswarm runs no merge loop.
 
+Two optional flags cover what a hand written merge loop usually does: `--rerun-failed-once` reruns the failed CI run
+of a PR that is blocked by `ci` (once per run, remembered in `$OPENSWARM_HOME/merge-reruns.json`; the runs of the
+current head sha only, the macOS pattern of `lib/merge/rerun.py` is ignored, `--ignore-checks-re` replaces it), and
+`--post-merge-hook CMD` runs a command (without a shell) once per new sha of `main` after a merge landed (the sha of
+the last successful run is kept in `$OPENSWARM_HOME/post-merge-hook.json`, a failed run is retried by the next
+round). With `--dry-run` both flags only report what they would do.
+
 ## 10. Learning loop
 
 The loop turns finished runs into better next runs. The curation commands write reviewable drafts; they never edit
