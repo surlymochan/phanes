@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline/static contract for merge-loop's idle heartbeat (Refs #1031)."""
+"""Offline/static contract for merge-loop's idle heartbeat (Refs #1072)."""
 
 from __future__ import annotations
 
