@@ -1,3 +1,7 @@
 # Reproducible benchmark summaries are tracked; per-run transcripts, prompts,
 # patches, and grader output are local artifacts.
 openswarm/bench/**/results/raw*/
+
+# The quota-reclaim drill sandbox is a local artifact: it holds throwaway lane
+# homes, repos and evidence, and must never dirty the working tree.
+.openswarm-tmp/
