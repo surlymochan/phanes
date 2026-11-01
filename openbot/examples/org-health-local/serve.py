@@ -18,6 +18,8 @@ class PortInUseError(RuntimeError):
     """端口已被占用：明确报错并退出，不静默改用其他端口。"""
 
 class LocalOnlyHandler(SimpleHTTPRequestHandler):
+    """只允许本地 loopback 访问与白名单路径；请求不存在路径返回稳定 404 且不列出目录内容。"""
+
     def __init__(self, *args, data=DATA, **kwargs):
         # 请求在 super().__init__() 内即被处理，诊断数据路径必须先就位。
         self.data_file = Path(data)
