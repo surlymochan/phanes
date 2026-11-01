@@ -6318,6 +6318,21 @@ def bus_worker_claim_mutated(issue, task, comments, allowed_planners):
     return current_task != task or not bus_worker_task_is_trusted(issue, task, comments, allowed_planners)
 
 
+def bus_task_drift_reason(task, issue, comments, allowed_planners):
+    """Classify how a card changed after validation, or None when unchanged."""
+    fence = bus_extract_task_fence((issue or {}).get("body", ""))
+    if not fence:
+        return "task_removed"
+    current = fence[1]
+    if current.get("base") != task.get("base"):
+        return "base_changed"
+    if current != task:
+        return "task_changed"
+    if not bus_worker_task_is_trusted(issue, task, comments, allowed_planners):
+        return "digest_mismatch"
+    return None
+
+
 def bus_comments(repo, number):
     return gh_pages(f"repos/{repo}/issues/{number}/comments")
 
@@ -6330,6 +6345,50 @@ def bus_claim(comment):
     return match.group(1) if match else None
 
 
+def bus_claim_release(comment):
+    """Return the executor name of an `/unclaim` comment, if any."""
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return None
+    match = re.fullmatch(r"/unclaim\s+([A-Za-z0-9_.-]{1,64})", body.strip())
+    return match.group(1) if match else None
+
+
+def bus_released_claim_indexes(comments, allowed):
+    allowed = {str(login).casefold() for login in allowed}
+    indexes = []
+    for index, comment in enumerate(comments):
+        name = bus_claim(comment)
+        login = str((comment.get("user") or {}).get("login") or "").casefold()
+        if not name or login not in allowed:
+            continue
+        if any(str((later.get("user") or {}).get("login") or "").casefold() == login
+               and (bus_claim_release(later) or "").casefold() == name.casefold()
+               for later in comments[index + 1:]):
+            indexes.append(index)
+    return indexes
+
+
+def bus_released_claim(comments, allowed):
+    """Return the newest released claim that no later allowlisted claim superseded.
+
+    A released claim only speaks for its own round: once another allowlisted executor
+    claims the card again, the earlier round's result must not override that takeover.
+    """
+    released = set(bus_released_claim_indexes(comments, allowed))
+    allowed_logins = {str(login).casefold() for login in allowed}
+    candidates = [(index, comment) for index, comment in enumerate(comments) if index in released]
+    candidates.sort(key=lambda item: (to_epoch(item[1].get("created_at")) or 0, int(item[1].get("id") or 0)),
+                    reverse=True)
+    for index, comment in candidates:
+        if any(bus_claim(later)
+               and str((later.get("user") or {}).get("login") or "").casefold() in allowed_logins
+               for later in comments[index + 1:]):
+            continue
+        return comment
+    return None
+
+
 def bus_claim_expiry(comment, lease_seconds=300):
     created = to_epoch(comment.get("created_at"))
     return (created if created is not None else NOW()) + float(lease_seconds)
@@ -6340,8 +6399,11 @@ def bus_claim_state(comments, allowed, lease_seconds=300, now=None):
     if now is None:
         # The offline GitHub fixture pins its remote clock for deterministic comment order.
         now = to_epoch(os.environ["OPENSWARM_FAKE_GH_NOW"]) if os.environ.get("OPENSWARM_FAKE_GH_NOW") else NOW()
-    claims = [comment for comment in comments
-              if str((comment.get("user") or {}).get("login") or "").casefold() in allowed and bus_claim(comment)]
+    allowed = {str(login).casefold() for login in allowed}
+    released = set(bus_released_claim_indexes(comments, allowed))
+    claims = [comment for index, comment in enumerate(comments)
+              if index not in released
+              and str((comment.get("user") or {}).get("login") or "").casefold() in allowed and bus_claim(comment)]
     claims.sort(key=lambda c: (to_epoch(c.get("created_at")) or 0, int(c.get("id") or 0)))
     active = None
     for claim in claims:
@@ -6354,6 +6416,20 @@ def bus_claim_state(comments, allowed, lease_seconds=300, now=None):
 
 def bus_winning_claim(comments, allowed, lease_seconds=300, now=None):
     return bus_claim_state(comments, allowed, lease_seconds, now)
+
+
+def bus_winning_result(comments, allowed, lease_seconds=300, now=None):
+    claim = bus_winning_claim(comments, allowed, lease_seconds, now) or bus_released_claim(comments, allowed)
+    if not claim:
+        return None, None
+    login = str((claim.get("user") or {}).get("login") or "").casefold()
+    for comment in reversed(comments[comments.index(claim) + 1:]):
+        if str((comment.get("user") or {}).get("login") or "").casefold() != login:
+            continue
+        parsed = bus_parse_result(comment.get("body") or "")
+        if parsed:
+            return claim, parsed
+    return claim, None
 
 
 def bus_parse_result(body, expected_run_id=None):
@@ -6382,7 +6458,8 @@ def bus_parse_result(body, expected_run_id=None):
             "claim_task_mutated", "compare_runner_failed", "exec_error", "executor_failed",
             "executor_io_lost", "model_unavailable", "network", "non-fast-forward", "no_report",
             "prepare_failed", "protocol_error", "rate_limit", "repo-missing", "risk_blocked", "stopped",
-            "upstream_forbidden", "verify_failed", "worker_crashed", "worktree_unavailable"}:
+            "upstream_forbidden", "verify_failed", "worker_crashed", "worktree_unavailable",
+            "task_changed", "base_changed", "digest_mismatch", "task_removed"}:
         return None
     if result.get("status") != "done" and error_class == "none":
         return None
@@ -6637,7 +6714,13 @@ def cmd_bus_run(args, policy, rid, rdir, task, title, budget_min):
             final_status = "stopped"
             break
         claim = bus_winning_claim(comments, cfg["allowed_executors"], cfg["claim_lease_seconds"])
-        if claim:
+        result_claim, released_result = bus_winning_result(comments, cfg["allowed_executors"],
+                                                           cfg["claim_lease_seconds"])
+        if result_claim and released_result and not claim:
+            if released_result.get("run_id") == metadata.get("run_id"):
+                executor = bus_claim(result_claim)
+                result, final_status = released_result, released_result["status"]
+        elif claim:
             claim_login = str((claim.get("user") or {}).get("login") or "")
             claim_index = comments.index(claim)
             claim_results = []
@@ -6696,7 +6779,8 @@ def cmd_bus_init(args, policy):
                 f"  - {bus_label(cfg, 'queued')}\nbody:\n  - type: markdown\n    attributes:\n      value: |\n"
                 "        Add the task description. Planner metadata is appended in an `openswarm-task` JSON block.\n"
                 "        Labels transition queued -> claimed -> done/failed; planners can cancel with the cancelled label.\n"
-                "        Executors claim with `/claim <executor-name>` and report in an `openswarm-result` JSON block.\n")
+                "        Executors claim with `/claim <executor-name>` and report in an `openswarm-result` JSON block.\n"
+                "        Executors release a claim they can no longer run with `/unclaim <executor-name>`.\n")
     with open(os.path.join(SKILL_DIR, "docs", "BUS.md")) as stream:
         bus_readme = stream.read()
     files = {"README.md": bus_readme, ".github/ISSUE_TEMPLATE/openswarm.yml": template}
@@ -6786,6 +6870,21 @@ def bus_worker_open_pr(repo, branch, title, task):
     return response.get("html_url")
 
 
+def bus_worker_release_claim(cfg, number, executor, reason, run_id):
+    """Release a changed card and report a failure before checkout."""
+    labels = {state: bus_label(cfg, state) for state in BUS_STATES}
+    bus_comment(cfg["repo"], number, f"/unclaim {executor}")
+    report = {"status": "failed", "run_id": run_id,
+              "summary": f"the task card changed after the claim ({reason})",
+              "files_changed": [], "tests": "not run: the task card changed after the claim",
+              "followups": ["re-queue the card after the task JSON and its digest are settled"],
+              "branch": None, "commit": None, "pr_url": None, "error_class": reason}
+    bus_comment(cfg["repo"], number,
+                "```openswarm-result\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```")
+    bus_set_issue_labels(cfg["repo"], number, cfg, add=[labels["failed"]],
+                         remove=[labels["queued"], labels["claimed"]])
+
+
 def bus_worker_repos(args, policy):
     configured = getattr(args, "repos", None)
     if configured is not None:
@@ -6840,6 +6939,12 @@ def bus_worker_run(issue, cfg, args, policy):
                                cfg["claim_lease_seconds"])
     if not winner or str(winner.get("id")) != str(own_claim.get("id")):
         return False
+    current = gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")
+    drift = bus_task_drift_reason(task, current, bus_comments(cfg["repo"], issue["number"]),
+                                  cfg["allowed_planners"])
+    if drift:
+        bus_worker_release_claim(cfg, issue["number"], args.name, drift, task["run_id"])
+        return True
     base_dir = os.path.join(DATA, "bus-worker", task["run_id"])
     repo_path = os.path.join(base_dir, "repo")
     os.makedirs(base_dir, exist_ok=True)

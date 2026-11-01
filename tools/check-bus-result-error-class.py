@@ -44,6 +44,10 @@ ERROR_CLASSES = {
     "verify_failed",
     "worker_crashed",
     "worktree_unavailable",
+    "task_changed",
+    "base_changed",
+    "digest_mismatch",
+    "task_removed",
 }
 
 
@@ -74,8 +78,13 @@ def main():
     failure = """```openswarm-result
 {"status":"failed","run_id":"run-failure","error_class":"verify_failed","summary":"verification failed","files_changed":[],"tests":"not run: verification failed","followups":[],"branch":null,"commit":null}
 ```"""
+    drift = """```openswarm-result
+{"status":"failed","run_id":"run-drift","error_class":"task_changed","summary":"the task card changed after the claim","files_changed":[],"tests":"not run: the task card changed after the claim","followups":[],"branch":null,"commit":null}
+```"""
     assert parse_result(success)["error_class"] == "none"
     assert parse_result(failure)["error_class"] == "verify_failed"
+    # 卡片漂移失败分类必须被契约接受：与 bus_parse_result 的 error_class 枚举保持一致
+    assert parse_result(drift)["error_class"] == "task_changed"
 
     # 缺字段拒绝：针对 REQUIRED 中的每个字段，缺失均必须抛出异常
     for sample in (success, failure):
