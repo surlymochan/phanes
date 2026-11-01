@@ -55,6 +55,8 @@ jobs:
               exit 1
             fi
           done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
+  # Advisory only (Nick: CI gates on Linux tests, no heavy gates). An unmarked PR title is a bookkeeping
+  # issue for upstream sync, not a broken build: report it as a warning, never fail the check or block merge.
   upstream-drift:
     name: Check upstream drift
     runs-on: ubuntu-24.04
@@ -64,10 +66,15 @@ jobs:
           fetch-depth: 0
       - name: Check PR drift marking
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python3 tools/upstream_drift.py --fail-on-unmarked
+        run: |
+          python3 tools/upstream_drift.py --fail-on-unmarked || {
+            echo "::warning title=upstream drift (advisory)::PR touches generic openswarm/openbot paths without 'upstream' in the title; add an upstream(<component>): prefix when convenient. Not a merge gate."
+            exit 1
+          }
       - name: Write drift report to job summary
         if: github.event_name != 'pull_request'
         shell: bash
@@ -76,8 +83,7 @@ jobs:
           status=0
           output="$(python3 tools/upstream_drift.py --json)" || status=$?
           printf '## Upstream drift\n\n```json\n%s\n```\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-          [ "$status" -eq 0 ] || echo "upstream_drift.py exited with $status" >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          [ "$status" -eq 0 ] || echo "upstream_drift.py exited with $status (advisory, not a gate)" >> "$GITHUB_STEP_SUMMARY"
   openswarm:
     name: OpenSwarm tests (${{ matrix.os }}, Python ${{ matrix.python }})
     needs: changes
