@@ -1,6 +1,27 @@
 {
-  "输入路径": "/data/home/.claude/openswarm-executor-candidate/lanes/CX1/wt/openbot/examples/org-health-local/demo/diagnosis.json",
+  "输入路径": "/root/.claude/openswarm-executor-candidate/lanes/CX2/wt/openbot/examples/org-health-local/demo/diagnosis.json",
   "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f",
+  "输入摘要": {
+    "diagnosis": {
+      "路径": "../openbot/examples/org-health-local/demo/diagnosis.json",
+      "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f"
+    },
+    "brief": {
+      "路径": "../openbot/examples/org-health-local/demo/brief.json",
+      "sha256": "857a824c0d90244b46c5c02170dd2030130bca4b4cef3db2fba1ed280b1fcd38"
+    }
+  },
+  "bundle": {
+    "路径": "app.bundle.js",
+    "字节数": 7552178,
+    "sha256": "a2ac5e29dbc6fe84656cbac15c4610a5414f3a788c7ab613d93676bb087aaa49"
+  },
+  "复制文件": [
+    "index.html",
+    "app.bundle.js",
+    "styles.css",
+    "data/diagnosis.json"
+  ],
   "文件清单": [
     {
       "路径": "index.html",
@@ -23,5 +44,5 @@
       "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f"
     }
   ],
-  "生成时间": "2026-10-31T18:43:55Z"
+  "生成时间": "2026-11-01T07:37:44Z"
 }
