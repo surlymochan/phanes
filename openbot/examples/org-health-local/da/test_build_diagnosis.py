@@ -11,6 +11,11 @@
 
 列顺序变化（表头名称不变、只调换列的位置）另用临时 CSV 夹具覆盖：仍按列名取数，
 生成的快照与原顺序一致；缺少必需列时仍失败并指出缺列与来源文件。
+
+多币种折算另用临时 raw 目录与真实命令行覆盖：任务书 `口径.折算` 声明需要折算时，
+`fx.csv` 缺某个期次或某个币种的汇率就退出码非 0，错误信息指出期次、币种与来源文件，
+不写 null 也不沿用其他期次的汇率；每期每币种汇率齐全时仍生成零结构错误的快照，
+并在输出里保留汇率来源。
 """
 from __future__ import annotations
 
@@ -181,6 +186,78 @@ REORDERED_COLUMNS = {
         "整体技术人力成本万元",
         "期次",
     ),
+}
+
+# 多币种回归夹具：revenue.csv 与 forecast.csv 增 `币种` 列，fx.csv 是逐期逐币种汇率表。
+MULTI_CURRENCY_COST_CSV = (
+    "月份,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元\n"
+    "2026-01,10.4,8.3,2.1\n"
+    "2026-02,10.6,8.5,2.1\n"
+    "2026-09,12.4,9.9,2.5\n"
+)
+MULTI_CURRENCY_HEADS_CSV = (
+    "月份,整体折算人头,营收业务折算人头\n"
+    "2026-01,10.4,8.3\n"
+    "2026-02,10.6,8.5\n"
+    "2026-09,12.4,9.9\n"
+)
+MULTI_CURRENCY_REVENUE_CSV = (
+    "月份,收入万美元,币种\n"
+    "2026-01,11.2,USD\n"
+    "2026-02,11.5,EUR\n"
+    "2026-09,13.6,EUR\n"
+)
+MULTI_CURRENCY_FORECAST_CSV = (
+    "期次,整体技术人力成本万元,营收业务技术人力成本万元,整体折算人头,营收业务折算人头,"
+    "运维设施成本万元,收入万美元,币种\n"
+    "年末测算,13.4,10.7,13.4,10.7,,14.8,USD\n"
+    "年末目标,,,,,,15.2,USD\n"
+)
+MULTI_CURRENCY_FX_CSV = (
+    "期次,币种,人民币每单位\n"
+    "2026-01,USD,7.2\n"
+    "2026-02,EUR,7.8\n"
+    "2026-09,EUR,7.9\n"
+    "年末测算,USD,7.1\n"
+)
+# 缺一个期次的汇率：2026-02 有欧元汇率，2026-09 没有。
+MULTI_CURRENCY_FX_MISSING_MONTH_CSV = (
+    "期次,币种,人民币每单位\n"
+    "2026-01,USD,7.2\n"
+    "2026-02,EUR,7.8\n"
+    "年末测算,USD,7.1\n"
+)
+# 缺一个币种的汇率：整表没有欧元行。
+MULTI_CURRENCY_FX_MISSING_CURRENCY_CSV = (
+    "期次,币种,人民币每单位\n"
+    "2026-01,USD,7.2\n"
+    "年末测算,USD,7.1\n"
+)
+MULTI_CURRENCY_RAW_FILES = {
+    "cost.csv": MULTI_CURRENCY_COST_CSV,
+    "heads.csv": MULTI_CURRENCY_HEADS_CSV,
+    "revenue.csv": MULTI_CURRENCY_REVENUE_CSV,
+    "forecast.csv": MULTI_CURRENCY_FORECAST_CSV,
+    "fx.csv": MULTI_CURRENCY_FX_CSV,
+}
+# 多币种任务书：声明需要逐期折算，且不写单一汇率（汇率只能来自 fx.csv）。
+MULTI_CURRENCY_BRIEF = {
+    "目标": ["复核技术人力成本与成本率的变化"],
+    "观察期间": {
+        "起始期次": "2026-01",
+        "参考期次": "2026-05",
+        "截止期次": "2026-09",
+        "数据截止": "2026-09-30",
+    },
+    "口径": {
+        "技术人力成本": "技术人力成本=固定薪酬+社保公积金+外包人力，按月汇总，单位万元/月，不含运维与设施。",
+        "收入": "收入=当月确认的营收业务收入（含共享平台分摊），单位万美元/月。",
+        "折算": ["USD", "EUR"],
+    },
+    "必答问题": ["整体技术人力成本从期初到期末如何变化？"],
+    "数据需求": ["临时 raw 目录下的五张 CSV"],
+    "禁止事项": ["禁止编造数字"],
+    "schema版本": 4,
 }
 
 
@@ -1349,6 +1426,203 @@ class MinimalRawInputErrorTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("cost.csv", message)
         self.assertIn("缺少必需列：整体技术人力成本万元", message)
+
+
+class MultiCurrencyFxTest(unittest.TestCase):
+    """多币种输入的汇率回归：缺期次或缺币种必须失败，每期汇率齐全才出快照。
+
+    全部用例用临时 raw 目录与真实命令行：失败时退出码非 0，错误信息指出期次、
+    币种与来源文件，且不留旧快照；不写 null 也不沿用上一期汇率。
+    """
+
+    def setUp(self) -> None:
+        self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.temporary = temporary_directory()
+        self.folder = Path(self.temporary.name)
+        self.out_path = self.folder / "diagnosis.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_raw(self, name: str, files: dict[str, str] | None = None) -> Path:
+        """写出临时 raw 目录；`files` 里给出要覆盖的 CSV 文件名与文本。"""
+        raw_dir = self.folder / name
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        content = dict(MULTI_CURRENCY_RAW_FILES)
+        content.update(files or {})
+        for filename, text in content.items():
+            (raw_dir / filename).write_text(text, encoding="utf-8")
+        return raw_dir
+
+    def write_task_brief(self, name: str, brief: dict) -> Path:
+        """把任务书写到临时目录。"""
+        folder = self.folder / name
+        folder.mkdir(parents=True, exist_ok=True)
+        return write_brief(folder, brief)
+
+    def test_complete_fx_builds_snapshot_with_period_rates(self) -> None:
+        """每期每币种汇率齐全时仍生成零结构错误的快照，数值按各期汇率折算。"""
+        raw_dir = self.write_raw("raw-complete-fx")
+        brief_path = self.write_task_brief("brief-complete-fx", MULTI_CURRENCY_BRIEF)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+
+        ratios = data["metrics"][3]["数值"]["整体技术人力成本率"]
+        # 2026-01 按 USD 7.2、2026-09 按 EUR 7.9 折算，不是同一个汇率。
+        self.assertEqual(ratios["2026-01实际"], "约12.9%")
+        self.assertEqual(ratios["2026-09实际"], "约11.5%")
+        self.assertEqual(ratios["年末测算"], "约12.8%")
+        self.assertNotIn("未提供", [ratios["2026-01实际"], ratios["2026-09实际"]])
+        text = self.out_path.read_text(encoding="utf-8")
+        self.assertNotIn("Infinity", text)
+        self.assertNotIn("NaN", text)
+
+    def test_complete_fx_keeps_calibration_source_in_output(self) -> None:
+        """逐期汇率来自 fx.csv 时，输出里保留汇率来源与折算币种。"""
+        raw_dir = self.write_raw("raw-complete-fx-source")
+        brief_path = self.write_task_brief("brief-complete-fx-source", MULTI_CURRENCY_BRIEF)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        notes = "\n".join(data["口径说明"])
+        self.assertIn("汇率来源：fx.csv", notes)
+        self.assertIn("逐期汇率表", notes)
+        self.assertIn("2026-09 欧元", notes)
+        definitions = "\n".join(data["definitions"])
+        self.assertIn("汇率来源 fx.csv", definitions)
+        self.assertIn("USD、EUR", definitions)
+
+    def test_missing_fx_month_fails_with_period_currency_and_source(self) -> None:
+        """fx.csv 缺某期次的汇率时退出码非 0，并指出期次、币种与来源文件。"""
+        raw_dir = self.write_raw(
+            "raw-missing-fx-month", {"fx.csv": MULTI_CURRENCY_FX_MISSING_MONTH_CSV}
+        )
+        brief_path = self.write_task_brief("brief-missing-fx-month", MULTI_CURRENCY_BRIEF)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("2026-09", message)
+        self.assertIn("EUR", message)
+        self.assertIn("fx.csv", message)
+        # 已有汇率的期次不重复报错。
+        self.assertNotIn("2026-02", message)
+        self.assertNotIn("Traceback", message)
+        self.assertFalse(self.out_path.exists())
+
+    def test_missing_fx_currency_fails_with_period_currency_and_source(self) -> None:
+        """fx.csv 整个币种缺失时退出码非 0，并指出期次、币种与来源文件。"""
+        raw_dir = self.write_raw(
+            "raw-missing-fx-currency", {"fx.csv": MULTI_CURRENCY_FX_MISSING_CURRENCY_CSV}
+        )
+        brief_path = self.write_task_brief("brief-missing-fx-currency", MULTI_CURRENCY_BRIEF)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("2026-02", message)
+        self.assertIn("2026-09", message)
+        self.assertIn("EUR", message)
+        self.assertIn("fx.csv", message)
+        self.assertFalse(self.out_path.exists())
+
+    def test_missing_fx_month_is_not_replaced_by_previous_period_rate(self) -> None:
+        """缺某期次汇率时不沿用上一期：构建失败，也不留下旧快照冒充成功。"""
+        raw_dir = self.write_raw("raw-no-carry-over")
+        brief_path = self.write_task_brief("brief-no-carry-over", MULTI_CURRENCY_BRIEF)
+        first = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertTrue(self.out_path.exists())
+
+        (raw_dir / "fx.csv").write_text(
+            MULTI_CURRENCY_FX_MISSING_MONTH_CSV, encoding="utf-8"
+        )
+        second = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("2026-09", second.stdout + second.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_single_rate_cannot_convert_other_currency(self) -> None:
+        """只有单一美元汇率时不得混用欧元金额：退出码非 0 并指出币种与来源。"""
+        raw_dir = self.write_raw(
+            "raw-single-rate",
+            {"fx.csv": "人民币每美元\n7.2\n"},
+        )
+        brief_path = self.write_task_brief("brief-single-rate", MULTI_CURRENCY_BRIEF)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("2026-09", message)
+        self.assertIn("EUR", message)
+        self.assertIn("fx.csv", message)
+        self.assertFalse(self.out_path.exists())
+
+    def test_undeclared_currency_in_data_is_rejected(self) -> None:
+        """原始数据出现任务书未声明的币种时退出码非 0，并指出币种与期次。"""
+        raw_dir = self.write_raw("raw-undeclared-currency")
+        brief = json.loads(json.dumps(MULTI_CURRENCY_BRIEF))
+        brief["口径"]["折算"] = ["USD"]
+        brief_path = self.write_task_brief("brief-undeclared-currency", brief)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("EUR", message)
+        self.assertIn("2026-09", message)
+        self.assertFalse(self.out_path.exists())
+
+    def test_per_period_fx_wins_over_brief_rate(self) -> None:
+        """逐期汇率表优先于任务书里的单一汇率，缺期次也不回落任务书汇率。"""
+        brief = json.loads(json.dumps(MULTI_CURRENCY_BRIEF))
+        brief["口径"]["汇率"] = 7.2
+        raw_dir = self.write_raw("raw-brief-rate-and-fx")
+        brief_path = self.write_task_brief("brief-rate-and-fx", brief)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        # 期末用 EUR 7.9 折算；用任务书的 7.2 会算成约12.7%。
+        self.assertEqual(data["metrics"][3]["数值"]["整体技术人力成本率"]["2026-09实际"], "约11.5%")
+
+        (raw_dir / "fx.csv").write_text(
+            MULTI_CURRENCY_FX_MISSING_MONTH_CSV, encoding="utf-8"
+        )
+        failed = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("2026-09", failed.stdout + failed.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_module_raises_raw_data_error_with_period_currency_and_source(self) -> None:
+        """模块接口在缺汇率时抛 RawDataError，消息里带期次、币种与来源文件。"""
+        raw_dir = self.write_raw(
+            "raw-missing-fx-module", {"fx.csv": MULTI_CURRENCY_FX_MISSING_MONTH_CSV}
+        )
+        brief_path = self.write_task_brief("brief-missing-fx-module", MULTI_CURRENCY_BRIEF)
+        with self.assertRaises(build_diagnosis.RawDataError) as caught:
+            build_diagnosis.build_from_files(brief_path, raw_dir)
+        message = str(caught.exception)
+        self.assertIn("2026-09", message)
+        self.assertIn("EUR", message)
+        self.assertIn("fx.csv", message)
+
+    def test_single_currency_snapshot_keeps_calibration_source(self) -> None:
+        """单币种输入仍生成有限数值快照，并在输出里保留汇率来源。"""
+        raw_dir = self.folder / "raw-single-currency"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        for filename, text in MINIMAL_RAW_FILES.items():
+            (raw_dir / filename).write_text(text, encoding="utf-8")
+        (raw_dir / "fx.csv").write_text("人民币每美元\n7.2\n", encoding="utf-8")
+        brief = json.loads(json.dumps(BRIEF))
+        del brief["口径"]["汇率"]
+        brief_path = self.write_task_brief("brief-single-currency", brief)
+        result = run_cli(brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+        notes = "\n".join(data["口径说明"])
+        self.assertIn("汇率来源：fx.csv 人民币每美元", notes)
+        self.assertIn("汇率：7.2 人民币/美元", notes)
+        ratios = data["metrics"][3]["数值"]["整体技术人力成本率"]
+        self.assertEqual(ratios["2026-01实际"], "约12.9%")
+        self.assertEqual(ratios["2026-09实际"], "约12.7%")
 
 
 if __name__ == "__main__":

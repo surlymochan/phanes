@@ -6,15 +6,21 @@
 
 输入：
     任务书 JSON：`目标`、`观察期间`、`口径`、`必答问题`、`数据需求`、`禁止事项`、`schema版本`。
+    `口径.折算` 声明需要折算的币种（`["USD", "EUR"]`、`{"币种": [...]}` 或文字说明）。
     原始数据目录：四张 CSV，表头固定（见 REQUIRED_COLUMNS）：
         cost.csv     月度技术人力成本（万元/月）与运维设施成本
         heads.csv    月度折算人头
-        revenue.csv  月度收入（万美元/月）
-        forecast.csv 年末测算与年末目标（`期次` 列为 `年末测算` / `年末目标`）
+        revenue.csv  月度收入（万美元/月），可带 `币种` 列声明该行金额的币种
+        forecast.csv 年末测算与年末目标（`期次` 列为 `年末测算` / `年末目标`），可带 `币种` 列
+    汇率文件 `fx.csv` 两种写法：
+        逐期逐币种汇率表 `期次,币种,人民币每单位`（或 `期次,人民币每美元`）
+        单一汇率表 `人民币每美元`（一列汇率对所有期次生效）
 
 输出：schema v4 诊断快照，结构见 `schema/diagnosis.schema.json`。
 只使用 Python 3.9+ 标准库。输出确定性：同一份任务书与原始数据得到同一份 JSON，键序固定。
 缺数据的期次写 null，不填估算值；整体口径的参考期次按 schema v4 固定为 null。
+需要折算时每个期次每个币种都要有对应汇率：缺期次或缺币种直接失败，不写 null，
+也不沿用其他期次的汇率；快照里保留汇率来源。
 """
 from __future__ import annotations
 
@@ -53,6 +59,16 @@ HEADS_FILE = "heads.csv"
 REVENUE_FILE = "revenue.csv"
 FORECAST_FILE = "forecast.csv"
 FX_FILE = "fx.csv"
+
+BASE_CURRENCY = "CNY"
+DEFAULT_CURRENCY = "USD"
+CURRENCY_COLUMN = "币种"
+FX_KEY_COLUMNS = ("期次", "月份")
+FX_CURRENCY_COLUMN = "币种"
+FX_RATE_COLUMN = "人民币每单位"
+FX_RATE_PREFIX = "人民币每"
+CURRENCY_NAMES = {"CNY": "人民币", "USD": "美元", "EUR": "欧元"}
+CURRENCY_CODES = {"人民币": "CNY", "美元": "USD", "欧元": "EUR", "英镑": "GBP", "日元": "JPY"}
 
 REQUIRED_COLUMNS = {
     COST_FILE: ("月份", "整体技术人力成本万元", "营收业务技术人力成本万元", "运维设施成本万元"),
@@ -95,6 +111,7 @@ METRIC_TITLES = (
 MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MONTH_TOKEN = re.compile(r"\d{4}-\d{2}")
+CURRENCY_PATTERN = re.compile(r"^[A-Z]{2,8}$")
 
 
 class BriefError(Exception):
@@ -187,17 +204,83 @@ def parse_periods(brief: dict) -> dict:
     }
 
 
-def parse_calibration(brief: dict, raw_dir: Path) -> tuple[float, list[str]]:
-    """从任务书 `口径` 解析汇率与口径说明文字。"""
+def currency_code(value: object) -> str:
+    """把币种写法规范成大写代码；支持 ISO 代码与登记过的中文名。"""
+    if not isinstance(value, str):
+        raise ValueError(f"币种必须是字符串：{value!r}")
+    text = value.strip()
+    if text in CURRENCY_CODES:
+        return CURRENCY_CODES[text]
+    code = text.upper()
+    if not CURRENCY_PATTERN.match(code):
+        raise ValueError(f"币种代码不合法：{value}")
+    return code
+
+
+def currency_name(code: str) -> str:
+    """币种代码的中文名；没有登记的名字时原样返回代码。"""
+    return CURRENCY_NAMES.get(code, code)
+
+
+def parse_conversion(calibration: dict) -> dict:
+    """解析任务书 `口径.折算` 声明：是否需要折算、声明的币种集合。
+
+    支持三种写法：`"折算": ["USD", "EUR"]`、`"折算": {"币种": ["USD", "EUR"]}`
+    与 `"折算": "需要折算"`（币种由原始数据的 `币种` 列给出）。
+    """
+    declared = calibration.get("折算")
+    if declared is None:
+        return {"declared": False, "currencies": None}
+    if isinstance(declared, dict):
+        raw_currencies = declared.get("币种")
+        if raw_currencies is None:
+            currencies = None
+        elif isinstance(raw_currencies, list):
+            currencies = brief_currencies(raw_currencies)
+        else:
+            raise BriefError("任务书 `口径.折算.币种` 必须是币种数组")
+    elif isinstance(declared, list):
+        currencies = brief_currencies(declared)
+    elif isinstance(declared, str):
+        currencies = None
+    else:
+        raise BriefError("任务书 `口径.折算` 必须是币种数组、对象或文字说明")
+    if currencies is not None and not currencies:
+        raise BriefError("任务书 `口径.折算.币种` 不能是空数组")
+    return {"declared": True, "currencies": currencies}
+
+
+def brief_currencies(items: list) -> list[str]:
+    """把任务书里的币种数组规范成大写代码列表；不合法时报 BriefError。"""
+    currencies: list[str] = []
+    for item in items:
+        try:
+            currencies.append(currency_code(item))
+        except ValueError as cause:
+            raise BriefError(f"任务书 `口径.折算` 的币种不合法：{cause}") from cause
+    return currencies
+
+
+def parse_calibration(brief: dict) -> dict:
+    """从任务书 `口径` 解析折算声明与口径说明文字。"""
     calibration = brief.get("口径")
     if not isinstance(calibration, dict):
         raise BriefError("任务书缺少 `口径` 对象")
+    conversion = parse_conversion(calibration)
+    definitions: list[str] = []
+    for key, value in calibration.items():
+        if key in ("汇率", "exchange_rate", "折算"):
+            continue
+        if isinstance(value, str) and value.strip():
+            definitions.append(f"{key}：{value.strip()}")
+    return {"conversion": conversion, "definitions": definitions}
+
+
+def parse_brief_rate(calibration: dict) -> float | None:
+    """读取任务书 `口径.汇率`；没有该字段时返回 None，由 fx.csv 提供汇率。"""
     rate = calibration.get("汇率", calibration.get("exchange_rate"))
     if rate is None:
-        fx_path = raw_dir / FX_FILE
-        if fx_path.is_file():
-            rows = read_table(fx_path, ("人民币每美元",))
-            rate = rows[0].get("人民币每美元") if rows else None
+        return None
     if isinstance(rate, dict):
         rate = first_text(rate, "人民币每美元", "人民币兑美元", "人民币/美元")
     if isinstance(rate, str):
@@ -207,13 +290,7 @@ def parse_calibration(brief: dict, raw_dir: Path) -> tuple[float, list[str]]:
             raise BriefError(f"任务书 `口径.汇率` 不是数值：{rate}") from cause
     if not isinstance(rate, (int, float)) or isinstance(rate, bool) or not math.isfinite(rate) or rate <= 0:
         raise BriefError("任务书 `口径.汇率` 缺失或不是正数，无法计算成本率")
-    definitions: list[str] = []
-    for key, value in calibration.items():
-        if key in ("汇率", "exchange_rate"):
-            continue
-        if isinstance(value, str) and value.strip():
-            definitions.append(f"{key}：{value.strip()}")
-    return float(rate), definitions
+    return float(rate)
 
 
 def parse_text_list(brief: dict, name: str) -> list[str]:
@@ -243,7 +320,10 @@ def parse_plan(brief: dict, raw_dir: Path) -> dict:
     if version is not None and version != SCHEMA_VERSION:
         raise BriefError(f"任务书 `schema版本` 为 {version}，与 schema v{SCHEMA_VERSION} 不一致")
     periods = parse_periods(brief)
-    rate, definitions = parse_calibration(brief, raw_dir)
+    calibration = parse_calibration(brief)
+    fx = resolve_fx_source(
+        parse_brief_rate(brief["口径"]), load_fx(raw_dir), calibration["conversion"]
+    )
     labels = {
         "start": f"{periods['start']}{ACTUAL_SUFFIX}",
         "reference": f"{periods['reference']}{REFERENCE_SUFFIX}",
@@ -254,8 +334,10 @@ def parse_plan(brief: dict, raw_dir: Path) -> dict:
     return {
         "periods": periods,
         "labels": labels,
-        "rate": rate,
-        "definitions": definitions,
+        "rate": fx["rate"],
+        "fx": fx,
+        "conversion": calibration["conversion"],
+        "definitions": calibration["definitions"],
         "goals": parse_text_list(brief, "目标"),
         "questions": parse_text_list(brief, "必答问题"),
         "prohibitions": parse_text_list(brief, "禁止事项"),
@@ -350,10 +432,168 @@ def load_table(
     return table
 
 
+def load_fx(raw_dir: Path) -> dict:
+    """读取原始数据目录的 fx.csv。
+
+    支持两种写法：逐期逐币种汇率表（`期次,币种,人民币每单位` 或 `期次,人民币每美元`）
+    与单一汇率表（`人民币每美元` 一列，对所有期次生效）。
+    返回 {"table": {(期次, 币种): 汇率}, "global": {币种: 汇率}, "source": 来源说明}。
+    """
+    path = raw_dir / FX_FILE
+    if not path.is_file():
+        return {"table": {}, "global": {}, "source": ""}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as cause:
+        raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    fieldnames = reader.fieldnames or []
+    key_column = next((name for name in FX_KEY_COLUMNS if name in fieldnames), None)
+    if key_column is None:
+        return load_global_fx(path, fieldnames)
+    if FX_CURRENCY_COLUMN in fieldnames:
+        rate_column = next(
+            (name for name in (FX_RATE_COLUMN, "汇率") if name in fieldnames), None
+        )
+        if rate_column is None:
+            raise RawDataError(f"原始数据 {path.name} 缺少必需列：{FX_RATE_COLUMN}")
+        return load_period_fx(path, key_column, (rate_column,), FX_CURRENCY_COLUMN)
+    rate_columns = tuple(name for name in fieldnames if name.startswith(FX_RATE_PREFIX))
+    if not rate_columns:
+        raise RawDataError(
+            f"原始数据 {path.name} 缺少必需列：{FX_CURRENCY_COLUMN} 或 {FX_RATE_PREFIX}<币种>"
+        )
+    return load_period_fx(path, key_column, rate_columns, None)
+
+
+def load_global_fx(path: Path, fieldnames: list[str]) -> dict:
+    """读取单一汇率表：表头形如 `人民币每美元`，一列汇率对所有期次生效。"""
+    rate_columns = [name for name in fieldnames if name.startswith(FX_RATE_PREFIX)]
+    if len(rate_columns) != 1:
+        found = "、".join(rate_columns) if rate_columns else "无"
+        raise RawDataError(
+            f"原始数据 {path.name} 的单一汇率表需要一列 {FX_RATE_PREFIX}<币种>，当前为{found}；"
+            f"逐期汇率表请写成 {FX_KEY_COLUMNS[0]},{FX_CURRENCY_COLUMN},{FX_RATE_COLUMN}"
+        )
+    column = rate_columns[0]
+    try:
+        code = currency_code(column[len(FX_RATE_PREFIX):])
+    except ValueError as cause:
+        raise RawDataError(f"原始数据 {path.name} 的汇率列名不合法：{cause}") from cause
+    rows = read_table(path, (column,))
+    if not rows:
+        raise RawDataError(f"原始数据 {path.name} 缺少汇率取值")
+    value = parse_number(rows[0].get(column), path, column, 2)
+    if value is None or value <= 0:
+        raise RawDataError(f"原始数据 {path.name} 第 2 行的 {column} 必须是正数汇率")
+    return {"table": {}, "global": {code: value}, "source": f"{path.name} {column}"}
+
+
+def load_period_fx(
+    path: Path, key_column: str, rate_columns: tuple[str, ...], currency_column: str | None
+) -> dict:
+    """读取逐期汇率表：长表按 `币种` 列取币种，宽表按 `人民币每<币种>` 列名取币种。"""
+    required = (key_column,) + rate_columns + ((currency_column,) if currency_column else ())
+    rows = read_table(path, required)
+    table: dict[tuple[str, str], float] = {}
+    for number, row in enumerate(rows, start=2):
+        period = (row.get(key_column) or "").strip()
+        if not period:
+            raise RawDataError(f"原始数据 {path.name} 第 {number} 行缺少 {key_column}")
+        for column in rate_columns:
+            if currency_column is None:
+                raw_currency = column[len(FX_RATE_PREFIX):]
+            else:
+                raw_currency = (row.get(currency_column) or "").strip()
+            try:
+                code = currency_code(raw_currency)
+            except ValueError as cause:
+                raise RawDataError(
+                    f"原始数据 {path.name} 第 {number} 行的币种不合法：{cause}"
+                ) from cause
+            value = parse_number(row.get(column), path, column, number)
+            if value is None:
+                continue
+            if value <= 0:
+                raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {column} 必须是正数汇率：{value}")
+            key = (period, code)
+            if key in table:
+                raise RawDataError(
+                    f"原始数据 {path.name} 中 {key_column} {period} 与币种 {code} 重复：第 {number} 行"
+                )
+            table[key] = value
+    source = f"{path.name} 逐期汇率表（{key_column}，{'、'.join(rate_columns)}）"
+    return {"table": table, "global": {}, "source": source}
+
+
+def resolve_fx_source(brief_rate: float | None, fx: dict, conversion: dict) -> dict:
+    """决定折算用的汇率来源。
+
+    逐期汇率表是唯一权威来源：缺某个期次或币种就报错，不回落任务书汇率，也不沿用上一期。
+    没有逐期汇率表时用任务书 `口径.汇率`，再退到 fx.csv 的单一汇率。
+    """
+    if fx["table"]:
+        return {
+            "mode": "per_period",
+            "table": fx["table"],
+            "global": {},
+            "rate": None,
+            "source": fx["source"],
+        }
+    if brief_rate is not None:
+        currencies = conversion["currencies"]
+        code = currencies[0] if currencies and len(currencies) == 1 else DEFAULT_CURRENCY
+        return {
+            "mode": "global",
+            "table": {},
+            "global": {code: brief_rate},
+            "rate": brief_rate,
+            "source": "任务书 `口径.汇率`",
+        }
+    if fx["global"]:
+        code = sorted(fx["global"])[0]
+        return {
+            "mode": "global",
+            "table": {},
+            "global": dict(fx["global"]),
+            "rate": fx["global"][code],
+            "source": fx["source"],
+        }
+    raise BriefError(
+        "任务书 `口径.汇率` 缺失或不是正数，且原始数据目录没有 fx.csv，无法计算成本率"
+    )
+
+
+def load_currency_map(path: Path, key_column: str) -> dict[str, str]:
+    """读取可选的 `币种` 列，返回每个期次的币种代码；没有该列时返回空字典。"""
+    if not path.is_file():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as cause:
+        raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    fieldnames = reader.fieldnames or []
+    if CURRENCY_COLUMN not in fieldnames:
+        return {}
+    mapping: dict[str, str] = {}
+    for number, row in enumerate(reader, start=2):
+        key = (row.get(key_column) or "").strip()
+        if not key:
+            continue
+        try:
+            mapping[key] = currency_code((row.get(CURRENCY_COLUMN) or "").strip())
+        except ValueError as cause:
+            raise RawDataError(
+                f"原始数据 {path.name} 第 {number} 行的 {CURRENCY_COLUMN} 不合法：{cause}"
+            ) from cause
+    return mapping
+
+
 def load_raw(
     raw_dir: Path, observation_range: tuple[str, str] | None = None
 ) -> dict[str, dict[str, dict[str, float | None]]]:
-    """读取四张原始数据 CSV。"""
+    """读取四张原始数据 CSV，并记下各表 `币种` 列声明的币种。"""
     if not raw_dir.is_dir():
         raise RawDataError(f"原始数据目录不存在：{raw_dir}")
     cost_columns = (OVERALL_COST, REVOPS_COST, OPS_COST)
@@ -370,6 +610,10 @@ def load_raw(
             raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True, observation_range=observation_range
         ),
         "forecast": load_table(raw_dir / FORECAST_FILE, "期次", forecast_columns, non_negative=True),
+        "currency": {
+            "revenue": load_currency_map(raw_dir / REVENUE_FILE, "月份"),
+            "forecast": load_currency_map(raw_dir / FORECAST_FILE, "期次"),
+        },
     }
 
 
@@ -381,7 +625,7 @@ def cell(table: dict[str, dict[str, float | None]], key: str, column: str) -> fl
     return row.get(column)
 
 
-def rate_of(cost: float | None, revenue: float | None, rate: float) -> float | None:
+def rate_of(cost: float | None, revenue: float | None, rate: float | None) -> float | None:
     """成本率 = 成本 ÷（收入按汇率折人民币）。缺任一输入时返回 None。"""
     if cost is None or revenue is None or revenue == 0:
         return None
@@ -432,11 +676,145 @@ def change_text(start: float | None, end: float | None, unit: str) -> str:
     return f"{direction} {fmt_number(abs(diff))} {unit}（{ratio} {abs(pct):.1f}%）"
 
 
+def default_currency(plan: dict) -> str:
+    """没有 `币种` 列时使用的默认币种：声明了单一币种就用它，否则用美元。"""
+    currencies = plan["conversion"]["currencies"]
+    if currencies and len(currencies) == 1:
+        return currencies[0]
+    return DEFAULT_CURRENCY
+
+
+def period_currency(plan: dict, raw: dict, period: str) -> str:
+    """取某个期次金额的币种：优先用原始数据的 `币种` 列，没有则用默认币种。"""
+    mapping = raw.get("currency", {})
+    if period in (FORECAST_LABEL, TARGET_LABEL):
+        table = mapping.get("forecast", {})
+    else:
+        table = mapping.get("revenue", {})
+    return table.get(period, default_currency(plan))
+
+
+def income_value(raw: dict, period: str) -> float | None:
+    """取某个期次的收入金额；没有该期次或金额为空时返回 None。"""
+    if period in (FORECAST_LABEL, TARGET_LABEL):
+        return cell(raw["forecast"], period, REVENUE)
+    return cell(raw["revenue"], period, REVENUE)
+
+
+def amount_periods(plan: dict, raw: dict) -> list[str]:
+    """列出需要折算的期次：观察期间内有收入金额的月份，以及年末测算行。"""
+    keys = [month for month in observation_months(plan) if month in raw["revenue"]]
+    if FORECAST_LABEL in raw["forecast"]:
+        keys.append(FORECAST_LABEL)
+    return keys
+
+
+def required_fx_pairs(plan: dict, raw: dict) -> list[tuple[str, str]]:
+    """列出需要折算的期次与币种组合：金额非空且币种不是基准币种。"""
+    pairs: list[tuple[str, str]] = []
+    for period in amount_periods(plan, raw):
+        if income_value(raw, period) is None:
+            continue
+        currency = period_currency(plan, raw, period)
+        if currency == BASE_CURRENCY:
+            continue
+        pairs.append((period, currency))
+    return pairs
+
+
+def missing_fx_pairs(plan: dict, raw: dict) -> list[tuple[str, str]]:
+    """列出缺汇率的期次与币种组合；只按精确匹配判定，不沿用其他期次的汇率。"""
+    fx = plan["fx"]
+    missing: list[tuple[str, str]] = []
+    for period, currency in required_fx_pairs(plan, raw):
+        if fx["mode"] == "per_period":
+            if (period, currency) not in fx["table"]:
+                missing.append((period, currency))
+        elif currency not in fx["global"]:
+            missing.append((period, currency))
+    return missing
+
+
+def check_fx_coverage(plan: dict, raw: dict) -> None:
+    """逐期逐币种汇率必须齐全；缺任一项都失败，不写 null 也不沿用上一期汇率。"""
+    missing = missing_fx_pairs(plan, raw)
+    if not missing:
+        return
+    detail = "；".join(f"{period} 的 {currency}" for period, currency in missing)
+    fx = plan["fx"]
+    if fx["mode"] == "per_period":
+        hint = (
+            f"请在 {FX_FILE} 补齐这些期次与币种的汇率（{FX_RATE_COLUMN}），"
+            "不沿用其他期次的汇率。"
+        )
+    else:
+        available = "、".join(sorted(fx["global"])) or "无"
+        hint = (
+            f"汇率来源 {fx['source']} 只提供 {available} 的汇率；"
+            f"请在 {FX_FILE} 补齐这些币种的汇率，或把金额改成同一币种。"
+        )
+    raise RawDataError(
+        f"原始数据 {FX_FILE} 缺少汇率：{detail}。"
+        f"任务书口径需要逐期折算为 {BASE_CURRENCY}，缺任一期次或币种都不能折算；{hint}"
+    )
+
+
+def check_declared_currencies(plan: dict, raw: dict) -> None:
+    """任务书声明的币种必须覆盖原始数据用到的币种，避免混用不同币种金额。"""
+    declared = plan["conversion"]["currencies"]
+    if not declared:
+        return
+    used: dict[str, list[str]] = {}
+    for mapping in raw.get("currency", {}).values():
+        for period, currency in mapping.items():
+            used.setdefault(currency, []).append(period)
+    unknown = sorted(code for code in used if code not in declared)
+    if not unknown:
+        return
+    detail = "；".join(f"{code}（{'、'.join(sorted(used[code]))}）" for code in unknown)
+    raise RawDataError(
+        f"原始数据出现任务书未声明的币种：{detail}；"
+        f"任务书 `口径.折算.币种` 只声明了 {'、'.join(declared)}，"
+        "不同币种的金额不能直接混用，请改任务书口径或把金额改成同一币种。"
+    )
+
+
+def fx_rate(plan: dict, period: str, currency: str) -> float:
+    """取某个期次某个币种的汇率；基准币种固定为 1，其余按精确匹配取。"""
+    if currency == BASE_CURRENCY:
+        return 1.0
+    fx = plan["fx"]
+    if fx["mode"] == "per_period":
+        rate = fx["table"].get((period, currency))
+    else:
+        rate = fx["global"].get(currency)
+    if rate is None:
+        raise RawDataError(
+            f"原始数据 {FX_FILE} 缺少 {period} 的 {currency} 汇率："
+            f"该期次金额按 {currency} 计价，需折算为 {BASE_CURRENCY}；"
+            f"请在 {FX_FILE} 补齐 {period} 行的 {currency} 汇率，不沿用其他期次的汇率。"
+        )
+    return rate
+
+
+def income_rate(plan: dict, raw: dict, period: str, value: float | None) -> float | None:
+    """取某个期次收入折算用的汇率；没有金额时返回 None。"""
+    if value is None:
+        return None
+    return fx_rate(plan, period, period_currency(plan, raw, period))
+
+
+def rate_phrase(plan: dict) -> str:
+    """折算所用汇率的简短说法。"""
+    if plan["fx"]["mode"] == "per_period":
+        return "逐期逐币种汇率"
+    return f"汇率 {plan['rate']}"
+
+
 def build_facts(plan: dict, raw: dict) -> dict:
     """按任务书期间取出各指标数值并算好成本率。"""
     periods = plan["periods"]
     labels = plan["labels"]
-    rate = plan["rate"]
     cost = raw["cost"]
     heads = raw["heads"]
     revenue = raw["revenue"]
@@ -484,43 +862,51 @@ def build_facts(plan: dict, raw: dict) -> dict:
             "schema v4 要求整体口径的参考期次固定为 null；原始数据含同口径数值，"
             "请调整任务书观察期间或原始数据。"
         )
+    check_declared_currencies(plan, raw)
+    check_fx_coverage(plan, raw)
+    rates = {
+        "start": income_rate(plan, raw, periods["start"], income["start"]),
+        "reference": income_rate(plan, raw, periods["reference"], income["reference"]),
+        "end": income_rate(plan, raw, periods["end"], income["end"]),
+        "forecast": income_rate(plan, raw, FORECAST_LABEL, income["forecast"]),
+    }
     ratios = {
         "overall": {
-            "start": rate_of(overall_cost["start"], income["start"], rate),
-            "reference": rate_of(overall_cost["reference"], income["reference"], rate),
-            "end": rate_of(overall_cost["end"], income["end"], rate),
-            "forecast": rate_of(overall_cost["forecast"], income["forecast"], rate),
+            "start": rate_of(overall_cost["start"], income["start"], rates["start"]),
+            "reference": rate_of(overall_cost["reference"], income["reference"], rates["reference"]),
+            "end": rate_of(overall_cost["end"], income["end"], rates["end"]),
+            "forecast": rate_of(overall_cost["forecast"], income["forecast"], rates["forecast"]),
         },
         "revops": {
-            "start": rate_of(revops_cost["start"], income["start"], rate),
-            "reference": rate_of(revops_cost["reference"], income["reference"], rate),
-            "end": rate_of(revops_cost["end"], income["end"], rate),
-            "forecast": rate_of(revops_cost["forecast"], income["forecast"], rate),
+            "start": rate_of(revops_cost["start"], income["start"], rates["start"]),
+            "reference": rate_of(revops_cost["reference"], income["reference"], rates["reference"]),
+            "end": rate_of(revops_cost["end"], income["end"], rates["end"]),
+            "forecast": rate_of(revops_cost["forecast"], income["forecast"], rates["forecast"]),
         },
         "full": {
             "start": rate_of(
                 None if overall_cost["start"] is None or ops_cost["start"] is None
                 else overall_cost["start"] + ops_cost["start"],
                 income["start"],
-                rate,
+                rates["start"],
             ),
             "reference": rate_of(
                 None if overall_cost["reference"] is None or ops_cost["reference"] is None
                 else overall_cost["reference"] + ops_cost["reference"],
                 income["reference"],
-                rate,
+                rates["reference"],
             ),
             "end": rate_of(
                 None if overall_cost["end"] is None or ops_cost["end"] is None
                 else overall_cost["end"] + ops_cost["end"],
                 income["end"],
-                rate,
+                rates["end"],
             ),
             "forecast": rate_of(
                 None if overall_cost["forecast"] is None or ops_cost["forecast"] is None
                 else overall_cost["forecast"] + ops_cost["forecast"],
                 income["forecast"],
-                rate,
+                rates["forecast"],
             ),
         },
     }
@@ -674,7 +1060,7 @@ def build_insights(plan: dict, facts: dict, raw: dict) -> list[dict]:
             "内容": (
                 f"整体技术人力成本率由{fmt_rate(ratios['overall']['start'])}变为"
                 f"{fmt_rate(ratios['overall']['end'])}；同期收入由 {fmt_number(income['start'])} 万美元/月"
-                f"变为 {fmt_number(income['end'])} 万美元/月，按汇率 {plan['rate']} 折人民币计算。"
+                f"变为 {fmt_number(income['end'])} 万美元/月，按{rate_phrase(plan)}折人民币计算。"
             ),
         }
     )
@@ -854,8 +1240,14 @@ def build_definitions(plan: dict) -> list[str]:
     )
     lines.append(
         f"数据截止：{periods['as_of']}；观察月份：{periods['end']}；"
-        f"收入折人民币按汇率 {plan['rate']} 计算。"
+        f"收入折人民币按{rate_phrase(plan)}计算（来源：{plan['fx']['source']}）。"
     )
+    declared = plan["conversion"]["currencies"]
+    if declared:
+        lines.append(
+            f"折算口径：任务书 `口径.折算` 声明的币种为 {'、'.join(declared)}，"
+            f"按各期次金额的币种折算为 {BASE_CURRENCY}；汇率来源 {plan['fx']['source']}。"
+        )
     lines.append(
         "null 含义：表示该期次未统计、未提供或无同口径对比数据，界面显示为未提供，"
         "不以 0 或其他推测值替代。"
@@ -1027,7 +1419,21 @@ def build_snapshot(plan: dict, raw: dict) -> dict:
         "单位：技术人力成本为万元/月（不含运维与设施）；折算人头为当量折算值，非自然人数；"
         "收入为万美元/月；成本率为成本占同期收入按汇率折人民币的比例。"
     )
-    notes.append(f"汇率：{plan['rate']} 人民币/美元；数据截止：{periods['as_of']}。")
+    if plan["fx"]["mode"] == "per_period":
+        notes.append(f"汇率：逐期逐币种；数据截止：{periods['as_of']}。")
+    else:
+        code = sorted(plan["fx"]["global"])[0]
+        notes.append(
+            f"汇率：{plan['rate']} 人民币/{currency_name(code)}；数据截止：{periods['as_of']}。"
+        )
+    notes.append(f"汇率来源：{plan['fx']['source']}。")
+    pairs = required_fx_pairs(plan, raw)
+    if len({code for _, code in pairs}) > 1:
+        notes.append(
+            "折算币种："
+            + "；".join(f"{period} {currency_name(code)}" for period, code in pairs)
+            + "。"
+        )
     notes.append(
         "null 含义：表示该期次未统计、未提供或无同口径对比数据，界面显示为未提供，"
         "不以 0 或其他推测值替代。"
