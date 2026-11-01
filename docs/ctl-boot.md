@@ -6,6 +6,10 @@ This box has no systemd user units and no cron for phanes ctl. After reboot, sta
 ~/phanes-ctl/bin/start-control-plane
 ```
 
+The reboot recovery story (short runbook + the recorded drill timeline, Refs #1478) lives in
+[`docs/fusion-box-boot-recovery.md`](fusion-box-boot-recovery.md); the offline drill that
+reproduces it is `python3 tools/check-box-boot-recovery.py`.
+
 That script starts (if not already running):
 
 | Loop | Script | Role | Heartbeat / status |
