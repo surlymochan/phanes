@@ -6,6 +6,7 @@ import argparse
 import hashlib
 from html.parser import HTMLParser
 import json
+import posixpath
 import re
 import sys
 from urllib.parse import unquote, urlsplit
@@ -88,6 +89,14 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def normalize_report_path(relative: str) -> str:
+    """规范化报告中的相对路径，并拒绝越出 dist 根目录的路径。"""
+    candidate = posixpath.normpath(relative.replace("\\", "/"))
+    if candidate in ("", ".") or candidate.startswith("/") or candidate == ".." or candidate.startswith("../"):
+        raise ValueError(f"文件路径必须是 dist 内的相对路径：{relative}")
+    return candidate
+
+
 def report_hashes(report: object) -> dict[str, str]:
     """读取报告中的文件摘要，兼容 build_site.py 的 文件清单 列表、files 或顶层 sha256 两种表示。"""
     if not isinstance(report, dict):
@@ -98,7 +107,10 @@ def report_hashes(report: object) -> dict[str, str]:
         for item in manifest:
             if not isinstance(item, dict) or not isinstance(item.get("路径"), str) or not isinstance(item.get("sha256"), str):
                 raise ValueError("文件清单 每项必须包含 路径 与 sha256 字符串")
-            hashes[item["路径"]] = item["sha256"]
+            relative = normalize_report_path(item["路径"])
+            if relative in hashes:
+                raise ValueError(f"文件清单存在重复路径或规范化后指向同一文件：{item['路径']}（{relative}）")
+            hashes[relative] = item["sha256"]
         return hashes
     source = report.get("files", report.get("sha256"))
     if not isinstance(source, dict):
@@ -109,7 +121,10 @@ def report_hashes(report: object) -> dict[str, str]:
             value = value.get("sha256")
         if not isinstance(name, str) or not isinstance(value, str):
             raise ValueError("文件摘要必须是 文件名 -> sha256 字符串")
-        hashes[name] = value
+        relative = normalize_report_path(name)
+        if relative in hashes:
+            raise ValueError(f"文件摘要存在重复路径或规范化后指向同一文件：{name}（{relative}）")
+        hashes[relative] = value
     return hashes
 
 
@@ -190,11 +205,21 @@ def check_site(dist: Path) -> list[str]:
             report = json.loads(report_path.read_text(encoding="utf-8"))
             hashes = report_hashes(report)
             registered = set(hashes)
+            actual_files: set[str] = set()
             for path in sorted(dist.rglob("*")):
-                if path.is_file():
+                if path.is_file() and path != report_path:
                     relative = path.relative_to(dist).as_posix()
-                    if relative != "build-report.json" and relative not in registered:
-                        print(f"警告：{relative} 未在 build-report 中登记")
+                    actual_files.add(relative)
+                    if path.stat().st_size and relative not in registered:
+                        failures.append(
+                            f"失败：{relative} 未在 build-report 中登记；"
+                            "修复：将该非空站点产物加入文件清单并记录 sha256，或移除该文件"
+                        )
+            for relative in sorted(registered - actual_files):
+                failures.append(
+                    f"失败：{relative} 已在 build-report 中登记但文件不存在；"
+                    "修复：重新构建站点并更新文件清单，或移除该登记"
+                )
             for relative in REQUIRED_FILES[:-1]:
                 expected = hashes.get(relative)
                 if not isinstance(expected, str) or not HASH_RE.fullmatch(expected):

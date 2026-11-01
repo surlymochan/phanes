@@ -81,12 +81,34 @@ class CheckSiteTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("站点检查通过", result.stdout)
 
-    def test_unregistered_file_warns_without_failing(self) -> None:
+    def test_unregistered_nonempty_file_fails_with_repair_action(self) -> None:
         dist = self.make_dist()
         (dist / "debug.log").write_text("fixture", encoding="utf-8")
         result = self.run_checker(dist)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("警告：debug.log 未在 build-report 中登记", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("失败：debug.log 未在 build-report 中登记", result.stdout)
+        self.assertIn("修复：", result.stdout)
+
+    def test_report_duplicate_and_normalized_duplicate_paths_fail(self) -> None:
+        dist = self.make_dist()
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        styles_hash = report["files"]["styles.css"]["sha256"]
+        report["files"]["./styles.css"] = {"sha256": styles_hash}
+        self.write_report(dist, report)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("规范化后指向同一文件", result.stdout)
+        self.assertIn("styles.css", result.stdout)
+
+    def test_report_registered_missing_file_fails_with_repair_action(self) -> None:
+        dist = self.make_dist()
+        report = json.loads((dist / "build-report.json").read_text(encoding="utf-8"))
+        report["files"]["missing.js"] = {"sha256": "0" * 64}
+        self.write_report(dist, report)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing.js 已在 build-report 中登记但文件不存在", result.stdout)
+        self.assertIn("修复：", result.stdout)
 
     def test_missing_file_fails(self) -> None:
         dist = self.make_dist()
@@ -627,6 +649,29 @@ class MinimalBriefPipelineCheckSiteTest(unittest.TestCase):
         self.assertIn("站点检查通过", cli_result.stdout)
         self.assertIn("通过：data/diagnosis.json 通过 validate.py", cli_result.stdout)
         self.assertNotIn("Traceback", cli_result.stderr)
+
+    def test_real_build_rejects_extra_tampered_and_duplicate_manifest_paths(self) -> None:
+        """真实 Builder 产物覆盖新增、篡改、重复登记三条清单失败路径。"""
+        cases = ("extra", "tampered", "duplicate")
+        for case in cases:
+            with self.subTest(case=case):
+                if self.dist_path.exists():
+                    shutil.rmtree(self.dist_path)
+                self._build_pipeline_site()
+                report_path = self.dist_path / "build-report.json"
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                if case == "extra":
+                    (self.dist_path / "debug.log").write_text("unexpected artifact", encoding="utf-8")
+                    expected = "debug.log 未在 build-report 中登记"
+                elif case == "tampered":
+                    (self.dist_path / "styles.css").write_text("tampered", encoding="utf-8")
+                    expected = "styles.css 的 sha256 与 build-report.json 不一致"
+                else:
+                    report["文件清单"].append(dict(report["文件清单"][0]))
+                    report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+                    expected = "重复路径或规范化后指向同一文件"
+                failures = check_site.check_site(self.dist_path)
+                self.assertTrue(any(expected in failure for failure in failures), failures)
 
     def test_deliberately_defective_site_fails_check_site(self) -> None:
         """故意坏站点失败路径：篡改管道产物使 validate.py 校验失败，check_site 检出缺陷且非零退出。"""
