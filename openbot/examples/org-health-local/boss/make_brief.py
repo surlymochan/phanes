@@ -242,6 +242,10 @@ def build_brief(
     goals: list[str] | None = None, month: str | None = None, fx: float | None = None
 ) -> dict:
     """生成任务书。goals 覆盖“目标”，month 覆盖观察月份。"""
+    if goals is not None and not isinstance(goals, list):
+        raise ValueError("目标必须是字符串数组，不能是字符串或其他类型")
+    if goals is not None and any(not isinstance(goal, str) or not goal.strip() for goal in goals):
+        raise ValueError("目标必须是非空字符串数组")
     observed = DEFAULT_MONTH if month is None else check_month(month)
     keys = period_keys(observed)
     definitions = build_definitions(keys, observed)
