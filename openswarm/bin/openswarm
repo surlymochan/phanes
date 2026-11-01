@@ -13011,6 +13011,27 @@ def consult_module():
     return module
 
 
+def dispatch_engine_module():
+    """Load the dispatch engine by path without adding its directory to sys.path."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                        "lib", "dispatch", "engine.py")
+    name = "openswarm_dispatch_engine"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError("no import loader available")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception as error:
+        sys.modules.pop(name, None)
+        raise ImportError(f"cannot load dispatch engine at {path}: {error}") from error
+
+
 COMPARE_DEFAULT_ORDER = ("codex", "ocgo", "deepseek", "agy", "cursor", "pi")
 
 
@@ -14368,6 +14389,15 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     consult_module().add_parser(sub)
 
+    dispatch_load_error = None
+    try:
+        dispatch_engine_module().add_parser(sub)
+    except ImportError as error:
+        dispatch_load_error = error
+        dispatch_parser = sub.add_parser("dispatch", help="push-mode GitHub label dispatcher")
+        dispatch_parser.add_argument("dispatch_cmd", choices=("tick", "serve"))
+        dispatch_parser.add_argument("args", nargs=argparse.REMAINDER)
+
     sp = sub.add_parser("probe")
     sp.add_argument("--quiet", action="store_true")
     sp = sub.add_parser("status")
@@ -14720,6 +14750,16 @@ def main():
     sp.add_argument("--json", action="store_true", help="print the gate results as JSON")
 
     a = ap.parse_args()
+    if a.cmd == "dispatch":
+        if dispatch_load_error is not None:
+            print(f"openswarm: {dispatch_load_error}", file=sys.stderr)
+            sys.exit(2)
+        try:
+            result = dispatch_engine_module().cmd_dispatch(a)
+            sys.exit(result or 0)
+        except Exception as error:
+            print(f"openswarm: dispatch failed: {error}", file=sys.stderr)
+            sys.exit(2)
     policy = load_policy()
     os.makedirs(DATA, exist_ok=True)
     if a.cmd == "probe":
