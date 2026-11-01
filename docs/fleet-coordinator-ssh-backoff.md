@@ -5,7 +5,7 @@
 依据与核对基准：
 - `brain/dual-mode-status.md:13`（`coordinator 在 gocc`，gorelay↔gocc 高峰 banner timeout 退避记录）
 - `brain/autopilot.md:20-22,34`（10+ 路并行拓扑与状态监控脚本）
-- `docs/fleet-topology-expected.md:6-18`（Fleet topology 各主机并发限额约定）
+- `docs/fleet-topology-expected.md:12-47`（Fleet topology 各主机并发限额约定）
 - `docs/dual-mode-ssh.md:32-41,53-75`（ControlMaster 配置与 SSH fleet 拓扑）
 - `openswarm/bin/openswarm:3345-3354`（`fleet_guard_call` 超时与 fail-closed 准入）
 - `openswarm/bin/openswarm:3370-3375`（`fleet_recovery_ttl_seconds` 600s 保护）
@@ -16,7 +16,7 @@
 ## 1. 现象说明
 
 ### 1.1 架构与背景
-在当前的 10+ 并行受控拓扑中（`brain/autopilot.md:22`、`docs/fleet-topology-expected.md:6-18`）：
+在当前的 10+ 并行受控拓扑中（`brain/autopilot.md:22`、`docs/fleet-topology-expected.md:12-47`）：
 - 控制面统一运行在 `box`，维护 10–11 个并发 lane。
 - 全局资源协调器（`fleet-capacity`）部署在 `gocc` 主机上，负责控制跨主机和跨后端的并发限额。
 - 执行器主机（如 `gorelay`，运行 A2 lane 或 codex 执行器）通过反向隧道（reverse tunnel / SSH 转发）连通 `gocc` 上的协调器以进行准入（`acquire`）、释放（`release`）与状态检查（`status`）。

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Offline contract for ib-refresh cooldown status accounting (Refs #1262)."""
+"""Offline contract for ib-refresh cooldown status accounting (Refs #1262).
+
+Deprecated (Refs #1480): the Instabox nodes are offline since 2026-11-02, so the
+host names below are historical fixtures only.  The live fleet topology lives in
+docs/fleet-topology-expected.md.
+"""
 
 import datetime as dt
 import importlib.util
@@ -40,6 +45,7 @@ def main():
     assert fields["hosts_ok"] == "3"
     assert fields["skipped_cooldown"] == "2"
     print("ib-refresh cooldown status: OK")
+    print("deprecated: instabox nodes are offline; this contract is history only (Refs #1480)")
 
 
 if __name__ == "__main__":
