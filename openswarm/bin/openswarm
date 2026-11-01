@@ -7434,6 +7434,59 @@ def lane_write_state(lane_name, **changes):
     return state
 
 
+LANE_IDEMPOTENCY_LIMIT = 200
+
+
+def lane_idempotency_table(state):
+    """Return the lane's idempotency table (key -> run id) from a lane state document."""
+    table = (state or {}).get("idempotency_keys")
+    if not isinstance(table, dict):
+        return {}
+    return {str(key): str(value) for key, value in table.items() if isinstance(value, str) and value}
+
+
+def lane_idempotency_record(lane_name, key, run_id):
+    """Remember key -> run_id in the lane state, keeping only the most recent keys.
+
+    The lane supervisor is the only writer of the lane state, so the table cannot
+    lose an entry to a concurrent writer.
+    """
+    state = jload(lane_state_path(lane_name), {}) or {}
+    table = lane_idempotency_table(state)
+    table.pop(key, None)
+    table[key] = run_id
+    while len(table) > LANE_IDEMPOTENCY_LIMIT:
+        table.pop(next(iter(table)))
+    state["idempotency_keys"] = table
+    state["updated"] = NOW()
+    jsave(lane_state_path(lane_name), state)
+    return table
+
+
+def lane_idempotency_lookup(lane_name, key):
+    """Return the run id an earlier assignment with this key created, if any."""
+    if not key:
+        return None
+    return lane_idempotency_table(jload(lane_state_path(lane_name), {}) or {}).get(key)
+
+
+def lane_run_state(run_id):
+    """Return the recorded state of a run, or 'unknown' when the run is gone."""
+    status = jload(os.path.join(RUNS, run_id, "status.json"), {}) or {}
+    return status.get("state") or "unknown"
+
+
+def validate_idempotency_key(key):
+    """Validate the optional idempotency key of one assignment."""
+    if key is None:
+        return None
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("idempotency key must be a non-empty string")
+    if len(key) > 200 or any(char in key for char in "\r\n\t"):
+        raise ValueError("idempotency key must be at most 200 characters without control characters")
+    return key
+
+
 def lane_call(name, request, timeout=8):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -7985,7 +8038,12 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                 answer["state"] = jload(lane_state_path(lane["name"]), {})
             elif op == "assign":
                 state = jload(lane_state_path(lane["name"]), {}) or {}
-                if state.get("state") != "idle" or current.get("run_id"):
+                key = str(req.get("idempotency_key") or "")
+                existing = lane_idempotency_table(state).get(key) if key else None
+                if existing:
+                    # A retry after a broken transport reuses the run the first attempt created.
+                    answer = {"ok": True, "id": existing, "reused": True, "state": lane_run_state(existing)}
+                elif state.get("state") != "idle" or current.get("run_id"):
                     answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
                 else:
                     rid = req.get("run_id")
@@ -8012,6 +8070,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         current.update(spec)
                         lane_write_state(lane["name"], state="busy", current_run=rid, turn_state="queued",
                                          concurrency_keys=[], last_error=None)
+                        if key:
+                            lane_idempotency_record(lane["name"], key, rid)
                         set_status(rdir, id=rid, state="queued", title=spec.get("title") or task.strip().splitlines()[0][:72],
                                    backend=lane["backend"], model=lane["model"], effort=lane.get("effort"), lane=lane["name"],
                                    provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
@@ -9265,9 +9325,30 @@ def cmd_lane_status():
     print(json.dumps(lane_status_rows(), indent=2, ensure_ascii=False))
 
 
+def lane_assign_reused(lane_name, key, run_id):
+    """Describe the assignment an earlier identical idempotency key already created."""
+    result = {"ok": True, "lane": lane_name, "run_id": run_id, "id": run_id, "status": "assigned",
+              "state": lane_run_state(run_id), "assigned": True, "reused": True, "idempotency_key": key,
+              "watch": f"openswarm watch {run_id}",
+              "result": os.path.join(RUNS, run_id, "result.json")}
+    try:
+        with open(os.path.join(RUNS, run_id, "task.md"), "rb") as stream:
+            result["task_sha256"] = hashlib.sha256(stream.read()).hexdigest()
+    except OSError:
+        pass
+    return result
+
+
 def cmd_lane_assign(args):
     validate_card_type(load_policy(), getattr(args, "card_type", None))
     lane = lanes_by_name([args.name])[0]
+    key = validate_idempotency_key(getattr(args, "idempotency_key", None))
+    if key:
+        # A retry after a broken transport reuses the run the first attempt created.
+        reused = lane_idempotency_lookup(lane["name"], key)
+        if reused:
+            print(json.dumps(lane_assign_reused(lane["name"], key, reused), indent=2, ensure_ascii=False))
+            return
     task_bytes = (args.prompt.encode("utf-8") if args.prompt is not None
                   else open(args.task_file, "rb").read())
     task_sha256 = hashlib.sha256(task_bytes).hexdigest()
@@ -9292,11 +9373,16 @@ def cmd_lane_assign(args):
                                          "card_type": getattr(args, "card_type", None),
                                          "rework_of": getattr(args, "rework_of", None),
                                          "paths": getattr(args, "paths", None) or [],
-                                         "read_only": getattr(args, "read_only", False)})
+                                         "read_only": getattr(args, "read_only", False),
+                                         "idempotency_key": key})
     if response.get("ok"):
-        response.update({"lane": lane["name"], "run_id": rid, "status": "assigned", "assigned": True,
-                         "task_sha256": task_sha256, "watch": f"openswarm watch {rid}",
-                         "result": os.path.join(RUNS, rid, "result.json")})
+        if response.get("reused"):
+            # The supervisor had already created this run under the same key.
+            response.update(lane_assign_reused(lane["name"], key, response.get("id") or rid))
+        else:
+            response.update({"lane": lane["name"], "run_id": rid, "status": "assigned", "assigned": True,
+                             "task_sha256": task_sha256, "watch": f"openswarm watch {rid}",
+                             "result": os.path.join(RUNS, rid, "result.json")})
         print(json.dumps(response, indent=2, ensure_ascii=False))
     else:
         response.update({"run_id": rid, "status": "rejected", "assigned": False})
@@ -10165,6 +10251,12 @@ def fleet_lane_assign(host, command):
     with open(task_path, "rb") as stream:
         card = stream.read()
     digest = hashlib.sha256(card).hexdigest()
+    idempotency_key = None
+    if "--idempotency-key" in command:
+        index = command.index("--idempotency-key")
+        if index + 1 >= len(command):
+            raise ValueError("--idempotency-key requires a value")
+        idempotency_key = command[index + 1]
     run_id = None
     if "--run-id" in command:
         index = command.index("--run-id")
@@ -10179,7 +10271,7 @@ def fleet_lane_assign(host, command):
         command = command + ["--run-id", run_id]
     if not card.strip():
         result = {"ok": False, "status": "rejected", "state": "rejected", "assigned": False, "run_id": run_id,
-                  "error": "empty task", "task_sha256": digest}
+                  "error": "empty task", "task_sha256": digest, "idempotency_key": idempotency_key}
         print(json.dumps(result, ensure_ascii=False))
         return 1
 
@@ -10195,7 +10287,7 @@ def fleet_lane_assign(host, command):
     if rc:
         result = {"ok": False, "status": "transfer_failed", "assigned": False, "run_id": run_id,
                   "state": "transfer_failed", "error": "task transfer verification failed", "task_sha256": digest,
-                  "exit_code": rc, "stderr": harvest_stderr_tail(err)}
+                  "exit_code": rc, "stderr": harvest_stderr_tail(err), "idempotency_key": idempotency_key}
         print(json.dumps(result, ensure_ascii=False))
         return 1
     try:
@@ -10204,7 +10296,8 @@ def fleet_lane_assign(host, command):
         remote_path, remote_digest = "", ""
     if remote_digest != digest or not remote_path:
         result = {"ok": False, "status": "transfer_failed", "assigned": False, "run_id": run_id,
-                  "state": "transfer_failed", "error": "task transfer verification failed", "task_sha256": digest}
+                  "state": "transfer_failed", "error": "task transfer verification failed", "task_sha256": digest,
+                  "idempotency_key": idempotency_key}
         print(json.dumps(result, ensure_ascii=False))
         return 1
     try:
@@ -10217,7 +10310,7 @@ def fleet_lane_assign(host, command):
                 result = {"ok": False, "error": "remote lane assign returned invalid JSON"}
         else:
             result = {"ok": False, "error": harvest_stderr_tail(err) or "remote lane assign failed"}
-        result.update({"run_id": run_id, "task_sha256": digest,
+        result.update({"run_id": run_id, "task_sha256": digest, "idempotency_key": idempotency_key,
                        "status": "assigned" if rc == 0 and result.get("ok") else "rejected",
                        "state": result.get("state") if rc == 0 and result.get("ok") else "rejected",
                        "assigned": bool(rc == 0 and result.get("ok"))})
@@ -13374,6 +13467,8 @@ def main():
                            task_source_required=True)
     lp.add_argument("--base")
     lp.add_argument("--run-id", help=argparse.SUPPRESS)
+    lp.add_argument("--idempotency-key",
+                    help="retry-safe key: repeating it returns the existing run instead of creating a second one")
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")
