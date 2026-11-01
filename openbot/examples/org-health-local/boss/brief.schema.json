@@ -6,8 +6,18 @@
   "$comment": "字段路径是逻辑路径：数据提供方的原始表与列名由 DA 按实际来源映射。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"],
+  "required": ["period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"],
   "properties": {
+    "period": {
+      "description": "观察月份，格式 YYYY-MM。",
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+    },
+    "summary": {
+      "description": "本次组织健康诊断的非空摘要。",
+      "type": "string",
+      "minLength": 1
+    },
     "目标": {
       "description": "本次诊断要回答的问题，1-5 条。",
       "type": "array",

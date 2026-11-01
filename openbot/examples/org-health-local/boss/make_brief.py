@@ -254,6 +254,8 @@ def build_brief(
             raise ValueError("汇率必须是正数（人民币/美元）")
         definitions["汇率"] = fx
     return {
+        "period": observed,
+        "summary": "；".join(goals) if goals else "；".join(DEFAULT_GOALS),
         "目标": list(goals) if goals else list(DEFAULT_GOALS),
         "观察期间": {
             "观察月份": observed,
