@@ -152,8 +152,9 @@ def dispatch(lane, cfg, item, base):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/openswarm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
-    rc, _, err = sh(["scp", "-q", *SSHO, path, f"{h}:/tmp/task-{lane}.md"], timeout=60)
-    if rc: raise RuntimeError(f"scp: {err.strip()[-200:]}")
+    with open(path) as task_file:
+        rc, _, err = sh(["ssh", *SSHO, h, f"cat > /tmp/task-{lane}.md"], timeout=60, inp=task_file.read())
+    if rc: raise RuntimeError(f"task upload: {err.strip()[-200:]}")
     ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
     cmd = (f"git -C {R} fetch -q https://github.com/{REPO}.git main && git -C {R} cat-file -e {base}^{{commit}} && "
            f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
