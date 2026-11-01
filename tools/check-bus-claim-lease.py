@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable contract check for issue bus claim lease expiry and takeover (Refs #1144).
+"""Executable contract check for issue bus claim lease expiry and takeover (Refs #1197).
 
 对齐 BUS.md：过期 claim 不永久锁死。`tools/check-bus-claim-lease.py` 假时钟+假评论。
 使用假时钟（fake clock）+ 假评论（fake comments）验证：
