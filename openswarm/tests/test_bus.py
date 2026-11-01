@@ -659,6 +659,9 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
                 if expected_status == "failed":
                     self.assertEqual(entry["error_class"], "verify_failed")
                     self.assertEqual(result_obj["error_class"], "verify_failed")
+                else:
+                    self.assertEqual(entry["error_class"], "none")
+                    self.assertEqual(result_obj["error_class"], "none")
 
     def test_worker_verify_success_with_schema_report_stays_done(self):
         """A RESULT_SCHEMA shaped executor report still yields a parseable done result."""
