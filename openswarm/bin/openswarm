@@ -6203,12 +6203,29 @@ def bus_extract_task(body):
 
 
 def bus_task_digest(task):
+    if isinstance(task, str):
+        try:
+            decoded = json.loads(task)
+        except ValueError:
+            decoded = None
+        task = decoded if isinstance(decoded, dict) else task
     payload = task if isinstance(task, str) else json.dumps(task, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def bus_task_digest_comment(task):
     return f"openswarm-task-digest: sha256:{bus_task_digest(task)}"
+
+
+def bus_publish_task_digest(repo, number, task, allowed_planners=None):
+    """Publish one digest for a task, making planner retries idempotent."""
+    expected = bus_task_digest_comment(task)
+    existing = bus_comments(repo, number)
+    allowed = {str(login).casefold() for login in (allowed_planners or [])}
+    match = next((comment for comment in existing
+                  if comment.get("body") == expected
+                  and (not allowed or str((comment.get("user") or {}).get("login") or "").casefold() in allowed)), None)
+    return match or bus_comment(repo, number, expected)
 
 
 def bus_worker_task_is_trusted(issue, task, comments, allowed_planners):
@@ -6218,12 +6235,14 @@ def bus_worker_task_is_trusted(issue, task, comments, allowed_planners):
     extracted = bus_extract_task_fence(issue.get("body", ""))
     if not extracted or extracted[1] != task:
         return False
-    expected = bus_task_digest_comment(extracted[0])
-    # GitHub returns issue comments oldest-first; ignore unrelated race comments until the first trusted match.
-    match = next((comment for comment in comments
-                  if str((comment.get("user") or {}).get("login") or "").casefold() in allowed_planners
-                  and comment.get("body") == expected), None)
-    return match is not None
+    expected = bus_task_digest_comment(task)
+    # GitHub returns issue comments oldest-first.  The first trusted digest is authoritative;
+    # repeated copies of the same canonical digest must not affect claim arbitration.
+    digests = [comment for comment in comments
+               if str((comment.get("user") or {}).get("login") or "").casefold() in allowed_planners
+               and isinstance(comment.get("body"), str)
+               and comment["body"].startswith("openswarm-task-digest: sha256:")]
+    return bool(digests) and digests[0].get("body") == expected
 
 
 def bus_comments(repo, number):
@@ -6327,7 +6346,7 @@ def bus_create_issue(repo, cfg, title, task, metadata, executor=None):
         "title": f"[openswarm] {title}", "body": body, "labels": labels,
     })
     if issue.get("number"):
-        bus_comment(repo, issue["number"], bus_task_digest_comment(task_fence))
+        bus_publish_task_digest(repo, issue["number"], metadata, cfg.get("allowed_planners"))
     return issue
 
 
