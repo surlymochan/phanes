@@ -24,7 +24,7 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --status-file ~/phanes-ctl/ib-refresh.status`)
    - **Heartbeat path**: `~/phanes-ctl/ctl-loop.heartbeat`
-   - **Status path**: `~/phanes-ctl/ib-refresh.status` (contains `start_lane_autodispatch` boolean gate)
+   - **Status path**: `~/phanes-ctl/ib-refresh.status` (stable row: `ok=... hosts_ok=... skipped_cooldown=... min_ttl=... min_exp=...`; field order is fixed)
 
 2. **`lane-autodispatch`** (fleet SSH dispatch + backlog refill):
    - **Startup command**: `~/phanes-ctl/bin/lane-autodispatch`  
@@ -60,7 +60,11 @@ fleet JSON (`--fleet-config`), classifies each certificate as `valid`,
 with `start_lane_autodispatch: true` may start the dispatch loop.  Renewals are
 staged in a temporary directory and atomically installed only after every
 renewal returns a valid X.509 certificate; a partial failure leaves the old
-certificates and fleet config untouched.
+certificates and fleet config untouched. The status file contains a stable,
+machine-readable row with those five fields; `hosts_ok` counts only valid
+certificates in the written fleet config, and cooldown skips contribute to
+`skipped_cooldown`. Check the parser contract offline with
+`python3 tools/check-ib-status-line.py`.
 
 ### SSH ControlMaster stale-socket sweep (Refs #921)
 
