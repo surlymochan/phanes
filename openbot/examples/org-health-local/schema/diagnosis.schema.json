@@ -6,8 +6,12 @@
   "$comment": "指标标题与页面 expected 数组一致；series 键名是页面按名读取的锚点。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["scope", "conclusion", "origin", "metrics", "insights", "definitions", "risks", "recommendations"],
+  "required": ["synthetic", "scope", "conclusion", "origin", "metrics", "insights", "definitions", "risks", "recommendations"],
   "properties": {
+    "synthetic": {
+      "const": true,
+      "description": "标记该快照为合成数据。"
+    },
     "口径说明": {
       "description": "可选：数据口径说明面板（期间、单位、年末测算与 H1 参考、null 含义），见 #55。",
       "type": "array",

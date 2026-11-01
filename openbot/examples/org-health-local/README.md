@@ -374,3 +374,5 @@ python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle dem
 `demo/vendor/app.bundle.js`）；不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）。
 退出码契约：`0` 构建成功，`1` 数据未通过校验或 bundle 文件不存在，`2` 输入不可用，`3` 打包或写出失败。
 单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络，并包含在 `python3 run_tests.py` 中。
+
+隐私守卫检查：`python3 tools/check-org-health-privacy.py`。
