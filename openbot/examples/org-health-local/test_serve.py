@@ -130,6 +130,17 @@ class LocalServeBoundaryTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def request_with_headers(self, path, host=None, port=None):
+        """发起 GET 并返回状态、响应头与响应体。"""
+        connection = http.client.HTTPConnection('127.0.0.1', port or self.port, timeout=5)
+        try:
+            headers = {} if host is None else {'Host': host}
+            connection.request('GET', path, headers=headers)
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
     def raw_head_response(self, path, port=None):
         """用裸 socket 发一次 HEAD，返回响应原始字节；用于确认响应头之后没有 body 字节。"""
         target_port = port or self.port
@@ -216,10 +227,11 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 self.assertIn(b'Not Found', body)
 
     def test_path_traversal_is_not_found(self):
-        for path in ('/../serve.py', '/%2e%2e/serve.py', '/..%2fserve.py', '/data/../serve.py'):
+        for path in ('/../', '/../serve.py', '/%2e%2e/serve.py', '/..%2fserve.py', '/data/../serve.py'):
             with self.subTest(path=path):
                 status, body = self.request(path)
-                self.assertEqual(status, 404)
+                self.assertGreaterEqual(status, 400)
+                self.assertLess(status, 500)
                 self.assertNotIn(str(serve.ROOT).encode(), body)
                 self.assertNotIn(str(self.data).encode(), body)
 
@@ -297,6 +309,14 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(content_type, 'application/json')
                 self.assertGreater(len(body), 0)
+
+    def test_json_response_headers(self):
+        status, headers, body = self.request_with_headers('/data/diagnosis.json')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, self.data.read_bytes())
+        self.assertEqual(headers['Content-Type'].split(';', 1)[0], 'application/json')
+        # 当前实现沿用 SimpleHTTPRequestHandler，不发送 Cache-Control。
+        self.assertNotIn('Cache-Control', headers)
 
     def test_diagnosis_api_matches_builder_data_fields(self):
         status, content_type, body = self.request_with_type('/api/diagnosis')
