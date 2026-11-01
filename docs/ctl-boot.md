@@ -298,7 +298,7 @@ heartbeats, missing/exited pids, and the one-decision-per-child rule:
 python3 tools/check-ctl-loop-reap.py
 ```
 
-### ctl-loop ib-refresh heartbeat maintenance (Refs #1090)
+### ctl-loop ib-refresh heartbeat maintenance (Refs #1127)
 
 During `ib-refresh` (instabox certificate renewal), `ctl-loop` enters a wall-clock wait
 loop bounded by `REFRESH_CAP` (default 420s). In accordance with the 37-minute silence
