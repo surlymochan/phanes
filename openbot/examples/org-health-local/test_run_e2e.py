@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 
-from run_e2e import (REVIEW_REPORT, REVIEW_RESULTS, STATUS_FILE, STEP_ERROR_DIR, parse_args,  # noqa: E402  (需要先让示例目录可被导入)
+from run_e2e import (REVIEW_REPORT, REVIEW_RESULTS, STATUS_FILE, STEP_ERROR_DIR, TIMINGS_FILE, parse_args,  # noqa: E402  (需要先让示例目录可被导入)
                      source_commit)
 
 RUNNER = ROOT / 'run_e2e.py'
@@ -186,7 +186,7 @@ if FAIL:
     def calls(self):
         return [json.loads(line) for line in self.log.read_text(encoding='utf-8').splitlines()]
 
-    def test_runs_in_order_with_expected_arguments_and_artifacts(self):
+    def test_timings_are_written_for_successful_run(self):
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
             self.write_stub(path, role)
         result = subprocess.run(self.command(), capture_output=True, text=True)
@@ -204,7 +204,7 @@ if FAIL:
         self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
         self.assertIn('serve.py --root', result.stdout)
-        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        timings = json.loads((self.workdir / TIMINGS_FILE).read_text(encoding='utf-8'))
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
         for item in timings:
             # 成功流水线的耗时记录结构固定：每步四个字段都不缺。
@@ -212,6 +212,25 @@ if FAIL:
             self.assertIsInstance(item['command'], list)
             self.assertGreaterEqual(item['duration_seconds'], 0)
             self.assertEqual(item['exit_code'], 0)
+
+    def test_timings_are_written_when_role_script_is_missing(self):
+        """缺少角色脚本时仍保留已执行步骤和失败步骤的耗时，供 soak 观测。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role)
+        self.scripts[1].unlink()
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        timings_path = self.workdir / TIMINGS_FILE
+        self.assertTrue(timings_path.is_file())
+        timings = json.loads(timings_path.read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA'])
+        for item in timings:
+            self.assertEqual(set(item), {'name', 'command', 'duration_seconds', 'exit_code'})
+            self.assertIsInstance(item['command'], list)
+            self.assertGreaterEqual(item['duration_seconds'], 0)
+        self.assertEqual(timings[-1]['exit_code'], 2)
 
     def test_timeout_kills_role_group_and_preserves_real_upstream_artifacts(self):
         """真实 Boss/DA/Builder 完成后，阻塞检查器超时仍保留上游产物并写完整 timings。"""

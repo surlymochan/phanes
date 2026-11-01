@@ -32,6 +32,8 @@ BLOCKING_DETAIL_LIMIT = 3
 BLOCKING_DETAIL_LENGTH = 120
 # 步骤状态文件：写出每步状态、失败步骤与错误，不必翻日志也能定位失败原因。
 STATUS_FILE = 'status.json'
+# Soak 观测读取的耗时产物名：成功与失败路径都使用同一个稳定名称。
+TIMINGS_FILE = 'timings.json'
 # 失败步骤的原始输出快照目录：便于诊断角色输出损坏 JSON 时仍能核对现场。
 STEP_ERROR_DIR = 'step-errors'
 # 步骤名到稳定角色名的映射：状态文件用稳定的英文角色名，
@@ -140,7 +142,7 @@ def write_timings(workdir, timings):
 
     写不进去时点名没能记录的步骤耗时：只看到「写入失败」无法判断缺了哪几步。
     """
-    path = workdir / 'timings.json'
+    path = workdir / TIMINGS_FILE
     try:
         path.write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     except OSError as error:
