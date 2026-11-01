@@ -209,10 +209,10 @@ class LocalServeBoundaryTests(unittest.TestCase):
     def test_nonexistent_path_returns_404_with_nonempty_body(self):
         for path in ('/nonexistent', '/missing.html', '/not_found'):
             with self.subTest(path=path):
-                status, body = self.request(path)
+                status, content_type, body = self.request_with_type(path)
                 self.assertEqual(status, 404)
-                self.assertTrue(body)
-                self.assertGreater(len(body), 0)
+                self.assertEqual(content_type, 'text/plain; charset=utf-8')
+                self.assertEqual(body, b'Not Found\n')
 
     def test_path_traversal_is_not_found(self):
         for path in ('/../serve.py', '/%2e%2e/serve.py', '/..%2fserve.py', '/data/../serve.py'):
