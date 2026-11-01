@@ -102,6 +102,8 @@ while True:
                     stream.write(str(child.pid))
             os._exit(17)
         if "LANE_TEST_EXIT_WITH_DETACHED_CHILD" in prompt:
+            if "LANE_TEST_LATE_FORK" in prompt:
+                time.sleep(4)  # fork after the lane's eager descendant-scan window has closed
             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                      start_new_session=True,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

@@ -571,6 +571,31 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertIn("overloaded", json.dumps(result))
 
+    def assert_auto_retry_done(self, markers):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign(f"LANE_TEST_AUTO_RETRY {markers} transient overload")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIsNone(result.get("error_class"))
+
+    def test_pi_auto_retry_follows_a_pi_delay_longer_than_the_grace(self):
+        self.assert_auto_retry_done("LANE_TEST_AUTO_RETRY_SLOW")
+
+    def test_pi_auto_retry_start_before_the_failed_agent_end(self):
+        self.assert_auto_retry_done("LANE_TEST_AUTO_RETRY_REVERSED LANE_TEST_AUTO_RETRY_SLOW")
+
+    def test_pi_auto_retry_that_never_resumes_ends_the_turn(self):
+        self.set_config("pi")
+        self.start_lane()
+        started = time.time()
+        run_id = self.assign("LANE_TEST_AUTO_RETRY LANE_TEST_AUTO_RETRY_STALL transient overload")
+        state = self.wait_run(run_id)
+        self.assertNotEqual(state["status"], "done")
+        self.assertLess(time.time() - started, 25)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIn("overloaded", json.dumps(result))
+
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
         (self.data / "policy.local.json").write_text(json.dumps({"rate_limit": {
@@ -1162,6 +1187,27 @@ class LaneTests(unittest.TestCase):
             reservations = self.fleet_reservations()
             self.assertEqual(len(reservations), 1)
             self.assertEqual(reservations[0]["run_id"], run_id)
+        finally:
+            if child_marker.exists():
+                try:
+                    os.kill(int(child_marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_late_detached_child_still_retains_shared_fleet_slot(self):
+        """A detached child forked late in the turn (after the eager scan window) is still seen."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        child_marker = self.root / "late-detached-child.pid"
+        self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_DETACHED_CHILD LANE_TEST_LATE_FORK")
+        try:
+            state = self.wait_run(run_id)
+            self.assertEqual(state["status"], "failed")
+            self.assertTrue(process_alive(int(child_marker.read_text())))
+            reservations = self.fleet_reservations()
+            self.assertEqual([row["run_id"] for row in reservations], [run_id])
         finally:
             if child_marker.exists():
                 try:
