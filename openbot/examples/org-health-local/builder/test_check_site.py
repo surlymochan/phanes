@@ -600,6 +600,8 @@ class MinimalBriefPipelineCheckSiteTest(unittest.TestCase):
     def minimal_legal_brief() -> dict:
         """返回仅包含 schema v4 必填项的最小合法 brief 结构，禁止只测空输入。"""
         return {
+            "period": "2026-09",
+            "summary": "复核整体技术人力成本与折算人头。",
             "目标": ["复核观察期间内整体技术人力成本与折算人头"],
             "观察期间": {
                 "观察月份": "2026-09",

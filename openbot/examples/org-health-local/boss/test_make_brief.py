@@ -43,8 +43,8 @@ from validate import Validator, load_schema  # noqa: E402
 EXAMPLE_PATH = EX / "data" / "diagnosis.json"
 SCHEMA_PATH = ROOT / "brief.schema.json"
 
-BRIEF_KEYS = {"目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"}
-ORDERED_BRIEF_KEYS = ["目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"]
+BRIEF_KEYS = {"period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"}
+ORDERED_BRIEF_KEYS = ["period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"]
 REQUIRED_FORBIDS = ("不得写入真实组织数据", "不作个人/薪酬/编制判断")
 
 # 期次锚点的期望顺序：2026-01实际 → 2026-05H1参考 → 2026-09实际 → 年末测算 → 年末目标。
@@ -765,6 +765,8 @@ class NonEmptyBriefSchemaViolationTest(unittest.TestCase):
     def test_缺少必填区块_非零退出且指出路径与字段名(self) -> None:
         """非空样本缺少必填区块时，make_brief 以非 0 退出并指出 JSON pointer 与字段名。"""
         cases = [
+            ("缺少 period", lambda b: b.pop("period"), "/period", "period"),
+            ("缺少 summary", lambda b: b.pop("summary"), "/summary", "summary"),
             ("缺少顶层口径区块", lambda b: b.pop("口径"), "/口径", "口径"),
             ("缺少顶层观察期间区块", lambda b: b.pop("观察期间"), "/观察期间", "观察期间"),
             ("缺少顶层数据需求区块", lambda b: b.pop("数据需求"), "/数据需求", "数据需求"),
