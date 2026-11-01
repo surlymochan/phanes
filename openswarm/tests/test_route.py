@@ -129,11 +129,18 @@ class RoutingScenarios(unittest.TestCase):
                                    "skipped": lambda s: s.get("codex") == "no working codex binary"},
                    OPT_IN_POLICY)
 
-    def test_21_unknown_and_empty_outcomes_use_stable_labels(self):
+    def test_21_config_disabled_default_backend_is_not_auto_selected_but_forceable(self):
+        policy = copy.deepcopy(OPT_IN_POLICY)
+        policy["routing"]["default_order"] = ["codex", "ocgo"]
+        policy["codex"]["disabled"] = True
+        self.check(prof("mechanical", 1), scenario(), {"backend": "ocgo"}, policy)
+        self.check(prof("mechanical", 1, backend="codex"), scenario(), {"backend": "codex"}, policy)
+
+    def test_22_unknown_and_empty_outcomes_use_stable_labels(self):
         self.assertEqual(xs.outcome_label({"accepted": "unknown"}), "unknown")
         self.assertEqual(xs.outcome_label({"accepted": False, "status": ""}), "fail/unknown")
 
-    def test_22_unknown_outcome_maps_to_default_bucket(self):
+    def test_23_unknown_outcome_maps_to_default_bucket(self):
         entry = {"accepted": "unexpected", "exec_pass": "unexpected", "status": "done"}
         self.assertIsNone(xs.routing_outcome(entry))
         self.assertEqual(xs.outcome_label(entry), "unknown")
