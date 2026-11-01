@@ -75,7 +75,8 @@ machine-readable row with those five fields; `hosts_ok` counts only valid
 certificates in the written fleet config, and cooldown skips contribute to
 `skipped_cooldown`. When `need_ok` is configured, the gate stays healthy when
 `hosts_ok >= need_ok`; cooldown hosts are omitted from an alternate fleet
-config, so three reachable hosts can keep `ok=1` while two hosts cool down.
+config, so three reachable hosts can keep `ok=1` while two hosts cool down
+(for example, `ok=1 hosts_ok=3 skipped_cooldown=2`).
 Hosts absent from the configured topology are errors and are excluded from
 `hosts_ok`; exercise this invariant with
 `python3 tools/check-fleet-unknown-host.py`.
