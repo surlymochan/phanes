@@ -1,5 +1,6 @@
 """Best-of-two runs use stub executors and reviewers with local fixtures only."""
 import contextlib
+import functools
 import io
 import json
 import os
@@ -50,6 +51,29 @@ class CompareScoreUnitTests(unittest.TestCase):
         left["score"], right["score"] = (xs.compare_candidate_score(left),
                                            xs.compare_candidate_score(right))
         self.assertIsNone(xs.choose_compare_winner(left, right))
+
+    def test_equal_scores_with_same_names_keep_stable_summary_order(self):
+        candidates = [self.candidate(changed_lines=8, seconds=3.25) for _ in range(3)]
+        for index, candidate in enumerate(candidates):
+            candidate.update(label="same-name", candidate_id=f"candidate-{index}")
+        ordered = sorted(candidates, key=functools.cmp_to_key(
+            lambda left, right: -xs.compare_order(left, right)))
+        self.assertEqual([candidate["candidate_id"] for candidate in ordered],
+                         ["candidate-0", "candidate-1", "candidate-2"])
+        self.assertEqual([xs.compare_order(left, right) for left, right in zip(ordered, ordered[1:])],
+                         [0, 0])
+
+    def test_equal_score_summary_order_is_reproducible_for_reversed_input(self):
+        candidates = [self.candidate(changed_lines=8, seconds=3.25) for _ in range(3)]
+        for index, candidate in enumerate(candidates):
+            candidate.update(label="same-name", candidate_id=f"candidate-{index}")
+        sort_key = functools.cmp_to_key(lambda left, right: -xs.compare_order(left, right))
+        forward = [candidate["candidate_id"] for candidate in sorted(candidates, key=sort_key)]
+        reverse = [candidate["candidate_id"] for candidate in sorted(reversed(candidates), key=sort_key)]
+        repeat = [candidate["candidate_id"] for candidate in sorted(candidates, key=sort_key)]
+        self.assertEqual(forward, ["candidate-0", "candidate-1", "candidate-2"])
+        self.assertEqual(reverse, ["candidate-2", "candidate-1", "candidate-0"])
+        self.assertEqual(repeat, forward)
 
     def test_missing_optional_score_field_uses_remaining_criteria(self):
         missing = self.candidate(changed_lines=8, seconds=1.0)
