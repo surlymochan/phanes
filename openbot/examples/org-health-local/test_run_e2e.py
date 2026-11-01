@@ -361,6 +361,40 @@ time.sleep(30)
         # 阶段顺序不变：DA 失败后 Builder 与站点自检不再执行。
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da'])
 
+    def test_missing_step_timings_are_named_when_timings_cannot_be_written(self):
+        """末步失败且耗时记录写不出来时：非零退出、点名失败步骤，并点名缺失的步骤耗时。
+
+        覆盖末步（站点自检）失败：耗时记录缺失时失败步骤仍要可核对，
+        状态文件作为兜底仍保留每步耗时与失败步骤。
+        """
+        for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
+            self.write_stub(path, role, failing=(index == 3), exit_code=6)
+        # 耗时记录路径被目录占用：每步耗时写不出来。
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        (self.workdir / 'timings.json').mkdir()
+
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+
+        # 整体判失败，不因耗时记录缺失而误报成功。
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        self.assertNotIn('Traceback', result.stderr)
+        # 失败步骤在 stderr 里被点名。
+        self.assertIn('步骤失败: 检查', result.stderr)
+        self.assertIn('失败步骤: 检查', result.stderr)
+        # 写入失败提示同时点名缺失的步骤耗时。
+        self.assertIn('耗时记录写入失败', result.stderr)
+        self.assertIn('缺失的步骤耗时: Boss、DA、Builder、检查', result.stderr)
+        # 阶段顺序不变：自检是末步，失败后不再继续。
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker'])
+        # 耗时记录写不出来时，状态文件仍保留失败步骤与每步耗时。
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'checker')
+        self.assertEqual([item['name'] for item in status['timings']], ['Boss', 'DA', 'Builder', '检查'])
+        self.assertEqual(status['timings'][-1]['exit_code'], 6)
+        self.assertGreaterEqual(status['timings'][-1]['duration_seconds'], 0)
+
     def test_runs_from_repo_root_with_relative_workdir_and_default_raw(self):
         """以仓库根为 cwd、相对路径为 --workdir 运行，产物落在相对工作目录且默认 raw 路径仍指向示例目录。"""
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):

@@ -117,12 +117,18 @@ def undecodable_reason(path):
 
 
 def write_timings(workdir, timings):
-    """写出已执行步骤的耗时记录；失败路径也由调用方在 finally 中调用。"""
+    """写出已执行步骤的耗时记录；失败路径也由调用方在 finally 中调用。
+
+    写不进去时点名没能记录的步骤耗时：只看到「写入失败」无法判断缺了哪几步。
+    """
     path = workdir / 'timings.json'
     try:
         path.write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     except OSError as error:
         message = f'耗时记录写入失败: {path} ({error.strerror or str(error)})'
+        missing = '、'.join(str(item.get('name', '')) for item in timings)
+        if missing:
+            message += f'；缺失的步骤耗时: {missing}'
         print(message, file=sys.stderr, flush=True)
         return message
     return None
