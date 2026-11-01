@@ -78,4 +78,28 @@ openswarm watch <run-id>
 `openswarm/<run-id>`，并在 issue 评论中写入 `openswarm-result`；planner 随后取得该结果并写入本地 run 记录。不要把
 真实 token、私密环境变量或其他凭据放进任务文件、issue body 或评论。
 
+### 结果评论的机读契约
+
+`bus-worker` 的结果评论必须包含一个 fenced `openswarm-result` JSON 块。除展示用摘要外，块内必须有以下机读字段：
+`status` 只能是 `ok` 或 `error`，`run_id` 必须是本次任务的运行 ID；成功结果必须提供 `pr_url`（没有 PR 时为 `null`），失败结果必须提供非空的 `error_class`。
+解析评论时应按 JSON 解析，不要依赖自然语言摘要或 issue label：
+
+```json
+{
+  "status": "ok",
+  "run_id": "20261027-195945-d50fd3",
+  "pr_url": "https://github.com/surlymochan/phanes/pull/42"
+}
+```
+
+失败结果使用同一结构，并以 `error_class` 说明可分类的失败原因：
+
+```json
+{
+  "status": "error",
+  "run_id": "20261027-195945-d50fd3",
+  "error_class": "push_failed"
+}
+```
+
 受控主机仍应使用 SSH fleet；只有需要跨信任边界派发时才采用这里的 GitHub issue bus。
