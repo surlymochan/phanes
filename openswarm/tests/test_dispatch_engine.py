@@ -439,6 +439,45 @@ class RebaseHarvest(Base):
         self.assertIn("--add-label lane-pr", " ".join(self.runner.called("issue edit 7")))
 
 
+class QuotaHarvest(Base):
+    ST = {"issue": 1537, "run": "r1", "base": SHA}
+
+    def harvest(self, error_class, summary="upstream HTTP 429 rate limit", requeue_classes=None):
+        if requeue_classes is not None:
+            self.cfg["quota"]["requeue_classes"] = requeue_classes
+        d = self.make()
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "failed", "error_class": error_class, "summary": summary}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state))
+        return d, state
+
+    def test_rate_limit_requeues_and_pauses_backend(self):
+        d, state = self.harvest("rate_limit")
+        edit = d.runner.called("issue edit 1537")[0]
+        comment = d.runner.called("issue comment 1537")[0]
+        self.assertIn("--remove-label in-progress", edit)
+        self.assertIn("--remove-label lane-failed", edit)
+        self.assertIn("--add-label lane-ready", edit)
+        self.assertIn("quota/rate limiting", comment)
+        self.assertIn("not a card failure", comment)
+        self.assertNotIn("--add-label lane-failed", edit)
+        self.assertEqual(state["_done"], [1537])
+        self.assertTrue(os.path.exists(d.path("PAUSE-BACKEND-codex")))
+
+    def test_exec_error_still_fails(self):
+        d, _ = self.harvest("exec_error", "process exited with code 1")
+        edit = d.runner.called("issue edit 1537")[0]
+        self.assertIn("--add-label lane-failed", edit)
+        self.assertNotIn("--add-label lane-ready", edit)
+
+    def test_requeue_classes_can_be_overridden(self):
+        d, _ = self.harvest("custom_quota", requeue_classes=["custom_quota"])
+        edit = d.runner.called("issue edit 1537")[0]
+        self.assertIn("--add-label lane-ready", edit)
+        self.assertIn("--remove-label lane-failed", edit)
+
+
 class FreshReads(Base):
     def test_read_failure_is_not_stale_and_budget_caps_reads(self):
         self.cfg["fresh_read_budget"] = 2
