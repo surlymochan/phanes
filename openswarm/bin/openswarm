@@ -6291,6 +6291,13 @@ BUS_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 BUS_SECRET_RE = re.compile(
     r"(?i)(?:\bgh[pousr]_[A-Za-z0-9_]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|\bsk-[A-Za-z0-9_-]{8,}|\bBearer\s+[^\s\"']+)"
 )
+# GitHub failures that look temporary: rate limits and server-side errors.
+BUS_TRANSIENT_RE = re.compile(
+    r"HTTP\s*(?:429|5\d{2})\b|(?:429|5\d{2})\s+(?:Too Many Requests|Internal Server Error|Bad Gateway|"
+    r"Service Unavailable|Gateway Timeout)\b|rate limit|too many requests|server error|"
+    r"service unavailable|bad gateway|gateway timeout",
+    re.I,
+)
 
 
 class BusError(RuntimeError):
@@ -6304,6 +6311,11 @@ class BaseUnavailableError(BusError):
 def bus_redact(value):
     """Remove common credential formats before issue-bus data reaches disk or logs."""
     return BUS_SECRET_RE.sub("[REDACTED]", str(value))
+
+
+def bus_is_transient_error(error):
+    """True when a GitHub failure looks temporary (rate limit or server side) and worth retrying."""
+    return bool(BUS_TRANSIENT_RE.search(str(error)))
 
 
 def bus_error_class(value):
@@ -6386,6 +6398,18 @@ def bus_config(policy, repo=None):
         raise BusError("policy.bus.allowed_planners must be a list of GitHub logins")
     cfg["allowed_planners"] = [login.strip().casefold() for login in planners]
     cfg["poll_seconds"] = max(0.01, float(cfg.get("poll_seconds", 60)))
+    try:
+        cfg["poll_retries"] = int(cfg.get("poll_retries", 5))
+    except (TypeError, ValueError):
+        raise BusError("policy.bus.poll_retries must be a positive integer")
+    if cfg["poll_retries"] < 1:
+        raise BusError("policy.bus.poll_retries must be a positive integer")
+    try:
+        cfg["max_backoff_seconds"] = float(cfg.get("max_backoff_seconds", 60))
+    except (TypeError, ValueError):
+        raise BusError("policy.bus.max_backoff_seconds must be a positive finite number")
+    if not math.isfinite(cfg["max_backoff_seconds"]) or cfg["max_backoff_seconds"] <= 0:
+        raise BusError("policy.bus.max_backoff_seconds must be a positive finite number")
     try:
         cfg["claim_lease_seconds"] = float(cfg.get("claim_lease_seconds", 300))
     except (TypeError, ValueError):
@@ -7307,13 +7331,64 @@ def bus_worker_run(issue, cfg, args, policy):
 def cmd_bus_worker(args, policy):
     validate_card_type(policy, getattr(args, "card_type", None))
     cfg = bus_config(policy, args.bus)
-    while True:
-        for issue in gh_pages(f"repos/{cfg['repo']}/issues?state=open"):
-            if "pull_request" not in issue and bus_worker_run(issue, cfg, args, policy) and args.once:
+    stop_event = getattr(args, "stop_event", None) or threading.Event()
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    old_handlers = {}
+    if is_main_thread:
+        def on_signal(signum, frame):
+            stop_event.set()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                old_handlers[sig] = signal.signal(sig, on_signal)
+            except (ValueError, AttributeError, OSError):
+                pass
+
+    def wait_for_stop(duration):
+        """Sleep in short slices so a stop signal ends the wait right away."""
+        deadline = time.monotonic() + max(0.0, float(duration))
+        while not stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return
-        if args.once:
-            return
-        time.sleep(cfg["poll_seconds"])
+            time.sleep(min(0.05, remaining))
+
+    consecutive_failures = 0
+    poll_interval = cfg["poll_seconds"]
+    max_backoff = max(poll_interval, cfg["max_backoff_seconds"])
+    try:
+        while not stop_event.is_set():
+            try:
+                issues = gh_pages(f"repos/{cfg['repo']}/issues?state=open")
+            except (BusError, OSError) as error:
+                if not bus_is_transient_error(error):
+                    raise
+                consecutive_failures += 1
+                if consecutive_failures >= cfg["poll_retries"]:
+                    raise BusError(f"GitHub polling failed repeatedly ({consecutive_failures} consecutive "
+                                   f"transient errors): {bus_redact(error)}")
+                wait_for_stop(min(poll_interval * (2 ** (consecutive_failures - 1)), max_backoff))
+                continue
+            consecutive_failures = 0
+            for issue in issues:
+                if stop_event.is_set():
+                    break
+                if "pull_request" in issue:
+                    continue
+                handled = bus_worker_run(issue, cfg, args, policy)
+                if handled and args.once:
+                    return
+                if stop_event.is_set():
+                    break
+            if args.once or stop_event.is_set():
+                return
+            wait_for_stop(poll_interval)
+    finally:
+        if is_main_thread:
+            for sig, handler in old_handlers.items():
+                try:
+                    signal.signal(sig, handler)
+                except (ValueError, AttributeError, OSError):
+                    pass
 
 
 # ---------------------------------------------------------------- resident lanes
