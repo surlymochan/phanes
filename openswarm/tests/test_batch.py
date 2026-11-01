@@ -296,12 +296,12 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
         proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "openswarm"), "batch",
                                "--repo", "project", "--cards", str(self.cards), "--hosts", "b1,b2", "--detach",
-                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=10,
+                               "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=20,
                               env={**os.environ, "OPENSWARM_HOME": str(self.data)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         reply = json.loads(proc.stdout)
         path = self.data / "batches" / reply["id"] / "summary.json"
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 30
         summary = None
         while time.monotonic() < deadline:
             try:

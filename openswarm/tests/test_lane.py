@@ -384,6 +384,9 @@ class LaneTests(unittest.TestCase):
         (self.data / "policy.local.json").write_text(json.dumps({"fleet": {
             "recovery_ttl_seconds": 0.1, "recovery_poll_seconds": 0.02}}))
         self.start_lane()
+        self.wait_for(lambda: (state if (state := self.lane_state()).get("supervisor_pid") and
+                               state.get("state") in ("idle", "busy") else None),
+                      description="resident lane supervisor to become ready")
         run_id, token = "killed-runner", "a" * 32
         answer = json.loads(self.fleet_call({"op": "acquire", "token": token, "run_id": run_id,
                                              "backend": "pi", "provider": "minimax-cn"}).stdout)
