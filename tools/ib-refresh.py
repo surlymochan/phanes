@@ -11,6 +11,32 @@ import subprocess
 import sys
 import tempfile
 
+STATUS_KEYS = ("ok", "hosts_ok", "skipped_cooldown", "min_ttl", "min_exp")
+
+
+def _status_line(ok, hosts_ok, skipped_cooldown, min_ttl, min_exp):
+    """Return the stable, whitespace-delimited control-plane status row."""
+    values = (int(bool(ok)), int(hosts_ok), int(skipped_cooldown), int(min_ttl), int(min_exp))
+    return " ".join(f"{key}={value}" for key, value in zip(STATUS_KEYS, values))
+
+
+def _status_for(result, hosts, config_path, now):
+    rows = result.get("hosts", [])
+    hosts_ok = sum(row.get("final_status", row.get("status")) == "valid" for row in rows)
+    skipped = sum(row.get("status") == "valid" for row in rows)
+    expiries = []
+    for host in hosts:
+        cert_name = host.get("cert") or host.get("certificate") or host.get("ssh_cert")
+        if cert_name:
+            expiry = _expiry(_cert_path(config_path, cert_name))
+            if expiry is not None:
+                expiries.append(expiry)
+    min_expiry = min(expiries) if expiries else None
+    min_exp = int(min_expiry.timestamp()) if min_expiry else -1
+    min_ttl = max(0, int((min_expiry - now).total_seconds())) if min_expiry else -1
+    result["status_line"] = _status_line(result["ok"], hosts_ok, skipped, min_ttl, min_exp)
+    return result
+
 
 def _expiry(cert):
     result = subprocess.run(
@@ -54,7 +80,8 @@ def refresh(config_path, renew_command, threshold, output_path=None):
         if not isinstance(hosts, list):
             raise ValueError("fleet config hosts must be a list")
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        return {"ok": False, "start_lane_autodispatch": False, "error": f"fleet config: {exc}"}
+        return {"ok": False, "start_lane_autodispatch": False, "error": f"fleet config: {exc}",
+                "status_line": _status_line(False, 0, 0, -1, -1)}
 
     now = dt.datetime.now(dt.timezone.utc)
     rows, pending = [], []
@@ -73,8 +100,8 @@ def refresh(config_path, renew_command, threshold, output_path=None):
             pending.append((host, cert, state))
 
     if config_errors:
-        return {"ok": False, "start_lane_autodispatch": False, "hosts": rows,
-                "renewed": [], "errors": config_errors}
+        return _status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
+                            "renewed": [], "errors": config_errors}, hosts, config_path, now)
 
     errors = []
     renewed = []
@@ -104,8 +131,8 @@ def refresh(config_path, renew_command, threshold, output_path=None):
                 break
 
         if errors:
-            return {"ok": False, "start_lane_autodispatch": False, "hosts": rows,
-                    "renewed": [], "errors": errors}
+            return _status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
+                                "renewed": [], "errors": errors}, hosts, config_path, now)
 
         for cert, staged_cert in replacements:
             if cert is None:
@@ -125,8 +152,8 @@ def refresh(config_path, renew_command, threshold, output_path=None):
                           for h in hosts if h.get("name") == row["host"]), None)
         final = _state(_cert_path(config_path, cert_name), now, threshold) if cert_name else "missing"
         result_rows.append({**row, "final_status": final})
-    return {"ok": True, "start_lane_autodispatch": True, "hosts": result_rows, "renewed": renewed,
-            "errors": []}
+    return _status_for({"ok": True, "start_lane_autodispatch": True, "hosts": result_rows,
+                        "renewed": renewed, "errors": []}, hosts, config_path, now)
 
 
 def main(argv=None):
@@ -143,7 +170,7 @@ def main(argv=None):
     payload = json.dumps(result, sort_keys=True)
     print(payload)
     if args.status_file:
-        Path(args.status_file).write_text(payload + "\n")
+        Path(args.status_file).write_text(result["status_line"] + "\n")
     return 0 if result["ok"] else 1
 
 
