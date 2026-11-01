@@ -25,6 +25,65 @@ sys.modules["openswarm"] = xs
 
 
 class LanePureFunctionTests(unittest.TestCase):
+    def lane_status_row(self, state):
+        lane = {"name": "L1", "backend": "codex", "model": "fake-model"}
+        with mock.patch.object(xs, "lane_config", return_value=[lane]), \
+                mock.patch.object(xs, "jload", return_value=state), \
+                mock.patch.object(xs, "pid_alive", return_value=True), \
+                mock.patch.object(xs, "execution_provider", return_value="fake-provider"), \
+                mock.patch.object(xs, "load_policy", return_value={}), \
+                mock.patch.object(xs, "NOW", return_value=110.0):
+            return xs.lane_status_rows()[0]
+
+    def assert_json_lane_status(self, row):
+        decoded = json.loads(json.dumps([row], ensure_ascii=False))[0]
+        self.assertEqual(decoded, row)
+        self.assertEqual(
+            list(row),
+            ["name", "state", "backend", "model", "pid", "supervisor_pid",
+             "quota_reset_at", "current_run", "run_state", "provider",
+             "uptime_seconds", "last_error"],
+        )
+        self.assertIsInstance(row["name"], str)
+        self.assertIsInstance(row["state"], str)
+        self.assertIsInstance(row["backend"], str)
+        self.assertIsInstance(row["model"], str)
+        self.assertIsInstance(row["provider"], str)
+
+    def test_lane_status_rows_missing_optional_metadata_is_stable(self):
+        row = self.lane_status_row({"state": "idle", "supervisor_pid": 42})
+
+        self.assert_json_lane_status(row)
+        self.assertEqual(row["state"], "idle")
+        self.assertEqual(row["supervisor_pid"], 42)
+        self.assertIsNone(row["pid"])
+        self.assertIsNone(row["current_run"])
+        self.assertIsNone(row["run_state"])
+        self.assertIsNone(row["uptime_seconds"])
+        self.assertIsNone(row["last_error"])
+
+    def test_lane_status_rows_none_optional_metadata_is_stable(self):
+        row = self.lane_status_row({
+            "state": "running", "supervisor_pid": 42, "child_pid": None,
+            "resolved_model": None, "quota_until": None, "current_run": None,
+            "turn_state": None, "started": None, "last_error": None,
+        })
+
+        self.assert_json_lane_status(row)
+        self.assertEqual(row["model"], "fake-model")
+        for key in ("pid", "quota_reset_at", "current_run", "run_state", "uptime_seconds", "last_error"):
+            self.assertIsNone(row[key])
+
+    def test_lane_status_rows_ignores_unknown_metadata(self):
+        row = self.lane_status_row({
+            "state": "idle", "supervisor_pid": 42, "started": 100.0,
+            "unknown_metadata": {"future": True},
+        })
+
+        self.assert_json_lane_status(row)
+        self.assertEqual(row["uptime_seconds"], 10.0)
+        self.assertNotIn("unknown_metadata", row)
+
     def test_systemd_quote_plain_string(self):
         self.assertEqual(xs.systemd_quote("plain"), '"plain"')
         self.assertEqual(xs.systemd_quote("lane_worker_1"), '"lane_worker_1"')
