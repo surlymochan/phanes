@@ -174,7 +174,10 @@ and `python3 tools/check-ad-heartbeat-stall.py --fixture-fresh` (expected 0).
 - `PAUSE-HOST-<host>` / `PAUSE-<LANE>` on hard disk/mem/ssh-streak
 - `PAUSE-BACKEND-<pi|agy|codex>` on quota/429 signals (also set by autodispatch on harvest)
 
-Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft alerts (disk_soft/mem_soft) stay in `health.alert` without pausing.
+Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft alerts
+(`disk_soft`/`mem_soft`) stay in `health.alert` with `level=soft` and never create a
+`PAUSE-HOST-*` file. The disk boundary contract is checked offline with
+`python3 tools/check-health-disk-soft.py`.
 
 During dual-mode cooldown, the production pause set is restricted to
 `PAUSE-HOST-ib1`, `PAUSE-HOST-ib2`, `PAUSE-M1`, and `PAUSE-M2`. The offline
