@@ -21,6 +21,36 @@ def quantiles(xs):
     return q[0], statistics.median(xs), q[2]
 
 
+def rep_breakdown(rows):
+    """Summarize observed repeats, weighting each repeat equally for wall time.
+
+    Harness errors do not contribute runs, matching the main report. Missing
+    rep fields mean repeat 1; absent repeats are not imputed as zero outcomes.
+    """
+    grouped = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        if "harness_error" not in row:
+            grouped[row["arm"]][row.get("rep", 1)].append(row)
+    result = {}
+    for arm in sorted(grouped):
+        resolved, walls, instances = {}, {}, defaultdict(lambda: [0, 0])
+        for rep, runs in sorted(grouped[arm].items()):
+            resolved[rep] = sum(1 for row in runs if row["resolved"])
+            walls[rep] = statistics.median(row["wall_s"] for row in runs)
+            for row in runs:
+                outcome = instances[row["instance_id"]]
+                outcome[0] += int(bool(row["resolved"]))
+                outcome[1] += 1
+        result[arm] = {
+            "resolved_per_rep": resolved,
+            "resolved_q1_med_q3": quantiles(resolved.values()),
+            "per_instance": dict(sorted(instances.items())),
+            "wall_s_per_rep_median": walls,
+            "wall_s_q1_med_q3": quantiles(walls.values()),
+        }
+    return result
+
+
 def cost(tok, row):
     return (tok["input"] * row["in"] + tok["output"] * row["out"] + tok["cache_read"] * row["cache_read"]
             + tok["cache_write"] * row["cache_write"]) / 1e6
@@ -98,7 +128,8 @@ def main():
     if args.price not in {r["id"] for r in prices}:
         raise SystemExit(f"unknown price row: {args.price}")
     other_rows = [r for r in prices if r.get("computed_not_billed")]
-    recs = [json.loads(l) for l in path.open()]
+    with path.open() as stream:
+        recs = [json.loads(l) for l in stream]
     if args.only_instances:
         keep = {x.strip() for x in args.only_instances.split(",") if x.strip()}
         recs = [r for r in recs if r["instance_id"] in keep]
@@ -151,6 +182,9 @@ def main():
         d[0] += int(r["resolved"]); d[1] += 1
     summary["per_instance"] = per_inst
     summary["leak_scan"] = leak_scan(raw)
+    repeats = rep_breakdown(good) if any(r.get("rep", 1) != 1 for r in good) else None
+    if repeats is not None:
+        summary["rep_breakdown"] = repeats
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
 
     L = [f"| Arm | Resolved (official tests) | Median wall-clock (IQR) | Median $ per task ({args.price}) | Total $ all runs ({args.price}) | Median tokens in+out | Median tokens incl. cache | n |",
@@ -162,6 +196,21 @@ def main():
         L.append(f"| {a} | **{s['resolved']}/{s['n']} ({s['resolved_rate']:.0%})** | {md:.0f} s ({q1:.0f}–{q3:.0f}) | "
                  f"${c['median_per_run']:.4f} | ${c['total']:.2f} | {s['tokens_in_out_median']:,.0f} | "
                  f"{s['tokens_total_incl_cache_median']:,.0f} | {s['n']} |")
+    if repeats is not None:
+        L += ["", "### Repeats", "",
+              "| Arm | resolved per rep: median (IQR) | Median wall-clock per rep (IQR) |",
+              "| --- | --- | --- |"]
+        for a in arms:
+            q1, md, q3 = repeats[a]["resolved_q1_med_q3"]
+            w1, wm, w3 = repeats[a]["wall_s_q1_med_q3"]
+            L.append(f"| {a} | {md:g} ({q1:g}–{q3:g}) | {wm:g} s ({w1:g}–{w3:g}) |")
+        L += ["", "Per instance across repeats (resolved / runs):", "",
+              "| Instance | " + " | ".join(arms) + " |",
+              "| --- | " + " | ".join("---" for _ in arms) + " |"]
+        for iid in sorted(per_inst):
+            L.append(f"| `{iid}` | " + " | ".join(
+                "{}/{}".format(*repeats[a]["per_instance"].get(iid, [0, 0]))
+                for a in arms) + " |")
     L += ["", "Same token counts at other list prices (computed, not billed):", "",
           "| Arm | " + " | ".join(f"{r['label']}: median / total" for r in other_rows) + " |",
           "| --- | " + " | ".join("---" for _ in other_rows) + " |"]
