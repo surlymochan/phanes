@@ -24,11 +24,18 @@ ARM_COLORS = {
 def load_rows(path: Path) -> tuple[dict | None, list[dict]]:
     env = None
     runs = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
         if not line:
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            print(f"warning: ignoring malformed JSONL line {line_number} in {path}: {error}", file=sys.stderr)
+            continue
+        if not isinstance(row, dict):
+            print(f"warning: ignoring malformed JSONL line {line_number} in {path}: expected an object", file=sys.stderr)
+            continue
         if row.get("type") == "environment":
             env = row
             continue
