@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline/static contract for merge-loop's idle heartbeat (Refs #1072)."""
+"""Offline/static contract for merge-loop's idle heartbeat (Refs #1131)."""
 
 from __future__ import annotations
 
@@ -15,8 +15,10 @@ MERGE_LOOP = ROOT / "bin" / "merge-loop.sh"
 
 def main() -> None:
     source = MERGE_LOOP.read_text(encoding="utf-8")
-    for marker in ("merge-heartbeat", "write_heartbeat", "MERGE_LOOP_ONCE", '== \"[]\"'):
+    for marker in ("merge-heartbeat", "write_heartbeat", "MERGE_LOOP_ONCE", '== "[]"'):
         assert marker in source, f"merge-loop missing idle heartbeat marker: {marker}"
+    idle_branch = source.split('if [[ "$prs" == "[]" ]]; then', 1)[1].split("fi", 1)[0]
+    assert "write_heartbeat" in idle_branch, "idle branch must refresh merge-heartbeat"
 
     with tempfile.TemporaryDirectory(prefix="merge-hb-idle-") as raw_dir:
         fixture = Path(raw_dir)
