@@ -81,6 +81,26 @@ class WatchTests(unittest.TestCase):
             self.assertEqual(messages.feed(event), [])
         self.assertEqual(messages.flush(), [])
 
+    def test_mixed_unknown_stream_keeps_assistant_snapshot_and_alert(self):
+        messages = xs.WatchMessages()
+        events = [
+            update("unknown", content={"type": "text", "text": "noise"}),
+            {"method": "session/update", "params": {"update": {}}},
+            update("agent_message_chunk", content={"type": "text", "text": 42}),
+            update("agent_message_chunk", content={}),
+            {"type": "message_end", "message": {"role": "assistant", "content": []}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "answer"},
+                {"type": "text", "text": None}]}},
+            {"type": "result", "result": {}},
+            {"type": "error", "error": "kept alert"},
+        ]
+
+        rows = [row for event in events for row in messages.feed(event)]
+
+        self.assertEqual(rows, [("msg", "answer"), ("error", '"kept alert"')])
+        self.assertEqual([row for row in rows if row[0] == "msg"], [("msg", "answer")])
+
     def test_incomplete_assistant_event_keeps_text_and_serializable_snapshot(self):
         messages = xs.WatchMessages()
         events = [

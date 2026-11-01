@@ -10062,6 +10062,8 @@ class WatchMessages:
             return rows + [("cmd", event.get("command") or event.get("tool_call", {}).get("command")
                             or event.get("subtype") or "tool")]
         kind, text = summarize_event(event)
+        if kind == "msg" and (not isinstance(text, str) or not text):
+            return rows
         return rows + ([(kind, text)] if kind else [])
 
 
