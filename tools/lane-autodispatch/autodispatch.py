@@ -10,7 +10,7 @@ Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one l
 import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
-TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
+TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10")); TARGET = int(os.environ.get("AD_TARGET", "20"))
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
          "files outside it — not the main repo, not $HOME, not /tmp; for scratch files use $TMPDIR (inside the worktree, cleaned "
          "automatically) and leave cleanup to the executor. Do not push, do not open PRs, do not touch credentials, no network "
@@ -150,6 +150,12 @@ def deps_met(item):
         if rc or json.loads(out)["state"] != "CLOSED": return False
     return True
 
+def refill_need(ready, low=LOW, target=TARGET, starve=0):
+    """Return the refill size when a low queue or backend starvation needs work."""
+    if ready >= low and starve <= 0:
+        return 0
+    return max(target - ready, starve)
+
 def dispatch(lane, cfg, item, base):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
@@ -260,9 +266,10 @@ def tick(lanes, state, last_warn):
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
-    if ready < LOW or starve > 0:
-        filed = replenish(max(LOW - ready, starve), state)
-        why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
+    need = refill_need(ready, LOW, TARGET, starve)
+    if need:
+        filed = replenish(need, state)
+        why = f"queue low ({ready} < {LOW}, target {TARGET})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
         if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
         elif time.time() - last_warn > 600:
             log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
@@ -273,6 +280,7 @@ def tick(lanes, state, last_warn):
 
 def file_issue(text, extra=()):
     lines = text.splitlines()
+    if is_thin_card(text): raise ValueError("thin backlog card")
     title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
     body = "\n".join(lines[2:]).strip() + "\n"
     args = ["issue", "create", "-t", title, "-b", body]
@@ -280,6 +288,11 @@ def file_issue(text, extra=()):
     rc, o, e = gh(args)
     if rc: raise RuntimeError(e.strip()[-200:])
     return "#" + o.strip().rsplit("/", 1)[-1]
+
+def is_thin_card(text):
+    """Reject backlog entries that contain only a title/labels header."""
+    lines = text.splitlines()
+    return len(lines) < 3 or not "\n".join(lines[2:]).strip()
 
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
 labels: p1,backend:codex,planner
