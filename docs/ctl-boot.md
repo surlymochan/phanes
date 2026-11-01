@@ -78,7 +78,7 @@ certificates in the written fleet config, and cooldown skips contribute to
 config, so three reachable hosts can keep `ok=1` while two hosts cool down
 (for example, `ok=1 hosts_ok=3 skipped_cooldown=2`).
 Hosts absent from the configured topology are errors and are excluded from
-`hosts_ok` (Refs #1110); exercise this invariant with
+`hosts_ok` (Refs #1183); exercise this invariant with
 `python3 tools/check-fleet-unknown-host.py`.
 For the ib1/ib2 cooldown case, exercise this accounting with the fake-input check
 `python3 tools/check-ib-cooldown-status.py`.

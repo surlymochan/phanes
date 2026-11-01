@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for rejecting hosts outside the configured topology (Refs #1110)."""
+"""Offline contract for rejecting hosts outside the configured topology (Refs #1183)."""
 
 import importlib.util
 from datetime import datetime, timezone
