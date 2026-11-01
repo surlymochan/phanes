@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Poll open PRs and keep the merge supervisor visibly alive, including idle ticks (Refs #1165).
+# Poll open PRs and keep the merge supervisor visibly alive, including idle ticks (Refs #1230).
 set -euo pipefail
 
 HEARTBEAT_FILE="${MERGE_HEARTBEAT:-$HOME/phanes-ctl/autodispatch/merge-heartbeat}"
