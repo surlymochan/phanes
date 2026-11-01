@@ -1,13 +1,34 @@
 #!/usr/bin/env python3
-"""Launch Antigravity with Keychain credentials in a volatile home."""
+"""Launch Antigravity with Keychain credentials in a volatile home.
+
+The child runs with HOME on a RAM volume, where macOS finds no default keychain.
+If agy then tries its OS keyring (service "antigravity"), Security shows the
+"keychain cannot be found" dialog in the GUI session and waits, once per save.
+
+OPENSWARM_AGY_KEYRING picks how agy stores its token:
+  file (default)  agy keeps the token in its own file under the volatile home and
+                  never calls the OS keyring, so no dialog can appear. agy only
+                  skips the keyring for sessions it sees as headless, so the
+                  wrapper sets SSH_CONNECTION/SSH_CLIENT in the child environment.
+  os              keep agy's default keyring behaviour (only for a HOME that can
+                  reach a login keychain).
+The wrapper itself still reads and writes its own credential with the real HOME.
+
+OPENSWARM_AGY_MIN_FREE_MB (default 24): when the volatile volume has less free
+space than this, conversations older than OPENSWARM_AGY_ARCHIVE_AFTER_H (default
+6) hours move to $OPENSWARM_HOME/agy-conversation-archive. A full volume makes
+agy's file writes fail, and then it falls back to the keyring.
+"""
 import base64
 import json
 import os
 import pathlib
 import plistlib
 import signal
+import shutil
 import subprocess
 import sys
+import time
 
 service = 'openbot-agy-nick-oauth'
 account = 'openswarm'
@@ -57,14 +78,56 @@ def ensure_home(stored_credential):
         token_path.chmod(0o600)
     json.loads(token_path.read_text())
 
+HEADLESS_ENV = {'SSH_CONNECTION': '127.0.0.1 0 127.0.0.1 0', 'SSH_CLIENT': '127.0.0.1 0 0'}
+
+
+def keyring_mode():
+    mode = os.environ.get('OPENSWARM_AGY_KEYRING', 'file').strip().lower() or 'file'
+    if mode not in ('file', 'os'):
+        raise ValueError('OPENSWARM_AGY_KEYRING must be "file" or "os", got ' + repr(mode))
+    return mode
+
+
+def child_env(mode, base=None):
+    env = dict(os.environ if base is None else base, HOME=str(home), HTTPS_PROXY='http://127.0.0.1:7890',
+               https_proxy='http://127.0.0.1:7890')
+    if mode == 'file':
+        for key, value in HEADLESS_ENV.items():
+            env.setdefault(key, value)
+    return env
+
+
+def archive_old_conversations(volume_path=volume, home_path=home, now=None):
+    """Move old conversations off the volume when it runs low; return the count moved."""
+    min_free = float(os.environ.get('OPENSWARM_AGY_MIN_FREE_MB', '24')) * 1024 * 1024
+    try:
+        if shutil.disk_usage(volume_path).free >= min_free:
+            return 0
+    except OSError:
+        return 0
+    cutoff = (now or time.time()) - float(os.environ.get('OPENSWARM_AGY_ARCHIVE_AFTER_H', '6')) * 3600
+    conversations = home_path / '.gemini/antigravity-cli/conversations'
+    base = pathlib.Path(os.environ.get('OPENSWARM_HOME') or original_home / '.openswarm')
+    archive = base / 'agy-conversation-archive'
+    moved = 0
+    for item in sorted(conversations.glob('*')) if conversations.is_dir() else []:
+        if item.is_file() and item.stat().st_mtime < cutoff:
+            archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.move(str(item), str(archive / item.name))
+            moved += 1
+    return moved
+
 
 def main():
     try:
         stored_credential = keychain_read()
         stored_refresh = json.loads(stored_credential).get('token', {}).get('refresh_token')
         ensure_home(stored_credential)
-        env = dict(os.environ, HOME=str(home), HTTPS_PROXY='http://127.0.0.1:7890',
-                   https_proxy='http://127.0.0.1:7890')
+        try:
+            archive_old_conversations()
+        except OSError as error:
+            print('Antigravity conversation archive skipped: ' + str(error), file=sys.stderr)
+        env = child_env(keyring_mode())
         child = subprocess.Popen([str(original_home / '.local/bin/agy'), *sys.argv[1:]], env=env)
         def forward(signum, _frame):
             if child.poll() is None:
