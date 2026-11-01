@@ -380,8 +380,15 @@ class Dispatcher:
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
-        self.hot_union = set(cfg["hot_files"].get("union") or [])
-        self.hot_limits = dict(cfg["hot_files"].get("limits") or {})
+        hotfiles = dispatch_module("hotfiles")
+        self.hotfiles = hotfiles
+        self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
+        hot_cfg = cfg["hot_files"]
+        hot_caps = dict(hot_cfg.get("limits") or {})
+        hot_caps.update(cfg.get("hot_shared") or {})
+        self.hot_lock = hotfiles.HotLock(
+            caps=hot_caps,
+            default_cap=hot_cfg.get("default_limit", 1))
         self.local_hosts = set(cfg.get("local_hosts") or [])
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
@@ -654,14 +661,8 @@ class Dispatcher:
         return (int(m.group(1)), m.group(2)) if m else None
 
     def hot_of(self, body):
-        m = re.search(self.cfg["hot_files"]["line_re"], body or "", re.M)
-        if not m:
-            return set()
-        return {x.strip().strip("`") for x in re.split(r"[,，\s]+", m.group(1)) if x.strip()} - self.hot_union
-
-    def hot_blocked(self, hot, held):
-        dl = int(self.cfg["hot_files"].get("default_limit", 1))
-        return any(held.get(f, 0) >= int(self.hot_limits.get(f, dl)) for f in hot)
+        return {f for f in self.hotfiles.parse_hot_files(body)
+                if f not in self.hot_union and not self.hotfiles.is_doc_file(f)}
 
     def deps_met(self, item):
         m = re.search(self.cfg["depends_line_re"], item["body"], re.M)
@@ -1581,6 +1582,7 @@ class Dispatcher:
                         self.log(f"harvest fut exc: {e!r}", brain=False)
                         continue
                     if ok:
+                        self.hot_lock.release((state.get(L) or {}).get("hot") or [])
                         state.pop(L, None)
                         self.save_state(state)
             except cf.TimeoutError:
@@ -1607,10 +1609,12 @@ class Dispatcher:
 
     def assign_issues(self, lanes, res, state, q):
         base = None
-        held = {}
+        self.hot_lock.counts.clear()
         for L in lanes:
-            for f in set((state.get(L) or {}).get("hot") or []) - self.hot_union:
-                held[f] = held.get(f, 0) + 1
+            for f in (state.get(L) or {}).get("hot") or []:
+                for normalized in self.hotfiles.parse_hot_files("热文件：" + str(f)):
+                    if normalized not in self.hot_union and not self.hotfiles.is_doc_file(normalized):
+                        self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
         for L, lc in self.lane_order(lanes):
             r = res[L]
             if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
@@ -1619,7 +1623,7 @@ class Dispatcher:
             pick = None
             for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(lc["backend"], i)),
                             key=lambda i: self.rank(lc["backend"], i)):
-                if self.hot_blocked(self.hot_of(c["body"]), held):
+                if self.hot_lock.blocked(self.hot_of(c["body"])):
                     continue
                 ls = self.label_state(c["n"])
                 if ls == "fresh":
@@ -1649,8 +1653,7 @@ class Dispatcher:
                 continue
             q.remove(pick)
             hot = self.hot_of(pick["body"])
-            for f in hot:
-                held[f] = held.get(f, 0) + 1
+            self.hot_lock.acquire(hot)
             if self.dry_run:
                 continue
             state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}

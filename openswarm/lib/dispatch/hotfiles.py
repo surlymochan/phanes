@@ -13,7 +13,7 @@ import posixpath
 import re
 
 # The card line that declares the hot files; both the Chinese and the ASCII colon are accepted.
-HOT_FILE_LINE_RE = re.compile(r"^热文件\s*[:：]\s*(.*)$")
+HOT_FILE_LINE_RE = re.compile(r"^(?:热文件|Hot-files)\s*[:：]\s*(.*)$", re.I)
 # Chinese and English commas, enumeration commas, semicolons and plain spaces all separate paths.
 HOT_FILE_SEPARATOR_RE = re.compile(r"[\s,，、;；]+")
 # Markdown list markers in front of the declaration (``- 热文件：a.py``).
