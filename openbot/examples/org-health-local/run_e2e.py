@@ -44,25 +44,24 @@ def parse_args(argv=None):
         '--raw',
         type=Path,
         default=ROOT / 'da' / 'sample-raw',
-        help='原始数据目录路径（相对当前工作目录解析，透传给 DA；默认使用 sample-raw）',
+        help='原始数据目录路径（相对示例目录解析，透传给 DA；默认使用 sample-raw）',
     )
     parser.add_argument(
         '--bundle',
         type=Path,
-        help='前端 bundle 文件路径（相对当前工作目录解析，透传给 Builder；默认优先使用 demo bundle）',
+        help='前端 bundle 文件路径（相对示例目录解析，透传给 Builder；默认优先使用 demo bundle）',
     )
-    # 角色脚本路径按当前工作目录解析：相对路径以调用时的 cwd 为基准，
-    # 默认值是示例目录内的绝对路径，不随 cwd 变化。
+    # 角色脚本路径相对示例目录解析，默认值是示例目录内的绝对路径。
     parser.add_argument('--boss', type=Path, default=ROOT / 'boss' / 'make_brief.py',
-                        help='Boss 角色脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+                        help='Boss 角色脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--da', type=Path, default=ROOT / 'da' / 'build_diagnosis.py',
-                        help='DA 角色脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+                        help='DA 角色脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py',
-                        help='Builder 角色脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+                        help='Builder 角色脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--checker', type=Path, default=ROOT / 'builder' / 'check_site.py',
-                        help='站点自检脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+                        help='站点自检脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py',
-                        help='审查脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
+                        help='审查脚本路径（相对示例目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
     parser.add_argument(
         '--timeout',
@@ -152,12 +151,17 @@ def status_steps(timings):
 
 
 def resolve_script(script):
-    """角色脚本路径解析：绝对路径原样使用，相对路径以调用时的当前工作目录为基准。
+    """角色脚本路径解析：绝对路径原样使用，相对路径以示例目录为基准。
 
     boss/da/builder/checker/reviewer 共用这条规则：无论从哪个目录调用，
-    相对路径都按调用时的 cwd 解析；脚本缺失时按同一基准给出可读提示。
+    相对路径都按本文件所在的示例目录解析；脚本缺失时按同一基准给出可读提示。
     """
-    return script if script.is_absolute() else Path.cwd() / script
+    return script if script.is_absolute() else ROOT / script
+
+
+def resolve_example_path(path):
+    """解析角色使用的输入路径：相对路径以示例目录为基准，绝对路径原样使用。"""
+    return path if path.is_absolute() else ROOT / path
 
 
 def forward_stderr(source, sink, buffer):
@@ -218,7 +222,7 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
         # 这样错误能归属到具体步骤，避免只留下子进程的错误输出。
         script = Path(command[1]) if command[0] == sys.executable and len(command) > 1 else None
         if script is not None:
-            # 角色脚本按调用时的 cwd 解析：相对路径先落到当前工作目录再检查，
+            # 角色脚本按示例目录解析：相对路径先落到示例目录再检查，
             # 提示里给出实际查找的路径。
             resolved = resolve_script(script)
             if not resolved.is_file():
@@ -316,7 +320,12 @@ def source_commit():
 
 def main(argv=None):
     args = parse_args(argv)
-    bundle = args.bundle
+    raw = resolve_example_path(args.raw)
+    bundle = resolve_example_path(args.bundle) if args.bundle is not None else None
+    scripts = {
+        name: resolve_script(getattr(args, name))
+        for name in ('boss', 'da', 'builder', 'checker', 'reviewer')
+    }
     if bundle is None:
         bundled_demo = ROOT / 'demo' / 'vendor' / 'app.bundle.js'
         if bundled_demo.is_file():
@@ -335,15 +344,15 @@ def main(argv=None):
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
     dist = workdir / 'dist'
-    # 角色脚本路径原样传给子进程：子进程继承调用时的 cwd，相对路径按同一基准解析
-    # （与 resolve_script 的检查规则一致），绝对路径（含默认值）原样使用；
+    # 角色脚本与原始数据路径按示例目录解析，避免依赖调用时的 cwd；
+    # 绝对路径（含默认值）原样使用；
     # boss/da/builder/checker/reviewer 共用这条解析规则；
     # 产物一律写到工作目录，与角色脚本路径所在目录无关。
     commands = [
-        ('Boss', [sys.executable, str(args.boss), '--out', str(brief)]),
-        ('DA', [sys.executable, str(args.da), '--brief', str(brief), '--raw', str(args.raw), '--out', str(diagnosis)]),
+        ('Boss', [sys.executable, str(scripts['boss']), '--out', str(brief)]),
+        ('DA', [sys.executable, str(scripts['da']), '--brief', str(brief), '--raw', str(raw), '--out', str(diagnosis)]),
     ]
-    build = [sys.executable, str(args.builder), '--data', str(diagnosis), '--out', str(dist)]
+    build = [sys.executable, str(scripts['builder']), '--data', str(diagnosis), '--out', str(dist)]
     commit = source_commit()
     if commit is not None:
         build.extend(['--source-commit', commit])
@@ -351,7 +360,7 @@ def main(argv=None):
         build.extend(['--bundle', str(bundle)])
     commands.extend([
         ('Builder', build),
-        ('检查', [sys.executable, str(args.checker), str(dist)]),
+        ('检查', [sys.executable, str(scripts['checker']), str(dist)]),
     ])
     status = 0
     failed = []
@@ -367,7 +376,7 @@ def main(argv=None):
                 status = 1
                 break
         if status == 0 and args.review:
-            review = [sys.executable, str(args.reviewer), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
+            review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist)]
             report = open_report(report_path)
             if report is None:
                 status = 1
