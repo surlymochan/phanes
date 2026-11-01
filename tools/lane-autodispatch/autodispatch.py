@@ -174,7 +174,10 @@ def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
 
 def should_retry_harvest_fetch(error, attempt, max_attempts=HARVEST_FETCH_MAX_ATTEMPTS):
     """Return whether a failed harvest fetch is transient and still within its retry bound."""
-    transient = re.search(r"Permission denied|Connection closed|broken pipe|timed out|banner", error or "", re.I)
+    transient = re.search(
+        r"Permission denied|Connection closed|broken pipe|timed out|banner|bad pack header|fetch-pack:\s+unexpected disconnect",
+        error or "", re.I,
+    )
     return bool(transient and attempt < max_attempts)
 
 def mark_done(state, n):
