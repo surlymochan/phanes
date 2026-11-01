@@ -578,7 +578,9 @@ in bytes) only when a ceiling is configured.
 A pi lane follows pi's own auto-retry of transient provider errors (429/5xx/overloaded): after a retryable
 `agent_end` it waits for `auto_retry_start`, then for pi's `delayMs` plus a grace window for the retry to show activity,
 and ends the turn with the original error if pi never resumes. The grace is `OPENSWARM_PI_RETRY_WAIT_SECONDS`
-(default `8`). The pi broker appends one JSON line per request (lane, sizes, tokens, HTTP/stream status, latency; no
+(default `8`). Cumulative auto-retry waiting is capped by `pi.retry_max_wait_s` (default `600`); set
+`PI_RETRY_MAX_WAIT_S` to override it. Each retry delay gets up to 20% jitter and is clipped to the remaining cap.
+The pi broker appends one JSON line per request (lane, sizes, tokens, HTTP/stream status, latency; no
 prompt text or keys) to `PI_BROKER_LOG` (default `<socket>.requests.jsonl`); rotate it with logrotate.
 The isolated pi sandbox mounts `/tmp` as a tmpfs, which the lane cgroup is charged for as shmem; on a small host a PR
 checkout there can pin the lane at `memory.high`. Set `OPENSWARM_PI_SANDBOX_TMP=<absolute dir>` (for example in the
