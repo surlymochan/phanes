@@ -262,6 +262,31 @@ class ReviewGate(Base):
         d.review_candidates({}, {}, [])
         self.assertEqual(self.runner.called("issue edit 100"), [])
 
+    def test_quota_failure_is_not_counted_and_next_review_uses_other_backend(self):
+        for error_class in ("rate_limit", "quota", "vm_paused"):
+            with self.subTest(error_class=error_class):
+                d = self.make()
+                st = {"review_pr": 31, "review_sha": SHA}
+                self.assertTrue(d.finish_review("M5", {"backend": "pi"}, st,
+                                                {"status": "failed", "error_class": error_class, "backend": "pi"}, {}))
+                self.assertEqual(d.load_reviews()["31"].get("fails", 0), 0)
+                self.assertEqual(d.load_reviews()["31"]["quota_backend"], "pi")
+        lanes = {"M1": {"backend": "pi"}, "M2": {"backend": "codex"}}
+        self.assertEqual(d.pick_reviewer(["M2"], lanes, None), "M2")
+
+    def test_exec_error_increments_review_failure_count(self):
+        d = self.make()
+        d.finish_review("M5", {"backend": "pi"}, {"review_pr": 32, "review_sha": SHA},
+                        {"status": "failed", "error_class": "exec_error"}, {})
+        self.assertEqual(d.load_reviews()["32"]["fails"], 1)
+
+    def test_review_failure_limit_still_skips_dispatch(self):
+        p = pr(33, 333)
+        d = self.make(self.rules([p], reviews={"33": {"fails": 4}}))
+        with mock.patch.object(d, "main_sha", side_effect=AssertionError("must not dispatch")):
+            d.dispatch_reviews({"M1": {"host": "box", "backend": "pi"}}, {"M1": {"lane": "idle"}}, {}, [])
+        self.assertFalse(self.runner.called("dispatch"))
+
     def test_green_unreviewed_is_candidate_macos_ignored(self):
         prs = [pr(11, 101), pr(12, 102, head=SHA2), pr(13, 103, checks=("PENDING",)), pr(14, 104, branch="feature/x")]
         d = self.make(self.rules(prs, reviews={"12": {"sha": SHA2, "verdict": "APPROVE"}}))

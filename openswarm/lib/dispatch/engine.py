@@ -1345,9 +1345,14 @@ class Dispatcher:
             txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PR-{pr}.md")[1]
         v, _ = status.parse_verdict(txt)
         if not v:
-            r["fails"] = int(r.get("fails") or 0) + 1
+            error_class = info.get("error_class") or ""
+            if error_class in {"rate_limit", "quota", "vm_paused"}:
+                r["quota_backend"] = info.get("backend") or lc.get("backend")
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry")
+            else:
+                r["fails"] = int(r.get("fails") or 0) + 1
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); fail #{r['fails']}, will retry")
             self.put_review(pr, r)
-            self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{info.get('error_class')}); fail #{r['fails']}, will retry")
             return True
         rc, cur, _ = self.gh(["pr", "view", str(pr), "--json", "headRefOid,state,headRefName,body"])
         try:
@@ -1448,6 +1453,10 @@ class Dispatcher:
             if int((revs.get(str(p["number"])) or {}).get("fails") or 0) >= int(self.R["max_fails"]):
                 continue
             L = self.pick_reviewer(idle, lanes, self.author_lane(p["headRefName"]))
+            previous_backend = (revs.get(str(p["number"])) or {}).get("quota_backend")
+            alternatives = [lane for lane in idle if lanes[lane].get("backend") != previous_backend]
+            if previous_backend and alternatives:
+                L = self.pick_reviewer(alternatives, lanes, self.author_lane(p["headRefName"]))
             if not L:
                 continue
             try:
