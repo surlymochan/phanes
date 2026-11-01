@@ -154,6 +154,10 @@ parameterized value (`composer-2.5[fast=true]`). Ambiguity fails with the matche
 
 Configure `$OPENSWARM_HOME/fleet.json` with `hosts`: each has `name`, `kind` (`local`, `ssh`, `instabox`),
 `ssh` alias or `box` when remote, optional `openswarm` executable, and `repos: {"project":"~/work/project"}`.
+Hosts can set `seed_strategy` to `fetch` (default) or `push` for bases passed to
+`fleet exec ... lane assign --base`. `fetch_retries` counts retries after the initial fetch attempt
+(default 2, so up to 3 total attempts); delays grow exponentially. `push` sends a Git bundle into
+`refs/openswarm/base/<sha>` on the target host before assignment.
 An `ssh` host may add `jump` (hop chain), `connect_timeout`, `control_persist` and an `ssh_options` table;
 every fleet command then uses the same ssh options (the matching quoted `GIT_SSH_COMMAND` value is built
 from them as well).

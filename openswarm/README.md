@@ -546,12 +546,15 @@ and an authenticated executor on each host. `repos` maps the same logical repo n
   {"name":"worker","kind":"ssh","ssh":"worker-alias","openswarm":"~/.local/bin/openswarm",
    "repos":{"project":"~/work/project"}},
   {"name":"sandbox","kind":"instabox","box":"task-box","openswarm":"~/.local/bin/openswarm",
-   "repos":{"project":"~/work/project"}}
+   "repos":{"project":"~/work/project"},"seed_strategy":"fetch","fetch_retries":2}
 ]}
 ```
 
 Local hosts use subprocesses; remote commands use `ssh <alias> --` or `instabox ssh <box> --`, with timeouts.
 Without a local repo mapping, the planner uses its current checkout. A missing fleet config defaults to local only.
+Fleet hosts may set `seed_strategy` to `fetch` (default) or `push` for `fleet exec ... lane assign --base`.
+Fetch makes up to `fetch_retries + 1` attempts (default: 3 total), with exponential delays between failures.
+Push sends the selected commit in a Git bundle to `refs/openswarm/base/<sha>` before assignment.
 
 An `ssh` host may carry its own transport options; `fleet status`, `fleet exec`, `fleet harvest` and
 `fleet exec ... lane assign` all build the same ssh argv from them:
