@@ -559,5 +559,73 @@ class LessonsTests(unittest.TestCase):
 
 
 
+class LessonTextHelperTests(unittest.TestCase):
+    """Pure-function coverage for root-cause classification and title cleaning."""
+
+    def test_lesson_root_cause_class_groups_findings_by_keyword(self):
+        expectations = (
+            ("secret_exposure", "The API token was printed to stdout"),
+            ("secret_exposure", "A user credential is embedded in the fixture"),
+            ("secret_exposure", "The client secret leaks into the log"),
+            ("concurrency", "A race condition corrupts the shared cache"),
+            ("concurrency", "The worker can deadlock while holding the lock"),
+            ("missing_test", "The new branch is missing tests for the parser"),
+            ("missing_test", "The resolver path is untested"),
+            ("trust_boundary", "The request crosses a trust boundary into the runner"),
+            ("trust_boundary", "The script escapes the sandbox and writes outside"),
+            ("other", "Rename the summary heading"),
+            ("other", ""),
+        )
+        for expected, text in expectations:
+            with self.subTest(expected=expected, text=text):
+                self.assertEqual(xs.lesson_root_cause_class(text), expected)
+
+    def test_lesson_plain_text_strips_markdown_html_badges_and_extra_whitespace(self):
+        self.assertEqual(xs.lesson_plain_text("**bold**"), "bold")
+        self.assertEqual(xs.lesson_plain_text("__italic__"), "italic")
+        self.assertEqual(xs.lesson_plain_text("~~strike~~"), "strike")
+        self.assertEqual(xs.lesson_plain_text("`code`"), "code")
+        self.assertEqual(xs.lesson_plain_text("see [the guide](https://example.invalid) now"),
+                         "see the guide now")
+        self.assertEqual(xs.lesson_plain_text("<sub>hello</sub>"), "hello")
+        self.assertEqual(xs.lesson_plain_text("![P1 Badge](https://example.invalid/badge.svg)"), "")
+        self.assertEqual(xs.lesson_plain_text("P1 Badge"), "")
+        self.assertEqual(xs.lesson_plain_text("![P1 Badge](https://example.invalid/badge.svg) Validate the path"),
+                         "Validate the path")
+        self.assertEqual(xs.lesson_plain_text("![Alt text](https://example.invalid/image.png)"), "Alt text")
+        self.assertEqual(xs.lesson_plain_text("a   b\n\nc"), "a b c")
+
+    def test_lesson_finding_title_takes_first_meaningful_line_and_drops_priority_prefix(self):
+        body = ("**[P1] Validate the archive path before extraction**\n\n"
+                "The finding affects this code path.\n\nP1 Badge")
+        self.assertEqual(xs.lesson_finding_title(body), "Validate the archive path before extraction")
+        self.assertEqual(xs.lesson_finding_title("[P1] Validate the archive path"),
+                         "Validate the archive path")
+        self.assertEqual(xs.lesson_finding_title("P1: Validate the archive path"),
+                         "Validate the archive path")
+        self.assertEqual(xs.lesson_finding_title("P1 — Validate the archive path"),
+                         "Validate the archive path")
+        self.assertEqual(xs.lesson_finding_title("P1 Badge\n\n**[P1] Real title**"), "Real title")
+        self.assertEqual(xs.lesson_finding_title("P1\n\nReal title here"), "Real title here")
+        self.assertEqual(xs.lesson_finding_title(""), "Review the affected code path")
+        self.assertEqual(xs.lesson_finding_title("   \n\nP1 Badge"), "Review the affected code path")
+        title = xs.lesson_finding_title("Fix the token ghp_abcdefgh12345678 leak")
+        self.assertEqual(title, "Fix the token [REDACTED] leak")
+        self.assertNotIn("ghp_abcdefgh12345678", title)
+
+    def test_lesson_rule_sentence_wraps_title_into_one_sentence(self):
+        rule = xs.lesson_rule_sentence("Validate the archive path before extraction")
+        self.assertTrue(rule.startswith("Prevent recurrence of this finding:"))
+        self.assertTrue(rule.endswith("."))
+        self.assertEqual(rule.count("."), 1)
+        self.assertEqual(rule, "Prevent recurrence of this finding: Validate the archive path before extraction.")
+        self.assertEqual(xs.lesson_rule_sentence("Validate the archive path. Extraction runs first!"),
+                         "Prevent recurrence of this finding: Validate the archive path; Extraction runs first.")
+        self.assertEqual(xs.lesson_rule_sentence("Is this safe? Yes."),
+                         "Prevent recurrence of this finding: Is this safe; Yes.")
+        self.assertEqual(xs.lesson_rule_sentence("**[P1] Validate the path**"),
+                         "Prevent recurrence of this finding: [P1] Validate the path.")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
