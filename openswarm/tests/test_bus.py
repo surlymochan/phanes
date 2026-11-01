@@ -27,6 +27,48 @@ class BusTitleHelperTests(unittest.TestCase):
         self.assertEqual(xs.short("first\nsecond\tthird"), "first second third")
 
 
+class BusPureHelperTests(unittest.TestCase):
+    def test_github_repo_from_url_normalizes_github_urls_and_rejects_invalid_values(self):
+        valid = (
+            "https://github.com/owner/repo",
+            "https://github.com/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "ssh://git@github.com/owner/repo",
+        )
+        for value in valid:
+            with self.subTest(value=value):
+                self.assertEqual(xs.github_repo_from_url(value), "owner/repo")
+
+        invalid = (
+            "https://gitlab.com/owner/repo",
+            "https://github.com//repo",
+            "https://github.com/owner/",
+            "https://github.com/owner/repo?ref=main",
+            "https://github.com/owner/repo name",
+            123,
+            None,
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(xs.github_repo_from_url(value))
+
+    def test_gh_pr_number_accepts_numeric_values_and_rejects_invalid_values(self):
+        self.assertEqual(xs.gh_pr_number({"number": 12}), 12)
+        self.assertEqual(xs.gh_pr_number({"number": "12"}), 12)
+
+        invalid = (
+            {"number": None},
+            {},
+            {"number": "not-a-number"},
+            {"number": []},
+            None,
+            "number",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(xs.gh_pr_number(value))
+
+
 class BusResultParserTests(unittest.TestCase):
     @staticmethod
     def result_comment(report):
