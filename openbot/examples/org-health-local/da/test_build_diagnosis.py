@@ -8,9 +8,14 @@
 
 输入错误（必需数字列为空、CSV 出现重复列名、缺少必需列）另用最小 raw fixture 覆盖：
 命令行退出码非 0，错误信息指出文件与列名。
+
+列顺序变化（表头名称不变、只调换列的位置）另用临时 CSV 夹具覆盖：仍按列名取数，
+生成的快照与原顺序一致；缺少必需列时仍失败并指出缺列与来源文件。
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import shutil
@@ -117,6 +122,21 @@ def drop_csv_column(text: str, column: str) -> str:
     return "\n".join(kept) + "\n"
 
 
+def reorder_csv_columns(text: str, order: list[str]) -> str:
+    """按 `order` 重排 CSV 的列：表头与每行取值一起移动，列名与取值本身不变。"""
+    rows = list(csv.reader(io.StringIO(text, newline="")))
+    positions = {name: index for index, name in enumerate(rows[0])}
+    missing = [name for name in order if name not in positions]
+    if missing:
+        raise ValueError(f"CSV 里没有这些列：{'、'.join(missing)}")
+    picked = [positions[name] for name in order]
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    for row in rows:
+        writer.writerow([row[index] for index in picked])
+    return buffer.getvalue()
+
+
 # 最小 raw fixture：只保留观察期间的起止两个月与年末两行，表头按必需列写全。
 MINIMAL_COST_CSV = (
     "月份,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元\n"
@@ -145,6 +165,22 @@ MINIMAL_RAW_FILES = {
     "heads.csv": MINIMAL_HEADS_CSV,
     "revenue.csv": MINIMAL_REVENUE_CSV,
     "forecast.csv": MINIMAL_FORECAST_CSV,
+}
+
+# 列顺序变化夹具：列名与取值都不变，只把各列在表头里的位置换掉（键列挪到末位）。
+REORDERED_COLUMNS = {
+    "cost.csv": ("运维设施成本万元", "营收业务技术人力成本万元", "整体技术人力成本万元", "月份"),
+    "heads.csv": ("营收业务折算人头", "整体折算人头", "月份"),
+    "revenue.csv": ("收入万美元", "月份"),
+    "forecast.csv": (
+        "收入万美元",
+        "运维设施成本万元",
+        "营收业务折算人头",
+        "整体折算人头",
+        "营收业务技术人力成本万元",
+        "整体技术人力成本万元",
+        "期次",
+    ),
 }
 
 
@@ -989,6 +1025,89 @@ class AbnormalRawDataTest(unittest.TestCase):
         self.assertIn("cost.csv", result.stdout + result.stderr)
         self.assertIn("整体技术人力成本万元", result.stdout + result.stderr)
         self.assertFalse(self.out_path.exists())
+
+
+class ColumnOrderTest(unittest.TestCase):
+    """原始 CSV 列顺序变化：按列名取数，快照与原顺序等价；缺列仍报出文件。"""
+
+    def setUp(self) -> None:
+        self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.temporary = temporary_directory()
+        self.folder = Path(self.temporary.name)
+        self.brief_path = write_brief(self.folder, BRIEF)
+        self.out_path = self.folder / "diagnosis.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_reordered_raw(self, name: str) -> Path:
+        """复制合成原始数据，并按 REORDERED_COLUMNS 重排各表的列顺序。"""
+        raw_dir = copy_raw(self.folder, name)
+        for filename, order in REORDERED_COLUMNS.items():
+            path = raw_dir / filename
+            path.write_text(
+                reorder_csv_columns(path.read_text(encoding="utf-8"), list(order)),
+                encoding="utf-8",
+            )
+        return raw_dir
+
+    def test_reordered_columns_build_equivalent_snapshot(self) -> None:
+        """列顺序变化后仍按列名取数，生成的快照与原顺序逐字节一致。"""
+        plain = copy_raw(self.folder, "raw-plain-order")
+        reordered = self.write_reordered_raw("raw-reordered-columns")
+
+        for filename, order in REORDERED_COLUMNS.items():
+            with self.subTest(file=filename):
+                original_header = csv_lines(plain / filename)[0].split(",")
+                new_header = csv_lines(reordered / filename)[0].split(",")
+                self.assertNotEqual(new_header, original_header)
+                self.assertEqual(sorted(new_header), sorted(original_header))
+                self.assertEqual(new_header, list(order))
+
+        plain_out = self.folder / "plain.json"
+        reordered_out = self.folder / "reordered.json"
+        plain_result = run_cli(self.brief_path, plain, plain_out)
+        reordered_result = run_cli(self.brief_path, reordered, reordered_out)
+        self.assertEqual(plain_result.returncode, 0, plain_result.stdout + plain_result.stderr)
+        self.assertEqual(reordered_result.returncode, 0, reordered_result.stdout + reordered_result.stderr)
+
+        data = json.loads(reordered_out.read_text(encoding="utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+        self.assertEqual(data["metrics"][0]["数值"]["2026-01实际"], 10.4)
+        self.assertEqual(data["metrics"][2]["数值"]["成本"]["2026-09实际"], 9.9)
+        self.assertEqual(data["metrics"][3]["数值"]["收入万美元每月"]["年末目标"], 15.2)
+        self.assertEqual(reordered_out.read_bytes(), plain_out.read_bytes())
+
+    def test_missing_required_column_after_reorder_reports_source_file(self) -> None:
+        """列顺序变化后缺少必需列仍失败，错误信息点出缺列与来源文件。"""
+        raw_dir = self.write_reordered_raw("raw-reordered-missing-column")
+        cost = raw_dir / "cost.csv"
+        cost.write_text(
+            drop_csv_column(cost.read_text(encoding="utf-8"), "运维设施成本万元"),
+            encoding="utf-8",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("cost.csv", message)
+        self.assertIn("缺少必需列：运维设施成本万元", message)
+        self.assertNotIn("KeyError", message)
+        self.assertNotIn("Traceback", message)
+        self.assertFalse(self.out_path.exists())
+
+    def test_missing_required_column_after_reorder_raises_raw_data_error(self) -> None:
+        """模块接口在列顺序变化且缺列时抛 RawDataError，消息里带文件名与列名。"""
+        raw_dir = self.write_reordered_raw("raw-reordered-missing-column-module")
+        cost = raw_dir / "cost.csv"
+        cost.write_text(
+            drop_csv_column(cost.read_text(encoding="utf-8"), "整体技术人力成本万元"),
+            encoding="utf-8",
+        )
+        with self.assertRaises(build_diagnosis.RawDataError) as caught:
+            build_diagnosis.build_from_files(self.brief_path, raw_dir)
+        message = str(caught.exception)
+        self.assertIn("cost.csv", message)
+        self.assertIn("缺少必需列：整体技术人力成本万元", message)
 
 
 class MinimalRawInputErrorTest(unittest.TestCase):
