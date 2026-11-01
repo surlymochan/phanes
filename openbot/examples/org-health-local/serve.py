@@ -173,7 +173,13 @@ def resolve_paths(root=None, data=None):
 
 def ensure_port_available(port):
     """端口预检：端口被占用时抛 PortInUseError，绝不静默改用其他端口。"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    except OSError as cause:
+        # 探测 socket 都创建不出来（文件句柄耗尽等）：同样给出可读中文提示，不抛裸 traceback。
+        raise PortInUseError(
+            f'无法检测端口 {port} 是否可用（{cause}）；请稍后重试，或用 --port 指定其他端口') from cause
+    with probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(('127.0.0.1', port))
@@ -228,6 +234,9 @@ def main(argv=None):
         return 1
     try:
         server = create_server(args.port, args.data, root=root_path)
+    except PortInUseError as cause:
+        print(f'错误: {cause}', file=sys.stderr, flush=True)
+        return 1
     except OSError as cause:
         print(f'错误: 端口 {args.port} 无法绑定（{cause}）；请先停止占用进程，或用 --port 指定其他端口',
               file=sys.stderr, flush=True)
