@@ -30,6 +30,7 @@ Subcommands:
   resume           recover active runs and recent results after planner restart
   retro            weekly fleet retrospective (Markdown report + JSON summary)
   stop             terminate a run (partial work is still committed to its branch)
+  merge-gate       merge a pull request only when the reviewed head sha still matches and CI is green
   ingest-claude    record Claude plan usage (from statusline JSON on stdin, or flags)
   ledger           show recent runs or ingest GitHub PR results
 
@@ -13632,6 +13633,323 @@ def cmd_doctor(args, policy):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- merge gate
+#
+# The merge gate replaces the box side merge loop: a pull request is merged
+# only when the head sha the lane reviewed is still the head sha, the CI is
+# green, and no needs-changes label is set.  Every gh call goes through one
+# injectable runner, so the gate is testable without network access.
+
+MERGE_GATE_REVIEW_FILE = "reviews.json"
+MERGE_GATE_BLOCKING_LABEL = "needs-changes"
+MERGE_GATE_SHA_KEYS = ("sha", "head_sha", "head", "headRefOid", "commit", "commit_sha",
+                       "reviewed_sha", "approved_sha")
+MERGE_GATE_VERDICT_KEYS = ("verdict", "review_verdict", "decision")
+MERGE_GATE_APPROVED_VERDICTS = ("approve", "approved", "accept", "accepted")
+MERGE_GATE_CHECK_FAILURES = ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE")
+MERGE_GATE_CHECK_PENDING = ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED")
+
+
+class MergeGateError(RuntimeError):
+    """A gh call of the merge gate failed."""
+
+
+def merge_gate_reviews_path():
+    """The lane review records: $OPENSWARM_HOME/reviews.json."""
+    return os.path.join(DATA, MERGE_GATE_REVIEW_FILE)
+
+
+def merge_gate_gh_runner(argv):
+    """The default gh runner: one gh call, returns (returncode, stdout, stderr)."""
+    command = [envvar("GH_BIN", "gh"), *argv]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return 127, "", str(error)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def merge_gate_gh_json(runner, argv):
+    """Run one gh command through the injected runner and parse its JSON output."""
+    code, out, err = runner(argv)
+    if code != 0:
+        raise MergeGateError(f"gh {' '.join(argv[:3])} failed: {(err or out).strip()[:300]}")
+    text = (out or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except ValueError as error:
+        raise MergeGateError(f"gh {' '.join(argv[:3])} returned invalid JSON: {error}")
+
+
+def merge_gate_label_is_blocking(name):
+    """Whether a PR label forbids merging (needs-changes in any spelling)."""
+    normalized = str(name or "").strip().lower().replace("_", "-").replace(" ", "-")
+    return normalized == MERGE_GATE_BLOCKING_LABEL
+
+
+def merge_gate_sha_matches(reviewed, head):
+    """Whether the reviewed sha is the head sha; a short sha prefix counts."""
+    reviewed = str(reviewed or "").strip().lower()
+    head = str(head or "").strip().lower()
+    if not reviewed or not head:
+        return False
+    if reviewed == head:
+        return True
+    return len(reviewed) >= 7 and head.startswith(reviewed)
+
+
+def merge_gate_review_keys(repo, number):
+    """The repository qualified key spellings a review file may use for one PR.
+
+    A bare number key is deliberately not listed here: it is shared by every
+    repository, so it only counts when the record itself names this repository.
+    """
+    return (f"{repo}#{number}", f"{repo}/{number}", f"{repo}:{number}")
+
+
+def merge_gate_record_repo(record):
+    """The repository a review record names, if it names one."""
+    if not isinstance(record, dict):
+        return None
+    value = record.get("repo") or record.get("repository")
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return None
+
+
+def merge_gate_review_record(value):
+    """Normalize one review file entry into a record object."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        return {"sha": value.strip()}
+    return None
+
+
+def merge_gate_review_matches(record, repo, number):
+    """Whether a review record names this PR of this repository.
+
+    A list record must name the repository itself: the bare PR number is
+    shared by every repository, so a record without a repository would
+    release the PR of whichever repository is judged.
+    """
+    value = record.get("pr", record.get("number", record.get("pull_request")))
+    try:
+        if int(value) != int(number):
+            return False
+    except (TypeError, ValueError):
+        return False
+    record_repo = merge_gate_record_repo(record)
+    if not record_repo or record_repo != repo.lower():
+        return False
+    return True
+
+
+def merge_gate_find_review(records, repo, number):
+    """Find the review record of one PR in the lane review file."""
+    if isinstance(records, list):
+        for record in records:
+            if isinstance(record, dict) and merge_gate_review_matches(record, repo, number):
+                return record
+        return None
+    if not isinstance(records, dict):
+        return None
+    for key in merge_gate_review_keys(repo, number):
+        record = merge_gate_review_record(records.get(key))
+        if record is None:
+            continue
+        record_repo = merge_gate_record_repo(record)
+        if record_repo and record_repo != repo.lower():
+            continue
+        return record
+    # A bare number key is shared by every repository: it only counts when the
+    # record names this repository itself.
+    record = merge_gate_review_record(records.get(str(number)))
+    if record is not None and merge_gate_record_repo(record) == repo.lower():
+        return record
+    nested = records.get("reviews")
+    if isinstance(nested, list):
+        return merge_gate_find_review(nested, repo, number)
+    return None
+
+
+def merge_gate_reviewed_sha(record):
+    """The head sha the lane reviewed for this PR."""
+    if not isinstance(record, dict):
+        return None
+    for key in MERGE_GATE_SHA_KEYS:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def merge_gate_review_verdict(record):
+    """The review verdict of a PR, if the review record carries one."""
+    if not isinstance(record, dict):
+        return None
+    for key in MERGE_GATE_VERDICT_KEYS:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def merge_gate_verdict_approved(verdict):
+    """Whether a review verdict approves the merge."""
+    return str(verdict or "").strip().lower() in MERGE_GATE_APPROVED_VERDICTS
+
+
+def merge_gate_check_counts(rollup):
+    """Count the CI checks of a PR and name the failing ones."""
+    counts = {"failed": 0, "pending": 0, "passed": 0, "total": 0, "failed_names": []}
+    for check in rollup or []:
+        if not isinstance(check, dict):
+            continue
+        counts["total"] += 1
+        conclusion = str(check.get("conclusion") or "").upper()
+        state = str(check.get("state") or "").upper()
+        status = str(check.get("status") or "").upper()
+        if conclusion in MERGE_GATE_CHECK_FAILURES or state in ("FAILURE", "ERROR"):
+            counts["failed"] += 1
+            counts["failed_names"].append(str(check.get("name") or ""))
+        elif state == "PENDING" or status in MERGE_GATE_CHECK_PENDING:
+            counts["pending"] += 1
+        elif status == "COMPLETED" and not conclusion:
+            counts["pending"] += 1
+        else:
+            counts["passed"] += 1
+    return counts
+
+
+def merge_gate_pr_view(runner, repo, number):
+    """Read the head sha, labels, mergeability, and CI status of one PR."""
+    fields = "number,headRefOid,labels,mergeable,statusCheckRollup"
+    data = merge_gate_gh_json(runner, ["pr", "view", str(number), "--repo", repo, "--json", fields])
+    if not isinstance(data, dict):
+        raise MergeGateError(f"gh pr view {number} returned no PR data")
+    labels = [label.get("name") if isinstance(label, dict) else label
+              for label in data.get("labels") or []]
+    return {"pr": int(number), "head_sha": data.get("headRefOid") or "", "labels": labels,
+            "mergeable": data.get("mergeable"),
+            "checks": merge_gate_check_counts(data.get("statusCheckRollup"))}
+
+
+def merge_gate_open_prs(runner, repo):
+    """The numbers of the open pull requests of a repository."""
+    data = merge_gate_gh_json(runner, ["pr", "list", "--repo", repo, "--state", "open",
+                                        "--json", "number", "--limit", "100"])
+    rows = data if isinstance(data, list) else []
+    numbers = []
+    for row in rows:
+        value = row.get("number") if isinstance(row, dict) else row
+        try:
+            numbers.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return numbers
+
+
+def merge_gate_evaluate(pr_view, review):
+    """Judge one PR: (status, details).
+
+    The reasons are collected in the order the status names them: a missing
+    head sha, a blocking label, the CI state, a conflict, the review verdict,
+    and the freshness of the reviewed sha.
+    """
+    head_sha = pr_view.get("head_sha") or ""
+    reviewed_sha = merge_gate_reviewed_sha(review)
+    verdict = merge_gate_review_verdict(review)
+    blocking_labels = [name for name in pr_view.get("labels") or []
+                       if merge_gate_label_is_blocking(name)]
+    checks = pr_view.get("checks") or {}
+    detail = {"head_sha": head_sha, "reviewed_sha": reviewed_sha,
+              "labels": pr_view.get("labels") or [], "checks": checks}
+    if verdict is not None:
+        detail["review_verdict"] = verdict
+    reasons = []
+    if not head_sha:
+        reasons.append("no_head_sha")
+    if blocking_labels:
+        detail["blocking_labels"] = blocking_labels
+        reasons.append("label")
+    if checks.get("failed"):
+        reasons.append("ci")
+    if checks.get("pending"):
+        reasons.append("ci_pending")
+    if str(pr_view.get("mergeable") or "").upper() == "CONFLICTING":
+        reasons.append("conflict")
+    if not checks.get("total"):
+        reasons.append("no_checks")
+    if not reviewed_sha:
+        reasons.append("no_review")
+    else:
+        if verdict is not None and not merge_gate_verdict_approved(verdict):
+            reasons.append("verdict")
+        if not merge_gate_sha_matches(reviewed_sha, head_sha):
+            reasons.append("stale_review")
+    detail["reasons"] = reasons
+    if reasons:
+        return f"blocked:{reasons[0]}", detail
+    return "mergeable", detail
+
+
+def merge_gate_merge(runner, repo, number, head_sha):
+    """Squash-merge one PR, pinned to the head sha that was reviewed."""
+    argv = ["pr", "merge", str(number), "--repo", repo, "--squash", "--match-head-commit", head_sha]
+    code, out, err = runner(argv)
+    if code != 0:
+        return {"action": "merge_failed", "error": bus_redact((err or out).strip())[:300]}
+    return {"action": "merged"}
+
+
+def cmd_merge_gate(args, policy=None, runner=None):
+    """Merge pull requests whose reviewed head sha is still current and green."""
+    runner = runner or merge_gate_gh_runner
+    repo = str(getattr(args, "repo", "") or "").strip()
+    if not BUS_REPO_RE.fullmatch(repo):
+        raise MergeGateError(f"invalid repository: {repo or '(empty)'}; expected owner/name")
+    dry_run = bool(getattr(args, "dry_run", False))
+    records = jload(merge_gate_reviews_path(), {}) or {}
+    numbers = ([int(args.pr)] if getattr(args, "pr", None) else merge_gate_open_prs(runner, repo))
+    results = []
+    for number in numbers:
+        try:
+            pr_view = merge_gate_pr_view(runner, repo, number)
+        except MergeGateError as error:
+            # One unreadable PR must not hide the verdicts of the other PRs.
+            results.append({"pr": number, "repo": repo, "status": "blocked:gh_error",
+                            "reasons": ["gh_error"], "action": "none",
+                            "error": bus_redact(str(error))[:300]})
+            continue
+        review = merge_gate_find_review(records, repo, number)
+        status, detail = merge_gate_evaluate(pr_view, review)
+        record = {"pr": number, "repo": repo, "status": status, **detail}
+        if status != "mergeable":
+            record["action"] = "none"
+        elif dry_run:
+            record["action"] = "dry_run"
+        else:
+            record.update(merge_gate_merge(runner, repo, number, detail["head_sha"]))
+        results.append(record)
+    blocked = [record for record in results if record["status"] != "mergeable"
+               or record.get("action") == "merge_failed"]
+    if getattr(args, "json", False):
+        print(json.dumps({"repo": repo, "dry_run": dry_run, "results": results},
+                         indent=2, ensure_ascii=False))
+    else:
+        for record in results:
+            checks = record.get("checks") or {}
+            total = sum(checks.get(key, 0) for key in ("passed", "failed", "pending"))
+            print(f"#{record['pr']}  {record['status']}  {record.get('action') or '-'}  "
+                  f"head={(record.get('head_sha') or '-')[:12]}  "
+                  f"reviewed={(record.get('reviewed_sha') or '-')[:12]}  "
+                  f"checks={checks.get('passed', 0)}/{total}")
+    return 1 if blocked else 0
+
+
 def main():
     ap = argparse.ArgumentParser(prog="openswarm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -13979,6 +14297,13 @@ def main():
     lp.add_argument("--fleet", action="store_true", help="update the merged fleet ledger")
     lp.add_argument("--recompute", action="store_true", help="recompute exec_pass for every finished ledger record")
 
+    sp = sub.add_parser("merge-gate",
+                         help="merge a pull request only when the reviewed head sha still matches and CI is green")
+    sp.add_argument("--repo", required=True, help="GitHub repository owner/name")
+    sp.add_argument("--pr", type=int, help="only judge this pull request number")
+    sp.add_argument("--dry-run", action="store_true", help="report the gate verdict without merging")
+    sp.add_argument("--json", action="store_true", help="print the gate results as JSON")
+
     a = ap.parse_args()
     policy = load_policy()
     os.makedirs(DATA, exist_ok=True)
@@ -14154,6 +14479,13 @@ def main():
         except ValueError as error:
             print(f"openswarm: {error}", file=sys.stderr)
             sys.exit(2)
+    elif a.cmd == "merge-gate":
+        try:
+            code = cmd_merge_gate(a, policy)
+        except MergeGateError as error:
+            print(json.dumps({"ok": False, "error": bus_redact(str(error))}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+        sys.exit(code)
     elif a.cmd == "ingest-claude":
         ingest_claude(a)
     elif a.cmd == "ledger":

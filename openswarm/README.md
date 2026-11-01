@@ -146,7 +146,7 @@ TASK
 openswarm run --cwd ~/code/myrepo --type impl --difficulty 2 --budget-minutes 15 \
   --verify 'npm test' --task-file /tmp/task.md
 
-# 5. Review and merge (openswarm never merges or pushes for you)
+# 5. Review and merge (a run never merges or pushes for you)
 git -C ~/code/myrepo merge --no-ff openswarm/<run-id>
 ```
 
@@ -272,6 +272,41 @@ A ledger record carries the outcome and what the next run learns from it: `exec_
 | `openswarm consult` | Ask several executors the same question in read-only mode and compare the answers. | `openswarm consult --question "Which parser change is safest?" --ask codex --ask pi --json` |
 | `openswarm review` | Review a finished run's branch with a read-only executor from another model family. | `openswarm review <run-id> --by codex --json` |
 | `openswarm compare` | Run one card on two executor families and record the best-of-two comparison. | `openswarm compare --task-file /tmp/task.md --title "Parser fix" --a codex --b pi --verify 'pytest -q'` |
+
+### Merge
+
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `openswarm merge-gate` | Merge a pull request only when the reviewed head sha is still the head sha, the CI is green, and no needs-changes label is set. | `openswarm merge-gate --repo acme/project --pr 42 --dry-run` |
+
+`merge-gate` reads the head sha, the labels, and the CI status of every open pull request (or of `--pr N` only),
+looks the PR up in the lane review records, and reports one verdict per PR: `mergeable` or `blocked:<reason>`.
+The reasons are `no_head_sha` (the PR has no head sha), `label` (a needs-changes label is set), `ci` (a check
+failed), `ci_pending` (a check is still running), `conflict` (the PR has merge conflicts), `no_checks` (the PR has
+no CI check at all), `no_review` (no review record), `verdict` (the review asked for changes), `stale_review` (the
+reviewed sha is not the current head sha), and `gh_error` (the PR could not be read). The `reasons` field holds
+those reason codes, one per hit, and the names of the failing checks are in `checks.failed_names`. The status names
+the first reason of the priority order `no_head_sha`, `label`, `ci`, `ci_pending`, `conflict`, `no_checks`,
+`no_review`, `verdict`, `stale_review`. Without `--dry-run` a `mergeable` PR is squash merged with
+`gh pr merge --squash --match-head-commit <sha>`, so the merge only happens while the head sha still is the
+reviewed one. A PR whose `gh pr view` call fails is reported as `blocked:gh_error`; the other PRs are still judged.
+The exit code is 0 when every PR passed the gate and 1 when a PR was blocked or could not be merged.
+
+The review records live in `$OPENSWARM_HOME/reviews.json`. One entry per pull request, keyed by `owner/name#number`:
+
+```json
+{
+  "acme/project#42": {"sha": "1f0c3d9...", "verdict": "approved", "reviewer": "lane-C1"}
+}
+```
+
+The `sha` is the head sha the lane reviewed (a short sha of 7 characters or more counts as the same commit). A
+`verdict` of `approve` (or `approved`) approves the merge, any other verdict (`changes`) blocks it, and a record
+without a verdict is a review of that sha only. A list of records
+(`{"reviews": [{"repo": "acme/project", "pr": 42, "sha": "1f0c3d9..."}]}`) is read as well. A record that names
+another repository never releases a PR, a list record without a repository never releases a PR either (the bare PR
+number is shared by every repository), and a bare number key only counts when the record names the repository
+itself.
 
 ## Learning loop
 
@@ -718,13 +753,13 @@ unless you add it to `routing.default_order`.
 
 | Path | What |
 | --- | --- |
-| `bin/openswarm` | The CLI: `probe`, `status`, `route`, `run`, `lane`, `batch`, `bus`, `bus-worker`, `verify-remote`, `watch`, `runs`, `resume`, `report`, `budget`, `stop`, `fleet`, `consult`, `review`, `compare`, `regress`, `routing`, `lessons`, `patterns`, `retro`, `ingest-claude`, `ledger` |
+| `bin/openswarm` | The CLI: `probe`, `status`, `route`, `run`, `lane`, `batch`, `bus`, `bus-worker`, `verify-remote`, `watch`, `runs`, `resume`, `report`, `budget`, `stop`, `fleet`, `consult`, `review`, `compare`, `regress`, `routing`, `lessons`, `patterns`, `retro`, `ingest-claude`, `ledger`, `merge-gate` |
 | `SKILL.md` | Claude Code skill: the planner's operating manual |
 | `policy.json` | Defaults: thresholds, difficulty map, model caps, local data sources |
 | `backends/*.json` | One manifest per executor: invocation, quota source, data boundary |
 | `templates/openswarm-workflow.js` | Parallel fan-out template for Claude Code workflows |
 | `examples/demo-state.json` | Synthetic state for offline demos |
-| `~/.claude/openswarm/` (`$OPENSWARM_HOME`) | Runtime data: `state.json`, `ledger.jsonl`, `breakers.json`, `lanes.json`, `lanes/<name>/`, `fleet.json`, `batches/<id>/`, `remote-results/<id>.json`, `runs/<id>/` |
+| `~/.claude/openswarm/` (`$OPENSWARM_HOME`) | Runtime data: `state.json`, `ledger.jsonl`, `breakers.json`, `lanes.json`, `lanes/<name>/`, `fleet.json`, `reviews.json`, `batches/<id>/`, `remote-results/<id>.json`, `runs/<id>/` |
 
 ## Configuration
 
@@ -789,7 +824,7 @@ Prompts and diffs go to the executor's model provider. Each backend's data bound
 ## Safety model
 
 - Codex runs with `-s workspace-write`. OpenCode gets edit and bash permission scoped to the worktree with `external_directory: deny`.
-- Executors never commit; openswarm commits on `openswarm/<id>`. Nothing is pushed or merged automatically.
+- Executors never commit; openswarm commits on `openswarm/<id>`. Nothing is pushed automatically by a run, and nothing is merged automatically either: the only path that merges a pull request is the explicit `openswarm merge-gate` command, which merges only when the reviewed head sha is still the head sha, the CI is green, and no needs-changes label is set. openswarm runs no merge loop of its own.
 - If a worktree can't be created, the run fails. It never falls back to editing your checkout in place.
 - Codex `ultra` effort is never used, because it self-delegates and blows budgets.
 
