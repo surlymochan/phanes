@@ -5637,6 +5637,9 @@ def review_command(reviewer, prompt, repo, scratch_dir, policy):
 
 
 def review_payload_from_text(text):
+    raw = str(text or "")
+    if raw.count("```") % 2:
+        return None
     decoder = json.JSONDecoder()
     def objects(value):
         if isinstance(value, dict):
@@ -5662,12 +5665,15 @@ def review_payload_from_text(text):
                     continue
                 yield from objects(parsed)
 
-    for candidate in objects(str(text or "")):
+    candidates = {}
+    for candidate in objects(raw):
         try:
-            return validate_peer_review(candidate)
+            payload = validate_peer_review(candidate)
         except ValueError:
             continue
-    return None
+        key = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        candidates[key] = payload
+    return next(iter(candidates.values())) if len(candidates) == 1 else None
 
 
 def validate_peer_review(payload):
