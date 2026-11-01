@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for refilling AD's ready queue to TARGET (Refs #1176).
+"""Offline contract for refilling AD's ready queue to TARGET (Refs #1203).
 
 The fixture is entirely local: this check must not invoke gh, git, SSH, or
 any other network-backed command.
