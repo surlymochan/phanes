@@ -143,6 +143,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
+- `python3 tools/check-ctl-hb-refresh.py` — offline #1007 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
@@ -264,6 +265,21 @@ heartbeats, missing/exited pids, and the one-decision-per-child rule:
 
 ```bash
 python3 tools/check-ctl-loop-reap.py
+```
+
+### ctl-loop ib-refresh heartbeat maintenance (Refs #1007)
+
+During `ib-refresh` (instabox certificate renewal), `ctl-loop` enters a wall-clock wait
+loop bounded by `REFRESH_CAP` (default 420s). In accordance with the 37-minute silence
+lesson (`brain/lessons-37min-silence.md`), long child waits must never pause supervisor
+heartbeats: `ctl-loop` must refresh `ctl-loop.heartbeat` with the current `date` timestamp
+inside every iteration of the wait loop.
+
+The offline static scanner verifies that `bin/ctl-loop` enforces `REFRESH_CAP`, references
+`ctl-loop.heartbeat`, and updates it via `date` within the wait loop:
+
+```bash
+python3 tools/check-ctl-hb-refresh.py
 ```
 
 Autodispatch skips paused host/backend/lane and keeps other backends busy.
