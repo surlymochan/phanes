@@ -6305,18 +6305,28 @@ def bus_parse_result(body, expected_run_id=None):
         result = json.loads(match.group(1))
     except ValueError:
         return None
-    required = ("status", "run_id", "summary", "files_changed", "tests", "followups", "branch", "commit")
+    required = ("status", "run_id", "summary", "files_changed", "tests", "followups", "branch", "commit",
+                "error_class")
     if not isinstance(result, dict) or any(key not in result for key in required):
         return None
-    if result.get("status") not in ("ok", "error", "done", "partial", "failed") or not isinstance(result.get("summary"), str):
+    if result.get("status") not in ("done", "partial", "failed") or not isinstance(result.get("summary"), str):
         return None
     run_id = result.get("run_id")
     if not isinstance(run_id, str) or not BUS_RUN_ID_RE.fullmatch(run_id):
         return None
     if expected_run_id is not None and run_id != expected_run_id:
         return None
-    if result.get("status") == "error" and (not isinstance(result.get("error_class"), str)
-                                              or not result["error_class"].strip()):
+    error_class = result.get("error_class")
+    if not isinstance(error_class, str) or error_class not in {
+            "none", "auth", "base_unavailable", "budget_exceeded", "budget_exceeded_daily", "bus_error",
+            "claim_task_mutated", "compare_runner_failed", "exec_error", "executor_failed",
+            "executor_io_lost", "model_unavailable", "network", "non-fast-forward", "no_report",
+            "prepare_failed", "protocol_error", "rate_limit", "repo-missing", "risk_blocked", "stopped",
+            "upstream_forbidden", "verify_failed", "worker_crashed", "worktree_unavailable"}:
+        return None
+    if result.get("status") != "done" and error_class == "none":
+        return None
+    if result.get("status") == "done" and error_class != "none":
         return None
     if not isinstance(result.get("files_changed"), list) or not all(isinstance(x, str) for x in result["files_changed"]):
         return None
@@ -6336,8 +6346,6 @@ def bus_parse_result(body, expected_run_id=None):
     if not all(isinstance(value, str) for value in result["followups"]):
         return None
     if result.get("pr_url") is not None and not isinstance(result["pr_url"], str):
-        return None
-    if result.get("error_class") is not None and not isinstance(result["error_class"], str):
         return None
     return result
 
