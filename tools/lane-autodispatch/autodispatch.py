@@ -44,6 +44,15 @@ def log(msg, brain=True):
 def sh(cmd, timeout=120, inp=None):
     p = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout, input=inp)
     return p.returncode, p.stdout, p.stderr
+
+def git_ssh_command(ssh_options):
+    """Quote the complete SSH option vector for Git's core.sshCommand value."""
+    return shlex.join(["ssh", *ssh_options])
+
+def ssh_argv(ssh_options, *args):
+    """Recover the same safely quoted SSH command as argv for direct probes."""
+    return shlex.split(git_ssh_command(ssh_options)) + list(args)
+
 def load(p, d):
     try: return json.load(open(p))
     except Exception: return d
@@ -78,7 +87,7 @@ if R:
 print(json.dumps(out))
 '''
 def remote(lane, cfg, run=""):
-    try: rc, out, err = sh(["ssh", *SSHO, cfg["host"], "python3", "-", lane, run], timeout=60, inp=REMOTE_STATUS)
+    try: rc, out, err = sh(ssh_argv(SSHO, cfg["host"], "python3", "-", lane, run), timeout=60, inp=REMOTE_STATUS)
     except subprocess.TimeoutExpired: return {"error": "ssh status timeout"}
     if rc: return {"error": (err or out).strip()[-200:]}
     try: return json.loads(out.strip().splitlines()[-1])
@@ -168,7 +177,7 @@ def dispatch(lane, cfg, item, base):
 
 def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
     """Build the harvest fetch argv without splitting SSH option values twice."""
-    ssh_command = shlex.join(["ssh", *ssh_options])
+    ssh_command = git_ssh_command(ssh_options)
     return ["git", "-c", f"core.sshCommand={ssh_command}", "-C", local_repo,
             "fetch", "-q", remote, f"+{branch}:refs/fleet/{lane}"]
 

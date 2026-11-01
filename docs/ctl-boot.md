@@ -39,6 +39,10 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      over the existing SSH connection with stdin (`ssh ... 'cat > /tmp/task-*.md'`).
      A standalone `scp` upload is forbidden because it is unreliable through
      the instabox ProxyJump path. Check with `python3 tools/check-ad-task-upload.py`.
+   - **SSH option quoting contract (Refs #972)**: status probes and harvest both
+     build their SSH command from the same `git_ssh_command`/`shlex` path, so a
+     `ProxyCommand` or `ProxyJump` value containing spaces remains one argv item.
+     Check offline with `python3 tools/check-ssh-opts-quote.py`.
 
 3. **`lane-merge`** (merge Linux-green `fleet/*` PRs):
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
