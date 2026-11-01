@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -294,6 +295,36 @@ class DistRootServeTests(unittest.TestCase):
         status, body = self.request('/')
         self.assertEqual(status, 200)
         self.assertEqual(body, self.index.read_bytes())
+
+    def test_concurrent_diagnosis_gets_return_consistent_json_and_shutdown_cleanly(self):
+        """真实服务线程下并发读取诊断数据时，响应稳定且服务可干净关闭。"""
+        server = serve.create_server(0, root=self.dist)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={'poll_interval': 0.05},
+            daemon=True,
+        )
+        thread.start()
+        port = server.server_address[1]
+        try:
+            def get_diagnosis():
+                return self.request('/data/diagnosis.json', port=port)
+
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                responses = list(executor.map(lambda _: get_diagnosis(), range(64)))
+
+            expected = json.loads(self.data.read_text(encoding='utf-8'))
+            self.assertTrue(expected)
+            for status, body in responses:
+                with self.subTest(status=status):
+                    self.assertEqual(status, 200)
+                    self.assertTrue(body)
+                    self.assertEqual(json.loads(body.decode('utf-8')), expected)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
 
     def test_dist_data_option_overrides_default_dist_data(self):
         override_data = Path(self.tmp.name) / 'override.json'
