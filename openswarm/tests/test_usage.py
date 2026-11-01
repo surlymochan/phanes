@@ -22,9 +22,10 @@ class UsageParsers(unittest.TestCase):
                          {"inputTokens": 7, "outputTokens": 0,
                           "cacheReadTokens": 0, "cacheWriteTokens": 0})
         self.assertEqual(xs.cursor_usage({"inputTokens": "8", "outputTokens": 2.9,
-                                          "cacheReadTokens": -1, "cacheWriteTokens": 0}),
+                                          "cacheReadTokens": -1, "cacheWriteTokens": True}),
                          {"inputTokens": 8, "outputTokens": 2,
-                          "cacheReadTokens": -1, "cacheWriteTokens": 0})
+                          "cacheReadTokens": 0, "cacheWriteTokens": 0})
+        self.assertEqual(xs.cursor_usage({"inputTokens": False}), empty)
 
     def test_pi_usage_reads_assistant_message_end_events(self):
         empty = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
@@ -48,6 +49,9 @@ class UsageParsers(unittest.TestCase):
                     "usage": {"input": "bad", "output": None},
                     "content": [{"type": "text", "text": "ignored?"}],
                     "stopReason": "end_turn"}},
+                {"type": "message_end", "message": {"role": "assistant",
+                    "usage": {"input": True, "output": False, "cacheRead": -3},
+                    "content": []}},
                 {"type": "message_start", "message": {"role": "assistant",
                     "content": [{"type": "text", "text": "not final"}]}},
             ]
