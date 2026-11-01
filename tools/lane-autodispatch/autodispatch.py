@@ -25,6 +25,7 @@ HOST_BACKOFF_BASE = 30
 HOST_BACKOFF_MAX = 600
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
+STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
@@ -151,6 +152,20 @@ def fresh_ready(n, state):
     if not (j["state"] == "OPEN" and "lane-ready" in labels and not labels & {"in-progress", "lane-pr", "lane-failed"}): return False
     return True
 
+def note_stale_skip():
+    global STALE_STRIPPED_N
+    STALE_STRIPPED_N += 1
+
+def status_snapshot(lanes, state, res, ready, blocked):
+    """Build the observable lane status row, including this process's stale skips."""
+    status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
+    status["_busy"] = sum(1 for L in lanes if state.get(L))
+    status["_ready"] = ready
+    status["_blocked"] = blocked
+    status["_stale_stripped_n"] = STALE_STRIPPED_N
+    status["_at"] = time.strftime("%F %T")
+    return status
+
 def deps_met(item):
     """Body line `依赖：#12 #34` (or `Depends on: #12`) gates dispatch until those issues are CLOSED."""
     m = re.search(r"^\s*(?:依赖|Depends on)\s*[:：](.*)$", item["body"], re.M)
@@ -257,7 +272,7 @@ def tick(lanes, state, last_warn):
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
             if fresh_ready(c["n"], state): pick = c; break
-            q.remove(c); log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
+            q.remove(c); note_stale_skip(); log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
@@ -278,8 +293,7 @@ def tick(lanes, state, last_warn):
         if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
         elif time.time() - last_warn > 600:
             log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
-    st = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
-    st["_busy"] = sum(1 for L in lanes if state.get(L)); st["_ready"] = ready; st["_blocked"] = blocked; st["_at"] = time.strftime("%F %T")
+    st = status_snapshot(lanes, state, res, ready, blocked)
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
 

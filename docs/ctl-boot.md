@@ -34,7 +34,9 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      It contains `_busy` (lanes currently assigned work), `_ready` (open GH
      `lane-ready` issues not marked `in-progress`, `lane-pr`, or
      `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
-     is the dispatchable count after `_blocked` is removed.
+     is the dispatchable count after `_blocked` is removed. `_stale_stripped_n`
+     is the non-negative count of stale-search-index entries stripped by the
+     current autodispatch process.
    - **Task upload contract (Refs #920)**: dispatch uploads the generated task
      over the existing SSH connection with stdin (`ssh ... 'cat > /tmp/task-*.md'`).
      A standalone `scp` upload is forbidden because it is unreliable through
