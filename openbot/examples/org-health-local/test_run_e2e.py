@@ -608,6 +608,104 @@ elif role == 'reviewer':
         self.assertNotIn('reviewer', [call[0] for call in self.calls()])
         self.assertNotIn('预览命令', result.stdout)
 
+    def test_occupied_review_report_returns_nonzero_and_keeps_upstream_artifacts(self):
+        """审查报告路径被目录占用时整体非 0，报出报告路径与失败原因，上游产物保留。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role, probe=(role in ('da', 'builder')))
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        report = self.workdir / REVIEW_REPORT
+        report.mkdir()
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # 返回值回归：报告写不进去时整体非 0，不误报成功
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 输出给出报告路径与写入失败原因，不裸抛 Traceback
+        self.assertIn('审查报告无法写入', result.stderr)
+        self.assertIn(str(self.workdir.resolve() / REVIEW_REPORT), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 失败步骤被点名，审查者不再被调用
+        self.assertIn('失败步骤: 审查', result.stderr)
+        self.assertNotIn('reviewer', [call[0] for call in self.calls()])
+        # 上游产物保留：任务书、诊断快照与站点仍在，内容不变
+        self.assertTrue((self.workdir / 'brief.json').is_file(), '报告写失败后任务书被删除')
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file(), '报告写失败后站点产物被删除')
+        # 耗时记录照常写出，便于核对失败发生在哪一步
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
+
+    @unittest.skipIf(IS_ROOT, 'root 用户不受文件写权限限制')
+    def test_unwritable_review_report_returns_nonzero_and_keeps_upstream_artifacts(self):
+        """审查报告文件不可写时整体非 0，报出报告路径与失败原因，上游产物保留。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role, probe=(role in ('da', 'builder')))
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        report = self.workdir / REVIEW_REPORT
+        report.write_text('上一轮的审查报告', encoding='utf-8')
+        report.chmod(0o444)
+        self.addCleanup(report.chmod, 0o600)
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # 返回值回归：报告写不进去时整体非 0，不误报成功
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 输出给出报告路径与写入失败原因，不裸抛 Traceback
+        self.assertIn('审查报告无法写入', result.stderr)
+        self.assertIn(str(self.workdir.resolve() / REVIEW_REPORT), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 失败步骤被点名，审查者不再被调用
+        self.assertIn('失败步骤: 审查', result.stderr)
+        self.assertNotIn('reviewer', [call[0] for call in self.calls()])
+        # 上游产物保留：任务书、诊断快照与站点仍在，内容不变
+        self.assertTrue((self.workdir / 'brief.json').is_file(), '报告写失败后任务书被删除')
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file(), '报告写失败后站点产物被删除')
+        # 写不进去时旧报告不被清空，失败原因仍可从输出核对
+        self.assertEqual(report.read_text(encoding='utf-8'), '上一轮的审查报告')
+        # 耗时记录照常写出，便于核对失败发生在哪一步
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
+
+    def test_review_report_target_cannot_be_created_returns_nonzero(self):
+        """审查报告目标的父目录不存在时整体非 0，报出报告路径与失败原因，上游产物保留。
+
+        报告路径指向不存在的目录，任何用户（含 root）都写不进去，
+        因此这条用例不受目录写权限限制影响。
+        """
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role, probe=(role in ('da', 'builder')))
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        report = self.workdir / REVIEW_REPORT
+        report.symlink_to(self.workdir / 'missing-dir' / REVIEW_REPORT)
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # 返回值回归：报告写不进去时整体非 0，不误报成功
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('预览命令', result.stdout)
+        # 输出给出报告路径与写入失败原因，不裸抛 Traceback
+        self.assertIn('审查报告无法写入', result.stderr)
+        self.assertIn(str(self.workdir.resolve() / REVIEW_REPORT), result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 失败步骤被点名，审查者不再被调用
+        self.assertIn('失败步骤: 审查', result.stderr)
+        self.assertNotIn('reviewer', [call[0] for call in self.calls()])
+        # 上游产物保留：任务书、诊断快照与站点仍在
+        self.assertTrue((self.workdir / 'brief.json').is_file(), '报告写失败后任务书被删除')
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file(), '报告写失败后诊断快照被删除')
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file(), '报告写失败后站点产物被删除')
+
 
 class RunE2EReviewContractTest(unittest.TestCase):
     """交叉审查产物契约：审查失败时退出码非 0，且仍写出审查记录。
