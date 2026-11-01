@@ -174,6 +174,7 @@ DEFAULTS = {
     "quota": {
         "backend_pause": True,
         "lane_pause": {},                 # backend -> regex: matching run errors pause that lane
+        "requeue_classes": ["rate_limit", "quota"],
         # Per-backend quota table in lib/dispatch/quota.py's own shape: quota_error_re is
         # matched against the run's error/summary/status text, cooldown_s is the fallback
         # cooldown (a "resets in ..." / "Retry-After" in the text wins), scope says what is
@@ -1164,13 +1165,23 @@ class Dispatcher:
             self.mark_done(state, n)
             self.log(f"{lane} #{n} run {run} watchdog-aborted ({why}) → requeued {L['ready']}")
         else:
-            self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
-            self.gh(["issue", "comment", str(n), "--body",
-                     f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
-                     f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\n"
-                     f"Label `{L['failed']}`; re-add `{L['ready']}` to retry."])
+            error_class = info.get("error_class") or ""
+            requeue_classes = (self.cfg.get("quota") or {}).get("requeue_classes", ["rate_limit", "quota"])
+            if error_class in requeue_classes:
+                self.relabel(n, L["ready"], [L["in_progress"], L["failed"]])
+                self.gh(["issue", "comment", str(n), "--body",
+                         f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
+                         f"because of backend quota/rate limiting (`{error_class}`), not a card failure. "
+                         f"Requeued as `{L['ready']}`.\n\nExecutor summary: {info.get('summary')}"])
+            else:
+                self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
+                self.gh(["issue", "comment", str(n), "--body",
+                         f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
+                         f"(error_class `{error_class}`).\n\nExecutor summary: {info.get('summary')}\n\n"
+                         f"Label `{L['failed']}`; re-add `{L['ready']}` to retry."])
             self.mark_done(state, n)
-            self.log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled {L['failed']}")
+            label = L["ready"] if error_class in requeue_classes else L["failed"]
+            self.log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{error_class}) → labelled {label}")
             self.quota_backend_guard(lane, lc, info)
         return True
 
