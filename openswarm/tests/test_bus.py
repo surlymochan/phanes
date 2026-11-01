@@ -27,6 +27,42 @@ class BusTitleHelperTests(unittest.TestCase):
         self.assertEqual(xs.short("first\nsecond\tthird"), "first second third")
 
 
+class BusResultParserTests(unittest.TestCase):
+    @staticmethod
+    def result_comment(report):
+        return "```openswarm-result\n" + json.dumps(report) + "\n```"
+
+    def test_success_and_failure_result_comments_parse_non_empty_contract_fields(self):
+        samples = (
+            {"status": "done", "run_id": "run-success-753", "branch": "openswarm/run-success-753",
+             "summary": "worker completed successfully", "files_changed": ["worker.txt"],
+             "tests": "python3 -m unittest", "followups": [], "commit": "a" * 40,
+             "error_class": "none"},
+            {"status": "failed", "run_id": "run-failure-753", "branch": "openswarm/run-failure-753",
+             "summary": "worker verification failed", "files_changed": [],
+             "tests": "not run: verification failed", "followups": ["inspect test output"],
+             "commit": None, "error_class": "verify_failed"},
+        )
+
+        for sample in samples:
+            with self.subTest(status=sample["status"]):
+                parsed = xs.bus_parse_result(self.result_comment(sample))
+                self.assertIsNotNone(parsed)
+                self.assertEqual(parsed["run_id"], sample["run_id"])
+                self.assertTrue(parsed["branch"])
+                self.assertTrue(parsed["summary"])
+                self.assertTrue(parsed["error_class"])
+
+    def test_result_comment_missing_required_field_is_rejected(self):
+        report = {"status": "done", "summary": "completed", "files_changed": [], "tests": "ok",
+                  "followups": [], "branch": "openswarm/run-required-753", "commit": None}
+        required = ("status", "summary", "files_changed", "tests", "followups", "branch", "commit")
+        for field in required:
+            with self.subTest(field=field):
+                missing = {key: value for key, value in report.items() if key != field}
+                self.assertIsNone(xs.bus_parse_result(self.result_comment(missing)))
+
+
 class BusTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-bus-")
