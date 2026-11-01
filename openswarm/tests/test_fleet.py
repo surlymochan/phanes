@@ -65,6 +65,38 @@ class FleetTests(unittest.TestCase):
             xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=False))
         self.assertEqual(output.getvalue(), "box  no lanes  lanes=0 active=0\n")
 
+    def test_empty_lane_snapshot_keeps_capacity_fields_and_status(self):
+        self.config([{"name": "local", "kind": "local"},
+                     {"name": "paused-box", "kind": "instabox", "box": "paused-box"}])
+        snapshot = {"lanes": [], "active_runs": [], "provider": "minimax-cn", "total": 4,
+                    "lane_config_valid": True}
+
+        def status(host, command, **kw):
+            self.assertEqual(host["name"], "local")
+            return 0, json.dumps(snapshot).encode(), b""
+
+        structured = io.StringIO()
+        with mock.patch.object(xs, "sh", return_value=(0, "paused-box  Paused\n", "")) as ls, \
+                mock.patch.object(xs, "host_run", side_effect=status) as transport, \
+                contextlib.redirect_stdout(structured):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        rows = json.loads(structured.getvalue())["hosts"]
+        self.assertTrue(rows[0]["reachable"])
+        self.assertEqual(rows[0]["status"], "no lanes")
+        self.assertEqual(rows[0]["provider"], "minimax-cn")
+        self.assertEqual(rows[0]["total"], 4)
+        self.assertTrue(rows[1]["paused"])
+        self.assertEqual(transport.call_count, 1)
+        ls.assert_called_once_with(["instabox", "ls"], timeout=20)
+
+        output = io.StringIO()
+        with mock.patch.object(xs, "sh", return_value=(0, "paused-box  Paused\n", "")), \
+                mock.patch.object(xs, "host_run", side_effect=status), \
+                contextlib.redirect_stdout(output):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=False))
+        self.assertIn("local  no lanes  lanes=0 active=0", output.getvalue())
+        self.assertNotIn("config invalid", output.getvalue())
+
     def test_empty_lane_config_is_valid(self):
         config = self.root / "lanes.json"
         config.write_text('{"lanes": []}')
