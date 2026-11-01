@@ -62,6 +62,20 @@ class BusResultParserTests(unittest.TestCase):
                 missing = {key: value for key, value in report.items() if key != field}
                 self.assertIsNone(xs.bus_parse_result(self.result_comment(missing)))
 
+    def test_result_delivery_is_idempotent_but_conflicting_payload_stops_progress(self):
+        commit = "a" * 40
+        report = {"status": "done", "run_id": "run-797", "branch": "openswarm/run-797",
+                  "summary": "completed", "files_changed": ["worker.txt"], "tests": "fake",
+                  "followups": [], "commit": commit, "error_class": "none", "pr_url": None}
+        comments = [{"user": {"login": "executor"}, "body": self.result_comment(report)},
+                    {"user": {"login": "executor"}, "body": self.result_comment(dict(report))}]
+        parsed = [xs.bus_parse_result(comment["body"], "run-797") for comment in comments]
+        self.assertTrue(parsed[0]["branch"] and parsed[0]["commit"])
+        self.assertFalse(xs.bus_result_conflict(parsed))
+        conflict = dict(report, commit="b" * 40)
+        parsed.append(xs.bus_parse_result(self.result_comment(conflict), "run-797"))
+        self.assertTrue(xs.bus_result_conflict(parsed))
+
 
 class BusTests(unittest.TestCase):
     def setUp(self):
