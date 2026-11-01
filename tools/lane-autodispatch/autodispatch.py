@@ -32,6 +32,15 @@ HOST_BACKOFF_BASE = 30
 HOST_BACKOFF_MAX = 600
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
+# Refs #947: a harvest fetch failure is transient until HARVEST_FETCH_MAX_TRANSIENT_FAILURES consecutive
+# failures; up to that threshold it only logs and backs off, past it the issue is labelled lane-failed.
+HARVEST_FETCH_MAX_TRANSIENT_FAILURES = int(os.environ.get("AD_HARVEST_MAX_FAILURES", "3"))
+HARVEST_FETCH_BACKOFF_BASE = 30  # seconds; doubles per consecutive failure (30s → 60s → 120s …)
+HARVEST_FETCH_BACKOFF_CAP = 600
+# Transfer/ssh hiccups seen in the field (M4#904): `fetch-pack: unexpected disconnect`, `bad pack header`.
+HARVEST_FETCH_TRANSIENT_RE = re.compile(r"Permission denied|Connection closed|broken pipe|timed out|banner|"
+                                        r"unexpected disconnect|bad pack header|early eof|index-pack failed|"
+                                        r"RPC failed|Connection reset|hung up unexpectedly", re.I)
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -427,31 +436,83 @@ def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
     return ["git", "-c", f"core.sshCommand={ssh_command}", "-C", local_repo,
             "fetch", "-q", remote, f"+{branch}:refs/fleet/{lane}"]
 
+def classify_harvest_fetch_error(error):
+    """Classify a harvest fetch failure: `transient` (retry after a backoff) or `fatal` (a retry cannot help)."""
+    return "transient" if HARVEST_FETCH_TRANSIENT_RE.search(error or "") else "fatal"
+
 def should_retry_harvest_fetch(error, attempt, max_attempts=HARVEST_FETCH_MAX_ATTEMPTS):
     """Return whether a failed harvest fetch is transient and still within its retry bound."""
-    transient = re.search(
-        r"Permission denied|Connection closed|broken pipe|timed out|banner|bad pack header|fetch-pack:\s+unexpected disconnect",
-        error or "", re.I,
-    )
-    return bool(transient and attempt < max_attempts)
+    return classify_harvest_fetch_error(error) == "transient" and attempt < max_attempts
+
+def harvest_fetch_backoff_seconds(failures, base=HARVEST_FETCH_BACKOFF_BASE, cap=HARVEST_FETCH_BACKOFF_CAP):
+    """Exponential backoff (seconds) before the next harvest attempt after `failures` consecutive failures."""
+    if failures <= 0: return 0
+    return min(cap, base * 2 ** (failures - 1))
+
+def harvest_fetch_outcome(failures, classification, threshold=HARVEST_FETCH_MAX_TRANSIENT_FAILURES):
+    """Outcome of a failed harvest fetch: `transient` (log + backoff) or `lane-failed` (give up on the issue)."""
+    if classification == "fatal": return "lane-failed"
+    return "lane-failed" if failures > threshold else "transient"
+
+def lane_in_fetch_backoff(st, now=None):
+    """True while a lane's harvest fetch is backing off after a transient failure."""
+    until = float((st or {}).get("fetch_backoff_until", 0) or 0)
+    return until > (time.time() if now is None else now)
 
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
+
+def label_lane_failed(n, body):
+    """Label the issue lane-failed and explain why in a comment."""
+    gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
+    gh(["issue", "comment", str(n), "--body", body])
+
+def harvest_fetch(lane, n, fetch, st):
+    """Fetch a finished lane branch with bounded attempts.
+
+    Returns (ok, error, failures); `failures` counts the consecutive failed harvest
+    cycles of this lane and is reset by the first successful fetch.
+    """
+    err = ""
+    for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
+        rc, _, err = sh(fetch, timeout=180)
+        if not rc:
+            st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
+            return True, "", 0
+        if not should_retry_harvest_fetch(err, attempt):
+            log(f"{lane} #{n} fetch failed after {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} attempts ({classify_harvest_fetch_error(err)}: {err.strip()[-120:]})", brain=False)
+            break
+        log(f"{lane} #{n} fetch failed attempt {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} (transient: {err.strip()[-90:]}); retrying in {HARVEST_FETCH_RETRY_DELAY}s", brain=False)
+        time.sleep(HARVEST_FETCH_RETRY_DELAY)
+    failures = int(st.get("fetch_failures", 0) or 0) + 1
+    st["fetch_failures"] = failures
+    return False, err, failures
+
+def handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures):
+    """Transient harvest fetch failures only log and back off; past the threshold the issue is lane-failed."""
+    n, run = st["issue"], st["run"]
+    classification = classify_harvest_fetch_error(err)
+    if harvest_fetch_outcome(failures, classification) == "transient":
+        wait = harvest_fetch_backoff_seconds(failures)
+        st["fetch_backoff_until"] = time.time() + wait
+        save_state(state)
+        log(f"{lane} #{n} harvest fetch failed (transient) {failures}/{HARVEST_FETCH_MAX_TRANSIENT_FAILURES}; backing off {wait}s before the next attempt", brain=False)
+        return False
+    st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
+    label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) produced commit `{info.get('commit')}` but the harvest fetch failed "
+                       f"({classification}, {failures} consecutive failure(s)): {err.strip()[-200:]}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+    mark_done(state, n)
+    log(f"{lane} #{n} harvest fetch failed ({classification}) {failures} consecutive failure(s) → labelled lane-failed")
+    return True
 
 def finish(lane, cfg, st, info, state):
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
-        for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
-            rc, _, err = sh(fetch, timeout=180)
-            if not rc: break
-            if should_retry_harvest_fetch(err, attempt):
-                log(f"{lane} #{n} fetch failed attempt {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} ({err.strip()[-90:]}); retrying in {HARVEST_FETCH_RETRY_DELAY}s", brain=False)
-                time.sleep(HARVEST_FETCH_RETRY_DELAY)
-            else:
-                log(f"{lane} #{n} fetch failed after {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} attempts ({err.strip()[-120:]})", brain=False)
-        if not rc: rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
+        ok, err, failures = harvest_fetch(lane, n, fetch, st)
+        if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
+        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return log(f"{lane} #{n} run {run}: push failed: {err.strip()[-200:]}") or False
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
@@ -465,9 +526,8 @@ def finish(lane, cfg, st, info, state):
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
     else:
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
-        gh(["issue", "comment", str(n), "--body", f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
-            f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry."])
+        label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
+            f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
     return True
 
@@ -491,6 +551,7 @@ def tick(lanes, state, last_warn):
         st = state.get(L)
         if "error" in r: continue
         if st and isinstance(r.get("run"), dict):
+            if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
             if finish(L, lanes[L], st, r["run"], state): state.pop(L); save_state(state)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
     try: q = queue()

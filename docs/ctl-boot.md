@@ -294,6 +294,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ghost-in-progress.py` — offline ghost in-progress check (Refs #922). Fake fixtures only: an open issue carrying `in-progress` with no lane entry in `state.json` counts as a ghost only when the label is older than **10 minutes** (a dispatch in flight still has no lane record), `lane-pr` issues are protected, and a `lane-failed` ghost is only re-labelled `lane-ready` when `state.json` has no lane occupancy and the issue body keeps its acceptance command (#960). It prints the recommended `gh issue edit` commands and never touches GitHub.
 - `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
 - `python3 tools/check-health-hosts-ok-pause.py` — offline #948 contract check. It asserts that a host held by a `PAUSE-HOST-<host>` file is never counted in the `hosts_ok` summary, that it is reported in `skipped_cooldown`, that an expired automatic pause is released, and that a pause that has not expired yet — or a manual one — is never cleared.
+- `python3 tools/check-ad-harvest-backoff.py` — offline #947 contract check. It replays a fake harvest fetch failure sequence and asserts the transient/fatal classification, the exponential backoff ladder, and that the first N transient failures only log and back off — the (N+1)-th failure is the one labelled `lane-failed`. It never touches the live lane state.
 - `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
 ### Roll back a failed assign (Refs #968)
@@ -358,6 +359,42 @@ failure/success sequence and does not touch the real backoff state:
 
 ```bash
 python3 tools/check-ad-host-backoff.py
+```
+
+### AD harvest fetch backoff and `lane-failed` threshold (Refs #947)
+
+The lane harvest pulls the finished branch from the fleet host with `git fetch`
+(`tools/lane-autodispatch/autodispatch.py`).  Every failure is classified
+first (`classify_harvest_fetch_error`):
+
+- **transient** — a broken transfer or a flaky ssh mux, as seen in the field
+  (M4#904): `fetch-pack: unexpected disconnect`, `bad pack header`, `early eof`,
+  `index-pack failed`, `RPC failed`, `Connection reset`, `Connection closed`,
+  `broken pipe`, banner/`timed out` and `Permission denied`.
+- **fatal** — anything else (e.g. `could not read from remote repository`); a
+  retry cannot help.
+
+Rules:
+
+- One harvest cycle runs at most **3** fetch attempts
+  (`HARVEST_FETCH_MAX_ATTEMPTS`), 20 s apart (`HARVEST_FETCH_RETRY_DELAY`).
+- A transient failure increments the lane's consecutive-failure counter
+  (`fetch_failures` in the lane state) and only **logs and backs off**:
+  `min(600, 30 * 2 ** (failures - 1))` seconds (30s → 60s → 120s → 240s →
+  480s → 600s cap).  The issue stays `in-progress` and the next tick skips the
+  lane until `fetch_backoff_until` has passed.
+- The first **N** consecutive transient failures (N =
+  `HARVEST_FETCH_MAX_TRANSIENT_FAILURES`, default **3**, override with
+  `AD_HARVEST_MAX_FAILURES`) therefore never label the issue `lane-failed`:
+  only the failure **past** the threshold (N+1) — or a fatal error right away —
+  labels it `lane-failed` with an explanatory comment.  A successful fetch
+  resets the counter.
+
+The offline contract check replays a fake failure sequence (no SSH, no live
+lane state):
+
+```bash
+python3 tools/check-ad-harvest-backoff.py
 ```
 
 ### AD ready queue target refill (Refs #1242)
