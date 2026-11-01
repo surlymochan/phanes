@@ -31,6 +31,10 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-autodispatch >/dev/null 2>&1 &`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/heartbeat`
    - **Status snapshot**: `~/phanes-ctl/autodispatch/lanes-status.json` (inspect with `~/phanes-ctl/bin/lane-autodispatch-status`)
+   - **Task upload contract (Refs #920)**: dispatch uploads the generated task
+     over the existing SSH connection with stdin (`ssh ... 'cat > /tmp/task-*.md'`).
+     A standalone `scp` upload is forbidden because it is unreliable through
+     the instabox ProxyJump path. Check with `python3 tools/check-ad-task-upload.py`.
 
 3. **`lane-merge`** (merge Linux-green `fleet/*` PRs):
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
@@ -96,6 +100,7 @@ Check scripts (no SSH):
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
+- `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 
 Recommended heartbeat monitoring (no SSH and no restart): run this from the
 repository checkout every five minutes, for example with cron:
