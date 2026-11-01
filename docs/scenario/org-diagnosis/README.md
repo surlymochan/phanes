@@ -55,7 +55,11 @@
   verification/                # Builder 本机访问验证报告 + 交叉审查记录
 ```
 
-### 3.2 工件清单
+### 3.2 本地 e2e 临时目录产物
+
+`openbot/examples/org-health-local/run_e2e.py` 使用 `--workdir` 指定的临时目录时，产物直接落在该目录根下：Boss 步骤生成 `brief.json`，DA 步骤读取它并生成 `diagnosis.json`；Builder 步骤生成站点目录 `dist/`（其中包含 `build-report.json`，对应上文的 site/report 产物）。启用审查时，Reviewer 步骤生成 `review.md`；编排器最后还会写入 `timings.json` 记录各步骤耗时。任一步骤失败时也应保留整个临时目录（包括已生成的产物和失败时写出的审查记录），供复查失败原因。
+
+### 3.3 工件清单
 
 | 工件 | 生产者 | 消费者 | 路径 | 能否入仓库 |
 | --- | --- | --- | --- | --- |
