@@ -87,6 +87,56 @@ class VerifyRemoteTests(FakeFleetFixture, unittest.TestCase):
         rc, reply = self.verify(row["run_id"], "local", f"test -f {row['run_id']}.txt")
         self.assertEqual(rc, 0, reply)
 
+    def test_result_upload_uses_manifest_and_confirms_existing_content_after_disconnect(self):
+        rid, original = self.start_source_run()
+        source = self.root / "b1" / "repo"
+        self.git(source, "checkout", "-q", original["branch"])
+        (source / "artifact-a.txt").write_text("a\n")
+        (source / "nested").mkdir()
+        (source / "nested" / "artifact-b.txt").write_text("b\n")
+        (source / "empty.txt").write_text("")
+        self.git(source, "add", "artifact-a.txt", "nested/artifact-b.txt", "empty.txt")
+        self.git(source, "-c", "user.name=fleet", "-c", "user.email=fleet@example.invalid", "commit", "-qm", "artifacts")
+        commit = self.git(source, "rev-parse", "HEAD")
+        rc, content, error = xs.host_git(self.hosts["b1"], str(source), ["show", commit + ":nested/artifact-b.txt"])
+        self.assertEqual((rc, content, error), (0, b"b\n", b""))
+        target = self.root / "b2" / "upload-target"
+        target_calls = [0]
+        transport = xs.host_run.side_effect
+
+        def disconnect_after_first_write(host, command, **kwargs):
+            if host["name"] == "b2" and "python3 -c" in command and target_calls[0] == 0:
+                target_calls[0] += 1
+                transport(host, command, **kwargs)
+                return 255, b"", b"Connection closed"
+            if host["name"] == "b2" and "python3 -c" in command:
+                target_calls[0] += 1
+            return transport(host, command, **kwargs)
+
+        xs.host_run.side_effect = disconnect_after_first_write
+        reply = xs.upload_result_files(self.hosts["b1"], self.hosts["b2"], str(source), str(target), rid,
+                                       commit, {"files_changed": ["nested/artifact-b.txt", "empty.txt", "artifact-a.txt"]})
+        self.assertEqual(reply["status"], "confirmed")
+        self.assertEqual(reply["uploaded"], 2)
+        self.assertEqual((target / "artifact-a.txt").read_text(), "a\n")
+        self.assertEqual((target / "nested" / "artifact-b.txt").read_text(), "b\n")
+        self.assertEqual(target_calls[0], 3)  # first file: disconnect + confirmation, then second file
+
+    def test_result_upload_rejects_different_existing_file_with_retry_state(self):
+        rid, original = self.start_source_run()
+        source = self.root / "b1" / "repo"
+        target = self.root / "b2" / "upload-target"
+        target.mkdir(parents=True)
+        (target / (rid + ".txt")).write_text("not the run\n")
+        with self.assertRaises(xs.ResultUploadError) as raised:
+            xs.upload_result_files(self.hosts["b1"], self.hosts["b2"], str(source), str(target), rid,
+                                   original["commit"], {"files_changed": [rid + ".txt"]})
+        report = raised.exception.report
+        self.assertEqual(report["run"], rid)
+        self.assertEqual(report["path"], rid + ".txt")
+        self.assertEqual(report["uploaded"], 0)
+        self.assertIn("retry", report["next"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,7 @@ import io
 import json
 import math
 import os
+import pathlib
 import re
 import select
 import shlex
@@ -9463,6 +9464,123 @@ def transfer_ref(source, source_repo, rev, target, target_repo, destination=""):
                                            timeout=300, input=bundle), "bundle import").decode().strip()
 
 
+RESULT_UPLOAD = """
+import hashlib, os, pathlib, sys, tempfile
+root, relative, expected = os.path.expanduser(sys.argv[1]), sys.argv[2], sys.argv[3]
+path = pathlib.Path(root, relative)
+try:
+    path.relative_to(pathlib.Path(root))
+except ValueError:
+    print('{\"error\":\"path escapes target\"}')
+    raise SystemExit(2)
+if path.exists():
+    if not path.is_file():
+        print('{\"error\":\"target is not a file\"}')
+        raise SystemExit(2)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest == expected:
+        print('{\"status\":\"confirmed\"}')
+        raise SystemExit(0)
+    print('{\"error\":\"target content differs\"}')
+    raise SystemExit(2)
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix='.openswarm-upload-', dir=str(path.parent))
+try:
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(sys.stdin.buffer.read())
+        stream.flush()
+        os.fsync(stream.fileno())
+    if hashlib.sha256(pathlib.Path(temporary).read_bytes()).hexdigest() != expected:
+        raise RuntimeError('uploaded content hash mismatch')
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+print('{\"status\":\"uploaded\"}')
+"""
+
+
+class ResultUploadError(RuntimeError):
+    """A result artifact could not be confirmed on the destination host."""
+
+    def __init__(self, run_id, relative, uploaded, detail):
+        self.report = {"run": run_id, "path": relative, "uploaded": uploaded,
+                       "error": str(detail),
+                       "next": "retry the run upload; already confirmed files will be skipped"}
+        super().__init__(json.dumps(self.report, ensure_ascii=False))
+
+
+def result_upload_manifest(result, run_id):
+    """Return a stable, non-empty artifact manifest from a run result."""
+    if not isinstance(result, dict) or not safe_id(run_id):
+        raise ValueError("invalid result run")
+    payload = result
+    if "files_changed" not in payload and isinstance(payload.get("result"), dict):
+        payload = payload["result"]
+    paths = payload.get("files_changed") or []
+    if not isinstance(paths, list):
+        raise ValueError("result files_changed must be a list")
+    manifest = []
+    seen = set()
+    for raw in paths:
+        relative = str(raw).replace("\\", "/")
+        if not relative or relative in seen or relative.startswith("/") or ".." in pathlib.PurePosixPath(relative).parts:
+            raise ValueError(f"invalid result path: {raw}")
+        seen.add(relative)
+        manifest.append(relative)
+    return sorted(manifest)
+
+
+def upload_result_files(source, target, source_repo, target_dir, run_id, commit, result,
+                        attempts=3):
+    """Upload non-empty changed files one at a time, confirming each before moving on.
+
+    A retry is scoped to the current unconfirmed file.  The destination helper never
+    overwrites a different file and treats an identical existing file as confirmed,
+    which makes a disconnect after rename safe to retry.
+    """
+    if attempts <= 0:
+        raise ValueError("upload attempts must be positive")
+    manifest = result_upload_manifest(result, run_id)
+    uploaded = 0
+    statuses = []
+    for relative in manifest:
+        content = host_require(source, host_git(source, source_repo,
+                                                ["show", f"{commit}:{relative}"], timeout=60),
+                               f"read result {relative}")
+        if not content:
+            continue
+        digest = hashlib.sha256(content).hexdigest()
+        confirmed = False
+        detail = "upload failed"
+        for attempt in range(1, attempts + 1):
+            rc, out, err = host_python(target, RESULT_UPLOAD,
+                                       [target_dir, relative, digest], timeout=120, input=content)
+            if not rc:
+                try:
+                    response = json.loads(out.decode().strip().splitlines()[-1])
+                except (ValueError, IndexError, UnicodeError):
+                    response = {"status": "confirmed"}
+                confirmed = response.get("status") in ("uploaded", "confirmed")
+                if confirmed:
+                    uploaded += 1
+                    statuses.append({"path": relative, "status": response["status"]})
+                    break
+                detail = response.get("error") or "destination did not confirm upload"
+            else:
+                detail = (err or out).decode(errors="replace").strip() or f"transport failed (rc={rc})"
+                if "target content differs" in detail or "target is not a file" in detail:
+                    break
+            if attempt < attempts:
+                continue
+        if not confirmed:
+            raise ResultUploadError(run_id, relative, uploaded, detail)
+    return {"status": "confirmed", "run": run_id, "uploaded": uploaded,
+            "files": statuses}
+
+
 def instabox_states(hosts):
     boxes = [host["box"] for host in hosts if host["kind"] == "instabox"]
     if not boxes:
@@ -12048,7 +12166,10 @@ def main():
             else:
                 cmd_verify_remote(a)
         except (ValueError, RuntimeError) as e:
-            print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False), file=sys.stderr)
+            if isinstance(e, ResultUploadError):
+                print(json.dumps({"ok": False, **e.report}, ensure_ascii=False), file=sys.stderr)
+            else:
+                print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False), file=sys.stderr)
             sys.exit(2)
     elif a.cmd == "lane":
         try:
