@@ -25,7 +25,7 @@ staged in a temporary directory and atomically installed only after every
 renewal returns a valid X.509 certificate; a partial failure leaves the old
 certificates and fleet config untouched.
 
-## Smoke (safe, no restart)
+## Smoke (safe, no restart) (Refs #777)
 
 ```bash
 ~/phanes-ctl/bin/start-control-plane          # idempotent; prints already/start
