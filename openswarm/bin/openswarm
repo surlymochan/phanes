@@ -9000,6 +9000,15 @@ def cmd_lane_systemd(args):
 
 # ---------------------------------------------------------------- fleet
 
+# How the baseline commit reaches a host before its task starts.  "fetch" lets the host
+# fetch the commit from its own remote; "push" has the planner push the commit into the
+# host's repository, so a host without access to the upstream remote still gets the base.
+FLEET_SEED_STRATEGIES = ("fetch", "push")
+FLEET_SEED_FETCH_RETRIES = 3
+FLEET_SEED_RETRY_DELAY = 2.0
+FLEET_SEED_REF = "refs/openswarm/base/"
+
+
 def fleet_config():
     path = os.path.join(DATA, "fleet.json")
     cfg = jload(path, {"hosts": [{"name": "local", "kind": "local"}]} if not os.path.exists(path) else None)
@@ -9020,6 +9029,13 @@ def fleet_config():
             raise ValueError(f"invalid repos for fleet host {name}")
         if "openswarm" in host and (not isinstance(host["openswarm"], str) or not host["openswarm"]):
             raise ValueError(f"invalid openswarm path for fleet host {name}")
+        strategy = host.get("seed_strategy", "fetch")
+        if strategy not in FLEET_SEED_STRATEGIES:
+            raise ValueError(f"invalid seed_strategy for fleet host {name}: {strategy!r}")
+        retries = host.get("fetch_retries", FLEET_SEED_FETCH_RETRIES)
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise ValueError(f"invalid fetch_retries for fleet host {name}")
+        host["seed_strategy"], host["fetch_retries"] = strategy, retries
         hosts[name] = host
     return hosts
 
@@ -9675,10 +9691,14 @@ def host_require(host, response, operation):
     return out
 
 
-def fleet_lane_assign(host, command):
+def fleet_lane_assign(host, command, seed=None, repo=None):
     """Copy a task card to a fleet host, verify its digest there, then assign it."""
     if len(command) < 3 or command[:2] != ["lane", "assign"]:
         return None
+    sha = seed or fleet_command_base(command)
+    if sha:
+        # The host needs the baseline commit before the lane picks the card up.
+        fleet_seed_baseline(host, sha, command, repo)
     try:
         task_index = command.index("--task-file")
         task_path = command[task_index + 1]
@@ -9760,6 +9780,152 @@ def host_repo(host, name, local=False):
     if local and host["kind"] == "local":
         return os.getcwd()
     raise ValueError(f"{host['name']}: no repository mapping for {name}")
+
+
+def fleet_seed_strategy(host):
+    """How the baseline commit reaches a host: the host fetches it, or the planner pushes it."""
+    strategy = host.get("seed_strategy") or "fetch"
+    if strategy not in FLEET_SEED_STRATEGIES:
+        raise ValueError(f"unknown fleet seed strategy: {strategy}")
+    return strategy
+
+
+def fleet_seed_retries(host):
+    """How many extra fetch attempts a host gets before the dispatch fails."""
+    retries = host.get("fetch_retries", FLEET_SEED_FETCH_RETRIES)
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise ValueError(f"invalid fleet fetch_retries: {retries}")
+    return retries
+
+
+def fleet_seed_ref(sha):
+    """The ref the planner pushes a baseline commit to inside the host's repository."""
+    return FLEET_SEED_REF + sha
+
+
+def fleet_command_option(command, option):
+    """Read an option value out of a forwarded command line."""
+    if option in command:
+        index = command.index(option)
+        if index + 1 < len(command):
+            return command[index + 1]
+    return None
+
+
+def fleet_command_base(command):
+    """The baseline commit a forwarded command runs against."""
+    return fleet_command_option(command, "--base")
+
+
+def fleet_seed_paths(host, command, name=None):
+    """The (host repository, local repository) pair used to seed a host before a dispatch."""
+    repos = host.get("repos") or {}
+    cwd = fleet_command_option(command, "--cwd")
+    if name and name not in repos:
+        raise ValueError(f"{host['name']}: no repository mapping for {name}")
+    if not name and cwd:
+        name = next((key for key, value in repos.items() if value == cwd), None)
+    if name:
+        repo = repos[name]
+    elif cwd:
+        repo = cwd
+    elif len(repos) == 1:
+        name, repo = next(iter(repos.items()))
+    elif repos:
+        raise ValueError(f"{host['name']}: the host has several repositories; pass --repo")
+    else:
+        raise ValueError(f"{host['name']}: no repository mapping for seeding")
+    return repo, fleet_seed_source(name, command)
+
+
+def fleet_seed_source(name, command):
+    """The local checkout that holds the baseline commit."""
+    if command[:2] == ["lane", "assign"] and len(command) > 2:
+        try:
+            lanes = [lane for lane in lane_config() if lane["name"] == command[2]]
+        except (OSError, ValueError):
+            lanes = []
+        if lanes and lanes[0].get("repo"):
+            return lanes[0]["repo"]
+    if name:
+        local = fleet_config().get("local") or {}
+        path = (local.get("repos") or {}).get(name)
+        if path:
+            return path
+    return os.getcwd()
+
+
+def fleet_seed_fetch(host, repo, sha):
+    """Fetch the baseline on the host, retrying with a backoff before giving up."""
+    retries = fleet_seed_retries(host)
+    delay, detail = FLEET_SEED_RETRY_DELAY, ""
+    for attempt in range(retries + 1):
+        rc, _, err = host_git(host, repo, ["fetch", "--no-tags", "origin"], timeout=300)
+        if not rc:
+            rc, _, _ = host_git(host, repo, ["cat-file", "-e", sha + "^{commit}"])
+            if not rc:
+                return
+            detail = f"base commit {sha} is missing after the fetch"
+        else:
+            detail = harvest_stderr_tail(err) or f"git fetch failed (rc={rc})"
+        if attempt >= retries:
+            raise RuntimeError(f"{host['name']}: fetch of the base commit failed after {attempt + 1} "
+                               f"attempt(s): {detail}")
+        time.sleep(delay)
+        delay = min(delay * 2, 60)
+
+
+def fleet_seed_push_destination(host, repo):
+    """The git destination that writes into the host's repository, or None without a transport."""
+    if host["kind"] == "local":
+        return repo
+    if host["kind"] == "ssh":
+        # git's ssh transport addresses the host home with "alias:path".
+        return host["ssh"] + ":" + repo[2:] if repo.startswith("~/") else "ssh://" + host["ssh"] + repo
+    return None
+
+
+def fleet_seed_push(host, source, repo, sha):
+    """Push the baseline commit into the host's repository at refs/openswarm/base/<sha>."""
+    ref = fleet_seed_ref(sha)
+    destination = fleet_seed_push_destination(host, repo)
+    if destination is None:
+        # instabox has no git transport: ship the commit with the bundle transport instead.
+        landed = transfer_ref(fleet_host("local"), source, sha, host, repo, ref)
+        if landed != sha:
+            raise RuntimeError(f"{host['name']}: base commit transfer mismatch")
+        return
+    rc, _, err = git(["-C", source, "push", destination, f"{sha}:{ref}"], source, timeout=300)
+    if rc:
+        raise RuntimeError(f"{host['name']}: push of the base commit failed: "
+                           f"{(err or '').strip()[:300] or f'git push failed (rc={rc})'}")
+    rc, out, err = host_git(host, repo, ["rev-parse", "--verify", ref])
+    if rc or out.decode(errors="replace").strip() != sha:
+        raise RuntimeError(f"{host['name']}: the pushed base commit is missing from the host repository")
+
+
+def fleet_seed_checkout(host, repo, sha):
+    """Point the host's own checkout at the seeded commit; the host never fetches it."""
+    rc, out, _ = host_git(host, repo, ["rev-parse", "--is-bare-repository"])
+    if not rc and out.decode(errors="replace").strip() == "true":
+        return  # a bare repository has no worktree to check out
+    rc, _, err = host_git(host, repo, ["checkout", "--detach", sha], timeout=300)
+    if rc:
+        raise RuntimeError(f"{host['name']}: local checkout of the base commit failed: "
+                           f"{harvest_stderr_tail(err) or f'git checkout failed (rc={rc})'}")
+
+
+def fleet_seed_baseline(host, sha, command, name=None):
+    """Make the baseline commit available on the host before its task is dispatched."""
+    strategy = fleet_seed_strategy(host)
+    repo, source = fleet_seed_paths(host, command, name)
+    if strategy == "fetch":
+        fleet_seed_fetch(host, repo, sha)
+    elif strategy == "push":
+        fleet_seed_push(host, source, repo, sha)
+        fleet_seed_checkout(host, repo, sha)
+    else:
+        raise ValueError(f"unknown fleet seed strategy: {strategy}")
 
 
 BUNDLE_EXPORT = """
@@ -10146,8 +10312,12 @@ def cmd_fleet(args):
         command = args.args[1:] if args.args[:1] == ["--"] else args.args
         if not command:
             raise ValueError("fleet exec requires openswarm arguments after --")
+        seed, repo = getattr(args, "seed", None), getattr(args, "repo", None)
         if command[:2] == ["lane", "assign"] and "--task-file" in command:
-            raise SystemExit(fleet_lane_assign(host, command))
+            raise SystemExit(fleet_lane_assign(host, command, seed=seed, repo=repo))
+        sha = seed or fleet_command_base(command)
+        if sha:
+            fleet_seed_baseline(host, sha, command, repo)
         rc, out, err = host_run(host, host_openswarm(host, command), timeout=args.timeout)
         sys.stdout.buffer.write(out)
         sys.stderr.buffer.write(err)
@@ -12406,6 +12576,8 @@ def main():
     fp.add_argument("--json", action="store_true")
     fp = fleet_sub.add_parser("exec")
     fp.add_argument("--timeout", type=float, default=300)
+    fp.add_argument("--seed", help="baseline commit to make available on the host before the dispatch")
+    fp.add_argument("--repo", help="logical repository name used for seeding the host")
     fp.add_argument("host")
     fp.add_argument("args", nargs=argparse.REMAINDER)
     fp = fleet_sub.add_parser("harvest", help="collect assigned lane results from fleet hosts")
