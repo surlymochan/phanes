@@ -422,6 +422,38 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertIn("整体技术人力成本万元", message)
         self.assertFalse(self.out_path.exists())
 
+    def test_dirty_csv_with_bad_delimiter_fails_without_empty_diagnosis(self) -> None:
+        """坏分隔符不得被当作空表成功生成诊断。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-bad-delimiter")
+        cost = raw_dir / "cost.csv"
+        cost.write_text(
+            "月份;整体技术人力成本万元;营收业务技术人力成本万元;运维设施成本万元\n"
+            "2026-01;10.4;8.3;2.1\n",
+            encoding="utf-8",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cost.csv", result.stdout + result.stderr)
+        self.assertIn("缺少必需列", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_dirty_csv_with_mixed_currency_fails_explicitly(self) -> None:
+        """金额列混入货币符号时不得按纯数字静默计算。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-mixed-currency")
+        revenue = raw_dir / "revenue.csv"
+        lines = csv_lines(revenue)
+        revenue.write_text(
+            "\n".join(line.replace("2026-01,11.2", "2026-01,$11.2") for line in lines) + "\n",
+            encoding="utf-8",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        message = result.stdout + result.stderr
+        self.assertIn("revenue.csv", message)
+        self.assertIn("收入万美元", message)
+        self.assertIn("不是数值", message)
+        self.assertFalse(self.out_path.exists())
+
     def test_one_csv_missing_period_keeps_gap_fact_and_valid_snapshot(self) -> None:
         """单个业务 CSV 缺一个观察月份时保留 null 缺口事实并继续生成。"""
         raw_dir = copy_raw(self.folder, "raw-single-file-gap")
