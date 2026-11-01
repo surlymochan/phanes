@@ -7171,6 +7171,65 @@ def cmd_bus_worker(args, policy):
         time.sleep(cfg["poll_seconds"])
 
 
+def dispatch_tick(policy, shadow=False):
+    """Plan one push-dispatch tick; shadow mode has no remote or lane side effects."""
+    cfg = policy.get("dispatch") or {}
+    repo = cfg.get("repo") or (policy.get("bus") or {}).get("repo")
+    if not BUS_REPO_RE.fullmatch(str(repo or "")):
+        raise ValueError("configure policy.dispatch.repo as owner/repo")
+    loader = importlib.util.spec_from_file_location(
+        "openswarm_autodispatch", os.path.join(os.path.dirname(SKILL_DIR), "tools", "lane-autodispatch", "autodispatch.py"))
+    helper = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(helper)
+    issues = gh_pages(f"repos/{repo}/issues?state=open")
+    available = []
+    for lane in lanes_by_name():
+        state = jload(lane_state_path(lane["name"]), {}) or {}
+        if state.get("state") == "idle" and lane_call(lane["name"], {"op": "ping"}).get("ok"):
+            available.append(lane)
+    assignments = helper.select_dispatches(issues, available, cfg)
+    results = []
+    for issue, lane in assignments:
+        row = {"issue": issue.get("number"), "title": issue.get("title"), "lane": lane["name"],
+               "backend": lane.get("backend"), "shadow": bool(shadow)}
+        if not shadow:
+            body = issue.get("body") or issue.get("title") or ""
+            response = lane_call(lane["name"], {"op": "assign", "task": body,
+                "title": (issue.get("title") or body.splitlines()[0])[:72],
+                "budget_minutes": float(cfg.get("budget_minutes", 45)),
+                "card_type": cfg.get("card_type", "impl"), "paths": [],
+                "idempotency_key": f"github-issue-{issue.get('number')}"}, timeout=8)
+            row["assigned"] = bool(response.get("ok"))
+            if not response.get("ok"):
+                row["error_class"] = bus_error_class(response.get("error", ""))
+            else:
+                labels = {item.get("name", "") for item in issue.get("labels", []) if isinstance(item, dict)}
+                labels.discard(cfg.get("ready_label", "lane-ready"))
+                labels.add(cfg.get("assigned_label", "in-progress"))
+                try:
+                    gh_transport(f"repos/{repo}/issues/{issue['number']}/labels", method="PUT",
+                                 payload={"labels": sorted(labels)})
+                except BusError as error:
+                    row["error_class"] = bus_error_class(error)
+                    row["label_error"] = bus_redact(str(error))
+        results.append(row)
+    return {"shadow": bool(shadow), "available_lanes": [lane["name"] for lane in available],
+            "assignments": results, "unassigned": not available}
+
+
+def cmd_dispatch(args, policy):
+    while True:
+        try:
+            print(json.dumps(dispatch_tick(policy, args.shadow), ensure_ascii=False), flush=True)
+        except (BusError, ValueError, OSError) as error:
+            print(json.dumps({"error_class": bus_error_class(error), "error": bus_redact(str(error))}), flush=True)
+            if args.once:
+                raise
+        if args.once:
+            return
+        time.sleep(max(1, int((policy.get("dispatch") or {}).get("poll_seconds", 60))))
+
+
 # ---------------------------------------------------------------- resident lanes
 
 LANE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
@@ -13448,6 +13507,12 @@ def main():
                            rework_of_help="run id this task reworks")
     sp.add_argument("--once", action="store_true", help="claim at most one queued issue, then exit")
 
+    sp = sub.add_parser("dispatch", help="push ready GitHub issues to idle resident lanes")
+    dispatch_mode = sp.add_mutually_exclusive_group(required=True)
+    dispatch_mode.add_argument("--once", action="store_true", help="run one dispatch tick")
+    dispatch_mode.add_argument("--loop", action="store_true", help="run dispatch ticks continuously")
+    sp.add_argument("--shadow", action="store_true", help="print proposed assignments without assigning")
+
     sp = sub.add_parser("card-lint", help="reject thin cards and thin PRs with reason codes")
     sp.add_argument("card", nargs="?", help="card file to lint, or - to read the card from stdin")
     sp.add_argument("--pr-diff", nargs=2, metavar=("BASE", "REF"),
@@ -13633,6 +13698,13 @@ def main():
             cmd_bus_worker(a, policy)
         except (BusError, ValueError) as error:
             print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+    elif a.cmd == "dispatch":
+        try:
+            cmd_dispatch(a, policy)
+        except (BusError, ValueError) as error:
+            print(json.dumps({"ok": False, "error_class": bus_error_class(error),
+                              "error": bus_redact(str(error))}, ensure_ascii=False), file=sys.stderr)
             sys.exit(2)
     elif a.cmd in ("fleet", "batch", "verify-remote"):
         try:

@@ -56,6 +56,16 @@
     "recovery_ttl_seconds": 600,
     "recovery_poll_seconds": 5
   },
+  "dispatch": {
+    "_doc": "Push-mode issue dispatch. Shadow mode reports proposed assignments without changing labels or assigning lanes.",
+    "repo": "",
+    "ready_label": "lane-ready",
+    "excluding_labels": ["in-progress", "lane-pr", "lane-failed"],
+    "priorities": {"p0": 0, "p1": 1, "p2": 2},
+    "backend_label_prefix": "backend:",
+    "assigned_label": "in-progress",
+    "poll_seconds": 60
+  },
   "acceptance": {
     "_doc": "Card and PR lint rules. min_effective_diff is the smallest effective diff a card must promise and a PR must deliver; thin_keywords are the placeholder words that make a card body keyword-only; weak_acceptance_re matches acceptance commands that only read the tree.",
     "min_effective_diff": 30,

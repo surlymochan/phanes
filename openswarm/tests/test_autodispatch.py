@@ -17,6 +17,39 @@ spec.loader.exec_module(autodispatch)
 
 
 class GitSSHCommandTests(unittest.TestCase):
+    def test_dispatch_sorts_priority_then_issue_number(self):
+        issues = [
+            {"number": 9, "labels": ["lane-ready", "p1"]},
+            {"number": 4, "labels": ["lane-ready", "p0"]},
+            {"number": 2, "labels": ["lane-ready", "p1"]},
+        ]
+        planned = autodispatch.select_dispatches(issues, [{"name": "a", "backend": "codex"}], {})
+        self.assertEqual(planned[0][0]["number"], 4)
+
+    def test_dispatch_respects_backend_pin_and_skips_when_no_lane(self):
+        issue = {"number": 4, "labels": ["lane-ready", "backend:pi"]}
+        lanes = [{"name": "codex-lane", "backend": "codex"}, {"name": "pi-lane", "backend": "pi"}]
+        self.assertEqual(autodispatch.select_dispatches([issue], lanes)[0][1]["name"], "pi-lane")
+        self.assertEqual(autodispatch.select_dispatches([issue], [lanes[0]]), [])
+
+    def test_dispatch_uses_configured_label_names(self):
+        issue = {"number": 4, "labels": ["ready-now", "urgent"]}
+        planned = autodispatch.select_dispatches([issue], [{"name": "lane", "backend": "codex"}], {
+            "ready_label": "ready-now", "priorities": {"urgent": 0}})
+        self.assertEqual([entry[0]["number"] for entry in planned], [4])
+
+    def test_dispatch_skips_claimed_issues_and_unmatched_backend_pins(self):
+        issues = [
+            {"number": 1, "labels": ["lane-ready", "in-progress"]},
+            {"number": 2, "labels": ["lane-ready", "backend:agy"]},
+        ]
+        lanes = [{"name": "codex", "backend": "codex"}]
+        self.assertEqual(autodispatch.select_dispatches(issues, lanes), [])
+
+    def test_dispatch_with_no_available_lanes_returns_no_assignments(self):
+        issue = {"number": 1, "labels": ["lane-ready"]}
+        self.assertEqual(autodispatch.select_dispatches([issue], []), [])
+
     def test_ssh_command_quotes_proxy_command_as_one_option(self):
         options = ["-o", "ConnectTimeout=20", "-o", "ProxyCommand=ssh -W %h:%p bastion"]
 

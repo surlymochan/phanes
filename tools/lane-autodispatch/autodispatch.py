@@ -41,6 +41,42 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
 
+def dispatch_priority(issue, config=None):
+    """Return configured priority rank, with issue number as a stable tie breaker."""
+    config = config or {}
+    labels = {label.get("name", "") if isinstance(label, dict) else str(label)
+              for label in issue.get("labels", [])}
+    priorities = config.get("priorities", {"p0": 0, "p1": 1, "p2": 2})
+    ranks = ({str(label): rank for rank, label in enumerate(priorities)} if isinstance(priorities, list)
+             else priorities if isinstance(priorities, dict) else {})
+    matching = [ranks[label] for label in labels if label in ranks]
+    return (min(matching) if matching else len(ranks), int(issue.get("number", 0)))
+
+def select_dispatches(issues, lanes, config=None):
+    """Match ready issues to idle lanes, honoring configured labels and backend pins."""
+    config = config or {}
+    ready = config.get("ready_label", "lane-ready")
+    excluded = set(config.get("excluding_labels", ["in-progress", "lane-pr", "lane-failed"]))
+    queue = []
+    for issue in issues:
+        labels = {label.get("name", "") if isinstance(label, dict) else str(label)
+                  for label in issue.get("labels", [])}
+        if ready in labels and not labels.intersection(excluded):
+            queue.append(issue)
+    queue.sort(key=lambda issue: dispatch_priority(issue, config))
+    idle = list(lanes)
+    selected = []
+    for issue in queue:
+        labels = {label.get("name", "") if isinstance(label, dict) else str(label)
+                  for label in issue.get("labels", [])}
+        pin_prefix = config.get("backend_label_prefix", "backend:")
+        pin = next((label[len(pin_prefix):] for label in labels if label.startswith(pin_prefix)), None)
+        lane = next((candidate for candidate in idle if not pin or candidate.get("backend") == pin), None)
+        if lane:
+            selected.append((issue, lane))
+            idle.remove(lane)
+    return selected
+
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)
