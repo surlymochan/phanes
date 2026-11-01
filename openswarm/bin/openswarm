@@ -9810,6 +9810,12 @@ def fleet_config():
         repos = host.get("repos", {})
         if not isinstance(repos, dict) or any(not isinstance(p, str) or not p for p in repos.values()):
             raise ValueError(f"invalid repos for fleet host {name}")
+        strategy = host.get("seed_strategy", "fetch")
+        retries = host.get("fetch_retries", 2)
+        if strategy not in ("fetch", "push"):
+            raise ValueError(f"invalid seed_strategy for fleet host {name}")
+        if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+            raise ValueError(f"invalid fetch_retries for fleet host {name}")
         if "openswarm" in host and (not isinstance(host["openswarm"], str) or not host["openswarm"]):
             raise ValueError(f"invalid openswarm path for fleet host {name}")
         fleet_ssh_validate(host, name, kind)
@@ -10504,6 +10510,20 @@ def fleet_lane_assign(host, command):
         print(json.dumps(result, ensure_ascii=False))
         return 1
 
+    base = command[command.index("--base") + 1] if "--base" in command and command.index("--base") + 1 < len(command) else None
+    if base:
+        try:
+            seed_sha = fleet_seed(host, base)
+        except (ValueError, RuntimeError) as error:
+            result = {"ok": False, "status": "seed_failed", "state": "seed_failed", "assigned": False,
+                      "run_id": run_id, "error": str(error), "task_sha256": digest,
+                      "idempotency_key": idempotency_key}
+            print(json.dumps(result, ensure_ascii=False))
+            return 1
+        if host.get("seed_strategy", "fetch") == "push":
+            base_index = command.index("--base")
+            command = command[:base_index + 1] + [seed_sha] + command[base_index + 2:]
+
     source = ("import hashlib, os, sys, tempfile\n"
               "data = sys.stdin.buffer.read()\n"
               "expected = sys.argv[1]\n"
@@ -10559,7 +10579,43 @@ def host_repo(host, name, local=False):
         return path
     if local and host["kind"] == "local":
         return os.getcwd()
-    raise ValueError(f"{host['name']}: no repository mapping for {name}")
+    if host["kind"] == "local":
+        raise ValueError(f"{host['name']}: no repository mapping for {name}; local checkout is unavailable")
+    raise ValueError(f"{host['name']}: host has no repos.{name} mapping; cannot seed")
+
+
+def fleet_seed(host, rev, hosts=None):
+    """Make a requested base commit available in the target host's project checkout."""
+    hosts = fleet_config() if hosts is None else hosts
+    local = fleet_host("local", hosts)
+    strategy = host.get("seed_strategy", "fetch")
+    if strategy not in ("fetch", "push"):
+        raise ValueError(f"invalid seed_strategy for fleet host {host['name']}")
+    remote_repo = host_repo(host, "project", local=host["kind"] == "local")
+    if strategy == "push":
+        local_repo = host_repo(local, "project", local=True)
+        rc, out, _ = host_git(local, local_repo, ["rev-parse", "--verify", "--end-of-options", rev + "^{commit}"])
+        if rc:
+            raise RuntimeError(f"{host['name']}: base {rev} is not a commit in the local project")
+        sha = out.decode().strip()
+        transfer_ref(local, local_repo, sha, host, remote_repo, "refs/openswarm/base/" + sha)
+        return sha
+    retries = host.get("fetch_retries", 2)
+    last_error = b""
+    for attempt in range(retries + 1):
+        rc, _, last_error = host_git(host, remote_repo, ["fetch", "--no-tags", "origin"], timeout=300)
+        if not rc:
+            break
+        if attempt < retries:
+            time.sleep(2 ** attempt)
+    rc, _, _ = host_git(host, remote_repo, ["cat-file", "-e", rev + "^{commit}"])
+    if rc:
+        reason = "fetch failed" if last_error else f"base {rev} is missing after fetch"
+        raise RuntimeError(f"{host['name']}: {reason} after {retries + 1} attempts")
+    rc, out, _ = host_git(host, remote_repo, ["rev-parse", "--verify", "--end-of-options", rev + "^{commit}"])
+    if rc:
+        raise RuntimeError(f"{host['name']}: cannot resolve base {rev}")
+    return out.decode().strip()
 
 
 BUNDLE_EXPORT = """
