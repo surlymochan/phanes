@@ -25,3 +25,22 @@ show reliable headroom.
 
 This note records the configuration and qualitative baseline available in the
 repository; it does not claim a live memory or swap measurement.
+
+## Unprivileged observation and acceptance
+
+The following commands can be run without root before and during the smoke
+task. They select the first generated OpenSwarm lane unit when checking its
+cap:
+
+```sh
+UNIT="$(systemctl list-units --type=service --all 'openswarm*' --no-legend | awk 'NR==1 {print $1}')"
+test -n "$UNIT" && systemctl show "$UNIT" -p MemoryMax --value
+free -h
+swapon --show
+```
+
+Documentation acceptance also requires no root access:
+
+```sh
+test -f docs/fleet-govpn-cx5.md && rg -n 'MemoryMax|swap|CX5' docs/fleet-govpn-cx5.md
+```
