@@ -15,6 +15,11 @@ ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'o
 class LaneBusy(RuntimeError):
     pass
 
+class FleetTopologyDrift(RuntimeError):
+    def __init__(self, details):
+        self.details = details
+        super().__init__('fleet topology drift')
+
 def remote(payload):
     p = subprocess.run(ssh, input=json.dumps(payload), capture_output=True, text=True, timeout=35)
     try: result = json.loads(p.stdout)
@@ -66,6 +71,54 @@ def backend_filters(hosts):
                    for host, backends in filters.items())):
         raise RuntimeError('invalid automatic routing backend configuration')
     return {host: set(backends) for host, backends in filters.items()}
+
+def fleet_topology_policy():
+    """Read optional dispatch topology expectations from the fleet policy."""
+    path = os.environ.get('OPENSWARM_AUTO_TOPOLOGY_POLICY') or os.environ.get('OPENSWARM_FLEET_GUARD_CONFIG')
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as stream:
+            policy = json.load(stream)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'invalid automatic routing topology policy: {error}') from error
+    if not isinstance(policy, dict):
+        raise RuntimeError('invalid automatic routing topology policy')
+    topology = policy.get('topology', policy)
+    if not isinstance(topology, dict):
+        raise RuntimeError('invalid automatic routing topology policy')
+    return topology if any(key in topology for key in ('hosts', 'limits', 'backends', 'backend_allowlist')) else {}
+
+def validate_fleet_snapshot(hosts, filters, snapshots):
+    """Reject a changed fleet before any non-empty task can be claimed."""
+    policy = fleet_topology_policy()
+    if not policy:
+        return
+    expected_hosts = policy.get('hosts', hosts)
+    expected_limits = policy.get('limits', {})
+    expected_backends = policy.get('backends', policy.get('backend_allowlist', filters))
+    actual_hosts = set(snapshots)
+    drift = {}
+    if set(expected_hosts) != actual_hosts:
+        drift['hosts'] = {'expected': sorted(expected_hosts), 'actual': sorted(actual_hosts)}
+    total_expected = expected_limits.get('total') if isinstance(expected_limits, dict) else None
+    if total_expected is not None:
+        actual_total = sum(len(rows) for rows in snapshots.values())
+        if actual_total != total_expected:
+            drift['capacity'] = {'expected': total_expected, 'actual': actual_total}
+    if expected_backends:
+        backend_drift = {}
+        for host in sorted(set(expected_backends) | actual_hosts):
+            if host not in actual_hosts and host == local_host():
+                continue
+            expected = set(expected_backends.get(host, []))
+            actual = {row.get('backend') for row in snapshots.get(host, [])}
+            if expected != actual:
+                backend_drift[host] = {'expected': sorted(expected), 'actual': sorted(actual)}
+        if backend_drift:
+            drift['backends'] = backend_drift
+    if drift:
+        raise FleetTopologyDrift({'code': 'fleet_topology_drift', 'drift': drift})
 
 def fleet_lanes(host):
     process = subprocess.run([cli, 'fleet', 'exec', host, '--', 'lane', 'status'],
@@ -125,16 +178,21 @@ def discovered_lanes():
     local_allowed = filters.get(local_host())
     # An explicit empty local allowlist makes this a Hub-only router.  Do not
     # probe a local lane runtime or require its lanes.json in that layout.
-    rows = [] if local_allowed == set() else [
-        {**row, '_origin': 'local'} for row in local_lanes()
-        if local_allowed is None or row.get('backend') in local_allowed
-    ]
+    snapshots = {}
+    local_snapshot = [] if local_allowed == set() else local_lanes()
+    rows = [{**row, '_origin': 'local'} for row in local_snapshot
+            if local_allowed is None or row.get('backend') in local_allowed]
+    if local_allowed != set():
+        # Keep the status query single-shot; validate the unfiltered snapshot.
+        snapshots[local_host()] = [dict(row) for row in local_snapshot]
     if hosts:
         unavailable = []
         for host in hosts:
             try:
                 allowed = filters.get(host)
-                rows.extend({**row, '_origin': 'fleet', '_fleet_host': host} for row in fleet_lanes(host)
+                snapshot = fleet_lanes(host)
+                snapshots[host] = [dict(row) for row in snapshot]
+                rows.extend({**row, '_origin': 'fleet', '_fleet_host': host} for row in snapshot
                             if allowed is None or row.get('backend') in allowed)
             except (RuntimeError, OSError, subprocess.SubprocessError):
                 unavailable.append(host)
@@ -143,6 +201,7 @@ def discovered_lanes():
         # operational distinction from the Hub handoff journal.
         if len(unavailable) == len(hosts) and not rows:
             raise RuntimeError('fleet lane discovery unavailable: ' + ','.join(unavailable))
+        validate_fleet_snapshot(hosts, filters, snapshots)
         return rows
     try:
         rows.extend({**row, '_origin': 'remote'} for row in remote({'op':'lanes'}))
@@ -255,4 +314,5 @@ def main():
 if __name__ == '__main__':
     try: main()
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
-        print(json.dumps({'ok':False,'error':str(e)})); sys.exit(1)
+        error = e.details if isinstance(e, FleetTopologyDrift) else str(e)
+        print(json.dumps({'ok':False,'error':error})); sys.exit(1)

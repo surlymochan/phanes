@@ -19,6 +19,61 @@ preference = MOD['preference']
 G = MOD['main'].__globals__
 
 class FleetAutoTests(unittest.TestCase):
+    def _topology_environment(self, policy):
+        directory = tempfile.TemporaryDirectory()
+        pathlib.Path(directory.name, 'fleet-capacity.json').write_text(json.dumps(policy))
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'local',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gocc"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"local":[],"gocc":["agy"]}',
+            'OPENSWARM_FLEET_GUARD_CONFIG': str(pathlib.Path(directory.name, 'fleet-capacity.json')),
+        }
+        return directory, environment
+
+    def test_topology_drift_extra_host_is_structured_and_pre_dispatch(self):
+        directory, environment = self._topology_environment(
+            {'hosts': ['gocc', 'extra'], 'limits': {'total': 1}, 'backends': {'gocc': ['agy'], 'extra': ['agy']}})
+        try:
+            with mock.patch.dict(os.environ, environment), mock.patch.dict(G, {
+                    'local_lanes': lambda: [],
+                    'fleet_lanes': lambda host: [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'gemini'}],
+                    'fleet_assign': mock.Mock()}):
+                with self.assertRaisesRegex(RuntimeError, 'fleet topology drift'):
+                    G['discovered_lanes']()
+                G['fleet_assign'].assert_not_called()
+        finally:
+            directory.cleanup()
+
+    def test_topology_drift_capacity_shortfall_is_pre_dispatch(self):
+        directory, environment = self._topology_environment(
+            {'hosts': ['gocc'], 'limits': {'total': 2}, 'backends': {'gocc': ['agy']}})
+        try:
+            with mock.patch.dict(os.environ, environment), mock.patch.dict(G, {
+                    'local_lanes': lambda: [],
+                    'fleet_lanes': lambda host: [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'gemini'}],
+                    'fleet_assign': mock.Mock()}):
+                with self.assertRaisesRegex(RuntimeError, 'fleet topology drift'):
+                    G['discovered_lanes']()
+                G['fleet_assign'].assert_not_called()
+        finally:
+            directory.cleanup()
+
+    def test_topology_snapshot_match_dispatches_matching_backend(self):
+        directory, environment = self._topology_environment(
+            {'hosts': ['gocc'], 'limits': {'total': 1}, 'backends': {'gocc': ['agy']}})
+        assigned = mock.Mock(return_value={'id': 'run-1', 'state': 'queued'})
+        args = ['openswarm-auto', '--type', 'migration', '--difficulty', '4', '--base', 'abcdef0', '--prompt', 'task']
+        try:
+            with mock.patch.object(sys, 'argv', args), mock.patch.dict(os.environ, environment), \
+                    mock.patch.dict(G, {'local_lanes': lambda: [],
+                                        'fleet_lanes': lambda host: [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'gemini'}],
+                                        'fleet_assign': assigned}), contextlib.redirect_stdout(io.StringIO()) as output:
+                MOD['main']()
+            self.assertEqual(json.loads(output.getvalue())['id'], 'run-1')
+            assigned.assert_called_once()
+        finally:
+            directory.cleanup()
+
     def test_remote_discovery_timeout_keeps_local_lane_available(self):
         args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task', '--dry-run']
         lanes = [{'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'}]
