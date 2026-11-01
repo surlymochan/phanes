@@ -33,8 +33,10 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Status snapshot**: `~/phanes-ctl/autodispatch/lanes-status.json` (inspect with `~/phanes-ctl/bin/lane-autodispatch-status`)
      It contains `_busy` (lanes currently assigned work), `_ready` (open GH
      `lane-ready` issues not marked `in-progress`, `lane-pr`, or
-     `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
-     is the dispatchable count after `_blocked` is removed.
+     `lane-failed`), `_blocked` (ready issues waiting on `依赖`), and
+     `_stale_stripped_n` (the process-cumulative count of stale-search-index
+     candidates removed before dispatch); `_ready` is the dispatchable count
+     after `_blocked` is removed.
    - **Task upload contract (Refs #920)**: dispatch uploads the generated task
      over the existing SSH connection with stdin (`ssh ... 'cat > /tmp/task-*.md'`).
      A standalone `scp` upload is forbidden because it is unreliable through
@@ -155,6 +157,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-fetch-transient-class.py` — offline #986 contract check. It asserts `bad pack header` and `fetch-pack: unexpected disconnect` stderr samples remain transient and retryable within the harvest bound.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
+- `python3 tools/check-ad-stale-obs.py` — offline #1022 contract check using fake lane state; asserts `_stale_stripped_n` exists and is a non-negative integer.
 
 ### Roll back a failed assign (Refs #968)
 
