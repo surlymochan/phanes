@@ -46,6 +46,49 @@ class HubBridgeTests(unittest.TestCase):
             self.assertTrue(MOD['mapped']('run-1','info'))
             self.assertIn('Executor host: gores1',json.loads(output.getvalue())['result']['result']['summary'])
 
+    def test_bus_worker_pid_state_recovers_stale_pid_and_is_idempotent(self):
+        command = [sys.executable, '-c', 'import time; time.sleep(30)']
+        exited = subprocess.Popen([sys.executable, '-c', 'pass'])
+        exited.wait()
+        with mock.patch.dict(os.environ, {'OPENSWARM_CTL_STATE_DIR': str(self.path / 'ctl-state')}):
+            state_path = MOD['worker_state_path']('bus-worker')
+            state_path.write_text(json.dumps({'pid': exited.pid, 'started_at': 1}))
+            first = MOD['start_bus_worker'](command)
+            def stop_worker():
+                if MOD['worker_alive'](first['pid'], first['started_at']):
+                    os.kill(first['pid'], 15)
+                    os.waitpid(first['pid'], 0)
+            self.addCleanup(stop_worker)
+            self.assertTrue(MOD['worker_alive'](first['pid'], first['started_at']))
+            self.assertGreater(first['started_at'], 1)
+            self.assertEqual(MOD['start_bus_worker'](command)['pid'], first['pid'])
+
+    def test_bus_worker_clears_nonpositive_pid_and_starts_worker(self):
+        command = [sys.executable, '-c', 'import time; time.sleep(30)']
+        with mock.patch.dict(os.environ, {'OPENSWARM_CTL_STATE_DIR': str(self.path / 'ctl-state')}):
+            state_path = MOD['worker_state_path']('bus-worker')
+            for invalid_pid in (0, -1):
+                state_path.write_text(json.dumps({'pid': invalid_pid, 'started_at': 1}))
+                state = MOD['start_bus_worker'](command)
+                self.assertGreater(state['pid'], 1)
+                self.assertNotEqual(state['pid'], invalid_pid)
+                self.assertGreater(state['started_at'], 1)
+                os.kill(state['pid'], 15)
+                os.waitpid(state['pid'], 0)
+
+    def test_bus_worker_rejects_reused_pid_with_different_start_time(self):
+        command = [sys.executable, '-c', 'import time; time.sleep(30)']
+        live = subprocess.Popen(command)
+        with mock.patch.dict(os.environ, {'OPENSWARM_CTL_STATE_DIR': str(self.path / 'ctl-state')}):
+            state_path = MOD['worker_state_path']('bus-worker')
+            state_path.write_text(json.dumps({'pid': live.pid, 'started_at': 1}))
+            state = MOD['start_bus_worker'](command)
+            self.assertNotEqual(state['pid'], live.pid)
+            os.kill(state['pid'], 15)
+            os.waitpid(state['pid'], 0)
+        live.terminate()
+        live.wait()
+
     def test_local_router_uses_existing_fleet_for_remote_lifecycle(self):
         response = {'id': 'gocc-a1', 'result': {'result': {'summary': 'done'}}}
         command = mock.Mock(return_value=response)

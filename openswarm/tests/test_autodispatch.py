@@ -3,7 +3,11 @@ import json
 import os
 import pathlib
 import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest import mock
 
 
 AUTODISPATCH = pathlib.Path(__file__).parents[2] / "tools" / "lane-autodispatch" / "autodispatch.py"
@@ -65,6 +69,50 @@ class GitSSHCommandTests(unittest.TestCase):
                 os.environ.pop(autodispatch.JUMP_HOSTS_ENV, None)
             else:
                 os.environ[autodispatch.JUMP_HOSTS_ENV] = old
+    def test_autodispatch_pid_state_restarts_stale_pid_and_skips_live_pid(self):
+        command = [sys.executable, "-c", "import time; time.sleep(30)"]
+        exited = subprocess.Popen([sys.executable, "-c", "pass"])
+        exited.wait()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_CTL_STATE_DIR": directory}):
+            state_path = pathlib.Path(autodispatch.worker_state_path())
+            state_path.write_text(json.dumps({"pid": exited.pid, "started_at": 1}))
+            first = autodispatch.start_autodispatch(command)
+            def stop_worker():
+                if autodispatch.worker_alive(first["pid"], first["started_at"]):
+                    os.kill(first["pid"], 15)
+                    os.waitpid(first["pid"], 0)
+            self.addCleanup(stop_worker)
+            self.assertTrue(autodispatch.worker_alive(first["pid"], first["started_at"]))
+            self.assertGreater(first["started_at"], 1)
+            self.assertEqual(autodispatch.start_autodispatch(command)["pid"], first["pid"])
+
+    def test_autodispatch_clears_nonpositive_pid_and_starts_worker(self):
+        command = [sys.executable, "-c", "import time; time.sleep(30)"]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_CTL_STATE_DIR": directory}):
+            state_path = pathlib.Path(autodispatch.worker_state_path())
+            for invalid_pid in (0, -1):
+                state_path.write_text(json.dumps({"pid": invalid_pid, "started_at": 1}))
+                state = autodispatch.start_autodispatch(command)
+                self.assertGreater(state["pid"], 1)
+                self.assertGreater(state["started_at"], 1)
+                os.kill(state["pid"], 15)
+                os.waitpid(state["pid"], 0)
+
+    def test_autodispatch_rejects_reused_pid_with_different_start_time(self):
+        command = [sys.executable, "-c", "import time; time.sleep(30)"]
+        live = subprocess.Popen(command)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_CTL_STATE_DIR": directory}):
+            state_path = pathlib.Path(autodispatch.worker_state_path())
+            state_path.write_text(json.dumps({"pid": live.pid, "started_at": 1}))
+            state = autodispatch.start_autodispatch(command)
+            self.assertNotEqual(state["pid"], live.pid)
+            os.kill(state["pid"], 15)
+            os.waitpid(state["pid"], 0)
+        live.terminate()
+        live.wait()
 
 
 if __name__ == "__main__":
