@@ -2,6 +2,12 @@
 """Fake-queue proof for backend starvation fallback (Refs #232)."""
 import re
 import unittest
+import importlib.util
+from pathlib import Path
+
+SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
+AUTODISPATCH = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(AUTODISPATCH)
 
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
 
@@ -62,6 +68,13 @@ class BackendFallbackTest(unittest.TestCase):
     def test_exact_pin_always(self):
         item = {"n": 9, "title": "x", "body": "socketpair", "prio": 1, "backend": "codex", "strict": True}
         self.assertTrue(can_take("codex", item))
+
+    def test_harvest_fetch_retry_is_bounded_and_matches_ssh_disconnects(self):
+        self.assertTrue(AUTODISPATCH.should_retry_harvest_fetch("ssh: Connection closed", 1))
+        self.assertTrue(AUTODISPATCH.should_retry_harvest_fetch("write: broken pipe", 2))
+        self.assertFalse(AUTODISPATCH.should_retry_harvest_fetch("ssh: Connection closed", 3))
+        self.assertFalse(AUTODISPATCH.should_retry_harvest_fetch("fatal: repository not found", 1))
+        self.assertEqual(AUTODISPATCH.HARVEST_FETCH_MAX_ATTEMPTS, 3)
 
 if __name__ == "__main__":
     unittest.main()

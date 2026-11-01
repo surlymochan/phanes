@@ -21,6 +21,8 @@ PRIO = {"p0": 0, "p1": 1, "p2": 2}
 SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ControlMaster=auto",
         "-o", f"ControlPath={HOME}/.ssh/cm/%r@%h:%p", "-o", "ControlPersist=600"]
 BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
+HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
+HARVEST_FETCH_RETRY_DELAY = 20
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
@@ -167,6 +169,11 @@ def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
     return ["git", "-c", f"core.sshCommand={ssh_command}", "-C", local_repo,
             "fetch", "-q", remote, f"+{branch}:refs/fleet/{lane}"]
 
+def should_retry_harvest_fetch(error, attempt, max_attempts=HARVEST_FETCH_MAX_ATTEMPTS):
+    """Return whether a failed harvest fetch is transient and still within its retry bound."""
+    transient = re.search(r"Permission denied|Connection closed|broken pipe|timed out|banner", error or "", re.I)
+    return bool(transient and attempt < max_attempts)
+
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
 
@@ -175,9 +182,14 @@ def finish(lane, cfg, st, info, state):
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(SSHO, LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
-        rc, _, err = sh(fetch, timeout=180)
-        if rc and re.search(r"Permission denied|Connection closed|timed out|banner", err):
-            log(f"{lane} #{n} fetch transient ({err.strip()[-90:]}); retrying in 20s", brain=False); time.sleep(20); rc, _, err = sh(fetch, timeout=180)
+        for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
+            rc, _, err = sh(fetch, timeout=180)
+            if not rc: break
+            if should_retry_harvest_fetch(err, attempt):
+                log(f"{lane} #{n} fetch failed attempt {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} ({err.strip()[-90:]}); retrying in {HARVEST_FETCH_RETRY_DELAY}s", brain=False)
+                time.sleep(HARVEST_FETCH_RETRY_DELAY)
+            else:
+                log(f"{lane} #{n} fetch failed after {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} attempts ({err.strip()[-120:]})", brain=False)
         if not rc: rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return log(f"{lane} #{n} run {run}: push failed: {err.strip()[-200:]}") or False
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])

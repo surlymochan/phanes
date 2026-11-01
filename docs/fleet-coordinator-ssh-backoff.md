@@ -61,6 +61,10 @@
 
 ## 3. 建议观察命令
 
+### Harvest fetch 的有界重试
+
+`tools/lane-autodispatch/autodispatch.py` 在收集（harvest）完成分支时，对 `Connection closed`、`broken pipe`、banner 超时等 SSH 瞬时错误最多尝试 **3 次**（初次 + 2 次重试），每次间隔 20 秒；达到上限后停止重试，不会无限等待。日志会记录每次失败的 `attempt x/3`，并在放弃时记录 `failed after x/3 attempts`。非瞬时错误不重试。
+
 在高并发运行或疑似发生连接退避时，应通过以下两组核心命令观察系统状态：
 
 ### 3.1 观察派发与 Lane 状态（lane-autodispatch-status）
