@@ -75,6 +75,46 @@ class ResumeTests(unittest.TestCase):
         self.assertIn(str(self.runs / "finished" / "result.json"), output.getvalue())
         self.assertIn("partial", output.getvalue())
 
+    def test_resume_empty_status_is_empty_and_stable_in_json_and_text(self):
+        self.run_record("empty", state=None)
+        (self.runs / "empty" / "status.json").write_text("{}")
+        with mock.patch.object(xs, "lane_status_rows", return_value=[]), \
+                mock.patch.object(xs, "pid_alive", return_value=False):
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                xs.cmd_resume(argparse.Namespace(since_hours=6, json=True))
+            text_output = io.StringIO()
+            with contextlib.redirect_stdout(text_output):
+                xs.cmd_resume(argparse.Namespace(since_hours=6, json=False))
+        result = json.loads(json_output.getvalue())
+        self.assertEqual(result["active_runs"], [])
+        self.assertEqual(result["busy_lanes"], [])
+        self.assertEqual(result["recent_finished"], [])
+        self.assertIn("Active runs:\n  none", text_output.getvalue())
+        self.assertIn("Recently finished (last 6 hours):\n  none", text_output.getvalue())
+
+    def test_resume_finished_records_sort_ties_and_keep_result_hints(self):
+        now = xs.NOW()
+        for run_id in ("finished-b", "finished-a"):
+            self.run_record(run_id, state="finished", finished=now - 60, status="done")
+        with mock.patch.object(xs, "lane_status_rows", return_value=[]):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                xs.cmd_resume(argparse.Namespace(since_hours=6, json=True))
+        result = json.loads(output.getvalue())
+        self.assertEqual([row["id"] for row in result["recent_finished"]], ["finished-a", "finished-b"])
+        self.assertEqual([row["result_path"] for row in result["recent_finished"]], [
+            str(self.runs / "finished-a" / "result.json"), str(self.runs / "finished-b" / "result.json")])
+
+    def test_resume_missing_optional_time_fields_does_not_break_live_output(self):
+        self.run_record("no-times", state="queued", runner_pid=101, title="task")
+        with mock.patch.object(xs, "lane_status_rows", return_value=[]), \
+                mock.patch.object(xs, "pid_alive", return_value=True):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                xs.cmd_resume(argparse.Namespace(since_hours=6, json=False))
+        self.assertIn("openswarm watch no-times", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
