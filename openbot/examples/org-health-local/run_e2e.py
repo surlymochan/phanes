@@ -43,6 +43,9 @@ STEP_ROLES = {
     '检查': 'checker',
     '审查': 'review',
 }
+# 角色脚本缺失时错误里点名的角色名：步骤名 → 角色名。
+# 中文步骤名补上英文角色名，其余步骤名本身就是角色名。
+ROLE_NAMES = {'检查': 'Checker', '审查': 'Reviewer'}
 # 错误文件里保留的子进程输出字节上限：只留最近的一段，避免输出过大撑爆产物。
 CAPTURE_LIMIT = 8192
 
@@ -276,6 +279,24 @@ def resolve_example_path(path):
     return path if path.is_absolute() else ROOT / path
 
 
+def missing_script(command):
+    """返回命令里缺失的角色脚本路径；脚本存在或不是本地脚本时返回 None。
+
+    角色脚本按示例目录解析：相对路径先落到示例目录再检查，
+    提示里给出实际查找的路径。
+    """
+    script = Path(command[1]) if command[0] == sys.executable and len(command) > 1 else None
+    if script is None:
+        return None
+    resolved = resolve_script(script)
+    return None if resolved.is_file() else resolved
+
+
+def missing_script_label(name):
+    """返回角色脚本缺失时的错误标签：中文步骤名补上英文角色名。"""
+    return f'{ROLE_NAMES.get(name, name)} 脚本文件不存在'
+
+
 def forward_output(source, sink, buffer):
     """转发子进程输出：一边写回当前流，一边留最近的一段副本。
 
@@ -355,13 +376,9 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
     try:
         # Python 将缺失的脚本作为退出码报告，而不是抛出异常；先检查本地角色脚本，
         # 这样错误能归属到具体步骤，避免只留下子进程的错误输出。
-        script = Path(command[1]) if command[0] == sys.executable and len(command) > 1 else None
-        if script is not None:
-            # 角色脚本按示例目录解析：相对路径先落到示例目录再检查，
-            # 提示里给出实际查找的路径。
-            resolved = resolve_script(script)
-            if not resolved.is_file():
-                raise FileNotFoundError(2, 'No such file or directory', str(resolved))
+        missing = missing_script(command)
+        if missing is not None:
+            raise FileNotFoundError(2, 'No such file or directory', str(missing))
         process = subprocess.Popen(command,
                                    stdout=(subprocess.PIPE if capture_stdout else stdout),
                                    stderr=(subprocess.PIPE if capture_stderr else stderr),
@@ -419,11 +436,12 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
         timings.append({'name': name, 'command': list(map(str, command)),
                         'duration_seconds': elapsed, 'exit_code': 2})
         print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
-        print(f'步骤失败: {name} (文件不存在: {error.filename})', file=sys.stderr, flush=True)
+        # 角色脚本缺失时点名角色与脚本路径：调用方不必再猜是哪一步的角色没跑起来。
+        text = f'步骤失败: {name} ({missing_script_label(name)}: {error.filename})'
+        print(text, file=sys.stderr, flush=True)
         if error_path is not None:
             write_step_error(error_path, command, 2, stdout_capture, stderr_capture)
-        return False, failure_reason(
-            f'步骤失败: {name} (文件不存在: {error.filename})', stderr_capture), False
+        return False, failure_reason(text, stderr_capture), False
     elapsed = time.monotonic() - started
     # 步骤输出写进报告时校验编码：审查器输出不可解码时也算这一步失败，
     # 免得报告已损坏却仍然报成功。
@@ -542,40 +560,53 @@ def main(argv=None):
                 review_results.unlink(missing_ok=True)
             except OSError:
                 pass
-            report = open_report(report_path)
-            if report is None:
+            error_path = workdir / STEP_ERROR_DIR / 'review.json'
+            # 审查脚本缺失：审查从未启动，不写出空的审查报告，只点名角色与脚本路径。
+            missing = missing_script(review)
+            if missing is not None:
+                ok, error, started = run_step('审查', review, timings, timeout=args.timeout,
+                                              error_path=error_path)
+                failed.append('审查')
+                step_errors.append(error)
+                step_error_files.append(str(error_path))
                 status = 1
-                problems.append(f'审查报告无法写入: {report_path}')
+                print('review 角色失败：审查脚本不存在，未写出审查报告',
+                      file=sys.stderr, flush=True)
+                print(f'审查脚本: {missing}', file=sys.stderr, flush=True)
             else:
-                with report:
-                    # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
-                    error_path = workdir / STEP_ERROR_DIR / 'review.json'
-                    ok, error, started = run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT,
-                                                 output_path=report_path, timeout=args.timeout,
-                                                 error_path=error_path)
-                    # 审查进程真的起来了才算调用过审查角色。
-                    reviewer_called = started
-                    if not ok:
-                        failed.append('审查')
-                        step_errors.append(f'{error}\n审查报告: {report_path}'.strip())
-                        step_error_files.append(str(error_path))
-                        status = 1
-                        # 同时标出稳定的角色名，便于调用方不依赖本地化步骤名定位 review 失败。
-                        print('review 角色失败：审查报告已保留，请检查该报告和 timings.json',
-                              file=sys.stderr, flush=True)
+                report = open_report(report_path)
+                if report is None:
+                    status = 1
+                    problems.append(f'审查报告无法写入: {report_path}')
+                else:
+                    with report:
+                        # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
+                        ok, error, started = run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT,
+                                                     output_path=report_path, timeout=args.timeout,
+                                                     error_path=error_path)
+                        # 审查进程真的起来了才算调用过审查角色。
+                        reviewer_called = started
+                        if not ok:
+                            failed.append('审查')
+                            step_errors.append(f'{error}\n审查报告: {report_path}'.strip())
+                            step_error_files.append(str(error_path))
+                            status = 1
+                            # 同时标出稳定的角色名，便于调用方不依赖本地化步骤名定位 review 失败。
+                            print('review 角色失败：审查报告已保留，请检查该报告和 timings.json',
+                                  file=sys.stderr, flush=True)
+                            print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
+                    # 审查结论汇总：发现数、各严重级计数与是否阻断写进结果 JSON。
+                    review_summary = summarize_review(review_results)
+                    if review_summary is not None and review_summary['blocking']:
+                        message = describe_blocking(review_summary)
+                        print(message, file=sys.stderr, flush=True)
                         print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
-                # 审查结论汇总：发现数、各严重级计数与是否阻断写进结果 JSON。
-                review_summary = summarize_review(review_results)
-                if review_summary is not None and review_summary['blocking']:
-                    message = describe_blocking(review_summary)
-                    print(message, file=sys.stderr, flush=True)
-                    print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
-                    print(f'审查结果: {review_results}', file=sys.stderr, flush=True)
-                    if status == 0:
-                        # 审查角色自身返回 0 但结论里有阻断级发现：同样判失败，不误报成功。
-                        status = 1
-                        failed.append('审查')
-                        step_errors.append(message)
+                        print(f'审查结果: {review_results}', file=sys.stderr, flush=True)
+                        if status == 0:
+                            # 审查角色自身返回 0 但结论里有阻断级发现：同样判失败，不误报成功。
+                            status = 1
+                            failed.append('审查')
+                            step_errors.append(message)
     finally:
         if failed:
             # 每步耗时可能缺失（耗时记录写不出来），先点名失败步骤，

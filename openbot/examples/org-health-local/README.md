@@ -252,6 +252,8 @@ ls "$workdir/brief.json" "$workdir/diagnosis.json" "$workdir/dist" \
 `brief.json`/`diagnosis.json`、`--raw` 目录、bundle 或 `dist/`。若已进入审查，查看
 `$workdir/review.md` 中的 FAIL 条目；上游失败时不会调用审查角色，也不会生成该报告。
 
+角色脚本路径不存在时同样以非零退出，并在 stderr 点名角色与该路径（例如 `步骤失败: 审查 (Reviewer 脚本文件不存在: <path>)`）；失败步骤之前已生成的产物保留在工作目录，审查步骤未启动时不会写出空的 `review.md`。
+
 从仓库根目录运行、只使用 Python 标准库的测试命令：
 
 ```bash

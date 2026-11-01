@@ -1113,6 +1113,46 @@ time.sleep(30)
         self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
         self.assertEqual(timings[-1]['exit_code'], 0)
 
+    def test_missing_reviewer_script_reports_role_error_and_keeps_upstream_artifacts(self):
+        """缺少 --reviewer 脚本时非零退出，错误点名 Reviewer 与脚本路径，上游产物仍可读。"""
+        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+            self.write_stub(path, role, probe=(role in ('da', 'builder')))
+        (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
+        self.bundle.write_text('missing-reviewer-bundle', encoding='utf-8')
+        missing_reviewer = self.root / 'missing-reviewer.py'
+        command = self.command() + ['--review', '--reviewer', str(missing_reviewer)]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # 失败结果明确：退出码非 0，错误点名 Reviewer 角色与缺失的脚本路径
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        self.assertIn('Reviewer', result.stderr)
+        self.assertIn(str(missing_reviewer), result.stderr)
+        self.assertIn('失败步骤: 审查', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 失败不误报为成功：不再打印成功路径才有的预览命令
+        self.assertNotIn('预览命令', result.stdout)
+        # 审查者从未被执行，审查步骤未启动也就不写出空的审查记录
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder', 'checker'])
+        self.assertFalse((self.workdir / REVIEW_REPORT).exists())
+        # 上游产物仍可读：任务书、诊断快照与站点都保留在工作目录
+        self.assertEqual(json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8')), {})
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
+        self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
+                         'missing-reviewer-bundle')
+        # 失败步骤在耗时记录里可核对
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertEqual(timings[-1]['exit_code'], 2)
+        # 状态文件记录失败角色为 review，并说明审查角色没有被调用
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'review')
+        self.assertFalse(status['reviewer_called'])
+        self.assertIn('Reviewer', status['error'])
+
     def test_workdir_occupied_by_file_reports_readable_error(self):
         """工作目录被同名文件占用时给出可读提示并非零退出，不裸抛 Traceback。"""
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
