@@ -4,6 +4,7 @@
 """
 import http.client
 import io
+import json
 import socket
 import subprocess
 import sys
@@ -204,6 +205,12 @@ class LocalServeBoundaryTests(unittest.TestCase):
         status, body = self.request('/data/diagnosis.json', port=port)
         self.assertEqual(status, 200)
         self.assertEqual(body, BUNDLED_DATA.read_bytes())
+
+    def test_diagnosis_api_matches_builder_data_fields(self):
+        status, body = self.request('/api/diagnosis')
+        self.assertEqual(status, 200)
+        expected = json.loads(self.data.read_text(encoding='utf-8'))
+        self.assertEqual(json.loads(body), expected)
 
 
 class DistRootServeTests(unittest.TestCase):
@@ -778,6 +785,25 @@ class MissingDiagnosisDataTests(unittest.TestCase):
             index_resp = conn.getresponse()
             self.assertEqual(index_resp.status, 200)
             self.assertEqual(index_resp.read(), self.index.read_bytes())
+        finally:
+            conn.close()
+
+    def test_diagnosis_api_missing_file_returns_stable_404_json(self):
+        args = serve.parse_args(['--port', '0', '--root', str(self.dist)])
+        server = serve.create_server(args.port, args.data, root=args.root)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_address[1], timeout=5)
+        try:
+            conn.request('GET', '/api/diagnosis')
+            response = conn.getresponse()
+            self.assertEqual(response.status, 404)
+            self.assertEqual(response.getheader('Content-Type'), 'application/json; charset=utf-8')
+            self.assertEqual(json.loads(response.read()), {'error': 'diagnosis data not found'})
         finally:
             conn.close()
 
