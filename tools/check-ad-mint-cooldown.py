@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract check for the seed-mint burst cooldown (Refs #1243).
+"""Offline contract check for the seed-mint burst cooldown (Refs #1260).
 
 The small model below mirrors the control-plane guard: a successful seed mint
 records its timestamp, and another mint is skipped until ``MINT_COOLDOWN``
