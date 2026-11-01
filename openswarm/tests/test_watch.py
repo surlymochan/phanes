@@ -81,6 +81,24 @@ class WatchTests(unittest.TestCase):
             self.assertEqual(messages.feed(event), [])
         self.assertEqual(messages.flush(), [])
 
+    def test_incomplete_assistant_event_keeps_text_and_serializable_snapshot(self):
+        messages = xs.WatchMessages()
+        events = [
+            update("agent_message_chunk", content={"type": "text", "text": "kept"}),
+            update("agent_message_chunk", content={"type": "text", "text": ["skip"]}),
+            {"id": "prompt-incomplete", "result": {"stopReason": "end_turn"}},
+            {"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": " final"},
+                {"type": "text"},
+            ]}},
+        ]
+
+        rows = [row for event in events for row in messages.feed(event)]
+
+        self.assertEqual(rows, [("msg", "kept"), ("msg", " final")])
+        self.assertEqual(json.loads(json.dumps({"events": rows, "lane": None})),
+                         {"events": [["msg", "kept"], ["msg", " final"]], "lane": None})
+
     def test_quiet_keeps_alerts_and_heartbeat_has_lane_diff_and_last_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

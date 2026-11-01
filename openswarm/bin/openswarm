@@ -10016,8 +10016,9 @@ class WatchMessages:
             self.prompt_id = event.get("id")
         if method == "session/update" and kind == "agent_message_chunk":
             content = update.get("content") or {}
-            if isinstance(content, dict) and content.get("type") == "text":
-                self.chunks.append(content.get("text") or "")
+            if (isinstance(content, dict) and content.get("type") == "text"
+                    and isinstance(content.get("text"), str)):
+                self.chunks.append(content["text"])
             return []
         if not method and ("result" in event or "error" in event) and "id" in event:
             # Lane logs contain incoming replies, including session/new and model selection.
@@ -10033,8 +10034,8 @@ class WatchMessages:
             return []
         if event.get("type") == "stream_event":
             delta = (event.get("event") or {}).get("delta") or {}
-            if delta.get("type") == "text_delta":
-                self.chunks.append(delta.get("text") or "")
+            if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                self.chunks.append(delta["text"])
             return []
         boundary = (method == "session/update" and kind in ("tool_call", "tool_call_update"))
         boundary = boundary or event.get("type") in ("tool_call", "result")
