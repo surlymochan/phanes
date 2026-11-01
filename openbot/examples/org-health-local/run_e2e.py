@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -45,6 +46,12 @@ def parse_args(argv=None):
     parser.add_argument('--reviewer', type=Path, default=ROOT / 'review' / 'cross_check.py',
                         help='审查脚本路径（相对当前工作目录解析；默认使用示例目录内的绝对路径）')
     parser.add_argument('--review', action='store_true', help=f'检查后运行交叉审阅并写入 {REVIEW_REPORT}')
+    parser.add_argument(
+        '--timeout',
+        type=float,
+        default=None,
+        help='每个角色子进程的超时时间（秒；省略表示不限制）',
+    )
     parser.add_argument(
         '--review-report',
         type=Path,
@@ -112,7 +119,7 @@ def resolve_script(script):
     return script if script.is_absolute() else Path.cwd() / script
 
 
-def run_step(name, command, timings, stdout=None, stderr=None, output_path=None):
+def run_step(name, command, timings, stdout=None, stderr=None, output_path=None, timeout=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
     try:
@@ -125,7 +132,34 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None)
             resolved = resolve_script(script)
             if not resolved.is_file():
                 raise FileNotFoundError(2, 'No such file or directory', str(resolved))
-        result = subprocess.run(command, stdout=stdout, stderr=stderr)
+        process = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # 每个角色都是新会话的组长；杀整个进程组，避免角色再派生的进程继续
+            # 持有报告/管道或让编排器在超时后假成功。
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            elapsed = time.monotonic() - started
+            timings.append({'name': name, 'command': list(map(str, command)),
+                            'duration_seconds': elapsed, 'exit_code': process.returncode,
+                            'timeout': True,
+                            'reason': f'超时（超过 {timeout:g} 秒）'})
+            print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
+            print(f'步骤失败: {name} (超过 {timeout:g} 秒，已回收进程组)',
+                  file=sys.stderr, flush=True)
+            return False
+        result = process
     except FileNotFoundError as error:
         elapsed = time.monotonic() - started
         timings.append({'name': name, 'command': list(map(str, command)),
@@ -209,7 +243,7 @@ def main(argv=None):
     failed = []
     try:
         for name, command in commands:
-            if not run_step(name, command, timings):
+            if not run_step(name, command, timings, timeout=args.timeout):
                 failed.append(name)
                 status = 1
                 break
@@ -222,7 +256,7 @@ def main(argv=None):
                 with report:
                     # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
                     if not run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT,
-                                   output_path=report_path):
+                                   output_path=report_path, timeout=args.timeout):
                         failed.append('审查')
                         status = 1
                         print(f'审查报告: {report_path}', file=sys.stderr, flush=True)

@@ -33,7 +33,7 @@ class RunE2EArgumentContractTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         for option in ('--workdir', '--raw', '--bundle', '--boss', '--da', '--builder', '--checker',
-                       '--reviewer', '--review'):
+                       '--reviewer', '--review', '--timeout'):
             self.assertIn(option, result.stdout)
 
     def test_help_describes_custom_path_options_relative_to_cwd(self):
@@ -197,6 +197,37 @@ elif role == 'reviewer':
             self.assertIsInstance(item['command'], list)
             self.assertGreaterEqual(item['duration_seconds'], 0)
             self.assertEqual(item['exit_code'], 0)
+
+    def test_timeout_kills_role_group_and_preserves_real_upstream_artifacts(self):
+        """真实 Boss/DA/Builder 完成后，阻塞检查器超时仍保留上游产物并写完整 timings。"""
+        blocker = self.root / 'blocking_checker.py'
+        blocker.write_text('''import pathlib, sys, time
+pathlib.Path(sys.argv[1], "checker-started").write_text("started", encoding="utf-8")
+time.sleep(30)
+''', encoding='utf-8')
+        command = [
+            sys.executable, str(RUNNER), '--workdir', str(self.workdir),
+            '--raw', str(ROOT / 'da' / 'sample-raw'),
+            '--bundle', str(ROOT / 'demo' / 'vendor' / 'app.bundle.js'),
+            '--boss', str(ROOT / 'boss' / 'make_brief.py'),
+            '--da', str(ROOT / 'da' / 'build_diagnosis.py'),
+            '--builder', str(ROOT / 'builder' / 'build_site.py'),
+            '--checker', str(blocker), '--timeout', '0.2',
+        ]
+
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.workdir / 'brief.json').is_file())
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+        self.assertTrue((self.workdir / 'dist' / 'checker-started').is_file())
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查'])
+        self.assertTrue(timings[-1]['timeout'])
+        self.assertNotEqual(timings[-1]['exit_code'], 0)
+        self.assertIn('超时', timings[-1]['reason'])
+        self.assertNotIn('[审查] 命令', result.stdout)
 
     def test_timings_are_written_when_a_step_fails(self):
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
