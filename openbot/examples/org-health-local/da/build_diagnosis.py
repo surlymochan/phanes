@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import csv
+import io
 import json
 import math
 import re
@@ -268,7 +269,7 @@ def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
         text = path.read_text(encoding="utf-8-sig")
     except OSError as cause:
         raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
-    reader = csv.DictReader(text.splitlines())
+    reader = csv.DictReader(io.StringIO(text, newline=""))
     fieldnames = reader.fieldnames or []
     missing = [name for name in required if name not in fieldnames]
     if missing:
