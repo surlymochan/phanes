@@ -35,7 +35,10 @@ EXIT_USAGE = 2
 
 SCHEMA_VERSION = 4
 DEFAULT_MONTH = "2026-09"
-MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+# 观察月份：ASCII 数字的 YYYY-MM，月份在 01-12 之间。
+# 用 \A/\Z 而不是 ^/$：$ 允许结尾换行，"2026-01\n" 会被误判成合法月份；
+# 用 [0-9] 而不是 \d：\d 匹配 Unicode 数字，全角“２０２６-09”会被误判成合法月份。
+MONTH_PATTERN = re.compile(r"\A[0-9]{4}-(0[1-9]|1[0-2])\Z")
 
 # 站点期望的四个指标标题，顺序与 data/diagnosis.json 的 metrics 一致。
 METRIC_TITLES = (
@@ -179,13 +182,22 @@ def build_definitions(keys: list[str], month: str) -> dict:
     }
 
 
+def check_month(month: str) -> str:
+    """校验观察月份并原样返回；不满足 YYYY-MM 时抛出 ValueError。
+
+    月份越界（00、13）与格式非法都走这一处检查，命令行据此以状态码 2 退出，
+    错误信息同时点明“观察月份”与 YYYY-MM 约束。
+    """
+    if not isinstance(month, str) or not MONTH_PATTERN.match(month):
+        raise ValueError(f"观察月份必须是 YYYY-MM（月份在 01-12 之间）：{month}")
+    return month
+
+
 def build_brief(
     goals: list[str] | None = None, month: str | None = None, fx: float | None = None
 ) -> dict:
     """生成任务书。goals 覆盖“目标”，month 覆盖观察月份。"""
-    observed = DEFAULT_MONTH if month is None else month
-    if not MONTH_PATTERN.match(observed):
-        raise ValueError(f"观察月份必须是 YYYY-MM（月份在 01-12 之间）：{observed}")
+    observed = DEFAULT_MONTH if month is None else check_month(month)
     keys = period_keys(observed)
     definitions = build_definitions(keys, observed)
     if fx is not None:
