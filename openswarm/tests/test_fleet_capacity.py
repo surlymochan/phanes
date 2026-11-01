@@ -884,3 +884,98 @@ class FleetTopologyTests(unittest.TestCase):
         self.assertIn('limits', answer['error'])
         self.assertNotIn('Traceback', process.stdout)
         self.assertNotIn('Traceback', process.stderr)
+
+    def test_valid_nonempty_topology_success_path(self):
+        """A valid non-empty topology successfully admits and limits registered hosts."""
+        topology = {
+            'hosts': ['ib1', 'ib2', 'gocc'],
+            'limits': {'total': 5, 'host:ib1': 1, 'host:ib2': 2, 'host:gocc': 2,
+                       'pi': 4, 'minimax-cn': 4, 'codex': 2},
+        }
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps(topology))
+        # First acquire on ib1 succeeds.
+        rc, out = self.call('ib1', op='acquire', token='1' * 32, run_id='run-1',
+                            backend='pi', provider='minimax-cn')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertTrue(out['admitted'])
+
+        # Second acquire on ib1 is blocked by host cap.
+        rc, out = self.call('ib1', op='acquire', token='2' * 32, run_id='run-2',
+                            backend='pi', provider='minimax-cn')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertFalse(out['admitted'])
+        self.assertEqual(out['blocked'], ['host:ib1'])
+
+        # Acquire on ib2 succeeds under its separate host cap.
+        rc, out = self.call('ib2', op='acquire', token='3' * 32, run_id='run-3',
+                            backend='codex', provider=None)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertTrue(out['admitted'])
+
+        # Status check shows active reservations.
+        rc, out = self.call('gocc', op='status')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertEqual(len(out['reservations']), 2)
+
+        # Release frees the capacity slot.
+        rc, out = self.call('ib1', op='release', token='1' * 32, run_id='run-1')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['released'])
+
+    def test_topology_referencing_unknown_host_fails_closed_and_names_host(self):
+        """A topology referencing an unknown host in limits must fail closed and name the host."""
+        topology = {
+            'hosts': ['ib1', 'gocc'],
+            'limits': {'total': 8, 'host:ib1': 2, 'host:unknownhost': 2},
+        }
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps(topology))
+        process = subprocess.run([str(BIN), 'ib1'], input=json.dumps({'op': 'status'}), text=True,
+                                 capture_output=True, env=self.env, timeout=15)
+        self.assertNotEqual(process.returncode, 0)
+        answer = json.loads(process.stdout)
+        self.assertFalse(answer['ok'])
+        self.assertIn('invalid fleet topology', answer['error'])
+        self.assertIn('unknownhost', answer['error'])
+        self.assertNotIn('Traceback', process.stdout)
+        self.assertNotIn('Traceback', process.stderr)
+
+    def test_topology_unknown_host_zero_limit_never_silently_continues(self):
+        """An unknown host in limits must not be silently treated as 0 capacity."""
+        topology = {
+            'hosts': ['ib1', 'gocc'],
+            'limits': {'total': 8, 'host:ib1': 2, 'host:ghosthost': 0},
+        }
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps(topology))
+        process = subprocess.run(
+            [str(BIN), 'ib1'],
+            input=json.dumps({'op': 'acquire', 'token': 'a' * 32, 'run_id': 'r-silent',
+                              'backend': 'pi', 'provider': 'minimax-cn'}),
+            text=True, capture_output=True, env=self.env, timeout=15)
+        self.assertNotEqual(process.returncode, 0)
+        answer = json.loads(process.stdout)
+        self.assertFalse(answer['ok'])
+        self.assertIn('invalid fleet topology', answer['error'])
+        self.assertIn('ghosthost', answer['error'])
+        self.assertNotIn('Traceback', process.stdout)
+        self.assertNotIn('Traceback', process.stderr)
+
+    def test_topology_bare_unknown_host_in_limits_fails_closed_naming_host(self):
+        """Unprefixed unknown host limit keys fail closed and identify the key."""
+        topology = {
+            'hosts': ['ib1', 'gocc'],
+            'limits': {'total': 8, 'phantom': 2},
+        }
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps(topology))
+        process = subprocess.run([str(BIN), 'gocc'], input=json.dumps({'op': 'status'}), text=True,
+                                 capture_output=True, env=self.env, timeout=15)
+        self.assertNotEqual(process.returncode, 0)
+        answer = json.loads(process.stdout)
+        self.assertFalse(answer['ok'])
+        self.assertIn('invalid fleet topology', answer['error'])
+        self.assertIn('phantom', answer['error'])
+        self.assertNotIn('Traceback', process.stdout)
+        self.assertNotIn('Traceback', process.stderr)

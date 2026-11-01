@@ -28,6 +28,13 @@ if _topology.exists():
         if not isinstance(_limits, dict) or any(not isinstance(k, str) or isinstance(v, bool) or
                                                 not isinstance(v, int) or v < 0 for k, v in _limits.items()):
             raise ValueError('limits')
+        for k in _limits:
+            if k.startswith('host:'):
+                h = k[len('host:'):]
+                if h not in _hosts:
+                    raise ValueError(f"unknown host '{h}' in limits")
+            elif k not in ('total', 'minimax-cn') and k not in ALLOWED:
+                raise ValueError(f"unknown host '{k}' in limits")
         HOSTS, LIMITS = tuple(_hosts), dict(_limits)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(json.dumps({'ok': False, 'error': f'invalid fleet topology: {error}'}))
