@@ -26,6 +26,41 @@ INDEX = serve.ROOT / 'index.html'
 BUNDLED_DATA = serve.ROOT / 'data' / 'diagnosis.json'
 
 
+class ResolvePathsUnitTests(unittest.TestCase):
+    """只验证路径解析与白名单常量，不启动 HTTP 服务。"""
+
+    def test_resolve_paths_without_arguments_uses_default_paths(self):
+        self.assertEqual(
+            serve.resolve_paths(),
+            (serve.ROOT, serve.ROOT / 'data' / 'diagnosis.json'),
+        )
+
+    def test_resolve_paths_with_root_uses_root_data_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(
+                serve.resolve_paths(root=root),
+                (root, root / 'data' / 'diagnosis.json'),
+            )
+
+    def test_resolve_paths_with_explicit_data_uses_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / 'site'
+            data = Path(temp_dir) / 'diagnosis.json'
+            self.assertEqual(serve.resolve_paths(root, data), (root, data))
+
+    def test_resolve_paths_with_none_root_keeps_default_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / 'diagnosis.json'
+            self.assertEqual(serve.resolve_paths(None, data), (serve.ROOT, data))
+
+    def test_allowed_paths_are_exactly_the_five_expected_paths(self):
+        self.assertEqual(
+            serve.ALLOWED_PATHS,
+            ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/diagnosis.json'),
+        )
+
+
 class ErrorRecorder:
     """替身：只记录 send_error 调用，用于直接检查 handler 的目录列举禁令。"""
 
