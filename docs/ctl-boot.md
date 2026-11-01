@@ -118,6 +118,7 @@ Check scripts (no SSH):
 - `bash docs/check-ctl-boot.sh` — offline path and heartbeat existence verification under `~/phanes-ctl` (or `bash docs/check-ctl-boot.sh --self-test` to test in an offline fixture)
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
+- `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
@@ -161,6 +162,32 @@ and `python3 tools/check-ad-heartbeat-stall.py --fixture-fresh` (expected 0).
 - `PAUSE-BACKEND-<pi|agy|codex>` on quota/429 signals (also set by autodispatch on harvest)
 
 Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft alerts (disk_soft/mem_soft) stay in `health.alert` without pausing.
+
+## ctl-loop child reaping and restart (Refs #951)
+
+`~/phanes-ctl/bin/ctl-loop` is the supervisor for the resident `ad` (`lane-autodispatch`),
+`health` (`health-loop`), and `ib-refresh` children. Each child has one pid file and one
+heartbeat file. The canonical heartbeat paths are `autodispatch/heartbeat`,
+`autodispatch/health.heartbeat`, and `ctl-loop.heartbeat`; the corresponding pid files are
+`autodispatch/autodispatch.pid`, `autodispatch/health.pid`, and `ib-refresh.pid` under
+`~/phanes-ctl`.
+
+On every supervisor tick, ctl-loop must:
+
+1. read and validate each pid, and treat a missing, malformed, or exited pid as unhealthy;
+2. treat a missing heartbeat or one older than 120 seconds as unhealthy;
+3. restart each unhealthy child exactly once; if its old pid is still alive, terminate and
+   reap that process before spawning its replacement;
+4. write the replacement pid and wait for a fresh heartbeat before considering the child
+   healthy again.
+
+The pid check is the duplicate-instance guard: a stale heartbeat never authorizes a second
+copy to run alongside a live old pid. The offline fixture contract covers fresh/stale
+heartbeats, missing/exited pids, and the one-decision-per-child rule:
+
+```bash
+python3 tools/check-ctl-loop-reap.py
+```
 
 Autodispatch skips paused host/backend/lane and keeps other backends busy.
 
