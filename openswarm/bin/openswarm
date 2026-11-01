@@ -12832,8 +12832,12 @@ def card_lint_is_code(path):
     name = path
     if "=>" in name:
         name = name.split("=>")[-1]
-    name = os.path.basename(name.strip().strip("{} "))
-    return name.endswith(CARD_LINT_CODE_SUFFIXES)
+    name = name.strip().strip("{} ")
+    base = os.path.basename(name)
+    if base.endswith(CARD_LINT_CODE_SUFFIXES):
+        return True
+    # Extensionless executables under a bin/ directory (for example bin/openswarm) are source code too.
+    return "." not in base and "bin" in pathlib.PurePosixPath(name).parts[:-1]
 
 
 def card_lint_numstat(repo, base, ref):
