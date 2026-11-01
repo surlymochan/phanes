@@ -257,18 +257,28 @@ class CrossCheckTest(unittest.TestCase):
         self.assertEqual(failures[0].name, "期间一致")
         self.assertIn("观察月份", failures[0].detail)
 
-    @unittest.expectedFailure
     def test_brief_period_keys_mismatch_fails(self) -> None:
-        """快照数值序列的期次键与任务书 `观察期间.期次` 不一致时必须报出。
-
-        当前实现只核对 `scope.观察月份`，没有比对快照各指标的期次键与任务书期次锚点，
-        DA 用错期次锚点时漏报。实现补上该比较后，删掉 expectedFailure 标记。
-        """
+        """快照数值序列的期次键与任务书期次锚点不一致时必须报出结构化冲突。"""
         self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
         for metric in self.diagnosis["metrics"]:
             rename_period_key(metric["数值"], "2026-09实际", "2026-08实际")
         failures = self.failing(self.check())
         self.assertTrue(failures, "快照期次键与任务书期次不一致时未报出")
+        period = failures[0]
+        self.assertEqual(period.name, "期间一致")
+        self.assertEqual(period.severity, "error")
+        self.assertEqual(period.finding["field"], "期次")
+        self.assertEqual(period.finding["brief_path"], "/观察期间/期次")
+        self.assertIn("2026-08实际", period.finding["actual"])
+        finding = cross_check.findings_report([period])[0]
+        self.assertEqual(finding["severity"], "error")
+        self.assertEqual(finding["path"], period.finding["diagnosis_path"])
+        self.assertEqual(finding["context"]["field"], "期次")
+
+    def test_brief_period_keys_aligned_passes(self) -> None:
+        """任务书期次锚点与快照数值序列对齐时通过。"""
+        self.brief["观察期间"] = copy.deepcopy(BOSS_PERIOD)
+        self.assertEqual(self.failing(self.check()), [])
 
     def test_version_mismatch_fails(self) -> None:
         """任务书与快照的 schema版本 不一致时失败。"""
