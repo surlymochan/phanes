@@ -91,9 +91,16 @@ class BusResultParserTests(unittest.TestCase):
                 parsed = xs.bus_parse_result(self.result_comment(sample))
                 self.assertIsNotNone(parsed)
                 self.assertEqual(parsed["run_id"], sample["run_id"])
+                self.assertEqual(parsed["status"], sample["status"])
                 self.assertTrue(parsed["branch"])
                 self.assertTrue(parsed["summary"])
                 self.assertTrue(parsed["error_class"])
+
+    def test_failed_result_missing_error_class_is_rejected(self):
+        report = {"status": "failed", "run_id": "run-failure-missing-error", "summary": "failed",
+                  "files_changed": [], "tests": "not run", "followups": [],
+                  "branch": None, "commit": None}
+        self.assertIsNone(xs.bus_parse_result(self.result_comment(report)))
 
     def test_result_comment_missing_required_field_is_rejected(self):
         report = {"status": "done", "summary": "completed", "files_changed": [], "tests": "ok",

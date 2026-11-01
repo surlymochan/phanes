@@ -70,6 +70,7 @@ The worker checks out the requested base, runs openswarm's regular local run mac
 ```json
 {
   "status": "done",
+  "run_id": "<run-id>",
   "error_class": "none",
   "summary": "<summary>",
   "files_changed": ["<path>"],
@@ -80,6 +81,8 @@ The worker checks out the requested base, runs openswarm's regular local run mac
   "pr_url": null
 }
 ```
+
+Successful results use `status: "done"` and include a non-empty `run_id`. Failed results use a machine-readable failure status (`"partial"` or `"failed"`) and include a non-empty `error_class` so they are actionable without parsing prose.
 
 The result comment is a machine-readable contract: it must contain `status=<done|partial|failed>` and a stable `error_class` enum (JSON keys are `"status"` and `"error_class"`). The enum is `none` for successful results, or one of `auth`, `base_unavailable`, `budget_exceeded`, `budget_exceeded_daily`, `bus_error`, `claim_task_mutated`, `compare_runner_failed`, `exec_error`, `executor_failed`, `executor_io_lost`, `model_unavailable`, `network`, `non-fast-forward`, `no_report`, `prepare_failed`, `protocol_error`, `rate_limit`, `repo-missing`, `risk_blocked`, `stopped`, `upstream_forbidden`, `verify_failed`, `worker_crashed`, and `worktree_unavailable` for failures. Both success and failure comments must include `error_class`; missing fields or values outside this enum are rejected. `status`, `summary`, `files_changed`, `tests`, and `followups` follow openswarm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. Each result also carries `claim_round` and an `idempotency_key` derived from the issue number, winning `/claim` comment id, and run id. The planner accepts a result only when both fields match the current winning claim; a delayed result from an expired or earlier claim round is ignored, so a prior round cannot override a takeover. Repeating the same result with the same key is idempotent. The planner takes the terminal status from a valid `openswarm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `openswarm/<run_id>`; `branch_hint` is informational and ignored.
 
