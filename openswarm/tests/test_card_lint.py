@@ -135,6 +135,19 @@ class CardLintPrDiffTests(unittest.TestCase):
         self.assertEqual(report["reasons"], [])
         self.assertGreaterEqual(report["effective_diff"], report["min_effective_diff"])
 
+    def test_an_extensionless_bin_script_counts_as_code(self):
+        (self.repo / "bin").mkdir()
+        ref = self.commit("bin", "bin/tool",
+                          "#!/usr/bin/env python3\n" + "\n".join(f"value_{i} = {i}" for i in range(40)) + "\n")
+        result, report = self.lint_diff(ref)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(report["effective_diff"], report["min_effective_diff"])
+
+    def test_an_extensionless_file_outside_bin_is_not_code(self):
+        self.assertFalse(xs.card_lint_is_code("LICENSE"))
+        self.assertFalse(xs.card_lint_is_code("docs/bin.md"))
+        self.assertTrue(xs.card_lint_is_code("openswarm/bin/openswarm"))
+
     def test_a_missing_ref_is_an_error_not_a_rejection(self):
         result = run_cli("card-lint", "--pr-diff", self.base, "no-such-ref", "--repo", str(self.repo))
         self.assertEqual(result.returncode, 2)
