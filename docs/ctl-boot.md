@@ -260,6 +260,9 @@ python3 tools/check-codex-queue-heartbeat.py
 
 - `PAUSE-HOST-<host>` / `PAUSE-<LANE>` on hard disk/mem/ssh-streak
 - `PAUSE-BACKEND-<pi|agy|codex>` on quota/429 signals (also set by autodispatch on harvest)
+- An SSH probe containing `cooling down until` or `machine_cooldown` writes
+  `PAUSE-HOST-<host>` with `auto:cooldown:until=<deadline>`; `clear_auto` must
+  retain that pause until the deadline has passed.
 
 Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft alerts
 (`disk_soft`/`mem_soft`) stay in `health.alert` with `level=soft` and never create a
@@ -273,6 +276,10 @@ check uses a fake pause directory and never changes the real state:
 ```bash
 python3 tools/check-pause-set-cooldown.py
 ```
+
+The SSH cooldown set/hold contract is checked offline with
+`python3 tools/check-health-pause.py`; it uses fake probe output and never
+starts the resident health loop or connects over SSH.
 
 ## ctl-loop child reaping and restart (Refs #951)
 
