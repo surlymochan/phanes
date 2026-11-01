@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data' / 'diagnosis.json'
 ALLOWED_PATHS = ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/diagnosis.json', '/api/diagnosis')
 DEFAULT_PORT = 8765
+JSON_CONTENT_TYPE = 'application/json'
 
 class PortInUseError(RuntimeError):
     """端口已被占用：明确报错并退出，不静默改用其他端口。"""
@@ -112,7 +113,7 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             self._send_json(payload, status, head=head)
             return
         self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Type', JSON_CONTENT_TYPE)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if not head:
@@ -122,7 +123,7 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         """发送 API JSON；HEAD 与 GET 保持状态和头部契约但不发送正文。"""
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Type', JSON_CONTENT_TYPE)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         if not head:
