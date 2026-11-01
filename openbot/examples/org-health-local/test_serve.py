@@ -290,8 +290,10 @@ class LocalServeBoundaryTests(unittest.TestCase):
         self.assertEqual(body, BUNDLED_DATA.read_bytes())
 
     def test_diagnosis_api_matches_builder_data_fields(self):
-        status, body = self.request('/api/diagnosis')
+        status, content_type, body = self.request_with_type('/api/diagnosis')
         self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json')
+        self.assertTrue(body)
         expected = json.loads(self.data.read_text(encoding='utf-8'))
         self.assertEqual(json.loads(body), expected)
 
@@ -337,7 +339,7 @@ class DiagnosisApiSiteContractTests(unittest.TestCase):
     def test_api_contains_schema_fields_and_matches_embedded_site_data(self):
         status, content_type, api_body = self.request('/api/diagnosis')
         self.assertEqual(status, 200)
-        self.assertEqual(content_type, 'application/json; charset=utf-8')
+        self.assertEqual(content_type, 'application/json')
         api_data = json.loads(api_body)
         expected_fields = {'scope', 'conclusion', 'origin', 'metrics', 'insights', 'definitions',
                            'risks', 'recommendations'}
@@ -356,7 +358,7 @@ class DiagnosisApiSiteContractTests(unittest.TestCase):
         self.data.unlink()
         status, content_type, body = self.request('/api/diagnosis')
         self.assertEqual(status, 404)
-        self.assertEqual(content_type, 'application/json; charset=utf-8')
+        self.assertEqual(content_type, 'application/json')
         self.assertEqual(json.loads(body), {'error': 'diagnosis data not found'})
         self.assertNotIn(b'Traceback', body)
 
@@ -1141,7 +1143,7 @@ class MissingDiagnosisDataTests(unittest.TestCase):
             conn.request('GET', '/api/diagnosis')
             response = conn.getresponse()
             self.assertEqual(response.status, 404)
-            self.assertEqual(response.getheader('Content-Type'), 'application/json; charset=utf-8')
+            self.assertEqual(response.getheader('Content-Type'), 'application/json')
             self.assertEqual(json.loads(response.read()), {'error': 'diagnosis data not found'})
         finally:
             conn.close()
