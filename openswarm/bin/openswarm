@@ -9630,6 +9630,10 @@ def batch_provider_slot_available(spec, row):
 
 def execute_batch(spec, summary):
     validate_card_type(load_policy(), spec.get("card_type"))
+    if not summary["cards"]:
+        summary.update(state="finished", finished=NOW())
+        batch_save(summary)
+        return 0
     summary.update(state="running", runner_pid=os.getpid())
     blocked_hosts = set()
     batch_save(summary)
@@ -9738,6 +9742,13 @@ def cmd_batch(args, policy):
     validate_card_type(policy, getattr(args, "card_type", None))
     if args.per_host < 1 or args.poll_seconds <= 0 or (args.budget_minutes is not None and args.budget_minutes <= 0):
         raise ValueError("batch concurrency, budget and poll interval must be positive")
+    paths = sorted(path for path in glob.glob(os.path.join(os.path.abspath(args.cards), "*")) if os.path.isfile(path))
+    if not paths:
+        bid = new_run_id()
+        summary = {"id": bid, "repo": args.repo, "base": args.base or "HEAD", "state": "finished",
+                   "started": NOW(), "finished": NOW(), "cards": []}
+        batch_save(summary)
+        raise SystemExit(0)
     hosts = fleet_config()
     names = args.hosts.split(",")
     if len(set(names)) != len(names):
@@ -9749,9 +9760,6 @@ def cmd_batch(args, policy):
     repo = os.path.realpath(os.path.expanduser(host_repo(local, args.repo, local=True)))
     base = host_require(local, host_git(local, repo, ["rev-parse", "--verify", "--end-of-options",
                                                     (args.base or "HEAD") + "^{commit}"]), "base resolution").decode().strip()
-    paths = sorted(path for path in glob.glob(os.path.join(os.path.abspath(args.cards), "*")) if os.path.isfile(path))
-    if not paths:
-        raise ValueError("cards directory contains no files")
     minutes = args.budget_minutes if args.budget_minutes is not None else policy["run"]["timeout_seconds"] / 60
     backend = args.backend
     decision = None
