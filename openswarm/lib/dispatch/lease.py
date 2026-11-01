@@ -120,7 +120,9 @@ class LeaseStore:
         record = self.load().get(_issue_key(issue))
         return dict(record) if record else None
 
-    def expired(self, now: Any, running_runs: Optional[Iterable[Any]] = None) -> List[Any]:
+    def expired(
+        self, now: Any, running_runs: Optional[Iterable[Any]] = None, grace_s: Any = 0
+    ) -> List[Any]:
         """The issues whose lease expired and whose run is not running any more.
 
         A lease that expired while its run is still alive is *not* reclaimable:
@@ -131,6 +133,7 @@ class LeaseStore:
         :meth:`release`.
         """
         moment = _number(now, "now")
+        grace = _number(grace_s, "grace_s")
         if isinstance(running_runs, (str, bytes)):
             running_runs = [running_runs]
         alive = set()
@@ -141,12 +144,42 @@ class LeaseStore:
             expires_at = record.get("expires_at")
             if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
                 continue
-            if moment < float(expires_at):
+            if moment < float(expires_at) + grace:
                 continue
             if _run_text(record.get("run_id")) in alive:
                 continue
             reclaimable.append(_issue_value(key))
         return sorted(reclaimable, key=_issue_sort_key)
+
+    def shift(self, paused_s: Any, now: Any) -> int:
+        """Extend leases that were still live when a pause began.
+
+        ``now`` is the resume time. Leases already expired before the pause
+        are deliberately left expired. The amount applied is accumulated in
+        each lease's ``shifted_s`` field.
+        """
+        paused = _number(paused_s, "paused_s")
+        moment = _number(now, "now")
+        if paused <= 0:
+            return 0
+        records = self.load()
+        cutoff = moment - paused
+        shifted = 0
+        for record in records.values():
+            expiry = record.get("expires_at")
+            if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+                continue
+            if float(expiry) <= cutoff:
+                continue
+            record["expires_at"] = float(expiry) + paused
+            previous = record.get("shifted_s", 0)
+            if isinstance(previous, bool) or not isinstance(previous, (int, float)):
+                previous = 0
+            record["shifted_s"] = float(previous) + paused
+            shifted += 1
+        if shifted:
+            self._write(records)
+        return shifted
 
     # ----------------------------------------------------------------- write
 
@@ -237,3 +270,48 @@ class LeaseStore:
             except OSError:
                 pass
             raise
+
+
+def shift_from_pauses(
+    store: LeaseStore, pauses_jsonl: Any, now: Any, state_file: Any
+) -> int:
+    """Apply each valid, not-yet-applied pause record exactly once."""
+    moment = _number(now, "now")
+    state_path = Path(state_file)
+    try:
+        with open(state_path, encoding="utf-8") as stream:
+            state = json.load(stream)
+        applied = set(state.get("resumed", [])) if isinstance(state, dict) else set()
+    except (OSError, ValueError, TypeError):
+        applied = set()
+
+    pending = []
+    try:
+        stream = open(pauses_jsonl, encoding="utf-8")
+    except OSError:
+        return 0
+    with stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+                resumed = _number(row["resumed"], "resumed")
+                gap = _number(row["gap_s"], "gap_s")
+                _number(row["started"], "started")
+                if resumed > moment or gap <= 0 or resumed in applied:
+                    continue
+                pending.append((resumed, gap))
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+
+    for resumed, gap in pending:
+        store.shift(gap, resumed)
+        applied.add(resumed)
+    if pending:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = state_path.with_name(state_path.name + ".tmp")
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump({"resumed": sorted(applied)}, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, state_path)
+    return len(pending)
