@@ -942,6 +942,24 @@ class AbnormalRawDataTest(unittest.TestCase):
         second = self.build_bytes(extra, self.folder / "extra.json")
         self.assertEqual(first, second)
 
+    def test_quoted_text_with_comma_and_quote_keeps_numeric_columns(self) -> None:
+        """合法 CSV 的文本列含逗号和引号时，数值列仍按列名读取并通过 schema。"""
+        plain = copy_raw(self.folder, "raw-plain-quoted-text")
+        quoted = copy_raw(self.folder, "raw-quoted-text")
+        cost = quoted / "cost.csv"
+        lines = csv_lines(cost)
+        lines[0] = "月份,备注,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元"
+        lines[1] = '2026-01,"研发, ""平台"" 团队",10.4,8.3,2.1'
+        lines[2:] = [
+            f'{line.split(",", 1)[0]},"普通备注",{line.split(",", 1)[1]}'
+            for line in lines[2:]
+        ]
+        write_csv_lines(cost, lines)
+
+        first = self.build_data(plain)
+        second = self.build_data(quoted)
+        self.assertEqual(second, first)
+
     def test_duplicated_column_name_is_rejected(self) -> None:
         """表头出现重复列名时报错退出，并指出文件与重复的列名。"""
         raw_dir = copy_raw(self.folder, "raw-duplicated-column")
