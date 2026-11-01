@@ -7443,6 +7443,91 @@ def lane_memory_limit(lane, policy=None):
     return LANE_DEFAULT_MEMORY_MAX, "default"
 
 
+# A lane turn that shows no life for this many seconds is aborted with error_class "stalled".
+# The policy value "lane.stall_after_s" overrides it; 0 turns the check off.
+LANE_STALL_DEFAULT_SECONDS = 900
+# The provider request log is optional, so it is polled rarely instead of on every loop tick.
+LANE_PROVIDER_ACTIVITY_POLL_SECONDS = 5
+
+
+def lane_stall_after_seconds(policy=None):
+    """Seconds without any lane activity after which a turn is aborted as stalled (0 disables)."""
+    policy = policy if isinstance(policy, dict) else load_policy()
+    policy_lane = policy.get("lane")
+    value = policy_lane.get("stall_after_s", LANE_STALL_DEFAULT_SECONDS) if isinstance(policy_lane, dict) \
+        else LANE_STALL_DEFAULT_SECONDS
+    if isinstance(value, bool):
+        return LANE_STALL_DEFAULT_SECONDS
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return LANE_STALL_DEFAULT_SECONDS
+    return seconds if seconds >= 0 else LANE_STALL_DEFAULT_SECONDS
+
+
+def lane_provider_request_log(policy=None):
+    """Path of the broker request log, when the host records one."""
+    policy = policy if isinstance(policy, dict) else load_policy()
+    policy_lane = policy.get("lane")
+    value = policy_lane.get("provider_request_log") if isinstance(policy_lane, dict) else None
+    path = value or envvar("OPENSWARM_PROVIDER_REQUEST_LOG")
+    return str(path) if path else None
+
+
+def lane_activity_timestamp(value):
+    """Read one activity timestamp from a broker log field: epoch seconds, epoch millis or ISO."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        stamp = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            stamp = float(text)
+        except ValueError:
+            try:
+                stamp = dt.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+    else:
+        return None
+    # Epoch milliseconds are far larger than any plausible second-based stamp.
+    return stamp / 1000.0 if stamp > 1e11 else stamp
+
+
+def lane_provider_last_request(path):
+    """Timestamp of the last provider request in the broker log, or None when there is none."""
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 4096))
+            tail = stream.read().decode("utf-8", "ignore")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("ts", "time", "timestamp", "at", "request_at"):
+                stamp = lane_activity_timestamp(payload.get(key))
+                if stamp is not None:
+                    return stamp
+            continue
+        head = line.split()
+        if head:
+            stamp = lane_activity_timestamp(head[0])
+            if stamp is not None:
+                return stamp
+    return None
+
+
 def lane_root(name):
     return os.path.join(DATA, "lanes", name)
 
@@ -8646,7 +8731,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     if not os.path.exists(event_file):
         open(event_file, "w").close()
     deadline = spec["started"] + max(0, float(spec["budget_minutes"] or 0)) * 60
-    provider = execution_provider(lane["backend"], policy=load_policy(), lane=lane)
+    policy = load_policy()
+    provider = execution_provider(lane["backend"], policy=policy, lane=lane)
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
@@ -8679,6 +8765,16 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     risk_policy = load_policy()
     abort_deadline = None
     codex_io_streak = 0
+    # Stall watchdog. A turn has to show life: a child stream event, or a provider request when
+    # the host records one. The check is independent of the backend, so pi, codex, agy and copilot
+    # all abort the same way. "lane.stall_after_s" sets the threshold, 0 turns the check off.
+    stall_after = lane_stall_after_seconds(policy)
+    provider_log = lane_provider_request_log(policy)
+    last_event_at = NOW()
+    last_provider_at = None
+    provider_checked_at = 0.0
+    stall_hit = False
+    stall_detail = None
 
     def agy_resume_steer():
         """Restart the agy turn with the queued steer text; True when a new turn was started."""
@@ -8706,6 +8802,12 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         if RATE_LIMIT_RE.search(text):
             return "rate_limit", text
         return ("risk_blocked" if spec.get("risk_blocks") else "exec_error"), text
+
+    def turn_failed(error_class, rc, detail):
+        """Classify a turn that ended without a report; a stalled turn keeps its own class."""
+        if stall_hit:
+            return None, usage, "stalled", 124, event_file, stall_detail
+        return None, usage, error_class, rc, event_file, detail
 
     if budget_hit:
         lane_abort_child(lane, child, turn)
@@ -8739,14 +8841,38 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         if spec.get("abort_requested") and not abort_deadline:
             lane_abort_child(lane, child, turn)
             abort_deadline = now + 30
+        if stall_after and not stall_hit and not budget_hit and not spec.get("abort_requested"):
+            # Without a broker request log only child events count as activity.
+            if now - provider_checked_at >= LANE_PROVIDER_ACTIVITY_POLL_SECONDS:
+                provider_checked_at = now
+                observed = lane_provider_last_request(provider_log)
+                if observed is not None:
+                    last_provider_at = observed
+            activity = max(last_event_at, last_provider_at or 0.0)
+            if now - activity > stall_after:
+                stall_hit = True
+                stall_detail = (f"lane stalled: no provider request and no child event for "
+                                f"{round(now - activity, 3)}s (stall_after_s={round(stall_after)})")
+                lane_record_event(event_file, {"type": "stalled", "last_activity_at": activity,
+                                               "idle_seconds": round(now - activity, 3),
+                                               "stall_after_s": stall_after})
+                set_status(rdir, stalled=True, last_activity_at=activity)
+                spec["stalled_last_activity_at"] = activity
+                lane_abort_child(lane, child, turn)
+                abort_deadline = abort_deadline or now + 30
         if budget_hit and abort_deadline and now >= abort_deadline:
             lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after interrupt"})
             child.close()
-            return None, usage, "budget_exceeded", 124, event_file, "executor did not stop within 30s after interrupt"
+            return turn_failed("budget_exceeded", 124, "executor did not stop within 30s after interrupt")
         if spec.get("abort_requested") and not budget_hit and abort_deadline and now >= abort_deadline:
             lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after abort"})
             child.close()
-            return None, usage, "risk_blocked" if spec.get("risk_blocks") else "stopped", 130, event_file, "executor did not stop within 30s after abort"
+            return turn_failed("risk_blocked" if spec.get("risk_blocks") else "stopped", 130,
+                               "executor did not stop within 30s after abort")
+        if stall_hit and abort_deadline and now >= abort_deadline:
+            lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after stall interrupt"})
+            child.close()
+            return turn_failed("stalled", 124, stall_detail)
         if pi_retry_wait is not None and time.monotonic() >= pi_retry_wait:
             if not errors:
                 errors.append("pi auto-retry did not resume after a transient provider error")
@@ -8754,6 +8880,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             continue
         msg = child.next_event(0.15)
         idle_tick = msg is False
+        if msg is not False and msg is not None:
+            last_event_at = NOW()
         if msg is False:
             if not child.alive():
                 lane_note_executor_exit(rdir, desc_recorded_at)
@@ -8763,9 +8891,10 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                         if agy_resume_steer():
                             continue
                         error_class, detail = lane_failure("resident executor process exited")
-                        return None, usage, error_class, 1, event_file, detail
+                        return turn_failed(error_class, 1, detail)
                 else:
-                    return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor process exited"
+                    return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
+                                       "resident executor process exited")
             continue
         if msg is None:
             lane_note_executor_exit(rdir, desc_recorded_at)
@@ -8780,8 +8909,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     # lane_failure intentionally prefers stderr for error
                     # classification; retain the observed process status too.
                     detail += f" (executor exit code {exit_code})"
-                return None, usage, error_class, 1, event_file, detail
-            return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor stdout closed"
+                return turn_failed(error_class, 1, detail)
+            return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
+                               "resident executor stdout closed")
         block = None if turn.get("risk_resume") else enforced_risk(msg, risk_policy, ws["path"])
         if block and lane_risk_deniable(lane, block, spec):
             # Refuse only this command: interrupt the turn, then continue the same session with the reason.
@@ -8816,8 +8946,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 lane_record_event(event_file, {"type": "error", "error": io_lost, "streak": codex_io_streak})
                 lane_abort_child(lane, child, turn)
                 abort_deadline = NOW() + 30
-                return None, usage, "executor_io_lost", 134, event_file, (
-                    "codex shell returned exit 0 with empty output repeatedly")
+                return turn_failed("executor_io_lost", 134,
+                                   "codex shell returned exit 0 with empty output repeatedly")
             if method == "item/completed" and item.get("type") in ("agentMessage", "agent_message"):
                 text = item.get("text") or "".join(x.get("text", "") for x in item.get("content") or [] if isinstance(x, dict))
                 if text:
@@ -8943,7 +9073,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             if lane_headless(lane):
                 # Drain buffered events and EOF before deciding whether to resume a steer.
                 continue
-            return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor process exited"
+            return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
+                               "resident executor process exited")
     # An end-of-turn event is an acknowledgement that this turn has stopped,
     # including cancelled and failed turns. Clear this marker before each retry.
     spec["_turn_completed"] = True
@@ -8951,6 +9082,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         return final, usage, "risk_blocked", 133, event_file, None
     if spec.get("abort_requested"):
         return final, usage, "stopped", 130, event_file, None
+    if stall_hit:
+        return final, usage, "stalled", 124, event_file, stall_detail
     if budget_hit:
         return final, usage, "budget_exceeded", 124, event_file, None
     if errors:
@@ -9015,7 +9148,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         exclude_dependency_links(ws["root"], ws["linked"])
     verify = None
     prepare_error = None
-    if spec.get("verify") and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
+    if spec.get("verify") and error_class not in ("risk_blocked", "rate_limit", "stalled") and (final is not None or changed):
         if read_only or lockfiles_changed(ws):
             prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_verify")
             if prepared:
@@ -9045,6 +9178,9 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         status, verify_note = ("partial" if fin.get("commit") or changed else "failed"), "rate limited"
     elif error_class == "executor_io_lost":
         status, verify_note = "failed", "codex shell returned exit 0 with empty output repeatedly"
+    elif error_class == "stalled":
+        status, verify_note = ("partial" if fin.get("commit") or changed else "failed"), \
+            "lane stalled: no provider request and no child event"
     elif stopped:
         status, verify_note = "stopped", None
     elif budget_hit and not (verify and verify["rc"] == 0 and final is None):
@@ -9076,6 +9212,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
            "prepare": ws.get("prepare", []), "workspace_note": ws.get("workspace_note"), "verify": verify,
            "verify_note": verify_note, "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
            **({"resolved_model": model} if lane["backend"] in ("cursor", "copilot") else {}),
+           **({"last_activity_at": spec.get("stalled_last_activity_at")} if error_class == "stalled" else {}),
            "risk_blocks": spec.get("risk_blocks", []), "review_changes_discarded": bool(read_only and changed),
            "usage": usage, "seconds": round(sum(attempt["seconds"] for attempt in attempts), 3), "result": final, "workspace":
            {k: v for k, v in ws.items() if k in ("mode", "path", "repo", "base", "note", "lane")},

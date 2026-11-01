@@ -512,6 +512,13 @@ draining or undraining needs no restart. `drain` must be a JSON boolean; anythin
 lanes.json that no longer loads makes the lane refuse new work with that reason. `fleet render-lanes` carries a `drain`
 set in the inventory; `--check` lists a host lane drained by hand under `"draining"` rather than calling it drift.
 
+A lane turn has to show life. `lane serve` records the last child stream event and, when the host records
+provider requests, the last provider request. When neither moved for `lane.stall_after_s` seconds (default
+900, `0` turns the check off) the turn is interrupted and the run records `error_class: "stalled"` with the
+last activity time. The check is backend independent, so pi, codex, agy and copilot lanes behave the same.
+`lane.provider_request_log` in `policy.local.json` (or `OPENSWARM_PROVIDER_REQUEST_LOG`) points at a broker
+request log used as the provider activity signal; without it only child events count.
+
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
 ```bash

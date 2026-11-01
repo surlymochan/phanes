@@ -308,8 +308,10 @@
     "fallback": true
   },
   "lane": {
-    "_doc": "Generated lane service definitions. memory_max sets the systemd MemoryMax= ceiling written by `lane systemd-unit`; the built-in default is 900M. Lower it for low-memory hosts (for example \"700M\") in policy.local.json, or per lane with \"memory_max\" in lanes.json.",
-    "memory_max": null
+    "_doc": "Generated lane service definitions. memory_max sets the systemd MemoryMax= ceiling written by `lane systemd-unit`; the built-in default is 900M. Lower it for low-memory hosts (for example \"700M\") in policy.local.json, or per lane with \"memory_max\" in lanes.json. stall_after_s aborts a lane turn that produced no child event and no provider request for that many seconds (error_class \"stalled\"); the built-in default is 900, and 0 turns the check off. provider_request_log names a broker request log used as the provider activity signal; without it only child events count.",
+    "memory_max": null,
+    "stall_after_s": 900,
+    "provider_request_log": null
   },
   "review": {
     "_doc": "Cross-family peer review uses read-only reviewer modes; automatic reviews run asynchronously within the concurrency, time, and diff-size caps.",
