@@ -16,8 +16,25 @@ from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import boss.make_brief as make_brief
+import builder.build_site as build_site
+import builder.check_site as check_site
+import da.build_diagnosis as build_diagnosis
+
 CHECKER = ROOT / "builder" / "check_site.py"
 SOURCE_DATA = ROOT / "data" / "diagnosis.json"
+SAMPLE_RAW_DIR = ROOT / "da" / "sample-raw"
+
+
+def temporary_directory() -> tempfile.TemporaryDirectory:
+    """在 TMPDIR 下建临时目录；TMPDIR 不可用时用系统默认目录。"""
+    parent = os.environ.get("TMPDIR")
+    if parent and Path(parent).is_dir():
+        return tempfile.TemporaryDirectory(dir=parent)
+    return tempfile.TemporaryDirectory()
 
 
 class CheckSiteTest(unittest.TestCase):
@@ -50,7 +67,7 @@ class CheckSiteTest(unittest.TestCase):
         (dist / "build-report.json").write_text(json.dumps(report), encoding="utf-8")
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = temporary_directory()
         self.addCleanup(self.tmp.cleanup)
 
     def run_checker(self, *args: str | Path, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -507,6 +524,169 @@ class CheckSiteTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("失败：data/diagnosis.json 存在空章节（risks 为空）", result.stdout)
         self.assertIn("站点检查失败：1 项", result.stdout)
+
+
+class MinimalBriefPipelineCheckSiteTest(unittest.TestCase):
+    """合法 brief 管道产出到 Builder 再到 check_site 的集成测试（#775）。
+
+    覆盖：
+    1. 用最小合法 brief 到 build_site 到 check_site 走通成功路径；
+    2. 故意坏站点失败路径（校验失败与空章节），禁止只测空输入。
+    """
+
+    def setUp(self) -> None:
+        self.temp = temporary_directory()
+        self.addCleanup(self.temp.cleanup)
+        self.workdir = Path(self.temp.name)
+        self.brief_path = self.workdir / "brief.json"
+        self.diag_path = self.workdir / "diagnosis.json"
+        self.dist_path = self.workdir / "dist"
+        self.bundle_path = self.workdir / "fake.bundle.js"
+        self.bundle_path.write_text("/* fake bundle */\nconsole.log('pipeline');\n", encoding="utf-8")
+
+    @staticmethod
+    def minimal_legal_brief() -> dict:
+        """返回仅包含 schema v4 必填项的最小合法 brief 结构，禁止只测空输入。"""
+        return {
+            "目标": ["复核观察期间内整体技术人力成本与折算人头"],
+            "观察期间": {
+                "观察月份": "2026-09",
+                "数据截止": "2026-09-30",
+                "期次": ["2026-01实际", "2026-05H1参考", "2026-09实际", "年末测算", "年末目标"],
+                "说明": "2026-09 最小期间说明",
+            },
+            "口径": {
+                "整体技术人力成本": {"单位": "万元/月", "定义": "技术人力成本", "期间": "2026", "缺失处理": "null"},
+                "整体折算人头": {"单位": "人", "定义": "折算人头", "期间": "2026", "缺失处理": "null"},
+                "营收业务（含共享平台）技术人力成本与折算人头": {"单位": "万元/月", "定义": "营收技术成本", "期间": "2026", "缺失处理": "null"},
+                "收入与成本率": {"单位": "万美元/月", "定义": "收入成本率", "期间": "2026", "缺失处理": "null"},
+                "汇率": 7.2,
+            },
+            "必答问题": ["观察期间内整体技术人力成本是多少？相对期初实际增减多少？"],
+            "数据需求": [
+                {
+                    "字段路径": "月度成本/技术人力成本",
+                    "单位": "万元/月",
+                    "口径": "计入技术人力的成本合计",
+                    "对应指标": "整体技术人力成本",
+                }
+            ],
+            "禁止事项": ["不得写入真实组织数据", "不作个人/薪酬/编制判断"],
+            "schema版本": 4,
+        }
+
+    def _build_pipeline_site(self) -> None:
+        """用最小合法 brief 经 DA 归并后由 Builder 生成完整静态站点。"""
+        brief_data = self.minimal_legal_brief()
+        self.brief_path.write_text(json.dumps(brief_data, ensure_ascii=False), encoding="utf-8")
+
+        # 校验 brief 符合 brief.schema.json
+        brief_errors = make_brief.validate_brief(brief_data)
+        self.assertEqual(brief_errors, [], f"最小合法 brief 结构不合法：{brief_errors}")
+
+        # DA 从原始样本数据归并生成快照
+        snapshot = build_diagnosis.build_from_files(self.brief_path, SAMPLE_RAW_DIR)
+        self.diag_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        self.assertTrue(self.diag_path.is_file())
+        self.assertGreater(self.diag_path.stat().st_size, 0)
+
+        # Builder 生成站点静态资源
+        exit_code = build_site.main(
+            [
+                "--data",
+                str(self.diag_path),
+                "--out",
+                str(self.dist_path),
+                "--bundle",
+                str(self.bundle_path),
+            ]
+        )
+        self.assertEqual(exit_code, build_site.EXIT_OK)
+
+    def test_minimal_legal_brief_pipeline_passes_check_site(self) -> None:
+        """最小合法 brief 到 build_site 到 check_site 走通成功路径，断言零缺陷且非空。"""
+        self._build_pipeline_site()
+
+        # 验证站点骨架完整且非空（禁止只测空输入）
+        for relative in ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "build-report.json"):
+            file_path = self.dist_path / relative
+            self.assertTrue(file_path.is_file(), f"产物缺少 {relative}")
+            self.assertGreater(file_path.stat().st_size, 0, f"{relative} 为空文件")
+
+        # Python API 调用 check_site：返回零缺陷
+        failures = check_site.check_site(self.dist_path)
+        self.assertEqual(failures, [], f"站点检查未通过：{failures}")
+
+        # CLI 子进程调用 check_site：退出码 0，包含通过标志
+        cli_result = subprocess.run(
+            [sys.executable, str(CHECKER), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(cli_result.returncode, 0, cli_result.stderr)
+        self.assertIn("站点检查通过", cli_result.stdout)
+        self.assertIn("通过：data/diagnosis.json 通过 validate.py", cli_result.stdout)
+        self.assertNotIn("Traceback", cli_result.stderr)
+
+    def test_deliberately_defective_site_fails_check_site(self) -> None:
+        """故意坏站点失败路径：篡改管道产物使 validate.py 校验失败，check_site 检出缺陷且非零退出。"""
+        self._build_pipeline_site()
+
+        # 故意损坏站点快照（篡改 schema 版本导致 validate.py 失败）
+        dist_diag_path = self.dist_path / "data" / "diagnosis.json"
+        dist_data = json.loads(dist_diag_path.read_text(encoding="utf-8"))
+        dist_data["scope"]["schema版本"] = 999
+        dist_diag_path.write_text(json.dumps(dist_data, ensure_ascii=False), encoding="utf-8")
+        build_site.write_report(self.dist_path, dist_diag_path)
+
+        # 确认不是空输入测试：站点各文件仍非空存在
+        self.assertGreater(dist_diag_path.stat().st_size, 0)
+        self.assertGreater((self.dist_path / "index.html").stat().st_size, 0)
+
+        # Python API 检出 validate 错误
+        failures = check_site.check_site(self.dist_path)
+        self.assertGreater(len(failures), 0)
+        self.assertTrue(any("未通过 validate.py" in f for f in failures), failures)
+
+        # CLI 退出非 0，报告站点检查失败，无 Traceback
+        cli_result = subprocess.run(
+            [sys.executable, str(CHECKER), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(cli_result.returncode, 0)
+        self.assertIn("未通过 validate.py", cli_result.stdout)
+        self.assertIn("站点检查失败", cli_result.stdout)
+        self.assertNotIn("Traceback", cli_result.stderr)
+
+    def test_deliberately_defective_site_with_empty_section_fails_check_site(self) -> None:
+        """故意坏站点失败路径：清空快照核心章节（如 risks 赋空），check_site 报错并精确定位。"""
+        self._build_pipeline_site()
+
+        # 故意将诊断数据 risks 核心章节清空
+        dist_diag_path = self.dist_path / "data" / "diagnosis.json"
+        dist_data = json.loads(dist_diag_path.read_text(encoding="utf-8"))
+        dist_data["risks"] = []
+        dist_diag_path.write_text(json.dumps(dist_data, ensure_ascii=False), encoding="utf-8")
+        build_site.write_report(self.dist_path, dist_diag_path)
+
+        # 确认不是空输入：index.html 与其他核心章节依然饱满
+        self.assertGreater(len(dist_data["metrics"]), 0)
+        self.assertGreater((self.dist_path / "index.html").stat().st_size, 0)
+
+        failures = check_site.check_site(self.dist_path)
+        self.assertGreater(len(failures), 0)
+        self.assertTrue(any("data/diagnosis.json 存在空章节（risks 为空）" in f for f in failures), failures)
+
+        cli_result = subprocess.run(
+            [sys.executable, str(CHECKER), str(self.dist_path)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(cli_result.returncode, 0)
+        self.assertIn("data/diagnosis.json 存在空章节（risks 为空）", cli_result.stdout)
+        self.assertIn("站点检查失败", cli_result.stdout)
+        self.assertNotIn("Traceback", cli_result.stderr)
 
 
 if __name__ == "__main__":
