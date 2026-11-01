@@ -7,11 +7,12 @@ import os
 import socket
 import subprocess
 import argparse
+import json
 import sys
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data' / 'diagnosis.json'
-ALLOWED_PATHS = ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/diagnosis.json')
+ALLOWED_PATHS = ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/diagnosis.json', '/api/diagnosis')
 DEFAULT_PORT = 8765
 
 class PortInUseError(RuntimeError):
@@ -38,6 +39,50 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             self.send_error(404, 'File not found')
             return None
         return super().send_head()
+
+    def _serve_diagnosis_api(self, head=False):
+        """返回与 builder 产出的 diagnosis.json 相同字段的 JSON 响应。"""
+        if not self.data_file.is_file():
+            payload = {'error': 'diagnosis data not found'}
+            status = 404
+        else:
+            try:
+                payload = json.loads(self.data_file.read_text(encoding='utf-8'))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                payload = {'error': 'diagnosis data is invalid'}
+                status = 500
+            else:
+                status = 200
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if not head:
+            self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.split('?', 1)[0] == '/api/diagnosis':
+            if not self._check_request():
+                return
+            self._serve_diagnosis_api()
+            return
+        super().do_GET()
+
+    def do_HEAD(self):
+        if self.path.split('?', 1)[0] == '/api/diagnosis':
+            if not self._check_request():
+                return
+            self._serve_diagnosis_api(head=True)
+            return
+        super().do_HEAD()
+
+    def _check_request(self):
+        port = self.server.server_address[1]
+        if self.headers.get('Host') not in (f'127.0.0.1:{port}', f'localhost:{port}'):
+            self.send_error(403)
+            return False
+        return True
 
     def translate_path(self, path):
         if path.split('?', 1)[0] == '/data/diagnosis.json':
