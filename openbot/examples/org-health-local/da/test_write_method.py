@@ -49,6 +49,85 @@ PIPELINE_BRIEF = {
 }
 
 
+# Boss 格式任务书：观察期间与口径都是嵌套对象，与 DA 流水线实际吃到的输入一致。
+BOSS_BRIEF = {
+    "目标": ["复核观察期间内整体技术人力成本的变化"],
+    "观察期间": {
+        "观察月份": "2026-09",
+        "数据截止": "2026-09-30",
+        "期次": ["2026-01实际", "2026-05H1参考", "2026-09实际", "年末测算", "年末目标"],
+        "说明": "观察月份 2026-09，数据截止 2026-09-30。",
+    },
+    "口径": {
+        "整体技术人力成本": {
+            "单位": "万元/月",
+            "定义": "技术人力成本为当期计入的技术人力相关成本合计，不含运维与设施。",
+            "期间": "按观察期间期次取值：2026-01实际、2026-05H1参考、2026-09实际、年末测算、年末目标。",
+            "缺失处理": "该期次没有同口径取数时写 null，界面显示为未提供，不以 0 或推测值替代。",
+        },
+        "整体折算人头": {
+            "单位": "人（当量）",
+            "定义": "折算人头为按投入当量折算的人数，非自然人数。",
+            "期间": "按观察期间期次取值：2026-01实际、2026-05H1参考、2026-09实际、年末测算、年末目标。",
+            "缺失处理": "该期次没有同口径取数时写 null，界面显示为未提供，不以 0 或推测值替代。",
+        },
+    },
+    "必答问题": ["整体技术人力成本从期初到期末如何变化？"],
+    "禁止事项": ["不得编造数字"],
+    "schema版本": 4,
+}
+
+# 与 BOSS_BRIEF 对应的诊断快照：数值取自合成样本。
+BOSS_DIAGNOSIS = {
+    "scope": {
+        "数据截止": "2026-09-30",
+        "观察月份": "2026-09",
+        "来源": "合成示例数据",
+        "schema版本": 4,
+    },
+    "conclusion": "2026-01 至 2026-09，整体技术人力成本由 10.4 万元/月变为 12.4 万元/月。",
+    "origin": "DA 快照（合成示例原始数据，按任务书口径计算）",
+    "metrics": [
+        {
+            "标题": "整体技术人力成本",
+            "数值": {
+                "2026-01实际": 10.4,
+                "2026-05H1参考": None,
+                "2026-09实际": 12.4,
+                "年末测算": 13.4,
+            },
+        },
+        {
+            "标题": "整体折算人头",
+            "数值": {
+                "2026-01实际": 10.4,
+                "2026-05H1参考": None,
+                "2026-09实际": 12.4,
+                "年末测算": 13.4,
+            },
+        },
+    ],
+    "insights": [
+        {
+            "类型": "事实",
+            "标题": "整体技术人力成本 2026-01 → 2026-09",
+            "内容": "整体技术人力成本由 10.4 万元/月变为 12.4 万元/月。",
+        }
+    ],
+    "definitions": ["期间：2026-01 与 2026-09 为已发生实际期次。"],
+    "risks": [{"标题": "参考期次 2026-05 数据缺口", "内容": "参考期次缺同口径数据，按 null 表示。"}],
+    "recommendations": [
+        {
+            "优先级": "P1",
+            "标题": "补齐参考期次取数",
+            "依据": "参考期次缺同口径数据。",
+            "缺失证据": "2026-05 的整体技术人力成本明细。",
+            "验证方式": "回填原始数据后重跑 build_diagnosis.py。",
+        }
+    ],
+}
+
+
 def run_write_method(brief, diagnosis, raw_files=None, raw_dir=None):
     """跑一次 write_method.py，返回 (退出码, 标准错误, 输出内容)。"""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -410,6 +489,61 @@ class WriteMethodTest(unittest.TestCase):
             with self.assertRaises(write_method.MethodError) as ctx:
                 write_method.load_json(corrupted)
             self.assertIn(str(corrupted), str(ctx.exception))
+
+    def test_boss_style_brief_renders_actual_metrics(self):
+        """Boss 格式任务书（观察期间与口径都是嵌套对象）能生成方法说明并引用实际指标。"""
+        code, stderr, content = run_write_method(BOSS_BRIEF, BOSS_DIAGNOSIS)
+
+        self.assertEqual(code, 0, stderr)
+        # 观察期间与口径按字段展开，不再输出 Python 字典字面量。
+        self.assertIn("观察月份：2026-09", content)
+        self.assertIn("数据截止：2026-09-30", content)
+        self.assertIn("整体技术人力成本：单位：万元/月", content)
+        self.assertNotIn("{'", content)
+        # 实际指标与字段路径都在说明里。
+        self.assertIn("### 整体技术人力成本", content)
+        self.assertIn("### 整体折算人头", content)
+        self.assertIn("`metrics[0].数值`", content)
+        self.assertIn("`metrics[1].数值`", content)
+        # 每个指标按标题引用任务书口径里的同名条目。
+        self.assertIn("计算口径：引用任务书“口径”的「整体技术人力成本」条目", content)
+        self.assertIn("计算口径：引用任务书“口径”的「整体折算人头」条目", content)
+        # 缺口期次按字段路径写明。
+        self.assertIn("已知缺口：2026-05H1参考 为 null", content)
+        # 不复述诊断数值。
+        for value in ("10.4", "12.4", "13.4"):
+            self.assertNotIn(value, content)
+
+    def test_calibration_prose_numbers_do_not_trip_leak_check(self):
+        """口径文案里的“不以 0 或推测值替代”不是诊断数值，不该被判成数值泄露。"""
+        code, stderr, content = run_write_method(BOSS_BRIEF, BOSS_DIAGNOSIS)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("不以 0 或推测值替代", content)
+
+    def test_conclusion_value_in_brief_still_fails(self):
+        """结论里的数值出现在任务书口径中时，仍然按数值泄露失败。"""
+        brief = {
+            **BOSS_BRIEF,
+            "口径": {**BOSS_BRIEF["口径"], "备注": {"说明": "本期整体技术人力成本 42 万元/月"}},
+        }
+        diagnosis = {
+            **BOSS_DIAGNOSIS,
+            "conclusion": "本期整体技术人力成本 42 万元/月。",
+        }
+
+        code, stderr, content = run_write_method(brief, diagnosis)
+
+        self.assertEqual(code, 1)
+        self.assertIn("生成文档包含诊断数值：42", stderr)
+        self.assertEqual(content, "")
+
+    def test_period_labels_are_not_treated_as_values(self):
+        """期次标签是结构：任务书与快照里的 2026-01实际 不算诊断数值。"""
+        code, stderr, content = run_write_method(BOSS_BRIEF, BOSS_DIAGNOSIS)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("2026-01实际", content)
 
 
 if __name__ == "__main__":
