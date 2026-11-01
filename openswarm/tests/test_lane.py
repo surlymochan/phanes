@@ -240,6 +240,7 @@ class LaneTests(unittest.TestCase):
         for path in FIXTURES.glob("fake_*py"):
             path.chmod(0o755)
         self.env = dict(os.environ, OPENSWARM_HOME=str(self.data))
+        self.env["OPENSWARM_PI_RETRY_WAIT_SECONDS"] = "2"  # keep retryable-error tests fast
         self.env["FAKE_PI_RPC_LOG"] = str(self.root / "fake-pi-rpc.jsonl")
         self.lane_name = "L1"
         self.backend = "codex"
@@ -542,6 +543,26 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
+
+    def test_pi_auto_retry_after_transient_error_finishes_the_turn(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_AUTO_RETRY transient overload")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIsNone(result.get("error_class"))
+        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"), "completed")
+        messages = [json.loads(line) for line in pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text().splitlines()]
+        self.assertEqual(sum(row.get("type") == "prompt" for row in messages), 1)
+
+    def test_pi_auto_retry_exhausted_fails_with_final_error(self):
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_AUTO_RETRY LANE_TEST_AUTO_RETRY_EXHAUSTED transient overload")
+        state = self.wait_run(run_id)
+        self.assertNotEqual(state["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIn("overloaded", json.dumps(result))
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")

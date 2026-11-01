@@ -7582,6 +7582,19 @@ def pi_compact_event(msg):
     return out
 
 
+PI_RETRYABLE_RE = re.compile(r"overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|"
+                             r"service.?unavailable|server.?error|internal.?error|network.?error|connection.?(?:error|refused|lost)|"
+                             r"fetch failed|socket hang up|ended without|timed? out|timeout|terminated", re.I)
+
+
+def pi_retry_wait_seconds():
+    """How long a retryable pi error waits for pi's own auto_retry_start before the turn ends."""
+    try:
+        return max(0.0, float(os.environ.get("OPENSWARM_PI_RETRY_WAIT_SECONDS") or 8))
+    except ValueError:
+        return 8.0
+
+
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -8016,9 +8029,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     elif spec.get("abort_requested"):
         lane_abort_child(lane, child, turn)
         abort_deadline = NOW() + 30
+    desc_recorded_at = 0.0
+    pi_retry_wait = None
     while not ended:
-        if child.pid and pid_alive(child.pid):
+        # Scanning descendants costs one pgrep per process plus a status.json rewrite; doing it
+        # for every streamed event throttled pi/codex lanes and left the model idle while the
+        # event queue backed up (box 2026-11-01). Record at most every 5 seconds.
+        if child.pid and time.monotonic() - desc_recorded_at >= 5.0 and pid_alive(child.pid):
             record_executor_descendants(rdir, child.pid)
+            desc_recorded_at = time.monotonic()
         lane_control_messages(server, lane, spec, child, turn, pending)
         now = NOW()
         if not budget_hit and now >= deadline:
@@ -8037,6 +8056,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after abort"})
             child.close()
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "stopped", 130, event_file, "executor did not stop within 30s after abort"
+        if pi_retry_wait and NOW() >= pi_retry_wait:
+            ended = True
+            continue
         msg = child.next_event(0.15)
         if msg is False:
             if not child.alive():
@@ -8129,13 +8151,25 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     if message.get("errorMessage") or message.get("stopReason") == "error":
                         errors.append(short(message.get("errorMessage") or "provider returned stopReason=error", 400))
             if msg.get("type") == "agent_end":
+                last_err = ""
                 for message in msg.get("messages") or []:
                     if message.get("role") == "assistant":
                         text = "".join(b.get("text", "") for b in message.get("content") or []
                                        if isinstance(b, dict) and b.get("type") == "text")
                         final = extract_json(text) or final
+                        last_err = (message.get("errorMessage") or "") if message.get("stopReason") == "error" else ""
                 if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
                     continue
+                if last_err and PI_RETRYABLE_RE.search(last_err):
+                    # pi may auto-retry a transient provider error; wait for auto_retry_start before ending.
+                    pi_retry_wait = NOW() + pi_retry_wait_seconds()
+                else:
+                    ended = True
+            elif msg.get("type") == "auto_retry_start":
+                pi_retry_wait = None
+                errors.clear()  # the failed attempt is superseded by the retry
+            elif msg.get("type") == "auto_retry_end" and not msg.get("success"):
+                errors.append(short(msg.get("finalError") or "pi auto-retry exhausted", 400))
                 ended = True
         elif lane_headless(lane):
             lane_record_event(event_file, msg)
