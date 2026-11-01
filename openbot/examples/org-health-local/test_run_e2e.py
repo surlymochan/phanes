@@ -77,6 +77,8 @@ class RunE2EArgumentContractTest(unittest.TestCase):
 
 # 供交叉审查契约用例使用的合成任务书与诊断快照（与 review/test_cross_check.py 的夹具同构）。
 BRIEF = {
+    'producer': 'boss',
+    'periods': ['2026-01', '2026-05', '2026-09'],
     'schema版本': 4,
     '观察期间': {
         '起始期次': '2026-01',
@@ -88,6 +90,8 @@ BRIEF = {
 }
 
 DIAGNOSIS = {
+    'producer': 'da',
+    'periods': ['2026-01', '2026-05', '2026-09'],
     'scope': {'观察月份': '2026-09', '数据截止': '2026-09-30', 'schema版本': 4},
     'insights': [{
         '类型': '事实',
@@ -95,6 +99,13 @@ DIAGNOSIS = {
         '内容': '12 万元/月。',
     }],
     'recommendations': [],
+}
+
+# Builder 交给 Reviewer 的站点内容摘要（含角色元数据）。
+SITE_SUMMARY = {
+    'producer': 'builder',
+    'periods': ['2026-01', '2026-05', '2026-09'],
+    'summary': '站点内容摘要',
 }
 
 
@@ -1298,18 +1309,21 @@ class RunE2EReviewContractTest(unittest.TestCase):
         self.bundle.write_text('fake', encoding='utf-8')
         self.scripts = {role: self.root / f'{role}.py' for role in ('boss', 'da', 'builder', 'checker')}
 
-    def write_json_stub(self, role, payload):
+    def write_json_stub(self, role, payload, summary_payload=None):
         """写一个只产出固定 JSON 的桩脚本。"""
         body = repr(json.dumps(payload, ensure_ascii=False))
+        summary_repr = repr(json.dumps(summary_payload if summary_payload is not None else SITE_SUMMARY, ensure_ascii=False))
         source = (
             'import json, pathlib, sys\n'
             'args = sys.argv[1:]\n'
             f'payload = json.loads({body})\n'
+            f'summary_payload = json.loads({summary_repr})\n'
             f'if {role!r} == "builder":\n'
             "    out = pathlib.Path(args[args.index('--out') + 1])\n"
             "    (out / 'data').mkdir(parents=True, exist_ok=True)\n"
             "    (out / 'index.html').write_text('ok', encoding='utf-8')\n"
             "    (out / 'data' / 'diagnosis.json').write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')\n"
+            "    (out / 'site-summary.json').write_text(json.dumps(summary_payload, ensure_ascii=False), encoding='utf-8')\n"
             'else:\n'
             "    pathlib.Path(args[args.index('--out') + 1]).write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')\n"
         )
@@ -1345,7 +1359,7 @@ class RunE2EReviewContractTest(unittest.TestCase):
         self.assertIn('步骤失败: 审查', result.stderr)
         content = self.record(result)
         self.assertIn('FAIL 站点数据一致', content)
-        self.assertIn('共 5 项检查：4 项通过，1 项失败', content)
+        self.assertIn('共 6 项检查：5 项通过，1 项失败', content)
 
     def test_review_record_written_when_brief_inconsistent(self):
         """任务书与快照不一致时审查非 0，且仍写出记录并标出 FAIL 项。"""
@@ -1360,7 +1374,7 @@ class RunE2EReviewContractTest(unittest.TestCase):
         self.assertIn('步骤失败: 审查', result.stderr)
         content = self.record(result)
         self.assertIn('FAIL 期间一致', content)
-        self.assertIn('共 5 项检查：4 项通过，1 项失败', content)
+        self.assertIn('共 6 项检查：5 项通过，1 项失败', content)
 
     def test_review_record_written_when_consistent(self):
         """三方一致时审查为 0，审查记录写出 PASS 行。"""
@@ -1372,7 +1386,38 @@ class RunE2EReviewContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         content = self.record(result)
         self.assertIn('PASS 期间一致', content)
-        self.assertIn('共 5 项检查：5 项通过，0 项失败', content)
+        self.assertIn('PASS 角色元数据', content)
+        self.assertIn('共 6 项检查：6 项通过，0 项失败', content)
+
+    def test_review_record_written_when_brief_lacks_metadata(self):
+        """交接文件 brief 缺少角色元数据时 e2e 审查失败，记录写出 FAIL 角色元数据并指明文件与字段。"""
+        brief = copy.deepcopy(BRIEF)
+        del brief['producer']
+        self.write_json_stub('boss', brief)
+        self.write_json_stub('da', DIAGNOSIS)
+        self.write_json_stub('builder', DIAGNOSIS)
+        self.write_checker_stub()
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        content = self.record(result)
+        self.assertIn('FAIL 角色元数据', content)
+        self.assertIn('brief.json', content)
+        self.assertIn('producer', content)
+
+    def test_review_record_written_when_site_summary_lacks_metadata(self):
+        """交接文件 site summary 缺少角色元数据时 e2e 审查失败，记录写出 FAIL 角色元数据。"""
+        broken_summary = copy.deepcopy(SITE_SUMMARY)
+        del broken_summary['periods']
+        self.write_json_stub('boss', BRIEF)
+        self.write_json_stub('da', DIAGNOSIS)
+        self.write_json_stub('builder', DIAGNOSIS, summary_payload=broken_summary)
+        self.write_checker_stub()
+        result = subprocess.run(self.command(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        content = self.record(result)
+        self.assertIn('FAIL 角色元数据', content)
+        self.assertIn('site-summary.json', content)
+        self.assertIn('periods', content)
 
 
 class RunE2EReviewSummaryTest(unittest.TestCase):

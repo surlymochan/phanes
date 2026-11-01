@@ -68,7 +68,7 @@ python3 run_e2e.py --workdir <工作目录> [--review]
 - 想单步跑就各跑各的，命令见本文 Q8 与各题的「命令」段。
 
 **实测：** `python3 run_e2e.py --workdir <目录> --review` 退出码 0，产出 `brief.json`、`diagnosis.json`、`dist/`、`review.md`；
-`review.md` 写「共 10 项检查：10 项通过，0 项失败」。
+`review.md` 写「共 11 项检查：11 项通过，0 项失败」。
 
 ---
 
@@ -263,7 +263,7 @@ python3 builder/check_site.py <dist>
   `demo/site-summary.md`：指标卡片的标题与各期次数值、口径说明条目、洞察/建议条数，
   以及页面字段与快照字段的对应关系。
 
-**实测：** `python3 run_tests.py` 输出 `Ran 237 tests: 0 failures, 0 errors`，退出码 0；其中包含已知边界 `expected failures`，不计为回归失败。
+**实测：** `python3 run_tests.py` 输出 `Ran 581 tests: 0 failures, 0 errors`，退出码 0；其中包含已知边界 `expected failures`，不计为回归失败。
 
 ---
 
@@ -272,13 +272,15 @@ python3 builder/check_site.py <dist>
 **答：** 机器审查 + 人工审查两道，最终放行由人做。
 
 ```bash
-python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>] [--out <报告.md>]
+python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>] [--summary <站点摘要.json>] [--out <报告.md>]
 ```
 
 - 逐条输出 `PASS`/`FAIL`，退出码 `0` 全部通过 / `1` 至少一项失败 / `2` 输入不可读或不是 JSON 对象
   （`openbot/examples/org-health-local/review/cross_check.py:50-52`、`:466-474`）；脚本只读，不改任何文件。
-- 10 项检查：期间一致、版本一致、6 条必答问题覆盖、站点数据一致、隐私边界
+- 11 项检查：期间一致、版本一致、6 条必答问题覆盖、站点数据一致、隐私边界、角色元数据
   （`openbot/examples/org-health-local/review/cross_check.py:200-243`、`:345-397`、`:422-437`）。
+- 交接文件（任务书、诊断快照、站点摘要）缺 `producer` 或 `periods` 时，报出缺哪个字段与文件路径；
+  `--dist` 目录里的 `site-summary.json` 会被当作站点摘要交接文件一并核对。
 - `run_e2e.py --review` 会把审查记录写到 `<workdir>/review.md`，**失败路径也照常写**，
   便于核对失败原因（`openbot/examples/org-health-local/run_e2e.py:11`、`:69-72`）。
 - 人工审查按 `docs/scenario/org-diagnosis/review-checklist.md` 逐项复核，结论模板在该文件末尾；
@@ -286,7 +288,7 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 - 放行：机器审查只是第二意见，最终验收属控制面、由人做出，验收要引用独立复核记录与可复现命令
   （`docs/scenario/org-diagnosis/README.md` 第 5.4 节）。
 
-**实测：** `run_e2e.py --review` 产出的 `review.md` 记录「共 10 项检查：10 项通过，0 项失败」，退出码 0。
+**实测：** `run_e2e.py --review` 产出的 `review.md` 记录「共 11 项检查：11 项通过，0 项失败」，退出码 0。
 
 ---
 
@@ -313,10 +315,10 @@ python3 boss/make_brief.py --out "$W/brief-fx.json" --fx 7.0
 python3 da/build_diagnosis.py --brief "$W/brief-fx.json" --raw da/sample-raw --out "$W/diagnosis-fx.json"     # 退出码 0
 
 # Q2 全链路
-python3 run_e2e.py --workdir "$W/e2e" --review                # 退出码 0，review.md 10 项全 PASS
+python3 run_e2e.py --workdir "$W/e2e" --review                # 退出码 0，review.md 11 项全 PASS
 
 # Q9 单元测试
-python3 run_tests.py                                          # Ran 237 tests: 0 failures, 0 errors（含已知边界 expected failures）
+python3 run_tests.py                                          # Ran 581 tests: 0 failures, 0 errors（含已知边界 expected failures）
 ```
 
 ## 已知边界（本文不展开）

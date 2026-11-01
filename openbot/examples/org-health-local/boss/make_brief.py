@@ -7,6 +7,7 @@
     python3 make_brief.py --check brief.json
 
 任务书只写口径、问题与字段映射，不含真实组织数据或真实数字。
+任务书带角色元数据（`producer` 与 `periods`），供下游与 Reviewer 核对交接链。
 默认口径与合成示例 data/diagnosis.json 一致：观察月份 2026-09、数据截止
 2026-09-30、指标标题与顺序同站点的 metrics。--goal 覆盖“目标”，--month 覆盖
 观察月份（数据截止与期次锚点随之推算），--period/--periods 直接给出期次锚点，
@@ -43,6 +44,8 @@ EXIT_USAGE = 2
 
 SCHEMA_VERSION = 4
 DEFAULT_MONTH = "2026-09"
+# 交接文件里的角色元数据：产出方写进任务书，供下游与 Reviewer 核对。
+PRODUCER = "boss"
 # 观察月份：ASCII 数字的 YYYY-MM，月份在 01-12 之间。
 # 用 \A/\Z 而不是 ^/$：$ 允许结尾换行，"2026-01\n" 会被误判成合法月份；
 # 用 [0-9] 而不是 \d：\d 匹配 Unicode 数字，全角“２０２６-09”会被误判成合法月份。
@@ -151,6 +154,21 @@ def period_keys(
         if key not in ordered:
             ordered.append(key)
     return ordered
+
+
+def period_months(keys: list[str]) -> list[str]:
+    """从期次锚点里取出观察月份（YYYY-MM），按时间升序去重。
+
+    年末测算与年末目标没有月份，不计入观察期次。
+    """
+    months: list[str] = []
+    for key in keys:
+        if not isinstance(key, str):
+            continue
+        month = key[:7]
+        if MONTH_PATTERN.match(month) and month not in months:
+            months.append(month)
+    return sorted(months)
 
 
 def extract_diagnosis_periods(diagnosis: dict) -> set[str]:
@@ -341,6 +359,8 @@ def build_brief(
         "数据需求": [dict(item) for item in DEFAULT_DATA_NEEDS],
         "禁止事项": list(DEFAULT_FORBIDS),
         "schema版本": SCHEMA_VERSION,
+        "producer": PRODUCER,
+        "periods": period_months(keys),
     }
 
 

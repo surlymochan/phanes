@@ -46,6 +46,8 @@ Refs #1332, Refs #6（记录数据口径），依赖 #52。
 | facts | 页面不读取（schema/diagnosis.schema.json:33-37） | 可选的事实来源快照，供结论里的数字回溯 | —（自由对象） | DA 写入原始事实；结构定义允许任意子键，页面不渲染 | DA |
 | series | 页面不读取（schema/diagnosis.schema.json:38-42） | 可选的期间序列来源快照，供数字回溯到同值指标 | —（自由对象） | DA 写入同值序列；结构定义允许任意子键，页面不渲染 | DA |
 | stage | app.js:115 | 业务分档区块 | —（区块） | DA 给出分档规则与例证；子键见 2.6 | DA |
+| producer | 页面不读取（schema/diagnosis.schema.json:71-75） | 产出该交接文件的角色名（角色元数据） | —（文本） | DA 写入固定值 `da`，供 Reviewer 核对交接链上各文件的产出方；页面不渲染 | DA |
+| periods | 页面不读取（schema/diagnosis.schema.json:76-83） | 交接文件覆盖的观察期次（角色元数据） | —（月份 YYYY-MM 数组） | DA 沿用 Boss 任务书声明的 `periods`，按时间升序；Reviewer 用它核对各交接文件的期次是否一致 | DA |
 
 ### 2.2 scope 字段
 

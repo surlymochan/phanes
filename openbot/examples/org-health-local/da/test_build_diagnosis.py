@@ -300,6 +300,23 @@ class BuildDiagnosisTest(unittest.TestCase):
         data = self.build()
         self.assertEqual(self.errors(data), [])
 
+    def test_snapshot_carries_role_metadata(self) -> None:
+        """快照带角色元数据：产出方与期次，供下游与 Reviewer 核对交接链。"""
+        data = self.build()
+        self.assertEqual(data["producer"], "da")
+        self.assertEqual(data["periods"], ["2026-01", "2026-05", "2026-09"])
+        self.assertEqual(self.errors(data), [])
+
+    def test_snapshot_periods_follow_brief_metadata(self) -> None:
+        """任务书声明 periods 时快照沿用同一组期次，交接链上的期次不漂移。"""
+        brief = json.loads(json.dumps(BRIEF))
+        brief["periods"] = ["2026-01", "2026-05", "2026-09", "2026-12"]
+        brief_path = write_brief(self.folder, brief)
+        result = run_cli(brief_path, SAMPLE_RAW, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["periods"], ["2026-01", "2026-05", "2026-09", "2026-12"])
+
     def test_metric_titles_follow_page_order(self) -> None:
         """指标标题与顺序与页面期望一致。"""
         data = self.build()

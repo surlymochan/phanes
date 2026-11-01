@@ -350,7 +350,7 @@ python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  #
 
 ```bash
 cd openbot/examples/org-health-local
-python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>]
+python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>] [--summary <site-summary.json>]
 ```
 
 - 期间一致：任务书 `观察期间`（对象、字符串或数组）里的期次必须覆盖 `scope.观察月份`；显式的 `观察月份`（Boss 格式）/`截止期次`/`数据截止` 必须与 `scope` 相同。
@@ -358,6 +358,9 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 - 必答问题覆盖：任务书 `必答问题` 每条都要在快照的 `insights`/`recommendations` 里被引用一次；命中 id、原文或提取出的关键词任一即算被引用（关键词规则见脚本文档字符串）。
 - 站点数据一致：给出 `--dist` 时 `dist/data/diagnosis.json` 与 `--data` 字节相同，并打印 sha256 前 12 位。
 - 隐私边界：快照的字段名（含嵌套）不含个人/薪酬/编制粒度黑名单词条；黑名单写在脚本里。
+- 角色元数据：交接文件（任务书、诊断快照与站点摘要）有非空业务内容时必须带 `producer` 与 `periods`，缺哪个字段就报出哪个字段与文件路径并以失败退出；各文件的 `periods` 必须一致。站点摘要只认 Builder 产出的 `dist/site-summary.json`（不给 `--summary` 时从 `--dist` 里找）；`--dist` 里找不到该文件时结果里显式说明「未找到站点摘要」，不整环跳过。
+
+仓库内的示例交接产物（`data/diagnosis.json`、`demo/brief.json`、`demo/diagnosis.json`）已带 `producer` 与 `periods`；快照没声明 `periods` 时，`builder/build_site.py` 会按快照 `scope.观察月份` 与指标期次键回落推导站点摘要的 `periods`。
 
 审查单元测试只用测试内构造的最小样本，不依赖其他角色的脚本，并包含在 `python3 run_tests.py` 中。
 
@@ -375,7 +378,8 @@ cd openbot/examples/org-health-local
 python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle demo/vendor/app.bundle.js
 ```
 
-产物为 `dist/index.html`、`dist/app.bundle.js`、`dist/styles.css`、`dist/data/diagnosis.json`
+产物为 `dist/index.html`、`dist/app.bundle.js`、`dist/styles.css`、`dist/data/diagnosis.json`、
+`dist/site-summary.json`（交给 Reviewer 的站点内容摘要，带 `producer` 与 `periods`）
 和 `dist/build-report.json`。`--bundle` 指向已编译好的浏览器包，文件必须已存在（仓库里可用
 `demo/vendor/app.bundle.js`）；不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）。
 退出码契约：`0` 构建成功，`1` 数据未通过校验或 bundle 文件不存在，`2` 输入不可用，`3` 打包或写出失败。

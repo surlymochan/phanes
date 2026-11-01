@@ -82,6 +82,8 @@ python3 boss/make_brief.py --out <brief.json> [--goal 文本 ...] [--month YYYY-
 | `数据需求` | 对象数组：`字段路径`/`单位`/`口径`/`对应指标` | 是 | Boss | DA 按实际来源映射原始列名（脚本不读此字段，只作为交付要求） |
 | `禁止事项` | 字符串数组（≥2 条） | 是 | Boss | DA 写进快照 `definitions` 末尾（`da/build_diagnosis.py:710-711`） |
 | `schema版本` | 常量 `4` | 是 | Boss | DA 校验版本（`da/build_diagnosis.py:221-223`）；Reviewer 核版本（`review/cross_check.py:226-243`） |
+| `producer` | 字符串（固定 `boss`） | 否 | Boss | 角色元数据：产出方；DA 沿用、Reviewer 核（`review/cross_check.py:780-814`） |
+| `periods` | 字符串数组（`YYYY-MM`，按时间升序） | 否 | Boss | 角色元数据：观察期次；DA 沿用、Reviewer 核各交接文件期次是否一致（`boss/make_brief.py:159-171`） |
 
 ## 3. DA 契约：`da/build_diagnosis.py`
 
@@ -131,6 +133,8 @@ python3 da/build_diagnosis.py --brief <brief.json> --raw <dir> --out <diagnosis.
 | `definitions` | 口径说明字符串数组（`da/build_diagnosis.py:694-712`） | 页面、Reviewer 引用检索 |
 | `risks` | 证据缺口数组，`标题`/`内容`（`da/build_diagnosis.py:715-769`） | 页面、Reviewer 引用检索 |
 | `recommendations` | 建议数组，`优先级`/`标题`/`依据`/`缺失证据`/`验证方式`（`da/build_diagnosis.py:771-818`） | 页面、Reviewer 引用检索 |
+| `producer` | 角色元数据：产出方，固定 `da`（`da/build_diagnosis.py:1287`） | Builder 沿用、Reviewer 核（`review/cross_check.py:780-814`） |
+| `periods` | 角色元数据：观察期次，沿用任务书声明的 `periods`（`da/build_diagnosis.py:282-291`、`:1288`） | Builder 沿用、Reviewer 核各交接文件期次是否一致 |
 
 结构定义：`openbot/examples/org-health-local/schema/diagnosis.schema.json`
 （顶层必需键 `:9`；`scope` `:63-86`；期次键名写死在 `actualSeries` `:184-196`、
@@ -192,8 +196,14 @@ python3 builder/build_site.py --data <diagnosis.json> --out <dist> [--bundle <ap
 <dist>/styles.css            # 从示例目录复制
 <dist>/app.bundle.js         # 复制或 bun 打包
 <dist>/data/diagnosis.json   # 快照字节原样复制
+<dist>/site-summary.json     # 站点内容摘要交接文件（含角色元数据）
 <dist>/build-report.json     # 构建报告
 ```
+
+`site-summary.json` 是 Builder 交给 Reviewer 的站点内容摘要，含角色元数据
+（`producer` 固定 `builder`、`periods` 沿用快照声明的期次；快照没声明 `periods` 时
+按 `scope.观察月份` 与指标期次键回落）与页面条目清单
+（`观察月份`/`指标标题`/`洞察条数`/`建议条数`/`摘要`，`builder/build_site.py:135-166`）。
 
 `build-report.json` 字段（`builder/build_site.py:83-105`）：
 
@@ -249,13 +259,15 @@ python3 serve.py [--port 8765] [--root <dist>] [--data <diagnosis.json>]
 
 ```
 python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>]
+                               [--summary <site-summary.json>]
 ```
 
 | 参数 | 必填 | 说明（引用） |
 | --- | --- | --- |
-| `--brief` | 是 | `review/cross_check.py:451` |
-| `--data` | 是 | `review/cross_check.py:452` |
-| `--dist` | 否 | 给了就核对 `dist/data/diagnosis.json` 与 `--data` 字节是否相同（`review/cross_check.py:453-458`） |
+| `--brief` | 是 | `review/cross_check.py:1038` |
+| `--data` | 是 | `review/cross_check.py:1039` |
+| `--dist` | 否 | 给了就核对 `dist/data/diagnosis.json` 与 `--data` 字节是否相同（`review/cross_check.py:1041-1046`）；目录里的 `site-summary.json` 也会被当作站点摘要交接文件核对 |
+| `--summary` | 否 | 站点摘要交接文件路径；不给时从 `--dist` 目录里找（`review/cross_check.py:1047-1053`、`review/cross_check.py:912-925`） |
 
 检查项与判定：
 
@@ -266,6 +278,7 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 | 必答问题覆盖 | 每条必答问题按 id / 原文 / 关键词命中 `insights`+`recommendations` 的全部字符串即算覆盖 | `review/cross_check.py:249-363`、`:365-378` |
 | 站点数据一致 | `dist/data/diagnosis.json` 与 `--data` 字节相同（打印 sha256 前 12 位） | `review/cross_check.py:380-397` |
 | 隐私边界 | 快照所有键名（含嵌套）不含个人/薪酬/编制粒度黑名单词条 | `review/cross_check.py:108-137`、`:399-429` |
+| 角色元数据 | 交接文件（任务书、诊断快照、站点摘要）有非空业务内容时必须带 `producer` 与 `periods`；缺哪个字段就报哪个字段，并给出文件路径；各文件的 `periods` 必须一致 | `review/cross_check.py:780-910` |
 
 | 退出码 | 含义 | 触发条件（引用） |
 | --- | --- | --- |
@@ -399,7 +412,7 @@ python3 builder/check_site.py "$W/dist"
 # 4. DA 口径说明：对 Boss 任务书失败（退出码 1）→ 缺口 3
 python3 da/write_method.py --brief "$W/brief.json" --data "$W/diagnosis.json" --out "$W/da-method.md"
 
-# 5. Reviewer 三方核对：10 项全 PASS（退出码 0）
+# 5. Reviewer 三方核对：全部检查 PASS（退出码 0；检查项数随任务书 `必答问题` 条数变化）
 python3 review/cross_check.py --brief "$W/brief.json" --data "$W/diagnosis.json" --dist "$W/dist"
 
 # 6. validate.py 当前使用位置参数；以下两条旧写法仍失败（仅作旧写法演示，编排 spec 已不再使用）
@@ -419,10 +432,10 @@ python3 run_e2e.py --workdir "$W/e2e" --bundle "$W/app.bundle.js" --review
 | `da/build_diagnosis.py`（Boss 产物 + `fx.csv`） | 0 | 已生成诊断快照，`观察期间.期次` 与 `fx.csv` 汇率均被消费 |
 | `da/build_diagnosis.py --month 2026-06` | 1 | 生成的快照未通过结构校验（缺 `2026-09实际`） |
 | `da/write_method.py`（Boss 任务书） | 1 | 生成文档包含诊断数值：0、2026 |
-| `builder/build_site.py`（合法快照） | 0 | 已生成站点，5 个产物 |
+| `builder/build_site.py`（合法快照） | 0 | 已生成站点，6 个产物 |
 | `builder/build_site.py`（`schema版本=3`） | 1 | 校验失败，且不生成 `dist` |
 | `builder/check_site.py`（build_site 产物） | 0 | 站点检查通过，文件清单 sha256 全部一致 |
-| `review/cross_check.py` | 0 | 10 项检查全部通过 |
+| `review/cross_check.py` | 0 | 全部检查通过（默认任务书 11 项：期间一致、版本一致、6 条必答问题覆盖、站点数据一致、隐私边界、角色元数据） |
 | `validate.py …` | 0 | 校验通过（位置参数） |
 | `validate.py --data …` / `test_serve.py --data …` | 2 | unrecognized arguments: --data；这是旧写法的演示，编排 spec 已不再使用这两条命令 |
 | `run_e2e.py --workdir … --review` | 0 | 审查完成并写出 `review.md` |

@@ -22,6 +22,8 @@ from review import cross_check  # noqa: E402  (需要先让示例目录可被导
 SCRIPT = ROOT / "review" / "cross_check.py"
 
 BRIEF = {
+    "producer": "boss",
+    "periods": ["2026-01", "2026-05", "2026-09"],
     "目标": ["说明整体成本与成本率的走势"],
     "观察期间": {
         "起始期次": "2026-01",
@@ -40,6 +42,8 @@ BRIEF = {
 }
 
 DIAGNOSIS = {
+    "producer": "da",
+    "periods": ["2026-01", "2026-05", "2026-09"],
     "scope": {
         "数据截止": "2026-09-30",
         "观察月份": "2026-09",
@@ -130,6 +134,14 @@ DIAGNOSIS = {
 }
 
 
+# 供测试使用的合成站点内容摘要。
+SITE_SUMMARY = {
+    "producer": "builder",
+    "periods": ["2026-01", "2026-05", "2026-09"],
+    "summary": "合成示例站点内容摘要",
+}
+
+
 # Boss 格式的观察期间（与 boss/make_brief.py 产出一致）：期次是字符串数组。
 BOSS_PERIOD = {
     "观察月份": "2026-09",
@@ -181,11 +193,14 @@ def run_script(
     dist: Path | None = None,
     out: Path | None = None,
     json_out: Path | None = None,
+    summary: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """调用命令行脚本，返回进程结果。"""
     argv = [sys.executable, str(SCRIPT), "--brief", str(brief), "--data", str(data)]
     if dist is not None:
         argv.extend(["--dist", str(dist)])
+    if summary is not None:
+        argv.extend(["--summary", str(summary)])
     if out is not None:
         argv.extend(["--out", str(out)])
     if json_out is not None:
@@ -199,12 +214,19 @@ class CrossCheckTest(unittest.TestCase):
     def setUp(self) -> None:
         self.brief = copy.deepcopy(BRIEF)
         self.diagnosis = copy.deepcopy(DIAGNOSIS)
+        self.summary = copy.deepcopy(SITE_SUMMARY)
 
-    def check(self, brief: dict | None = None, diagnosis: dict | None = None) -> list:
+    def check(
+        self,
+        brief: dict | None = None,
+        diagnosis: dict | None = None,
+        site_summary: dict | None = None,
+    ) -> list:
         """在内存里跑一遍检查，返回逐条结果。"""
         return cross_check.run_checks(
             brief if brief is not None else self.brief,
             diagnosis if diagnosis is not None else self.diagnosis,
+            site_summary=site_summary,
         )
 
     def failing(self, results: list) -> list:
@@ -622,7 +644,7 @@ class CrossCheckTest(unittest.TestCase):
 
         # 现有报告格式及 PASS/FAIL 汇总稳定不变
         report = cross_check.markdown_report(results)
-        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", report)
+        self.assertIn("**汇总：共 6 项检查，5 项通过，1 项失败。**", report)
         self.assertIn(
             f"- **FAIL 隐私边界**：出现个人/薪酬/编制粒度字段名：{expected_path}（岗位）",
             report,
@@ -682,7 +704,7 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(brief, data, out=report)
             content = report.read_text(encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("**汇总：共 5 项检查，5 项通过，0 项失败。**", content)
+        self.assertIn("**汇总：共 6 项检查，6 项通过，0 项失败。**", content)
         self.assertIn("- **PASS 期间一致**", content)
         self.assertIn("- **PASS 隐私边界**", content)
         self.assertNotIn("- **FAIL ", content)
@@ -698,7 +720,7 @@ class CrossCheckTest(unittest.TestCase):
             payload = json.loads(json_out.read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, cross_check.EXIT_OK, result.stdout + result.stderr)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["summary"], {"total": 5, "passed": 5, "failed": 0})
+        self.assertEqual(payload["summary"], {"total": 6, "passed": 6, "failed": 0})
         self.assertTrue(payload["checks"])
         self.assertTrue(
             all(set(check) == {"name", "ok", "detail"} for check in payload["checks"])
@@ -813,7 +835,7 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(brief, data, out=report)
             content = report.read_text(encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("**汇总：共 5 项检查，5 项通过，0 项失败。**", content)
+        self.assertIn("**汇总：共 6 项检查，6 项通过，0 项失败。**", content)
         self.assertIn("- **PASS 必答问题覆盖**", content)
         self.assertNotIn("- **FAIL ", content)
 
@@ -865,7 +887,7 @@ class CrossCheckTest(unittest.TestCase):
             content = report.read_text(encoding="utf-8")
         self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
         self.assertIn("FAIL 必答问题覆盖", result.stdout)
-        self.assertIn("**汇总：共 4 项检查，3 项通过，1 项失败。**", content)
+        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", content)
 
     def test_command_line_nested_multiline_forbidden_field_writes_report(self) -> None:
         """命令行遇到嵌套数组/对象中含禁止字段名且文本跨行时，生成完整且未被换行截断的报告。"""
@@ -894,7 +916,7 @@ class CrossCheckTest(unittest.TestCase):
             f"FAIL 隐私边界：出现个人/薪酬/编制粒度字段名：{expected_path}（岗位）",
             result.stdout,
         )
-        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", content)
+        self.assertIn("**汇总：共 6 项检查，5 项通过，1 项失败。**", content)
         self.assertIn(
             f"- **FAIL 隐私边界**：出现个人/薪酬/编制粒度字段名：{expected_path}（岗位）",
             content,
@@ -930,7 +952,7 @@ class CrossCheckTest(unittest.TestCase):
             content = report.read_text(encoding="utf-8")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("# 组织诊断交叉审查报告", content)
-        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", content)
+        self.assertIn("**汇总：共 6 项检查，5 项通过，1 项失败。**", content)
         self.assertIn("- **FAIL 版本一致**", content)
         self.assertIn("- **PASS 期间一致**", content)
 
@@ -950,7 +972,7 @@ class CrossCheckTest(unittest.TestCase):
             content = report.read_text(encoding="utf-8")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("- **FAIL 站点数据一致**", content)
-        self.assertIn("**汇总：共 6 项检查，5 项通过，1 项失败。**", content)
+        self.assertIn("**汇总：共 8 项检查，7 项通过，1 项失败。**", content)
 
     def test_command_line_prints_one_line_per_check(self) -> None:
         """命令行逐条输出检查结果并给出汇总。"""
@@ -960,8 +982,8 @@ class CrossCheckTest(unittest.TestCase):
             data = write_json(base / "diagnosis.json", self.diagnosis)
             result = run_script(brief, data)
         lines = [line for line in result.stdout.splitlines() if line]
-        self.assertEqual(len(lines), 6)
-        self.assertTrue(lines[-1].startswith("共 5 项检查"))
+        self.assertEqual(len(lines), 7)
+        self.assertTrue(lines[-1].startswith("共 6 项检查"))
 
     def test_dist_identical_bytes_passes(self) -> None:
         """站点数据与快照字节相同时通过。"""
@@ -1075,7 +1097,7 @@ class CrossCheckTest(unittest.TestCase):
             result = run_script(brief, data)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("站点数据一致", result.stdout)
-        self.assertIn("共 5 项检查：5 项通过，0 项失败", result.stdout)
+        self.assertIn("共 6 项检查：6 项通过，0 项失败", result.stdout)
 
     def test_unreadable_brief_exits_non_zero(self) -> None:
         """任务书不可读时退出码非 0。"""
@@ -1154,9 +1176,339 @@ class CrossCheckTest(unittest.TestCase):
             content = report.read_text(encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("# 组织诊断交叉审查报告", content)
-        self.assertIn("**汇总：共 5 项检查，5 项通过，0 项失败。**", content)
+        self.assertIn("**汇总：共 6 项检查，6 项通过，0 项失败。**", content)
         self.assertIn("- **PASS 期间一致**", content)
         self.assertNotIn("- **FAIL ", content)
+
+
+    def test_brief_missing_producer_metadata_fails_with_finding(self) -> None:
+        """任务书有业务内容但缺少 producer 元数据时生成带路径和字段名的 finding 并以失败退出。"""
+        brief_data = copy.deepcopy(self.brief)
+        del brief_data["producer"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", brief_data)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            result = run_script(brief_file, data_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    brief_data, self.diagnosis, brief_path=brief_file, data_path=data_file
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("producer", result.stdout)
+        self.assertIn(str(brief_file), result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "producer")
+        self.assertEqual(finding["path"], str(brief_file))
+
+    def test_brief_missing_periods_metadata_fails_with_finding(self) -> None:
+        """任务书有业务内容但缺少 periods 元数据时生成带路径和字段名的 finding 并以失败退出。"""
+        brief_data = copy.deepcopy(self.brief)
+        del brief_data["periods"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", brief_data)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            result = run_script(brief_file, data_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    brief_data, self.diagnosis, brief_path=brief_file, data_path=data_file
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("periods", result.stdout)
+        self.assertIn(str(brief_file), result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "periods")
+        self.assertEqual(finding["path"], str(brief_file))
+
+    def test_diagnosis_missing_producer_metadata_fails_with_finding(self) -> None:
+        """诊断快照有业务内容但缺少 producer 元数据时生成带路径和字段名的 finding 并以失败退出。"""
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+        del diagnosis_data["producer"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", diagnosis_data)
+            result = run_script(brief_file, data_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    self.brief, diagnosis_data, brief_path=brief_file, data_path=data_file
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("producer", result.stdout)
+        self.assertIn(str(data_file), result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "producer")
+        self.assertEqual(finding["path"], str(data_file))
+
+    def test_diagnosis_missing_periods_metadata_fails_with_finding(self) -> None:
+        """诊断快照有业务内容但缺少 periods 元数据时生成带路径和字段名的 finding 并以失败退出。"""
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+        del diagnosis_data["periods"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", diagnosis_data)
+            result = run_script(brief_file, data_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    self.brief, diagnosis_data, brief_path=brief_file, data_path=data_file
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("periods", result.stdout)
+        self.assertIn(str(data_file), result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "periods")
+        self.assertEqual(finding["path"], str(data_file))
+
+    def test_site_summary_missing_producer_metadata_fails_with_finding(self) -> None:
+        """站点摘要有业务内容但缺少 producer 元数据时生成带路径和字段名的 finding 并以失败退出。"""
+        summary_data = copy.deepcopy(self.summary)
+        del summary_data["producer"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            summary_file = write_json(base / "site-summary.json", summary_data)
+            result = run_script(brief_file, data_file, summary=summary_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    self.brief,
+                    self.diagnosis,
+                    brief_path=brief_file,
+                    data_path=data_file,
+                    site_summary=summary_data,
+                    site_summary_path=summary_file,
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("producer", result.stdout)
+        self.assertIn(str(summary_file), result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "producer")
+        self.assertEqual(finding["path"], str(summary_file))
+
+    def test_site_summary_missing_periods_metadata_fails_with_finding(self) -> None:
+        """站点摘要有业务内容但缺少 periods 元数据时生成带路径和字段名的 finding 并以失败退出。"""
+        summary_data = copy.deepcopy(self.summary)
+        del summary_data["periods"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            summary_file = write_json(base / "site-summary.json", summary_data)
+            result = run_script(brief_file, data_file, summary=summary_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    self.brief,
+                    self.diagnosis,
+                    brief_path=brief_file,
+                    data_path=data_file,
+                    site_summary=summary_data,
+                    site_summary_path=summary_file,
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("periods", result.stdout)
+        self.assertIn(str(summary_file), result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "periods")
+        self.assertEqual(finding["path"], str(summary_file))
+
+    def test_site_summary_periods_mismatch_fails_with_finding(self) -> None:
+        """交接文件期次元数据数值不一致时报告 FAIL 并给出结构化 finding。"""
+        summary_data = copy.deepcopy(self.summary)
+        summary_data["periods"] = ["2026-01", "2026-08", "2026-09"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            summary_file = write_json(base / "site-summary.json", summary_data)
+            result = run_script(brief_file, data_file, summary=summary_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    self.brief,
+                    self.diagnosis,
+                    brief_path=brief_file,
+                    data_path=data_file,
+                    site_summary=summary_data,
+                    site_summary_path=summary_file,
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("期次元数据不一致", result.stdout)
+
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        self.assertTrue(meta_findings)
+        finding = meta_findings[0].finding
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["field"], "periods")
+
+    def test_all_handover_files_metadata_complete_and_consistent_passes(self) -> None:
+        """brief、diagnosis 与 site summary 元数据齐全且数值一致时输出通过报告。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            summary_file = write_json(base / "site-summary.json", self.summary)
+            report_file = base / "report.md"
+            result = run_script(brief_file, data_file, summary=summary_file, out=report_file)
+            content = report_file.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, cross_check.EXIT_OK, result.stdout + result.stderr)
+        self.assertIn("PASS 角色元数据", result.stdout)
+        self.assertIn("- **PASS 角色元数据**", content)
+        self.assertNotIn("- **FAIL ", content)
+
+    def test_site_summary_in_dist_is_checked_without_summary_argument(self) -> None:
+        """站点目录里的站点摘要交接文件不给 --summary 也会被核对。"""
+        summary_data = copy.deepcopy(self.summary)
+        del summary_data["producer"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "dist"
+            (dist / "data").mkdir(parents=True)
+            (dist / "data" / "diagnosis.json").write_bytes(data_file.read_bytes())
+            summary_file = write_json(dist / "site-summary.json", summary_data)
+            result = run_script(brief_file, data_file, dist)
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        self.assertIn("producer", result.stdout)
+        self.assertIn(str(summary_file), result.stdout)
+
+    def test_missing_site_summary_in_dist_is_reported_not_skipped(self) -> None:
+        """站点目录里没有站点摘要交接文件时显式说明，不整环静默跳过。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", self.brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            dist = base / "dist"
+            (dist / "data").mkdir(parents=True)
+            (dist / "data" / "diagnosis.json").write_bytes(data_file.read_bytes())
+            report_file = base / "report.md"
+            result = run_script(brief_file, data_file, dist, out=report_file)
+            content = report_file.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, cross_check.EXIT_OK, result.stdout + result.stderr)
+        self.assertIn("未找到站点摘要交接文件", result.stdout)
+        self.assertIn(str(dist / "site-summary.json"), result.stdout)
+        self.assertIn("未找到站点摘要交接文件", content)
+
+    def test_repo_demo_handover_files_carry_role_metadata(self) -> None:
+        """仓库内已提交的交接产物（demo/brief.json、demo/diagnosis.json）满足新契约。"""
+        brief_path = ROOT / "demo" / "brief.json"
+        data_path = ROOT / "demo" / "diagnosis.json"
+        result = run_script(brief_path, data_path)
+
+        self.assertEqual(result.returncode, cross_check.EXIT_OK, result.stdout + result.stderr)
+        self.assertIn("PASS 角色元数据", result.stdout)
+
+    def test_missing_metadata_never_silently_skipped_as_empty_report(self) -> None:
+        """禁止把缺少元数据字段当作空报告静默跳过，必须生成 finding 并退出非 0。"""
+        # brief、diagnosis 均有非空业务内容但完全不含 producer/periods 元数据
+        raw_brief = copy.deepcopy(self.brief)
+        del raw_brief["producer"]
+        del raw_brief["periods"]
+        raw_diag = copy.deepcopy(self.diagnosis)
+        del raw_diag["producer"]
+        del raw_diag["periods"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", raw_brief)
+            data_file = write_json(base / "diagnosis.json", raw_diag)
+            result = run_script(brief_file, data_file)
+            findings = self.failing(
+                cross_check.run_checks(
+                    raw_brief, raw_diag, brief_path=brief_file, data_path=data_file
+                )
+            )
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL)
+        self.assertIn("FAIL 角色元数据", result.stdout)
+        meta_findings = [item for item in findings if item.name == "角色元数据"]
+        # 不得为空报告
+        self.assertGreater(len(meta_findings), 0)
+        # 必须带文件路径和字段名
+        for item in meta_findings:
+            self.assertIsNotNone(item.finding)
+            self.assertIn("path", item.finding)
+            self.assertIn("field", item.finding)
+            self.assertIn(item.finding["field"], ("producer", "periods"))
+
+    def test_missing_metadata_findings_use_unified_contract(self) -> None:
+        """缺元数据的 finding 走统一契约：severity/path/message 与定位用的字段名。"""
+        raw_brief = copy.deepcopy(self.brief)
+        del raw_brief["producer"]
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief_file = write_json(base / "brief.json", raw_brief)
+            data_file = write_json(base / "diagnosis.json", self.diagnosis)
+            json_out = base / "review.json"
+            result = run_script(brief_file, data_file, json_out=json_out)
+            payload = json.loads(json_out.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertFalse(payload["ok"])
+        findings = [
+            item for item in payload["findings"] if item["path"] == str(brief_file)
+        ]
+        self.assertTrue(findings)
+        finding = findings[0]
+        self.assertEqual(finding["severity"], "error")
+        self.assertTrue(finding["message"])
+        self.assertEqual(finding["context"]["field"], "producer")
+
+    def test_empty_handover_file_is_not_reported_as_missing_metadata(self) -> None:
+        """没有业务内容的交接文件不报缺元数据：空报告不是缺字段。"""
+        empty_brief = {"producer": "boss", "periods": ["2026-01"]}
+        results = cross_check.run_checks(empty_brief, {})
+        failures = self.failing(results)
+        self.assertNotIn("角色元数据", [item.name for item in failures])
 
 
 if __name__ == "__main__":

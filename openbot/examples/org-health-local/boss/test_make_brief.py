@@ -43,8 +43,8 @@ from validate import Validator, load_schema  # noqa: E402
 EXAMPLE_PATH = EX / "data" / "diagnosis.json"
 SCHEMA_PATH = ROOT / "brief.schema.json"
 
-BRIEF_KEYS = {"period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"}
-ORDERED_BRIEF_KEYS = ["period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本"]
+BRIEF_KEYS = {"period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本", "producer", "periods"}
+ORDERED_BRIEF_KEYS = ["period", "summary", "目标", "观察期间", "口径", "必答问题", "数据需求", "禁止事项", "schema版本", "producer", "periods"]
 REQUIRED_FORBIDS = ("不得写入真实组织数据", "不作个人/薪酬/编制判断")
 
 # 期次锚点的期望顺序：2026-01实际 → 2026-05H1参考 → 2026-09实际 → 年末测算 → 年末目标。
@@ -110,6 +110,12 @@ class MakeBriefTest(unittest.TestCase):
         self.assertRegex(self.brief["period"], r"^[0-9]{4}-(0[1-9]|1[0-2])$")
         self.assertIsInstance(self.brief["summary"], str)
         self.assertTrue(self.brief["summary"].strip())
+
+    def test_brief_carries_role_metadata(self) -> None:
+        """任务书带角色元数据：产出方与观察期次，供下游与 Reviewer 核对交接链。"""
+        self.assertEqual(self.brief["producer"], "boss")
+        self.assertEqual(self.brief["periods"], ["2026-01", "2026-05", "2026-09"])
+        self.assertEqual(self.errors(self.brief), [])
 
     def test_schema_requires_period_and_summary(self) -> None:
         """schema 明确要求 period 与 summary。"""
