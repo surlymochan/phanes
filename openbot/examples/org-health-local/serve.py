@@ -79,8 +79,12 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
             return None, {'error': 'diagnosis data not found'}, 404
         for attempt in range(3):
             try:
-                expected_size = self.data_file.stat().st_size
-                body = self.data_file.read_bytes()
+                # Open before checking the size: an atomic os.replace() may swap
+                # the pathname while this request is in flight, but the open
+                # descriptor must continue reading one complete inode.
+                with self.data_file.open('rb') as stream:
+                    expected_size = os.fstat(stream.fileno()).st_size
+                    body = stream.read()
                 if len(body) != expected_size:
                     raise OSError('diagnosis file changed during read')
                 payload = json.loads(body.decode('utf-8'))
