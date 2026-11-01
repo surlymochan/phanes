@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -80,8 +81,18 @@ def copy_static_files(out_dir: Path) -> None:
         shutil.copyfile(EX_ROOT / name, out_dir / name)
 
 
-def write_report(out_dir: Path, data_path: Path, source_commit: str | None = None) -> dict:
-    """写 build-report.json：输入路径、输入 sha256、文件清单、生成时间。"""
+def report_relative_path(path: Path, out_dir: Path) -> str:
+    """返回相对于构建工作目录（dist 的父目录）的稳定 POSIX 路径。"""
+    return Path(os.path.relpath(path.resolve(), out_dir.parent.resolve())).as_posix()
+
+
+def write_report(
+    out_dir: Path,
+    data_path: Path,
+    source_commit: str | None = None,
+    brief_path: Path | None = None,
+) -> dict:
+    """写 build-report.json：输入摘要、bundle 摘要、复制文件清单与生成时间。"""
     files = []
     for relative in SITE_FILES:
         path = out_dir / relative
@@ -94,6 +105,18 @@ def write_report(out_dir: Path, data_path: Path, source_commit: str | None = Non
         )
     input_path = str(data_path.resolve())
     input_sha256 = sha256_of(data_path)
+    input_summary = {
+        "diagnosis": {
+            "路径": report_relative_path(data_path, out_dir),
+            "sha256": input_sha256,
+        }
+    }
+    if brief_path is not None:
+        input_summary["brief"] = {
+            "路径": report_relative_path(brief_path, out_dir),
+            "sha256": sha256_of(brief_path),
+        }
+    bundle_entry = next(entry for entry in files if entry["路径"] == BUNDLE_NAME)
     previous_time = None
     report_path = out_dir / REPORT_NAME
     if report_path.is_file():
@@ -106,6 +129,9 @@ def write_report(out_dir: Path, data_path: Path, source_commit: str | None = Non
             and previous.get("输入路径") == input_path
             and previous.get("sha256") == input_sha256
             and previous.get("文件清单") == files
+            and previous.get("输入摘要") == input_summary
+            and previous.get("bundle") == bundle_entry
+            and previous.get("复制文件") == list(SITE_FILES)
             and previous.get("来源提交") == source_commit
             and isinstance(previous.get("生成时间"), str)
         ):
@@ -113,6 +139,9 @@ def write_report(out_dir: Path, data_path: Path, source_commit: str | None = Non
     report = {
         "输入路径": input_path,
         "sha256": input_sha256,
+        "输入摘要": input_summary,
+        "bundle": bundle_entry,
+        "复制文件": list(SITE_FILES),
         "文件清单": files,
         "生成时间": previous_time
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -130,6 +159,7 @@ def build_site(
     out_dir: Path,
     bundle_path: Path | None = None,
     source_commit: str | None = None,
+    brief_path: Path | None = None,
 ) -> dict:
     """把已校验的数据构建成 dist 目录，返回 build-report 的内容。
 
@@ -137,6 +167,11 @@ def build_site(
     """
     if bundle_path is not None and not bundle_path.is_file():
         raise FileNotFoundError(f"bundle 文件不存在或不是有效文件：{bundle_path}")
+    if brief_path is None:
+        candidate = data_path.parent / "brief.json"
+        brief_path = candidate if candidate.is_file() else None
+    elif not brief_path.is_file():
+        raise FileNotFoundError(f"brief 文件不存在或不是有效文件：{brief_path}")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "data").mkdir(parents=True, exist_ok=True)
     copy_static_files(out_dir)
@@ -145,13 +180,14 @@ def build_site(
         build_bundle(out_dir / BUNDLE_NAME)
     else:
         shutil.copyfile(bundle_path, out_dir / BUNDLE_NAME)
-    return write_report(out_dir, data_path, source_commit)
+    return write_report(out_dir, data_path, source_commit, brief_path)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数。"""
     parser = argparse.ArgumentParser(description="把诊断快照构建成可预览的静态站点目录。")
     parser.add_argument("--data", type=Path, required=True, help="诊断快照路径（schema v4）")
+    parser.add_argument("--brief", type=Path, default=None, help="任务书路径（可选，用于构建报告输入摘要）")
     parser.add_argument("--out", type=Path, required=True, help="输出目录 dist")
     parser.add_argument(
         "--bundle",
@@ -167,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     """校验数据并构建站点。返回进程退出码。"""
     args = parse_args(argv)
     data_path: Path = args.data
+    brief_path: Path | None = args.brief
     out_dir: Path = args.out
     bundle_path: Path | None = args.bundle
     source_commit: str | None = args.source_commit
@@ -180,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_INVALID
+    if brief_path is not None and not brief_path.is_file():
+        print(f"brief 文件不存在或不是有效文件：{brief_path}", file=sys.stderr)
+        return EXIT_USAGE
 
     validate = load_module("org_health_validate", VALIDATE_PATH)
     try:
@@ -202,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
 
     created = not out_dir.exists()
     try:
-        report = build_site(data_path, out_dir, bundle_path, source_commit)
+        report = build_site(data_path, out_dir, bundle_path, source_commit, brief_path)
     except (OSError, subprocess.CalledProcessError) as cause:
         print(f"构建失败：{cause}", file=sys.stderr)
         if created and out_dir.exists():
