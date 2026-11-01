@@ -6845,6 +6845,39 @@ def cmd_bus_worker(args, policy):
 # ---------------------------------------------------------------- resident lanes
 
 LANE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
+# The generated lane unit keeps a high ceiling by default; low-memory hosts lower it
+# per lane ("memory_max" in lanes.json) or per host ("lane.memory_max" in policy.local.json).
+LANE_DEFAULT_MEMORY_MAX = "900M"
+LANE_MEMORY_RE = re.compile(r"^([0-9]+)([KMGT]?)$")
+LANE_MEMORY_UNITS = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def parse_memory_bytes(value):
+    """Return the byte count of a systemd-style size (900M), or None when it is not usable."""
+    if not isinstance(value, str):
+        return None
+    match = LANE_MEMORY_RE.fullmatch(value.strip())
+    if not match:
+        return None
+    size = int(match.group(1)) * LANE_MEMORY_UNITS[match.group(2)]
+    return size or None
+
+
+def lane_memory_limit(lane, policy=None):
+    """Resolve the memory ceiling of a lane: lane entry, then host policy, then the default.
+
+    The built-in default keeps the historical high ceiling so existing lanes are unaffected.
+    """
+    lane_value = lane.get("memory_max") if isinstance(lane, dict) else None
+    policy_lane = policy.get("lane") if isinstance(policy, dict) else None
+    policy_value = policy_lane.get("memory_max") if isinstance(policy_lane, dict) else None
+    for value, source in ((lane_value, "lane"), (policy_value, "policy")):
+        if value is None:
+            continue
+        if parse_memory_bytes(value) is None:
+            raise ValueError(f"invalid memory_max {value!r}: expected a positive size such as 900M")
+        return value.strip(), source
+    return LANE_DEFAULT_MEMORY_MAX, "default"
 
 
 def lane_root(name):
@@ -6939,6 +6972,8 @@ def lane_config():
             raise ValueError(f"invalid lane config {where}: binary override must be an absolute path")
         if lane.get("binary") and not os.access(lane["binary"], os.X_OK):
             raise ValueError(f"invalid lane config {where}: binary override is not executable")
+        if lane.get("memory_max") is not None and parse_memory_bytes(lane["memory_max"]) is None:
+            raise ValueError(f"invalid lane config {where}: memory_max must be a size such as 900M")
         out.append(dict(lane))
     return out
 
@@ -8776,6 +8811,7 @@ def generate_lane_service_definition(lane, service_manager):
     environment = {"OPENSWARM_HOME": DATA}
     if lanes_file:
         environment["OPENSWARM_LANES_FILE"] = lanes_file
+    memory_max, memory_source = lane_memory_limit(lane, load_policy())
 
     if service_manager == "launchd-plist":
         import plistlib
@@ -8783,6 +8819,13 @@ def generate_lane_service_definition(lane, service_manager):
         obj = {"Label": f"com.openswarm.lane.{name}", "ProgramArguments": command,
                "RunAtLoad": True, "KeepAlive": True, "StandardOutPath": log, "StandardErrorPath": log,
                "EnvironmentVariables": environment}
+        if memory_source != "default":
+            # launchd has no MemoryMax=; the resource limit is the closest equivalent and
+            # is only written when a limit was requested, because RLIMIT_AS caps address
+            # space rather than resident memory.
+            limit = parse_memory_bytes(memory_max)
+            obj["SoftResourceLimits"] = {"Memory": limit}
+            obj["HardResourceLimits"] = {"Memory": limit}
         plist = plistlib.dumps(obj, fmt=plistlib.FMT_XML).decode()
         return json.dumps({"name": name, "plist": plist}, indent=2, ensure_ascii=False)
 
@@ -8803,7 +8846,7 @@ def generate_lane_service_definition(lane, service_manager):
                  "[Service]", "Type=simple", f"User={user}",
                  f"ExecStart={' '.join(systemd_quote(x) for x in command)}",
                  f"Environment={systemd_quote('OPENSWARM_HOME=' + environment['OPENSWARM_HOME'])}",
-                 f"Environment={systemd_quote('PATH=' + path)}", "Restart=always", "MemoryMax=900M",
+                 f"Environment={systemd_quote('PATH=' + path)}", "Restart=always", f"MemoryMax={memory_max}",
                  "CPUQuota=150%", "Nice=10"]
         if "OPENSWARM_LANES_FILE" in environment:
             lines.append(f"Environment={systemd_quote('OPENSWARM_LANES_FILE=' + environment['OPENSWARM_LANES_FILE'])}")

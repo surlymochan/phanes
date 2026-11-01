@@ -430,6 +430,11 @@ steered or aborted while working. Cursor lanes run the local `cursor-agent acp` 
 ]}
 ```
 
+An optional lane `memory_max` (`"700M"`) lowers the memory ceiling of the generated service definition for that
+lane; `{"lane":{"memory_max":"700M"}}` in `policy.local.json` lowers it for every lane of that host. The value is a
+systemd size (an integer with an optional `K`, `M`, `G` or `T` suffix) and an unusable value is rejected when the
+lane config is read.
+
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
 ```bash
@@ -457,7 +462,11 @@ waits for its response, then continues in the same ACP session with the steer te
 
 On small Linux lane hosts, omit `--verify` so test suites and their dependencies do not compete with the agent for
 memory and CPU. The planner can run acceptance checks on its host. `lane systemd-unit` prints a system service with
-`MemoryMax=900M`, `CPUQuota=150%`, and `Nice=10`; review and install it separately if needed.
+`MemoryMax=900M`, `CPUQuota=150%`, and `Nice=10`; review and install it separately if needed. The `MemoryMax` ceiling
+follows the lane and the host policy: set `memory_max` in `lanes.json` (for example `700M` on a ~1 GiB host) or
+`lane.memory_max` in `policy.local.json` for all lanes of that host. Without either, the default stays `900M`.
+`lane launchd-plist` writes the closest launchd equivalent (`SoftResourceLimits`/`HardResourceLimits` with `Memory`
+in bytes) only when a ceiling is configured.
 
 For automated queue dispatch, label issues with `lane-ready` and an optional backend pin (`backend:pi|agy|codex`) to prioritize matching lane workers.
 
