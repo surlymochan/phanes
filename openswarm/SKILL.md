@@ -128,7 +128,8 @@ waits for its cancelled response, then sends the steer text as a correction in t
 requests are answered with the offered `allow_always` option, or `allow_once` when that is unavailable. `lane down`
 aborts an active turn and stops its child and supervisor. The printed LaunchAgent plist uses `KeepAlive` and the
 systemd unit uses `Restart=always`, `MemoryMax=900M`, `CPUQuota=150%`, and `Nice=10`; neither is installed
-automatically. On small Linux lane hosts, omit `--verify` to keep verification load off the agent host; the planner
+automatically. The `MemoryMax` ceiling is configurable per lane (`memory_max` in `lanes.json`, e.g. `700M`) or per
+host (`lane.memory_max` in `policy.local.json`); without either, the default stays `900M`. On small Linux lane hosts, omit `--verify` to keep verification load off the agent host; the planner
 can verify elsewhere.
 
 Cursor ACP selects an exact model value first; otherwise a base name such as `composer-2.5` resolves to a unique

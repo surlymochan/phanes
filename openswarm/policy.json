@@ -269,6 +269,10 @@
     "timeout_seconds": 2400,
     "fallback": true
   },
+  "lane": {
+    "_doc": "Generated lane service definitions. memory_max sets the systemd MemoryMax= ceiling written by `lane systemd-unit`; the built-in default is 900M. Lower it for low-memory hosts (for example \"700M\") in policy.local.json, or per lane with \"memory_max\" in lanes.json.",
+    "memory_max": null
+  },
   "review": {
     "_doc": "Cross-family peer review uses read-only reviewer modes; automatic reviews run asynchronously within the concurrency, time, and diff-size caps.",
     "prefer": ["codex", "agy", "pi", "cursor"],

@@ -119,6 +119,18 @@ Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft ale
 
 Autodispatch skips paused host/backend/lane and keeps other backends busy.
 
+## Lane memory ceiling on low-memory hosts (Refs #867)
+
+Lane hosts with ~1 GiB RAM (`govpn`, `govpn2`) should lower the memory ceiling of the
+generated lane unit instead of editing an installed unit:
+
+- per lane: `"memory_max": "700M"` in that host's `$OPENSWARM_HOME/lanes.json`
+- per host: `{"lane": {"memory_max": "700M"}}` in that host's `$OPENSWARM_HOME/policy.local.json`
+
+`openswarm lane systemd-unit <lane>` then prints `MemoryMax=700M`; without either setting the
+default stays `900M`, so higher-memory hosts are unaffected. The recommended values and the
+launchd equivalent are documented in [`docs/fleet-govpn-cx5.md`](fleet-govpn-cx5.md).
+
 ## Backend pause gate and recovery (Refs #768)
 
 `PAUSE-BACKEND-*` files live in the autodispatch state dir `~/phanes-ctl/autodispatch/`

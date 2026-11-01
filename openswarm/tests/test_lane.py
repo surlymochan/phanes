@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import plistlib
 import signal
 import shutil
 import subprocess
@@ -177,6 +178,38 @@ class LanePureFunctionTests(unittest.TestCase):
         self.assertIn(f"{expected_capacity}-byte", msg)
         self.assertIn(full_path, msg)
 
+    def test_parse_memory_bytes_uses_systemd_units(self):
+        self.assertEqual(xs.parse_memory_bytes("900M"), 900 * 1024 * 1024)
+        self.assertEqual(xs.parse_memory_bytes("700M"), 700 * 1024 * 1024)
+        self.assertEqual(xs.parse_memory_bytes("2G"), 2 * 1024 ** 3)
+        self.assertEqual(xs.parse_memory_bytes("512K"), 512 * 1024)
+        self.assertEqual(xs.parse_memory_bytes("1048576"), 1048576)
+
+    def test_parse_memory_bytes_rejects_unusable_values(self):
+        for value in ("", "0", "900MB", "-700M", "700 m", "1.5G", "50%", None, 900):
+            self.assertIsNone(xs.parse_memory_bytes(value), value)
+
+    def test_lane_memory_limit_defaults_to_high_ceiling(self):
+        value, source = xs.lane_memory_limit({"name": "L1"}, {})
+        self.assertEqual(value, "900M")
+        self.assertEqual(source, "default")
+        self.assertGreater(xs.parse_memory_bytes(value), 700 * 1024 * 1024)
+
+    def test_lane_memory_limit_prefers_lane_then_policy(self):
+        value, source = xs.lane_memory_limit({"memory_max": "700M"}, {"lane": {"memory_max": "640M"}})
+        self.assertEqual((value, source), ("700M", "lane"))
+        value, source = xs.lane_memory_limit({}, {"lane": {"memory_max": "640M"}})
+        self.assertEqual((value, source), ("640M", "policy"))
+        value, source = xs.lane_memory_limit({}, {"lane": {"memory_max": None}})
+        self.assertEqual((value, source), ("900M", "default"))
+
+    def test_lane_memory_limit_rejects_invalid_size(self):
+        with self.assertRaises(ValueError) as cm:
+            xs.lane_memory_limit({"memory_max": "700MB"}, {})
+        self.assertIn("memory_max", str(cm.exception))
+        with self.assertRaises(ValueError):
+            xs.lane_memory_limit({}, {"lane": {"memory_max": "0"}})
+
 
 # Running bin/openswarm as a script recompiles the whole ~600 KB source on every
 # invocation. Loading it as a module reuses the cached bytecode instead, the same
@@ -241,7 +274,7 @@ class LaneTests(unittest.TestCase):
                         raise
                     time.sleep(0.05)
 
-    def set_config(self, backend=None, model=None, fallback_models=None):
+    def set_config(self, backend=None, model=None, fallback_models=None, memory_max=None):
         if backend:
             self.backend = backend
         fixture = {"codex": "fake_app_server.py", "cursor": "fake_cursor_acp.py",
@@ -256,6 +289,7 @@ class LaneTests(unittest.TestCase):
             **({"fallback_models": fallback_models} if fallback_models is not None else {}),
             **({"effort": "xhigh"} if self.backend == "codex" else
                ({"provider": "fake-provider"} if self.backend == "pi" else {})),
+            **({"memory_max": memory_max} if memory_max is not None else {}),
             "repo": str(self.repo), "binary": str(binary),
         }]}))
         if self.backend == "cursor":
@@ -744,6 +778,46 @@ class LaneTests(unittest.TestCase):
         self.assertIn("Nice=10", unit)
         self.assertIn(os.path.expanduser("~/.local/bin"), unit)
         self.assertIn("lane\" \"serve\" \"L1", unit)
+
+    def memory_max_of(self, unit):
+        line = next(row for row in unit.splitlines() if row.startswith("MemoryMax="))
+        return line.split("=", 1)[1]
+
+    def test_systemd_unit_memory_max_default_stays_high(self):
+        unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
+        self.assertEqual(self.memory_max_of(unit), "900M")
+        self.assertGreater(xs.parse_memory_bytes(self.memory_max_of(unit)), 700 * 1024 * 1024)
+
+    def test_systemd_unit_memory_max_can_be_lowered_per_lane(self):
+        self.set_config(memory_max="700M")
+        unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
+        self.assertEqual(self.memory_max_of(unit), "700M")
+        self.assertNotIn("MemoryMax=900M", unit)
+        self.assertLessEqual(xs.parse_memory_bytes(self.memory_max_of(unit)), 700 * 1024 * 1024)
+
+    def test_systemd_unit_memory_max_can_be_lowered_by_host_policy(self):
+        (self.data / "policy.local.json").write_text(json.dumps({"lane": {"memory_max": "640M"}}))
+        unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
+        self.assertEqual(self.memory_max_of(unit), "640M")
+        self.assertLessEqual(xs.parse_memory_bytes(self.memory_max_of(unit)), 700 * 1024 * 1024)
+
+    def test_systemd_unit_rejects_invalid_memory_max(self):
+        self.set_config(memory_max="700MB")
+        result = self.cli("lane", "systemd-unit", self.lane_name, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("memory_max", result.stderr)
+
+    def test_launchd_plist_memory_limit_equivalent(self):
+        default = json.loads(self.cli("lane", "launchd-plist", self.lane_name).stdout)["plist"]
+        self.assertNotIn("HardResourceLimits", default)
+        self.assertNotIn("SoftResourceLimits", default)
+
+        self.set_config(memory_max="700M")
+        plist = json.loads(self.cli("lane", "launchd-plist", self.lane_name).stdout)["plist"]
+        limits = plistlib.loads(plist.encode())
+        self.assertEqual(limits["HardResourceLimits"]["Memory"], 700 * 1024 * 1024)
+        self.assertEqual(limits["SoftResourceLimits"]["Memory"], 700 * 1024 * 1024)
+        self.assertLessEqual(limits["HardResourceLimits"]["Memory"], 700 * 1024 * 1024)
 
     def test_cursor_model_missing_fails_with_available_values(self):
         self.set_config("cursor", model="missing-model")
