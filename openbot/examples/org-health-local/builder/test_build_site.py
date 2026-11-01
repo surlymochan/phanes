@@ -2,13 +2,15 @@
 
 只用标准库，不调用 bun：单测一律传入假的 bundle 文件，构建目录为 TMPDIR 下的临时目录。
 覆盖：示例数据构建出齐全的站点文件；坏数据退出码非 0 且不生成 dist；
-结构定义文件缺失时给出可读错误（含路径）且不生成 dist。
+结构定义文件缺失时给出可读错误（含路径）且不生成 dist；
+同一份 brief 与诊断快照连续构建两次时，第二次仍成功，报告与站点关键文件依旧齐全可读。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +24,9 @@ sys.path.insert(0, str(EX_ROOT))
 import builder.build_site as build_site  # noqa: E402  (需要先让示例目录可被导入)
 
 EXAMPLE_PATH = EX_ROOT / "data" / "diagnosis.json"
+# 仓库里同一对 brief → 诊断快照：重复构建场景用这同一份输入。
+DEMO_BRIEF_PATH = EX_ROOT / "demo" / "brief.json"
+DEMO_DIAGNOSIS_PATH = EX_ROOT / "demo" / "diagnosis.json"
 FAKE_BUNDLE = "/* fake bundle */\nconsole.log('fake');\n"
 
 
@@ -67,6 +72,11 @@ class BuildSiteTest(unittest.TestCase):
             argv += ["--bundle", str(bundle)]
         return subprocess.run(argv, capture_output=True, text=True)
 
+    def read_manifest(self) -> dict:
+        """读取构建报告里的文件清单，返回 路径 -> sha256。"""
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        return {entry["路径"]: entry["sha256"] for entry in report["文件清单"]}
+
     def test_build_writes_all_files(self) -> None:
         """构建产物包含页面、样式、包、数据与构建报告。"""
         self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
@@ -100,6 +110,72 @@ class BuildSiteTest(unittest.TestCase):
         self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), EXAMPLE_PATH.read_bytes())
         self.assertNotEqual((self.out / "build-report.json").read_bytes(), old_content)
         self.assertEqual(unrelated.read_bytes(), b"unrelated old file\n")
+
+    def test_repeated_build_keeps_site_and_report_readable(self) -> None:
+        """同一份 brief 与诊断快照连续构建两次：第二次成功，报告与站点关键文件仍存在且可读。"""
+        self.assertEqual(self.build(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle), build_site.EXIT_OK)
+        first_manifest = self.read_manifest()
+
+        self.assertEqual(self.build(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle), build_site.EXIT_OK)
+
+        for relative in ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "build-report.json"):
+            with self.subTest(relative=relative):
+                path = self.out / relative
+                self.assertTrue(path.is_file(), f"缺少 {relative}")
+                self.assertGreater(path.stat().st_size, 0, f"{relative} 为空")
+
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["输入路径"], str(DEMO_DIAGNOSIS_PATH.resolve()))
+        self.assertEqual(report["sha256"], sha256_of(DEMO_DIAGNOSIS_PATH))
+        manifest = {entry["路径"]: entry["sha256"] for entry in report["文件清单"]}
+        self.assertEqual(sorted(manifest), sorted(build_site.SITE_FILES))
+        for relative, digest in manifest.items():
+            with self.subTest(relative=relative):
+                self.assertEqual(digest, sha256_of(self.out / relative))
+        self.assertEqual(manifest, first_manifest, "同一份输入两次构建的文件摘要应一致")
+
+        # 站点内容仍可读：诊断快照与来源逐字节一致，页面与浏览器包没有损坏。
+        self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), DEMO_DIAGNOSIS_PATH.read_bytes())
+        snapshot = json.loads((self.out / "data/diagnosis.json").read_text(encoding="utf-8"))
+        brief = json.loads(DEMO_BRIEF_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(snapshot["scope"]["数据截止"], brief["观察期间"]["数据截止"])
+        self.assertEqual(snapshot["scope"]["schema版本"], 4)
+        self.assertIn("<html", (self.out / "index.html").read_text(encoding="utf-8"))
+        self.assertEqual((self.out / "app.bundle.js").read_bytes(), self.bundle.read_bytes())
+
+    def test_repeated_build_recreates_missing_output_subdirectory(self) -> None:
+        """已有输出目录里缺少 data 子目录或页面文件时，重复构建仍会补齐并写出报告。"""
+        self.assertEqual(self.build(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle), build_site.EXIT_OK)
+        shutil.rmtree(self.out / "data")
+        (self.out / "index.html").unlink()
+
+        self.assertEqual(self.build(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle), build_site.EXIT_OK)
+
+        self.assertTrue((self.out / "index.html").is_file(), "重复构建应补齐缺失的页面文件")
+        self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), DEMO_DIAGNOSIS_PATH.read_bytes())
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["sha256"], sha256_of(DEMO_DIAGNOSIS_PATH))
+        for relative in ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json"):
+            with self.subTest(relative=relative):
+                entry = next(item for item in report["文件清单"] if item["路径"] == relative)
+                self.assertEqual(entry["sha256"], sha256_of(self.out / relative))
+
+    def test_command_line_repeated_build_keeps_artifacts(self) -> None:
+        """命令行对同一份诊断快照连续构建两次：第二次退出码为 0，报告与站点关键文件仍存在且可读。"""
+        first = self.run_cli(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        second = self.run_cli(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("已生成站点", second.stdout)
+
+        for relative in ("index.html", "app.bundle.js", "styles.css", "data/diagnosis.json", "build-report.json"):
+            with self.subTest(relative=relative):
+                path = self.out / relative
+                self.assertTrue(path.is_file(), f"缺少 {relative}")
+                self.assertGreater(path.stat().st_size, 0, f"{relative} 为空")
+        report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["sha256"], sha256_of(DEMO_DIAGNOSIS_PATH))
 
     def test_utf8_diagnosis_copy_matches_input_and_report(self) -> None:
         """含 UTF-8 中文内容的诊断快照复制后保持字节与摘要一致。"""
