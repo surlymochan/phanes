@@ -422,6 +422,50 @@ class CrossCheckTest(unittest.TestCase):
         }
         self.assertEqual(self.failing(self.check(diagnosis=diagnosis)), [])
 
+    def test_nested_multiline_forbidden_field_fails_with_stable_path(self) -> None:
+        """嵌套数组与对象中含禁止字段名且文本跨行时，失败报告输出稳定路径且不被换行截断。"""
+        diagnosis = copy.deepcopy(self.diagnosis)
+        diagnosis["recommendations"][0]["行动清单"] = [
+            {
+                "方案说明": "跨行行动建议第一行\n跨行行动建议第二行\n跨行行动建议第三行",
+                "执行细节": {
+                    "岗位明细": "第一行梳理关键岗位明细与分工职责\n第二行按季度评估编制并优化配置",
+                    "整体折算人头": 14,
+                    "营收业务技术人力成本": "约2%",
+                },
+            }
+        ]
+
+        results = self.check(diagnosis=diagnosis)
+        failures = self.failing(results)
+        self.assertEqual(len(failures), 1)
+        privacy = failures[0]
+        self.assertEqual(privacy.name, "隐私边界")
+
+        expected_path = "/recommendations/0/行动清单/0/执行细节/岗位明细"
+        self.assertIn(expected_path, privacy.detail)
+        self.assertIn("岗位明细", privacy.detail)
+        self.assertIn("（岗位）", privacy.detail)
+
+        # 失败报告单行稳定，不被跨行文本污染或截断
+        self.assertNotIn("\n", privacy.detail)
+        self.assertNotIn("\r", privacy.detail)
+
+        # 同级合法 aggregate 聚合字段不被误判为违规
+        self.assertNotIn("整体折算人头", privacy.detail)
+        self.assertNotIn("营收业务技术人力成本", privacy.detail)
+
+        # 现有报告格式及 PASS/FAIL 汇总稳定不变
+        report = cross_check.markdown_report(results)
+        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", report)
+        self.assertIn(
+            f"- **FAIL 隐私边界**：出现个人/薪酬/编制粒度字段名：{expected_path}（岗位）",
+            report,
+        )
+        self.assertIn("- **PASS 期间一致**", report)
+        self.assertIn("- **PASS 版本一致**", report)
+        self.assertIn("- **PASS 必答问题覆盖**", report)
+
     def test_extract_keywords(self) -> None:
         """关键词提取保留日期片段并去掉疑问词。"""
         keywords = cross_check.extract_keywords("整体技术人力成本在 2026-09 的实际值是多少？")
@@ -534,6 +578,41 @@ class CrossCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
         self.assertIn("FAIL 必答问题覆盖", result.stdout)
         self.assertIn("**汇总：共 4 项检查，3 项通过，1 项失败。**", content)
+
+    def test_command_line_nested_multiline_forbidden_field_writes_report(self) -> None:
+        """命令行遇到嵌套数组/对象中含禁止字段名且文本跨行时，生成完整且未被换行截断的报告。"""
+        diagnosis = copy.deepcopy(self.diagnosis)
+        diagnosis["recommendations"][0]["行动清单"] = [
+            {
+                "方案说明": "跨行行动建议第一行\n跨行行动建议第二行",
+                "执行细节": {
+                    "岗位明细": "第一行按团队梳理岗位明细\n第二行编制与预算对齐",
+                    "整体折算人头": 14,
+                    "营收业务技术人力成本": "约2%",
+                },
+            }
+        ]
+        expected_path = "/recommendations/0/行动清单/0/执行细节/岗位明细"
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", diagnosis)
+            report = base / "report.md"
+            result = run_script(brief, data, out=report)
+            content = report.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertIn(
+            f"FAIL 隐私边界：出现个人/薪酬/编制粒度字段名：{expected_path}（岗位）",
+            result.stdout,
+        )
+        self.assertIn("**汇总：共 5 项检查，4 项通过，1 项失败。**", content)
+        self.assertIn(
+            f"- **FAIL 隐私边界**：出现个人/薪酬/编制粒度字段名：{expected_path}（岗位）",
+            content,
+        )
+        self.assertNotIn("整体折算人头", content)
+        self.assertNotIn("营收业务技术人力成本", content)
 
     def test_command_line_exit_code_is_two_on_unreadable_input(self) -> None:
         """输入不可读或不是 JSON 对象时退出码为 2。"""
