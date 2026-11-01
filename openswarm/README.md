@@ -635,6 +635,40 @@ openswarm fleet exec --timeout 120 worker -- runs --active --json
 Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
 `fleet exec` forwards stdout, stderr and the exit code; it does not issue a separate wake command.
 
+A host may name its certificate renewal command with `renew_command`, or opt into a read-only check with
+`check_certificate`:
+
+```json
+{"name":"worker","kind":"ssh","ssh":"worker-alias","renew_command":"ssh worker-alias renew-cert"}
+{"name":"reader","kind":"ssh","ssh":"reader-alias","check_certificate":true}
+```
+
+`renew_command` is the command that renews the certificate and prints it; `check_certificate` inspects the
+certificate the host already carries with `ssh <alias> ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub` (a string
+value names another certificate path). `cert` and `certificate` keep their meaning of a certificate file path and
+never switch the check on. The inspection reaches the host over the transport options of that host (`jump`,
+`ssh_options`, `connect_timeout`, `control_persist`), the same ones every other fleet command uses, so a host
+behind a jump host is never judged unreachable.
+
+`fleet status` and `fleet exec` check the certificate before they use the host. A failed command, a renewal output
+without an expiry, or an expiry that already passed leaves the host as `certificate_invalid`: it reports no lanes
+and no dispatchable capacity, `fleet status` exits non-zero and `fleet exec` refuses to run the command. A valid
+certificate keeps the host and its lane assignments usable. The renewal command always comes from the host's own
+configuration, never from a request: the `fleet.json` entry of the host, then the `renew_commands` map of the fleet
+topology, then the `OPENSWARM_FLEET_RENEW_COMMAND` environment variable (which reaches the `ssh` hosts only).
+
+The `fleet-capacity` admission gate reads the same rules and applies them to `lanes` and `assign`. It judges the
+fleet host of the capacity host id: the `fleet.json` entry whose fleet name or `ssh` alias is that id, the same
+entry `fleet exec <name>` judges. A capacity host id that names no fleet host has no certificate check. The gate
+runs the rules from `openswarm/bin/fleet_certificate.py`, deployed next to `fleet-capacity`:
+
+```bash
+install -m 0755 openswarm/bin/fleet-capacity openswarm/bin/fleet_certificate.py ~/.claude/openswarm-fleet-capacity/
+```
+
+Without that file the capacity operations (`acquire`, `release`, `status`, `recover`) keep working, but the
+certificate gate cannot run and fails closed with `certificate_invalid`.
+
 One fleet inventory renders every host's `lanes.json`, so the lane topology lives in one file instead of one
 copy per host:
 
@@ -871,7 +905,9 @@ guard config uses the fleet-only SSH config and an explicit owner, for example
 The forced command pins the authenticated owner; OpenSwarm also records the final
 `gores1` argument in run status and reuses it for release and TTL recovery. Do
 not infer ownership from an SSH alias or expose the fleet-control key/socket to
-an executor sandbox.
+an executor sandbox. The coordinator runs `fleet-capacity` and the certificate
+rules beside it (`fleet_certificate.py`); deploy both files together, otherwise
+the capacity operations keep working but the certificate gate fails closed.
 
 `risk.enforce` defaults to `["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]`.
 The runner stops one-shot executors or aborts lane turns on matching command events,
