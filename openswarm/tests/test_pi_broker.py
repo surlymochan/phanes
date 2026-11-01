@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 
@@ -503,6 +504,165 @@ https.request = (_options, callback) => {
             finally:
                 proc.terminate()
                 proc.wait(timeout=5)
+
+
+@unittest.skipUnless(shutil.which('node'), 'requires node')
+class PiBrokerUpstreamErrorTests(unittest.TestCase):
+    @contextmanager
+    def broker(self, status, body, headers=None, streaming=False):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            module = root / 'auth.mjs'
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            config = root / 'response.json'
+            config.write_text(json.dumps({'status': status, 'body': body.decode('utf-8'),
+                                          'headers': headers or {}, 'streaming': streaming}))
+            preload = root / 'fake.cjs'
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+const fixture = JSON.parse(fs.readFileSync(process.env.ERROR_FIXTURE, 'utf8'));
+https.request = (_options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const upstream = new PassThrough();
+    upstream.statusCode = fixture.status; upstream.headers = fixture.headers;
+    upstream.complete = !fixture.streaming;
+    upstream.on('close', () => fs.appendFileSync(process.env.UPSTREAM_CLOSED, 'closed\\n'));
+    callback(upstream);
+    if (!fixture.streaming) upstream.end(Buffer.from(fixture.body));
+    else {
+      const chunk = Buffer.from(fixture.body);
+      const send = () => {
+        if (upstream.destroyed) return;
+        upstream.write(chunk);
+        setImmediate(send);
+      };
+      send();
+    }
+  };
+  return req;
+};
+''')
+            path = str(root / 'broker.sock')
+            log = root / 'requests.jsonl'
+            closed = root / 'upstream-closed'
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), PI_BROKER_LOG=str(log),
+                       ERROR_FIXTURE=str(config), UPSTREAM_CLOSED=str(closed))
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not create its socket')
+                yield path, log, closed, proc
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                proc.stderr.close()
+
+    def request(self, path):
+        client = UnixHTTP(path)
+        try:
+            client.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
+                           {'authorization': 'request-only-value', 'x-client-sensitive': 'request-only-value'})
+            response = client.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            client.close()
+
+    def rows(self, log, count=1):
+        deadline = time.monotonic() + 3
+        rows = []
+        while time.monotonic() < deadline:
+            if log.exists():
+                rows = [json.loads(line) for line in log.read_text().splitlines()]
+                if len(rows) >= count:
+                    return rows
+            time.sleep(0.01)
+        self.fail('expected %s completed request log rows, got %s' % (count, len(rows)))
+
+    def test_token_plan_error_preserves_status_body_and_logs_provider_details(self):
+        message = '已达到 Token Plan 用量上限 (2056)'
+        body = json.dumps({'error': {'type': 'rate_limit_error', 'message': message},
+                           'base_resp': {'status_code': 2056}}, ensure_ascii=False).encode()
+        headers = {'retry-after': '120', 'x-ratelimit-reset': '1800000123',
+                   'x-ratelimit-reset-tokens': '5h', 'authorization': 'fake-key', 'x-debug-key': 'fake-key'}
+        with self.broker(429, body, headers) as (path, log, _closed, _proc):
+            status, returned_headers, returned_body = self.request(path)
+            self.assertEqual(status, 429)
+            self.assertEqual(returned_headers['content-type'], 'application/json')
+            self.assertEqual(returned_body, body)
+            row = self.rows(log)[0]
+            self.assertEqual(row['status'], 429)
+            self.assertEqual(row['upstream_type'], 'rate_limit_error')
+            self.assertEqual(row['provider_code'], 2056)
+            self.assertEqual(row['err'], message)
+            self.assertEqual(row['retry_after'], {'retry-after': '120', 'x-ratelimit-reset': '1800000123',
+                                                   'x-ratelimit-reset-tokens': '5h'})
+            for forbidden in ('fake-key', 'request-only-value', 'x-debug-key'):
+                self.assertNotIn(forbidden, json.dumps(returned_headers))
+                self.assertNotIn(forbidden, returned_body.decode())
+                self.assertNotIn(forbidden, log.read_text())
+
+    def test_top_level_error_and_unicode_log_message_limit(self):
+        message = '配额😀已用尽' * 100
+        body = json.dumps({'type': 'rate_limit_error', 'message': message,
+                           'base_resp': {'status_code': 2056}}, ensure_ascii=False).encode()
+        with self.broker(429, body) as (path, log, _closed, _proc):
+            self.assertEqual(self.request(path)[2], body)
+            row = self.rows(log)[0]
+            self.assertEqual(row['upstream_type'], 'rate_limit_error')
+            self.assertEqual(row['provider_code'], 2056)
+            self.assertEqual(row['err'], message[:160])
+
+    def test_html_error_is_logged_as_non_json_and_keeps_upstream_status(self):
+        body = b'<html>bad gateway</html>'
+        with self.broker(502, body) as (path, log, _closed, _proc):
+            status, headers, returned = self.request(path)
+            self.assertEqual(status, 502)
+            self.assertEqual(headers['content-type'], 'application/json')
+            self.assertEqual(returned, body)
+            self.assertEqual(self.rows(log)[0]['err'], 'non_json_body')
+
+    def test_exact_4kb_json_error_is_not_truncated(self):
+        prefix = b'{"error":{"type":"api_error","message":"'
+        suffix = b'"}}'
+        body = prefix + b'x' * (4096 - len(prefix) - len(suffix)) + suffix
+        self.assertEqual(len(body), 4096)
+        with self.broker(500, body) as (path, log, _closed, _proc):
+            status, _headers, returned = self.request(path)
+            self.assertEqual(status, 500)
+            self.assertEqual(returned, body)
+            row = self.rows(log)[0]
+            self.assertEqual(row['upstream_type'], 'api_error')
+            self.assertEqual(row['err'], 'x' * 160)
+
+    def test_unending_oversize_body_is_capped_and_releases_slots(self):
+        # The fake provider never emits end; the broker must stop consuming at its cap.
+        chunk = b'x' * 1024
+        with self.broker(429, chunk, streaming=True) as (path, log, closed, proc):
+            for _ in range(6):
+                status, headers, body = self.request(path)
+                self.assertEqual(status, 429)
+                self.assertEqual(headers['content-type'], 'application/json')
+                self.assertEqual(body, chunk * 4)
+            rows = self.rows(log, 6)
+            self.assertEqual(len(rows), 6)
+            self.assertTrue(all(row['err'] == 'non_json_body' for row in rows))
+            deadline = time.monotonic() + 3
+            while (not closed.exists() or len(closed.read_text().splitlines()) < 6) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(closed.read_text().splitlines()), 6)
+            self.assertIsNone(proc.poll(), 'oversize responses must not terminate the broker')
 
 
 if __name__ == '__main__':
