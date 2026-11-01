@@ -79,6 +79,19 @@ test -f ~/phanes-ctl/bin/lane-autodispatch \
 Check scripts (no SSH):
 - `bash docs/check-ctl-boot.sh` — offline path and heartbeat existence verification under `~/phanes-ctl` (or `bash docs/check-ctl-boot.sh --self-test` to test in an offline fixture)
 - `bash tools/check-ctl-boot.sh` — offline control-plane check asserting `PAUSE-BACKEND-*` naming conventions and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
+- `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
+
+Recommended heartbeat monitoring (no SSH and no restart): run this from the
+repository checkout every five minutes, for example with cron:
+
+```cron
+*/5 * * * * cd /path/to/phanes-ctl && python3 tools/check-ad-heartbeat-stall.py >>/tmp/ad-heartbeat-check.log 2>&1
+```
+
+For a manual check, run `python3 tools/check-ad-heartbeat-stall.py` (or pass
+`--heartbeat-file PATH --threshold-minutes 20`). Offline smoke fixtures are
+`python3 tools/check-ad-heartbeat-stall.py --fixture-old` (expected non-zero)
+and `python3 tools/check-ad-heartbeat-stall.py --fixture-fresh` (expected 0).
 
 ## Health pauses (stability)
 
