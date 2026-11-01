@@ -16,6 +16,15 @@ That script starts (if not already running):
 | bus-worker | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/` |
 | health-loop | `health-loop` → `health-check.py` | disk/mem/ssh/quota probes; auto PAUSE-* | `~/phanes-ctl/autodispatch/health.heartbeat`, `health.json`, `health.alert` |
 
+`ib-refresh` must run its renewal preflight before starting `lane-autodispatch`.
+The repository implementation is `tools/ib-refresh.py`; it reads a temporary
+fleet JSON (`--fleet-config`), classifies each certificate as `valid`,
+`expiring`, `expired`, or `missing`, and prints one JSON result.  Only a result
+with `start_lane_autodispatch: true` may start the dispatch loop.  Renewals are
+staged in a temporary directory and atomically installed only after every
+renewal returns a valid X.509 certificate; a partial failure leaves the old
+certificates and fleet config untouched.
+
 ## Smoke (safe, no restart)
 
 ```bash
