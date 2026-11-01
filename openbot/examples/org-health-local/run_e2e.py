@@ -137,9 +137,11 @@ def main(argv=None):
         ('检查', [sys.executable, str(args.checker), str(dist)]),
     ])
     status = 0
+    failed = []
     try:
         for name, command in commands:
             if not run_step(name, command, timings):
+                failed.append(name)
                 status = 1
                 break
         if status == 0 and args.review:
@@ -150,8 +152,13 @@ def main(argv=None):
             else:
                 with report:
                     if not run_step('审查', review, timings, stdout=report):
+                        failed.append('审查')
                         status = 1
     finally:
+        if failed:
+            # 每步耗时可能缺失（耗时记录写不出来），先点名失败步骤，
+            # 避免只看到「写入失败」却不知道是哪一步挂了。
+            print(f'失败步骤: {"、".join(failed)}', file=sys.stderr, flush=True)
         # 耗时记录写不进去时整体判失败，不误报成功。
         if not write_timings(workdir, timings):
             status = 1
