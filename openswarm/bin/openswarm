@@ -8426,6 +8426,53 @@ def pi_retry_wait_seconds():
         return 8.0
 
 
+def pi_retry_max_wait_s(policy=None):
+    """Maximum cumulative time a pi run may spend waiting for automatic retries."""
+    try:
+        value = os.environ.get("PI_RETRY_MAX_WAIT_S")
+        if value is not None:
+            return max(0.0, float(value))
+        cfg = ((policy if policy is not None else load_policy()).get("pi") or {})
+        return max(0.0, float(cfg.get("retry_max_wait_s", 600)))
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def pi_retry_budget_error(last_error, waited_s):
+    error_class = "rate_limit" if (RATE_LIMIT_RE.search(last_error or "") or
+                                    re.search(r"\boverloaded\b", last_error or "", re.I)) else "exec_error"
+    return error_class, (f"pi auto-retry wait budget exhausted after {waited_s:.1f}s; "
+                         f"last error: {last_error or 'unknown'}")
+
+
+class PiRetryBudget:
+    """Tracks scheduled retry waiting against a per-run cap."""
+    def __init__(self, max_wait_s):
+        self.max_wait_s = max(0.0, float(max_wait_s))
+        self.waited_s = 0.0
+        self.pending_s = 0.0
+        self.started_at = None
+
+    def schedule(self, seconds, now=None):
+        # A later auto_retry_start refines the grace scheduled after agent_end.
+        now = time.monotonic() if now is None else now
+        elapsed = max(0.0, now - self.started_at) if self.started_at is not None else 0.0
+        remaining = max(0.0, self.max_wait_s - self.waited_s)
+        requested = elapsed + max(0.0, float(seconds)) * random.uniform(1.0, 1.2)
+        self.pending_s = min(max(self.pending_s, requested), remaining)
+        if self.started_at is None:
+            self.started_at = now
+        return max(0.0, self.pending_s - elapsed)
+
+    def resumed(self, now=None, expired=False):
+        if self.pending_s:
+            now = time.monotonic() if now is None else now
+            elapsed = self.pending_s if expired else min(self.pending_s, max(0.0, now - self.started_at))
+            self.waited_s = min(self.max_wait_s, self.waited_s + elapsed)
+        self.pending_s = 0.0
+        self.started_at = None
+
+
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -8896,6 +8943,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     # pi auto-retry: a deadline (monotonic seconds) by which pi must show the retry progressing.
     pi_retry_wait = None
     pi_retry_started = False
+    pi_retry_budget = PiRetryBudget(pi_retry_max_wait_s(risk_policy))
+    pi_retry_error_class = None
     while not ended:
         # Scanning descendants costs one pgrep per process plus a status.json rewrite; doing it
         # for every streamed event throttled pi/codex lanes and left the model idle while the
@@ -8949,7 +8998,14 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             child.close()
             return turn_failed("stalled", 124, stall_detail)
         if pi_retry_wait is not None and time.monotonic() >= pi_retry_wait:
-            if not errors:
+            pi_retry_budget.resumed(expired=True)
+            if pi_retry_budget.waited_s >= pi_retry_budget.max_wait_s:
+                last_error = errors[-1] if errors else "retry wait budget exhausted"
+                pi_retry_error_class, summary = pi_retry_budget_error(last_error, pi_retry_budget.waited_s)
+                spec["failure_summary"] = summary
+                spec["pi_retry_budget_exceeded"] = True
+                errors[:] = [summary]
+            elif not errors:
                 errors.append("pi auto-retry did not resume after a transient provider error")
             ended = True
             continue
@@ -9064,7 +9120,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 if last_err and PI_RETRYABLE_RE.search(last_err):
                     # pi may auto-retry a transient provider error: wait for auto_retry_start (or,
                     # if it already arrived, keep its longer deadline) instead of ending now.
-                    wait_until = time.monotonic() + pi_retry_wait_seconds()
+                    delay = pi_retry_budget.schedule(pi_retry_wait_seconds())
+                    wait_until = time.monotonic() + delay
                     pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
                 else:
                     if pi_retry_started and not last_err:
@@ -9076,7 +9133,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     delay = max(0.0, float(msg.get("delayMs") or 0) / 1000.0)
                 except (TypeError, ValueError):
                     delay = 0.0
-                wait_until = time.monotonic() + delay + pi_retry_wait_seconds()
+                wait_seconds = pi_retry_budget.schedule(delay + pi_retry_wait_seconds())
+                wait_until = time.monotonic() + wait_seconds
                 pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
                 pi_retry_started = True
             elif msg.get("type") == "auto_retry_end":
@@ -9088,6 +9146,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     ended = True
             elif pi_retry_started and pi_retry_wait is not None and msg.get("type") in (
                     "agent_start", "turn_start", "message_start", "message_update", "tool_execution_start"):
+                pi_retry_budget.resumed()
                 pi_retry_wait = None  # the retry is running; the turn budget bounds it from here
         elif lane_headless(lane):
             lane_record_event(event_file, msg)
@@ -9163,7 +9222,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         return final, usage, "budget_exceeded", 124, event_file, None
     if errors:
         text = " ".join(errors)
-        if agy_upstream_forbidden(lane["backend"], text):
+        if pi_retry_error_class:
+            error_class = pi_retry_error_class
+        elif agy_upstream_forbidden(lane["backend"], text):
             error_class = "upstream_forbidden"
         elif AUTH_ERROR_RE.search(text):
             error_class = "auth"
@@ -9275,6 +9336,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     status, verify_note = adjust_status_for_change_evidence(
         status, verify_note, commit=fin.get("commit"), workspace_changed=changed, changed=changed,
         read_only=read_only, verify=verify, require_change_evidence=True)
+    if spec.get("pi_retry_budget_exceeded"):
+        status = "failed"
     if read_only and verify:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx", "-e", "/.openswarm-tmp/"]):
             cleanup_rc, _, cleanup_err = lane_git(command, ws["root"])
@@ -9284,6 +9347,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         detach_at = fin.get("commit") or ws["base"]
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
+           **({"summary": spec["failure_summary"]} if spec.get("failure_summary") else {}),
            "prepare": ws.get("prepare", []), "workspace_note": ws.get("workspace_note"), "verify": verify,
            "verify_note": verify_note, "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
            **({"resolved_model": model} if lane["backend"] in ("cursor", "copilot") else {}),
@@ -9303,7 +9367,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "attempts": attempts, "error_class": error_class,
                    "seconds": round(sum(attempt["seconds"] for attempt in attempts), 3),
                    "usage": usage, "commit": fin.get("commit"),
-                   "risk_blocks": out["risk_blocks"], "summary": (final or {}).get("summary"),
+                   "risk_blocks": out["risk_blocks"],
+                   "summary": (final or {}).get("summary") or spec.get("failure_summary"),
                    "files": len((final or {}).get("files_changed") or []),
                    **pass_fields,
                    "branch": fin.get("branch"), "verify": verify,

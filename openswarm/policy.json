@@ -261,10 +261,11 @@
     "print_timeout": null
   },
   "pi": {
-    "_doc": "Opt-in executor: Pi coding agent (pi -p --mode json). Not in routing.default_order. provider/default_model null means Pi's own default. OPENSWARM_PI_BIN may point at a wrapper that takes the same flags. Quota is unknown; usage is summed from message_end events.",
+    "_doc": "Opt-in executor: Pi coding agent (pi -p --mode json). Not in routing.default_order. provider/default_model null means Pi's own default. OPENSWARM_PI_BIN may point at a wrapper that takes the same flags. Quota is unknown; usage is summed from message_end events. retry_max_wait_s caps cumulative automatic retry waiting; PI_RETRY_MAX_WAIT_S overrides it.",
     "provider": "minimax-cn",
     "default_model": "MiniMax-M3.1-Flash",
-    "require_isolation": true
+    "require_isolation": true,
+    "retry_max_wait_s": 600
   },
   "deepseek": {
     "_doc": "API key: DEEPSEEK_API_KEY env, or list macOS Keychain items you created for openswarm, e.g. [\"openswarm-deepseek-api-key\"].",
