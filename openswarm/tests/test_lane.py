@@ -810,18 +810,23 @@ class LaneTests(unittest.TestCase):
         config["lanes"][0].update(fields)
         config_path.write_text(json.dumps(config))
 
-    def test_systemd_unit_carries_lane_env_file_and_env(self):
-        self.edit_lane(env_file="/etc/mihomo-egress/codex-proxy.env",
+    def env_file(self, text, mode=0o600, name="lane.env"):
+        path = self.root / name
+        path.write_text(text)
+        path.chmod(mode)
+        return str(path)
+
+    def test_systemd_unit_carries_lane_env_and_leaves_env_file_to_the_supervisor(self):
+        self.set_config("cursor")
+        self.edit_lane(env_file=self.env_file("HTTPS_PROXY=http://file\n"),
                        env={"HTTPS_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"})
-        unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
-        lines = unit.splitlines()
-        self.assertIn("EnvironmentFile=/etc/mihomo-egress/codex-proxy.env", lines)
+        lines = self.cli("lane", "systemd-unit", self.lane_name).stdout.splitlines()
         self.assertIn('Environment="HTTPS_PROXY=http://127.0.0.1:7890"', lines)
         self.assertIn('Environment="NO_PROXY=localhost,127.0.0.1"', lines)
-        # File first, explicit env after it, both inside [Service].
-        self.assertLess(lines.index("EnvironmentFile=/etc/mihomo-egress/codex-proxy.env"),
-                        lines.index('Environment="HTTPS_PROXY=http://127.0.0.1:7890"'))
         self.assertLess(lines.index('Environment="NO_PROXY=localhost,127.0.0.1"'), lines.index("[Install]"))
+        # systemd's EnvironmentFile= would override Environment= and could not drop reserved keys.
+        self.assertFalse(any(line.startswith("EnvironmentFile=") for line in lines))
+        self.assertNotIn("http://file", "\n".join(lines))
 
     def test_systemd_unit_without_lane_env_is_unchanged(self):
         unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
@@ -829,9 +834,8 @@ class LaneTests(unittest.TestCase):
         self.assertNotIn("PROXY", unit)
 
     def test_launchd_plist_carries_env_but_not_env_file_contents(self):
-        secret = self.root / "lane.env"
-        secret.write_text("GH_TOKEN=secret-value\n")
-        self.edit_lane(env_file=str(secret), env={"HTTPS_PROXY": "http://127.0.0.1:7890"})
+        self.set_config("cursor")
+        self.edit_lane(env_file=self.env_file("GH_TOKEN=secret-value\n"), env={"HTTPS_PROXY": "http://127.0.0.1:7890"})
         plist = plistlib.loads(json.loads(self.cli("lane", "launchd-plist", self.lane_name).stdout)["plist"].encode())
         env = plist["EnvironmentVariables"]
         self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:7890")
@@ -839,46 +843,50 @@ class LaneTests(unittest.TestCase):
         self.assertNotIn("secret-value", json.dumps(plist))
 
     def test_lane_env_is_validated(self):
-        for fields, needle in (({"env_file": "relative.env"}, "env_file"),
-                               ({"env_file": ["/ok.env", 3]}, "env_file"),
-                               ({"env": ["A=B"]}, "env must be an object"),
-                               ({"env": {"BAD-KEY": "x"}}, "BAD-KEY"),
-                               ({"env": {"A": 1}}, "'A'"),
-                               ({"env": {"OPENSWARM_HOME": "/tmp/x"}}, "OPENSWARM_HOME")):
+        open_file = self.env_file("A=1\n", mode=0o644, name="open.env")
+        for backend, fields, needle in (
+                ("cursor", {"env_file": "relative.env"}, "env_file"),
+                ("cursor", {"env_file": ["/ok.env", 3]}, "env_file"),
+                ("cursor", {"env_file": open_file}, "must be 600"),
+                ("cursor", {"env": ["A=B"]}, "env must be an object"),
+                ("cursor", {"env": {"BAD-KEY": "x"}}, "BAD-KEY"),
+                ("cursor", {"env": {"A": 1}}, "'A'"),
+                ("cursor", {"env": {"OPENSWARM_HOME": "/tmp/x"}}, "OPENSWARM_HOME"),
+                ("pi", {"env": {"HTTPS_PROXY": "http://x"}}, "not supported for pi")):
             with self.subTest(fields=fields):
-                self.set_config()
+                self.set_config(backend)
                 self.edit_lane(**fields)
                 result = self.cli("lane", "systemd-unit", self.lane_name, check=False)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(needle, result.stderr)
 
     def test_parse_env_file_reads_systemd_style_lines(self):
-        path = self.root / "proxy.env"
-        path.write_text("# comment\n; other\n\nHTTPS_PROXY=http://127.0.0.1:7890\n"
-                        "export no_proxy='localhost'\nQUOTED=\"a b\"\nnot a line\nEMPTY=\n")
-        self.assertEqual(xs.parse_env_file(str(path)), {"HTTPS_PROXY": "http://127.0.0.1:7890",
-                                                        "no_proxy": "localhost", "QUOTED": "a b", "EMPTY": ""})
+        path = self.env_file("# comment\n; other\n\nHTTPS_PROXY=http://127.0.0.1:7890\n"
+                             "export no_proxy='localhost'\nQUOTED=\"a b\"\nnot a line\nEMPTY=\n")
+        self.assertEqual(xs.parse_env_file(path), {"HTTPS_PROXY": "http://127.0.0.1:7890",
+                                                   "no_proxy": "localhost", "QUOTED": "a b", "EMPTY": ""})
 
-    def test_lane_environment_env_overrides_file_and_missing_file_is_reported(self):
-        path = self.root / "lane.env"
-        path.write_text("LANE_ENV_A=from-file\nLANE_ENV_B=file\nOPENSWARM_HOME=/elsewhere\n")
-        extra, problems = xs.lane_environment({"name": "L1", "env_file": [str(path), str(self.root / "missing.env")],
+    def test_lane_environment_env_wins_reserved_keys_dropped_and_bad_files_reported(self):
+        good = self.env_file("LANE_ENV_A=from-file\nLANE_ENV_B=file\nOPENSWARM_HOME=/elsewhere\n")
+        too_open = self.env_file("LANE_ENV_C=x\n", mode=0o640, name="open.env")
+        extra, problems = xs.lane_environment({"name": "L1", "env_file": [good, str(self.root / "missing.env"), too_open],
                                                "env": {"LANE_ENV_B": "from-env"}})
         self.assertEqual(extra, {"LANE_ENV_A": "from-file", "LANE_ENV_B": "from-env"})
-        self.assertEqual(len(problems), 1)
+        self.assertEqual(len(problems), 2)
         self.assertIn("missing.env", problems[0])
+        self.assertIn("must be 600", problems[1])
+        with self.assertRaises(RuntimeError):
+            xs.lane_apply_environment({"name": "L1", "env_file": str(self.root / "missing.env")})
 
     def test_lane_executor_inherits_lane_env_file_and_env(self):
-        self.set_config("pi")
-        path = self.root / "lane.env"
-        path.write_text("LANE_ENV_A=from-file\nLANE_ENV_B=file\n")
-        self.edit_lane(env_file=str(path), env={"LANE_ENV_B": "from-env"})
+        self.set_config("cursor")
+        self.edit_lane(env_file=self.env_file("LANE_ENV_A=from-file\nLANE_ENV_B=file\n"), env={"LANE_ENV_B": "from-env"})
         self.start_lane()
         run_id = self.assign("use the lane environment")
         self.assertEqual(self.wait_run(run_id)["status"], "done")
-        rows = [json.loads(line) for line in pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text().splitlines()]
-        probe = next(row for row in rows if row.get("type") == "env_probe")
-        self.assertEqual(probe["env"], {"LANE_ENV_A": "from-file", "LANE_ENV_B": "from-env"})
+        rows = [json.loads(line) for line in pathlib.Path(self.env["FAKE_CURSOR_ACP_LOG"]).read_text().splitlines()]
+        probe = next(row["env_probe"] for row in rows if "env_probe" in row)
+        self.assertEqual(probe, {"LANE_ENV_A": "from-file", "LANE_ENV_B": "from-env"})
 
     def test_systemd_unit_rejects_invalid_memory_max(self):
         self.set_config(memory_max="700MB")

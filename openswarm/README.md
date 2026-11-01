@@ -435,6 +435,16 @@ lane; `{"lane":{"memory_max":"700M"}}` in `policy.local.json` lowers it for ever
 systemd size (an integer with an optional `K`, `M`, `G` or `T` suffix) and an unusable value is rejected when the
 lane config is read.
 
+A lane may also carry its own environment, for example a proxy or a token for one backend only (never a global
+proxy). `env_file` is an absolute path or a list of them, in systemd `KEY=value` syntax; `env` is a string map. The
+lane supervisor applies both before it starts the executor, the same way under systemd and launchd: `env` overrides
+`env_file`, later files override earlier ones, and `OPENSWARM_HOME`/`OPENSWARM_LANES_FILE` are never taken from
+either. An `env_file` must be mode `600` or stricter; a group/other-readable file is rejected when the lane config is
+read, and a missing or unreadable file stops the lane instead of running it without its proxy or token. The
+generated systemd unit and launchd plist carry `env` but never the `env_file` contents (no `EnvironmentFile=`, since
+systemd would let it override `Environment=`). `pi` lanes reject both fields because `pi-isolated` clears the
+environment; their egress is the broker's.
+
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
 ```bash

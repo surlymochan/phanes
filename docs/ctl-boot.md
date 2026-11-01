@@ -395,6 +395,18 @@ generated lane unit instead of editing an installed unit:
 default stays `900M`, so higher-memory hosts are unaffected. The recommended values and the
 launchd equivalent are documented in [`docs/fleet-govpn-cx5.md`](fleet-govpn-cx5.md).
 
+## Per-lane proxy and token environment (Refs #1347)
+
+Give one lane its own proxy or token in `lanes.json` instead of a unit drop-in, a wrapper
+script or a global `/etc/environment` proxy:
+
+- `"env_file": "/root/.config/openswarm-secrets/<lane>.env"` (absolute path or list, `KEY=value` lines, mode `600`)
+- `"env": {"NO_PROXY": "localhost,127.0.0.1"}` (string map; overrides `env_file`)
+
+The lane supervisor applies both on systemd and launchd hosts alike; the generated unit or plist
+only carries `env`. A too-open file is rejected at config load, a missing one stops the lane.
+`OPENSWARM_HOME`/`OPENSWARM_LANES_FILE` cannot be set this way, and `pi` lanes reject both fields.
+
 ## Backend pause gate and recovery (Refs #768)
 
 `PAUSE-BACKEND-*` files live in the autodispatch state dir `~/phanes-ctl/autodispatch/`

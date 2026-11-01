@@ -56,6 +56,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import sqlite3
 import statistics
 import subprocess
@@ -7067,12 +7068,17 @@ def lane_env_files(lane):
 
 def lane_env_config_error(lane):
     """Validate the per-lane environment: "env_file" (absolute path or list) and "env" (string map)."""
+    if lane.get("backend") == "pi" and (lane.get("env_file") is not None or lane.get("env") is not None):
+        return "env/env_file are not supported for pi lanes (pi-isolated starts with a cleared environment)"
     files = lane.get("env_file")
     if files is not None and not (isinstance(files, str) or isinstance(files, list)):
         return "env_file must be an absolute path or a list of absolute paths"
     for path in lane_env_files(lane):
         if not isinstance(path, str) or not os.path.isabs(path) or "\n" in path:
             return "env_file must be an absolute path or a list of absolute paths"
+        error = env_file_mode_error(path)
+        if error:
+            return error
     env = lane.get("env")
     if env is None:
         return None
@@ -7083,6 +7089,19 @@ def lane_env_config_error(lane):
             return f"env entry {key!r} must be NAME: string"
         if key in LANE_ENV_RESERVED:
             return f"env must not override {key}"
+    return None
+
+
+def env_file_mode_error(path):
+    """env_file holds tokens and proxy credentials: it must not be readable or writable by group/other."""
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return None  # reported when the lane starts
+    except OSError as error:
+        return f"env_file {path} cannot be checked: {error.__class__.__name__}"
+    if mode & 0o077:
+        return f"env_file {path} has mode {mode:o}; it must be 600 or stricter"
     return None
 
 
@@ -7109,15 +7128,19 @@ def parse_env_file(path):
 def lane_environment(lane):
     """The extra environment a lane's executor runs with: env_file entries, then env overrides.
 
-    Unreadable files are reported, not fatal: under systemd the unit's EnvironmentFile= has
-    already applied them (systemd reads them before dropping privileges).
+    The lane supervisor is the only place env_file is applied (systemd and launchd alike), so
+    the precedence (env over env_file) and the reserved keys hold under every service manager.
     """
     out, problems = {}, []
     for path in lane_env_files(lane):
+        error = env_file_mode_error(path)
+        if error:
+            problems.append(error)
+            continue
         try:
             out.update(parse_env_file(path))
         except (OSError, UnicodeError) as error:
-            problems.append(f"{path}: {error.__class__.__name__}")
+            problems.append(f"env_file {path}: {error.__class__.__name__}")
     out.update(lane.get("env") or {})
     for key in LANE_ENV_RESERVED:
         out.pop(key, None)
@@ -7125,12 +7148,16 @@ def lane_environment(lane):
 
 
 def lane_apply_environment(lane):
-    """Export the lane environment into this lane supervisor so every executor child inherits it."""
+    """Export the lane environment into this lane supervisor so every executor child inherits it.
+
+    A missing, unreadable or too-open env_file stops the lane: running without its proxy or
+    token would send traffic or auth the wrong way.
+    """
     extra, problems = lane_environment(lane)
+    if problems:
+        raise RuntimeError(f"lane {lane['name']} env_file not applied: " + "; ".join(problems))
     os.environ.update(extra)
-    for problem in problems:
-        print(f"openswarm: warning: lane {lane['name']} env_file not applied: {problem}", file=sys.stderr)
-    return sorted(extra), problems
+    return sorted(extra)
 
 
 def lanes_by_name(names=None):
@@ -8653,7 +8680,6 @@ def agy_quota_available(lane, child):
 
 def cmd_lane_serve(lane, policy):
     name = lane["name"]
-    lane_apply_environment(lane)
     server = lane_ctl_listener(name)
     current, child = {}, None
     started, backoff, next_start = NOW(), 1, 0
@@ -8661,6 +8687,14 @@ def cmd_lane_serve(lane, policy):
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
                      started=started, last_error=None, resolved_model=None)
+    try:
+        lane_apply_environment(lane)
+    except RuntimeError as error:
+        # Never start the executor without its proxy/token; exit so the service manager retries.
+        print(f"openswarm: {error}", file=sys.stderr)
+        lane_write_state(name, state="crashed", last_error=short(error, 500), supervisor_pid=None)
+        time.sleep(10)
+        return 2
     quota_state = jload(lane_state_path(name), {}) or {}
     if lane["backend"] == "agy" and quota_state.get("quota_model") == lane["model"]:
         due = quota_state.get("quota_until")
@@ -9014,7 +9048,8 @@ def generate_lane_service_definition(lane, service_manager):
                  "CPUQuota=150%", "Nice=10"]
         if "OPENSWARM_LANES_FILE" in environment:
             lines.append(f"Environment={systemd_quote('OPENSWARM_LANES_FILE=' + environment['OPENSWARM_LANES_FILE'])}")
-        lines.extend(f"EnvironmentFile={path}" for path in lane_env_files(lane))
+        # env_file is applied by the lane supervisor, not EnvironmentFile=: systemd lets an
+        # EnvironmentFile= override Environment= and cannot drop reserved keys.
         lines.extend(f"Environment={systemd_quote(key + '=' + value)}" for key, value in (lane.get("env") or {}).items())
         lines.extend(["", "[Install]", "WantedBy=multi-user.target", ""])
         return "\n".join(lines)
