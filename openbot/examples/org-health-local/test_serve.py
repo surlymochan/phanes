@@ -2,6 +2,7 @@
 
 仅使用标准库且不调用 bun：在临时端口起服务后逐条检查响应状态码。
 """
+import errno
 import http.client
 import io
 import json
@@ -32,6 +33,58 @@ class ErrorRecorder:
 
     def send_error(self, code, *args, **kwargs):
         self.errors.append(code)
+
+
+class FakeSocket:
+    """假 socket：记录 setsockopt/bind 调用，并可按需在 bind 时抛出 OSError。"""
+
+    def __init__(self, bind_error=None):
+        self.bind_error = bind_error
+        self.bind_calls = []
+        self.sockopts = []
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def setsockopt(self, *args):
+        self.sockopts.append(args)
+
+    def bind(self, address):
+        self.bind_calls.append(address)
+        if self.bind_error is not None:
+            raise self.bind_error
+
+    def close(self):
+        self.closed = True
+
+
+class FakeSocketModule:
+    """假 socket 模块：替换 serve.socket，避免测试真的去碰端口。
+
+    create_error 模拟 socket() 本身创建失败；bind_error 模拟 bind 阶段的端口冲突。
+    """
+
+    AF_INET = socket.AF_INET
+    SOCK_STREAM = socket.SOCK_STREAM
+    SOL_SOCKET = socket.SOL_SOCKET
+    SO_REUSEADDR = socket.SO_REUSEADDR
+
+    def __init__(self, bind_error=None, create_error=None):
+        self.bind_error = bind_error
+        self.create_error = create_error
+        self.sockets = []
+
+    def socket(self, *args, **kwargs):
+        if self.create_error is not None:
+            raise self.create_error
+        fake = FakeSocket(self.bind_error)
+        self.sockets.append(fake)
+        return fake
 
 
 class LocalServeBoundaryTests(unittest.TestCase):
@@ -714,6 +767,105 @@ class PortInUseTests(unittest.TestCase):
         self.assertIn(f'端口 {self.port} 已被占用', stderr.getvalue())
         self.assertNotIn('预览地址', stdout.getvalue())
         mock_create.assert_not_called()
+
+    def test_cli_exits_nonzero_with_chinese_hint_when_port_is_occupied(self):
+        # 端到端：目标端口被占用时，命令行退出码非 0、stderr 含端口号与 --port 指引，且没有 traceback。
+        result = subprocess.run(
+            [sys.executable, str(serve.ROOT / 'serve.py'), '--port', str(self.port)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'端口 {self.port} 已被占用', result.stderr)
+        self.assertIn('--port', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertNotIn('预览地址', result.stdout)
+
+
+class PortPrecheckContractTests(unittest.TestCase):
+    """端口预检契约：占用与可用两条路径都由假 socket / stub 固定住行为。
+
+    - 占用：预检抛 PortInUseError，CLI 打印含端口号的中文提示并以非 0 退出，不出现 traceback；
+    - 可用：预检通过后照常进入服务流程。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dist = Path(self.tmp.name) / 'dist'
+        (self.dist / 'data').mkdir(parents=True)
+        (self.dist / 'index.html').write_bytes(b'<!doctype html><title>dist index</title>')
+        self.dist_data = self.dist / 'data' / 'diagnosis.json'
+        self.dist_data.write_bytes(b'{"source": "dist-diagnosis"}')
+
+    def run_main(self, argv):
+        """运行 main 并捕获输出，返回 (退出码, stdout, stderr)。"""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serve.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_ensure_port_available_raises_when_bind_reports_port_in_use(self):
+        # 假 socket：bind 抛 EADDRINUSE，模拟端口已被占用。
+        fake_module = FakeSocketModule(bind_error=OSError(errno.EADDRINUSE, 'Address already in use'))
+        with patch.object(serve, 'socket', fake_module):
+            with self.assertRaises(serve.PortInUseError) as caught:
+                serve.ensure_port_available(8765)
+        message = str(caught.exception)
+        self.assertIn('端口 8765 已被占用', message)
+        self.assertIn('--port', message)
+        self.assertEqual(len(fake_module.sockets), 1)
+        self.assertEqual(fake_module.sockets[0].bind_calls, [('127.0.0.1', 8765)])
+        self.assertTrue(fake_module.sockets[0].closed)
+
+    def test_ensure_port_available_accepts_available_port(self):
+        # 可用路径：bind 成功时不抛异常，探测 socket 用完即关。
+        fake_module = FakeSocketModule()
+        with patch.object(serve, 'socket', fake_module):
+            serve.ensure_port_available(8765)
+        self.assertEqual(len(fake_module.sockets), 1)
+        self.assertEqual(fake_module.sockets[0].bind_calls, [('127.0.0.1', 8765)])
+        self.assertEqual(len(fake_module.sockets[0].sockopts), 1)
+        self.assertTrue(fake_module.sockets[0].closed)
+
+    def test_ensure_port_available_reports_probe_failure_without_traceback(self):
+        # 探测 socket 都创建不出来（资源耗尽等）：也要中文提示 + PortInUseError，不抛裸 OSError。
+        fake_module = FakeSocketModule(create_error=OSError(errno.EMFILE, 'Too many open files'))
+        with patch.object(serve, 'socket', fake_module):
+            with self.assertRaises(serve.PortInUseError) as caught:
+                serve.ensure_port_available(8765)
+        message = str(caught.exception)
+        self.assertIn('8765', message)
+        self.assertIn('--port', message)
+
+    def test_main_prints_chinese_hint_and_exits_nonzero_when_port_is_occupied(self):
+        # stub 预检为占用：CLI 打印含端口号与 --port 指引的中文提示，退出码非 0，且不建服务。
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(serve, 'ensure_port_available',
+                          side_effect=serve.PortInUseError(
+                              '端口 8765 已被占用，请先停止占用进程，或用 --port 指定其他端口')), \
+             patch.object(serve, 'create_server') as mock_create:
+            code, out, err = self.run_main(['--port', '8765', '--root', str(self.dist)])
+        self.assertEqual(code, 1)
+        self.assertIn('错误: 端口 8765 已被占用', err)
+        self.assertIn('--port', err)
+        self.assertNotIn('Traceback', err)
+        self.assertNotIn('预览地址', out)
+        mock_create.assert_not_called()
+
+    def test_main_continues_when_port_is_available(self):
+        # 可用路径：预检通过后照常进入服务流程，不打印错误提示。
+        mock_server = MagicMock()
+        mock_server.server_address = ('127.0.0.1', 9999)
+        mock_server.serve_forever.return_value = None
+        with patch.object(serve, 'ensure_port_available') as mock_check, \
+             patch.object(serve, 'create_server', return_value=mock_server) as mock_create:
+            code, out, err = self.run_main(['--port', '0', '--root', str(self.dist)])
+        self.assertEqual(code, 0)
+        self.assertEqual(err, '')
+        self.assertIn('预览地址', out)
+        mock_check.assert_called_once_with(0)
+        mock_create.assert_called_once_with(0, self.dist_data.resolve(), root=self.dist.resolve())
 
 
 class MissingBunTests(unittest.TestCase):

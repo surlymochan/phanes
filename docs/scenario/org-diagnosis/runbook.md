@@ -211,8 +211,8 @@ python3 demo/make_site_summary.py
 ### ② 端口已被占用（`serve.py`）
 - **错误字符串**：`端口 {port} 已被占用，请先停止占用进程，或用 --port 指定其他端口`
 - **文件与行号**：
-  - 抛出位置：`openbot/examples/org-health-local/serve.py:81`
-  - 捕获输出：`openbot/examples/org-health-local/serve.py:108`（终端打印 `错误: 端口 8765 已被占用，请先停止占用进程，或用 --port 指定其他端口`）
+  - 抛出位置：`openbot/examples/org-health-local/serve.py:187`
+  - 捕获输出：`openbot/examples/org-health-local/serve.py:213`（终端打印 `错误: 端口 8765 已被占用，请先停止占用进程，或用 --port 指定其他端口`，退出码非 0，不打印 traceback）
 - **原因**：默认端口 `8765` 已被之前启动的 `serve.py` 实例或其他本地服务占用。`serve.py` 的端口预检机制禁止静默更换端口。
 - **修复**：
   1. 使用命令查找并杀掉占用该端口的残留进程：
