@@ -135,6 +135,8 @@ def build_site(
 
     data_path 是诊断快照；bundle_path 是已编译好的浏览器包，给 None 时调用 bun 打包。
     """
+    if bundle_path is not None and not bundle_path.is_file():
+        raise FileNotFoundError(f"bundle 文件不存在或不是有效文件：{bundle_path}")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "data").mkdir(parents=True, exist_ok=True)
     copy_static_files(out_dir)

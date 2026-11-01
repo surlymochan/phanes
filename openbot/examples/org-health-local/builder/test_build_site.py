@@ -278,6 +278,7 @@ class BuildSiteTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("demo/vendor/app.bundle.js", stderr.getvalue())
         self.assertFalse(self.out.exists(), "bundle 缺失时不应生成 dist")
+        self.assertFalse((self.out / "app.bundle.js").exists(), "bundle 缺失时不应创建不完整的 app.bundle.js")
 
     def test_bundle_path_is_directory_fails(self) -> None:
         """bundle 路径是目录时以 1 退出，报错含路径且不生成 dist。"""
@@ -489,6 +490,51 @@ class BuildSiteTest(unittest.TestCase):
         self.assertIn(str(missing), result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(out_dir.exists(), "诊断 JSON 缺失时不应生成 dist 或留下半成品")
+
+    def test_build_site_missing_bundle_raises_and_creates_no_bundle(self) -> None:
+        """build_site 函数直接调用时若 bundle 不存在则抛出 FileNotFoundError，不创建或留下半成品 bundle。"""
+        missing_bundle = self.root / "no_such_bundle.js"
+        target_out = self.root / "dist_direct_call"
+        with self.assertRaises(FileNotFoundError):
+            build_site.build_site(EXAMPLE_PATH, target_out, bundle_path=missing_bundle)
+        self.assertFalse(target_out.exists(), "build_site 在 bundle 不存在时不应创建半成品输出目录")
+        self.assertFalse((target_out / "app.bundle.js").exists())
+
+    def test_command_line_missing_bundle_fails_and_creates_no_bundle(self) -> None:
+        """显式 --bundle 指向不存在文件时命令行非零退出且不会报告成功，不创建半成品 app.bundle.js。"""
+        missing_bundle = self.root / "nonexistent.bundle.js"
+        out_dir = self.root / "dist_missing_bundle"
+        result = self.run_cli(bundle=missing_bundle, out=out_dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, build_site.EXIT_INVALID)
+        self.assertNotIn("已生成站点", result.stdout)
+        self.assertIn("bundle 文件不存在或不是有效文件", result.stderr)
+        self.assertIn(str(missing_bundle), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(out_dir.exists(), "bundle 缺失时不应生成 dist 或留下半成品站点")
+        self.assertFalse((out_dir / "app.bundle.js").exists(), "不应创建不完整的 app.bundle.js")
+
+    def test_command_line_missing_bundle_preserves_existing_output_and_snapshot(self) -> None:
+        """显式 --bundle 指向不存在文件时，已有输出目录与输入快照保持原样，不创建不完整的 app.bundle.js。"""
+        out_dir = self.root / "existing_dist"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        unrelated = out_dir / "keep-me.txt"
+        unrelated.write_bytes(b"existing output file\n")
+
+        snapshot_content = EXAMPLE_PATH.read_bytes()
+        missing_bundle = self.root / "absent.bundle.js"
+
+        result = self.run_cli(data=EXAMPLE_PATH, bundle=missing_bundle, out=out_dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, build_site.EXIT_INVALID)
+        self.assertNotIn("已生成站点", result.stdout)
+        self.assertIn("bundle 文件不存在或不是有效文件", result.stderr)
+        self.assertIn(str(missing_bundle), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        self.assertFalse((out_dir / "app.bundle.js").exists(), "已有输出目录中不应创建不完整的 app.bundle.js")
+        self.assertEqual(unrelated.read_bytes(), b"existing output file\n", "已有输出目录的既有文件应保持原样")
+        self.assertEqual(EXAMPLE_PATH.read_bytes(), snapshot_content, "输入快照文件应保持原样")
 
 
 if __name__ == "__main__":
