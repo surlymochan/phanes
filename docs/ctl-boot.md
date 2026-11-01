@@ -213,7 +213,7 @@ failure/success sequence and does not touch the real backoff state:
 python3 tools/check-ad-host-backoff.py
 ```
 
-### AD ready queue target refill (Refs #1139)
+### AD ready queue target refill (Refs #1176)
 
 When `lane-autodispatch` ready queue drops below `LOW` (`AD_LOW`, default 10), the refill
 loop must request enough candidate cards to refill up to `TARGET` (`TARGET = 20`) rather than
