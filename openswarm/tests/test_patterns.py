@@ -122,6 +122,42 @@ class PatternsTests(unittest.TestCase):
             "body": "# Pattern\n\nValidate the input.",
         })
 
+    def test_pattern_next_id_scans_ids_and_skips_unreadable_files(self):
+        self.assertEqual(xs.pattern_next_id(str(self.knowledge)), 1)
+
+        (self.skills / "nested").mkdir()
+        (self.skills / "nested" / "P-7.md").write_text("id: P-7\n", encoding="utf-8")
+        self.proposals.mkdir()
+        quoted_id = self.proposals / "P-12.md"
+        quoted_id.write_text('id: "P-12"\n', encoding="utf-8")
+        (self.proposals / "body-id.md").write_text("text id: P-99\n", encoding="utf-8")
+        unreadable = self.skills / "unreadable.md"
+        unreadable.write_text("id: P-100\n", encoding="utf-8")
+
+        original_open = open
+
+        def open_for_test(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(unreadable):
+                raise OSError("fixture is unreadable")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=open_for_test):
+            self.assertEqual(xs.pattern_next_id(str(self.knowledge)), 13)
+
+    def test_pattern_existing_sources_reads_proposal_front_matter_only(self):
+        self.proposals.mkdir()
+        nested = self.proposals / "nested"
+        nested.mkdir()
+        (nested / "valid.md").write_text("---\nsource: alpha\n---\nBody\n", encoding="utf-8")
+        (self.proposals / "quoted.md").write_text('---\nsource: "beta"\n---\nBody\n', encoding="utf-8")
+        (self.proposals / "no-front-matter.md").write_text("source: ignored\n", encoding="utf-8")
+        (self.proposals / "unclosed.md").write_text("---\ntitle: Unclosed\n", encoding="utf-8")
+        (self.proposals / "no-source.md").write_text("---\ntitle: No source\n---\nBody\n", encoding="utf-8")
+        (self.proposals / "ignored.txt").write_text("---\nsource: ignored-extension\n---\n", encoding="utf-8")
+        (self.skills / "skill.md").write_text("---\nsource: ignored-skill\n---\n", encoding="utf-8")
+
+        self.assertEqual(xs.pattern_existing_sources(str(self.knowledge)), {"alpha", "beta"})
+
     def write_pattern(self, pattern_id, title, body="When to use: common change.\nPattern:\n- Validate input.\n- Test boundary cases.\nExample: [PR](https://example.invalid/pr/1)",
                       card_types="[]", paths="[]", backends="[]", status="active"):
         path = self.skills / f"{pattern_id}.md"
