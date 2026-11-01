@@ -49,7 +49,7 @@ def _status_for(result, hosts, config_path, now, need_ok=None):
         )
         result["ok"] = False
     hosts_ok = len(_usable_hosts(rows, known_hosts))
-    skipped = sum(_is_cooldown(row) for row in rows)
+    skipped = sum(_is_cooldown(row) for row in rows if row.get("host") in known_hosts)
     required = len(hosts) if need_ok is None else need_ok
     result["ok"] = bool(result["ok"] and _need_ok(hosts_ok, skipped, required))
     result["start_lane_autodispatch"] = bool(result.get("start_lane_autodispatch") and result["ok"])

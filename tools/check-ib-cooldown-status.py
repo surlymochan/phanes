@@ -30,7 +30,10 @@ def main():
     )
     assert result["ok"] is True
     assert result["start_lane_autodispatch"] is True
-    assert result["status_line"].startswith("ok=1 hosts_ok=3 skipped_cooldown=2")
+    fields = dict(field.split("=", 1) for field in result["status_line"].split())
+    assert fields["ok"] == "1"
+    assert fields["hosts_ok"] == "3"
+    assert fields["skipped_cooldown"] == "2"
     print("ib-refresh cooldown status: OK")
 
 
