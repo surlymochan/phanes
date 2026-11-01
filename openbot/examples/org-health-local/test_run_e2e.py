@@ -119,8 +119,17 @@ elif role == 'builder':
     if PROBE:
         bundle = pathlib.Path(args[args.index('--bundle') + 1])
         (out / 'index.html').write_text(bundle.read_text(encoding='utf-8'), encoding='utf-8')
+        (out / 'build-report.json').write_text(json.dumps({'status': 'ok'}), encoding='utf-8')
     else:
         (out / 'index.html').write_text('ok', encoding='utf-8')
+elif role == 'reviewer':
+    if PROBE:
+        brief = pathlib.Path(args[args.index('--brief') + 1])
+        data = pathlib.Path(args[args.index('--data') + 1])
+        dist = pathlib.Path(args[args.index('--dist') + 1])
+        print(f"# 组织诊断交叉审查报告\\n- brief: {brief.name}\\n- data: {data.name}\\n- dist: {dist.name}\\nPASS", flush=True)
+    else:
+        print("# 组织诊断交叉审查报告\\nPASS", flush=True)
 '''.replace('ROLE', repr(role)).replace('LOG', repr(str(self.log)))
         source = source.replace('FAIL', repr(failing)).replace('PROBE', repr(probe))
         source = source.replace('EXIT_CODE', repr(exit_code))
@@ -275,11 +284,12 @@ elif role == 'builder':
         self.bundle.parent.mkdir()
         self.bundle.write_text('space path bundle', encoding='utf-8')
 
-        for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
             self.write_stub(path, role, probe=True)
         (self.raw / 'metrics.csv').write_text('metric,value\nrevenue,1\n', encoding='utf-8')
 
-        result = subprocess.run(self.command(), capture_output=True, text=True)
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+        result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = dict(self.calls())
         self.assertEqual(calls['boss'], ['--out', str(self.workdir / 'brief.json')])
@@ -289,11 +299,41 @@ elif role == 'builder':
                                             '--out', str(self.workdir / 'dist'), '--source-commit', SOURCE_COMMIT,
                                             '--bundle', str(self.bundle)])
         self.assertEqual(calls['checker'], [str(self.workdir / 'dist')])
+        self.assertEqual(calls['reviewer'], ['--brief', str(self.workdir / 'brief.json'),
+                                             '--data', str(self.workdir / 'diagnosis.json'),
+                                             '--dist', str(self.workdir / 'dist')])
+        # 关键上游 JSON 存在且可解析
         self.assertTrue((self.workdir / 'brief.json').is_file())
+        brief = json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
+        self.assertEqual(brief, {})
+        self.assertTrue((self.workdir / 'diagnosis.json').is_file())
         diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
         self.assertEqual(diagnosis['raw_files'], ['metrics.csv'])
         self.assertEqual((self.workdir / 'dist' / 'index.html').read_text(encoding='utf-8'),
                          'space path bundle')
+        # workdir 内的 timings 存在且可解析
+        timings_path = self.workdir / 'timings.json'
+        self.assertTrue(timings_path.is_file())
+        timings = json.loads(timings_path.read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        for item in timings:
+            self.assertEqual(set(item), {'name', 'command', 'duration_seconds', 'exit_code'})
+            self.assertIsInstance(item['command'], list)
+            self.assertGreaterEqual(item['duration_seconds'], 0)
+            self.assertEqual(item['exit_code'], 0)
+        # 最终报告文件（审查报告）存在且可解析
+        report_path = self.workdir / REVIEW_REPORT
+        self.assertTrue(report_path.is_file())
+        report_text = report_path.read_text(encoding='utf-8')
+        self.assertIn('# 组织诊断交叉审查报告', report_text)
+        self.assertIn('PASS', report_text)
+        self.assertIn('brief.json', report_text)
+        self.assertIn('diagnosis.json', report_text)
+        # 构建报告同样存在且可解析
+        build_report_path = self.workdir / 'dist' / 'build-report.json'
+        self.assertTrue(build_report_path.is_file())
+        build_report = json.loads(build_report_path.read_text(encoding='utf-8'))
+        self.assertEqual(build_report['status'], 'ok')
 
     def test_uses_demo_bundle_by_default(self):
         for path, role in zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker')):
