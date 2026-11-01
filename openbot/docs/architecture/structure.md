@@ -39,8 +39,9 @@ vendor/              Patches for the vendored remote desktop runtime
 ```
 
 The desktop application stays at the repository root. Its package metadata is also the release
-metadata used by Electron Builder and GitHub releases. Moving it into `apps/desktop` would create a
-second version source and add package-signing risk without adding a useful runtime boundary.
+metadata used by Electron Builder and GitHub releases. Moving it into `apps/desktop` (待核实:
+counterexample path, the repository has no such directory) would create a second version source and
+add package-signing risk without adding a useful runtime boundary.
 
 ## Dependency direction
 

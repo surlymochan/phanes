@@ -59,9 +59,10 @@ allowlist: `scripts/install-cua-driver.ts` copies only the named paths and check
 upstream layout change fails the build instead of shipping a surprise file. Each installer carries
 only its own target. On macOS `mac.signIgnore` keeps the vendor's Developer ID signature, because
 re-signing under OpenBot's inherited entitlements would drop the Automation entitlement the driver
-needs. A packaged build reads the copy under `resources/cua-driver` and nothing else, because the release
-is pinned and signed against that build and an environment variable must not decide which program
-drives the user's desktop; a release without the binary reports no driver. In a checkout
+needs. A packaged build reads the copy under `resources/cua-driver/<platform>/<architecture>` and
+nothing else, because the release is pinned and signed against that build and an environment
+variable must not decide which program drives the user's desktop; a release without the binary
+reports no driver. In a checkout
 `resolveCuaDriver` also reads an override, an install directory and `PATH`, so a developer can point
 `OPENBOT_CUA_DRIVER_PATH` at another build.
 
