@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1090).
+"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1127).
 
 对照 37min 静默课（brain/lessons-37min-silence.md）：
 `ctl-loop` 在执行 `ib-refresh` 续签 instabox 证书期间，墙钟等待循环（受 REFRESH_CAP 约束，默认 420s）
@@ -144,9 +144,12 @@ def scan_ctl_loop_source(source: str) -> None:
         combined = header + "\n" + body
         is_refresh_wait = any(token in combined.lower() for token in ("refresh", "refresh_cap"))
         if is_refresh_wait:
-            has_heartbeat = bool(re.search(r"heartbeat", body, re.IGNORECASE))
-            has_date = bool(re.search(r"\bdate\b", body))
-            if has_heartbeat and has_date:
+            # Require the timestamp command and heartbeat path on the same line so
+            # unrelated date calculations and heartbeat references cannot pass.
+            has_heartbeat_write = bool(
+                re.search(r"(?:\bdate\b[^\n]*heartbeat|heartbeat[^\n]*\bdate\b)", body, re.IGNORECASE)
+            )
+            if has_heartbeat_write:
                 refresh_wait_loop_found = True
                 break
 
@@ -225,6 +228,27 @@ done
         assert "date" in str(err)
     else:
         raise AssertionError("预期拦截缺少 date 的脚本")
+
+    # 负例 4: 循环体内分别出现 date 和 heartbeat，但没有用 date 写 heartbeat
+    split_timestamp_and_heartbeat = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+while kill -0 "$refresh_pid" 2>/dev/null; do
+    echo "heartbeat path: $HEARTBEAT_PATH"
+    now=$(date +%s)
+    if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+        break
+    fi
+    sleep 5
+done
+"""
+    try:
+        scan_ctl_loop_source(split_timestamp_and_heartbeat)
+    except AssertionError as err:
+        assert "37min静默课" in str(err)
+    else:
+        raise AssertionError("预期拦截未用 date 写 heartbeat 的脚本")
 
     # 正例 2: 含有注释行的 bash 脚本能正确解析并判定
     valid_with_comments = """#!/usr/bin/env bash
