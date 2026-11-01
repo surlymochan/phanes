@@ -948,6 +948,58 @@ class AbnormalRawDataTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(self.out_path.exists())
 
+    def test_nonfinite_numeric_value_reports_source_file_and_row(self) -> None:
+        """nan/inf 不是缺失值，必须失败并指出 CSV 文件与行号。"""
+        cases = (
+            ("cost.csv", "2026-01,10.4,8.3,2.1", "2026-01,nan,8.3,2.1"),
+            ("revenue.csv", "2026-01,11.2", "2026-01,inf"),
+        )
+        for filename, original, invalid in cases:
+            with self.subTest(filename=filename):
+                raw_dir = copy_raw(self.folder, f"raw-nonfinite-{filename}")
+                path = raw_dir / filename
+                write_csv_lines(
+                    path,
+                    [line.replace(original, invalid) for line in csv_lines(path)],
+                )
+                result = run_cli(self.brief_path, raw_dir, self.out_path)
+                message = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"原始数据 {filename} 第 2 行", message)
+                self.assertIn("有限数值", message)
+                self.assertFalse(self.out_path.exists())
+
+    def test_whitespace_numeric_value_is_accepted_and_snapshot_is_valid(self) -> None:
+        """带首尾空白的数值按数值解析，成功快照仍通过 schema。"""
+        raw_dir = copy_raw(self.folder, "raw-whitespace-number")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(
+            cost,
+            [line.replace("2026-01,10.4,8.3,2.1", "2026-01, 10.4 , 8.3 , 2.1 ") for line in csv_lines(cost)],
+        )
+        data = self.build_data(raw_dir)
+        self.assertEqual(data["metrics"][0]["数值"]["2026-01实际"], 10.4)
+
+    def test_negative_forecast_cost_is_rejected_with_source_location(self) -> None:
+        """forecast.csv 中除收入外的负数也违反非负业务契约。"""
+        raw_dir = copy_raw(self.folder, "raw-negative-forecast-cost")
+        forecast = raw_dir / "forecast.csv"
+        write_csv_lines(
+            forecast,
+            [
+                line.replace(
+                    "年末测算,13.4,10.7,13.4,10.7,,14.8",
+                    "年末测算,-13.4,10.7,13.4,10.7,,14.8",
+                )
+                for line in csv_lines(forecast)
+            ],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 forecast.csv 第 2 行", result.stderr)
+        self.assertIn("非负数", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
     def test_duplicate_month_row_exits_nonzero(self) -> None:
         """同一月份重复行时报错退出。"""
         raw_dir = copy_raw(self.folder, "raw-duplicate-month")
