@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1090).
+"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1143).
 
 对照 37min 静默课（brain/lessons-37min-silence.md）：
 `ctl-loop` 在执行 `ib-refresh` 续签 instabox 证书期间，墙钟等待循环（受 REFRESH_CAP 约束，默认 420s）
@@ -262,6 +262,22 @@ while kill -0 "$refresh_pid" 2>/dev/null; do # wait loop
 done # finished
 """
     scan_ctl_loop_source(valid_with_inline_comments)
+
+    # 正例 4: 支持 until 等待循环模式
+    valid_with_until = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+until ! kill -0 "$refresh_pid" 2>/dev/null; do
+    date +%s > "$HEARTBEAT_PATH"
+    now=$(date +%s)
+    if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+        break
+    fi
+    sleep 5
+done
+"""
+    scan_ctl_loop_source(valid_with_until)
 
 
 def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
