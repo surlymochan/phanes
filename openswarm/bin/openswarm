@@ -11028,8 +11028,12 @@ def compare_markdown(report):
              f"Compare ID: `{report['id']}`", "",
              f"Winner: **{report['winner_label'] or 'none'}**" +
              (f" (`{report['winner']}`)" if report.get("winner") else ""), ""]
-    for label in ("a", "b"):
-        candidate = report["runs"][label]
+    runs = report.get("runs") or {}
+    labels = ("a", "b") if isinstance(runs, dict) else ()
+    for label in labels:
+        candidate = runs.get(label)
+        if not isinstance(candidate, dict):
+            continue
         result = candidate.get("result") or {}
         diff = candidate.get("diff") or {}
         review = candidate.get("review") or {}
