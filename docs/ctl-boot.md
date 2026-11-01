@@ -68,7 +68,8 @@ certificates and fleet config untouched. The status file contains a stable,
 machine-readable row with those five fields; `hosts_ok` counts only valid
 certificates in the written fleet config, and cooldown skips contribute to
 `skipped_cooldown`. Check the parser contract offline with
-`python3 tools/check-ib-status-line.py`.
+`python3 tools/check-ib-status-line.py`. The `need_ok` floor below decides how
+many reachable machines are enough to start the dispatch loop.
 
 ### SSH ControlMaster stale-socket sweep (Refs #921)
 
@@ -95,6 +96,30 @@ earlier renewal; `--threshold-seconds` is the one-run override.  The offline
 contract check `python3 tools/check-ib-cert-reuse.py` uses fake TTLs and the
 environment variable to cover both branches, and never invokes a real renewal
 command or touches a machine certificate.
+
+### Partial fleet availability with `need_ok` (Refs #970)
+
+`ib-refresh` can be told how many machines have to be reachable before the
+preflight passes.  `--need-ok N` (environment `IB_NEED_OK`) sets that floor;
+`0`, the default, keeps the strict rule that every host of the fleet config
+must hold a valid certificate.  A fleet entry may carry `"cooldown": true`;
+such a host is parked on purpose, so it is never renewed, it is not counted as
+reachable, and it is left out of the written fleet config.
+
+With `need_ok=3` and two hosts cooling down the status row is
+`ok=1 hosts_ok=3 skipped_cooldown=2 ...`, `start_lane_autodispatch` becomes
+`true`, and only the reachable machines (`ib3`-`ib5`) are written to
+`--output-fleet-config`, so dispatching runs on them.  The floor is enforced
+before anything is installed: when fewer than `need_ok` hosts end up valid,
+no certificate is installed, no config is written, and the run stays `ok=0`.
+Every host is renewed on its own, so one unreachable machine does not hide the
+others.  The offline contract check uses a fake host table and a fake renewal
+command, so it never runs the real renewal and never touches a machine
+certificate:
+
+```bash
+python3 tools/check-ib-need-ok.py
+```
 
 ## Smoke (safe, no restart) (Refs #777)
 

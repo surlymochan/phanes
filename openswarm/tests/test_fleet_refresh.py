@@ -71,6 +71,29 @@ class FleetRefreshTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0)
         self.assertEqual(json.loads(second.stdout)["renewed"], [])
 
+    def test_need_ok_writes_only_the_reachable_hosts(self):
+        hosts = [{"name": "ib1", "cert": str(self.root / "ib1.cert"), "cooldown": True},
+                 {"name": "ib2", "cert": str(self.root / "ib2.cert"), "cooldown": True},
+                 {"name": "ib3", "cert": str(self.root / "ib3.cert")},
+                 {"name": "ib4", "cert": str(self.root / "ib4.cert")},
+                 {"name": "ib5", "cert": str(self.root / "ib5.cert")}]
+        self.config.write_text(json.dumps({"hosts": hosts}))
+        output = self.root / "fleet-out.json"
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--fleet-config", str(self.config),
+            "--renew-command", f"{sys.executable} {self.renew}",
+            "--threshold-seconds", "86400",
+            "--need-ok", "3", "--output-fleet-config", str(output),
+        ], capture_output=True, text=True)
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(payload["start_lane_autodispatch"])
+        self.assertEqual(payload["renewed"], ["ib3", "ib4", "ib5"])
+        self.assertEqual(payload["errors"], [])
+        self.assertIn("ok=1 hosts_ok=3 skipped_cooldown=2", payload["status_line"])
+        written = json.loads(output.read_text())
+        self.assertEqual([host["name"] for host in written["hosts"]], ["ib3", "ib4", "ib5"])
+
 
 if __name__ == "__main__":
     unittest.main()
