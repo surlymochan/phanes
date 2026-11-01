@@ -3234,13 +3234,13 @@ def route(prof, st, policy, exclude=()):
 
     if prof.get("backend"):
         order = [canonical_backend(prof["backend"])]
-    elif prof["type"] in r["review_types"]:
+    elif prof.get("type") in r["review_types"]:
         if any(backend in default_order for backend in ("ocgo", "deepseek")):
             order = prioritize(("ocgo", "codex", "deepseek"))
             notes.append("review: prefer a non-GPT family for an independent second opinion")
         else:
             order = default_order
-    elif prof["difficulty"] <= r["ocgo_first_max_difficulty"] and prof["type"] in r["ocgo_first_types"]:
+    elif prof["difficulty"] <= r["ocgo_first_max_difficulty"] and prof.get("type") in r["ocgo_first_types"]:
         if "ocgo" in default_order:
             order = prioritize(("ocgo", "codex", "deepseek"))
             notes.append("low-difficulty mechanical work: OpenCode Go first to save Codex")
