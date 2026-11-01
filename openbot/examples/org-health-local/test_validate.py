@@ -22,6 +22,7 @@ import validate  # noqa: E402
 
 EXAMPLE_PATH = ROOT / "data" / "diagnosis.json"
 SCHEMA_PATH = ROOT / "schema" / "diagnosis.schema.json"
+BRIEF_PATH = ROOT / "demo" / "brief.json"
 
 
 def load_json(path: Path):
@@ -928,6 +929,52 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(output["errors"], [])
         self.assertEqual(output["schema_version"], 4)
         self.assertEqual(result.stderr, "")
+
+    def test_command_line_root_aggregates_schema_errors_across_outputs(self) -> None:
+        """临时 root 中 brief、diagnosis 与 site 的多处 schema 错误全部出现在错误列表。"""
+        brief = load_json(BRIEF_PATH)
+        diagnosis = copy.deepcopy(self.data)
+        site_diagnosis = copy.deepcopy(self.data)
+        diagnosis["scope"]["schema版本"] = 3
+        del brief["目标"]
+        site_diagnosis["metrics"] = []
+        with temporary_directory() as folder:
+            root = Path(folder)
+            (root / "brief.json").write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+            (root / "diagnosis.json").write_text(json.dumps(diagnosis, ensure_ascii=False), encoding="utf-8")
+            (root / "site" / "data").mkdir(parents=True)
+            (root / "site" / "data" / "diagnosis.json").write_text(
+                json.dumps(site_diagnosis, ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--root", str(root), "--json"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, validate.EXIT_INVALID, result.stdout + result.stderr)
+        output = json.loads(result.stdout)
+        self.assertFalse(output["ok"])
+        error_paths = {error["path"] for error in output["errors"]}
+        self.assertIn(f"{root / 'brief.json'}/目标", error_paths)
+        self.assertIn(f"{root / 'diagnosis.json'}/scope/schema版本", error_paths)
+        self.assertIn(f"{root / 'site' / 'data' / 'diagnosis.json'}/metrics", error_paths)
+
+    def test_command_line_root_accepts_valid_outputs(self) -> None:
+        """临时 root 中三个真实 JSON 文件均合法时退出码为 0。"""
+        with temporary_directory() as folder:
+            root = Path(folder)
+            (root / "brief.json").write_text(BRIEF_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+            content = json.dumps(self.data, ensure_ascii=False)
+            (root / "diagnosis.json").write_text(content, encoding="utf-8")
+            (root / "site" / "data").mkdir(parents=True)
+            (root / "site" / "data" / "diagnosis.json").write_text(content, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "validate.py"), "--root", str(root)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, validate.EXIT_OK, result.stdout + result.stderr)
+        self.assertIn("校验通过", result.stdout)
 
     def test_supported_keywords_contains_exclusive_maximum(self) -> None:
         """SUPPORTED_KEYWORDS 常量集合中包含 exclusiveMaximum。"""
