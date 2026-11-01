@@ -11,6 +11,18 @@ Ignore rules come from config:
   whose name matches `re` is ignored only while `path` exists (e.g. the
   `MACOS-UPSTREAM-RED` switch file with `macos`).
 
+Advisory rules come from config too:
+
+* `advisory_checks`: a list of check names that are advisory, matched exactly
+  (case-insensitively).
+* `advisory_file`: a file with one check name per line (`#` starts a comment).
+  A missing file means "no advisory checks".
+
+An advisory check never gates: SUCCESS, FAILURE or PENDING, it counts neither as
+red, nor as pending, nor as green. It is only reported in the `advisory` field of
+`classify` so that logs still show what happened. A rollup that holds nothing but
+advisory checks is `none`, not green.
+
 Names are matched case-insensitively. The module is loaded by path:
 `openswarm/lib/ci/` is a namespace package without an `__init__.py`.
 """
@@ -27,13 +39,34 @@ _GREEN_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _RED_STATES = {"ERROR", "FAILURE"}
 
 
-class IgnorePolicy:
-    """Which red checks do not count as red."""
+def _read_name_file(path):
+    """Check names from a one-per-line file; `#` starts a comment.
 
-    def __init__(self, ignore_re=None, file_rules=(), exists=os.path.exists):
+    A missing (or unreadable) file means "no names", never an error: the
+    advisory list is a hot switch, not a gate.
+    """
+    names = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    names.append(line)
+    except OSError:
+        return []
+    return names
+
+
+class IgnorePolicy:
+    """Which red checks do not count as red, and which checks are advisory."""
+
+    def __init__(self, ignore_re=None, file_rules=(), exists=os.path.exists, advisory=()):
         self.ignore_re = ignore_re
         self.file_rules = list(file_rules)
         self._exists = exists
+        self.advisory = frozenset(
+            str(name).strip().lower() for name in advisory if str(name).strip()
+        )
 
     @classmethod
     def from_cfg(cls, cfg, exists=os.path.exists):
@@ -48,7 +81,16 @@ class IgnorePolicy:
             (os.path.expanduser(rule["path"]), re.compile(rule["re"], re.IGNORECASE))
             for rule in raw
         ]
-        return cls(ignore_re, file_rules, exists=exists)
+        advisory = cfg.get("advisory_checks") or []
+        if isinstance(advisory, str):
+            advisory = [advisory]
+        advisory = list(advisory)
+        paths = cfg.get("advisory_file")
+        if isinstance(paths, str):
+            paths = [paths]
+        for path in paths or []:
+            advisory.extend(_read_name_file(os.path.expanduser(path)))
+        return cls(ignore_re, file_rules, exists=exists, advisory=advisory)
 
     def ignores(self, name):
         """True when a red check with this name must not count as red."""
@@ -58,6 +100,10 @@ class IgnorePolicy:
             if rule_re.search(name) and self._exists(path):
                 return True
         return False
+
+    def is_advisory(self, name):
+        """True when a check with this name is advisory and must never gate."""
+        return (name or "").strip().lower() in self.advisory
 
 
 def _bucket(item):
@@ -87,13 +133,30 @@ def _bucket(item):
     return name, PENDING
 
 
+def _conclusion(item, bucket):
+    """The raw GitHub conclusion/state of a check, for the advisory report."""
+    if "context" in item and "state" in item:
+        raw = item.get("state") or ""
+    else:
+        raw = item.get("conclusion") or ""
+    return raw.upper() or bucket.upper()
+
+
 def classify(checks, policy):
-    """Summarise a statusCheckRollup list into green, red, pending or none."""
-    red, pending, ignored = [], [], []
-    seen = False
+    """Summarise a statusCheckRollup list into green, red, pending or none.
+
+    Advisory checks never gate: whatever their conclusion they are only reported
+    in `advisory`, they count neither as red, nor as pending, nor as green. A
+    rollup that holds nothing but advisory checks is `none`, not green.
+    """
+    red, pending, ignored, advisory = [], [], [], []
+    counted = False
     for item in checks or []:
-        seen = True
         name, bucket = _bucket(item)
+        if policy.is_advisory(name):
+            advisory.append({"name": name, "conclusion": _conclusion(item, bucket)})
+            continue
+        counted = True
         if bucket == RED:
             if policy.ignores(name):
                 ignored.append(name)
@@ -101,7 +164,7 @@ def classify(checks, policy):
                 red.append(name)
         elif bucket == PENDING:
             pending.append(name)
-    if not seen:
+    if not counted:
         state = NONE
     elif red:
         state = RED
@@ -109,14 +172,14 @@ def classify(checks, policy):
         state = PENDING
     else:
         state = GREEN
-    return {"state": state, "red": red, "pending": pending, "ignored": ignored}
+    return {"state": state, "red": red, "pending": pending, "ignored": ignored, "advisory": advisory}
 
 
 def rerun_targets(runs, policy):
-    """Failed workflow runs worth rerunning, minus the ignored ones, in input order."""
+    """Failed workflow runs worth rerunning, minus the ignored and advisory ones, in input order."""
     targets = []
     for run in runs or []:
         name, bucket = _bucket(run)
-        if bucket == RED and not policy.ignores(name):
+        if bucket == RED and not policy.ignores(name) and not policy.is_advisory(name):
             targets.append(run)
     return targets
