@@ -8,6 +8,9 @@
 
 输入错误（必需数字列为空、CSV 出现重复列名、缺少必需列）另用最小 raw fixture 覆盖：
 命令行退出码非 0，错误信息指出文件与列名。
+
+脏 CSV（数值非法、字段数不符、期次重复、负数）另有一组用例：默认仍按输入错误退出，
+加 `--skip-bad-rows` 时跳过坏行继续生成快照，坏行写进快照的可选字段 `warnings`。
 """
 from __future__ import annotations
 
@@ -64,7 +67,13 @@ def temporary_directory() -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory()
 
 
-def run_cli(brief_path: Path, raw_dir: Path, out_path: Path, strict: bool = False) -> subprocess.CompletedProcess:
+def run_cli(
+    brief_path: Path,
+    raw_dir: Path,
+    out_path: Path,
+    strict: bool = False,
+    skip_bad_rows: bool = False,
+) -> subprocess.CompletedProcess:
     """调用 build_diagnosis.py 命令行。"""
     return subprocess.run(
         [
@@ -76,7 +85,9 @@ def run_cli(brief_path: Path, raw_dir: Path, out_path: Path, strict: bool = Fals
             str(raw_dir),
             "--out",
             str(out_path),
-        ] + (["--strict"] if strict else []),
+        ]
+        + (["--strict"] if strict else [])
+        + (["--skip-bad-rows"] if skip_bad_rows else []),
         capture_output=True,
         text=True,
     )
@@ -1120,6 +1131,139 @@ class MinimalRawInputErrorTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("cost.csv", message)
         self.assertIn("缺少必需列：整体技术人力成本万元", message)
+
+
+class DirtyRawDataTest(unittest.TestCase):
+    """脏 CSV：跳过坏行继续生成快照，坏行进可审计的 warnings。
+
+    默认模式（不给 `--skip-bad-rows`）仍把坏行当输入错误报出；开了该参数才跳过坏行。
+    """
+
+    def setUp(self) -> None:
+        self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.temporary = temporary_directory()
+        self.folder = Path(self.temporary.name)
+        self.brief_path = write_brief(self.folder, BRIEF)
+        self.out_path = self.folder / "diagnosis.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def dirty_raw(self, name: str) -> Path:
+        """复制合成样本并写入四类坏行，返回原始数据目录。
+
+        cost.csv：2026-03 的数值不是数值、第 5 行字段数多于表头、2026-01 期次重复。
+        heads.csv：2026-07 的折算人头是负数。
+        """
+        raw_dir = copy_raw(self.folder, name)
+        cost = raw_dir / "cost.csv"
+        lines = csv_lines(cost)
+        lines[3] = "2026-03,待补,8.6,2.2"
+        lines.insert(4, "2026-04,11.0,8.8,2.2,备注")
+        lines.append("2026-01,10.4,8.3,2.1")
+        write_csv_lines(cost, lines)
+        heads = raw_dir / "heads.csv"
+        head_lines = csv_lines(heads)
+        head_lines[6] = "2026-07,-1,9.4"
+        write_csv_lines(heads, head_lines)
+        return raw_dir
+
+    def test_bad_rows_are_skipped_and_recorded(self) -> None:
+        """跳过坏行后仍生成快照，坏行写进快照的 warnings。"""
+        raw_dir = self.dirty_raw("raw-dirty")
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path, skip_bad_rows=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+        warnings = data["warnings"]
+        self.assertEqual(len(warnings), 4)
+        joined = "\n".join(warnings)
+        self.assertIn("cost.csv", joined)
+        self.assertIn("整体技术人力成本万元 不是数值：待补", joined)
+        self.assertIn("字段数多于表头", joined)
+        self.assertIn("heads.csv", joined)
+        self.assertIn("非负数", joined)
+
+    def test_bad_rows_fail_without_skip_flag(self) -> None:
+        """不开跳过坏行时，坏行仍按输入错误报出，不留下快照。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-value")
+        cost = raw_dir / "cost.csv"
+        lines = csv_lines(cost)
+        lines[3] = "2026-03,待补,8.6,2.2"
+        write_csv_lines(cost, lines)
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cost.csv", result.stdout + result.stderr)
+        self.assertIn("不是数值", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_warnings_are_sorted_by_file_and_line(self) -> None:
+        """warnings 按文件名与行号排序，便于回原始 CSV 逐条核对。"""
+        raw_dir = self.dirty_raw("raw-dirty-order")
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path, skip_bad_rows=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        warnings = data["warnings"]
+        self.assertEqual(
+            [build_diagnosis.warning_sort_key(item) for item in warnings],
+            sorted(build_diagnosis.warning_sort_key(item) for item in warnings),
+        )
+        self.assertTrue(warnings[0].startswith("原始数据 cost.csv"))
+
+    def test_skipped_row_becomes_missing_period(self) -> None:
+        """被跳过的行按缺数据处理：期次写 null，并在口径说明里写明缺口。"""
+        raw_dir = self.dirty_raw("raw-dirty-gap")
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path, skip_bad_rows=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertIn("整体技术人力成本 缺 2026-03、2026-05 数据，按 null 处理", data["口径说明"])
+        self.assertIn("整体折算人头 缺 2026-05、2026-07 数据，按 null 处理", data["口径说明"])
+        self.assertEqual(data["metrics"][0]["数值"]["2026-09实际"], 12.4)
+
+    def test_clean_raw_has_no_warnings(self) -> None:
+        """原始数据干净时不写 warnings，快照与不开参数时一致。"""
+        raw_dir = copy_raw(self.folder, "raw-clean")
+        clean_out = self.folder / "clean.json"
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path, skip_bad_rows=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertNotIn("warnings", data)
+        plain = run_cli(self.brief_path, raw_dir, clean_out)
+        self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
+        self.assertEqual(self.out_path.read_bytes(), clean_out.read_bytes())
+
+    def test_module_api_collects_warnings(self) -> None:
+        """模块接口把坏行记进 warnings 列表，快照里也带上。"""
+        raw_dir = self.dirty_raw("raw-dirty-module")
+        warnings: list[str] = []
+
+        snapshot = build_diagnosis.build_from_files(self.brief_path, raw_dir, warnings=warnings)
+
+        self.assertEqual(len(warnings), 4)
+        self.assertEqual(snapshot["warnings"], sorted(warnings, key=build_diagnosis.warning_sort_key))
+        self.assertEqual(validate.validate_data(snapshot, self.schema), [])
+
+    def test_missing_column_still_fails_with_skip_flag(self) -> None:
+        """表头缺列是输入错误：开了跳过坏行也不放行。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-missing-column")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, drop_csv_column(cost.read_text(encoding="utf-8"), "运维设施成本万元").splitlines())
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path, skip_bad_rows=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("缺少必需列：运维设施成本万元", result.stdout + result.stderr)
+        self.assertFalse(self.out_path.exists())
 
 
 if __name__ == "__main__":

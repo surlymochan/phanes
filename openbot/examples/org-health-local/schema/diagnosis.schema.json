@@ -55,6 +55,14 @@
         "$ref": "#/$defs/recommendation"
       }
     },
+    "warnings": {
+      "description": "可选：原始数据里被跳过的坏行与原因（文件、行号、列名），供审计回查，见 #736。",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "stage": {
       "$ref": "#/$defs/stage"
     }

@@ -15,6 +15,9 @@
 输出：schema v4 诊断快照，结构见 `schema/diagnosis.schema.json`。
 只使用 Python 3.9+ 标准库。输出确定性：同一份任务书与原始数据得到同一份 JSON，键序固定。
 缺数据的期次写 null，不填估算值；整体口径的参考期次按 schema v4 固定为 null。
+
+`--skip-bad-rows`：原始数据里有坏行时跳过该行并继续，快照的 `warnings` 记录问题
+（文件、行号、列名与原因），便于回查；不给该参数时坏行仍按输入错误报错退出。
 """
 from __future__ import annotations
 
@@ -95,6 +98,8 @@ METRIC_TITLES = (
 MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MONTH_TOKEN = re.compile(r"\d{4}-\d{2}")
+WARNING_FILE = re.compile(r"^原始数据 (\S+)")
+WARNING_LINE = re.compile(r"第 (\d+) 行")
 
 
 class BriefError(Exception):
@@ -107,6 +112,16 @@ class RawDataError(Exception):
 
 class SnapshotError(Exception):
     """生成的快照不满足结构定义。"""
+
+
+def warning_sort_key(warning: str) -> tuple[str, int]:
+    """按文件名与行号给警告排序，便于回原始 CSV 逐条核对。"""
+    file_match = WARNING_FILE.match(warning)
+    line_match = WARNING_LINE.search(warning)
+    return (
+        file_match.group(1) if file_match else "",
+        int(line_match.group(1)) if line_match else 0,
+    )
 
 
 def load_brief(path: Path) -> dict:
@@ -187,8 +202,14 @@ def parse_periods(brief: dict) -> dict:
     }
 
 
-def parse_calibration(brief: dict, raw_dir: Path) -> tuple[float, list[str]]:
-    """从任务书 `口径` 解析汇率与口径说明文字。"""
+def parse_calibration(
+    brief: dict, raw_dir: Path, warnings: list[str] | None = None
+) -> tuple[float, list[str]]:
+    """从任务书 `口径` 解析汇率与口径说明文字。
+
+    warnings 非 None 时启用容错：fx.csv 里取不到汇率的行跳过并记入警告，
+    汇率仍取不到时照旧报 BriefError（没有汇率算不出成本率）。
+    """
     calibration = brief.get("口径")
     if not isinstance(calibration, dict):
         raise BriefError("任务书缺少 `口径` 对象")
@@ -196,8 +217,21 @@ def parse_calibration(brief: dict, raw_dir: Path) -> tuple[float, list[str]]:
     if rate is None:
         fx_path = raw_dir / FX_FILE
         if fx_path.is_file():
-            rows = read_table(fx_path, ("人民币每美元",))
-            rate = rows[0].get("人民币每美元") if rows else None
+            for number, row in read_table(fx_path, ("人民币每美元",), warnings=warnings):
+                value = (row.get("人民币每美元") or "").strip()
+                try:
+                    rate = float(value)
+                except ValueError as cause:
+                    if warnings is None:
+                        raise BriefError(
+                            f"原始数据 {FX_FILE} 第 {number} 行的 人民币每美元 不是数值：{value}"
+                        ) from cause
+                    warnings.append(
+                        f"原始数据 {FX_FILE} 第 {number} 行的 人民币每美元 不是数值：{value}（已跳过该行）"
+                    )
+                    rate = None
+                    continue
+                break
     if isinstance(rate, dict):
         rate = first_text(rate, "人民币每美元", "人民币兑美元", "人民币/美元")
     if isinstance(rate, str):
@@ -237,13 +271,13 @@ def detect_nature(brief: dict, raw_dir: Path) -> str:
     return "未标注"
 
 
-def parse_plan(brief: dict, raw_dir: Path) -> dict:
+def parse_plan(brief: dict, raw_dir: Path, warnings: list[str] | None = None) -> dict:
     """把任务书解析成计算用的口径计划。"""
     version = brief.get("schema版本")
     if version is not None and version != SCHEMA_VERSION:
         raise BriefError(f"任务书 `schema版本` 为 {version}，与 schema v{SCHEMA_VERSION} 不一致")
     periods = parse_periods(brief)
-    rate, definitions = parse_calibration(brief, raw_dir)
+    rate, definitions = parse_calibration(brief, raw_dir, warnings=warnings)
     labels = {
         "start": f"{periods['start']}{ACTUAL_SUFFIX}",
         "reference": f"{periods['reference']}{REFERENCE_SUFFIX}",
@@ -263,8 +297,15 @@ def parse_plan(brief: dict, raw_dir: Path) -> dict:
     }
 
 
-def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
-    """读取 CSV 并检查必需列。缺列时抛出 RawDataError。"""
+def read_table(
+    path: Path, required: tuple[str, ...], warnings: list[str] | None = None
+) -> list[tuple[int, dict[str, str]]]:
+    """读取 CSV 并检查必需列。缺列时抛出 RawDataError。
+
+    返回 (行号, 行) 列表，行号从 2 开始（表头占第 1 行）。
+    warnings 非 None 时启用容错：行级问题（字段数多于表头、缺取值）跳过该行，
+    并把问题写进 warnings；表头缺列、列名重复仍按输入错误抛出 RawDataError。
+    """
     try:
         text = path.read_text(encoding="utf-8-sig")
     except OSError as cause:
@@ -277,17 +318,25 @@ def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
     duplicated = [name for name, count in Counter(fieldnames).items() if count > 1 and name]
     if duplicated:
         raise RawDataError(f"原始数据 {path.name} 表头出现重复列：{'、'.join(duplicated)}")
-    rows: list[dict[str, str]] = []
+    rows: list[tuple[int, dict[str, str]]] = []
     for number, row in enumerate(reader, start=2):
         if None in row:
-            raise RawDataError(f"原始数据 {path.name} 第 {number} 行的字段数多于表头")
+            message = f"原始数据 {path.name} 第 {number} 行的字段数多于表头"
+            if warnings is None:
+                raise RawDataError(message)
+            warnings.append(f"{message}（已跳过该行）")
+            continue
         # 字段数少于表头时 DictReader 把缺的取值写成 None：该列在这行里是空的。
         empty = [name for name in required if row.get(name) is None]
         if empty:
-            raise RawDataError(
+            message = (
                 f"原始数据 {path.name} 第 {number} 行缺少 {'、'.join(empty)} 的取值（字段数少于表头）"
             )
-        rows.append(row)
+            if warnings is None:
+                raise RawDataError(message)
+            warnings.append(f"{message}（已跳过该行）")
+            continue
+        rows.append((number, row))
     return rows
 
 
@@ -313,31 +362,57 @@ def load_table(
     columns: tuple[str, ...],
     non_negative: bool = False,
     non_negative_columns: tuple[str, ...] = (),
+    warnings: list[str] | None = None,
 ) -> dict[str, dict[str, float | None]]:
     """读取一张 CSV，按期次索引各列数值。
 
     non_negative 为真时各列数值都必须是非负数；non_negative_columns 列出额外要求非负的列。
     负数按原始数据错误报出。
+    warnings 非 None 时启用容错：行级问题（期次缺失、期次重复、数值非法、负数）
+    跳过该行并记入警告，其余行照常取数。
     """
-    rows = read_table(path, (key_column,) + columns)
+    rows = read_table(path, (key_column,) + columns, warnings=warnings)
     table: dict[str, dict[str, float | None]] = {}
-    for number, row in enumerate(rows, start=2):
+    for number, row in rows:
         key = (row.get(key_column) or "").strip()
         if not key:
-            raise RawDataError(f"原始数据 {path.name} 第 {number} 行缺少 {key_column}")
+            message = f"原始数据 {path.name} 第 {number} 行缺少 {key_column}"
+            if warnings is None:
+                raise RawDataError(message)
+            warnings.append(f"{message}（已跳过该行）")
+            continue
         if key in table:
-            raise RawDataError(f"原始数据 {path.name} 中 {key_column} {key} 重复")
+            message = f"原始数据 {path.name} 中 {key_column} {key} 重复"
+            if warnings is None:
+                raise RawDataError(message)
+            warnings.append(
+                f"原始数据 {path.name} 第 {number} 行的 {key_column} {key} 重复（已跳过该行）"
+            )
+            continue
         values: dict[str, float | None] = {}
         for name in columns:
-            value = parse_number(row.get(name), path, name, number)
+            try:
+                value = parse_number(row.get(name), path, name, number)
+            except RawDataError as cause:
+                if warnings is None:
+                    raise
+                warnings.append(f"{cause}（已跳过该行）")
+                break
             if value is not None and value < 0 and (non_negative or name in non_negative_columns):
-                raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {name} 必须是非负数：{value}")
+                message = f"原始数据 {path.name} 第 {number} 行的 {name} 必须是非负数：{value}"
+                if warnings is None:
+                    raise RawDataError(message)
+                warnings.append(f"{message}（已跳过该行）")
+                break
             values[name] = value
-        table[key] = values
+        else:
+            table[key] = values
     return table
 
 
-def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
+def load_raw(
+    raw_dir: Path, warnings: list[str] | None = None
+) -> dict[str, dict[str, dict[str, float | None]]]:
     """读取四张原始数据 CSV。"""
     if not raw_dir.is_dir():
         raise RawDataError(f"原始数据目录不存在：{raw_dir}")
@@ -345,11 +420,21 @@ def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
     heads_columns = (OVERALL_HEADS, REVOPS_HEADS)
     forecast_columns = cost_columns + heads_columns + (REVENUE,)
     return {
-        "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns, non_negative=True),
-        "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True),
-        "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True),
+        "cost": load_table(
+            raw_dir / COST_FILE, "月份", cost_columns, non_negative=True, warnings=warnings
+        ),
+        "heads": load_table(
+            raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True, warnings=warnings
+        ),
+        "revenue": load_table(
+            raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True, warnings=warnings
+        ),
         "forecast": load_table(
-            raw_dir / FORECAST_FILE, "期次", forecast_columns, non_negative_columns=(REVENUE,)
+            raw_dir / FORECAST_FILE,
+            "期次",
+            forecast_columns,
+            non_negative_columns=(REVENUE,),
+            warnings=warnings,
         ),
     }
 
@@ -954,8 +1039,11 @@ def build_conclusion(plan: dict, facts: dict) -> str:
     )
 
 
-def build_snapshot(plan: dict, raw: dict) -> dict:
-    """生成 schema v4 诊断快照。"""
+def build_snapshot(plan: dict, raw: dict, warnings: list[str] | None = None) -> dict:
+    """生成 schema v4 诊断快照。
+
+    warnings 非空时写入快照的 `warnings`：被跳过的坏行与原因，供审计与人工回查。
+    """
     periods = plan["periods"]
     facts = build_facts(plan, raw)
     labels = facts["labels"]
@@ -1018,6 +1106,8 @@ def build_snapshot(plan: dict, raw: dict) -> dict:
         "risks": build_risks(plan, facts, raw),
         "recommendations": build_recommendations(plan, facts, raw),
     }
+    if warnings:
+        snapshot["warnings"] = sorted(warnings, key=warning_sort_key)
     return snapshot
 
 
@@ -1050,12 +1140,17 @@ def validate_snapshot(snapshot: dict) -> list[str]:
     return validate.validate_data(snapshot, schema)
 
 
-def build_from_files(brief_path: Path, raw_dir: Path) -> dict:
-    """按任务书与原始数据生成快照，并自检结构。"""
+def build_from_files(
+    brief_path: Path, raw_dir: Path, warnings: list[str] | None = None
+) -> dict:
+    """按任务书与原始数据生成快照，并自检结构。
+
+    warnings 非 None 时启用容错：行级问题跳过该行，问题写进 warnings 与快照的 `warnings`。
+    """
     brief = load_brief(brief_path)
-    plan = parse_plan(brief, raw_dir)
-    raw = load_raw(raw_dir)
-    snapshot = build_snapshot(plan, raw)
+    plan = parse_plan(brief, raw_dir, warnings=warnings)
+    raw = load_raw(raw_dir, warnings=warnings)
+    snapshot = build_snapshot(plan, raw, warnings=warnings)
     errors = validate_snapshot(snapshot)
     if errors:
         raise SnapshotError("生成的快照未通过结构校验：\n  " + "\n  ".join(errors))
@@ -1077,12 +1172,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--raw", type=Path, help="原始数据目录（若干 CSV）。")
     parser.add_argument("--out", type=Path, help="输出诊断快照 JSON 路径。")
     parser.add_argument("--strict", action="store_true", help="任一指标缺少观察期次数据时失败。")
+    parser.add_argument(
+        "--skip-bad-rows",
+        action="store_true",
+        help=(
+            "跳过原始数据里的坏行：行级问题（数值非法、字段数不符、期次重复、负数）"
+            "不再中断，改为跳过该行并写入快照的 warnings；缺列等表头问题仍报错。"
+        ),
+    )
     args = parser.parse_args(argv)
     missing_args = [name for name in ("--brief", "--raw", "--out") if getattr(args, name[2:]) is None]
     if missing_args:
         parser.error("缺少必需参数：" + "、".join(missing_args))
+    warnings: list[str] | None = [] if args.skip_bad_rows else None
     try:
-        snapshot = build_from_files(args.brief, args.raw)
+        snapshot = build_from_files(args.brief, args.raw, warnings=warnings)
     except (BriefError, RawDataError, SnapshotError) as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_DATA
@@ -1097,6 +1201,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"无法写出诊断快照 {args.out}：{cause}", file=sys.stderr)
         return EXIT_DATA
     print(f"{args.out}: 已生成诊断快照")
+    if warnings:
+        print(f"原始数据有 {len(warnings)} 处问题，相关行已跳过并写入快照的 warnings：", file=sys.stderr)
+        for warning in sorted(warnings, key=warning_sort_key):
+            print(f"  {warning}", file=sys.stderr)
     return EXIT_OK
 
 
