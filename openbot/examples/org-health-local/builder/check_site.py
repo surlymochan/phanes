@@ -128,6 +128,42 @@ def report_hashes(report: object) -> dict[str, str]:
     return hashes
 
 
+def validate_report_metadata(report: object) -> list[str]:
+    """校验新格式报告的输入摘要、bundle 摘要与复制清单。"""
+    if not isinstance(report, dict):
+        return ["build-report.json 必须是对象"]
+    failures: list[str] = []
+    summary = report.get("输入摘要")
+    if summary is not None:
+        if not isinstance(summary, dict):
+            failures.append("失败：build-report.json 的输入摘要必须是对象")
+        else:
+            for name in ("brief", "diagnosis"):
+                item = summary.get(name)
+                if item is None and name == "brief":
+                    continue
+                if not isinstance(item, dict) or not isinstance(item.get("路径"), str):
+                    failures.append(f"失败：build-report.json 缺少输入摘要 {name} 的相对路径")
+                elif not isinstance(item.get("sha256"), str) or not HASH_RE.fullmatch(item["sha256"]):
+                    failures.append(f"失败：build-report.json 的输入摘要 {name} 缺少有效 sha256")
+                else:
+                    input_path = item["路径"].replace("\\", "/")
+                    if not input_path or input_path.startswith("/") or "\x00" in input_path:
+                        failures.append(f"失败：build-report.json 的输入摘要 {name} 路径必须是相对路径")
+    bundle = report.get("bundle")
+    if bundle is not None:
+        if not isinstance(bundle, dict) or bundle.get("路径") != "app.bundle.js":
+            failures.append("失败：build-report.json 的 bundle 路径必须是 app.bundle.js")
+        elif not isinstance(bundle.get("sha256"), str) or not HASH_RE.fullmatch(bundle["sha256"]):
+            failures.append("失败：build-report.json 的 bundle 缺少有效 sha256")
+    copied = report.get("复制文件")
+    if copied is not None and (
+        not isinstance(copied, list) or any(not isinstance(item, str) for item in copied)
+    ):
+        failures.append("失败：build-report.json 的复制文件必须是路径字符串清单")
+    return failures
+
+
 def check_site(dist: Path) -> list[str]:
     """返回逐条检查结果；空列表表示通过。"""
     failures: list[str] = []
@@ -203,7 +239,11 @@ def check_site(dist: Path) -> list[str]:
     if report_path.is_file() and report_path.stat().st_size:
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
+            failures.extend(validate_report_metadata(report))
             hashes = report_hashes(report)
+            copied = report.get("复制文件") if isinstance(report, dict) else None
+            if isinstance(copied, list) and set(copied) != set(hashes):
+                failures.append("失败：build-report.json 的复制文件清单与文件摘要清单不一致")
             registered = set(hashes)
             actual_files: set[str] = set()
             for path in sorted(dist.rglob("*")):
@@ -229,6 +269,12 @@ def check_site(dist: Path) -> list[str]:
                         failures.append(f"失败：{relative} 的 sha256 与 build-report.json 不一致")
                     else:
                         print(f"通过：{relative} 的 sha256 一致")
+            bundle = report.get("bundle") if isinstance(report, dict) else None
+            if isinstance(bundle, dict) and paths["app.bundle.js"].is_file():
+                if bundle.get("sha256") == sha256(paths["app.bundle.js"]):
+                    print("通过：bundle 的 sha256 一致")
+                else:
+                    failures.append("失败：app.bundle.js 的 sha256 与 build-report.json 的 bundle 摘要不一致")
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as cause:
             failures.append(f"失败：无法读取 build-report.json 中的 sha256（{cause}）")
 

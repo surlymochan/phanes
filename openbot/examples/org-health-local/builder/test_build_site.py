@@ -241,6 +241,23 @@ class BuildSiteTest(unittest.TestCase):
         report = build_site.build_site(EXAMPLE_PATH, self.out, self.bundle, "abc123")
         self.assertEqual(report["来源提交"], "abc123")
 
+    def test_report_records_relative_inputs_bundle_hash_and_copy_list(self) -> None:
+        """报告记录 brief/diagnosis 相对路径、输入摘要、bundle 摘要与复制清单。"""
+        report = build_site.build_site(
+            DEMO_DIAGNOSIS_PATH,
+            self.out,
+            self.bundle,
+            brief_path=DEMO_BRIEF_PATH,
+        )
+        summary = report["输入摘要"]
+        self.assertFalse(Path(summary["brief"]["路径"]).is_absolute())
+        self.assertEqual(summary["brief"]["sha256"], sha256_of(DEMO_BRIEF_PATH))
+        self.assertFalse(Path(summary["diagnosis"]["路径"]).is_absolute())
+        self.assertEqual(summary["diagnosis"]["sha256"], sha256_of(DEMO_DIAGNOSIS_PATH))
+        self.assertEqual(report["bundle"]["路径"], "app.bundle.js")
+        self.assertEqual(report["bundle"]["sha256"], sha256_of(self.bundle))
+        self.assertEqual(report["复制文件"], list(build_site.SITE_FILES))
+
     def test_report_omits_source_commit_when_not_provided(self) -> None:
         """未指定来源提交时保持既有报告字段。"""
         self.assertEqual(self.build(bundle=self.bundle), build_site.EXIT_OK)
