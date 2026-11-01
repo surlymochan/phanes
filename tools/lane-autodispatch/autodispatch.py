@@ -27,6 +27,7 @@ HOST_BACKOFF_MAX = 600
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
+STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
@@ -163,9 +164,18 @@ def fresh_ready(n, state):
     if rc: return False
     return dispatchable_issue(json.loads(out))
 
-def note_stale_skip():
-    global STALE_STRIPPED_N
+def issue_labels(n):
+    """Authoritative labels of an issue as re-read by `gh issue view` (empty set when unreadable)."""
+    rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
+    if rc: return set()
+    try: return label_names(json.loads(out))
+    except (TypeError, ValueError, KeyError): return set()
+
+def note_stale_skip(lane_failed_residual=False):
+    """Count a stale search hit; a `lane-failed` + `lane-ready` residual is counted separately (Refs #985)."""
+    global STALE_STRIPPED_N, STALE_LANE_FAILED_N
     STALE_STRIPPED_N += 1
+    if lane_failed_residual: STALE_LANE_FAILED_N += 1
 
 def status_snapshot(lanes, state, res, ready, blocked):
     """Build the observable lane status row, including this process's stale skips."""
@@ -174,6 +184,8 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_ready"] = ready
     status["_blocked"] = blocked
     status["_stale_stripped_n"] = STALE_STRIPPED_N
+    status["_stale_search_skips"] = STALE_STRIPPED_N
+    status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -283,7 +295,13 @@ def tick(lanes, state, last_warn):
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
             if fresh_ready(c["n"], state): pick = c; break
-            q.remove(c); note_stale_skip(); log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
+            q.remove(c); labels = issue_labels(c["n"])
+            residual = "lane-failed" in labels and "lane-ready" in labels
+            note_stale_skip(residual)
+            if residual:
+                log(f"skip #{c['n']}: stale search hit lane-failed + lane-ready; remove lane-ready label to clear the residual", brain=False)
+            else:
+                log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
