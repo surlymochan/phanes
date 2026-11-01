@@ -300,7 +300,7 @@ def parse_number(value: str | None, path: Path, column: str, number: int) -> flo
         return None
     try:
         number_value = float(text)
-    except ValueError as cause:
+    except (TypeError, ValueError, OverflowError) as cause:
         raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {column} 不是数值：{text}") from cause
     if not math.isfinite(number_value):
         raise RawDataError(f"原始数据 {path.name} 第 {number} 行的 {column} 不是有限数值：{text}")
@@ -348,9 +348,7 @@ def load_raw(raw_dir: Path) -> dict[str, dict[str, dict[str, float | None]]]:
         "cost": load_table(raw_dir / COST_FILE, "月份", cost_columns, non_negative=True),
         "heads": load_table(raw_dir / HEADS_FILE, "月份", heads_columns, non_negative=True),
         "revenue": load_table(raw_dir / REVENUE_FILE, "月份", (REVENUE,), non_negative=True),
-        "forecast": load_table(
-            raw_dir / FORECAST_FILE, "期次", forecast_columns, non_negative_columns=(REVENUE,)
-        ),
+        "forecast": load_table(raw_dir / FORECAST_FILE, "期次", forecast_columns, non_negative=True),
     }
 
 
@@ -1050,12 +1048,27 @@ def validate_snapshot(snapshot: dict) -> list[str]:
     return validate.validate_data(snapshot, schema)
 
 
+def ensure_finite_snapshot(value: object, path: str = "快照") -> None:
+    """拒绝计算过程中产生的非有限数值，避免 JSON 写出 Infinity/NaN。"""
+    if isinstance(value, bool):
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise SnapshotError(f"{path} 含非有限数值；请检查原始数据 CSV 的来源文件与行号")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            ensure_finite_snapshot(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            ensure_finite_snapshot(child, f"{path}[{index}]")
+
+
 def build_from_files(brief_path: Path, raw_dir: Path) -> dict:
     """按任务书与原始数据生成快照，并自检结构。"""
     brief = load_brief(brief_path)
     plan = parse_plan(brief, raw_dir)
     raw = load_raw(raw_dir)
     snapshot = build_snapshot(plan, raw)
+    ensure_finite_snapshot(snapshot)
     errors = validate_snapshot(snapshot)
     if errors:
         raise SnapshotError("生成的快照未通过结构校验：\n  " + "\n  ".join(errors))
@@ -1084,11 +1097,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         snapshot = build_from_files(args.brief, args.raw)
     except (BriefError, RawDataError, SnapshotError) as cause:
+        # 失败时不得让旧文件伪装成这次运行成功生成的快照。
+        if args.out.is_file():
+            try:
+                args.out.unlink()
+            except OSError as cleanup_cause:
+                print(f"无法清理失败的诊断快照 {args.out}：{cleanup_cause}", file=sys.stderr)
         print(str(cause), file=sys.stderr)
         return EXIT_DATA
     if args.strict:
         missing = [note for note in snapshot["口径说明"] if " 缺 " in note and note.endswith(" 数据，按 null 处理")]
         if missing:
+            if args.out.is_file():
+                args.out.unlink()
             print("严格模式失败：观察期间存在指标缺失期次：" + "；".join(missing), file=sys.stderr)
             return EXIT_DATA
     try:
