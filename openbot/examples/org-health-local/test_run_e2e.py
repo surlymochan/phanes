@@ -364,6 +364,57 @@ elif role == 'reviewer':
         self.assertTrue((expected_workdir / 'dist' / 'index.html').is_file())
         self.assertFalse((work_cwd / 'brief.json').exists())
 
+    def test_relative_role_paths_resolve_after_chdir_to_temp_dir(self):
+        """chdir 到临时目录再跑：相对角色路径按当前 cwd 解析，boss/da/builder/review 都能找到。"""
+        # 临时目录里按真实角色目录摆好桩脚本：路径全部相对 cwd，与默认值的目录结构一致。
+        layout = {
+            'boss': 'boss/make_brief.py',
+            'da': 'da/build_diagnosis.py',
+            'builder': 'builder/build_site.py',
+            'checker': 'builder/check_site.py',
+            'reviewer': 'review/cross_check.py',
+        }
+        for role, relative in layout.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.write_stub(path, role)
+        # 调用方先 chdir 到临时目录：编排器继承这个 cwd 再解析相对角色路径。
+        original_cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, original_cwd)
+        command = [
+            sys.executable, str(RUNNER),
+            '--workdir', 'out',
+            '--raw', str(self.raw),
+            '--bundle', str(self.bundle),
+            '--boss', layout['boss'],
+            '--da', layout['da'],
+            '--builder', layout['builder'],
+            '--checker', layout['checker'],
+            '--reviewer', layout['reviewer'],
+            '--review',
+        ]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 五个角色脚本都按临时目录里的相对路径找到并执行，审查脚本也不例外。
+        self.assertEqual([call[0] for call in self.calls()],
+                         ['boss', 'da', 'builder', 'checker', 'reviewer'])
+        for relative in layout.values():
+            self.assertIn(relative, result.stdout)
+        # 产物写入 cwd 下的相对工作目录。
+        expected_workdir = self.root / 'out'
+        self.assertTrue((expected_workdir / 'brief.json').is_file())
+        self.assertTrue((expected_workdir / 'diagnosis.json').is_file())
+        self.assertTrue((expected_workdir / 'dist' / 'index.html').is_file())
+        self.assertTrue((expected_workdir / 'timings.json').is_file())
+        # 审查记录同样写出，产物不落到角色脚本所在目录以外的地方。
+        report = expected_workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file())
+        self.assertIn('PASS', report.read_text(encoding='utf-8'))
+        self.assertFalse((self.root / 'brief.json').exists())
+
     def test_default_role_paths_stay_absolute(self):
         """默认角色脚本路径保持绝对路径，不随 cwd 变化。"""
         args = parse_args(['--workdir', 'out'])

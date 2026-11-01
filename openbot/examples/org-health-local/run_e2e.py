@@ -103,6 +103,15 @@ def write_timings(workdir, timings):
     return True
 
 
+def resolve_script(script):
+    """角色脚本路径解析：绝对路径原样使用，相对路径以调用时的当前工作目录为基准。
+
+    boss/da/builder/checker/reviewer 共用这条规则：无论从哪个目录调用，
+    相对路径都按调用时的 cwd 解析；脚本缺失时按同一基准给出可读提示。
+    """
+    return script if script.is_absolute() else Path.cwd() / script
+
+
 def run_step(name, command, timings, stdout=None, stderr=None, output_path=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
@@ -110,8 +119,12 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None)
         # Python 将缺失的脚本作为退出码报告，而不是抛出异常；先检查本地角色脚本，
         # 这样错误能归属到具体步骤，避免只留下子进程的错误输出。
         script = Path(command[1]) if command[0] == sys.executable and len(command) > 1 else None
-        if script is not None and not script.is_file():
-            raise FileNotFoundError(2, 'No such file or directory', str(script))
+        if script is not None:
+            # 角色脚本按调用时的 cwd 解析：相对路径先落到当前工作目录再检查，
+            # 提示里给出实际查找的路径。
+            resolved = resolve_script(script)
+            if not resolved.is_file():
+                raise FileNotFoundError(2, 'No such file or directory', str(resolved))
         result = subprocess.run(command, stdout=stdout, stderr=stderr)
     except FileNotFoundError as error:
         elapsed = time.monotonic() - started
@@ -174,7 +187,9 @@ def main(argv=None):
     brief = workdir / 'brief.json'
     diagnosis = workdir / 'diagnosis.json'
     dist = workdir / 'dist'
-    # 角色脚本路径原样传给子进程：相对路径按调用时的 cwd 解析，绝对路径（含默认值）原样使用；
+    # 角色脚本路径原样传给子进程：子进程继承调用时的 cwd，相对路径按同一基准解析
+    # （与 resolve_script 的检查规则一致），绝对路径（含默认值）原样使用；
+    # boss/da/builder/checker/reviewer 共用这条解析规则；
     # 产物一律写到工作目录，与角色脚本路径所在目录无关。
     commands = [
         ('Boss', [sys.executable, str(args.boss), '--out', str(brief)]),
