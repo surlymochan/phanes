@@ -1439,9 +1439,17 @@ export class MailboxStore {
     // One turn runs in one lane: the agent's own chat, or the side thread that sent the request.
     const lane = message.taskId ?? null;
     const messages = this.#messagesById();
+    const paused = this.isQueuePaused(next.recipientAgentId);
+    const executionMessageIds = paused ? this.#executionMessageIds() : null;
     return this.#contexts(
       this.#queuedFor(next.recipientAgentId).filter((candidate) => {
         if (candidate.id === next.id || !this.#mayStart(candidate) || this.#taskIdOf(candidate, messages) !== lane)
+          return false;
+        if (
+          paused &&
+          !executionMessageIds?.has(candidate.messageId) &&
+          !this.#runNow.has(candidate.id)
+        )
           return false;
         if (!requestId) return this.#isHeldReply(candidate);
         const reply = this.#requireMessage(candidate.messageId, messages);
@@ -1463,8 +1471,13 @@ export class MailboxStore {
     const first = this.#requireMessage(next.messageId, messages);
     if (!isChatMessageFromPerson(first)) return [];
     const lane = first.taskId ?? null;
+    const paused = this.isQueuePaused(next.recipientAgentId);
+    const executionMessageIds = paused ? this.#executionMessageIds() : null;
     const queued = this.#queuedFor(next.recipientAgentId).filter(
-      (candidate) => this.#taskIdOf(candidate, messages) === lane && !this.#isHeldReply(candidate),
+      (candidate) =>
+        this.#taskIdOf(candidate, messages) === lane &&
+        !this.#isHeldReply(candidate) &&
+        (!paused || executionMessageIds?.has(candidate.messageId) || this.#runNow.has(candidate.id)),
     );
     const start = queued.findIndex((candidate) => candidate.id === next.id);
     if (start < 0) return [];
