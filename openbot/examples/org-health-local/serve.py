@@ -17,6 +17,16 @@ ALLOWED_PATHS = ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/dia
 DEFAULT_PORT = 8765
 JSON_CONTENT_TYPE = 'application/json'
 
+
+def parse_port(value):
+    """解析并校验监听端口，返回 argparse 可读的范围错误。"""
+    port = int(value)
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(
+            f'端口需要在 0-65535 之间，收到 {port}'
+        )
+    return port
+
 class PortInUseError(RuntimeError):
     """端口已被占用：明确报错并退出，不静默改用其他端口。"""
 
@@ -198,7 +208,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         '--port',
-        type=int,
+        type=parse_port,
         default=DEFAULT_PORT,
         help=f'服务监听端口（0-65535，默认 {DEFAULT_PORT}）',
     )
@@ -215,8 +225,6 @@ def parse_args(argv=None):
         help='诊断数据 JSON 文件路径（默认使用 root 下的 data/diagnosis.json）',
     )
     args = parser.parse_args(argv)
-    if not 0 <= args.port <= 65535:
-        parser.error(f'--port 需要在 0-65535 之间，收到 {args.port}')
     if args.root is not None:
         args.root = args.root.resolve()
     if args.data is not None:
