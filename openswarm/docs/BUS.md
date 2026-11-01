@@ -23,6 +23,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
     "worker_repos": ["<target-owner>/<target-repo>"],
     "worker_verify_allow": ["<exact-verify-command>"],
     "poll_seconds": 60,
+    "claim_lease_seconds": 300,
     "labels_prefix": "openswarm",
     "open_pr": false
   }
@@ -62,7 +63,7 @@ An issue is one task card. Its title is `[openswarm] <run title>`. The task desc
 }
 ```
 
-The state labels are `openswarm:queued`, `openswarm:claimed`, `openswarm:done`, and `openswarm:failed`; they are display labels and do not authorize planner state transitions. The planner acts on `openswarm:cancelled` only as a stop signal. An optional `executor:<name>` label routes a card to one worker name. A worker claims by adding `openswarm:claimed` and commenting `/claim <executor-name>`. The earliest `/claim` comment authored by an allowlisted GitHub account wins. The planner posts an `openswarm-task-digest: sha256:<hex>` first comment over the canonical task JSON.
+The state labels are `openswarm:queued`, `openswarm:claimed`, `openswarm:done`, and `openswarm:failed`; they are display labels and do not authorize planner state transitions. The planner acts on `openswarm:cancelled` only as a stop signal. An optional `executor:<name>` label routes a card to one worker name. A worker claims by adding `openswarm:claimed` and commenting `/claim <executor-name>`. The active claim is a lease (300 seconds by default): the same worker name may renew an unexpired lease after restarting, while another worker can take over only after it expires. The earliest active `/claim` comment authored by an allowlisted GitHub account wins. The planner posts an `openswarm-task-digest: sha256:<hex>` first comment over the canonical task JSON.
 
 The worker checks out the requested base, runs openswarm's regular local run machinery with a hard budget and optional verify command, pushes `openswarm/<run-id>` to the target repository, then posts a fenced `openswarm-result` JSON comment:
 
