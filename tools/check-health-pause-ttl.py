@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for expiring automatic health-check PAUSE files (Refs #1194)."""
+"""Offline contract for expiring automatic health-check PAUSE files (Refs #1224)."""
 
 from __future__ import annotations
 
