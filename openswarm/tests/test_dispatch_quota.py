@@ -1,7 +1,9 @@
 """Tests for lib/dispatch/quota.py module."""
 
+import datetime
 import email.utils
 import importlib.util
+import json
 from pathlib import Path
 import time
 import unittest
@@ -13,6 +15,9 @@ spec.loader.exec_module(quota_mod)
 
 classify = quota_mod.classify
 extract_cooldown = quota_mod.extract_cooldown
+classify_minimax = quota_mod.classify_minimax
+reset_from_minimax_remains = quota_mod.reset_from_minimax_remains
+minimax_reset_at = quota_mod.minimax_reset_at
 
 SAMPLE_CFG = {
     "copilot": {
@@ -204,6 +209,144 @@ class TestUnmatchedAndEdgeCases(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertEqual(res["scope"], "backend")
         self.assertEqual(res["ttl_s"], 500)
+
+
+# The error body MiniMax answered with on 2026-11-02 06:13 UTC+8, when the
+# 5 hour Token Plan window ran out.
+MINIMAX_TOKEN_PLAN_BODY = (
+    '{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限，请等待下一个 5 小时窗口重置 (2056)"}'
+)
+
+# The same window error in English.
+MINIMAX_ENGLISH_BODY = (
+    '{"type":"rate_limit_error","message":"Token Plan usage limit reached for the current 5 hour '
+    'window, please retry after it resets (2056)"}'
+)
+
+# A plain requests-per-minute limit: no window, no 2056.
+MINIMAX_RPM_BODY = (
+    '{"type":"rate_limit_error","message":"Too many requests, please retry in a few seconds"}'
+)
+
+# Reference time for the remains samples (epoch seconds).
+NOW = 1700000000
+
+
+def _remains(interval_pct, weekly_pct, end_offset=960, weekly_offset=7200):
+    """A coding-plan remains response with the given remaining percentages."""
+    return {
+        "base_resp": {"status_code": 0, "status_msg": "success"},
+        "model_remains": [
+            {
+                "model_name": "MiniMax-M2.7",
+                "current_interval_remaining_percent": interval_pct,
+                "current_weekly_remaining_percent": weekly_pct,
+                "end_time": (NOW + end_offset) * 1000,
+                "weekly_end_time": (NOW + weekly_offset) * 1000,
+            }
+        ],
+    }
+
+
+class TestClassifyMiniMax(unittest.TestCase):
+    """MiniMax Token Plan window vs plain rate limit."""
+
+    def test_token_plan_body_is_a_quota_window(self):
+        res = classify_minimax(MINIMAX_TOKEN_PLAN_BODY)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["kind"], "quota_window")
+        self.assertEqual(res["scope"], "backend")
+        # The body does not say when the window resets: the remains API does.
+        self.assertEqual(res["ttl_s"], 0)
+        self.assertTrue(res["reason"])
+
+    def test_english_usage_limit_body_is_a_quota_window(self):
+        res = classify_minimax(MINIMAX_ENGLISH_BODY)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["kind"], "quota_window")
+        self.assertEqual(res["scope"], "backend")
+        self.assertEqual(res["ttl_s"], 0)
+
+    def test_rpm_429_is_a_plain_rate_limit(self):
+        res = classify_minimax(MINIMAX_RPM_BODY)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["kind"], "rate_limit")
+        self.assertEqual(res["scope"], "backend")
+        self.assertEqual(res["ttl_s"], 60)
+
+    def test_plain_rate_limit_error_without_markers(self):
+        res = classify_minimax('{"type":"rate_limit_error","message":"slow down"}')
+        self.assertIsNotNone(res)
+        self.assertEqual(res["kind"], "rate_limit")
+
+    def test_quota_window_wins_over_rate_limit_markers(self):
+        res = classify_minimax('HTTP 429 {"type":"rate_limit_error","message":"Token Plan 用量上限 (2056)"}')
+        self.assertIsNotNone(res)
+        self.assertEqual(res["kind"], "quota_window")
+
+    def test_unrelated_text_is_not_classified(self):
+        self.assertIsNone(classify_minimax("Task completed with exit code 0"))
+        self.assertIsNone(classify_minimax("HTTP 500: Internal Server Error"))
+
+    def test_empty_or_none_input(self):
+        self.assertIsNone(classify_minimax(None))
+        self.assertIsNone(classify_minimax(""))
+        self.assertIsNone(classify_minimax("   "))
+
+
+class TestMiniMaxRemains(unittest.TestCase):
+    """The coding-plan remains API gives the real window reset time."""
+
+    def test_interval_exhausted_returns_interval_end(self):
+        res = reset_from_minimax_remains(_remains(0, 52), NOW)
+        self.assertEqual(res, 960)
+
+    def test_weekly_exhausted_returns_weekly_end(self):
+        res = reset_from_minimax_remains(_remains(100, 0), NOW)
+        self.assertEqual(res, 7200)
+
+    def test_both_exhausted_returns_the_interval_end(self):
+        res = reset_from_minimax_remains(_remains(0, 0), NOW)
+        self.assertEqual(res, 960)
+
+    def test_nothing_exhausted_returns_none(self):
+        self.assertIsNone(reset_from_minimax_remains(_remains(100, 52), NOW))
+        self.assertIsNone(reset_from_minimax_remains(_remains(87, 3), NOW))
+
+    def test_json_string_payload_is_parsed(self):
+        payload = json.dumps(_remains(0, 52))
+        self.assertEqual(reset_from_minimax_remains(payload, NOW), 960)
+
+    def test_bad_json_returns_none(self):
+        self.assertIsNone(reset_from_minimax_remains("{not json", NOW))
+        self.assertIsNone(reset_from_minimax_remains("[]", NOW))
+        self.assertIsNone(reset_from_minimax_remains(None, NOW))
+        self.assertIsNone(reset_from_minimax_remains(42, NOW))
+
+    def test_missing_fields_return_none(self):
+        payload = {"model_remains": [{"model_name": "MiniMax-M2.7"}]}
+        self.assertIsNone(reset_from_minimax_remains(payload, NOW))
+        self.assertIsNone(reset_from_minimax_remains({"base_resp": {"status_code": 0}}, NOW))
+
+    def test_wrong_types_return_none(self):
+        payload = _remains("0", "0")
+        self.assertIsNone(reset_from_minimax_remains(payload, NOW))
+        payload = _remains(0, 52)
+        payload["model_remains"][0]["end_time"] = "not a timestamp"
+        self.assertIsNone(reset_from_minimax_remains(payload, NOW))
+
+    def test_expired_window_returns_zero(self):
+        payload = _remains(0, 52, end_offset=-600)
+        self.assertEqual(reset_from_minimax_remains(payload, NOW), 0)
+
+    def test_now_accepts_a_datetime(self):
+        now = datetime.datetime.fromtimestamp(NOW, datetime.timezone.utc)
+        self.assertEqual(reset_from_minimax_remains(_remains(0, 52), now), 960)
+
+    def test_reset_at_is_the_absolute_window_end(self):
+        self.assertEqual(minimax_reset_at(_remains(0, 52)), NOW + 960)
+        self.assertEqual(minimax_reset_at(_remains(100, 0)), NOW + 7200)
+        self.assertIsNone(minimax_reset_at(_remains(100, 52)))
 
 
 if __name__ == "__main__":
