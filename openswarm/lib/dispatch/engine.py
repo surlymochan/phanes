@@ -33,6 +33,7 @@ import calendar  # noqa: E402
 import concurrent.futures as cf
 import copy
 import fnmatch
+import importlib.util
 import json
 import os
 import re
@@ -106,6 +107,20 @@ DEFAULTS = {
     "quota": {
         "backend_pause": True,
         "lane_pause": {},                 # backend -> regex: matching run errors pause that lane
+        # Per-backend quota table in lib/dispatch/quota.py's own shape: quota_error_re is
+        # matched against the run's error/summary/status text, cooldown_s is the fallback
+        # cooldown (a "resets in ..." / "Retry-After" in the text wins), scope says what is
+        # paused: "lane" -> PAUSE-<lane>, "backend" -> PAUSE-BACKEND-<backend>.
+        "backends": {
+            "copilot": {"quota_error_re": r"402|429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\s+(exceeded|reached|exhausted)",
+                        "cooldown_s": 3600, "scope": "lane"},
+            "codex": {"quota_error_re": r"429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\s+(exceeded|reached|exhausted)",
+                      "cooldown_s": 3600, "scope": "backend"},
+            "agy": {"quota_error_re": r"429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\s+(exceeded|reached|exhausted)",
+                    "cooldown_s": 1800, "scope": "backend"},
+            "pi": {"quota_error_re": r"429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\s+(exceeded|reached|exhausted)",
+                   "cooldown_s": 1800, "scope": "backend"},
+        },
     },
     "upstream_manifest": "",              # e.g. upstream-sync.json: prefix PR title with upstream(<comp>):
     "thin_pr": {"min_effective_diff": 30,
@@ -224,6 +239,25 @@ def run_cmd(cmd, timeout=120, inp=None, env=None):
     finally:
         done["v"] = True
     return (proc.returncode if proc.returncode is not None else 124), out or "", err or ""
+
+
+_QUOTA_MOD = None
+
+
+def quota_module():
+    """The pure quota classifier (lib/dispatch/quota.py), loaded from its sibling path.
+
+    It is loaded by path and not by name: the dispatch directory sits first on sys.path when
+    this file runs as a script, and its modules must never shadow the stdlib (see above).
+    """
+    global _QUOTA_MOD
+    if _QUOTA_MOD is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quota.py")
+        spec = importlib.util.spec_from_file_location("openswarm_dispatch_quota", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _QUOTA_MOD = mod
+    return _QUOTA_MOD
 
 
 REMOTE_STATUS = r'''
@@ -763,42 +797,95 @@ class Dispatcher:
                  f"run_state={r.get('run_state')}, runner dead) → {what}")
         return True
 
-    def quota_lane_guard(self, lane, lc, info):
-        rx = ((self.cfg.get("quota") or {}).get("lane_pause") or {}).get(lc.get("backend") or "")
-        if not rx:
-            return
-        errs = " ".join(str(v) for k, v in (info or {}).items()
-                        if any(t in k for t in ("error", "reason", "message")) and v)
-        if errs and re.search(rx, errs, re.I) and not os.path.exists(self.path(f"PAUSE-{lane}")):
-            self.touch_file(f"PAUSE-{lane}", f"{time.strftime('%F %T')} quota guard: {errs[-300:]}\n")
-            self.log(f"{lane} quota signal detected -> PAUSE-{lane} (a human clears it after the quota resets)")
+    def quota_table(self):
+        """The per-backend quota table lib/dispatch/quota.py classifies with.
 
-    QUOTA_HARD = r"(RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit\s+(exceeded|reached)|quota\s+(exceeded|reached|exhausted))"
-    QUOTA_ANY = r"(429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|rate.?limit|usage.?limit|weekly.?limit|tokens? per min)"
+        Shape (the module's own): {"<backend>": {"quota_error_re": str, "cooldown_s": int,
+        "scope": "lane"|"backend"}}.  cfg["quota"]["backends"] holds it; the legacy
+        cfg["quota"]["lane_pause"] (backend -> regex) is still read as a lane-scoped entry.
+        """
+        q = self.cfg.get("quota") or {}
+        table = {}
+        for be, bc in (q.get("backends") or {}).items():
+            if isinstance(bc, dict) and bc.get("quota_error_re"):
+                table[be] = dict(bc)
+        for be, rx in (q.get("lane_pause") or {}).items():
+            table.setdefault(be, {"scope": "lane"})
+            table[be].setdefault("quota_error_re", rx)
+        return table
 
-    def quota_backend_guard(self, lane, lc, info):
-        if not (self.cfg.get("quota") or {}).get("backend_pause"):
-            return
-        be = lc.get("backend") or ""
-        if not be:
-            return
-        err, status = info.get("error_class") or "", info.get("status") or ""
-        blob = f"{err}\n{info.get('summary') or ''}\n{status}"
-        # A successful run whose feature text mentions 429 handling is not a quota signal.
+    def quota_text(self, info):
+        """The text a quota signal is judged on: error, summary and status only.
+
+        A run id, a branch name or a path is never scanned: "run 20261102-042901-429abc" is
+        not a rate limit.  A run that ended well is judged on its error text alone, so a
+        summary that merely mentions 429 handling ("处理 429 限流") is feature text.
+        """
+        info = info or {}
+        err = " ".join(str(info.get(k)) for k in ("error", "error_class") if info.get(k))
+        status = str(info.get("status") or "")
+        summary = str(info.get("summary") or "")
         if status in ("done", "partial") and not err:
-            if not re.search(self.QUOTA_HARD, blob, re.I):
-                return
-        elif not re.search(self.QUOTA_ANY, blob, re.I):
-            return
-        p = self.path(f"PAUSE-BACKEND-{be}")
+            summary = ""
+        return "\n".join(x for x in (err, summary, status) if x)
+
+    def quota_hit(self, lane, lc, info):
+        """Classify the run text with lib/dispatch/quota.py; None when there is no signal.
+
+        The hit is {"kind", "scope", "cooldown_s"}: the kind is what the backend's pattern
+        matched, the scope says what to pause, the cooldown is the seconds to wait.
+        """
+        be = (info or {}).get("backend") or (lc or {}).get("backend") or ""
+        text = self.quota_text(info)
+        if not be or not text:
+            return None
+        try:
+            res = quota_module().classify(be, text, self.quota_table())
+        except Exception as e:
+            self.log(f"quota classifier unavailable: {e!r}", brain=False)
+            return None
+        if not res:
+            return None
+        return {"kind": re.sub(r"\s+", "_", str(res.get("reason") or "quota"))[:40],
+                "scope": str(res.get("scope") or "backend"),
+                "cooldown_s": int(res.get("ttl_s") or 0)}
+
+    def quota_pause(self, name, lane, hit):
+        """Write the automatic pause file; a manual (non-auto) pause is never overwritten."""
+        p = self.path(name)
         if os.path.exists(p):
             try:
-                if not open(p).read().startswith("auto:"):
-                    return
+                with open(p) as f:
+                    if not f.read().startswith("auto:"):
+                        return False
             except Exception:
-                return
-        self.touch_file(f"PAUSE-BACKEND-{be}", f"auto:quota:{lane}:{err or status} @ {time.strftime('%F %T')}\n")
-        self.log(f"PAUSE-BACKEND-{be} (quota signal from {lane})")
+                return False
+        cd = int(hit.get("cooldown_s") or 0)
+        body = f"auto:quota:{lane}:{hit['kind']}"
+        if cd:
+            body += f" until={int(self.clock()) + cd}"
+        self.touch_file(name, body + "\n")
+        self.log(f"{name} (quota signal from {lane}: {hit['kind']})")
+        return True
+
+    def quota_lane_guard(self, lane, lc, info):
+        """Pause the lane when the run text shows a lane-scoped quota error."""
+        hit = self.quota_hit(lane, lc, info)
+        if not hit or hit["scope"] != "lane":
+            return
+        self.quota_pause(f"PAUSE-{lane}", lane, hit)
+
+    def quota_backend_guard(self, lane, lc, info):
+        """Pause the backend when the run text shows a backend-scoped quota error."""
+        if not (self.cfg.get("quota") or {}).get("backend_pause"):
+            return
+        hit = self.quota_hit(lane, lc, info)
+        if not hit or hit["scope"] != "backend":
+            return
+        be = (info or {}).get("backend") or (lc or {}).get("backend") or ""
+        if not be:
+            return
+        self.quota_pause(f"PAUSE-BACKEND-{be}", lane, hit)
 
     def upstream_title(self, subj, base, ref):
         man = self.cfg.get("upstream_manifest")
