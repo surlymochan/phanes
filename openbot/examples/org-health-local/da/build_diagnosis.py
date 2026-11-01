@@ -24,8 +24,10 @@ import csv
 import io
 import json
 import math
+import os
 import re
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -1118,11 +1120,28 @@ def build_from_files(brief_path: Path, raw_dir: Path) -> dict:
 
 
 def write_snapshot(path: Path, snapshot: dict) -> None:
-    """写出快照 JSON，键序固定。"""
+    """以同目录临时文件写出快照，再原子替换目标文件。"""
     path = Path(path)
     if path.parent and not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+            suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
