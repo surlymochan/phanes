@@ -17,7 +17,8 @@ This module turns a JSON service table into two artifacts:
     left to the caller.
 
 ``load_services(cfg)`` reads and validates the service table, ``status(services,
-state_dir)`` reports ``running`` / ``dead`` / ``stale-pid`` per service.
+state_dir, now=None, resume_file=None)`` reports ``running`` / ``stalled`` / ``resuming``
+/ ``dead`` / ``stale-pid`` per service (heartbeat-aware when a service sets ``heartbeat``).
 
 The service table lives in the deployment config, not in this repository.
 
@@ -47,10 +48,12 @@ __all__ = [
     "load_services",
     "render_boot_hook",
     "render_supervisor",
+    "render_status_lines",
     "status",
 ]
 
-_SERVICE_KEYS = {"name", "cmd", "cwd", "env", "restart_backoff_max"}
+_SERVICE_KEYS = {"name", "cmd", "cwd", "env", "restart_backoff_max", "heartbeat", "heartbeat_max_s"}
+_REQUIRED_SERVICE_KEYS = _SERVICE_KEYS - {"heartbeat", "heartbeat_max_s"}
 
 # The issue caps the restart backoff at one minute.
 MAX_BACKOFF_SECONDS = 60
@@ -85,7 +88,7 @@ def load_services(cfg):
         if not isinstance(service, dict):
             raise ValueError("%s must be an object" % prefix)
         unknown = set(service) - _SERVICE_KEYS
-        missing = _SERVICE_KEYS - set(service)
+        missing = _REQUIRED_SERVICE_KEYS - set(service)
         if unknown or missing:
             raise ValueError("%s fields invalid (missing=%s, unknown=%s)" % (prefix, sorted(missing), sorted(unknown)))
         name = service["name"]
@@ -112,6 +115,11 @@ def load_services(cfg):
         maximum = service["restart_backoff_max"]
         if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= MAX_BACKOFF_SECONDS:
             raise ValueError("%s.restart_backoff_max must be an integer between 1 and %d" % (prefix, MAX_BACKOFF_SECONDS))
+        if "heartbeat" in service and (not isinstance(service["heartbeat"], str) or not service["heartbeat"]):
+            raise ValueError("%s.heartbeat must be a non-empty path" % prefix)
+        heartbeat_max = service.get("heartbeat_max_s", 180)
+        if isinstance(heartbeat_max, bool) or not isinstance(heartbeat_max, (int, float)) or heartbeat_max <= 0:
+            raise ValueError("%s.heartbeat_max_s must be a positive number" % prefix)
         validated.append(dict(service))
     return validated
 
@@ -419,8 +427,21 @@ WantedBy=default.target
     raise ValueError("unsupported boot hook kind: %s" % kind)
 
 
-def status(services, state_dir):
-    """Return pidfile status records for each configured service."""
+def status(services, state_dir, now=None, resume_file=None):
+    """Return process and optional heartbeat status records for each service."""
+    import datetime
+    import time
+
+    def timestamp(value):
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, datetime.datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=datetime.timezone.utc)
+            return value.timestamp()
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+    current = time.time() if now is None else timestamp(now)
     result = {}
     state = os.fspath(state_dir)
     for service in services:
@@ -439,9 +460,40 @@ def status(services, state_dir):
             continue
         try:
             os.kill(pid, 0)
-            result[name] = {"state": "running", "pid": pid}
         except ProcessLookupError:
-            result[name] = {"state": "stale-pid", "pid": pid}
+            result[name] = {"state": "dead", "pid": pid}
+            continue
         except PermissionError:
-            result[name] = {"state": "running", "pid": pid}
+            pass
+        record = {"state": "running", "pid": pid}
+        heartbeat = service.get("heartbeat")
+        if heartbeat:
+            heartbeat_path = heartbeat if os.path.isabs(heartbeat) else os.path.join(state, heartbeat)
+            try:
+                with open(heartbeat_path, encoding="utf-8") as stream:
+                    beat_time = timestamp(stream.read().strip())
+            except (OSError, ValueError, TypeError):
+                record["heartbeat"] = "missing"
+            else:
+                age = max(0.0, current - beat_time)
+                record["heartbeat_age_s"] = age
+                maximum = service.get("heartbeat_max_s", 180)
+                if age > maximum:
+                    resume_time = None
+                    if resume_file:
+                        try:
+                            with open(resume_file, encoding="utf-8") as stream:
+                                resume_time = timestamp(stream.read().strip())
+                        except (OSError, ValueError, TypeError):
+                            pass
+                    if resume_time is not None and resume_time > beat_time and current - resume_time < maximum:
+                        record["state"] = "resuming"
+                    else:
+                        record["state"] = "stalled"
+        result[name] = record
     return result
+
+
+def render_status_lines(result):
+    """Render status records as one compact line per service."""
+    return "\n".join("%s:%s" % (name, record["state"]) for name, record in result.items())
