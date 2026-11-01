@@ -211,6 +211,7 @@ Every subcommand, grouped by what it does. `openswarm <command> --help` lists al
 | `openswarm fleet status` | Show reachability, paused hosts, lanes, and active runs. | `openswarm fleet status --json` |
 | `openswarm fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `openswarm fleet exec worker -- lane status` |
 | `openswarm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `openswarm fleet ledger pull --hosts worker,sandbox` |
+| `openswarm fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `openswarm fleet render-lanes --inventory fleet-inventory.json --check` |
 | `openswarm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `openswarm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
 
 ### Learn
@@ -507,6 +508,22 @@ openswarm fleet exec --timeout 120 worker -- runs --active --json
 
 Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
 `fleet exec` forwards stdout, stderr and the exit code; it does not issue a separate wake command.
+
+One fleet inventory renders every host's `lanes.json`, so the lane topology lives in one file instead of one
+copy per host:
+
+```bash
+openswarm fleet render-lanes --inventory fleet-inventory.json             # render every host
+openswarm fleet render-lanes --inventory fleet-inventory.json --host ib1  # render one host
+openswarm fleet render-lanes --inventory fleet-inventory.json --check     # compare with the hosts
+```
+
+The inventory is `{"hosts": {"<host>": {"ssh": "<alias>", "lanes": [ ... ]}}}`; a host may also set `kind`
+(`local`, `ssh`, `instabox`), `box`, `openswarm`, and `lanes_file`. Every lane entry uses the `lanes.json` lane
+schema (`name`, `backend`, `model`, absolute `repo`, plus the backend extras such as `effort`); an unknown field
+or a duplicate lane name is an error. `--check` reads the `lanes.json` each host has (the local file, or `cat`
+over the host transport) and reports the extra, missing, and changed lanes; it exits non-zero when a host
+drifted. The command only renders and compares: it never writes to a host.
 
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
