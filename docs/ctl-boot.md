@@ -62,6 +62,25 @@ staged in a temporary directory and atomically installed only after every
 renewal returns a valid X.509 certificate; a partial failure leaves the old
 certificates and fleet config untouched.
 
+### SSH ControlMaster stale-socket sweep (Refs #921)
+
+At the beginning of every `lane-autodispatch` tick, sweep
+`~/.ssh/cm-ad` and `unlink` Unix-socket entries whose mtime is more than `600`
+seconds old.  A socket exactly `600` seconds old remains for that tick, and
+regular files are never removed.  This is the cleanup boundary for the
+`ControlMaster` mux used by fleet SSH; it is intentionally before dispatch so
+the next connection can recreate a usable mux.
+
+The sweep matters after `ib-refresh` renews a fleet SSH certificate: an old
+mux can stay wedged with the pre-renewal session and make fresh certificate
+authentication appear broken.  Removing only stale sockets lets the next SSH
+operation establish a new control connection without touching certificates or
+keys.  The offline contract check creates fake sockets with old and fresh mtimes:
+
+```bash
+python3 tools/check-cm-ad-sweep.py
+```
+
 ## Smoke (safe, no restart) (Refs #777)
 
 ```bash
