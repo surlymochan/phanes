@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 
 BROKER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-minimax-broker.mjs'
 
@@ -503,6 +504,201 @@ https.request = (_options, callback) => {
             finally:
                 proc.terminate()
                 proc.wait(timeout=5)
+
+
+@unittest.skipUnless(shutil.which('node'), 'requires node')
+class PiBrokerLogRotationTests(unittest.TestCase):
+    @contextmanager
+    def broker(self, max_bytes=None, seed=b'', archive=None, bad_path=False,
+               rename_failure=False, unicode_rows=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            module = root / 'auth.mjs'
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            log = root / 'requests.jsonl'
+            if bad_path:
+                obstruction = root / 'not-a-directory'
+                obstruction.write_text('fixture')
+                log = obstruction / 'requests.jsonl'
+            else:
+                log.write_bytes(seed)
+                if archive is not None:
+                    pathlib.Path(str(log) + '.1').write_bytes(archive)
+            preload = root / 'fake.cjs'
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+if (process.env.FAIL_RENAME === '1') {
+  const rename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (from === process.env.PI_BROKER_LOG) {
+      const error = new Error('fixture rename denied'); error.code = 'EACCES'; throw error;
+    }
+    return rename(from, to);
+  };
+  require('node:module').syncBuiltinESMExports();
+}
+if (process.env.UNICODE_ROWS === '1') {
+  const stringify = JSON.stringify;
+  JSON.stringify = (value, ...args) => stringify(
+    value && Object.hasOwn(value, 'req_bytes') ? {...value, fixture_unicode: '配'.repeat(100)} : value,
+    ...args);
+}
+https.request = (_options, callback) => {
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const upstream = new PassThrough();
+    upstream.statusCode = 200; upstream.headers = {'content-type': 'application/json'}; upstream.complete = true;
+    callback(upstream);
+    setTimeout(() => upstream.end('{}'), 10);
+  };
+  return req;
+};
+''')
+            path = str(root / 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload), PI_BROKER_LOG=str(log),
+                       FAIL_RENAME='1' if rename_failure else '0', UNICODE_ROWS='1' if unicode_rows else '0')
+            if max_bytes is None:
+                env.pop('PI_BROKER_LOG_MAX_BYTES', None)
+            else:
+                env['PI_BROKER_LOG_MAX_BYTES'] = str(max_bytes)
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            result = {'stderr': ''}
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not create its socket')
+                yield path, log, result
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                result['stderr'] = proc.stderr.read().decode(errors='replace')
+                proc.stderr.close()
+
+    def request(self, path):
+        client = UnixHTTP(path)
+        try:
+            client.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b'{}')
+        finally:
+            client.close()
+
+    def read_rows(self, path):
+        data = path.read_bytes()
+        self.assertTrue(data.endswith(b'\n'), 'rotation must preserve complete JSONL records')
+        return [json.loads(line) for line in data.splitlines()]
+
+    def seed(self, size):
+        prefix, suffix = b'{"seed":"', b'"}\n'
+        return prefix + b'x' * (size - len(prefix) - len(suffix)) + suffix
+
+    def wait_for_rows(self, log, count):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if log.exists():
+                lines = log.read_bytes().splitlines()
+                if len(lines) >= count and any('id' in json.loads(line) for line in lines):
+                    return
+            time.sleep(0.01)
+        self.fail('broker did not finish writing request log')
+
+    def test_projected_size_rotates_and_replaces_existing_archive(self):
+        seed = self.seed(240)
+        with self.broker(300, seed, b'{"obsolete":true}\n') as (path, log, _result):
+            self.request(path)
+            self.wait_for_rows(log, 1)
+            archive = pathlib.Path(str(log) + '.1')
+            self.assertTrue(archive.exists(), 'next line must trigger rotation before append')
+            self.assertEqual(archive.read_bytes(), seed)
+            self.assertEqual(self.read_rows(log)[0]['id'], 1)
+            self.assertEqual(self.read_rows(archive), [json.loads(seed)])
+
+    def test_default_limit_is_twenty_mebibytes(self):
+        limit = 20 * 1024 * 1024
+        seed = self.seed(limit - 100)
+        with self.broker(seed=seed) as (path, log, _result):
+            self.request(path)
+            self.wait_for_rows(log, 1)
+            archive = pathlib.Path(str(log) + '.1')
+            self.assertTrue(archive.exists())
+            self.assertEqual(archive.stat().st_size, len(seed))
+            self.assertEqual(self.read_rows(log)[0]['status'], 200)
+
+    def test_zero_disables_rotation_but_continues_logging(self):
+        seed = self.seed(20 * 1024 * 1024 + 100)
+        with self.broker(0, seed) as (path, log, _result):
+            for _ in range(4):
+                self.request(path)
+            self.wait_for_rows(log, 5)
+            rows = self.read_rows(log)
+            self.assertEqual(rows[0], json.loads(seed))
+            self.assertEqual([row['id'] for row in rows[1:]], [1, 2, 3, 4])
+            self.assertFalse(pathlib.Path(str(log) + '.1').exists())
+
+    def test_utf8_bytes_are_used_for_projected_line_size(self):
+        seed = self.seed(100)
+        with self.broker(550, seed, unicode_rows=True) as (path, log, _result):
+            self.request(path)
+            self.wait_for_rows(log, 1)
+            line = log.read_bytes()
+            # Characters would fit, but encoded bytes cross the threshold.
+            self.assertLess(len(seed) + len(line.decode()), 550)
+            self.assertGreater(len(seed) + len(line), 550)
+            self.assertEqual(pathlib.Path(str(log) + '.1').read_bytes(), seed)
+            self.assertEqual(self.read_rows(log)[0]['fixture_unicode'], '配' * 100)
+
+    def test_concurrent_requests_have_complete_records_without_loss_across_rotation(self):
+        seed = self.seed(1600)
+        with self.broker(2000, seed) as (path, log, _result):
+            failures = []
+            def request():
+                try:
+                    self.request(path)
+                except Exception as error:
+                    failures.append(error)
+            threads = [threading.Thread(target=request) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            deadline = time.monotonic() + 3
+            archive = pathlib.Path(str(log) + '.1')
+            while not archive.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(archive.exists())
+            rows = self.read_rows(archive) + self.read_rows(log)
+            self.assertEqual([row for row in rows if 'seed' in row], [json.loads(seed)])
+            self.assertEqual(sorted(row['id'] for row in rows if 'id' in row), [1, 2, 3, 4])
+
+    def test_unwritable_log_path_does_not_fail_successful_requests(self):
+        with self.broker(300, bad_path=True) as (path, _log, result):
+            self.request(path)
+            self.request(path)
+        self.assertTrue(result['stderr'], 'filesystem failure should be visible on stderr')
+
+    def test_rotation_failure_is_reported_but_append_is_still_attempted(self):
+        seed = self.seed(240)
+        with self.broker(300, seed, rename_failure=True) as (path, log, result):
+            self.request(path)
+            self.wait_for_rows(log, 2)
+            rows = self.read_rows(log)
+            self.assertEqual(rows[0], json.loads(seed))
+            self.assertEqual(rows[1]['status'], 200)
+            self.assertFalse(pathlib.Path(str(log) + '.1').exists())
+        self.assertIn('EACCES', result['stderr'])
 
 
 if __name__ == '__main__':

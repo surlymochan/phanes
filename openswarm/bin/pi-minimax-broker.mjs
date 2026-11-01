@@ -2,7 +2,7 @@
 // A private, single-model Anthropic proxy. The Pi credential stays in this process.
 import { createServer } from 'node:http';
 import https from 'node:https';
-import { appendFileSync, chmodSync, lstatSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const [socket, authModule, model] = process.argv.slice(2);
@@ -30,8 +30,35 @@ let inFlight = 0;
 // Per-request audit log (JSON lines, no credentials or prompt text): time, lane, sizes, tokens,
 // status and latency. Lane is taken from the worktree path in the prompt (".../lanes/<L>/wt").
 const logPath = process.env.PI_BROKER_LOG || (socket + '.requests.jsonl');
+// Byte limit includes the next complete UTF-8 JSONL record. Zero disables rotation,
+// not logging; invalid, negative and empty settings use the 20 MiB default.
+const configuredLogLimit = process.env.PI_BROKER_LOG_MAX_BYTES;
+const parsedLogLimit = configuredLogLimit?.trim() ? Number(configuredLogLimit) : NaN;
+const maxLogBytes = Number.isSafeInteger(parsedLogLimit) && parsedLogLimit >= 0
+  ? parsedLogLimit : 20 * 1024 * 1024;
 let seq = 0;
-const audit = (row) => { try { appendFileSync(logPath, JSON.stringify(row) + '\n'); } catch {} };
+const auditWarning = (operation, error) => {
+  // Do not include the row, request, headers, or credential in diagnostics.
+  console.error(`broker audit log ${operation} failed (${error.code || 'unknown'})`);
+};
+const audit = (row) => {
+  let line;
+  try { line = JSON.stringify(row) + '\n'; }
+  catch (error) { auditWarning('serialization', error); return; }
+  // Synchronous stat/rename/append keep records serialized within this broker.
+  if (maxLogBytes > 0) {
+    let size = 0;
+    try { size = statSync(logPath).size; }
+    catch (error) { if (error.code !== 'ENOENT') auditWarning('stat', error); }
+    if (size > 0 && size + Buffer.byteLength(line, 'utf8') > maxLogBytes) {
+      try { renameSync(logPath, logPath + '.1'); }
+      catch (error) { auditWarning('rotation', error); }
+    }
+  }
+  // Rotation failure must not drop this record: still try the current log path.
+  try { appendFileSync(logPath, line, 'utf8'); }
+  catch (error) { auditWarning('append', error); }
+};
 const laneOf = (text) => { const m = /\/lanes\/([A-Za-z0-9_-]{1,16})\/wt\b/.exec(text); return m ? m[1] : '?'; };
 // Optional request log. A lane turn reads the last entry of this file to learn whether the
 // provider is still being asked for work; without it only the child event stream counts.
