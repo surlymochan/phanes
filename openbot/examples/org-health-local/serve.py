@@ -28,8 +28,12 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         if self.headers.get('Host') not in (f'127.0.0.1:{port}', f'localhost:{port}'):
             self.send_error(403)
             return None
-        if self.path.split('?', 1)[0] not in ALLOWED_PATHS:
+        clean_path = self.path.split('?', 1)[0]
+        if clean_path not in ALLOWED_PATHS:
             self.send_error(404)
+            return None
+        if clean_path == '/data/diagnosis.json' and not self.data_file.is_file():
+            self.send_error(404, 'File not found')
             return None
         return super().send_head()
 
@@ -136,6 +140,13 @@ def main(argv=None):
         root_path = ROOT
     else:
         root_path = args.root
+        if not root_path.is_dir():
+            print(f'错误: 静态站点根目录不存在: {root_path}', file=sys.stderr, flush=True)
+            return 1
+    root_path, data_path = resolve_paths(root_path, args.data)
+    if not data_path.is_file():
+        print(f'错误: 诊断数据文件不存在: {data_path}', file=sys.stderr, flush=True)
+        return 1
     try:
         server = create_server(args.port, args.data, root=root_path)
     except OSError as cause:
