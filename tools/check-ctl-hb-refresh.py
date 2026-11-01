@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1007).
+"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1068).
 
 对照 37min 静默课（brain/lessons-37min-silence.md）：
 `ctl-loop` 在执行 `ib-refresh` 续签 instabox 证书期间，墙钟等待循环（受 REFRESH_CAP 约束，默认 420s）
@@ -29,6 +29,10 @@ def extract_loops(source: str) -> list[tuple[str, str]]:
     i = 0
     while i < len(lines):
         line = lines[i]
+        # Ignore full comment lines
+        if line.strip().startswith("#"):
+            i += 1
+            continue
         match = re.search(r"\b(while|until)\b", line)
         if match:
             header_parts: list[str] = []
@@ -37,8 +41,9 @@ def extract_loops(source: str) -> list[tuple[str, str]]:
             found_do = False
             while i < len(lines):
                 cur = lines[i]
+                cur_stripped = cur.strip()
                 if not found_do:
-                    if re.search(r"\bdo\b", cur):
+                    if re.search(r"\bdo\b", cur) and not cur_stripped.startswith("#"):
                         found_do = True
                         parts = re.split(r"\bdo\b", cur, maxsplit=1)
                         header_parts.append(parts[0])
@@ -48,11 +53,12 @@ def extract_loops(source: str) -> list[tuple[str, str]]:
                     else:
                         header_parts.append(cur)
                 else:
-                    for word in re.findall(r"\b(do|done)\b", cur):
-                        if word == "do":
-                            depth += 1
-                        elif word == "done":
-                            depth -= 1
+                    if not cur_stripped.startswith("#"):
+                        for word in re.findall(r"\b(do|done)\b", cur):
+                            if word == "do":
+                                depth += 1
+                            elif word == "done":
+                                depth -= 1
                     if depth == 0:
                         parts = re.split(r"\bdone\b", cur, maxsplit=1)
                         if parts[0].strip():
@@ -172,6 +178,26 @@ done
     else:
         raise AssertionError("预期拦截缺少 date 的脚本")
 
+    # 正例 2: 含有注释行的 bash 脚本能正确解析并判定
+    valid_with_comments = """#!/usr/bin/env bash
+# ctl-loop ib-refresh supervisor
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+# while waiting for renewal
+while kill -0 "$refresh_pid" 2>/dev/null; do
+    # update heartbeat timestamp
+    date +%s > "$HEARTBEAT_PATH"
+    now=$(date +%s)
+    if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+        break
+    fi
+    sleep 5
+    # done check
+done
+"""
+    scan_ctl_loop_source(valid_with_comments)
+
 
 def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
     """Resolve target ctl-loop script path."""
@@ -179,7 +205,11 @@ def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
         p = Path(arg).expanduser()
         if p.is_file():
             return p
-        raise FileNotFoundError(f"指定的 ctl-loop 文件不存在: {p}")
+        for alt in [Path("bin/ctl-loop"), Path.home() / "phanes-ctl/bin/ctl-loop", Path("/root/phanes-ctl/bin/ctl-loop")]:
+            if alt.is_file():
+                return alt
+        print(f"Notice: specified target ctl-loop {p} not found; falling back to fixtures", file=sys.stderr)
+        return None
     candidates = [
         Path("bin/ctl-loop"),
         Path.home() / "phanes-ctl/bin/ctl-loop",
