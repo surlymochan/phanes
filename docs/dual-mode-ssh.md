@@ -51,6 +51,49 @@ ssh -F ~/.ssh/openswarm-hub/config gocc -- true
 
 box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持该循环。
 
+## 跳板 / ProxyCommand 拓扑
+
+跳板拓扑的事实来源是 box 端真正生效的 ssh config：AD 用 `~/.ssh/config`
+（AD 的 `ssh` 不带 `-F`，见 `tools/lane-autodispatch/autodispatch.py`），
+`openswarm-fleet` 用上面那段 `~/.ssh/openswarm-hub/config`。仓库里能核对到的
+只有这几点：
+
+- 受控 fleet 主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、`govpn2`
+  （`docs/fleet-topology-expected.md:12-14`）。`bastion` **不是** fleet 主机，
+  在本仓库里只作为引用回归样例出现（`tools/check-ssh-opts-quote.py:18`、
+  `openswarm/tests/test_autodispatch.py:17`），不是可核对的跳板拓扑。
+- 上面那段示例 ssh config 对这 9 台主机只配了 `IdentityFile` 与 ControlMaster，
+  没有 `ProxyJump` / `ProxyCommand`；真实跳板链以 box 上实际生效的 ssh config 为准。
+- 方向：coordinator 部署在 `gocc`，是 `gorelay` 通过反向隧道连 `gocc`
+  （gorelay→gocc，见 `docs/fleet-coordinator-ssh-backoff.md:21-22`）；
+  `gocc` 并不是“经 gorelay 跳板”的机器。
+
+因此 **AD 代码里不写死任何跳板主机名**：
+
+- 只有运行配置显式给出跳板时，AD 才注入 `ProxyCommand`：来源是
+  `$AD_JUMP_HOSTS`（JSON 对象）或 `~/phanes-ctl/autodispatch/jump-hosts.json`
+  （JSON 对象 `{"<host>": "<ProxyCommand>"}`）；默认空表 → 完全依赖 box 端
+  ssh config 的 `ProxyJump`。
+- 优先级提醒：命令行上的 `-o ProxyCommand=` 会先于 config 里的 `ProxyJump`
+  生效（OpenSSH 把 `ProxyJump` 展开成 `ProxyCommand`，显式给出的优先）。所以
+  表里的条目会覆盖 box 端既有跳板路由，改表前先核对 box 上的 `~/.ssh/config`。
+
+值的写法（示例仅示意格式，取值以 box 上实际 ssh config 为准）：
+
+```json
+{
+  "ib1": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
+}
+```
+
+值可以只写跳板别名（AD 会展开成 `ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <别名>`），
+也可以写完整的 ProxyCommand 命令串。内层 ssh 只继承 `BatchMode` / `ConnectTimeout`
+（不继承外层的 ControlMaster），目的是首次连接不弹 host key / 口令提示而挂到外层超时。
+两种写法都含空格，写进 `core.sshCommand` 时必须经 `shlex.quote` 引用，否则 git 解析
+命令串时会把 `ProxyCommand` 拆碎、让 `ssh` 打印 usage（Refs #907，校验脚本
+`python3 tools/check-ad-ssh-command.py`）。表里只放跳板路由，不要放凭据（key 路径由
+ssh config 的 `IdentityFile` 负责）。
+
 ## Fleet 主机和十 lane 拓扑
 
 自动路由的主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、

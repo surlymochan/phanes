@@ -21,6 +21,12 @@ DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
 SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ControlMaster=auto",
         "-o", f"ControlPath={HOME}/.ssh/cm/%r@%h:%p", "-o", "ControlPersist=600"]
+# Hosts reached through a jump host need an explicit ProxyCommand (Refs #907). The jump topology is
+# NOT hardcoded here: the box ssh config owns it (docs/dual-mode-ssh.md), and a command-line
+# `-o ProxyCommand=` overrides the config's `ProxyJump`. The table below is operator configuration,
+# read from $AD_JUMP_HOSTS (JSON object) or <state dir>/jump-hosts.json; empty means "no injection".
+JUMP_HOSTS_ENV = "AD_JUMP_HOSTS"
+JUMP_HOSTS_FILE = "jump-hosts.json"
 BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
 HOST_BACKOFF_BASE = 30
 HOST_BACKOFF_MAX = 600
@@ -47,6 +53,39 @@ def log(msg, brain=True):
 def sh(cmd, timeout=120, inp=None):
     p = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout, input=inp)
     return p.returncode, p.stdout, p.stderr
+
+def load_jump_hosts():
+    """Return the host -> ProxyCommand table for jump hosts (Refs #907).
+
+    Sources, in order: $AD_JUMP_HOSTS (JSON object), then <state dir>/jump-hosts.json.
+    No jump host is hardcoded in code: the box ssh config owns the routing topology, and an
+    injected `-o ProxyCommand=` would override the config's `ProxyJump` for that host.
+    """
+    raw = os.environ.get(JUMP_HOSTS_ENV) or ""
+    if not raw:
+        try: raw = open(f"{D}/{JUMP_HOSTS_FILE}").read()
+        except OSError: return {}
+    try: table = json.loads(raw)
+    except ValueError: return {}
+    if not isinstance(table, dict): return {}
+    return {h: v for h, v in table.items() if isinstance(h, str) and isinstance(v, str) and v.strip()}
+
+JUMP_HOSTS = load_jump_hosts()
+
+def ssh_opts(host=None, jump_hosts=None):
+    """Return the SSH option vector for a host, injecting ProxyCommand for configured jump hosts.
+
+    `jump_hosts` defaults to the table loaded from the AD runtime configuration (JUMP_HOSTS).
+    """
+    opts = list(SSHO)
+    table = JUMP_HOSTS if jump_hosts is None else jump_hosts
+    proxy = table.get(host) if host else None
+    if proxy:
+        # A bare jump host becomes `ssh -W %h:%p <host>`; the inner ssh must never prompt, so it
+        # inherits BatchMode/ConnectTimeout. A full command string is used verbatim.
+        cmd = proxy if (" " in proxy or "%h" in proxy) else f"ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p {proxy}"
+        opts.extend(["-o", f"ProxyCommand={cmd}"])
+    return opts
 
 def git_ssh_command(ssh_options):
     """Quote the complete SSH option vector for Git's core.sshCommand value."""
@@ -102,7 +141,7 @@ if R:
 print(json.dumps(out))
 '''
 def remote(lane, cfg, run=""):
-    try: rc, out, err = sh(ssh_argv(SSHO, cfg["host"], "python3", "-", lane, run), timeout=60, inp=REMOTE_STATUS)
+    try: rc, out, err = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", lane, run), timeout=60, inp=REMOTE_STATUS)
     except subprocess.TimeoutExpired: return {"error": "ssh status timeout"}
     if rc: return {"error": (err or out).strip()[-200:]}
     try: return json.loads(out.strip().splitlines()[-1])
@@ -202,13 +241,13 @@ def dispatch(lane, cfg, item, base):
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/openswarm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
     with open(path) as task_file:
-        rc, _, err = sh(["ssh", *SSHO, h, f"cat > /tmp/task-{lane}.md"], timeout=60, inp=task_file.read())
+        rc, _, err = sh(ssh_argv(ssh_opts(h), h, f"cat > /tmp/task-{lane}.md"), timeout=60, inp=task_file.read())
     if rc: raise RuntimeError(f"task upload: {err.strip()[-200:]}")
     ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
     cmd = (f"git -C {R} fetch -q https://github.com/{REPO}.git main && git -C {R} cat-file -e {base}^{{commit}} && "
            f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
            + (f" --verify {shlex.quote(ver)}" if ver else ""))
-    rc, out, err = sh(["ssh", *SSHO, h, cmd], timeout=180)
+    rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
     m = re.search(r'"id":\s*"([^"]+)"', out)
     if rc or not m: raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
     return m.group(1), ver
@@ -234,7 +273,7 @@ def finish(lane, cfg, st, info, state):
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
-        fetch = git_fetch_command(SSHO, LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
+        fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
             rc, _, err = sh(fetch, timeout=180)
             if not rc: break

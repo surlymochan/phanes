@@ -50,6 +50,14 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      build their SSH command from the same `git_ssh_command`/`shlex` path, so a
      `ProxyCommand` or `ProxyJump` value containing spaces remains one argv item.
      Check offline with `python3 tools/check-ssh-opts-quote.py`.
+   - **Jump host ProxyCommand contract (Refs #907)**: a host listed in the AD jump
+     table gets its `ProxyCommand` injected by `ssh_opts(host)`; the value carries
+     spaces and is `shlex.quote`d before it reaches `core.sshCommand`, so `ssh`
+     never sees a split option. The jump table is runtime configuration
+     (`$AD_JUMP_HOSTS` or `~/phanes-ctl/autodispatch/jump-hosts.json`), not code —
+     the box ssh config owns the topology (see
+     [`docs/dual-mode-ssh.md`](dual-mode-ssh.md)).
+     Check offline with `python3 tools/check-ad-ssh-command.py`.
    - **Chunked sleep heartbeat contract (Refs #906)**: between ticks, autodispatch sleeps
      in chunks of ≤ 5s (`sleep(5)`) and refreshes `autodispatch/heartbeat` at each step.
      This prevents host suspend / nanosleep freeze from creating ~40-minute silent heartbeat
@@ -171,6 +179,7 @@ Check scripts (no SSH):
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-ad-heartbeat-chunk.py` — offline #906 contract check asserting that lane-autodispatch's main loop sleeps in chunks of ≤ 5s (`sleep(5)`) between ticks and updates `autodispatch/heartbeat` on each step, preventing host suspend / nanosleep freeze false stalls.
+- `python3 tools/check-ad-ssh-command.py` — offline #907 contract check. The fleet host list is parsed from `docs/fleet-topology-expected.md` and the jump-host table from the AD runtime configuration (`$AD_JUMP_HOSTS` / `~/phanes-ctl/autodispatch/jump-hosts.json`), so the script keeps no second copy of the topology; it asserts that a `ProxyCommand` containing spaces stays one `shlex.quote`d argv item and that the `core.sshCommand` of the harvest fetch has no unquoted space breakage. It also fails if the AD source hardcodes a fleet host name.
 - `python3 tools/check-ad-queue-filter.py` — offline #903 contract check using fake issue JSON; issues carrying `lane-ready` together with `lane-failed` or `lane-pr` are not dispatchable.
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
@@ -430,6 +439,35 @@ file makes the same backend dispatchable again.
 Mirror drift to fix separately: the repo mirror `tools/lane-autodispatch/autodispatch.py`
 only gates on `PAUSE` / `PAUSE-<LANE>` (lines 8 and 229); the `PAUSE-BACKEND-*` gate runs
 in the box runtime (`~/phanes-ctl/bin/autodispatch.py`) and is not mirrored yet.
+
+## Autodispatch git_ssh_command 与 ProxyCommand 引用保护 (Refs #907)
+
+Autodispatch 在 harvest 阶段通过 `core.sshCommand` 拉取各 host 分支。若某 host 需要经跳板访问，AD 会给它注入一条含空格的 `ProxyCommand`（如 `ssh -W %h:%p <跳板别名>`）。
+
+写入 `core.sshCommand` 必须经 `shlex.quote`（`shlex.join` 对每个参数逐一引用）。如果未引用，git 在调用 shell 解析命令串时会将 `ProxyCommand` 拆碎（如拆出独立的 `-o ProxyCommand=ssh` 与孤立参数），导致 `ssh` 打印 usage 并使 harvest 失败。
+
+- 跳板拓扑不在代码里写死：AD 从运行配置读跳板表 `$AD_JUMP_HOSTS`（JSON）或
+  `~/phanes-ctl/autodispatch/jump-hosts.json`，默认空表 → 完全依赖 box 端 ssh config 的
+  `ProxyJump`。事实来源与核对依据见 [`docs/dual-mode-ssh.md`](dual-mode-ssh.md)（含
+  “命令行 `-o ProxyCommand=` 会先于 config 里的 `ProxyJump` 生效”这条优先级）。
+- 引用路径：`ssh_opts(host)` 生成选项向量 → `git_ssh_command(opts)` 用 `shlex.join` 引用；
+  `git_fetch_command()` 复用同一路径写 `core.sshCommand`；`ssh_argv()` 反解回 argv，
+  状态探针（`remote()`）与 dispatch（`dispatch()`）都走这一条 argv 构造路径。
+- 校验工具：`python3 tools/check-ad-ssh-command.py` 对样例 host 生成命令串并断言不含未引用空格破损；跳板主机集合取自 AD 运行配置，脚本里不另抄一份。
+
+### 部署说明（仓库镜像 ≠ 运行副本）
+
+本改动落在仓库镜像 `tools/lane-autodispatch/autodispatch.py`；box 上真正运行的是
+`~/phanes-ctl/bin/autodispatch.py`。不同步到运行副本，线上 harvest 行为不变：
+
+```bash
+cp tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+```
+
+若 box 需要 AD 自己注入跳板（而不是用 ssh config 的 `ProxyJump`），另外在运行副本的
+状态目录放 `~/phanes-ctl/autodispatch/jump-hosts.json`（JSON 对象
+`{"<host>": "<ProxyCommand>"}`），格式与取值见
+[`docs/dual-mode-ssh.md`](dual-mode-ssh.md)。
 
 ## Manual one-shots
 
