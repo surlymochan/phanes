@@ -10846,11 +10846,11 @@ def compare_order(a, b):
         return 1 if left["p0p1"] < right["p0p1"] else -1
     for key in ("diff_size", "seconds"):
         lv, rv = left.get(key), right.get(key)
-        if lv is None and rv is not None:
-            return -1
-        if rv is None and lv is not None:
-            return 1
-        if lv is not None and rv is not None and lv != rv:
+        # Optional score criteria only apply when both candidates provide them.
+        # Missing evidence must not make an otherwise comparable candidate lose.
+        if lv is None or rv is None:
+            continue
+        if lv != rv:
             return 1 if lv < rv else -1
     return 0
 
