@@ -94,12 +94,30 @@ Builder 会调用 Bun 打包，因此无可用预构建包时依赖 Bun。显式
 
 以下章节按角色逐个说明本示例的脚本与产物。
 
-## 自检
+## 自检与标准库回归测试
 
-在本目录执行以下命令，可一键运行全部单元测试，或分别运行各模块的单元测试：
+在本目录执行 `python3 run_tests.py` 可一键运行全部单元测试，亦可直接使用 Python 标准库单独执行各角色对应的测试入口，或按子包进行测试发现：
 
 ```bash
+# 一键运行全部角色与模块的单元测试
 python3 run_tests.py
+
+# 单独运行各角色 test_*.py 回归测试入口
+python3 test_run_e2e.py                # 流水线与 E2E 编排测试
+python3 review/test_cross_check.py     # Review 角色：交叉审查与规则一致性测试
+python3 boss/test_make_brief.py        # Boss 角色：诊断任务书生成与校验测试
+python3 da/test_build_diagnosis.py     # DA 角色：原始 CSV 归并快照测试
+python3 da/test_write_method.py        # DA 角色：计算口径说明文档测试
+python3 builder/test_build_site.py     # Builder 角色：静态站点生成测试
+python3 builder/test_check_site.py     # Builder 角色：站点产物自检测试
+python3 test_serve.py                  # 本地服务：路由白名单与安全边界测试
+python3 test_validate.py               # 快照校验：JSON Schema 规范校验测试
+python3 demo/test_make_site_summary.py # Demo 角色：站点展示摘要生成测试
+```
+
+亦可使用标准库 `unittest discover` 按目录发现并运行测试：
+
+```bash
 python3 -m unittest discover -s . -p 'test_*.py'
 python3 -m unittest discover -s boss -p 'test_*.py'
 python3 -m unittest discover -s da -p 'test_*.py'
@@ -107,6 +125,14 @@ python3 -m unittest discover -s builder -p 'test_*.py'
 python3 -m unittest discover -s review -p 'test_*.py'
 python3 -m unittest discover -s demo -p 'test_*.py'
 ```
+
+### 回归测试运行边界
+
+上述回归测试入口具有明确的环境与运行边界，与生产或业务运行完全解耦：
+- **纯 Python 标准库**：所有测试脚本均仅使用 Python 3 标准库（`unittest`、`pathlib`、`tempfile` 等），不需要安装任何第三方依赖。
+- **不需要 Bun**：Builder 测试使用假 bundle 桩文件，E2E 与 Review 测试通过最小合成夹具验证，测试链路中不调用 Bun 打包工具。
+- **不需要网络**：所有测试均为离线纯本地执行，不向外部网络发起 HTTP/HTTPS 请求；服务路由测试仅绑定 loopback（`127.0.0.1`）临时可用端口并在测试完成后随之关闭。
+- **不读取真实组织数据**：测试严格限制使用测试内构造的合成样本或隔离临时目录，禁止引入或提交真实组织数据。
 
 仅展示人工构造的示例数据，不包含真实组织数据。在已安装仓库依赖和 Bun 的环境中运行 `python3 serve.py`；服务启动时编译共享翻译目录，在本机访问 http://127.0.0.1:8765/。启动后终端打印可点击的预览地址与当前服务信息，例如 `预览地址: http://127.0.0.1:8765/`，并给出站点根目录、诊断数据文件和路径白名单（`--root`/`--data` 指定的路径按实际值打印）。默认中文，使用 `?lang=en` 查看英文界面；其他未翻译语言回退英文，诊断数据是用户内容，保持原文。默认端口 8765，可用 `--port` 指定；端口已被占用时打印明确错误并以非 0 退出，不会静默改用其他端口，请先停止其他示例服务。
 
@@ -228,6 +254,12 @@ openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backe
 cd openbot/examples/org-health-local && python3 run_tests.py
 ```
 
+单独运行流水线编排自身的回归测试（使用临时工作目录与角色桩，不需要 Bun 或网络）：
+
+```bash
+cd openbot/examples/org-health-local && python3 test_run_e2e.py
+```
+
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。
 
 从仓库根目录运行、只使用 Python 标准库的测试命令：
@@ -276,7 +308,11 @@ python3 boss/make_brief.py --out <brief.json> [--goal 目标] [--month YYYY-MM] 
 python3 boss/make_brief.py --check <brief.json>   # 校验已有任务书，不生成新文件
 ```
 
-`--out` 与 `--check` 互斥：生成用 `--out`，校验已有任务书用 `--check`（按 `boss/brief.schema.json` 校验，通过时退出码 0，不通过时退出码 1）。
+`--out` 与 `--check` 互斥：生成用 `--out`，校验已有任务书用 `--check`（按 `boss/brief.schema.json` 校验，通过时退出码 0，不通过时退出码 1）。Boss 单元测试只使用标准库，不依赖网络，亦包含在 `python3 run_tests.py` 中：
+
+```bash
+python3 boss/test_make_brief.py
+```
 
 ## DA 角色：合成原始数据 → 诊断快照
 
@@ -297,7 +333,12 @@ python3 validate.py <diagnosis.json>
 python3 da/write_method.py --brief <brief.json> --data <diagnosis.json> --raw da/sample-raw --out <method.md>
 ```
 
-- DA 单元测试包含在 `python3 run_tests.py` 中。
+- DA 单元测试只使用标准库与合成样本，不依赖网络，包含在 `python3 run_tests.py` 中，亦可直接单独执行：
+
+```bash
+python3 da/test_build_diagnosis.py
+python3 da/test_write_method.py
+```
 
 ## 结构定义与校验
 
@@ -314,7 +355,11 @@ python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结
 python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  # 指定结构定义
 ```
 
-退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
+退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试只依赖标准库，包含在 `python3 run_tests.py` 中，亦可直接单独执行：
+
+```bash
+python3 test_validate.py
+```
 
 ## Review 角色：独立交叉审查
 
@@ -331,7 +376,11 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 - 站点数据一致：给出 `--dist` 时 `dist/data/diagnosis.json` 与 `--data` 字节相同，并打印 sha256 前 12 位。
 - 隐私边界：快照的字段名（含嵌套）不含个人/薪酬/编制粒度黑名单词条；黑名单写在脚本里。
 
-审查单元测试只用测试内构造的最小样本，不依赖其他角色的脚本，并包含在 `python3 run_tests.py` 中。
+审查单元测试只用测试内构造的最小样本，不依赖其他角色的脚本，不需要 Bun 与网络，包含在 `python3 run_tests.py` 中，亦可直接单独执行：
+
+```bash
+python3 review/test_cross_check.py
+```
 
 退出码契约：`0` 全部 PASS，`1` 至少一项 FAIL，`2` 输入不可读或不是 JSON 对象。失败路径仍写产物：
 `--out` 的 Markdown 报告照常落盘（含 FAIL 项与汇总），`run_e2e.py --review` 也照常写出 `review.md`。
@@ -351,4 +400,9 @@ python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle dem
 和 `dist/build-report.json`。`--bundle` 指向已编译好的浏览器包，文件必须已存在（仓库里可用
 `demo/vendor/app.bundle.js`）；不带 `--bundle` 时用与 `serve.py` 相同的 bun 命令打包（需要本机安装 Bun）。
 退出码契约：`0` 构建成功，`1` 数据未通过校验或 bundle 文件不存在，`2` 输入不可用，`3` 打包或写出失败。
-单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络，并包含在 `python3 run_tests.py` 中。
+单元测试一律传入假的 bundle 文件，不依赖 Bun 与网络，包含在 `python3 run_tests.py` 中，亦可直接单独执行：
+
+```bash
+python3 builder/test_build_site.py
+python3 builder/test_check_site.py
+```
