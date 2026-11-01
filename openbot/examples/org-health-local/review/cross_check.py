@@ -575,6 +575,15 @@ def check_questions(brief: dict, diagnosis: dict) -> list[Result]:
     entries = question_entries(brief)
     if not entries:
         return [Result(False, name, "任务书 `必答问题` 为空，没有可核对的问题")]
+    unique_entries: list[tuple[str, str | None]] = []
+    seen_questions: set[str] = set()
+    for question, identifier in entries:
+        key = normalize_match_text(question)
+        if key in seen_questions:
+            continue
+        seen_questions.add(key)
+        unique_entries.append((question, identifier))
+    entries = unique_entries
     units = answer_units(diagnosis)
     normalized_units = [normalize_match_text(unit) for unit in units]
     keyword_sets = [extract_keywords(question) for question, _ in entries]

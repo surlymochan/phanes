@@ -418,6 +418,31 @@ class CrossCheckTest(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_duplicate_questions_count_once_and_keep_distinct_question(self) -> None:
+        """重复必答问题只生成一项检查，不影响不同问题的逐项核对。"""
+        brief_data = copy.deepcopy(self.brief)
+        duplicate = brief_data["必答问题"][0]
+        brief_data["必答问题"] = [duplicate, duplicate, brief_data["必答问题"][1]]
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+
+        results = cross_check.run_checks(brief_data, diagnosis_data)
+        question_results = [item for item in results if item.name == "必答问题覆盖"]
+
+        self.assertEqual(len(question_results), 2)
+        self.assertTrue(all(item.ok for item in question_results))
+        self.assertEqual(
+            [item.finding["question"]["text"] for item in question_results],
+            brief_data["必答问题"][::2],
+        )
+
+        with temporary_directory() as folder:
+            base = Path(folder)
+            result = run_script(
+                write_json(base / "brief.json", brief_data),
+                write_json(base / "diagnosis.json", diagnosis_data),
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_command_line_without_dist_outputs_each_pass(self) -> None:
         """命令行省略可选 --dist 时成功并逐项输出全部 PASS。"""
         with temporary_directory() as folder:
