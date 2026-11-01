@@ -32,6 +32,7 @@ import argparse  # noqa: E402
 import calendar  # noqa: E402
 import concurrent.futures as cf
 import copy
+import datetime
 import fnmatch
 import importlib.util
 import json
@@ -337,7 +338,7 @@ if R:
   p=f"{O}/runs/{R}/result.json"
   if os.path.exists(p):
     r=json.load(open(p)); res=r.get("result") or {}
-    out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
+    out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
@@ -936,11 +937,72 @@ class Dispatcher:
                 return False
         cd = int(hit.get("cooldown_s") or 0)
         body = f"auto:quota:{lane}:{hit['kind']}"
-        if cd:
+        if hit.get("until_iso"):
+            body += f" until={hit['until_iso']}"
+        elif cd:
             body += f" until={int(self.clock()) + cd}"
         self.touch_file(name, body + "\n")
         self.log(f"{name} (quota signal from {lane}: {hit['kind']})")
         return True
+
+    def quota_probe(self):
+        q = self.cfg.get("quota") or {}
+        cmd = q.get("probe_cmd")
+        if not cmd:
+            return {}
+        try:
+            rc, out, _ = self.runner(cmd, timeout=20)
+            return json.loads(out) if rc == 0 and isinstance(json.loads(out), dict) else {}
+        except Exception as e:
+            self.log(f"quota probe failed: {e!r}", brain=False)
+            return {}
+
+    @staticmethod
+    def quota_until(value):
+        if value is None:
+            return None
+        try:
+            if isinstance(value, (int, float)) or str(value).isdigit():
+                return float(value)
+            stamp = str(value).replace("Z", "+00:00")
+            return datetime.datetime.fromisoformat(stamp).timestamp()
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    def reap_quota_pauses(self):
+        try:
+            names = os.listdir(self.D)
+        except OSError:
+            return
+        for name in names:
+            if not name.startswith("PAUSE-BACKEND-"):
+                continue
+            path = self.path(name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    body = f.read()
+                if not body.startswith("auto:quota:"):
+                    continue
+                match = re.search(r"\buntil=([^\s]+)", body)
+                expiry = self.quota_until(match.group(1)) if match else None
+                if expiry is not None and expiry <= self.clock():
+                    os.unlink(path)
+                    self.log(f"{name} quota pause expired; cleared")
+                    continue
+                if (self.cfg.get("quota") or {}).get("probe_cmd"):
+                    result = self.quota_probe()
+                    if result.get("exhausted") is False:
+                        os.unlink(path)
+                        self.log(f"{name} quota probe reports available; cleared")
+            except OSError:
+                continue
+
+    def quota_signal_fresh(self, info):
+        info = info or {}
+        stamp = next((info.get(k) for k in ("timestamp", "updated_at", "finished_at", "ended_at") if info.get(k)), None)
+        parsed = self.quota_until(stamp)
+        fresh_s = float((self.cfg.get("quota") or {}).get("fresh_s", 900))
+        return parsed is not None and 0 <= self.clock() - parsed <= fresh_s
 
     def quota_lane_guard(self, lane, lc, info):
         """Pause the lane when the run text shows a lane-scoped quota error."""
@@ -953,12 +1015,26 @@ class Dispatcher:
         """Pause the backend when the run text shows a backend-scoped quota error."""
         if not (self.cfg.get("quota") or {}).get("backend_pause"):
             return
+        if not self.quota_signal_fresh(info):
+            return
         hit = self.quota_hit(lane, lc, info)
         if not hit or hit["scope"] != "backend":
             return
         be = (info or {}).get("backend") or (lc or {}).get("backend") or ""
         if not be:
             return
+        probe = self.quota_probe()
+        reset_at = probe.get("resets_at")
+        until = self.quota_until(reset_at)
+        if reset_at and until is not None and isinstance(reset_at, str) and "T" in reset_at:
+            hit["until_iso"] = reset_at.replace("+00:00", "Z")
+        elif until is not None:
+            hit["until_iso"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
+        if until is None and hit.get("cooldown_s"):
+            until = self.clock() + hit["cooldown_s"]
+            hit["until_iso"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
+        if until is not None:
+            hit["cooldown_s"] = max(0, int(until - self.clock()))
         self.quota_pause(f"PAUSE-BACKEND-{be}", lane, hit)
 
     def upstream_title(self, subj, base, ref):
@@ -1660,6 +1736,7 @@ class Dispatcher:
             self.log(f"replenish hook exc: {e!r}", brain=False)
 
     def tick(self, lanes, state):
+        self.reap_quota_pauses()
         if os.path.exists(self.path("PAUSE")):
             return
         self.label_cache, self.label_reads = {}, 0

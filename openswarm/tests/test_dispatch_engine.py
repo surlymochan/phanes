@@ -173,7 +173,7 @@ class QuotaGuards(Base):
         d = self.dispatcher()
         d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"},
                            {"status": "error", "error_class": "exec_error",
-                            "summary": "HTTP 402 Payment Required: monthly quota exceeded"})
+                            "timestamp": 1000, "summary": "HTTP 402 Payment Required: monthly quota exceeded"})
         p = d.path("PAUSE-M5")
         self.assertTrue(os.path.exists(p))
         self.assertEqual(self.read(p), "auto:quota:M5:402 until=4600\n")
@@ -183,18 +183,20 @@ class QuotaGuards(Base):
         d = self.dispatcher()
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
                               {"status": "error", "error_class": "exec_error",
+                               "timestamp": 1000,
                                "summary": "RESOURCE_EXHAUSTED: Resource has been exhausted. Resets in 90s."})
         p = d.path("PAUSE-BACKEND-agy")
         self.assertTrue(os.path.exists(p))
         body = self.read(p)
         self.assertTrue(body.startswith("auto:quota:M5:RESOURCE_EXHAUSTED"), body)
-        self.assertIn("until=1090", body)      # the cooldown the text asks for, not the default
+        self.assertIn("until=1970-01-01T00:18:10Z", body)
         self.assertFalse(os.path.exists(d.path("PAUSE-M5")))
 
     def test_successful_run_mentioning_429_is_not_a_quota_signal(self):
         d = self.dispatcher()
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
                               {"status": "done", "error_class": "",
+                               "timestamp": 1000,
                                "summary": "已修复 429 重试：处理 429 限流"})
         self.assertFalse(os.path.exists(d.path("PAUSE-BACKEND-agy")))
         self.assertFalse(os.path.exists(d.path("PAUSE-M5")))
@@ -202,7 +204,7 @@ class QuotaGuards(Base):
     def test_run_id_or_branch_with_429_does_not_pause(self):
         d = self.dispatcher()
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
-                              {"status": "error", "error_class": "exec_error", "summary": "boom",
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "boom",
                                "run": "20261102-042901-429abc", "branch": "fleet/M5-issue7-429abc",
                                "repo": "/srv/work/429"})
         self.assertFalse(os.path.exists(d.path("PAUSE-BACKEND-agy")))
@@ -213,12 +215,12 @@ class QuotaGuards(Base):
         with open(d.path("PAUSE-M5"), "w") as f:
             f.write("operator hold\n")
         d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"},
-                           {"status": "error", "error_class": "exec_error", "summary": "402 quota exceeded"})
+                           {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "402 quota exceeded"})
         self.assertEqual(self.read(d.path("PAUSE-M5")), "operator hold\n")
         with open(d.path("PAUSE-BACKEND-agy"), "w") as f:
             f.write("operator hold\n")
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
-                              {"status": "error", "error_class": "exec_error", "summary": "RESOURCE_EXHAUSTED"})
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "RESOURCE_EXHAUSTED"})
         self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")), "operator hold\n")
 
     def test_auto_pause_is_refreshed_with_the_new_cooldown(self):
@@ -226,9 +228,37 @@ class QuotaGuards(Base):
         with open(d.path("PAUSE-BACKEND-agy"), "w") as f:
             f.write("auto:quota:M1:429 until=500\n")
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
-                              {"status": "error", "error_class": "exec_error", "summary": "RESOURCE_EXHAUSTED"})
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "RESOURCE_EXHAUSTED"})
         self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")),
-                         "auto:quota:M5:RESOURCE_EXHAUSTED until=2800\n")
+                         "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z\n")
+
+    def test_backend_pause_until_is_reaped_only_after_expiry(self):
+        d = self.dispatcher()
+        p = d.path("PAUSE-BACKEND-agy")
+        with open(p, "w") as f:
+            f.write("auto:quota:M5:429 until=1970-01-01T00:20:00Z\n")
+        d.reap_quota_pauses()
+        self.assertTrue(os.path.exists(p))
+        d.clock = lambda: 1201.0
+        d.reap_quota_pauses()
+        self.assertFalse(os.path.exists(p))
+
+    def test_probe_available_early_clears_backend_pause(self):
+        d = self.make([("probe", (0, '{"exhausted":false}', ""))])
+        d.clock = lambda: 1000.0
+        p = d.path("PAUSE-BACKEND-agy")
+        with open(p, "w") as f:
+            f.write("auto:quota:M5:429 until=1970-01-01T01:00:00Z\n")
+        self.cfg["quota"]["probe_cmd"] = "probe"
+        d.reap_quota_pauses()
+        self.assertFalse(os.path.exists(p))
+
+    def test_stale_quota_signal_does_not_refresh_backend_pause(self):
+        d = self.dispatcher()
+        d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1,
+                               "summary": "RESOURCE_EXHAUSTED"})
+        self.assertFalse(os.path.exists(d.path("PAUSE-BACKEND-agy")))
 
     def test_inline_quota_regexes_are_gone(self):
         self.assertFalse(hasattr(E.Dispatcher, "QUOTA_HARD"))
