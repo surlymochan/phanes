@@ -19,8 +19,49 @@ REQUIRED_FILES = (
     "data/diagnosis.json",
     "build-report.json",
 )
+DIAGNOSIS_CORE_SECTIONS = (
+    "metrics",
+    "insights",
+    "definitions",
+    "risks",
+    "recommendations",
+)
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 EXTERNAL_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+
+
+class SectionChecker(HTMLParser):
+    """收集 HTML 中内容为空的 section 元素。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.empty_sections: list[str] = []
+        self._section_stack: list[dict[str, object]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "section":
+            attrs_dict = dict(attrs)
+            if "id" in attrs_dict and attrs_dict["id"]:
+                desc = f"<section id='{attrs_dict['id']}'>"
+            elif "class" in attrs_dict and attrs_dict["class"]:
+                desc = f"<section class='{attrs_dict['class']}'>"
+            else:
+                desc = "<section>"
+            self._section_stack.append({"desc": desc, "has_content": False})
+        elif self._section_stack:
+            for item in self._section_stack:
+                item["has_content"] = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "section" and self._section_stack:
+            item = self._section_stack.pop()
+            if not item["has_content"]:
+                self.empty_sections.append(str(item["desc"]))
+
+    def handle_data(self, data: str) -> None:
+        if self._section_stack and data.strip():
+            for item in self._section_stack:
+                item["has_content"] = True
 
 
 class LocalReferences(HTMLParser):
@@ -96,13 +137,18 @@ def check_site(dist: Path) -> list[str]:
             sys.path.insert(0, str(ROOT))
             import validate
 
-            errors = validate.Validator(validate.load_schema(validate.SCHEMA_PATH)).errors(
-                validate.load_data(data_path)
-            )
+            data = validate.load_data(data_path)
+            errors = validate.Validator(validate.load_schema(validate.SCHEMA_PATH)).errors(data)
             if errors:
                 failures.append(f"失败：data/diagnosis.json 未通过 validate.py（{len(errors)} 处问题）")
             else:
                 print("通过：data/diagnosis.json 通过 validate.py")
+
+            if isinstance(data, dict):
+                for section in DIAGNOSIS_CORE_SECTIONS:
+                    value = data.get(section)
+                    if isinstance(value, (list, dict)) and len(value) == 0:
+                        failures.append(f"失败：data/diagnosis.json 存在空章节（{section} 为空）")
         except (OSError, ValueError) as cause:
             failures.append(f"失败：data/diagnosis.json 无法通过 validate.py（{cause}）")
 
@@ -117,8 +163,9 @@ def check_site(dist: Path) -> list[str]:
 
     index_path = paths["index.html"]
     if index_path.is_file() and index_path.stat().st_size:
+        html_text = index_path.read_text(encoding="utf-8", errors="replace")
         parser = LocalReferences()
-        parser.feed(index_path.read_text(encoding="utf-8", errors="replace"))
+        parser.feed(html_text)
         for reference in parser.references:
             # urlsplit 剥离 query 与 fragment，保留并校验本地文件路径（无路径仅含片段时跳过）
             parsed = urlsplit(reference)
@@ -131,6 +178,11 @@ def check_site(dist: Path) -> list[str]:
                 failures.append(f"失败：index.html 引用的本地文件 {parsed.path} 不存在")
             else:
                 print(f"通过：index.html 引用的本地文件 {parsed.path} 存在")
+
+        section_checker = SectionChecker()
+        section_checker.feed(html_text)
+        for empty_section in section_checker.empty_sections:
+            failures.append(f"失败：index.html 存在空章节（{empty_section} 为空）")
 
     report_path = paths["build-report.json"]
     if report_path.is_file() and report_path.stat().st_size:
@@ -147,10 +199,11 @@ def check_site(dist: Path) -> list[str]:
                 expected = hashes.get(relative)
                 if not isinstance(expected, str) or not HASH_RE.fullmatch(expected):
                     failures.append(f"失败：build-report.json 缺少 {relative} 的有效 sha256")
-                elif expected != sha256(paths[relative]):
-                    failures.append(f"失败：{relative} 的 sha256 与 build-report.json 不一致")
-                else:
-                    print(f"通过：{relative} 的 sha256 一致")
+                elif paths[relative].is_file():
+                    if expected != sha256(paths[relative]):
+                        failures.append(f"失败：{relative} 的 sha256 与 build-report.json 不一致")
+                    else:
+                        print(f"通过：{relative} 的 sha256 一致")
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as cause:
             failures.append(f"失败：无法读取 build-report.json 中的 sha256（{cause}）")
 
