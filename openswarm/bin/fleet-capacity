@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Atomic fleet admission. Reservations persist until explicitly released, even after a crash."""
+import importlib.util
 import json
 import os
 import re
@@ -42,6 +43,44 @@ if _topology.exists():
 if len(sys.argv) != 2 or sys.argv[1] not in HOSTS:
     sys.exit('invalid authenticated host')
 host = sys.argv[1]
+
+
+def certificate_module():
+    """The shared fleet certificate rules, deployed next to this script.
+
+    The coordinator runs this script as a single file, so the helper is optional:
+    a coordinator without it keeps its capacity operations and only reports that
+    the certificate gate cannot run.
+    """
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'fleet_certificate.py')
+    try:
+        spec = importlib.util.spec_from_file_location('fleet_certificate', path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError, ValueError):
+        return None
+
+
+def certificate_gate(authenticated_host):
+    """Judge the certificate of the host that owns the dispatchable capacity.
+
+    The gate reads the very fleet.json entry the fleet CLI judges: the entry
+    whose fleet name or ssh alias is the capacity host id. The command comes
+    from that entry (or from the topology), never from the request.
+    """
+    module = certificate_module()
+    if module is None:
+        return False, 'certificate check unavailable: deploy fleet_certificate.py next to fleet-capacity'
+    entry = module.host_entry(authenticated_host)
+    name = (entry or {}).get('name') or authenticated_host
+    prefix = module.ssh_argv(entry) if entry else None
+    return module.host_certificate_status(name, timeout=10, host=entry, ssh_prefix=prefix,
+                                          aliases=(authenticated_host,))
+
+
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
@@ -81,6 +120,17 @@ try:
                 command += ['--verify', verify]
             if request.get('read_only') is True:
                 command.append('--read-only')
+        if op in ('lanes', 'assign'):
+            # The certificate command comes from the host's own fleet configuration, never
+            # from the request, and the request is validated before anything runs.
+            certificate_ok, certificate_error = certificate_gate(host)
+            if not certificate_ok:
+                # An unusable certificate keeps the host out of the dispatchable capacity.
+                out = {'ok': False, 'status': 'certificate_invalid', 'error': certificate_error}
+                if op == 'lanes':
+                    out['lanes'] = []
+                print(json.dumps(out, separators=(',', ':')))
+                sys.exit(1)
         process = subprocess.run(command, capture_output=True, text=True, timeout=30)
         try:
             result = json.loads(process.stdout)

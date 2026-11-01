@@ -1,0 +1,793 @@
+diff --git a/openswarm/README.md b/openswarm/README.md
+index c79d2e7c80..16547d0263 100644
+--- a/openswarm/README.md
++++ b/openswarm/README.md
+@@ -624,6 +624,28 @@ openswarm fleet exec --timeout 120 worker -- runs --active --json
+ Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
+ `fleet exec` forwards stdout, stderr and the exit code; it does not issue a separate wake command.
+ 
++A host may name its certificate renewal command with `renew_command`, or opt into a read-only check with
++`check_certificate`:
++
++```json
++{"name":"worker","kind":"ssh","ssh":"worker-alias","renew_command":"ssh worker-alias renew-cert"}
++{"name":"reader","kind":"ssh","ssh":"reader-alias","check_certificate":true}
++```
++
++`renew_command` is the command that renews the certificate and prints it; `check_certificate` inspects the
++certificate the host already carries with `ssh <alias> ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub` (a string
++value names another certificate path). `cert` and `certificate` keep their meaning of a certificate file path and
++never switch the check on.
++
++`fleet status` and `fleet exec` check the certificate before they use the host. A failed command, a renewal output
++without an expiry, or an expiry that already passed leaves the host as `certificate_invalid`: it reports no lanes
++and no dispatchable capacity, `fleet status` exits non-zero and `fleet exec` refuses to run the command. A valid
++certificate keeps the host and its lane assignments usable. The `fleet-capacity` admission gate reads the same
++configuration and applies the same rules to `lanes` and `assign`, so one host is never healthy for one path and
++broken for the other. The renewal command always comes from the host's own configuration, never from a request:
++the `fleet.json` entry of the host, then the `renew_commands` map of the fleet topology, then the
++`OPENSWARM_FLEET_RENEW_COMMAND` environment variable.
++
+ One fleet inventory renders every host's `lanes.json`, so the lane topology lives in one file instead of one
+ copy per host:
+ 
+diff --git a/openswarm/bin/fleet-capacity b/openswarm/bin/fleet-capacity
+index f63042fc33..c0a0b6a69a 100755
+--- a/openswarm/bin/fleet-capacity
++++ b/openswarm/bin/fleet-capacity
+@@ -9,6 +9,9 @@ import subprocess
+ import sys
+ import time
+ 
++sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
++import fleet_certificate  # noqa: E402  (the certificate rules shared with the fleet CLI)
++
+ ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
+ LIMITS = {'total': 8, 'host:gocc': 4, 'host:gores1': 4, 'host:local': 2,
+           'codex': 1, 'pi': 4, 'cursor': 2, 'agy': 2, 'copilot': 2, 'minimax-cn': 4}
+@@ -81,6 +84,17 @@ try:
+                 command += ['--verify', verify]
+             if request.get('read_only') is True:
+                 command.append('--read-only')
++        if op in ('lanes', 'assign'):
++            # The certificate command comes from the host's own fleet configuration, never
++            # from the request, and the request is validated before anything runs.
++            certificate_ok, certificate_error = fleet_certificate.host_certificate_status(host, timeout=15)
++            if not certificate_ok:
++                # An unusable certificate keeps the host out of the dispatchable capacity.
++                out = {'ok': False, 'status': 'certificate_invalid', 'error': certificate_error}
++                if op == 'lanes':
++                    out['lanes'] = []
++                print(json.dumps(out, separators=(',', ':')))
++                sys.exit(1)
+         process = subprocess.run(command, capture_output=True, text=True, timeout=30)
+         try:
+             result = json.loads(process.stdout)
+diff --git a/openswarm/bin/fleet_certificate.py b/openswarm/bin/fleet_certificate.py
+new file mode 100644
+index 0000000000..4d7e0d5bd2
+--- /dev/null
++++ b/openswarm/bin/fleet_certificate.py
+@@ -0,0 +1,227 @@
++#!/usr/bin/env python3
++"""The fleet certificate rules shared by every fleet path.
++
++`openswarm fleet status`, `openswarm fleet exec` and the `fleet-capacity`
++admission gate must judge one host the same way, so the expiry parsing and the
++command lookup live here instead of in two drifting copies.
++
++A host is configured for the check with `renew_command` (a command that renews
++the certificate and prints it) or with `check_certificate` (the opt-in that
++inspects the certificate the host already carries). `cert` and `certificate`
++keep their meaning of a certificate file path and never switch the check on.
++"""
++import datetime as dt
++import json
++import os
++from pathlib import Path
++import re
++import shlex
++import subprocess
++
++RENEW_ENV = "OPENSWARM_FLEET_RENEW_COMMAND"
++DEFAULT_CERTIFICATE = "~/.ssh/id_ed25519-cert.pub"
++
++
++def parse_cert_expiry(output):
++    """Parse the certificate expiry (UTC) from a renewal command output.
++
++    Returns an aware UTC datetime, or None when the output carries no expiry.
++    A renewal whose expiry cannot be parsed is never treated as a healthy host.
++    """
++    if isinstance(output, bytes):
++        text = output.decode(errors="replace")
++        raw = output
++    else:
++        text = str(output)
++        raw = text.encode()
++
++    def as_utc(value):
++        """Read one expiry as an aware UTC instant, or None when it is unreadable."""
++        if isinstance(value, bool):
++            return None
++        if isinstance(value, (int, float)):
++            try:
++                return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
++            except (OverflowError, OSError, ValueError):
++                return None
++        value = str(value).strip()
++        parsed = None
++        try:
++            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
++        except ValueError:
++            for fmt in ("%b %d %H:%M:%S %Y %Z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
++                try:
++                    parsed = dt.datetime.strptime(value, fmt)
++                    break
++                except ValueError:
++                    continue
++        if parsed is None:
++            try:
++                return dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
++            except (TypeError, ValueError, OverflowError, OSError):
++                return None
++        if parsed.tzinfo is None:
++            parsed = parsed.replace(tzinfo=dt.timezone.utc)
++        return parsed.astimezone(dt.timezone.utc)
++
++    try:
++        data = json.loads(text.strip())
++    except ValueError:
++        data = None
++    if isinstance(data, dict):
++        for key in ("expiry", "expires_at", "notAfter", "not_after"):
++            if data.get(key) is not None:
++                expiry = as_utc(data[key])
++                if expiry is not None:
++                    return expiry
++
++    if "-----BEGIN CERTIFICATE-----" in text:
++        try:
++            proc = subprocess.run(["openssl", "x509", "-noout", "-enddate"],
++                                  input=raw, capture_output=True, timeout=5)
++            enddate = proc.stdout.decode(errors="replace").strip() if proc.returncode == 0 else ""
++            if "notAfter=" in enddate:
++                expiry = as_utc(enddate.split("notAfter=", 1)[1].strip())
++                if expiry is not None:
++                    return expiry
++        except (OSError, subprocess.SubprocessError):
++            pass
++
++    match = re.search(r'(?:notAfter|expiry|expires)[:=]\s*([^\n\r]+)', text, re.I)
++    if match:
++        expiry = as_utc(match.group(1).strip())
++        if expiry is not None:
++            return expiry
++
++    # An SSH certificate inspection prints its validity window, e.g. ssh-keygen -L.
++    match = re.search(r'Valid:\s+from\s+.*?\s+to\s+([^\s\n\r]+)', text, re.I)
++    if match:
++        return as_utc(match.group(1).strip())
++    return None
++
++
++def command_argv(command):
++    """Return a configured command as an argv list, or None when it carries none."""
++    if isinstance(command, str):
++        parts = shlex.split(command)
++    elif isinstance(command, (list, tuple)):
++        parts = [str(part) for part in command]
++    else:
++        return None
++    return parts or None
++
++
++def fleet_home():
++    """The openswarm home that holds fleet.json (OPENSWARM_HOME, then the legacy name)."""
++    for name in ("OPENSWARM_HOME", "XSWARM_HOME"):
++        value = os.environ.get(name)
++        if value:
++            return value
++    return str(Path.home() / ".claude/openswarm")
++
++
++def fleet_config_paths():
++    """The fleet.json location a fleet host may be configured in."""
++    return [Path(fleet_home()) / "fleet.json"]
++
++
++def host_entry(name):
++    """The fleet.json entry of one host, or None when no config declares it."""
++    for path in fleet_config_paths():
++        try:
++            config = json.loads(path.read_text())
++        except (OSError, ValueError):
++            continue
++        hosts = config.get("hosts") if isinstance(config, dict) else None
++        if not isinstance(hosts, list):
++            continue
++        for host in hosts:
++            if isinstance(host, dict) and host.get("name") == name:
++                return host
++    return None
++
++
++def topology_path():
++    """The fleet topology that sits next to the capacity database."""
++    root = os.environ.get("OPENSWARM_FLEET_CAPACITY_DIR") or str(Path.home() / ".claude/openswarm-fleet-capacity")
++    return Path(root) / "topology.json"
++
++
++def topology_renew_command(name):
++    """The renewal command the fleet topology declares for one host."""
++    try:
++        config = json.loads(topology_path().read_text())
++    except (OSError, ValueError):
++        return None
++    commands = config.get("renew_commands") if isinstance(config, dict) else None
++    if isinstance(commands, dict):
++        return command_argv(commands.get(name))
++    return None
++
++
++def inspect_command(name, host, ssh_prefix=None):
++    """The default certificate inspection command of one ssh host.
++
++    `ssh <alias> ssh-keygen -L -f <certificate>` prints the validity window of
++    the host certificate, so its expiry can be read. A bare interactive ssh
++    would print nothing and is never used.
++    """
++    if (host.get("kind") or "ssh") != "ssh":
++        return None
++    alias = host.get("ssh") or name
++    certificate = host.get("check_certificate")
++    path = certificate if isinstance(certificate, str) and certificate else DEFAULT_CERTIFICATE
++    prefix = list(ssh_prefix) if ssh_prefix else ["ssh", alias]
++    return prefix + ["ssh-keygen", "-L", "-f", path]
++
++
++def renew_command(name, host=None, ssh_prefix=None):
++    """The certificate command of one fleet host, or None when it has none.
++
++    Every fleet path resolves a host the same way: the host's own
++    `renew_command`, then its `check_certificate` opt-in, then the topology
++    `renew_commands`, then the OPENSWARM_FLEET_RENEW_COMMAND environment
++    variable. The command never comes from a request.
++    """
++    entry = host if isinstance(host, dict) else host_entry(name)
++    if isinstance(entry, dict):
++        command = command_argv(entry.get("renew_command"))
++        if command:
++            return command
++        if entry.get("check_certificate"):
++            command = inspect_command(name, entry, ssh_prefix)
++            if command:
++                return command
++    command = topology_renew_command(name)
++    if command:
++        return command
++    return command_argv(os.environ.get(RENEW_ENV))
++
++
++def certificate_status(command, timeout=20):
++    """Run the certificate command of a host and judge the result.
++
++    Returns (ok, error): a failed command, a missing expiry and an expiry in
++    the past all leave the host without a usable certificate. The command never
++    reads stdin, so a status query cannot hang on an interactive ssh.
++    """
++    if not command:
++        return True, ""
++    try:
++        proc = subprocess.run(command, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
++    except (OSError, subprocess.SubprocessError):
++        return False, "certificate renewal command failed"
++    if proc.returncode != 0:
++        return False, f"certificate renewal command failed (rc={proc.returncode})"
++    expiry = parse_cert_expiry(proc.stdout)
++    if expiry is None:
++        return False, "certificate expiry missing from renewal output"
++    if expiry <= dt.datetime.now(dt.timezone.utc):
++        return False, "certificate expired"
++    return True, ""
++
++
++def host_certificate_status(name, timeout=20, host=None, ssh_prefix=None):
++    """The certificate status of one fleet host, resolved from its own config."""
++    command = renew_command(name, host=host, ssh_prefix=ssh_prefix)
++    return certificate_status(command, timeout=timeout)
+diff --git a/openswarm/bin/openswarm b/openswarm/bin/openswarm
+index 926a4f3944..3a26149444 100755
+--- a/openswarm/bin/openswarm
++++ b/openswarm/bin/openswarm
+@@ -9824,6 +9824,40 @@ FLEET_SSH_OPTION_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+ FLEET_SSH_DURATION = re.compile(r"[0-9]+[smhd]?")
+ 
+ 
++def certificate_module():
++    """The shared fleet certificate rules, loaded next to this script.
++
++    The `fleet-capacity` admission gate reads the same module, so one host is
++    judged the same way by `fleet status`, `fleet exec` and the gate.
++    """
++    module = sys.modules.get("fleet_certificate")
++    if module is not None:
++        return module
++    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "fleet_certificate.py")
++    spec = importlib.util.spec_from_file_location("fleet_certificate", path)
++    if spec is None or spec.loader is None:
++        raise ImportError(f"cannot load fleet certificate helper from {path}")
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++def fleet_certificate_command(host):
++    """The certificate command of one fleet host, or None when it has none."""
++    prefix = fleet_ssh_argv(host) if host.get("kind") == "ssh" else None
++    return certificate_module().renew_command(host["name"], host=host, ssh_prefix=prefix)
++
++
++def fleet_certificate_status(host, timeout=20):
++    """Renew and check the certificate of one fleet host.
++
++    Returns (ok, error): a failed renewal, a missing expiry and an expiry in
++    the past all leave the host without a usable certificate.
++    """
++    return certificate_module().certificate_status(fleet_certificate_command(host), timeout=timeout)
++
++
+ def fleet_ssh_control_path():
+     """Return the default ControlPath of the multiplexed fleet connection."""
+     return os.path.join(os.path.expanduser("~"), ".ssh", "openswarm", "cm-%C")
+@@ -9932,6 +9966,13 @@ def fleet_config():
+             raise ValueError(f"invalid fetch_retries for fleet host {name}")
+         if "openswarm" in host and (not isinstance(host["openswarm"], str) or not host["openswarm"]):
+             raise ValueError(f"invalid openswarm path for fleet host {name}")
++        renew = host.get("renew_command")
++        if renew is not None and (not isinstance(renew, str) or not renew.strip()):
++            raise ValueError(f"invalid renew_command for fleet host {name}")
++        check = host.get("check_certificate")
++        if check is not None and not (isinstance(check, bool)
++                                      or (isinstance(check, str) and check.strip())):
++            raise ValueError(f"invalid check_certificate for fleet host {name}")
+         fleet_ssh_validate(host, name, kind)
+         hosts[name] = host
+     return hosts
+@@ -11292,6 +11333,11 @@ def cmd_fleet(args):
+         return
+     if args.fleet_cmd == "exec":
+         host = fleet_host(args.host)
++        certificate_ok, certificate_error = fleet_certificate_status(host, timeout=min(args.timeout, 30))
++        if not certificate_ok:
++            # A host without a usable certificate is never used for a command.
++            sys.stderr.write(f"{host['name']}: certificate_invalid: {certificate_error}\n")
++            raise SystemExit(1)
+         command = args.args[1:] if args.args[:1] == ["--"] else args.args
+         if not command:
+             raise ValueError("fleet exec requires openswarm arguments after --")
+@@ -11307,8 +11353,17 @@ def cmd_fleet(args):
+     hosts = list(fleet_config().values())
+     states = instabox_states(hosts)
+     rows = []
++    invalid_certificate = False
+     for host in hosts:
+         row = {"name": host["name"], "reachable": False, "paused": False, "lanes": [], "active_runs": []}
++        certificate_ok, certificate_error = fleet_certificate_status(host)
++        if not certificate_ok:
++            # A host without a usable certificate never reports capacity.
++            invalid_certificate = True
++            row.update(status="certificate_invalid", certificate_valid=False, error=certificate_error,
++                       reachable=False, lanes=[], active_runs=[])
++            rows.append(row)
++            continue
+         state = states.get(host.get("box"), "").lower()
+         if host["kind"] == "instabox" and state not in ("running", "ready", "active"):
+             row.update(paused=state == "paused", state=state or "unknown")
+@@ -11334,7 +11389,9 @@ def cmd_fleet(args):
+         for row in rows:
+             state = row["status"]
+             print(f"{row['name']}  {state}  lanes={len(row['lanes'])} active={len(row['active_runs'])}")
+-            if state == "config invalid" and row.get("lane_config_error"):
++            if state == "certificate_invalid" and row.get("error"):
++                print(f"  certificate invalid: {row['error']}")
++            elif state == "config invalid" and row.get("lane_config_error"):
+                 print(f"  config invalid: {row['lane_config_error']}")
+             agy = (row.get("backends") or {}).get("agy") or {}
+             if agy:
+@@ -11344,6 +11401,8 @@ def cmd_fleet(args):
+                 print(f"  {lane['name']} {lane['state']} {lane.get('model') or '-'} run={lane.get('current_run') or '-'}")
+             for run in row["active_runs"]:
+                 print(f"  run {run['id']} {run['state']}")
++    if invalid_certificate:
++        raise SystemExit(1)
+ 
+ 
+ def safe_id(value):
+diff --git a/openswarm/tests/test_fleet.py b/openswarm/tests/test_fleet.py
+index f6dd575215..3ffa4bcd40 100644
+--- a/openswarm/tests/test_fleet.py
++++ b/openswarm/tests/test_fleet.py
+@@ -1,5 +1,6 @@
+ import argparse
+ import contextlib
++import datetime as dt
+ import io
+ import json
+ import os
+@@ -533,6 +534,150 @@ class FleetTests(unittest.TestCase):
+         self.assertEqual([row["run_id"] for row in xs.ledger_records(oversized + valid, "h")], ["kept"])
+         self.assertEqual(xs.ledger_records(b"\n" * xs.LEDGER_MAX_HOST_LINES + valid, "h"), [])
+ 
++    def certificate(self, expires_in_days):
++        """An SSH certificate inspection, as ssh-keygen -L prints it for a fleet certificate."""
++        now = dt.datetime.now(dt.timezone.utc)
++        return ("Type: ssh-ed25519-cert-v01@openswarm.com user certificate\n"
++                "Public key: ssh-ed25519-cert-v01@openswarm.com AAAAC3NzaC1lZDI1NTE5\n"
++                "Key ID: fake\n"
++                "Serial: 01\n"
++                f"Valid: from {(now - dt.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')} "
++                f"to {(now + dt.timedelta(days=expires_in_days)).strftime('%Y-%m-%dT%H:%M:%S')}\n")
++
++    def fake_certificate_ssh(self):
++        """A fake ssh that answers the certificate command of a fleet host.
++
++        The recorded argv shows which remote command ran, so a bare interactive
++        ssh (which prints no certificate at all) cannot pass unnoticed.
++        """
++        fake_bin = self.root / "bin"
++        fake_bin.mkdir(exist_ok=True)
++        ssh = fake_bin / "ssh"
++        ssh.write_text(
++            f"#!{sys.executable}\n"
++            "import os, pathlib, sys\n"
++            "mode = os.environ.get('FAKE_SSH_MODE', 'valid')\n"
++            "root = pathlib.Path(os.environ['OPENSWARM_TEST_SSH_ROOT'])\n"
++            "with (root / 'ssh-argv.log').open('a') as stream:\n"
++            "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
++            "if mode == 'failed':\n"
++            "    sys.stderr.write('renewal failed\\n')\n"
++            "    raise SystemExit(3)\n"
++            "if mode == 'expired':\n"
++            "    sys.stdout.write((root / 'expired.cert').read_text())\n"
++            "elif mode == 'missing_expiry':\n"
++            "    sys.stdout.write('renewed OK without expiry details\\n')\n"
++            "else:\n"
++            "    sys.stdout.write((root / 'valid.cert').read_text())\n"
++        )
++        ssh.chmod(0o755)
++        (self.root / "valid.cert").write_text(self.certificate(10))
++        (self.root / "expired.cert").write_text(self.certificate(-1))
++        return fake_bin
++
++    def certificate_env(self, fake_bin, mode):
++        """The environment a fleet host certificate command runs in."""
++        return {"PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
++                "OPENSWARM_TEST_SSH_ROOT": str(self.root),
++                "FAKE_SSH_MODE": mode}
++
++    def test_certificate_invalid_when_missing_expiry_or_expired(self):
++        fake_bin = self.fake_certificate_ssh()
++        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote"}])
++
++        # 1. Missing expiry -> certificate_invalid, exit code 1, empty capacity
++        output = io.StringIO()
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "missing_expiry")), \
++                contextlib.redirect_stdout(output):
++            with self.assertRaises(SystemExit) as exited:
++                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
++            self.assertEqual(exited.exception.code, 1)
++        res = json.loads(output.getvalue())
++        self.assertEqual(res["hosts"][0]["status"], "certificate_invalid")
++        self.assertEqual(res["hosts"][0]["lanes"], [])
++        self.assertIn("expiry", res["hosts"][0]["error"])
++
++        # 2. Expired cert -> certificate_invalid, exit code 1, empty capacity
++        output = io.StringIO()
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "expired")), \
++                contextlib.redirect_stdout(output):
++            with self.assertRaises(SystemExit) as exited:
++                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
++            self.assertEqual(exited.exception.code, 1)
++        res = json.loads(output.getvalue())
++        self.assertEqual(res["hosts"][0]["status"], "certificate_invalid")
++        self.assertEqual(res["hosts"][0]["lanes"], [])
++        self.assertIn("expired", res["hosts"][0]["error"])
++
++        # 3. Valid cert -> reachable, exit code 0, lanes preserved
++        output = io.StringIO()
++        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
++                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
++            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
++        res = json.loads(output.getvalue())
++        self.assertEqual(res["hosts"][0]["status"], "reachable")
++        self.assertEqual(len(res["hosts"][0]["lanes"]), 1)
++
++    def test_certificate_renewal_failure_marks_the_host_invalid(self):
++        fake_bin = self.fake_certificate_ssh()
++        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote renew"}])
++        output = io.StringIO()
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "failed")), \
++                mock.patch.object(xs, "host_json") as snapshot, contextlib.redirect_stdout(output):
++            with self.assertRaises(SystemExit) as exited:
++                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
++            self.assertEqual(exited.exception.code, 1)
++            snapshot.assert_not_called()
++        res = json.loads(output.getvalue())
++        self.assertEqual(res["hosts"][0]["status"], "certificate_invalid")
++        self.assertEqual(res["hosts"][0]["lanes"], [])
++        self.assertIn("renewal command failed", res["hosts"][0]["error"])
++
++    def test_fleet_exec_refuses_a_host_without_a_usable_certificate(self):
++        fake_bin = self.fake_certificate_ssh()
++        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote renew"}])
++        errors = io.StringIO()
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "expired")), \
++                mock.patch.object(xs, "host_run") as transport, contextlib.redirect_stderr(errors):
++            with self.assertRaises(SystemExit) as exited:
++                xs.cmd_fleet(argparse.Namespace(fleet_cmd="exec", host="remote", timeout=30,
++                                                args=["--", "lane", "status"]))
++            self.assertEqual(exited.exception.code, 1)
++            transport.assert_not_called()
++        self.assertIn("certificate_invalid", errors.getvalue())
++
++    def test_check_certificate_inspects_the_host_certificate(self):
++        fake_bin = self.fake_certificate_ssh()
++        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "check_certificate": True}])
++        output = io.StringIO()
++        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
++                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
++            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
++        res = json.loads(output.getvalue())
++        self.assertEqual(res["hosts"][0]["status"], "reachable")
++        # The opt-in inspects the certificate, it never opens an interactive ssh.
++        self.assertIn("ssh-keygen -L -f", (self.root / "ssh-argv.log").read_text())
++
++    def test_certificate_file_path_keys_do_not_switch_the_check_on(self):
++        fake_bin = self.fake_certificate_ssh()
++        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "cert": "certs/remote.crt"}])
++        output = io.StringIO()
++        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
++        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "expired")), \
++                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
++            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
++        res = json.loads(output.getvalue())
++        self.assertEqual(res["hosts"][0]["status"], "reachable")
++        self.assertFalse((self.root / "ssh-argv.log").exists())
++
++    def test_invalid_certificate_configuration_is_rejected(self):
++        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": ""}])
++        with self.assertRaises(ValueError) as raised:
++            xs.fleet_config()
++        self.assertIn("renew_command", str(raised.exception))
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/openswarm/tests/test_fleet_capacity.py b/openswarm/tests/test_fleet_capacity.py
+index 0ad526af0c..256f8af314 100644
+--- a/openswarm/tests/test_fleet_capacity.py
++++ b/openswarm/tests/test_fleet_capacity.py
+@@ -1,5 +1,9 @@
+ """Cross-host admission is atomic and uncertain reservations are never expired."""
++import argparse
+ import concurrent.futures
++import contextlib
++import datetime as dt
++import io
+ import json
+ import os
+ import pathlib
+@@ -38,6 +42,209 @@ class FleetCapacityTests(unittest.TestCase):
+         self.addCleanup(self.temp.cleanup)
+         self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
+ 
++    def certificate(self, expires_in_days):
++        """An SSH certificate inspection, as ssh-keygen -L prints it for a fleet certificate."""
++        now = dt.datetime.now(dt.timezone.utc)
++        return ("Type: ssh-ed25519-cert-v01@openswarm.com user certificate\n"
++                "Public key: ssh-ed25519-cert-v01@openswarm.com AAAAC3NzaC1lZDI1NTE5\n"
++                "Key ID: fake\n"
++                "Serial: 01\n"
++                f"Valid: from {(now - dt.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')} "
++                f"to {(now + dt.timedelta(days=expires_in_days)).strftime('%Y-%m-%dT%H:%M:%S')}\n")
++
++    def certificate_host(self, root, host='gores1', renew_command='ssh gores1 renew'):
++        """A fake fleet host: the certificate ssh, the lane CLI and the fleet.json entry."""
++        fake_bin = root / 'bin'
++        fake_bin.mkdir(exist_ok=True)
++        ssh = fake_bin / 'ssh'
++        ssh.write_text(
++            f"#!{sys.executable}\n"
++            "import os, pathlib, sys\n"
++            "mode = os.environ.get('FAKE_SSH_MODE', 'valid')\n"
++            "root = pathlib.Path(os.environ['OPENSWARM_TEST_SSH_ROOT'])\n"
++            "with (root / 'ssh-argv.log').open('a') as stream:\n"
++            "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
++            "if mode == 'failed':\n"
++            "    sys.stderr.write('renewal failed\\n')\n"
++            "    raise SystemExit(3)\n"
++            "if mode == 'expired':\n"
++            "    sys.stdout.write((root / 'expired.cert').read_text())\n"
++            "elif mode == 'missing_expiry':\n"
++            "    sys.stdout.write('renewed OK without expiry details\\n')\n"
++            "else:\n"
++            "    sys.stdout.write((root / 'valid.cert').read_text())\n"
++        )
++        ssh.chmod(0o755)
++        (root / 'valid.cert').write_text(self.certificate(10))
++        (root / 'expired.cert').write_text(self.certificate(-1))
++        fake_openswarm = root / '.local/bin/openswarm'
++        fake_openswarm.parent.mkdir(parents=True, exist_ok=True)
++        fake_openswarm.write_text(
++            f"#!{sys.executable}\n"
++            "import json, sys\n"
++            "if 'status' in sys.argv:\n"
++            "    print(json.dumps({'lanes': [{'name': 'GH1', 'state': 'idle', 'model': 'm'}]}))\n"
++            "elif 'assign' in sys.argv:\n"
++            "    print(json.dumps({'ok': True, 'lane': 'GH1', 'id': 'run-test-cert'}))\n"
++            "else:\n"
++            "    print(json.dumps({'ok': True}))\n"
++        )
++        fake_openswarm.chmod(0o755)
++        entry = {'name': host, 'kind': 'ssh', 'ssh': host}
++        if renew_command:
++            entry['renew_command'] = renew_command
++        (root / 'fleet.json').write_text(json.dumps({'hosts': [entry]}))
++        return dict(self.env, HOME=str(root), OPENSWARM_HOME=str(root),
++                    PATH=str(fake_bin) + os.pathsep + os.environ.get('PATH', ''),
++                    OPENSWARM_TEST_SSH_ROOT=str(root))
++
++    def call_with_rc(self, env, authenticated_host, **payload):
++        p = subprocess.run([str(BIN), authenticated_host], input=json.dumps(payload), text=True,
++                           capture_output=True, env=env, timeout=15)
++        out = json.loads(p.stdout) if p.stdout.strip().startswith('{') else p.stdout
++        return p.returncode, out
++
++    def test_fleet_capacity_certificate_validation_and_lane_filtering(self):
++        root = pathlib.Path(self.temp.name)
++        env = self.certificate_host(root)
++
++        # 1. Missing expiry: rc=1, status=certificate_invalid, lanes=[]
++        env['FAKE_SSH_MODE'] = 'missing_expiry'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++        self.assertEqual(out['lanes'], [])
++
++        rc, out = self.call_with_rc(env, 'gores1', op='assign', lane='GH1', prompt='prompt',
++                                    base='abcdef0', budget_minutes=3)
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++
++        # 2. Expired certificate: rc=1, status=certificate_invalid, lanes=[]
++        env['FAKE_SSH_MODE'] = 'expired'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++        self.assertEqual(out['lanes'], [])
++
++        rc, out = self.call_with_rc(env, 'gores1', op='assign', lane='GH1', prompt='prompt',
++                                    base='abcdef0', budget_minutes=3)
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++
++        # A failed renewal command is a broken certificate, not a healthy host.
++        env['FAKE_SSH_MODE'] = 'failed'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++        self.assertIn('renewal command failed', out['error'])
++
++        # 3. Valid certificate: rc=0, ok=True, non-empty lane assignment allowed
++        env['FAKE_SSH_MODE'] = 'valid'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 0)
++        self.assertTrue(out['ok'])
++        self.assertIn('result', out)
++
++        rc, out = self.call_with_rc(env, 'gores1', op='assign', lane='GH1', prompt='prompt',
++                                    base='abcdef0', budget_minutes=3)
++        self.assertEqual(rc, 0)
++        self.assertTrue(out['ok'])
++        self.assertEqual(out['result']['lane'], 'GH1')
++
++    def test_fleet_capacity_never_runs_a_renew_command_from_the_request(self):
++        root = pathlib.Path(self.temp.name)
++        env = self.certificate_host(root, renew_command=None)
++        env['FAKE_SSH_MODE'] = 'expired'
++
++        # A host without a certificate command keeps its capacity, and the command
++        # the request carries is never executed.
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes', renew_command='ssh gores1 renew')
++        self.assertEqual(rc, 0)
++        self.assertTrue(out['ok'])
++        self.assertFalse((root / 'ssh-argv.log').exists())
++
++        # A host with an unusable certificate stays unusable, even when the request
++        # carries a command that would print a valid certificate.
++        env = self.certificate_host(root)
++        env['FAKE_SSH_MODE'] = 'expired'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes', renew_command='ssh gores1')
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++
++    def test_fleet_capacity_reads_the_renew_command_from_the_topology(self):
++        root = pathlib.Path(self.temp.name)
++        env = self.certificate_host(root, renew_command=None)
++        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps({
++            'hosts': ['gores1', 'gocc'], 'limits': {'total': 8, 'host:gores1': 4, 'pi': 4},
++            'renew_commands': {'gores1': 'ssh gores1 renew'}}))
++        env['FAKE_SSH_MODE'] = 'expired'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++        self.assertIn('gores1 renew', (root / 'ssh-argv.log').read_text())
++
++    def test_fleet_and_capacity_share_the_renew_command_environment(self):
++        """One environment variable reaches both fleet paths."""
++        root = pathlib.Path(self.temp.name)
++        env = self.certificate_host(root, renew_command=None)
++        env['FAKE_SSH_MODE'] = 'expired'
++        env['OPENSWARM_FLEET_RENEW_COMMAND'] = 'ssh gores1 renew'
++
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 1)
++        self.assertEqual(out['status'], 'certificate_invalid')
++
++        with mock.patch.object(xs, 'DATA', str(root)), \
++                mock.patch.dict(os.environ, {'PATH': env['PATH'],
++                                             'OPENSWARM_TEST_SSH_ROOT': str(root),
++                                             'FAKE_SSH_MODE': 'expired',
++                                             'OPENSWARM_FLEET_RENEW_COMMAND': 'ssh gores1 renew'}), \
++                contextlib.redirect_stdout(io.StringIO()) as output:
++            with self.assertRaises(SystemExit) as exited:
++                xs.cmd_fleet(argparse.Namespace(fleet_cmd='status', json=True))
++            self.assertEqual(exited.exception.code, 1)
++        rows = json.loads(output.getvalue())['hosts']
++        self.assertEqual(rows[0]['status'], 'certificate_invalid')
++
++    def test_fleet_and_capacity_judge_the_same_host_the_same_way(self):
++        """One fleet.json must not look healthy to one path and broken to the other."""
++        root = pathlib.Path(self.temp.name)
++        env = self.certificate_host(root)
++
++        for mode in ('expired', 'missing_expiry'):
++            env['FAKE_SSH_MODE'] = mode
++            rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++            self.assertEqual(rc, 1)
++            self.assertEqual(out['status'], 'certificate_invalid')
++
++            with mock.patch.object(xs, 'DATA', str(root)), \
++                    mock.patch.dict(os.environ, {'PATH': env['PATH'],
++                                                 'OPENSWARM_TEST_SSH_ROOT': str(root),
++                                                 'FAKE_SSH_MODE': mode}), \
++                    contextlib.redirect_stdout(io.StringIO()) as output:
++                with self.assertRaises(SystemExit) as exited:
++                    xs.cmd_fleet(argparse.Namespace(fleet_cmd='status', json=True))
++                self.assertEqual(exited.exception.code, 1)
++            rows = json.loads(output.getvalue())['hosts']
++            self.assertEqual(rows[0]['status'], 'certificate_invalid')
++            self.assertEqual(rows[0]['lanes'], [])
++
++        env['FAKE_SSH_MODE'] = 'valid'
++        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
++        self.assertEqual(rc, 0)
++        snapshot = {'lanes': [{'name': 'GH1', 'state': 'idle', 'model': 'm'}], 'active_runs': []}
++        with mock.patch.object(xs, 'DATA', str(root)), \
++                mock.patch.dict(os.environ, {'PATH': env['PATH'],
++                                             'OPENSWARM_TEST_SSH_ROOT': str(root),
++                                             'FAKE_SSH_MODE': 'valid'}), \
++                mock.patch.object(xs, 'host_json', return_value=snapshot), \
++                contextlib.redirect_stdout(io.StringIO()) as output:
++            xs.cmd_fleet(argparse.Namespace(fleet_cmd='status', json=True))
++        rows = json.loads(output.getvalue())['hosts']
++        self.assertEqual(rows[0]['status'], 'reachable')
++        self.assertEqual(len(rows[0]['lanes']), 1)
++
+     def call(self, authenticated_host, **payload):
+         p = subprocess.run([str(BIN), authenticated_host], input=json.dumps(payload), text=True,
+                            capture_output=True, env=self.env, timeout=15)
