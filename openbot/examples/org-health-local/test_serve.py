@@ -289,6 +289,12 @@ class LocalServeBoundaryTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, BUNDLED_DATA.read_bytes())
 
+    def test_diagnosis_get_has_json_content_type_and_nonempty_body(self):
+        status, content_type, body = self.request_with_type('/data/diagnosis.json')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json')
+        self.assertTrue(body)
+
     def test_diagnosis_api_matches_builder_data_fields(self):
         status, content_type, body = self.request_with_type('/api/diagnosis')
         self.assertEqual(status, 200)
