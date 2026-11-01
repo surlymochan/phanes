@@ -33,6 +33,13 @@ const logPath = process.env.PI_BROKER_LOG || (socket + '.requests.jsonl');
 let seq = 0;
 const audit = (row) => { try { appendFileSync(logPath, JSON.stringify(row) + '\n'); } catch {} };
 const laneOf = (text) => { const m = /\/lanes\/([A-Za-z0-9_-]{1,16})\/wt\b/.exec(text); return m ? m[1] : '?'; };
+// Optional request log. A lane turn reads the last entry of this file to learn whether the
+// provider is still being asked for work; without it only the child event stream counts.
+const requestLog = process.env.OPENSWARM_BROKER_REQUEST_LOG;
+const noteRequest = () => {
+  if (!requestLog) return;
+  try { appendFileSync(requestLog, JSON.stringify({ts: Date.now() / 1000}) + '\n'); } catch { /* the log is advisory */ }
+};
 
 const server = createServer((req, res) => {
   const t0 = Date.now(); const id = ++seq;
@@ -49,6 +56,7 @@ const server = createServer((req, res) => {
   const length = Number(req.headers['content-length']);
   if (!Number.isSafeInteger(length) || length < 1 || length > maxBytes || req.headers['transfer-encoding']) return fail(400, 'invalid size');
   inFlight += 1;
+  noteRequest();
   req.setTimeout(uploadTimeoutMs, () => req.destroy());
   let settled = false;
   const release = () => {
