@@ -14,6 +14,21 @@ diagnosis.json 顶层字段一览（以 schema/diagnosis.schema.json 为准）�
 - stage：可选的流程阶段信息。
 -->
 
+## 常用命令
+
+在本目录（`openbot/examples/org-health-local`）可直接执行以下三条常用命令：
+
+```bash
+# 校验诊断快照数据
+python3 validate.py
+
+# 启动本地预览服务（默认端口 8765；未安装 Bun 时可用 --root demo/site）
+python3 serve.py
+
+# 运行完整端到端流水线并进行交叉审查
+python3 run_e2e.py --workdir demo --review
+```
+
 ## 三 Bot demo：一分钟查看
 
 `demo/` 是三棒（Boss → DA → Builder）加独立审查在本目录用合成样本实跑出来的产物，按
