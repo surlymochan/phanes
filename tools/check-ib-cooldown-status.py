@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for ib-refresh cooldown status accounting (Refs #1126)."""
+"""Offline contract for ib-refresh cooldown status accounting (Refs #1160)."""
 
 import datetime as dt
 import importlib.util
