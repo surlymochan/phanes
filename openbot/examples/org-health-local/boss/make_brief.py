@@ -3,13 +3,15 @@
 
 用法：
     python3 make_brief.py --out brief.json [--goal 文本] [--month YYYY-MM] [--diagnosis diagnosis.json]
+    python3 make_brief.py --out brief.json --periods 2026-01实际,2026-09实际
     python3 make_brief.py --check brief.json
 
 任务书只写口径、问题与字段映射，不含真实组织数据或真实数字。
 默认口径与合成示例 data/diagnosis.json 一致：观察月份 2026-09、数据截止
 2026-09-30、指标标题与顺序同站点的 metrics。--goal 覆盖“目标”，--month 覆盖
-观察月份（数据截止与期次锚点随之推算）。结构定义见同目录 brief.schema.json，
-校验复用上一级目录的 validate.py；只使用 Python 标准库。
+观察月份（数据截止与期次锚点随之推算），--period/--periods 直接给出期次锚点，
+用于让任务书期次与 diagnosis periods 逐项对齐。结构定义见同目录
+brief.schema.json，校验复用上一级目录的 validate.py；只使用 Python 标准库。
 
 写出任务书时先写同目录临时文件再替换目标文件：替换成功前旧任务书保持原样，
 写出失败不会留下半个任务书。输出路径的父目录必须已存在，缺失或不可写时报错。
@@ -120,12 +122,28 @@ DEFAULT_FORBIDS = [
 ]
 
 
-def period_keys(month: str) -> list[str]:
+def period_keys(
+    month: str, periods: list[str] | tuple[str, ...] | None = None
+) -> list[str]:
     """按观察月份给出期次锚点，顺序与站点期望一致。
 
     2026-09 的期次为 2026-01实际、2026-05H1参考、2026-09实际、年末测算、年末目标，
     与合成示例 data/diagnosis.json 的数值序列键名一致。
+    传入 periods 时改用给定的期次锚点（逐项校验后原样返回），用于与 diagnosis
+    periods 对齐；期次为空或含空项时报出可读错误。
     """
+    if periods is not None:
+        if isinstance(periods, str):
+            raise ValueError(f"期次锚点必须是非空字符串数组：{periods!r}")
+        if not periods:
+            raise ValueError("缺少期次锚点（periods）：期次列表不能为空")
+        cleaned: list[str] = []
+        for item in periods:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"期次锚点必须是非空字符串：{item!r}")
+            cleaned.append(item.strip())
+        return cleaned
+
     year = month[:4]
     keys = [f"{year}-01实际", f"{year}-05H1参考", f"{month}实际", "年末测算", "年末目标"]
     ordered: list[str] = []
@@ -181,33 +199,68 @@ def month_end(month: str) -> str:
 
 
 def period_line(keys: list[str], month: str) -> str:
-    """写出期间口径：哪些是已发生实际、参考基准与前瞻估算。"""
-    actual = f"{month}实际"
-    reference = f"{month[:4]}-05H1参考"
-    return (
-        f"按观察期间期次取值：{'、'.join(keys)}；"
-        f"其中 {keys[0]} 与 {actual} 为已发生实际期次，{reference} 为 H1 冻结对照基准，"
-        "年末测算与年末目标为前瞻预算与目标估算，不代表已发生实际。"
-    )
+    """写出期间口径：逐类列出已发生实际、参考基准与前瞻估算等全部口径。
+
+    期次多于默认的五个锚点时按实际出现的口径分类列出，不再只写首个与末个实际；
+    观察月份对应的实际期次不在锚点里时补一句缺口说明。
+    """
+    actuals = [k for k in keys if k.endswith("实际")]
+    references = [k for k in keys if "参考" in k]
+    forecasts = [k for k in keys if any(tag in k for tag in ("测算", "目标", "预算", "前瞻"))]
+    others = [k for k in keys if k not in actuals and k not in references and k not in forecasts]
+
+    clauses: list[str] = []
+    if actuals:
+        if len(actuals) == 1:
+            clauses.append(f"{actuals[0]} 为已发生实际期次")
+        elif len(actuals) == 2:
+            clauses.append(f"{actuals[0]} 与 {actuals[1]} 为已发生实际期次")
+        else:
+            clauses.append(f"{'、'.join(actuals)} 为已发生实际期次")
+
+    if references:
+        ref_names = "、".join(references)
+        if "H1" in ref_names:
+            clauses.append(f"{ref_names} 为 H1 冻结对照基准")
+        else:
+            clauses.append(f"{ref_names} 为参考基准")
+
+    if forecasts:
+        if forecasts == ["年末测算", "年末目标"]:
+            clauses.append("年末测算与年末目标为前瞻预算与目标估算，不代表已发生实际。")
+        else:
+            clauses.append(f"{'与'.join(forecasts)}为前瞻预算与目标估算，不代表已发生实际。")
+
+    if others:
+        clauses.append(f"{'、'.join(others)} 为其他观察期次")
+
+    observed_actual = f"{month}实际"
+    if observed_actual not in keys and actuals:
+        clauses.append(f"{observed_actual} 未列入期次锚点")
+
+    detail = "，".join(clauses)
+    return f"按观察期间期次取值：{'、'.join(keys)}；其中 {detail}"
 
 
 def build_definitions(keys: list[str], month: str) -> dict:
     """按指标标题给出口径定义：单位、定义、期间与缺失处理。"""
     period = period_line(keys, month)
-    reference = f"{month[:4]}-05H1参考"
+    references = [k for k in keys if "参考" in k]
+    reference = references[0] if references else f"{month[:4]}-05H1参考"
     missing = "该期次没有同口径取数时写 null，界面显示为未提供，不以 0 或推测值替代。"
+    ref_missing = f"{missing}（例如 {reference} 未单独拆分整体成本与人头）。"
     return {
         "整体技术人力成本": {
             "单位": "万元/月",
             "定义": "技术人力成本为当期计入的技术人力相关成本合计，不含运维与设施。",
             "期间": period,
-            "缺失处理": f"{missing}（例如 {reference} 未单独拆分整体成本与人头）。",
+            "缺失处理": ref_missing,
         },
         "整体折算人头": {
             "单位": "人（当量）",
             "定义": "折算人头为按投入当量折算的人数，非自然人数；与成本口径同源同范围。",
             "期间": period,
-            "缺失处理": f"{missing}（例如 {reference} 未单独拆分整体成本与人头）。",
+            "缺失处理": ref_missing,
         },
         "营收业务（含共享平台）技术人力成本与折算人头": {
             "单位": "成本：万元/月；折算人头：人（当量）",
@@ -239,15 +292,32 @@ def check_month(month: str) -> str:
 
 
 def build_brief(
-    goals: list[str] | None = None, month: str | None = None, fx: float | None = None
+    goals: list[str] | None = None,
+    month: str | None = None,
+    fx: float | None = None,
+    periods: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
-    """生成任务书。goals 覆盖“目标”，month 覆盖观察月份。"""
+    """生成任务书。goals 覆盖“目标”，month 覆盖观察月份，periods 覆盖期次锚点。"""
     if goals is not None and not isinstance(goals, list):
         raise ValueError("目标必须是字符串数组，不能是字符串或其他类型")
     if goals is not None and any(not isinstance(goal, str) or not goal.strip() for goal in goals):
         raise ValueError("目标必须是非空字符串数组")
-    observed = DEFAULT_MONTH if month is None else check_month(month)
-    keys = period_keys(observed)
+    if periods is not None:
+        # 显式给出期次锚点时按锚点推算观察月份：优先用 --month，其次用观察月份的
+        # 实际锚点，都没有时取最后一个实际锚点的月份。
+        keys = period_keys(DEFAULT_MONTH if month is None else month, periods=periods)
+        actuals = [k for k in keys if k.endswith("实际") and MONTH_PATTERN.match(k[:7])]
+        if month is not None:
+            observed = check_month(month)
+        elif any(k[:7] == DEFAULT_MONTH for k in actuals):
+            observed = DEFAULT_MONTH
+        elif actuals:
+            observed = actuals[-1][:7]
+        else:
+            observed = DEFAULT_MONTH
+    else:
+        observed = DEFAULT_MONTH if month is None else check_month(month)
+        keys = period_keys(observed)
     definitions = build_definitions(keys, observed)
     if fx is not None:
         if isinstance(fx, bool) or not isinstance(fx, (int, float)) or fx <= 0:
@@ -452,6 +522,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--fx", type=float, default=None, help="汇率，人民币/美元；默认不写入任务书。")
     parser.add_argument(
+        "--period",
+        action="append",
+        default=None,
+        help="期次锚点。可重复给出；不传时按观察月份推算。",
+    )
+    parser.add_argument(
+        "--periods",
+        default=None,
+        help="覆盖期次锚点，多个期次用逗号分隔。",
+    )
+    parser.add_argument(
         "--diagnosis",
         type=Path,
         help="可选诊断快照；生成前核对其 metrics 期次，空 periods 时拒绝写出任务书。",
@@ -485,8 +566,29 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_INVALID
         print("任务书校验通过")
         return EXIT_OK
+    periods: list[str] | None = None
+    if args.period is not None or args.periods is not None:
+        collected: list[str] = []
+        for item in args.period or []:
+            if not item or not item.strip():
+                print("缺少期次锚点（periods）：期次不能为空", file=sys.stderr)
+                return EXIT_USAGE
+            collected.append(item.strip())
+        if args.periods is not None:
+            if not args.periods.strip():
+                print("缺少期次锚点（periods）：期次不能为空", file=sys.stderr)
+                return EXIT_USAGE
+            items = [p.strip() for p in re.split(r"[,、，;\s]+", args.periods) if p.strip()]
+            if not items:
+                print("缺少期次锚点（periods）：期次不能为空", file=sys.stderr)
+                return EXIT_USAGE
+            collected.extend(items)
+        if not collected:
+            print("缺少期次锚点（periods）：期次不能为空", file=sys.stderr)
+            return EXIT_USAGE
+        periods = collected
     try:
-        brief = build_brief(args.goal, args.month, args.fx)
+        brief = build_brief(args.goal, args.month, args.fx, periods=periods)
     except ValueError as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE

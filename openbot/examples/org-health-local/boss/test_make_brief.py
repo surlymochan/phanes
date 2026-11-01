@@ -1359,5 +1359,172 @@ class OutputFileConsistencyTest(unittest.TestCase):
             self.assertNotIn("Traceback", result.stderr)
 
 
+class PeriodsAlignmentTest(unittest.TestCase):
+    """期次锚点与 diagnosis periods 对齐、多期次输入及缺期次的可读失败回归。"""
+
+    def setUp(self) -> None:
+        self.example = load_json(EXAMPLE_PATH)
+        # 多期次输入：三个实际期次 + 一个 H1 参考基准 + 两个年末前瞻口径。
+        self.periods = [
+            "2026-01实际",
+            "2026-03实际",
+            "2026-05H1参考",
+            "2026-09实际",
+            "年末测算",
+            "年末目标",
+        ]
+
+    def diagnosis_with_periods(self) -> dict:
+        """在合成示例快照里补上 2026-03实际 期次，得到与多期次任务书对齐的快照。"""
+        diagnosis = copy.deepcopy(self.example)
+        for metric in diagnosis["metrics"][:2]:
+            values = metric.get("数值")
+            if isinstance(values, dict) and "2026-01实际" in values:
+                values["2026-03实际"] = values["2026-01实际"]
+        return diagnosis
+
+    def test_multi_period_input_aligns_all_anchors_and_calibers(self) -> None:
+        """多期次输入生成包含全部锚点的 brief，明确列出多个口径，且可被 da 和 review 消费。"""
+        brief = make_brief.build_brief(periods=self.periods)
+        period_obj = brief["观察期间"]
+
+        # 包含全部锚点
+        self.assertEqual(period_obj["期次"], self.periods)
+        for anchor in self.periods:
+            self.assertIn(anchor, period_obj["说明"])
+
+        # 明确列出多个口径分类：已发生实际期次、参考基准、前瞻估算
+        period_def = brief["口径"]["整体技术人力成本"]["期间"]
+        self.assertIn("2026-01实际、2026-03实际、2026-09实际 为已发生实际期次", period_def)
+        self.assertIn("2026-05H1参考 为 H1 冻结对照基准", period_def)
+        self.assertIn("年末测算与年末目标为前瞻预算与目标估算", period_def)
+
+        # 结构校验通过
+        self.assertEqual(make_brief.validate_brief(brief), [])
+
+        # 能被 da 正常消费解析
+        from da import build_diagnosis  # noqa: E402
+
+        parsed = build_diagnosis.parse_periods(brief)
+        self.assertEqual(parsed["start"], "2026-01")
+        self.assertEqual(parsed["reference"], "2026-05")
+        self.assertEqual(parsed["end"], "2026-09")
+        self.assertEqual(parsed["as_of"], "2026-09-30")
+
+        # 能被 review 正常核对期间
+        from review import cross_check  # noqa: E402
+
+        diagnosis = self.diagnosis_with_periods()
+        res = cross_check.check_period(brief, diagnosis)
+        self.assertTrue(res.ok, res.detail)
+
+        # 任务书期次与 diagnosis periods 逐项对齐
+        self.assertEqual(make_brief.check_periods_alignment(brief, diagnosis), [])
+
+    def test_cli_multi_period_options_write_brief(self) -> None:
+        """命令行通过 --period 或 --periods 传入多期次可生成包含全部锚点的任务书。"""
+        periods = [
+            "2026-01实际",
+            "2026-05H1参考",
+            "2026-09实际",
+            "年末测算",
+            "年末目标",
+        ]
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            code = make_brief.main(["--out", str(path), "--periods", ",".join(periods)])
+            self.assertEqual(code, 0)
+            written = load_json(path)
+            self.assertEqual(written["观察期间"]["期次"], periods)
+            self.assertEqual(make_brief.validate_brief(written), [])
+
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            cli_args = ["--out", str(path)]
+            for p in periods:
+                cli_args.extend(["--period", p])
+            code = make_brief.main(cli_args)
+            self.assertEqual(code, 0)
+            written = load_json(path)
+            self.assertEqual(written["观察期间"]["期次"], periods)
+            self.assertEqual(make_brief.validate_brief(written), [])
+
+    def test_cli_periods_align_with_diagnosis(self) -> None:
+        """命令行给出的期次与诊断快照的 periods 对齐时才写出任务书。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            diagnosis_path = Path(folder) / "diagnosis.json"
+            diagnosis_path.write_text(
+                json.dumps(self.diagnosis_with_periods(), ensure_ascii=False), encoding="utf-8"
+            )
+            code = make_brief.main(
+                [
+                    "--out",
+                    str(path),
+                    "--periods",
+                    ",".join(self.periods),
+                    "--diagnosis",
+                    str(diagnosis_path),
+                ]
+            )
+            self.assertEqual(code, 0)
+            written = load_json(path)
+            self.assertEqual(written["观察期间"]["期次"], self.periods)
+
+    def test_missing_periods_raises_readable_error(self) -> None:
+        """缺少 periods 输入时抛出可读的 ValueError。"""
+        with self.assertRaisesRegex(ValueError, "缺少期次锚点"):
+            make_brief.build_brief(periods=[])
+
+        with self.assertRaisesRegex(ValueError, "非空字符串"):
+            make_brief.build_brief(periods=[""])
+
+        with self.assertRaisesRegex(ValueError, "缺少期次锚点"):
+            make_brief.period_keys("2026-09", periods=[])
+
+    def test_cli_empty_periods_fails_with_readable_error(self) -> None:
+        """命令行传入空期次时以状态码 2 退出，stderr 输出可读错误且不留任务书。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            error = StringIO()
+            with redirect_stderr(error):
+                code = make_brief.main(["--out", str(path), "--periods", ""])
+            self.assertEqual(code, 2)
+            self.assertIn("期次", error.getvalue())
+            self.assertFalse(path.exists())
+
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            error = StringIO()
+            with redirect_stderr(error):
+                code = make_brief.main(["--out", str(path), "--period", ""])
+            self.assertEqual(code, 2)
+            self.assertIn("期次", error.getvalue())
+            self.assertFalse(path.exists())
+
+    def test_check_missing_period_field_fails_readably(self) -> None:
+        """校验任务书缺少期次字段时给出可读失败且退出码为 1。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            brief = make_brief.build_brief()
+            del brief["观察期间"]["期次"]
+            path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+
+            # validate_brief 纯函数报错
+            errors = make_brief.validate_brief(brief)
+            self.assertTrue(any("期次" in e for e in errors))
+
+            # CLI --check 退出码为 1 且提示可读错误无 traceback
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--check", str(path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("期次", result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
