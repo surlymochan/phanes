@@ -129,6 +129,45 @@ def period_keys(month: str) -> list[str]:
     return ordered
 
 
+def extract_diagnosis_periods(diagnosis: dict) -> set[str]:
+    """从 diagnosis 的 metrics 数值序列中提取所有期次键名（去除「整体」前缀）。"""
+    periods: set[str] = set()
+    for metric in diagnosis.get("metrics", []):
+        values = metric.get("数值", {})
+        if not isinstance(values, dict):
+            continue
+        for key, val in values.items():
+            if isinstance(val, dict):
+                for sub_key in val:
+                    periods.add(sub_key.removeprefix("整体"))
+            else:
+                periods.add(key.removeprefix("整体"))
+    return periods
+
+
+def check_periods_alignment(brief: dict, diagnosis: dict) -> list[str]:
+    """核对任务书期次锚点与诊断快照的期次是否对齐。错期时返回可读错误列表。"""
+    errors: list[str] = []
+    period_info = brief.get("观察期间", {})
+    if not isinstance(period_info, dict):
+        return ["任务书缺少合法的 `观察期间` 对象"]
+    raw_keys = period_info.get("期次")
+    if not isinstance(raw_keys, list) or not raw_keys:
+        return ["任务书 `观察期间.期次` 缺失或为空"]
+    brief_keys = set(raw_keys)
+    diag_keys = extract_diagnosis_periods(diagnosis)
+    if not diag_keys:
+        return ["诊断快照 metrics 中未发现期次数值序列"]
+
+    missing_in_diag = [k for k in raw_keys if k not in diag_keys]
+    if missing_in_diag:
+        errors.append(f"任务书期次 {missing_in_diag} 未在诊断期次 ({sorted(diag_keys)}) 中找到")
+    missing_in_brief = [k for k in sorted(diag_keys) if k not in brief_keys]
+    if missing_in_brief:
+        errors.append(f"诊断期次 {missing_in_brief} 未在任务书期次 ({raw_keys}) 中找到")
+    return errors
+
+
 def month_end(month: str) -> str:
     """返回观察月份的最后一天，格式 YYYY-MM-DD。"""
     year, number = int(month[:4]), int(month[5:7])

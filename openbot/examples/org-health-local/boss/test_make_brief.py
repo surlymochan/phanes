@@ -159,16 +159,22 @@ class MakeBriefTest(unittest.TestCase):
         self.assertEqual(period["数据截止"], "2026-09-30")
 
     def test_期次_matches_example_series(self) -> None:
-        """期次锚点与合成示例的数值序列键名一致。"""
-        keys = set(self.brief["观察期间"]["期次"])
-        for metric in self.example["metrics"]:
-            for series in metric["数值"].values():
-                if not isinstance(series, dict):
-                    continue
-                for key in series:
-                    # 全口径成本率的键带“整体”前缀，其余直接是期次锚点。
-                    self.assertIn(key.removeprefix("整体"), keys, f"{metric['标题']} 的键名不在期次里")
-        self.assertIn("年末目标", keys)
+        """期次锚点与合成示例的数值序列键名一致，且 boss/make_brief.py 产出的期次都能在 diagnosis periods 中找到。"""
+        brief_periods = self.brief["观察期间"]["期次"]
+        diagnosis_periods = make_brief.extract_diagnosis_periods(self.example)
+        for period in brief_periods:
+            self.assertIn(
+                period,
+                diagnosis_periods,
+                f"boss/make_brief.py 产出的期次字段 {period} 必须能在 diagnosis periods 中找到",
+            )
+        for period in diagnosis_periods:
+            self.assertIn(
+                period,
+                brief_periods,
+                f"diagnosis period {period} 必须在任务书期次中",
+            )
+        self.assertEqual(set(brief_periods), diagnosis_periods)
 
     def test_口径_covers_metric_titles(self) -> None:
         """口径与示例 metrics 的标题、顺序一一对应。"""
@@ -994,6 +1000,85 @@ class NonEmptyBriefSchemaViolationTest(unittest.TestCase):
             self.assertEqual(result.returncode, make_brief.EXIT_INVALID)
             self.assertIn("不是合法 JSON", result.stdout + result.stderr)
             self.assertNotIn("Traceback", result.stderr)
+
+
+class DiagnosisPeriodsAlignmentTest(unittest.TestCase):
+    """期次锚点与 diagnosis periods 对齐及错期时的可读失败回归（含临时目录回归）。"""
+
+    def setUp(self) -> None:
+        self.example = load_json(EXAMPLE_PATH)
+
+    def test_generated_brief_periods_align_with_diagnosis(self) -> None:
+        """boss/make_brief.py 产出的期次字段全部能在 diagnosis periods 中找到。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "make_brief.py"), "--out", str(path)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            brief = load_json(path)
+
+            brief_periods = brief["观察期间"]["期次"]
+            diag_periods = make_brief.extract_diagnosis_periods(self.example)
+            for period in brief_periods:
+                self.assertIn(
+                    period,
+                    diag_periods,
+                    f"boss/make_brief.py 产出的期次字段 {period} 必须能在 diagnosis periods 中找到",
+                )
+            errors = make_brief.check_periods_alignment(brief, self.example)
+            self.assertEqual(errors, [])
+
+    def test_错期时失败可读_任务书错期(self) -> None:
+        """任务书期次与 diagnosis periods 错期时，报错信息清晰指出错期项及预期期次。"""
+        with temporary_directory() as folder:
+            path = Path(folder) / "brief.json"
+            # 制造任务书错期（如 2026-08实际 代替 2026-09实际）
+            mismatched_brief = brief_with_period(
+                ["2026-01实际", "2026-05H1参考", "2026-08实际", "年末测算", "年末目标"]
+            )
+            path.write_text(json.dumps(mismatched_brief, ensure_ascii=False), encoding="utf-8")
+            loaded = load_json(path)
+
+            errors = make_brief.check_periods_alignment(loaded, self.example)
+            self.assertTrue(errors)
+            error_message = "；".join(errors)
+            self.assertIn("2026-08实际", error_message)
+            self.assertIn("未在诊断期次", error_message)
+            self.assertIn("2026-09实际", error_message)
+
+    def test_错期时失败可读_诊断快照错期(self) -> None:
+        """诊断快照期次错期时，报错信息清晰指出未在任务书期次中找到的项。"""
+        with temporary_directory() as folder:
+            brief = make_brief.build_brief()
+            mismatched_diagnosis = copy.deepcopy(self.example)
+            # 修改诊断快照的一个指标期次造成错期
+            mismatched_diagnosis["metrics"][0]["数值"]["2026-99实际"] = 99
+            del mismatched_diagnosis["metrics"][0]["数值"]["2026-09实际"]
+
+            diag_path = Path(folder) / "diagnosis_mismatched.json"
+            diag_path.write_text(json.dumps(mismatched_diagnosis, ensure_ascii=False), encoding="utf-8")
+            loaded_diag = load_json(diag_path)
+
+            errors = make_brief.check_periods_alignment(brief, loaded_diag)
+            self.assertTrue(errors)
+            error_message = "；".join(errors)
+            self.assertIn("2026-99实际", error_message)
+            self.assertIn("2026-09实际", error_message)
+
+    def test_错期断言失败信息可读(self) -> None:
+        """直接对期次列表断言时，若产生错期，assertIn 的错误信息指出具体期次字段。"""
+        diag_periods = make_brief.extract_diagnosis_periods(self.example)
+        mismatched_period = "2026-08实际"
+        with self.assertRaises(AssertionError) as ctx:
+            self.assertIn(
+                mismatched_period,
+                diag_periods,
+                f"boss/make_brief.py 产出的期次字段 {mismatched_period} 必须能在 diagnosis periods 中找到",
+            )
+        self.assertIn(f"期次字段 {mismatched_period} 必须能在 diagnosis periods 中找到", str(ctx.exception))
 
 
 if __name__ == "__main__":
