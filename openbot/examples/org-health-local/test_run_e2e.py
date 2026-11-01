@@ -553,6 +553,32 @@ time.sleep(30)
         self.assertTrue((expected_workdir / 'timings.json').is_file())
         self.assertFalse((self.root / 'brief.json').exists())
 
+    def test_missing_relative_role_path_from_temp_cwd_is_readable(self):
+        """临时 cwd 下缺失的相对角色脚本应点名失败步骤，不留下 Traceback。"""
+        work_cwd = self.root / 'missing-role-cwd'
+        work_cwd.mkdir()
+        for role in ('da', 'builder', 'checker'):
+            self.write_stub(work_cwd / f'{role}.py', role)
+        command = [
+            sys.executable, str(RUNNER),
+            '--workdir', 'out',
+            '--raw', str(self.raw),
+            '--bundle', str(self.bundle),
+            '--boss', 'missing-boss.py',
+            '--da', 'da.py',
+            '--builder', 'builder.py',
+            '--checker', 'checker.py',
+        ]
+
+        result = subprocess.run(command, cwd=work_cwd, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: Boss', result.stderr)
+        self.assertIn('文件不存在', result.stderr)
+        self.assertIn('missing-boss.py', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_default_role_paths_stay_absolute(self):
         """默认角色脚本路径保持绝对路径，不随 cwd 变化。"""
         args = parse_args(['--workdir', 'out'])
