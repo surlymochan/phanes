@@ -11,7 +11,9 @@
       "upstream_repo": "https://github.com/surlymochan/openswarm.git",
       "base_sha": "6d5c3c555c2b2275924dacf9dd35c5e3c770b58a",
       "phanes_only": [
-        "tests/test_autodispatch.py"
+        "lib/dispatch/retry.py",
+        "tests/test_autodispatch.py",
+        "tests/test_dispatch_retry.py"
       ]
     }
   }
