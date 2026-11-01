@@ -218,7 +218,7 @@ class PatternsTests(unittest.TestCase):
         self.assertEqual(block, "")
         self.assertEqual(ids, [])
 
-    def test_pattern_apply_paths_normalizes_and_collapses_paths(self):
+    def test_pattern_apply_paths_normalizes_duplicate_relative_and_backslash_paths(self):
         cases = (
             ([], []),
             (["README.md"], ["README.md"]),
@@ -226,11 +226,16 @@ class PatternsTests(unittest.TestCase):
             (["src/one.py", "src/two.py"], ["src/**"]),
             (["src/one.py", "tests/two.py"], []),
             (["./src\\file.py"], ["src/**"]),
+            (["src/file.py", "./src/file.py", r"src\file.py", r"./src\file.py"], ["src/**"]),
             (["", None, "src/file.py"], ["src/**"]),
         )
         for paths, expected in cases:
             with self.subTest(paths=paths):
                 self.assertEqual(xs.pattern_apply_paths(paths), expected)
+
+        paths = ["./tests/two.py", r"src\one.py", "src/one.py", "./src/two.py", r".\tests\two.py"]
+        self.assertEqual(xs.pattern_apply_paths(paths), [])
+        self.assertEqual(xs.pattern_apply_paths(list(reversed(paths))), [])
 
     def test_compare_draft_empty_optional_config_uses_defaults_without_mutation(self):
         report = {"card_type": None, "runs": {}, "diff_notes": []}
