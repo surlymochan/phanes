@@ -5052,14 +5052,21 @@ def adjust_status_for_verify(status, verify):
         return status, None
     if verify["rc"] == 0 and status == "partial":
         return "done", "executor reported partial; host verify passed"
-    if verify["rc"] != 0 and status == "done":
-        return "partial", "executor reported done; host verify failed"
+    if verify["rc"] != 0:
+        note = "host verify failed: %s (rc %s)" % (verify.get("cmd", "unknown command"), verify["rc"])
+        if status == "done":
+            return "partial", note
+        return status, note
     return status, None
 
 
-def adjust_status_for_change_evidence(status, verify_note, *, commit, workspace_changed, changed, read_only, verify):
-    """Downgrade a false done when the executor reported success without commits, diffs, or host verify."""
-    if read_only or verify:
+def adjust_status_for_change_evidence(status, verify_note, *, commit, workspace_changed, changed, read_only, verify,
+                                      require_change_evidence=False):
+    """Downgrade a false done when the executor reported success without commits, diffs, or host verify.
+
+    A host verify normally stands in for change evidence; require_change_evidence=True keeps the
+    downgrade for callers (the lane) that must not report a done run without an auditable commit."""
+    if read_only or (verify and not require_change_evidence):
         return status, verify_note
     if status != "done":
         return status, verify_note
@@ -8316,7 +8323,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         status, verify_note = adjust_status_for_verify(status, verify)
     status, verify_note = adjust_status_for_change_evidence(
         status, verify_note, commit=fin.get("commit"), workspace_changed=changed, changed=changed,
-        read_only=read_only, verify=verify)
+        read_only=read_only, verify=verify, require_change_evidence=True)
     if read_only and verify:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx", "-e", "/.openswarm-tmp/"]):
             cleanup_rc, _, cleanup_err = lane_git(command, ws["root"])
@@ -10490,7 +10497,7 @@ def cmd_verify_remote(args):
                                      "--verify", args.verify, "--timeout", str(args.timeout)], timeout=args.timeout + 60)
     finally:
         host_require(target, host_git(target, target_repo, ["update-ref", "-d", ref]), "verification ref cleanup")
-    outcome = {"host": target["name"], "rc": outcome["rc"], "failing": outcome["failing"], "seconds": outcome["seconds"],
+    outcome = {"host": target["name"], "cmd": args.verify, "rc": outcome["rc"], "failing": outcome["failing"], "seconds": outcome["seconds"],
                "prepare": outcome.get("prepare", []), "workspace_note": outcome.get("workspace_note"),
                **({"error_class": outcome["error_class"]} if outcome.get("error_class") else {})}
     result["verify_remote"] = outcome
