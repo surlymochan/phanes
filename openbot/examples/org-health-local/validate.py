@@ -2,7 +2,7 @@
 """校验 diagnosis.json 是否符合 schema/diagnosis.schema.json。
 
 用法：
-    python3 validate.py [--schema 结构定义] [--json] [文件 ...]
+    python3 validate.py [--schema 结构定义] [--root 根目录] [--json] [文件 ...]
 
 默认校验 data/diagnosis.json。只使用标准库。校验失败时退出码非 0，
 并逐条打印出错路径，例如 /scope/schema版本。退出码：0 全部通过，
@@ -301,6 +301,16 @@ def validate_data(data: object, schema: dict) -> list[str]:
     return Validator(schema).errors(data)
 
 
+def root_targets(root: Path) -> list[tuple[Path, Path]]:
+    """返回 root 下实际存在的 brief、diagnosis 与 site 诊断文件及其 schema。"""
+    candidates = (
+        (root / "brief.json", ROOT / "boss" / "brief.schema.json"),
+        (root / "diagnosis.json", SCHEMA_PATH),
+        (root / "site" / "data" / "diagnosis.json", SCHEMA_PATH),
+    )
+    return [(path, schema) for path, schema in candidates if path.is_file()]
+
+
 def main(argv: list[str] | None = None) -> int:
     """校验命令行给出的文件。返回进程退出码。"""
     parser = argparse.ArgumentParser(
@@ -317,6 +327,11 @@ def main(argv: list[str] | None = None) -> int:
         help="待校验的数据文件。默认校验 data/diagnosis.json。",
     )
     parser.add_argument(
+        "--root",
+        type=Path,
+        help="校验临时工作根目录下的 brief.json、diagnosis.json 与 site/data/diagnosis.json。",
+    )
+    parser.add_argument(
         "--schema",
         type=Path,
         default=SCHEMA_PATH,
@@ -324,9 +339,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="以 JSON 格式输出校验结果。")
     args = parser.parse_args(argv)
-    paths = args.paths or [DATA_PATH]
+    if args.root is not None and args.paths:
+        parser.error("--root 不能与文件路径同时使用")
+    targets = (
+        root_targets(args.root)
+        if args.root is not None
+        else [(path, args.schema) for path in (args.paths or [DATA_PATH])]
+    )
+    if args.root is not None and not targets:
+        message = f"根目录 {args.root} 中没有可校验的 JSON 文件"
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [{"path": str(args.root), "message": message}],
+                        "schema_version": None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
+        return EXIT_USAGE
     try:
-        validator = Validator(load_schema(args.schema))
+        validators = {schema: Validator(load_schema(schema)) for _, schema in targets}
     except ValueError as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
@@ -334,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     unreadable = 0
     json_errors: list[dict[str, str]] = []
     schema_version = None
-    for path in paths:
+    for path, schema in targets:
         try:
             data = load_data(path)
         except ValueError as cause:
@@ -344,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(str(cause), file=sys.stderr)
             unreadable += 1
             continue
-        errors = validator.errors(data)
+        errors = validators[schema].errors(data)
         if isinstance(data, dict) and isinstance(data.get("scope"), dict):
             schema_version = data["scope"].get("schema版本", schema_version)
         if errors:
