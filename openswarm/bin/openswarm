@@ -7582,7 +7582,7 @@ def pi_compact_event(msg):
     return out
 
 
-PI_RETRYABLE_RE = re.compile(r"overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|"
+PI_RETRYABLE_RE = re.compile(r"overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504|529)\b|"
                              r"service.?unavailable|server.?error|internal.?error|network.?error|connection.?(?:error|refused|lost)|"
                              r"fetch failed|socket hang up|ended without|timed? out|timeout|terminated", re.I)
 
@@ -8030,12 +8030,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         lane_abort_child(lane, child, turn)
         abort_deadline = NOW() + 30
     desc_recorded_at = 0.0
+    desc_eager_until = time.monotonic() + 3.0
     pi_retry_wait = None
     while not ended:
         # Scanning descendants costs one pgrep per process plus a status.json rewrite; doing it
         # for every streamed event throttled pi/codex lanes and left the model idle while the
-        # event queue backed up (box 2026-11-01). Record at most every 5 seconds.
-        if child.pid and time.monotonic() - desc_recorded_at >= 5.0 and pid_alive(child.pid):
+        # event queue backed up (box 2026-11-01). Record at most every 5 seconds, except during
+        # the first seconds of a turn, so a short-lived executor's detached children are seen.
+        mono = time.monotonic()
+        if child.pid and (mono < desc_eager_until or mono - desc_recorded_at >= 5.0) and pid_alive(child.pid):
             record_executor_descendants(rdir, child.pid)
             desc_recorded_at = time.monotonic()
         lane_control_messages(server, lane, spec, child, turn, pending)

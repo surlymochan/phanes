@@ -86,7 +86,9 @@ const server = createServer((req, res) => {
         tail = (tail + chunk.toString('utf8')).slice(-4096);
         let m; const re = /"(input_tokens|output_tokens)"\s*:\s*(\d+)/g;
         while ((m = re.exec(tail))) { const k = m[1] === 'input_tokens' ? 'in_tok' : 'out_tok'; row[k] = Math.max(row[k] || 0, Number(m[2])); }
-        if (!row.stream_err && /"type"\s*:\s*"error"|event:\s*error|"http_code"\s*:\s*"?[45]\d\d/.test(tail)) {
+        // Only a real SSE error event counts (line-start `event: error` or an error `data:` frame);
+        // model text is JSON-escaped inside deltas, so it cannot forge either form.
+        if (!row.stream_err && /(?:^|\n)event:\s*error\b|(?:^|\n)data:\s*\{"type"\s*:\s*"error"|(?:^|\n)data:\s*\{[^\n]*"http_code"\s*:\s*"?[45]\d\d/.test(tail)) {
           const t = /"error"\s*:\s*\{[^}]*?"type"\s*:\s*"([a-z_]+)"/.exec(tail); const h = /"http_code"\s*:\s*"?([45]\d\d)/.exec(tail);
           const map = {rate_limit_error: 429, overloaded_error: 529, api_error: 500, invalid_request_error: 400, authentication_error: 401, permission_error: 403, not_found_error: 404, request_too_large: 413};
           row.http_status = row.status; row.status = h ? Number(h[1]) : (map[t && t[1]] || 500);

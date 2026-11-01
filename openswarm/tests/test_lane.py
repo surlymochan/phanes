@@ -85,6 +85,13 @@ class LanePureFunctionTests(unittest.TestCase):
         self.assertEqual(row["uptime_seconds"], 10.0)
         self.assertNotIn("unknown_metadata", row)
 
+    def test_pi_retryable_errors_need_whole_status_codes(self):
+        for text in ("529 overloaded_error: Overloaded", "HTTP 503 Service Unavailable", "429 Too Many Requests",
+                     "fetch failed", "socket hang up", "request timed out"):
+            self.assertTrue(xs.PI_RETRYABLE_RE.search(text), text)
+        for text in ("tool exceeded 15003 ms budget", "request id 4291838 rejected", "invalid_request_error: bad schema"):
+            self.assertFalse(xs.PI_RETRYABLE_RE.search(text), text)
+
     def test_systemd_quote_plain_string(self):
         self.assertEqual(xs.systemd_quote("plain"), '"plain"')
         self.assertEqual(xs.systemd_quote("lane_worker_1"), '"lane_worker_1"')
