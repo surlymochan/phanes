@@ -41,6 +41,64 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
 
+def ctl_state_dir():
+    directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    return directory
+
+def worker_state_path():
+    return os.path.join(ctl_state_dir(), "autodispatch.pid")
+
+def worker_alive(pid, started_at):
+    try:
+        if isinstance(pid, bool) or not re.fullmatch(r"[0-9]+", str(pid)):
+            return False
+        pid = int(pid)
+        if pid <= 1:
+            return False
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/stat") as stream:
+            stat = stream.read()
+        fields = stat[stat.rfind(")") + 2:].split()
+        with open("/proc/stat") as stream:
+            boot_time = float(stream.read().split("btime ", 1)[1].split()[0])
+        process_started_at = boot_time + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+        age = float(started_at) - process_started_at
+        return 0 <= age <= 5
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, OSError, IndexError, TypeError):
+        return False
+    return True
+
+def start_autodispatch(command=None):
+    """Start autodispatch once, removing a stale pid left by a reboot."""
+    state_path = worker_state_path()
+    try:
+        with open(state_path) as stream:
+            state = json.load(stream)
+        if worker_alive(state["pid"], state["started_at"]):
+            return state
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        os.unlink(state_path)
+    except FileNotFoundError:
+        pass
+    command = command or os.environ.get("OPENSWARM_AUTODISPATCH_COMMAND", f"{HOME}/phanes-ctl/bin/lane-autodispatch")
+    argv = shlex.split(command) if isinstance(command, str) else list(command)
+    if not argv:
+        raise ValueError("worker command must not be empty")
+    process = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    state = {"pid": process.pid, "started_at": time.time()}
+    temporary = state_path + ".tmp"
+    with open(temporary, "w") as stream:
+        json.dump(state, stream)
+        stream.write("\n")
+    os.replace(temporary, state_path)
+    return state
+
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
     b = BACKOFF.setdefault(h, {"n": 0, "until": 0}); b["n"] += 1
