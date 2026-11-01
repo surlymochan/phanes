@@ -258,9 +258,11 @@ class BusTests(unittest.TestCase):
     @staticmethod
     def report(status, branch=None, commit=None):
         return {"status": status, "summary": "external work", "files_changed": ["worker.txt"],
-                "tests": "fake verify", "followups": [], "branch": branch, "commit": commit, "pr_url": None}
+                "tests": "fake verify", "followups": [], "branch": branch, "commit": commit,
+                "pr_url": None, "error_class": "executor_failed" if status == "failed" else None}
 
     def send_result(self, number, report, label="done", login="executor"):
+        report.setdefault("run_id", xs.bus_extract_task(self.issue(number)["body"])["run_id"])
         self.add_comment(number, "```openswarm-result\n" + json.dumps(report) + "\n```", login=login)
         self.set_labels(number, [label], ["queued", "claimed"])
 
@@ -399,7 +401,7 @@ class BusTests(unittest.TestCase):
         self.assertIn("[REDACTED]", comment)
 
     def test_result_branch_validation_matches_run_id_pattern(self):
-        report = {"status": "done", "summary": "ok", "files_changed": [], "tests": "",
+        report = {"status": "done", "run_id": "a_B-9", "summary": "ok", "files_changed": [], "tests": "",
                   "followups": [], "branch": "openswarm/a_B-9", "commit": None}
         body = lambda value: "```openswarm-result\n" + json.dumps({**report, "branch": value}) + "\n```"
         self.assertIsNotNone(xs.bus_parse_result(body(report["branch"])))
