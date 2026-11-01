@@ -86,7 +86,19 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         if clean_path == '/data/diagnosis.json' and not self.data_file.is_file():
             self.send_error(404, 'File not found')
             return None
-        return super().send_head()
+        try:
+            return super().send_head()
+        except PermissionError:
+            # A broken/unreadable static tree must still produce an HTTP
+            # response; it must not abort the request handler before the API
+            # can serve its independent diagnosis snapshot.
+            self.send_error(403)
+            return None
+        except OSError:
+            # The root may disappear while a request is in flight. Treat that
+            # as a stable static 404 instead of leaking a handler traceback.
+            self.send_error(404)
+            return None
 
     def _serve_diagnosis_api(self, head=False):
         """返回与静态页面使用的 diagnosis.json 相同字段的 JSON 响应。"""

@@ -1174,6 +1174,39 @@ class MissingDiagnosisDataTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_broken_static_root_does_not_swallow_diagnosis_api(self):
+        """静态根目录运行中消失时，API 仍返回合法诊断 JSON。"""
+        diagnosis = Path(self.tmp.name) / 'diagnosis.json'
+        diagnosis.write_text('{"source": "regression"}', encoding='utf-8')
+        args = serve.parse_args([
+            '--port', '0', '--root', str(self.dist), '--data', str(diagnosis),
+        ])
+        server = serve.create_server(args.port, args.data, root=args.root)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+
+        broken_dist = self.dist.with_name('broken_dist')
+        self.dist.rename(broken_dist)
+        try:
+            conn = http.client.HTTPConnection('127.0.0.1', server.server_address[1], timeout=5)
+            try:
+                conn.request('GET', '/styles.css')
+                static_response = conn.getresponse()
+                self.assertEqual(static_response.status, 404)
+                static_response.read()
+
+                conn.request('GET', '/api/diagnosis')
+                api_response = conn.getresponse()
+                self.assertEqual(api_response.status, 200)
+                self.assertEqual(json.loads(api_response.read()), {'source': 'regression'})
+            finally:
+                conn.close()
+        finally:
+            broken_dist.rename(self.dist)
+
     def test_missing_static_diagnosis_has_explicit_error_content_type(self):
         args = serve.parse_args(['--port', '0', '--root', str(self.dist)])
         server = serve.create_server(args.port, args.data, root=args.root)
