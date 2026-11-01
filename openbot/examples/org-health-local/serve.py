@@ -14,6 +14,9 @@ import time
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data' / 'diagnosis.json'
 ALLOWED_PATHS = ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/diagnosis.json', '/api/diagnosis')
+# 静态页面与静态资源：缺失或不是普通文件时返回可读 404，而不是让目录列举或异常中断响应。
+STATIC_FILE_PATHS = ('/index.html', '/app.bundle.js', '/styles.css')
+INDEX_FILE_NAME = 'index.html'
 DEFAULT_PORT = 8765
 JSON_CONTENT_TYPE = 'application/json'
 
@@ -109,7 +112,25 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         if clean_path == '/data/diagnosis.json' and not self.data_file.is_file():
             self.send_error(404, 'File not found')
             return None
-        return super().send_head()
+        static_file = self.static_file_path(clean_path)
+        if static_file is not None and not static_file.is_file():
+            # 静态资源缺失、被目录占用或无法按文件读取：给出可读 404，API 响应不受影响。
+            self.send_error(404, 'File not found')
+            return None
+        try:
+            return super().send_head()
+        except OSError:
+            # 静态文件在检查后仍可能无法读取；不要让异常中断 HTTP 响应。
+            self.send_error(404, 'File not found')
+            return None
+
+    def static_file_path(self, clean_path):
+        """返回静态页面/资源对应的文件路径；非静态路径返回 None。"""
+        if clean_path == '/':
+            return Path(self.translate_path(clean_path)) / INDEX_FILE_NAME
+        if clean_path in STATIC_FILE_PATHS:
+            return Path(self.translate_path(clean_path))
+        return None
 
     def _serve_diagnosis_api(self, head=False):
         """返回与静态页面使用的 diagnosis.json 相同字段的 JSON 响应。"""

@@ -1221,5 +1221,115 @@ class MissingDiagnosisDataTests(unittest.TestCase):
         mock_create.assert_called_once_with(0, override_data.resolve(), root=self.dist.resolve())
 
 
+class StaticIndexFailureHttpTests(unittest.TestCase):
+    """静态 index 异常时，真实 HTTP 服务仍应独立返回诊断 API。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'root'
+        (self.root / 'data').mkdir(parents=True)
+        self.data = self.root / 'data' / 'diagnosis.json'
+        self.payload = {'source': 'non-empty-diagnosis', 'issues': ['owner-missing']}
+        self.data.write_text(json.dumps(self.payload), encoding='utf-8')
+
+    def start_server(self):
+        server = serve.create_server(0, root=self.root)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={'poll_interval': 0.05},
+            daemon=True,
+        )
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def request(self, port, path, method='GET'):
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request(method, path)
+            response = connection.getresponse()
+            return response.status, response.getheader('Content-Type'), response.read()
+        finally:
+            connection.close()
+
+    def test_missing_index_returns_readable_404_and_api_json(self):
+        server = self.start_server()
+        port = server.server_address[1]
+
+        status, content_type, body = self.request(port, '/')
+        self.assertEqual(status, 404)
+        self.assertEqual(content_type, 'text/html;charset=utf-8')
+        self.assertTrue(body)
+        self.assertIn(b'404', body)
+
+        status, content_type, body = self.request(port, '/api/diagnosis')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json')
+        self.assertEqual(json.loads(body), self.payload)
+
+    def test_unreadable_index_path_returns_readable_404_and_api_json(self):
+        # 目录占据 index.html 路径，静态处理器无法按文件读取；API 不应受影响。
+        (self.root / 'index.html').mkdir()
+        server = self.start_server()
+        port = server.server_address[1]
+
+        status, content_type, body = self.request(port, '/index.html')
+        self.assertEqual(status, 404)
+        self.assertEqual(content_type, 'text/html;charset=utf-8')
+        self.assertTrue(body)
+        self.assertIn(b'404', body)
+
+        status, content_type, body = self.request(port, '/api/diagnosis')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json')
+        self.assertEqual(json.loads(body), self.payload)
+
+    def test_broken_symlink_index_returns_readable_404_and_api_json(self):
+        # 悬空符号链接无法按文件读取：静态路径返回可读 404，API 不受影响。
+        (self.root / 'index.html').symlink_to(self.root / 'missing-index.html')
+        server = self.start_server()
+        port = server.server_address[1]
+
+        status, content_type, body = self.request(port, '/')
+        self.assertEqual(status, 404)
+        self.assertEqual(content_type, 'text/html;charset=utf-8')
+        self.assertTrue(body)
+        self.assertIn(b'404', body)
+
+        status, content_type, body = self.request(port, '/api/diagnosis')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json')
+        self.assertEqual(json.loads(body), self.payload)
+
+    def test_missing_index_head_returns_404_without_body(self):
+        # HEAD 与 GET 的 404 状态、Content-Type 保持一致，但不发送正文。
+        server = self.start_server()
+        port = server.server_address[1]
+
+        status, content_type, body = self.request(port, '/', method='HEAD')
+        self.assertEqual(status, 404)
+        self.assertEqual(content_type, 'text/html;charset=utf-8')
+        self.assertEqual(body, b'')
+
+    def test_non_empty_index_and_api_both_succeed(self):
+        index = self.root / 'index.html'
+        index.write_bytes(b'<!doctype html><title>healthy</title>')
+        server = self.start_server()
+        port = server.server_address[1]
+
+        status, content_type, body = self.request(port, '/')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'text/html')
+        self.assertEqual(body, index.read_bytes())
+
+        status, content_type, body = self.request(port, '/api/diagnosis')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json')
+        self.assertEqual(json.loads(body), self.payload)
+
+
 if __name__ == '__main__':
     unittest.main()
