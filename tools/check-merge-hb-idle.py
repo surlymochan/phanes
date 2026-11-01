@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline/static contract for merge-loop's idle heartbeat (Refs #1072)."""
+"""Offline/static contract for merge-loop's idle heartbeat (Refs #1111)."""
 
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ def main() -> None:
         gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' '[]'\n", encoding="utf-8")
         gh.chmod(0o755)
         heartbeat = fixture / "autodispatch" / "merge-heartbeat"
+        heartbeat.parent.mkdir(parents=True)
+        heartbeat.touch()
+        old_mtime = heartbeat.stat().st_mtime_ns
         env = {
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -41,6 +44,7 @@ def main() -> None:
         )
         assert result.returncode == 0, result.stderr
         assert heartbeat.is_file(), "idle tick did not update merge-heartbeat"
+        assert heartbeat.stat().st_mtime_ns > old_mtime, "idle tick did not refresh merge-heartbeat"
 
     print("merge heartbeat idle contract: OK")
 
