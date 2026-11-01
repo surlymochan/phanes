@@ -83,7 +83,10 @@ renewal returns a valid X.509 certificate; a partial failure leaves the old
 certificates and fleet config untouched. The status file contains a stable,
 machine-readable row with those five fields; `hosts_ok` counts only valid
 certificates in the written fleet config, and cooldown skips contribute to
-`skipped_cooldown`. When `need_ok` is configured, the gate stays healthy when
+`skipped_cooldown`. When the SSH BatchMode probe is enabled (`ssh_probe` in the fleet
+config, or `--ssh-probe`), a host whose probe exits non-zero is marked
+`probe_status: failed` and stays outside `hosts_ok` (Refs #954).
+When `need_ok` is configured, the gate stays healthy when
 `hosts_ok >= need_ok`; cooldown hosts are omitted from an alternate fleet
 config, so three reachable hosts can keep `ok=1` while two hosts cool down
 (for example, `ok=1 hosts_ok=3 skipped_cooldown=2`).
@@ -116,6 +119,37 @@ keys.  The offline contract check creates fake sockets with old and fresh mtimes
 
 ```bash
 python3 tools/check-cm-ad-sweep.py
+```
+
+### SSH fleet BatchMode probe & hosts_ok rollup (Refs #954)
+
+`ib-refresh` can probe every fleet host with `ssh -o BatchMode=yes` before it rolls the
+fleet up into the control-plane status row. Any non-zero probe exit code (including
+`Permission denied`, `Connection closed`, or timeout) marks the host as failed: the row
+carries `probe_status: failed` and the host is excluded from `hosts_ok`, so a broken host
+never adds capacity. Only a zero exit code may add one `hosts_ok`.
+
+Enable the probe in the fleet config (`~/phanes-ctl/fleet.json`) or on the command line:
+
+```json
+{
+  "need_ok": 3,
+  "ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/openswarm-hub/config"},
+  "hosts": [{"name": "ib1", "cert": "certs/ib1.crt"}]
+}
+```
+
+```bash
+python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json \
+  --renew-command ~/phanes-ctl/bin/renew-cert --ssh-probe \
+  --ssh-config ~/.ssh/openswarm-hub/config
+```
+
+The offline contract check drives the same production refresh path with a fake probe
+runner, so it never opens an SSH connection and never touches live instabox nodes:
+
+```bash
+python3 tools/check-fleet-batchmode-probe.py
 ```
 
 Certificate reuse is controlled by `IB_CERT_REUSE_TTL` (default `1500` seconds):
@@ -178,6 +212,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-ready-target.py` — offline #1242 AD ready-queue contract. With fake `ready`, `LOW`, and `TARGET` values, when `ready < LOW` the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects thin cards. It uses only a local fixture and never calls `gh`.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
+- `python3 tools/check-fleet-batchmode-probe.py` — offline #954 contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner: fake probe outputs with non-zero exit codes (such as `Permission denied` and `Connection closed`) never increment `hosts_ok`, while a zero exit code still does. It opens no SSH connection and touches no live instabox node.
 - `python3 tools/check-lane-failed-requeue.py` — offline #960 contract check. Before restoring `lane-ready` to a `lane-failed` issue, fake labels must have no `in-progress`/`lane-pr`, `state.json` must have no occupied lane entry, and the issue must still contain an inline acceptance command. It never touches the real issue or state.
 - `python3 tools/check-ad-fetch-transient-class.py` — offline #986 contract check. It asserts `bad pack header` and `fetch-pack: unexpected disconnect` stderr samples remain transient and retryable within the harvest bound.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.

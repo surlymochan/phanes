@@ -14,6 +14,11 @@ import tempfile
 
 STATUS_KEYS = ("ok", "hosts_ok", "skipped_cooldown", "min_ttl", "min_exp")
 COOLDOWN_RE = re.compile(r"^auto:cooldown:until=(\S+)", re.MULTILINE)
+BATCHMODE_OPTION = "BatchMode=yes"
+CONNECT_TIMEOUT_OPTION = "ConnectTimeout=5"
+PROBE_COMMAND = "true"
+PROBE_TIMEOUT_SECONDS = 15
+DEFAULT_SSH_CONFIG = "~/.ssh/openswarm-hub/config"
 
 
 def _status_line(ok, hosts_ok, skipped_cooldown, min_ttl, min_exp):
@@ -60,11 +65,80 @@ def _cooldown_hosts(pause_dir, now):
     return active
 
 
+def _probe_failed(row):
+    """True when the host's SSH BatchMode probe exited non-zero (Refs #954)."""
+    code = row.get("probe_exit_code")
+    return code is not None and code != 0
+
+
 def _usable_hosts(rows, known_hosts=None):
     return [row for row in rows
             if (known_hosts is None or row.get("host") in known_hosts)
             and row.get("final_status", row.get("status")) == "valid"
-            and not _is_cooldown(row)]
+            and not _is_cooldown(row)
+            and not _probe_failed(row)]
+
+
+def _probe_argv(host, ssh_config=None):
+    """Build the non-interactive BatchMode probe command for one fleet host."""
+    argv = ["ssh", "-o", BATCHMODE_OPTION, "-o", CONNECT_TIMEOUT_OPTION]
+    if ssh_config:
+        argv.extend(["-F", str(Path(ssh_config).expanduser())])
+    argv.extend([str(host), "--", PROBE_COMMAND])
+    return argv
+
+
+def _probe_host(host, *, ssh_config=None, runner=None, timeout=PROBE_TIMEOUT_SECONDS):
+    """Probe one fleet host over SSH and classify the result.
+
+    Any non-zero exit code (`Permission denied`, `Connection closed`, timeout) marks the
+    host as failed.  A failed host must never be counted in hosts_ok (Refs #954).
+    `runner` replaces the real SSH call so an offline check can feed fake probe output.
+    """
+    argv = _probe_argv(host, ssh_config=ssh_config)
+    try:
+        if runner is None:
+            proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+            exit_code, stderr = proc.returncode, proc.stderr
+        else:
+            exit_code, _stdout, stderr = runner(argv)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError) as exc:
+        exit_code, stderr = 255, str(exc)
+    try:
+        code = int(exit_code)
+    except (TypeError, ValueError):
+        code = 255
+    return {"host": str(host), "exit_code": code, "ok": code == 0,
+            "probe_status": "ok" if code == 0 else "failed",
+            "probe_error": (stderr or "").strip()[-200:]}
+
+
+def _probe_settings(config, ssh_config=None, enable=None):
+    """Resolve the SSH BatchMode probe settings for one refresh run.
+
+    The fleet config enables the probe with `"ssh_probe"` (true, or a mapping with
+    `enabled`, `ssh_config` and `timeout`); `--ssh-probe` and `--no-ssh-probe` override
+    the fleet config.
+    """
+    settings = config.get("ssh_probe")
+    timeout = PROBE_TIMEOUT_SECONDS
+    if isinstance(settings, dict):
+        enabled = bool(settings.get("enabled", True))
+        ssh_config = settings.get("ssh_config") or ssh_config
+        try:
+            timeout = int(settings.get("timeout", PROBE_TIMEOUT_SECONDS))
+        except (TypeError, ValueError):
+            timeout = PROBE_TIMEOUT_SECONDS
+    elif isinstance(settings, bool):
+        enabled = settings
+    else:
+        enabled = False
+    if enable is not None:
+        enabled = enable
+    if enabled and not ssh_config:
+        default = Path(DEFAULT_SSH_CONFIG).expanduser()
+        ssh_config = str(default) if default.exists() else None
+    return {"enabled": enabled, "ssh_config": ssh_config, "timeout": timeout}
 
 
 def _need_ok(hosts_ok, skipped_cooldown, need_ok):
@@ -157,7 +231,8 @@ def _cert_path(config_path, value):
     return path if path.is_absolute() else config_path.parent / path
 
 
-def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=None):
+def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=None,
+            probe_runner=None, probe_enabled=None, ssh_config=None):
     config_path = Path(config_path)
     output_path = Path(output_path or config_path)
     try:
@@ -166,9 +241,14 @@ def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=N
         if not isinstance(hosts, list):
             raise ValueError("fleet config hosts must be a list")
         need_ok = int(config.get("need_ok", len(hosts)))
+        probe = _probe_settings(config, ssh_config=ssh_config, enable=probe_enabled)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         return {"ok": False, "start_lane_autodispatch": False, "error": f"fleet config: {exc}",
                 "status_line": _status_line(False, 0, 0, -1, -1)}
+
+    def finish(result):
+        result["ssh_probe"] = "enabled" if probe["enabled"] else "disabled"
+        return result
 
     now = dt.datetime.now(dt.timezone.utc)
     pause_dir = Path(pause_dir) if pause_dir is not None else config_path.parent / "autodispatch"
@@ -195,8 +275,8 @@ def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=N
             pending.append((host, cert, state))
 
     if config_errors:
-        return _status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
-                            "renewed": [], "errors": config_errors}, hosts, config_path, now, need_ok)
+        return finish(_status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
+                                    "renewed": [], "errors": config_errors}, hosts, config_path, now, need_ok))
 
     errors = []
     renewed = []
@@ -226,8 +306,8 @@ def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=N
                 break
 
         if errors:
-            return _status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
-                                "renewed": [], "errors": errors}, hosts, config_path, now, need_ok)
+            return finish(_status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
+                                        "renewed": [], "errors": errors}, hosts, config_path, now, need_ok))
 
         for cert, staged_cert in replacements:
             if cert is None:
@@ -249,8 +329,20 @@ def refresh(config_path, renew_command, threshold, output_path=None, pause_dir=N
                           for h in hosts if h.get("name") == row["host"]), None)
         final = _state(_cert_path(config_path, cert_name), now, threshold) if cert_name else "missing"
         result_rows.append({**row, "final_status": final})
-    return _status_for({"ok": True, "start_lane_autodispatch": True, "hosts": result_rows,
-                        "renewed": renewed, "errors": []}, hosts, config_path, now, need_ok)
+    # Probe the fleet over SSH after the renewal, so a host that still refuses a
+    # non-interactive login never enters hosts_ok (Refs #954).
+    if probe["enabled"]:
+        for row in result_rows:
+            if _is_cooldown(row) or not row.get("host"):
+                continue
+            outcome = _probe_host(row["host"], ssh_config=probe["ssh_config"],
+                                  runner=probe_runner, timeout=probe["timeout"])
+            row["probe_exit_code"] = outcome["exit_code"]
+            row["probe_status"] = outcome["probe_status"]
+            if outcome["probe_error"]:
+                row["probe_error"] = outcome["probe_error"]
+    return finish(_status_for({"ok": True, "start_lane_autodispatch": True, "hosts": result_rows,
+                                "renewed": renewed, "errors": []}, hosts, config_path, now, need_ok))
 
 
 def main(argv=None):
@@ -263,10 +355,20 @@ def main(argv=None):
     parser.add_argument("--output-fleet-config")
     parser.add_argument("--pause-dir", help="read-only directory containing PAUSE-HOST-* files")
     parser.add_argument("--status-file")
+    probe = parser.add_mutually_exclusive_group()
+    probe.add_argument("--ssh-probe", dest="ssh_probe", action="store_true", default=None,
+                       help="probe every fleet host with `ssh -o BatchMode=yes`; a non-zero exit "
+                            "keeps the host out of hosts_ok")
+    probe.add_argument("--no-ssh-probe", dest="ssh_probe", action="store_false", default=None,
+                       help="skip the SSH BatchMode probe")
+    parser.add_argument("--ssh-config", help="SSH config file for the probe (passed to ssh with -F)")
     args = parser.parse_args(argv)
     threshold = cert_reuse_ttl(args.threshold_seconds)
+    # Naming the SSH config for the probe asks for the probe as well.
+    probe_enabled = True if args.ssh_probe is None and args.ssh_config else args.ssh_probe
     result = refresh(args.fleet_config, args.renew_command, threshold,
-                     args.output_fleet_config, args.pause_dir)
+                     args.output_fleet_config, args.pause_dir,
+                     probe_enabled=probe_enabled, ssh_config=args.ssh_config)
     payload = json.dumps(result, sort_keys=True)
     print(payload)
     if args.status_file:
