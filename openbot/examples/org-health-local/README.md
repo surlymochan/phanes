@@ -289,10 +289,11 @@ python3 builder/check_site.py "$tmp_dir/dist"
 
 ## Boss 角色：生成诊断任务书
 
-`boss/make_brief.py` 生成任务书；可用 `--fx` 写入 `口径.汇率`（正数，人民币/美元），省略时保持默认输出且不写汇率；`--goal` 覆盖「目标」（可重复给出，不给时用内置默认目标）。`观察期间` 可选写入 `起始期次`、`参考期次`、`截止期次`，各值必须来自 `期次` 列表。
+`boss/make_brief.py` 生成任务书；可用 `--fx` 写入 `口径.汇率`（正数，人民币/美元），省略时保持默认输出且不写汇率；`--goal` 覆盖「目标」（可重复给出，不给时用内置默认目标）；`--period`/`--periods` 直接给出「期次」锚点（`--period` 可重复给出，`--periods` 用逗号分隔），用于让任务书期次与诊断快照的 diagnosis periods 逐项对齐。`观察期间` 可选写入 `起始期次`、`参考期次`、`截止期次`，各值必须来自 `期次` 列表。
 
 ```bash
 python3 boss/make_brief.py --out <brief.json> [--goal 目标] [--month YYYY-MM] [--fx 人民币/美元]
+python3 boss/make_brief.py --out <brief.json> --periods 2026-01实际,2026-05H1参考,2026-09实际,年末测算,年末目标
 python3 boss/make_brief.py --check <brief.json>   # 校验已有任务书，不生成新文件
 ```
 
