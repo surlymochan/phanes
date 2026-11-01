@@ -394,6 +394,34 @@ class BuildDiagnosisTest(unittest.TestCase):
         self.assertFalse(any("cost.csv 缺" in note for note in data["口径说明"]))
         self.assertFalse(any("revenue.csv 缺" in note for note in data["口径说明"]))
 
+    def test_nonempty_dirty_copy_recovers_gap_and_ignores_extra_csv(self) -> None:
+        """非空脏副本缺一期且含多余非业务 CSV 时仍生成可校验快照。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-recoverable")
+        revenue = raw_dir / "revenue.csv"
+        write_csv_lines(revenue, [line for line in csv_lines(revenue) if not line.startswith("2026-06,")])
+        (raw_dir / "people-extra.csv").write_text("姓名,月份\n重复人,2026-06\n", encoding="utf-8")
+
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(data), [])
+        self.assertIn("收入 缺 2026-06 数据，按 null 处理", data["口径说明"])
+
+    def test_nonempty_dirty_copy_hard_fails_and_names_column(self) -> None:
+        """非空脏副本的负数成本必须失败并点名来源列。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-negative")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(
+            cost,
+            [line.replace("2026-01,10.4", "2026-01,-10.4") for line in csv_lines(cost)],
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+        message = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cost.csv", message)
+        self.assertIn("整体技术人力成本万元", message)
+        self.assertFalse(self.out_path.exists())
+
     def test_one_csv_missing_period_keeps_gap_fact_and_valid_snapshot(self) -> None:
         """单个业务 CSV 缺一个观察月份时保留 null 缺口事实并继续生成。"""
         raw_dir = copy_raw(self.folder, "raw-single-file-gap")
