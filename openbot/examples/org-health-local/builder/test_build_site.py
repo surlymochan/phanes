@@ -114,6 +114,8 @@ class BuildSiteTest(unittest.TestCase):
     def test_repeated_build_keeps_site_and_report_readable(self) -> None:
         """同一份 brief 与诊断快照连续构建两次：第二次成功，报告与站点关键文件仍存在且可读。"""
         self.assertEqual(self.build(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle), build_site.EXIT_OK)
+        first_report_bytes = (self.out / "build-report.json").read_bytes()
+        first_report = json.loads(first_report_bytes)
         first_manifest = self.read_manifest()
 
         self.assertEqual(self.build(data=DEMO_DIAGNOSIS_PATH, bundle=self.bundle), build_site.EXIT_OK)
@@ -127,12 +129,24 @@ class BuildSiteTest(unittest.TestCase):
         report = json.loads((self.out / "build-report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["输入路径"], str(DEMO_DIAGNOSIS_PATH.resolve()))
         self.assertEqual(report["sha256"], sha256_of(DEMO_DIAGNOSIS_PATH))
+        self.assertEqual(
+            [entry["路径"] for entry in report["文件清单"]], list(build_site.SITE_FILES)
+        )
+        self.assertEqual(
+            [list(entry) for entry in report["文件清单"]],
+            [["路径", "字节数", "sha256"]] * len(build_site.SITE_FILES),
+        )
         manifest = {entry["路径"]: entry["sha256"] for entry in report["文件清单"]}
-        self.assertEqual(sorted(manifest), sorted(build_site.SITE_FILES))
         for relative, digest in manifest.items():
             with self.subTest(relative=relative):
                 self.assertEqual(digest, sha256_of(self.out / relative))
         self.assertEqual(manifest, first_manifest, "同一份输入两次构建的文件摘要应一致")
+        self.assertEqual(
+            (self.out / "build-report.json").read_bytes(),
+            first_report_bytes,
+            "输入、bundle 与诊断 JSON 不变时两次报告字节应一致",
+        )
+        self.assertEqual(list(report), list(first_report))
 
         # 站点内容仍可读：诊断快照与来源逐字节一致，页面与浏览器包没有损坏。
         self.assertEqual((self.out / "data/diagnosis.json").read_bytes(), DEMO_DIAGNOSIS_PATH.read_bytes())

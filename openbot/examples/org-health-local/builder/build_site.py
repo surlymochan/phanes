@@ -92,11 +92,30 @@ def write_report(out_dir: Path, data_path: Path, source_commit: str | None = Non
                 "sha256": sha256_of(path),
             }
         )
+    input_path = str(data_path.resolve())
+    input_sha256 = sha256_of(data_path)
+    previous_time = None
+    report_path = out_dir / REPORT_NAME
+    if report_path.is_file():
+        try:
+            previous = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            previous = None
+        if (
+            isinstance(previous, dict)
+            and previous.get("输入路径") == input_path
+            and previous.get("sha256") == input_sha256
+            and previous.get("文件清单") == files
+            and previous.get("来源提交") == source_commit
+            and isinstance(previous.get("生成时间"), str)
+        ):
+            previous_time = previous["生成时间"]
     report = {
-        "输入路径": str(data_path.resolve()),
-        "sha256": sha256_of(data_path),
+        "输入路径": input_path,
+        "sha256": input_sha256,
         "文件清单": files,
-        "生成时间": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "生成时间": previous_time
+        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if source_commit is not None:
         report["来源提交"] = source_commit
