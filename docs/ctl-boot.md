@@ -31,6 +31,10 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-autodispatch >/dev/null 2>&1 &`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/heartbeat`
    - **Status snapshot**: `~/phanes-ctl/autodispatch/lanes-status.json` (inspect with `~/phanes-ctl/bin/lane-autodispatch-status`)
+     It contains `_busy` (lanes currently assigned work), `_ready` (open GH
+     `lane-ready` issues not marked `in-progress`, `lane-pr`, or
+     `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
+     is the dispatchable count after `_blocked` is removed.
    - **Task upload contract (Refs #920)**: dispatch uploads the generated task
      over the existing SSH connection with stdin (`ssh ... 'cat > /tmp/task-*.md'`).
      A standalone `scp` upload is forbidden because it is unreliable through
@@ -119,6 +123,11 @@ test -f ~/phanes-ctl/bin/lane-autodispatch \
 ```
 
 Check scripts (no SSH):
+- `python3 tools/check-lanes-status-summary.py` — offline #980 contract check
+  using a fake `lanes-status.json` summary and fake GH ready list. For a soak
+  read, compare the live snapshot with the filtered GH list (dependency
+  blockers are shown separately as `_blocked`):
+  `watch -n 30 "jq -c '{busy:._busy,ready:._ready,blocked:._blocked,at:._at}' ~/phanes-ctl/autodispatch/lanes-status.json; gh issue list --state open --label lane-ready --limit 100 --json number,labels --jq '[.[] | select(([.labels[].name] | index(\"in-progress\") | not) and ([.labels[].name] | index(\"lane-pr\") | not) and ([.labels[].name] | index(\"lane-failed\") | not))] | length'"`.
 - `bash docs/check-ctl-boot.sh` — offline path and heartbeat existence verification under `~/phanes-ctl` (or `bash docs/check-ctl-boot.sh --self-test` to test in an offline fixture)
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
