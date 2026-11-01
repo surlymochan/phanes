@@ -22,7 +22,7 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
 
 1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
    - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
-     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --status-file ~/phanes-ctl/ib-refresh.status`)
+     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --pause-dir ~/phanes-ctl/autodispatch --status-file ~/phanes-ctl/ib-refresh.status`)
    - **Heartbeat path**: `~/phanes-ctl/ctl-loop.heartbeat`
    - **Status path**: `~/phanes-ctl/ib-refresh.status` (stable row: `ok=... hosts_ok=... skipped_cooldown=... min_ttl=... min_exp=...`; field order is fixed)
 
@@ -87,6 +87,10 @@ Hosts absent from the configured topology are errors and are excluded from
 `python3 tools/check-fleet-unknown-host.py`.
 For the ib1/ib2 cooldown case, exercise this accounting with the fake-input check
 `python3 tools/check-ib-cooldown-status.py` (Refs #1262).
+An active `PAUSE-HOST-<host>` body with `auto:cooldown:until=<ISO-Z>` is read
+without modification; `ib-refresh` skips resume/wake/renew for that host and
+counts it in `skipped_cooldown`. Exercise this boundary with
+`python3 tools/check-ib-cooldown-skip.py` (Refs #904).
 Check the parser contract offline with
 `python3 tools/check-ib-status-line.py`.
 
