@@ -3214,7 +3214,8 @@ def concurrency(st, policy):
 def route(prof, st, policy, exclude=()):
     r = policy["routing"]
     notes = []
-    default_order = list(r["default_order"])
+    default_order = [backend for backend in r["default_order"]
+                     if not (policy.get(backend) or {}).get("disabled")]
 
     def prioritize(preferred):
         return [backend for backend in preferred if backend in default_order] + [
