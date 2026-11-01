@@ -11,14 +11,20 @@ issue for every class::
         "default": "close",
     }
 
-A policy is either one action -- ``requeue``, ``pause_lane``, ``lane_failed`` or
-``close`` -- or a bounded retry ``{"max": N, "then": ACTION}``.  The bounded form
-requeues while fewer than ``N`` attempts were made and switches to ``then`` as
-soon as ``N`` attempts have been made.
+A policy is either one action -- ``requeue``, ``reroute``, ``pause_lane``,
+``lane_failed`` or ``close`` -- or a bounded retry ``{"max": N, "then": ACTION}``.
+The bounded form requeues while fewer than ``N`` attempts were made and switches
+to ``then`` as soon as ``N`` attempts have been made.  ``reroute`` re-dispatches
+once on a fallback backend; the caller picks that backend.
 
 An error class that is not in the table falls back to the ``default`` entry.  A
 table without a default closes the issue: an unknown failure is not something to
-retry blindly.
+retry blindly.  ``DEFAULT_TABLE`` is the project default; ``merge_table`` applies
+a project override on top of it.  A ``stopped``/``partial`` run without an error
+class counts as ``exec_error``.
+
+``decide`` returns ``(action, counted)``.  ``counted`` is False for error classes
+in ``UNCOUNTED_CLASSES`` (a VM pause killed by the watchdog is not a failed try).
 
 The module is pure: it reads no files, touches no labels and knows nothing
 about lanes, so the wiring stays with the caller (#1365).
@@ -30,10 +36,27 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Tuple
 
 #: The actions a policy may ask for.
-ACTIONS = ("requeue", "pause_lane", "lane_failed", "close")
+ACTIONS = ("requeue", "reroute", "pause_lane", "lane_failed", "close")
 
 #: The table key used for error classes without their own policy.
 DEFAULT_CLASS = "default"
+
+#: Run statuses that count as ``exec_error`` when no error class was recorded.
+EXEC_ERROR_STATUSES = ("stopped", "partial")
+
+#: Error classes whose attempts do not count towards the retry limit.
+UNCOUNTED_CLASSES = frozenset({"vm_paused"})
+
+#: The project default retry table.
+DEFAULT_TABLE: Dict[str, Any] = {
+    "stalled": "requeue",
+    "risk_blocked": {"max": 1, "then": "reroute"},
+    "exec_error": {"max": 2, "then": "lane_failed"},
+    "vm_paused": "requeue",
+    "cli_too_old": "pause_lane",
+    "quota": "pause_lane",
+    DEFAULT_CLASS: "lane_failed",
+}
 
 
 def _action_names() -> str:
@@ -87,51 +110,60 @@ def _validate_attempts(attempts: Any) -> int:
     return attempts
 
 
+def merge_table(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return ``base`` with the ``override`` entries replacing matching keys.
+
+    Keys the override does not mention keep their base policy.  The result is
+    validated like any table; raise ValueError if it is invalid.
+    """
+    if not isinstance(override, Mapping):
+        raise ValueError(f"override must be a dict, got {override!r}")
+    merged = dict(base)
+    merged.update(override)
+    return _validate_table(merged)
+
+
 def decide(
-    error_class: Any, attempts: int, table: Mapping[str, Any]
-) -> Tuple[str, str]:
-    """Return the ``(action, reason)`` for a failed run.
+    error_class: Any,
+    attempts: int,
+    table: Mapping[str, Any] = DEFAULT_TABLE,
+    status: Any = None,
+) -> Tuple[str, bool]:
+    """Return the ``(action, counted)`` for a failed run.
 
     Args:
         error_class: the class the run ended with; unknown classes use the
-            ``default`` policy of the table.
+            ``default`` policy of the table.  ``None`` or ``""`` with a
+            ``stopped``/``partial`` status counts as ``exec_error``.
         attempts: how many attempts were already made for this issue.
         table: the retry table, see the module docstring for its shape.
+        status: the run status, used only to classify a missing error class.
 
     Returns:
-        A tuple of the action (``requeue``, ``pause_lane``, ``lane_failed`` or
-        ``close``) and a human readable reason naming the class and the policy
-        that decided.
+        A tuple of the action (one of ``ACTIONS``) and whether this failure
+        counts as an attempt (False for ``UNCOUNTED_CLASSES``).
 
     Raises:
         ValueError: the table, the error class or the attempt count is invalid.
     """
     policies = _validate_table(table)
     _validate_attempts(attempts)
+    if error_class in (None, "") and status in EXEC_ERROR_STATUSES:
+        error_class = "exec_error"
     if not isinstance(error_class, str):
         raise ValueError(f"error_class must be a string, got {error_class!r}")
 
+    counted = error_class not in UNCOUNTED_CLASSES
     if error_class in policies:
         selected = error_class
     elif DEFAULT_CLASS in policies:
         selected = DEFAULT_CLASS
     else:
-        return (
-            "close",
-            f"error class {error_class!r}: no policy and no default, closing",
-        )
+        return "close", counted
 
     policy = policies[selected]
     if isinstance(policy, str):
-        return policy, f"error class {error_class!r}: {selected} policy says {policy}"
+        return policy, counted
     if attempts < policy["max"]:
-        return (
-            "requeue",
-            f"error class {error_class!r}: attempt {attempts + 1} of "
-            f"{policy['max']}, requeue",
-        )
-    return (
-        policy["then"],
-        f"error class {error_class!r}: retry limit {policy['max']} reached, "
-        f"{policy['then']}",
-    )
+        return "requeue", counted
+    return policy["then"], counted
