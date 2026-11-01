@@ -92,6 +92,7 @@ After claiming, the worker snapshots the canonical task JSON and its planner dig
 - **未完成 claim 处理 / Unfinished claim reconciliation**: 常驻 worker 重启后应扫描识别未完成的 in-flight claim。依据策略写 error（发表包含 `error_class: "worker_crashed"` 的失败结果评论并标记 failed）或续跑（复用未过期 lease 继续执行，避免丢弃已有工作进度）。
 - **不得双开同 claim / Prevent duplicate claim execution**: 重启或重入时严格禁止对同一 in-flight claim 并发拉起两个运行进程。未完成 claim 必须在受控恢复（写 error 或续跑）确认前拒绝重复认领与双开。
 - **过期 claim 不永久锁死 / Expired claim lease takeover**: Claim 具有有效租约（默认 300 秒）。若持有 claim 的 worker 崩溃或未续约导致租约过期，过期 claim 不永久锁死，其它白名单 worker 判定原租约失效后可发表新的 `/claim <worker>` 接管任务。
+  可用 `python3 tools/check-bus-claim-lease.py` 以假时钟和假评论验证该契约。
 
 ## Trust and cancellation
 
