@@ -9726,6 +9726,26 @@ def instabox_states(hosts):
         return states
 
 
+def fleet_host_available(row):
+    """Only a confirmed, non-error probe may contribute capacity."""
+    if not row.get("reachable") or str(row.get("status", "")).upper() == "UNKNOWN":
+        return False
+    return "connection closed" not in str(row.get("error", "")).lower()
+
+
+def fleet_health_summary(rows):
+    """Summarize confirmed fleet capacity without counting unknown hosts."""
+    available = [row for row in rows if fleet_host_available(row)]
+    capacity_total = sum(row.get("total", 0) for row in available
+                         if isinstance(row.get("total"), (int, float))
+                         and not isinstance(row.get("total"), bool))
+    active = sum(len(row.get("active_runs") or []) for row in available)
+    return {"hosts_total": len(rows), "hosts_ok": len(available),
+            "hosts_unknown": len(rows) - len(available),
+            "capacity_total": capacity_total,
+            "capacity_available": max(0, capacity_total - active)}
+
+
 def fleet_snapshot():
     capacity_only = os.environ.get("OPENSWARM_FLEET_CAPACITY_ONLY") == "1"
     config_error = None
@@ -9900,7 +9920,13 @@ def cmd_fleet(args):
             row.update(paused=state == "paused", state=state or "unknown")
         else:
             try:
-                row.update(host_json(host, ["fleet", "_snapshot"], timeout=20), reachable=True)
+                snapshot = host_json(host, ["fleet", "_snapshot"], timeout=20)
+                probe_status = str(snapshot.get("status", "")).upper()
+                probe_error = str(snapshot.get("error", ""))
+                row.update(snapshot, reachable=not (probe_status == "UNKNOWN"
+                                                    or "connection closed" in probe_error.lower()))
+                if not row["reachable"]:
+                    row["error"] = probe_error or "host probe returned UNKNOWN"
             except RuntimeError as e:
                 row["error"] = str(e)
         if row["paused"]:
@@ -9915,7 +9941,8 @@ def cmd_fleet(args):
             row["status"] = "reachable"
         rows.append(row)
     if args.json:
-        print(json.dumps({"hosts": rows}, indent=2, ensure_ascii=False))
+        print(json.dumps({"hosts": rows, "summary": fleet_health_summary(rows)},
+                         indent=2, ensure_ascii=False))
     else:
         for row in rows:
             state = row["status"]

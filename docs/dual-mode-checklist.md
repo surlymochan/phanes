@@ -23,6 +23,7 @@
 | **ssh BatchMode** | 验证 box 至受控节点非交互连通性与 ControlMaster 复用 | `ssh -o BatchMode=yes -F ~/.ssh/openswarm-hub/config ib1 true` |
 | **lane idle** | 检查 10+ 路真实 lane 运行水位与空闲（idle）分配状态 | `~/phanes-ctl/bin/lane-autodispatch-status` |
 | **coordinator** | 向 gocc 协调器查询当前全局并发预约快照 | `ssh -F ~/.ssh/openswarm-hub/config gocc -- python3 ~/.claude/openswarm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'` |
+| **capacity health summary** | 确认 UNKNOWN / Connection closed host 不计入可用容量 | `openswarm fleet status --json`（核对 `summary.hosts_ok`、`summary.hosts_unknown`、`summary.capacity_available`） |
 | **autodispatch heartbeat** | 检查 autodispatch 派发守护循环最后心跳（>3 分钟异常） | `cat ~/phanes-ctl/autodispatch/heartbeat` |
 | **merge heartbeat** | 检查 lane-merge 自动合并循环日志与最新时戳（>3 分钟异常） | `tail -n 20 ~/phanes-ctl/autodispatch/merge.log` |
 
@@ -37,6 +38,9 @@
 - [ ] **3. coordinator**：
   - 命令：`ssh -F ~/.ssh/openswarm-hub/config gocc -- python3 ~/.claude/openswarm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'`
   - 判定：返回 `{"ok": true, "reservations": [...]}`，若报 `coordinator unavailable` 说明协调器或网络退避中。
+- [ ] **3a. capacity health summary**：
+  - 判定：host 探测为 `UNKNOWN` 或 `Connection closed` 时，该 host 必须 `reachable=false`，只计入
+    `summary.hosts_unknown`，不得计入 `summary.hosts_ok` 或 `summary.capacity_available`；此检查只读，不创建或删除任何 pause。
 - [ ] **4. autodispatch heartbeat**：
   - 命令：`cat ~/phanes-ctl/autodispatch/heartbeat`
   - 判定：输出 ISO 时间戳；对比当前时间若滞后超过 3 分钟，表明 `autodispatch.py` 循环可能阻塞或已退出。

@@ -98,6 +98,26 @@ class FleetTests(unittest.TestCase):
         self.assertIn("local  no lanes  lanes=0 active=0", output.getvalue())
         self.assertNotIn("config invalid", output.getvalue())
 
+    def test_status_summary_excludes_unknown_and_connection_closed_capacity(self):
+        self.config([{"name": "ok", "kind": "local"},
+                     {"name": "unknown", "kind": "local"},
+                     {"name": "closed", "kind": "local"}])
+        snapshots = {
+            "ok": {"lanes": [], "active_runs": [], "total": 4},
+            "unknown": {"status": "UNKNOWN", "error": "probe returned UNKNOWN", "total": 90},
+            "closed": {"error": "Connection closed", "total": 80},
+        }
+        with mock.patch.object(xs, "host_json", side_effect=lambda host, *args, **kwargs:
+                               snapshots[host["name"]]), contextlib.redirect_stdout(io.StringIO()) as output:
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["summary"], {
+            "hosts_total": 3, "hosts_ok": 1, "hosts_unknown": 2,
+            "capacity_total": 4, "capacity_available": 4,
+        })
+        self.assertFalse(payload["hosts"][1]["reachable"])
+        self.assertFalse(payload["hosts"][2]["reachable"])
+
     def test_empty_lane_config_is_valid(self):
         config = self.root / "lanes.json"
         config.write_text('{"lanes": []}')
