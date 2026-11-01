@@ -7,6 +7,7 @@ root=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.dirname(os.path
 # runtime while dispatching through the candidate binary.
 export OPENSWARM_HOME="$HOME/.claude/openswarm-executor-candidate"
 export OPENSWARM_FLEET_GUARD_CONFIG="${OPENSWARM_FLEET_GUARD_CONFIG:-$OPENSWARM_HOME/fleet-capacity.json}"
+export OPENSWARM_AUTO_TOPOLOGY_POLICY="$OPENSWARM_FLEET_GUARD_CONFIG"
 export OPENSWARM_FLEET_GUARD_REQUIRED="${OPENSWARM_FLEET_GUARD_REQUIRED:-1}"
 if [ "${1:-}" = push ]; then
   shift
