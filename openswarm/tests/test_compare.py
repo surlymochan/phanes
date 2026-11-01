@@ -62,6 +62,25 @@ class CompareScoreUnitTests(unittest.TestCase):
         missing["score"]["seconds"] = complete["score"]["seconds"]
         self.assertIsNone(xs.choose_compare_winner(missing, complete))
 
+    def test_empty_review_findings_are_missing_review_score(self):
+        candidate = self.candidate()
+        candidate["review"] = {}
+        self.assertEqual(xs.compare_candidate_score(candidate),
+                         {"verify_pass": True, "p0p1": None, "diff_size": 0, "seconds": 1.0})
+
+    def test_all_candidates_without_review_can_win_or_tie(self):
+        left = self.candidate(changed_lines=4, seconds=2.0)
+        right = self.candidate(changed_lines=8, seconds=1.0)
+        left["review"] = right["review"] = {}
+        left["score"] = xs.compare_candidate_score(left)
+        right["score"] = xs.compare_candidate_score(right)
+        self.assertIs(xs.choose_compare_winner(left, right), left)
+
+        right["diff"]["changed_lines"] = 4
+        right["seconds"] = 2.0
+        right["score"] = xs.compare_candidate_score(right)
+        self.assertIsNone(xs.choose_compare_winner(left, right))
+
 
 class CompareTests(unittest.TestCase):
     def setUp(self):
@@ -149,6 +168,36 @@ class CompareTests(unittest.TestCase):
         entries = [json.loads(line) for line in Path(xs.LEDGER).read_text(encoding="utf-8").splitlines()]
         self.assertEqual({entry["compare_result"] for entry in entries}, {"tie"})
         self.assertEqual({entry["compare_id"] for entry in entries}, {"compare-1"})
+
+    def test_empty_runs_have_stable_json_and_markdown_summary(self):
+        report = {"id": "compare-empty", "title": "No candidates", "winner": None,
+                  "winner_label": None, "runs": {}, "diff_notes": []}
+        encoded = json.dumps(report, ensure_ascii=False)
+        self.assertEqual(json.loads(encoded), report)
+        markdown = xs.compare_markdown(report)
+        self.assertIn("Winner: **none**", markdown)
+        self.assertNotIn("## A —", markdown)
+        self.assertNotIn("## B —", markdown)
+
+    def test_missing_review_fields_are_preserved_in_json_and_markdown_tie(self):
+        left = self.candidate("A", True, 0, 5, 2)
+        right = self.candidate("B", True, 0, 5, 2)
+        del left["review"]
+        del right["review"]
+        for candidate, backend in ((left, "codex"), (right, "agy")):
+            candidate.update(run_id=f"run-{candidate['label'].lower()}", backend=backend,
+                             result={"status": "done"})
+            candidate["diff"].update(files=1, insertions=3, deletions=2, paths=["x.py"])
+        left["score"] = right["score"] = xs.compare_candidate_score(left)
+        winner = xs.choose_compare_winner(left, right)
+        report = {"id": "compare-missing-review", "title": "Missing review", "winner": None,
+                  "winner_label": None, "runs": {"a": left, "b": right},
+                  "diff_notes": xs.compare_diff_notes(left, right, winner)}
+        encoded = json.dumps(report, ensure_ascii=False)
+        self.assertEqual(json.loads(encoded)["winner_label"], None)
+        markdown = xs.compare_markdown(report)
+        self.assertIn("Winner: **none**", markdown)
+        self.assertIn("- Review: None; unknown error", markdown)
 
     def test_default_selection_uses_available_different_families(self):
         state = {"ocgo": {"models": [{"id": "openai-model", "family": "OpenAI"}]}}
