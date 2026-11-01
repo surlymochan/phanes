@@ -80,6 +80,35 @@ class LocalReferences(HTMLParser):
                 self.references.append(value)
 
 
+class AnchorIds(HTMLParser):
+    """收集页面中可作为页内锚点的 id/name。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        for attribute in ("id", "name"):
+            value = attrs_dict.get(attribute)
+            if value:
+                self.ids.add(value)
+
+
+class InPageLinks(HTMLParser):
+    """收集链接元素中的页内引用，避免把资源 URL 的片段当作锚点。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.references: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            value = dict(attrs).get("href")
+            if value:
+                self.references.append(value)
+
+
 def sha256(path: Path) -> str:
     """返回文件的 SHA-256 摘要。"""
     digest = hashlib.sha256()
@@ -217,8 +246,18 @@ def check_site(dist: Path) -> list[str]:
         html_text = index_path.read_text(encoding="utf-8", errors="replace")
         parser = LocalReferences()
         parser.feed(html_text)
+        anchors = AnchorIds()
+        anchors.feed(html_text)
+        in_page_links = InPageLinks()
+        in_page_links.feed(html_text)
+        for reference in in_page_links.references:
+            parsed = urlsplit(reference)
+            if not parsed.path and parsed.fragment and unquote(parsed.fragment) not in anchors.ids:
+                failures.append(
+                    f"失败：index.html 页内锚点 #{parsed.fragment} 不存在 [broken_anchor]"
+                )
         for reference in parser.references:
-            # urlsplit 剥离 query 与 fragment，保留并校验本地文件路径（无路径仅含片段时跳过）
+            # urlsplit 剥离 query 与 fragment，分别校验本地文件和页内锚点。
             parsed = urlsplit(reference)
             if parsed.scheme or parsed.netloc or reference.startswith("/"):
                 continue
@@ -226,7 +265,9 @@ def check_site(dist: Path) -> list[str]:
                 continue
             target = index_path.parent / unquote(parsed.path)
             if not target.is_file():
-                failures.append(f"失败：index.html 引用的本地文件 {reference} 不存在")
+                failures.append(
+                    f"失败：index.html 引用的本地文件 {reference} 不存在 [missing_file]"
+                )
             else:
                 print(f"通过：index.html 引用的本地文件 {parsed.path} 存在")
 

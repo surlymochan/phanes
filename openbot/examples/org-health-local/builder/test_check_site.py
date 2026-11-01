@@ -276,7 +276,34 @@ class CheckSiteTest(unittest.TestCase):
         )
         result = self.run_checker(dist)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing_file", result.stdout)
         self.assertIn("missing.js 不存在", result.stdout)
+
+    def test_broken_in_page_anchor_fails_with_distinct_code(self) -> None:
+        """页内 #anchor 不存在时单独归类为 broken_anchor。"""
+        dist = self.make_dist()
+        (dist / "index.html").write_text(
+            '<main id="overview"><a href="#missing-section">缺失锚点</a></main>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("broken_anchor", result.stdout)
+        self.assertIn("页内锚点 #missing-section 不存在", result.stdout)
+        self.assertNotIn("missing_file", result.stdout)
+
+    def test_in_page_anchor_to_nonempty_id_passes(self) -> None:
+        """指向非空页面 id 的页内锚点通过检查。"""
+        dist = self.make_dist()
+        (dist / "index.html").write_text(
+            '<a href="#overview">概览</a><section id="overview">内容</section>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("broken_anchor", result.stdout)
 
     def test_absolute_and_protocol_relative_references_are_skipped(self) -> None:
         """绝对路径与协议相对地址跳过本地文件检查，相对路径缺失仍失败。"""
