@@ -89,6 +89,13 @@ keys.  The offline contract check creates fake sockets with old and fresh mtimes
 python3 tools/check-cm-ad-sweep.py
 ```
 
+Certificate reuse is controlled by `IB_CERT_REUSE_TTL` (default `1500` seconds):
+`need_renew` is true only below that remaining TTL.  Set a higher value to force
+earlier renewal; `--threshold-seconds` is the one-run override.  The offline
+contract check `python3 tools/check-ib-cert-reuse.py` uses fake TTLs and the
+environment variable to cover both branches, and never invokes a real renewal
+command or touches a machine certificate.
+
 ## Smoke (safe, no restart) (Refs #777)
 
 ```bash
