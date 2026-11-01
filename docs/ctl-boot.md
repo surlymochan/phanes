@@ -120,6 +120,26 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
+- `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
+
+### Orphan runner window after assign (Refs #961)
+
+An assign is not proof that the remote runner started. The control plane must
+re-read the remote lane state after the post-assign window:
+
+- `runner_alive=false`, `run_state=running`, and elapsed time **greater than**
+  the window means the assignment is an orphan;
+- reclaim the orphan assignment, clear its lane ownership, and re-apply the
+  `lane-ready` label so the task can be dispatched again;
+- `runner_alive=true`, a terminal `run_state`, or an elapsed time at or below
+  the window is not an orphan and must remain unchanged.
+
+The offline check uses a fake remote state and makes no SSH or live-state
+changes:
+
+```bash
+python3 tools/check-orphan-runner-window.py
+```
 
 Recommended heartbeat monitoring (no SSH and no restart): run this from the
 repository checkout every five minutes, for example with cron:
