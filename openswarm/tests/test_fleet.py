@@ -235,6 +235,34 @@ class FleetTests(unittest.TestCase):
         ssh.chmod(0o755)
         return fake_bin
 
+    def flaky_fleet_transport(self, failures=2, kind="run-info"):
+        """A fake ssh whose first calls fail with the transient SSH error of the harvest."""
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        ssh = fake_bin / "ssh"
+        ssh.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "alias = sys.argv[1]\n"
+            "command = ' '.join(sys.argv[3:])\n"
+            "root = pathlib.Path(os.environ['OPENSWARM_TEST_FLEET_ROOT'])\n"
+            "call = 'snapshot' if '_snapshot' in command else 'run-info'\n"
+            "counter = root / (alias + '.' + call + '.attempts')\n"
+            "attempts = int(counter.read_text()) if counter.exists() else 0\n"
+            "attempts += 1\n"
+            "counter.write_text(str(attempts))\n"
+            f"if call == '{kind}' and attempts <= {failures}:\n"
+            "    sys.stderr.write('ssh: Connection closed by remote host\\n')\n"
+            "    raise SystemExit(255)\n"
+            "spec = json.loads((root / (alias + '.json')).read_text())\n"
+            "if call == 'snapshot':\n"
+            "    print(json.dumps(spec['snapshot']))\n"
+            "else:\n"
+            "    print(json.dumps(spec['document']))\n"
+        )
+        ssh.chmod(0o755)
+        return fake_bin
+
     def harvest(self, fake_bin, destination):
         """Run the fleet harvest against the fake fleet and return its exit code and manifest."""
         original_argv = sys.argv
@@ -304,6 +332,42 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(failed["exit_code"], 0)
         self.assertIn("result.json", failed["error"])
         self.assertFalse(destination.exists())
+
+    def test_harvest_counts_the_failed_fetches_of_a_flaky_host(self):
+        fake_bin = self.flaky_fleet_transport(failures=2)
+        (self.root / "flaky.json").write_text(json.dumps({
+            "snapshot": {"lanes": [{"name": "L1", "state": "idle", "current_run": "run-9"}], "active_runs": []},
+            "document": {"id": "run-9", "state": "finished",
+                         "result": {"id": "run-9", "status": "done", "branch": "openswarm/run-9",
+                                    "commit": "b" * 40, "summary": "flaky result"}}}))
+        self.config([{"name": "flaky", "kind": "ssh", "ssh": "flaky"}])
+        destination = self.root / "harvest"
+        with mock.patch.object(xs, "HARVEST_FETCH_RETRY_DELAY", 0):
+            code, report = self.harvest(fake_bin, destination)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "completed")
+        entry = report["completed"][0]
+        self.assertGreaterEqual(entry["fetch_fails"], 2)
+        self.assertEqual(entry["fetch_fails"], 2)
+        self.assertEqual(report["fetch_fails"], 2)
+        bundle = json.loads(pathlib.Path(entry["bundle"]).read_text())
+        self.assertEqual(bundle["fetch_fails"], 2)
+
+    def test_harvest_gives_up_after_the_bound_and_reports_the_failures(self):
+        fake_bin = self.flaky_fleet_transport(failures=99)
+        (self.root / "down.json").write_text(json.dumps({
+            "snapshot": {"lanes": [{"name": "L2", "state": "idle", "current_run": "run-10"}], "active_runs": []},
+            "document": {"id": "run-10", "state": "finished"}}))
+        self.config([{"name": "down", "kind": "ssh", "ssh": "down"}])
+        destination = self.root / "harvest"
+        with mock.patch.object(xs, "HARVEST_FETCH_RETRY_DELAY", 0):
+            code, report = self.harvest(fake_bin, destination)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "failed")
+        failed = report["failed"][0]
+        self.assertGreaterEqual(failed["fetch_fails"], 2)
+        self.assertEqual(failed["fetch_fails"], xs.HARVEST_FETCH_MAX_ATTEMPTS)
+        self.assertEqual(report["fetch_fails"], xs.HARVEST_FETCH_MAX_ATTEMPTS)
 
     def test_invalid_config_rejected(self):
         self.config([{"name": "x", "kind": "ssh", "ssh": "-unsafe"}])

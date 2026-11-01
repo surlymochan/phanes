@@ -129,3 +129,27 @@ rm -f -- "$task"
 
 这个手动流程只验证 box→SSH→fleet→lane assign；Hub bridge 的端到端验收还应
 另行用已配置的绝对 `workspace`/`repo` 执行一次 detached dispatch。
+
+## Harvest 的 fetch 失败计数
+
+`openswarm-fleet fleet harvest` 从各 fleet host 收回 lane 结果时，每次远端 fetch 最多
+尝试 **3 次**（初次 + 2 次重试），间隔 20 秒；只有 `Connection closed`、`broken pipe`、
+banner 超时、`bad pack header` 等 SSH/git 瞬时错误才会重试（与 autodispatch harvest
+同一分类），非瞬时错误直接判失败（退避约定见
+[`docs/fleet-coordinator-ssh-backoff.md`](fleet-coordinator-ssh-backoff.md)）。
+
+有界重试结束后，失败的 fetch 次数会写成 `fetch_fails`，不再只留在日志里：
+
+- harvest 清单（`--json`）里每个 `completed[]` / `failed[]` 条目都带 `fetch_fails`；
+- 清单顶层的 `fetch_fails` 是本次 harvest 全部远端 fetch 的失败次数合计；
+- 收回的结果 bundle（`<into>/<host>/<run-id>.json`）顶层同样带 `fetch_fails`。
+
+健康巡检读这个字段即可判断 SSH 是否在抖动：
+
+```bash
+openswarm-fleet fleet harvest --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["fetch_fails"])'
+grep -h '"fetch_fails"' ~/.claude/openswarm-executor-candidate/harvest/*/*.json
+```
+
+`fetch_fails` 为 0 表示远端结果一次就抓回来了；大于 0 表示该 host 的 SSH 抓取发生过
+瞬时失败；等于尝试上限（3）表示有界重试已经放弃，必须人工确认该 lane 的结果是否已收回。
