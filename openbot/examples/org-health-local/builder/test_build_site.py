@@ -1,7 +1,8 @@
 """build_site.py 的单元测试。
 
 只用标准库，不调用 bun：单测一律传入假的 bundle 文件，构建目录为 TMPDIR 下的临时目录。
-覆盖：示例数据构建出齐全的站点文件；坏数据退出码非 0 且不生成 dist。
+覆盖：示例数据构建出齐全的站点文件；坏数据退出码非 0 且不生成 dist；
+结构定义文件缺失时给出可读错误（含路径）且不生成 dist。
 """
 from __future__ import annotations
 
@@ -231,6 +232,28 @@ class BuildSiteTest(unittest.TestCase):
         self.assertIn(str(path), stderr.getvalue())
         self.assertIn("不是合法 JSON", stderr.getvalue())
         self.assertFalse(self.out.exists(), "坏 JSON 时不应生成 dist")
+
+    def test_missing_schema_file_fails_with_readable_stderr(self) -> None:
+        """结构定义文件缺失时以 2 退出，stderr 给出可读错误（含路径），且没有 Traceback。"""
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+
+        missing = self.root / "schema" / "diagnosis.schema.json"
+        stdout = StringIO()
+        stderr = StringIO()
+        with unittest.mock.patch.object(build_site, "SCHEMA_PATH", missing), redirect_stdout(
+            stdout
+        ), redirect_stderr(stderr):
+            code = self.build(bundle=self.bundle)
+
+        self.assertEqual(code, build_site.EXIT_USAGE)
+        message = stderr.getvalue()
+        self.assertIn("结构定义不可用", message)
+        self.assertIn("diagnosis.schema.json", message)
+        self.assertIn(str(missing), message)
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("Traceback", stdout.getvalue())
+        self.assertFalse(self.out.exists(), "结构定义缺失时不应生成 dist")
 
     def test_bun_command_matches_serve(self) -> None:
         """不带 --bundle 时使用与 serve.py 相同的 bun 命令。"""
