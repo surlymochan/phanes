@@ -504,6 +504,328 @@ https.request = (_options, callback) => {
                 proc.terminate()
                 proc.wait(timeout=5)
 
+    def test_token_plan_quota_exhausted_trips_breaker_and_cooldown_recovers(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            counter = pathlib.Path(root, 'upstream_calls')
+            mode_file = pathlib.Path(root, 'mode')
+            mode_file.write_text('quota')
+            log = pathlib.Path(root, 'requests.jsonl')
+            quota_err = json.dumps({'type': 'rate_limit_error', 'message': '已达到 Token Plan 用量上限…(2056)'})
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const count = Number(fs.existsSync(process.env.COUNTER) ? fs.readFileSync(process.env.COUNTER, 'utf8') : 0) + 1;
+  fs.writeFileSync(process.env.COUNTER, String(count));
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const mode = fs.existsSync(process.env.MODE) ? fs.readFileSync(process.env.MODE, 'utf8').trim() : 'quota';
+    const upstream = new PassThrough(); upstream.headers = {'content-type': 'application/json'}; upstream.complete = true;
+    if (mode === 'quota') {
+      upstream.statusCode = 429;
+      callback(upstream);
+      upstream.end(JSON.stringify({type: 'rate_limit_error', message: '已达到 Token Plan 用量上限…(2056)'}));
+    } else {
+      upstream.statusCode = 200;
+      callback(upstream);
+      upstream.end(JSON.stringify({id: 'msg_1', type: 'message'}));
+    }
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload),
+                       COUNTER=str(counter), MODE=str(mode_file), PI_BROKER_LOG=str(log),
+                       PI_BROKER_QUOTA_COOLDOWN_S='0.3')
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+
+                c1 = UnixHTTP(path)
+                c1.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
+                           {'content-type': 'application/json'})
+                r1 = c1.getresponse()
+                self.assertEqual(r1.status, 429)
+                self.assertEqual(json.loads(r1.read().decode('utf8')),
+                                 {'type': 'rate_limit_error', 'message': '已达到 Token Plan 用量上限…(2056)'})
+                c1.close()
+                self.assertEqual(counter.read_text(), '1')
+
+                for _ in range(2):
+                    c = UnixHTTP(path)
+                    c.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
+                              {'content-type': 'application/json'})
+                    r = c.getresponse()
+                    self.assertEqual(r.status, 429)
+                    self.assertEqual(json.loads(r.read().decode('utf8')),
+                                     {'type': 'rate_limit_error', 'message': '已达到 Token Plan 用量上限…(2056)'})
+                    c.close()
+                self.assertEqual(counter.read_text(), '1')
+
+                deadline = time.monotonic() + 3
+                while (not log.exists() or len(log.read_text().splitlines()) < 3) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                rows = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(rows[1]['status'], 429)
+                self.assertEqual(rows[1]['breaker'], 'open')
+                self.assertIn('Token Plan', rows[1]['err'])
+                self.assertEqual(rows[2]['breaker'], 'open')
+
+                mode_file.write_text('ok')
+                time.sleep(0.35)
+
+                c4 = UnixHTTP(path)
+                c4.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
+                           {'content-type': 'application/json'})
+                r4 = c4.getresponse()
+                self.assertEqual(r4.status, 200)
+                r4.read()
+                c4.close()
+                self.assertEqual(counter.read_text(), '2')
+
+                c5 = UnixHTTP(path)
+                c5.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
+                           {'content-type': 'application/json'})
+                r5 = c5.getresponse()
+                self.assertEqual(r5.status, 200)
+                r5.read()
+                c5.close()
+                self.assertEqual(counter.read_text(), '3')
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+                proc.stderr.close()
+
+    def test_half_open_allows_only_single_probe_concurrently(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            counter = pathlib.Path(root, 'upstream_calls')
+            mode_file = pathlib.Path(root, 'mode')
+            mode_file.write_text('quota')
+            probe_started = pathlib.Path(root, 'probe_started')
+            probe_release = pathlib.Path(root, 'probe_release')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const count = Number(fs.existsSync(process.env.COUNTER) ? fs.readFileSync(process.env.COUNTER, 'utf8') : 0) + 1;
+  fs.writeFileSync(process.env.COUNTER, String(count));
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const mode = fs.existsSync(process.env.MODE) ? fs.readFileSync(process.env.MODE, 'utf8').trim() : 'quota';
+    const upstream = new PassThrough(); upstream.headers = {'content-type': 'application/json'}; upstream.complete = true;
+    if (mode === 'quota') {
+      upstream.statusCode = 429;
+      callback(upstream);
+      upstream.end(JSON.stringify({type: 'rate_limit_error', message: '已达到 Token Plan 用量上限…(2056)'}));
+    } else if (mode === 'slow_probe') {
+      fs.writeFileSync(process.env.PROBE_STARTED, '1');
+      const waitRelease = () => {
+        if (fs.existsSync(process.env.PROBE_RELEASE)) {
+          upstream.statusCode = 200;
+          callback(upstream);
+          upstream.end(JSON.stringify({id: 'probe_ok'}));
+        } else {
+          setTimeout(waitRelease, 10);
+        }
+      };
+      waitRelease();
+    }
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload),
+                       COUNTER=str(counter), MODE=str(mode_file),
+                       PROBE_STARTED=str(probe_started), PROBE_RELEASE=str(probe_release),
+                       PI_BROKER_QUOTA_COOLDOWN_S='0.3')
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+
+                c1 = UnixHTTP(path)
+                c1.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                r1 = c1.getresponse()
+                self.assertEqual(r1.status, 429)
+                r1.read()
+                c1.close()
+                self.assertEqual(counter.read_text(), '1')
+
+                mode_file.write_text('slow_probe')
+                time.sleep(0.35)
+
+                probe_res = []
+                def send_probe():
+                    cp = UnixHTTP(path)
+                    cp.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                    rp = cp.getresponse()
+                    probe_res.append(rp.status)
+                    rp.read()
+                    cp.close()
+
+                t = threading.Thread(target=send_probe)
+                t.start()
+
+                deadline = time.monotonic() + 3
+                while not probe_started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(probe_started.exists())
+                self.assertEqual(counter.read_text(), '2')
+
+                c2 = UnixHTTP(path)
+                c2.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                r2 = c2.getresponse()
+                self.assertEqual(r2.status, 429)
+                r2.read()
+                c2.close()
+                self.assertEqual(counter.read_text(), '2')
+
+                probe_release.touch()
+                t.join(timeout=5)
+                self.assertFalse(t.is_alive())
+                self.assertEqual(probe_res, [200])
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+                proc.stderr.close()
+
+    def test_normal_rate_limit_does_not_trip_breaker(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            counter = pathlib.Path(root, 'upstream_calls')
+            log = pathlib.Path(root, 'requests.jsonl')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const count = Number(fs.existsSync(process.env.COUNTER) ? fs.readFileSync(process.env.COUNTER, 'utf8') : 0) + 1;
+  fs.writeFileSync(process.env.COUNTER, String(count));
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const upstream = new PassThrough(); upstream.statusCode = 429; upstream.headers = {'content-type': 'application/json'}; upstream.complete = true;
+    callback(upstream);
+    upstream.end(JSON.stringify({type: 'rate_limit_error', message: 'Rate limit reached: 60 RPM'}));
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload),
+                       COUNTER=str(counter), PI_BROKER_LOG=str(log),
+                       PI_BROKER_QUOTA_COOLDOWN_S='300')
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+
+                c1 = UnixHTTP(path)
+                c1.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                r1 = c1.getresponse()
+                self.assertEqual(r1.status, 429)
+                r1.read()
+                c1.close()
+                self.assertEqual(counter.read_text(), '1')
+
+                c2 = UnixHTTP(path)
+                c2.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                r2 = c2.getresponse()
+                self.assertEqual(r2.status, 429)
+                r2.read()
+                c2.close()
+                self.assertEqual(counter.read_text(), '2')
+
+                deadline = time.monotonic() + 3
+                while (not log.exists() or len(log.read_text().splitlines()) < 2) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                rows = [json.loads(line) for line in log.read_text().splitlines()]
+                for row in rows:
+                    self.assertNotIn('breaker', row)
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+                proc.stderr.close()
+
+    def test_custom_quota_regex_override(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = pathlib.Path(root, 'auth.mjs')
+            module.write_text('export class AuthStorage { static create() { return { getApiKey: async () => "fake-key" }; } }')
+            counter = pathlib.Path(root, 'upstream_calls')
+            preload = pathlib.Path(root, 'fake.cjs')
+            preload.write_text('''
+const https = require('node:https');
+const fs = require('node:fs');
+const {EventEmitter} = require('node:events');
+const {PassThrough} = require('node:stream');
+https.request = (_options, callback) => {
+  const count = Number(fs.existsSync(process.env.COUNTER) ? fs.readFileSync(process.env.COUNTER, 'utf8') : 0) + 1;
+  fs.writeFileSync(process.env.COUNTER, String(count));
+  const req = new EventEmitter(); req.destroy = () => {};
+  req.end = () => {
+    const upstream = new PassThrough(); upstream.statusCode = 429; upstream.headers = {'content-type': 'application/json'}; upstream.complete = true;
+    callback(upstream);
+    upstream.end(JSON.stringify({error: {type: 'rate_limit_error', message: 'tier_cap_exceeded'}}));
+  };
+  return req;
+};
+''')
+            path = os.path.join(root, 'broker.sock')
+            env = dict(os.environ, NODE_OPTIONS='--require=' + str(preload),
+                       COUNTER=str(counter), PI_BROKER_QUOTA_RE='tier_cap_exceeded',
+                       PI_BROKER_QUOTA_COOLDOWN_S='60')
+            proc = subprocess.Popen(['node', str(BROKER), path, str(module), 'allowed-model'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 5
+                while not os.path.exists(path) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.path.exists(path), 'broker did not start')
+
+                c1 = UnixHTTP(path)
+                c1.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                r1 = c1.getresponse()
+                self.assertEqual(r1.status, 429)
+                r1.read()
+                c1.close()
+                self.assertEqual(counter.read_text(), '1')
+
+                c2 = UnixHTTP(path)
+                c2.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}))
+                r2 = c2.getresponse()
+                self.assertEqual(r2.status, 429)
+                r2.read()
+                c2.close()
+                self.assertEqual(counter.read_text(), '1')
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+                proc.stderr.close()
+
 
 if __name__ == '__main__':
     unittest.main()
