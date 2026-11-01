@@ -38,6 +38,32 @@ class FleetCapacityTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
 
+    def test_provider_capacity_ignores_zero_negative_and_missing_limits(self):
+        keys = xs.concurrency_keys('pi', 'minimax-cn')
+        self.assertEqual(xs.provider_concurrency_limits(
+            {'concurrency': {'pi': 4, 'minimax-cn': 0, 'total': -1}}, keys), {'pi': 4})
+        self.assertEqual(xs.provider_concurrency_limits(
+            {'concurrency': {'pi': 4}}, ['missing']), {})
+
+    def test_batch_capacity_aggregates_normal_and_full_load_without_negative_slots(self):
+        spec = {'backend': 'pi', 'provider': 'minimax-cn',
+                'concurrency': {'pi': 2, 'minimax-cn': 2, 'total': 2},
+                'hosts': {'local': {'kind': 'local'}}}
+        row = {'host': 'local'}
+        snapshots = {'local': {'active_runs': []}}
+        with mock.patch.object(xs, 'fleet_config', return_value=spec['hosts']), \
+                mock.patch.object(xs, 'instabox_states', return_value={}), \
+                mock.patch.object(xs, 'host_json', return_value=snapshots['local']):
+            self.assertTrue(xs.batch_provider_slot_available(spec, row))
+            snapshots['local']['active_runs'] = [
+                {'state': 'running', 'backend': 'pi', 'provider': 'minimax-cn'},
+                {'state': 'running', 'backend': 'pi', 'provider': 'minimax-cn'},
+            ]
+            self.assertFalse(xs.batch_provider_slot_available(spec, row))
+            snapshots['local']['active_runs'].append(
+                {'state': 'running', 'backend': 'pi', 'provider': 'minimax-cn'})
+            self.assertFalse(xs.batch_provider_slot_available(spec, row))
+
     def call(self, authenticated_host, **payload):
         p = subprocess.run([str(BIN), authenticated_host], input=json.dumps(payload), text=True,
                            capture_output=True, env=self.env, timeout=15)
