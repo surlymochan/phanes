@@ -12,22 +12,22 @@ OpenSwarm fleet 清单即可：
 
 ```text
 OPENSWARM_HUB_LOCAL_ROUTER=1
-OPENSWARM_AUTO_LOCAL_HOST=local
-OPENSWARM_AUTO_FLEET_HOSTS=["ib1","ib2","ib3","ib4","gocc","gorelay","ib5","govpn2"]
+OPENSWARM_AUTO_LOCAL_HOST=box
+OPENSWARM_AUTO_FLEET_HOSTS=["gores1","gores2","govpn","govpn2","gorelay","gocc"]
 OPENSWARM_AUTO_CLI=/absolute/path/to/openswarm-fleet
-OPENSWARM_AUTO_HOST_BACKENDS={"local":[],"ib1":["pi"],"ib2":["pi"],"ib3":["pi"],"ib4":["pi"],"gocc":["agy"],"gorelay":["agy"],"ib5":["codex"],"govpn2":["codex"]}
+OPENSWARM_AUTO_HOST_BACKENDS={"box":["pi"],"gores1":["pi"],"gores2":["pi"],"gocc":["agy"],"gorelay":["agy"],"govpn":["codex"],"govpn2":["codex"]}
 ```
 
 `OPENSWARM_AUTO_HOST_BACKENDS` 是管理员部署时设置的主机后端白名单。它避免旧
-lane 残留或同名 lane 混入当前 4pi+2agy+4codex 布局；任务卡本身不能指定主机。当前真实拓扑摘要如下：
+lane 残留或同名 lane 混入当前 5pi+3agy+3codex 布局；任务卡本身不能指定主机。当前真实拓扑摘要如下：
 
-- pi×4 on ib1–4
-- agy×2 on gocc + gorelay（同账号额度需留意）
-- codex×4 on ib5×2 + govpn2×2（+可选 govpn CX5）
+- pi×5 on box×1 + gores1×2 + gores2×2
+- agy×3 on gocc×2 + gorelay×1（同账号额度需留意）
+- codex×3 on govpn + govpn2×2
 - 控制面在 box，不依赖用户 Mac
-- 禁止默认 Copilot（白名单中不启用 copilot）
+- 禁止默认 Copilot（白名单中不启用 copilot；仅远程手工使用）
 
-`local` 不参与这个 4pi+2agy+4codex 方案；各远端主机（ib1–4、gocc、gorelay、ib5、govpn2）的 lane 每次派发都会经
+`local` 不参与这个 5pi+3agy+3codex 方案；各远端主机（gores1、gores2、govpn、govpn2、gorelay、gocc）的 lane 每次派发都会经
 `fleet exec ... lane status` 重新发现；派发、状态查询、停止和结果 bundle
 同样使用已配置 fleet 的直接 SSH 传输。lane supervisor 的共享 guard 仍是最终
 准入点。手工任务卡不能指定 host 或 SSH 参数。未列入这个配置的历史回执继续走

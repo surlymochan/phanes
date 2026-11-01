@@ -8,7 +8,12 @@ may add one.
 
 The check drives the production refresh path with a fake probe runner and a fake
 `openssl` that reports a far-future expiry, so it never opens an SSH connection, never
-touches a live instabox node and needs no certificate material.
+touches a live host and needs no certificate material.
+
+Deprecated (Refs #1480): the Instabox nodes are offline since 2026-11-02, so the
+production path exercised here (the instabox certificate refresh) is history.  The
+host names below are the current fleet hosts (docs/fleet-topology-expected.md) used
+as offline fixtures.
 """
 
 import datetime as dt
@@ -25,12 +30,12 @@ SPEC = importlib.util.spec_from_file_location("ib_refresh", ROOT / "tools" / "ib
 IB_REFRESH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(IB_REFRESH)
 
-HOSTS = ("ib1", "ib2", "ib3", "ib4", "gocc")
+HOSTS = ("gores1", "gores2", "govpn", "gorelay", "gocc")
 FAKE_OUTPUT = {
-    "ib1": (255, "", "ib1: Permission denied (publickey,keyboard-interactive)."),
-    "ib2": (255, "", "Connection closed by remote host"),
-    "ib3": (124, "", "ssh: connect to host ib3 port 22: Connection timed out"),
-    "ib4": (0, "OK\n", ""),
+    "gores1": (255, "", "gores1: Permission denied (publickey,keyboard-interactive)."),
+    "gores2": (255, "", "Connection closed by remote host"),
+    "govpn": (124, "", "ssh: connect to host govpn port 22: Connection timed out"),
+    "gorelay": (0, "OK\n", ""),
     "gocc": (0, "OK\n", ""),
 }
 FAKE_OPENSSL = """#!/bin/sh
@@ -68,7 +73,7 @@ def main() -> None:
                 cert.write_text("fake certificate\n")
                 fleet_hosts.append({"name": name, "cert": str(cert)})
             ssh_config = root / "ssh_config"
-            ssh_config.write_text("Host ib1 ib2 ib3 ib4 gocc\n    User openswarm\n")
+            ssh_config.write_text("Host gores1 gores2 govpn gorelay gocc\n    User openswarm\n")
             fleet = root / "fleet.json"
             fleet.write_text(json.dumps({
                 "need_ok": 2,
@@ -88,12 +93,12 @@ def main() -> None:
             assert result["renewed"] == [], "a valid certificate must not be renewed"
             assert result["ssh_probe"] == "enabled"
             rows = {row["host"]: row for row in result["hosts"]}
-            assert rows["ib1"]["probe_exit_code"] == 255
-            assert rows["ib1"]["probe_status"] == "failed"
-            assert "Permission denied" in rows["ib1"]["probe_error"]
-            assert rows["ib2"]["probe_status"] == "failed"
-            assert rows["ib3"]["probe_exit_code"] == 124
-            assert rows["ib4"]["probe_status"] == "ok"
+            assert rows["gores1"]["probe_exit_code"] == 255
+            assert rows["gores1"]["probe_status"] == "failed"
+            assert "Permission denied" in rows["gores1"]["probe_error"]
+            assert rows["gores2"]["probe_status"] == "failed"
+            assert rows["govpn"]["probe_exit_code"] == 124
+            assert rows["gorelay"]["probe_status"] == "ok"
             assert rows["gocc"]["probe_status"] == "ok"
 
             fields = dict(field.split("=", 1) for field in result["status_line"].split())
@@ -101,7 +106,7 @@ def main() -> None:
             assert fields["ok"] == "1", result["status_line"]
 
             usable = [row["host"] for row in IB_REFRESH._usable_hosts(result["hosts"], set(HOSTS))]
-            assert usable == ["ib4", "gocc"], usable
+            assert usable == ["gorelay", "gocc"], usable
 
             assert len(commands) == len(HOSTS), commands
             for argv in commands:
@@ -122,12 +127,12 @@ def main() -> None:
             # The production rollup itself must ignore a failed probe.
             rolled = IB_REFRESH._status_for(
                 {"ok": True, "start_lane_autodispatch": True, "hosts": [
-                    {"host": "ib1", "status": "valid", "final_status": "valid",
+                    {"host": "gores1", "status": "valid", "final_status": "valid",
                      "probe_exit_code": 255, "probe_status": "failed"},
-                    {"host": "ib2", "status": "valid", "final_status": "valid",
+                    {"host": "gores2", "status": "valid", "final_status": "valid",
                      "probe_exit_code": 0, "probe_status": "ok"},
                 ]},
-                [{"name": "ib1"}, {"name": "ib2"}],
+                [{"name": "gores1"}, {"name": "gores2"}],
                 ROOT / "fleet.json",
                 dt.datetime.now(dt.timezone.utc),
                 need_ok=1,
@@ -137,6 +142,7 @@ def main() -> None:
             os.environ["PATH"] = old_path
 
     print("fleet batchmode probe rollup: OK")
+    print("deprecated: instabox nodes are offline; this contract is history only (Refs #1480)")
 
 
 if __name__ == "__main__":

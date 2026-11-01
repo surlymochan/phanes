@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Offline contract for ib-refresh's partial-fleet readiness gate."""
+"""Offline contract for ib-refresh's partial-fleet readiness gate.
+
+Deprecated (Refs #1480): the Instabox nodes are offline since 2026-11-02, so the
+host names below are historical fixtures only.  The live fleet topology lives in
+docs/fleet-topology-expected.md.
+"""
 
 import importlib.util
 from pathlib import Path
@@ -27,6 +32,7 @@ def main():
         "ok=1 hosts_ok=3 skipped_cooldown=2"
     )
     print("ib-refresh need_ok partial fleet: OK")
+    print("deprecated: instabox nodes are offline; this contract is history only (Refs #1480)")
 
 
 if __name__ == "__main__":

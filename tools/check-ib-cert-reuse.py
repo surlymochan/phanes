@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Offline contract check for the ib-refresh certificate reuse threshold."""
+"""Offline contract check for the ib-refresh certificate reuse threshold.
+
+Deprecated (Refs #1480): the Instabox nodes are offline since 2026-11-02, so this
+check only keeps the historical instabox certificate-refresh contract alive.  It no
+longer describes the live fleet topology (see docs/fleet-topology-expected.md).
+"""
 
 import os
 import pathlib
@@ -34,6 +39,7 @@ def main():
         else:
             os.environ["IB_CERT_REUSE_TTL"] = original
     print("OK IB_CERT_REUSE_TTL need_renew contract")
+    print("deprecated: instabox nodes are offline; this contract is history only (Refs #1480)")
     return 0
 
 

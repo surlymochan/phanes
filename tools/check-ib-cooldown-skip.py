@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""E2E contract for skipping active PAUSE-HOST cooldowns (Refs #904)."""
+"""E2E contract for skipping active PAUSE-HOST cooldowns (Refs #904).
+
+Deprecated (Refs #1480): the Instabox nodes are offline since 2026-11-02, so this
+check only keeps the historical instabox refresh contract alive.  It no longer
+describes the live fleet topology (see docs/fleet-topology-expected.md).
+"""
 
 import datetime as dt
 import json
@@ -50,6 +55,7 @@ def main() -> None:
         assert not calls.exists(), "active cooldown host must not invoke resume/wake/renew CLI"
         assert (pause_dir / "PAUSE-HOST-ib2").exists(), "check must not modify the PAUSE file"
         print("ib-refresh active cooldown skip: OK")
+        print("deprecated: instabox nodes are offline; this contract is history only (Refs #1480)")
 
 
 if __name__ == "__main__":
