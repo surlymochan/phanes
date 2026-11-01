@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that issue-bus result comments use the stable error_class enum."""
+"""Check that issue-bus result comments use the stable error_class enum (Refs #1109)."""
 
 import json
 import re
@@ -77,13 +77,18 @@ def main():
     assert parse_result(success)["error_class"] == "none"
     assert parse_result(failure)["error_class"] == "verify_failed"
 
-    missing_error_class = success.replace(',"error_class":"none"', "")
-    try:
-        parse_result(missing_error_class)
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError("missing error_class must be rejected")
+    # 缺字段拒绝：针对 REQUIRED 中的每个字段，缺失均必须抛出异常
+    for sample in (success, failure):
+        for field in REQUIRED:
+            data = json.loads(RESULT_RE.search(sample).group(1))
+            del data[field]
+            missing_sample = f"```openswarm-result\n{json.dumps(data)}\n```"
+            try:
+                parse_result(missing_sample)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError(f"missing field {field!r} must be rejected")
 
     unsupported_error_class = failure.replace('"verify_failed"', '"unknown_failure"')
     try:
@@ -92,6 +97,22 @@ def main():
         pass
     else:
         raise AssertionError("unsupported error_class must be rejected")
+
+    failed_with_none = failure.replace('"verify_failed"', '"none"')
+    try:
+        parse_result(failed_with_none)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("failed result with error_class=none must be rejected")
+
+    success_with_error = success.replace('"none"', '"exec_error"')
+    try:
+        parse_result(success_with_error)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("successful result with non-none error_class must be rejected")
 
     print("bus result error_class contract: success, failure, and missing-field samples passed")
 
