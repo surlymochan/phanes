@@ -412,5 +412,73 @@ class OfflineStateTest(unittest.TestCase):
         self.assertEqual(r["backend"], "codex")
 
 
+class HarvestFetchFailureCountTest(unittest.TestCase):
+    """The harvest fetch failure count stays in the result summary (Refs #853)."""
+
+    def test_two_failed_fetches_are_counted_before_the_give_up(self):
+        calls = []
+
+        def fetch(attempt):
+            calls.append(attempt)
+            return 1, b"", b"ssh: Connection closed by remote host"
+
+        rc, out, err, summary = xs.harvest_fetch_attempts(fetch, max_attempts=2, delay=0)
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, [1, 2])
+        self.assertGreaterEqual(summary["fetch_fails"], 2)
+        self.assertEqual(summary["fetch_fails"], 2)
+        self.assertEqual(summary["attempts"], 2)
+        self.assertEqual(summary["max_attempts"], 2)
+        self.assertIn("Connection closed", summary["last_error"])
+
+    def test_transient_failures_are_retried_and_the_count_survives(self):
+        def fetch(attempt):
+            if attempt < 3:
+                return 1, b"", b"fatal: fetch-pack: unexpected disconnect"
+            return 0, b"{}", b""
+
+        rc, out, err, summary = xs.harvest_fetch_attempts(fetch, delay=0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["fetch_fails"], 2)
+        self.assertEqual(summary["attempts"], 3)
+
+    def test_permanent_failure_is_not_retried(self):
+        calls = []
+
+        def fetch(attempt):
+            calls.append(attempt)
+            return 128, b"", b"fatal: repository not found"
+
+        rc, out, err, summary = xs.harvest_fetch_attempts(fetch, delay=0)
+        self.assertEqual(calls, [1])
+        self.assertEqual(summary["fetch_fails"], 1)
+
+    def test_permission_failure_is_not_retried(self):
+        calls = []
+
+        def fetch(attempt):
+            calls.append(attempt)
+            return 128, b"", b"ssh: Permission denied (publickey)"
+
+        rc, out, err, summary = xs.harvest_fetch_attempts(fetch, delay=0)
+        self.assertEqual(calls, [1])
+        self.assertEqual(summary["fetch_fails"], 1)
+
+    def test_default_bound_is_three_attempts(self):
+        def fetch(attempt):
+            return 1, b"", b"ssh: Connection closed by remote host"
+
+        rc, out, err, summary = xs.harvest_fetch_attempts(fetch, delay=0)
+        self.assertEqual(summary["fetch_fails"], xs.HARVEST_FETCH_MAX_ATTEMPTS)
+        self.assertEqual(summary["attempts"], xs.HARVEST_FETCH_MAX_ATTEMPTS)
+
+    def test_harvest_failure_record_keeps_the_fetch_fails_count(self):
+        entry = xs.fleet_harvest_failure({"name": "ib1"}, "M1", "run-1", 255,
+                                         "remote run info failed (rc=255)", "Connection closed", 2)
+        self.assertEqual(entry["fetch_fails"], 2)
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(xs.fleet_harvest_failure({"name": "ib1"}, None, None, 255, "boom")["fetch_fails"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

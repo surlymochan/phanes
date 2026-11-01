@@ -9903,6 +9903,11 @@ def fleet_snapshot():
 
 
 HARVEST_STDERR_TAIL_LINES = 5
+HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
+HARVEST_FETCH_RETRY_DELAY = 20  # seconds between two harvest fetch attempts
+HARVEST_FETCH_TRANSIENT_RE = re.compile(
+    r"Connection closed|broken pipe|timed out|banner|bad pack header|fetch-pack:\s+unexpected disconnect",
+    re.I)
 
 
 def harvest_stderr_tail(data):
@@ -9913,10 +9918,49 @@ def harvest_stderr_tail(data):
     return "\n".join(text.splitlines()[-HARVEST_STDERR_TAIL_LINES:])
 
 
-def fleet_harvest_failure(host, lane, run_id, exit_code, error, stderr=""):
+def harvest_fetch_transient(error):
+    """Whether a failed harvest fetch is a transient SSH error that earns one more attempt."""
+    text = error.decode(errors="replace") if isinstance(error, bytes) else str(error or "")
+    return bool(HARVEST_FETCH_TRANSIENT_RE.search(text))
+
+
+def harvest_fetch_attempts(fetch, max_attempts=None, delay=None, sleep=time.sleep):
+    """Fetch one remote document with a bounded retry and count the failed attempts.
+
+    `fetch` is called with the attempt number and returns (rc, stdout, stderr). The
+    summary keeps `fetch_fails`, the number of failed attempts, so a flaky host stays
+    visible to the health check instead of looking like a plain failure. The retry
+    bound is never exceeded and only transient errors are retried.
+    """
+    bound = max(1, int(HARVEST_FETCH_MAX_ATTEMPTS if max_attempts is None else max_attempts))
+    wait = HARVEST_FETCH_RETRY_DELAY if delay is None else delay
+    rc, out, err = 1, b"", b""
+    fails = attempts = 0
+    for attempt in range(1, bound + 1):
+        rc, out, err = fetch(attempt)
+        attempts = attempt
+        if not rc:
+            break
+        fails += 1
+        if attempt >= bound or not harvest_fetch_transient(err):
+            break
+        if wait:
+            sleep(wait)
+    return rc, out, err, {"fetch_fails": fails, "attempts": attempts, "max_attempts": bound,
+                          "last_error": harvest_stderr_tail(err)}
+
+
+def fleet_harvest_failure(host, lane, run_id, exit_code, error, stderr="", fetch_fails=0):
     """One host-level failure record; it never hides the exit code or the remote error."""
     return {"host": host["name"], "lane": lane, "run_id": run_id, "status": "failed",
-            "exit_code": exit_code, "stderr": stderr, "error": error}
+            "exit_code": exit_code, "stderr": stderr, "error": error, "fetch_fails": fetch_fails}
+
+
+def fleet_harvest_fetch(host, command, timeout=60):
+    """Fetch one remote document with the bounded harvest retry."""
+    def fetch(attempt):
+        return host_run(host, command, timeout=timeout)
+    return harvest_fetch_attempts(fetch)
 
 
 def fleet_harvest_run(host, lane, run_id, into):
@@ -9925,10 +9969,11 @@ def fleet_harvest_run(host, lane, run_id, into):
         safe_id(run_id)
     except ValueError:
         return fleet_harvest_failure(host, lane, run_id, 0, "invalid remote run id")
-    rc, out, err = host_run(host, host_openswarm(host, ["fleet", "_run-info", run_id]), timeout=60)
+    rc, out, err, summary = fleet_harvest_fetch(host, host_openswarm(host, ["fleet", "_run-info", run_id]),
+                                                 timeout=60)
     if rc:
         return fleet_harvest_failure(host, lane, run_id, rc, f"remote run info failed (rc={rc})",
-                                     harvest_stderr_tail(err))
+                                     harvest_stderr_tail(err), summary["fetch_fails"])
     try:
         document = json.loads(out)
     except (ValueError, UnicodeError):
@@ -9941,18 +9986,21 @@ def fleet_harvest_run(host, lane, run_id, into):
     path = os.path.join(into, host["name"], run_id + ".json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as stream:
-        json.dump({"id": run_id, "host": host["name"], "lane": lane, "result": result},
+        json.dump({"id": run_id, "host": host["name"], "lane": lane, "result": result,
+                   "fetch_fails": summary["fetch_fails"]},
                   stream, ensure_ascii=False, indent=2)
     return {"host": host["name"], "lane": lane, "run_id": run_id, "status": "completed",
-            "bundle": path, "result": result}
+            "bundle": path, "result": result, "fetch_fails": summary["fetch_fails"]}
 
 
-def fleet_harvest_host(host, into):
+def fleet_harvest_host(host, into, totals=None):
     """Collect every assigned lane result of one host; the other hosts keep their work."""
-    rc, out, err = host_run(host, host_openswarm(host, ["fleet", "_snapshot"]), timeout=30)
+    totals = totals if totals is not None else {"fetch_fails": 0}
+    rc, out, err, summary = fleet_harvest_fetch(host, host_openswarm(host, ["fleet", "_snapshot"]), timeout=30)
     if rc:
         return [fleet_harvest_failure(host, None, None, rc, f"fleet snapshot failed (rc={rc})",
-                                      harvest_stderr_tail(err))]
+                                      harvest_stderr_tail(err), summary["fetch_fails"])]
+    totals["fetch_fails"] += summary["fetch_fails"]
     try:
         snapshot = json.loads(out)
     except (ValueError, UnicodeError):
@@ -9982,12 +10030,14 @@ def cmd_fleet_harvest(args):
         raise ValueError("fleet has no hosts")
     into = os.path.abspath(os.path.expanduser(args.into or os.path.join(DATA, "harvest")))
     completed, failed = [], []
+    totals = {"fetch_fails": 0}
     for host in selected:
-        for entry in fleet_harvest_host(host, into):
+        for entry in fleet_harvest_host(host, into, totals):
             (completed if entry["status"] == "completed" else failed).append(entry)
+            totals["fetch_fails"] += entry.get("fetch_fails", 0)
     status = "failed" if failed and not completed else ("partial" if failed else "completed")
     report = {"ok": not failed, "status": status, "into": into,
-              "completed": completed, "failed": failed}
+              "completed": completed, "failed": failed, "fetch_fails": totals["fetch_fails"]}
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
     else:
@@ -9995,8 +10045,10 @@ def cmd_fleet_harvest(args):
             print(f"{entry['host']}  {entry['lane']}  {entry['run_id']}  completed  {entry['bundle']}")
         for entry in failed:
             print(f"{entry['host']}  {entry['lane'] or '-'}  {entry['run_id'] or '-'}  failed  "
-                  f"rc={entry['exit_code']}  {entry['error']}", file=sys.stderr)
-        print(f"harvested {len(completed)} result bundle(s) into {into} (status={status})")
+                  f"rc={entry['exit_code']}  fetch_fails={entry.get('fetch_fails', 0)}  {entry['error']}",
+                  file=sys.stderr)
+        print(f"harvested {len(completed)} result bundle(s) into {into} "
+              f"(status={status}, fetch_fails={totals['fetch_fails']})")
     if failed:
         raise SystemExit(1)
 
