@@ -1332,6 +1332,193 @@ class ColumnOrderTest(unittest.TestCase):
         self.assertIn("缺少必需列：整体技术人力成本万元", message)
 
 
+class DirtyRawDataTest(unittest.TestCase):
+    """脏 CSV：单元格取值是占位文本时跳过该行，快照仍生成并留下可审计警告。"""
+
+    def setUp(self) -> None:
+        self.schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.temporary = temporary_directory()
+        self.folder = Path(self.temporary.name)
+        self.brief_path = write_brief(self.folder, BRIEF)
+        self.out_path = self.folder / "diagnosis.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def dirty_raw(self, name: str, filename: str, bad_row: str, good_row: str) -> Path:
+        """复制合成原始数据，把一行换成坏行（另一个月份的好行保持不变）。"""
+        raw_dir = copy_raw(self.folder, name)
+        path = raw_dir / filename
+        write_csv_lines(
+            path,
+            [
+                line.replace(good_row, bad_row) if line.startswith(good_row.split(",")[0]) else line
+                for line in csv_lines(path)
+            ],
+        )
+        return raw_dir
+
+    def build(self, raw_dir: Path, strict: bool = False) -> tuple[dict, subprocess.CompletedProcess]:
+        """用脏原始数据生成快照，返回 (快照内容, 命令行结果)。"""
+        result = run_cli(self.brief_path, raw_dir, self.out_path, strict=strict)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.out_path.read_text(encoding="utf-8"))
+        self.assertEqual(validate.validate_data(data, self.schema), [])
+        return data, result
+
+    def test_dirty_cost_row_is_skipped_and_reported(self) -> None:
+        """成本行里的取值是占位文本时整行跳过，快照照常生成并留下可审计警告。"""
+        raw_dir = self.dirty_raw(
+            "raw-dirty-cost",
+            "cost.csv",
+            "2026-03,待补,8.6,2.2",
+            "2026-03,10.8,8.6,2.2",
+        )
+        data, result = self.build(raw_dir)
+
+        # 好行照常取数，坏行所在期次按缺数据处理。
+        overall_cost = data["metrics"][0]["数值"]
+        self.assertEqual(overall_cost["2026-01实际"], 10.4)
+        self.assertEqual(overall_cost["2026-09实际"], 12.4)
+        self.assertIsNone(overall_cost["2026-05H1参考"])
+        self.assertIn("整体技术人力成本 缺 2026-03、2026-05 数据，按 null 处理", data["口径说明"])
+
+        # 坏行进可审计警告：文件、行号、期次、列名与原始取值都要写清楚。
+        warning_note = (
+            "原始数据 cost.csv 第 4 行（2026-03）的 整体技术人力成本万元 不是数值（取值“待补”）"
+        )
+        notes = [note for note in data["口径说明"] if note.startswith("原始数据问题行已跳过：")]
+        self.assertEqual(len(notes), 1)
+        self.assertIn(warning_note, notes[0])
+        risks = [risk for risk in data["risks"] if risk["标题"] == "原始数据 cost.csv 第 4 行已跳过"]
+        self.assertEqual(len(risks), 1)
+        self.assertIn(warning_note, risks[0]["内容"])
+        self.assertIn("按缺数据处理（null）", risks[0]["内容"])
+        insight_titles = [item["标题"] for item in data["insights"]]
+        self.assertIn("原始数据存在被跳过的问题行", insight_titles)
+        self.assertTrue(
+            any(item["标题"] == "修正原始数据中被跳过的问题行" for item in data["recommendations"])
+        )
+
+        # 命令行也提示一次，便于人工核对。
+        self.assertIn("警告：原始数据 cost.csv 第 4 行", result.stderr)
+
+    def test_dirty_row_in_another_table_keeps_snapshot(self) -> None:
+        """占位文本出现在收入表时同样跳过，快照与其余表照常生成。"""
+        raw_dir = self.dirty_raw(
+            "raw-dirty-revenue",
+            "revenue.csv",
+            "2026-04,待补",
+            "2026-04,12.1",
+        )
+        data, result = self.build(raw_dir)
+
+        income = data["metrics"][3]["数值"]["收入万美元每月"]
+        self.assertEqual(income["2026-01实际"], 11.2)
+        self.assertEqual(income["2026-09实际"], 13.6)
+        self.assertIn("收入 缺 2026-04 数据，按 null 处理", data["口径说明"])
+        risks = [risk["标题"] for risk in data["risks"] if "已跳过" in risk["标题"]]
+        self.assertEqual(risks, ["原始数据 revenue.csv 第 5 行已跳过"])
+        self.assertIn("警告：原始数据 revenue.csv 第 5 行", result.stderr)
+
+    def test_non_finite_value_fails_with_source_location(self) -> None:
+        """取值不是有限数值（inf）时按输入错误报出，错误信息指出文件与行号。"""
+        raw_dir = self.dirty_raw(
+            "raw-infinite-cost",
+            "cost.csv",
+            "2026-03,inf,8.6,2.2",
+            "2026-03,10.8,8.6,2.2",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv 第 4 行", result.stderr)
+        self.assertIn("不是有限数值", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_dirty_row_with_illegal_number_fails_with_column(self) -> None:
+        """行内先出现占位文本时，同行后续列的非法数值仍按输入错误报出并点名列。"""
+        raw_dir = self.dirty_raw(
+            "raw-dirty-and-illegal",
+            "cost.csv",
+            "2026-03,待补,$11.2,2.2",
+            "2026-03,10.8,8.6,2.2",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv 第 4 行", result.stderr)
+        self.assertIn("营收业务技术人力成本万元", result.stderr)
+        self.assertIn("不是数值", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_dirty_row_with_non_finite_value_fails_with_column(self) -> None:
+        """行内先出现占位文本时，同行后续列的非有限值仍按输入错误报出并点名列。"""
+        raw_dir = self.dirty_raw(
+            "raw-dirty-and-non-finite",
+            "cost.csv",
+            "2026-03,待补,nan,2.2",
+            "2026-03,10.8,8.6,2.2",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("原始数据 cost.csv 第 4 行", result.stderr)
+        self.assertIn("营收业务技术人力成本万元", result.stderr)
+        self.assertIn("不是有限数值", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_dirty_duplicate_row_is_skipped_not_fatal(self) -> None:
+        """占位文本行与好行期次重复时按脏行跳过，不按重复行报错。"""
+        raw_dir = copy_raw(self.folder, "raw-dirty-duplicate")
+        cost = raw_dir / "cost.csv"
+        write_csv_lines(cost, csv_lines(cost) + ["2026-01,待补,8.3,2.1"])
+        data, result = self.build(raw_dir)
+
+        self.assertEqual(data["metrics"][0]["数值"]["2026-01实际"], 10.4)
+        risks = [risk["标题"] for risk in data["risks"] if "已跳过" in risk["标题"]]
+        self.assertEqual(risks, ["原始数据 cost.csv 第 10 行已跳过"])
+
+    def test_dirty_row_fails_strict_mode(self) -> None:
+        """严格模式下脏行造成的期次缺口仍然失败，不写快照。"""
+        raw_dir = self.dirty_raw(
+            "raw-dirty-strict",
+            "cost.csv",
+            "2026-03,待补,8.6,2.2",
+            "2026-03,10.8,8.6,2.2",
+        )
+        result = run_cli(self.brief_path, raw_dir, self.out_path, strict=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("严格模式失败", result.stderr)
+        self.assertIn("整体技术人力成本 缺 2026-03", result.stderr)
+        self.assertFalse(self.out_path.exists())
+
+    def test_load_raw_collects_warnings(self) -> None:
+        """模块接口把被跳过的问题行写进 warnings 列表。"""
+        raw_dir = self.dirty_raw(
+            "raw-dirty-module",
+            "cost.csv",
+            "2026-03,待补,8.6,2.2",
+            "2026-03,10.8,8.6,2.2",
+        )
+        warnings: list = []
+        raw = build_diagnosis.load_raw(raw_dir, warnings=warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            warnings[0],
+            {
+                "文件": "cost.csv",
+                "行号": 4,
+                "期次": "2026-03",
+                "列": "整体技术人力成本万元",
+                "取值": "待补",
+                "原因": "不是数值",
+            },
+        )
+        self.assertNotIn("2026-03", raw["cost"])
+        self.assertIn("2026-02", raw["cost"])
+
+
 class MinimalRawInputErrorTest(unittest.TestCase):
     """最小 raw fixture：必需数字列为空、CSV 出现重复列名与缺少必需列三种输入错误。
 

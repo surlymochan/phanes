@@ -7,6 +7,9 @@
 `--raw` 指向原始 CSV 目录：给出时方法说明里增加“数据来源”小节，逐个列出 CSV 文件名与数据行数
 （不含表头），按文件名排序；不给时该小节写明未提供原始数据目录。
 
+任务书可以是 Boss 格式（`观察期间` 与 `口径` 为嵌套对象）：`观察期间` 按字段展开，
+`口径` 摊平成可读文字；每个指标小节按指标标题引用任务书 `口径` 里的同名条目。
+
 `--out` 的父目录不存在时自动创建。
 """
 
@@ -22,6 +25,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z])[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?%?")
 PERIOD_SUFFIXES = ("实际", "参考", "测算", "目标")
+PERIOD_LABEL_RE = re.compile(r"\d{4}-\d{2}(?:-\d{2})?")
 
 DATA_SOURCE_HEADING = "## 数据来源"
 CURRENCY_FIELDS = {"币种", "货币", "币别", "currency", "currency_code", "currencycode"}
@@ -114,16 +118,29 @@ def data_sources(raw_dir: Path) -> List[Tuple[str, int]]:
     return [(path.name, count_data_rows(path)) for path in sorted(raw_dir.glob("*.csv"), key=lambda item: item.name)]
 
 
+def flatten_text(value: Any) -> str:
+    """把嵌套的口径结构摊平成可读文本，不改写原文内容。"""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = []
+        for key, child in value.items():
+            text = flatten_text(child)
+            if text:
+                parts.append(f"{key}：{text}")
+        return "；".join(parts)
+    if isinstance(value, list):
+        parts = [flatten_text(item) for item in value]
+        return "；".join(part for part in parts if part)
+    if value is None:
+        return ""
+    return str(value)
+
+
 def brief_method(brief: Any) -> str:
     """Return the brief's method section without inventing a new definition."""
     method = brief.get("口径", "未提供") if isinstance(brief, dict) else "未提供"
-    if isinstance(method, str):
-        return method
-    if isinstance(method, list):
-        return "；".join(str(item) for item in method)
-    if isinstance(method, dict):
-        return "；".join(f"{key}：{value}" for key, value in method.items())
-    return str(method)
+    return flatten_text(method) or "未提供"
 
 
 def leaf_fields(value: Any, path: str) -> Iterable[Tuple[str, Any]]:
@@ -165,15 +182,49 @@ def period_labels(value: Any) -> List[str]:
     return [value, *re.findall(r"\d{4}|-\d{2}", value)]
 
 
-def render_period_text(value: Any) -> str:
-    """Render common brief period shapes without exposing a Python dict repr."""
-    if isinstance(value, dict):
-        return "、".join(
-            f"{key}：{child}" for key, child in value.items() if not isinstance(child, (dict, list))
-        ) or "未提供"
-    if isinstance(value, list):
-        return "、".join(str(item) for item in value)
-    return str(value)
+def brief_periods(brief: Any) -> str:
+    """观察期间的可读文本：对象按字段展开，数组与字符串原样列出。"""
+    window = brief.get("观察期间", "未提供") if isinstance(brief, dict) else "未提供"
+    if isinstance(window, dict):
+        parts = []
+        for key, value in window.items():
+            text = flatten_text(value)
+            if text:
+                parts.append(f"{key}：{text}")
+        return "；".join(parts) or "未提供"
+    if isinstance(window, list):
+        return "、".join(str(item) for item in window)
+    return flatten_text(window) or "未提供"
+
+
+def brief_period_labels(brief: Any) -> List[str]:
+    """观察期间里的期次标签：数组取元素，对象取期次类字段。"""
+    window = brief.get("观察期间") if isinstance(brief, dict) else None
+    labels: List[str] = []
+    if isinstance(window, list):
+        labels.extend(item.strip() for item in window if isinstance(item, str) and item.strip())
+    elif isinstance(window, dict):
+        for key in ("期次", "起始期次", "参考期次", "截止期次"):
+            value = window.get(key)
+            if isinstance(value, str) and value.strip():
+                labels.append(value.strip())
+            elif isinstance(value, list):
+                labels.extend(
+                    item.strip() for item in value if isinstance(item, str) and item.strip()
+                )
+    return labels
+
+
+def method_reference(brief: Any, title: str) -> str:
+    """指标对应的任务书口径条目：按指标标题在 `口径` 里找同名条目。"""
+    method = brief.get("口径") if isinstance(brief, dict) else None
+    if isinstance(method, dict):
+        for key in method:
+            if not isinstance(key, str) or not key:
+                continue
+            if title == key or title.startswith(key + "（"):
+                return f"引用任务书“口径”的「{key}」条目（内容见上「统一口径」）"
+    return "引用任务书“口径”（内容见上「统一口径」）"
 
 
 def markdown_code_block(value: Any) -> str:
@@ -239,8 +290,9 @@ def conclusion_sections(diagnosis: dict) -> Iterable[Tuple[str, str, Any, List[s
 
 def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]] = None) -> str:
     method = brief_method(brief)
-    periods = brief.get("观察期间", "未提供")
-    period_text = render_period_text(periods)
+    period_text = brief_periods(brief)
+    labels = brief_period_labels(brief)
+    label_text = "、".join(labels) if labels else period_text
 
     if sources is None:
         source_lines = ["未提供原始数据目录（`--raw`），无法列出数据来源文件。"]
@@ -274,9 +326,9 @@ def render(brief: dict, diagnosis: dict, sources: Optional[List[Tuple[str, int]]
                 f"### {markdown_escape_text(title)}",
                 "",
                 f"- 数据来源（字段路径）：`{path}`",
-                "- 计算口径：引用任务书“口径”：",
+                f"- 计算口径：{method_reference(brief, title)}：",
                 markdown_code_block(method),
-                f"- 期间：{period_text}",
+                f"- 期间：{label_text}",
                 "- 已知缺口："
                 + ("；".join(f"{period} 为 null" for period in missing) if missing else "未发现明确的 null 期次"),
                 "",
@@ -320,31 +372,54 @@ def strip_method_section(text: str) -> str:
     return pattern.sub("", text)
 
 
-def numeric_literals(value: Any) -> List[str]:
-    """Collect numeric diagnosis values for the output self-check."""
+def strip_period_labels(text: str) -> str:
+    """去掉文案里的期次标签（YYYY-MM、YYYY-MM-DD）：它们是结构，不是数值。"""
+    return PERIOD_LABEL_RE.sub(" ", text)
+
+
+def numeric_literals(value: Any, strip_periods: bool = False) -> List[str]:
+    """Collect numeric diagnosis values for the output self-check.
+
+    strip_periods 为真时先去掉文案里的期次标签（YYYY-MM、YYYY-MM-DD）：它们是结构，不是数值。
+    """
     found: List[str] = []
     if isinstance(value, bool) or value is None:
         return found
     if isinstance(value, (int, float)):
         found.append(str(value))
     elif isinstance(value, str):
-        found.extend(NUMBER_RE.findall(value))
+        text = strip_period_labels(value) if strip_periods else value
+        found.extend(NUMBER_RE.findall(text))
     elif isinstance(value, dict):
         for child in value.values():
-            found.extend(numeric_literals(child))
+            found.extend(numeric_literals(child, strip_periods))
     elif isinstance(value, list):
         for child in value:
-            found.extend(numeric_literals(child))
+            found.extend(numeric_literals(child, strip_periods))
     return found
 
 
-def metric_numeric_literals(diagnosis: dict) -> List[str]:
-    """Collect numeric values only from metrics[].数值 for the output self-check."""
-    found: List[str] = []
-    for metric in diagnosis.get("metrics", []):
-        if isinstance(metric, dict):
-            found.extend(numeric_literals(metric.get("数值")))
-    return found
+def leak_tokens(diagnosis: dict) -> List[str]:
+    """诊断快照里不该出现在方法说明中的数值。
+
+    只取指标数值与结论里的数字：口径说明、洞察、风险等文案里的数字（如“不以 0 或推测值替代”）
+    是口径文字，不是诊断数值，不参与泄露比对；期次标签是结构，同样排除。
+    """
+    tokens: List[str] = []
+    metrics = diagnosis.get("metrics") if isinstance(diagnosis, dict) else None
+    if isinstance(metrics, list):
+        for metric in metrics:
+            if isinstance(metric, dict):
+                tokens.extend(numeric_literals(metric.get("数值"), strip_periods=True))
+    conclusion = diagnosis.get("conclusion") if isinstance(diagnosis, dict) else None
+    tokens.extend(numeric_literals(conclusion, strip_periods=True))
+    return sorted({token for token in tokens if token})
+
+
+def conclusion_leak_tokens(diagnosis: dict) -> List[str]:
+    """诊断结论里的数值：方法说明复述结论数值时按泄露失败。"""
+    conclusion = diagnosis.get("conclusion") if isinstance(diagnosis, dict) else None
+    return sorted({token for token in numeric_literals(conclusion, strip_periods=True) if token})
 
 
 def _number_key(value: Any) -> Optional[Decimal]:
@@ -476,15 +551,18 @@ def main(argv: List[str] = None) -> int:
     periods = brief.get("观察期间", []) if isinstance(brief, dict) else []
     for period in period_labels(periods):
         check_output = check_output.replace(period, "")
-    leaked = sorted(
-        set(
-            token
-            for token in metric_numeric_literals(diagnosis)
-            if token and re.search(r"(?<![\d.])" + re.escape(token) + r"(?![\d.])", check_output)
-        )
-    )
+    # 期次标签（YYYY-MM、YYYY-MM-DD）是结构，同样排除。
+    check_output = strip_period_labels(check_output)
+    leaked = set()
+    for token in leak_tokens(diagnosis):
+        if token and re.search(r"(?<![\d.])" + re.escape(token) + r"(?![\d.])", check_output):
+            leaked.add(token)
+    # 结论数值写进任务书口径时同样算泄露：方法说明不应复述诊断结论。
+    for token in conclusion_leak_tokens(diagnosis):
+        if token and re.search(r"(?<![\d.])" + re.escape(token) + r"(?![\d.])", method):
+            leaked.add(token)
     if leaked:
-        print("生成文档包含诊断数值：" + "、".join(leaked), file=sys.stderr)
+        print("生成文档包含诊断数值：" + "、".join(sorted(leaked)), file=sys.stderr)
         return 1
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(output, encoding="utf-8")

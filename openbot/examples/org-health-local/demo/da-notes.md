@@ -150,8 +150,8 @@
 
 ## 四、已知问题与脚本 Bug 记录（严格遵守“不改 brief.json，不改脚本”）
 
-1. **`da/write_method.py` 无法直接消费 schema v4 任务书**：
-   - **现象**：执行 `python3 da/write_method.py --brief demo/brief.json --data demo/diagnosis.json --out demo/method.md` 时报错退出（退出码 1），输出信息：
+1. **`da/write_method.py` 无法直接消费 schema v4 任务书（已修复，Refs #736）**：
+   - **原现象**：执行 `python3 da/write_method.py --brief demo/brief.json --data demo/diagnosis.json --out demo/method.md` 时报错退出（退出码 1），输出信息：
      ```text
      生成文档包含诊断数值：0、2026
      ```
@@ -160,6 +160,7 @@
      - Boss #103 产出的 `demo/brief.json`（schema v4）中，`观察期间` 为字典结构 `{"观察月份": "2026-09", "数据截止": "2026-09-30", "期次": [...]}`，`口径` 为嵌套字典；
      - `write_method.py:98-103` 与 `write_method.py:166-171` 在做期次文本替换时，未递归解包字典，把字典 repr 整体拼接输出（包含 `'2026-09'`），随后 `numeric_literals` 提取了年份 `2026` 与数字 `0`，触发泄露检查正则；
      - 另外，`build_diagnosis.py`（在 #125）已内建生成完整的 `口径说明` 字段并直接写入 `diagnosis.json`（符合 `schema/diagnosis.schema.json` 定义），故快照本身已包含完整口径与缺失期次说明。按规则记录 bug，不改动脚本与 brief.json。
+   - **修复现状**：`da/write_method.py` 现按字段展开 `观察期间` 与嵌套 `口径`，泄露比对只取指标数值与结论里的数字（口径文案里的“不以 0 或推测值替代”不是诊断数值），期次标签按结构排除；结论数值即使被写进任务书口径也按数值泄露失败；同一命令现在退出码为 0，生成的方法说明按指标标题引用任务书 `口径` 的同名条目并写明字段路径与 `null` 期次。
 2. **Boss 任务书与站点页面期次键保持对齐**：
    - Boss 任务书（`demo/brief.json`）与 DA 脚本在 #127 适配后，期次键统一采用 `2026-01实际`、`2026-05H1参考`、`2026-09实际`、`年末测算`、`年末目标`，`app.js` 能够正常加载并正确渲染各个指标与未提供状态。
 
