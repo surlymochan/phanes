@@ -48,14 +48,14 @@ python3 boss/make_brief.py --out <brief.json> [--goal 文本 ...] [--month YYYY-
 
 | 参数 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `--out` | 是 | 无 | 任务书输出路径；父目录不存在时自动创建（`boss/make_brief.py:211-218`） |
+| `--out` | 是 | 无 | 任务书输出路径；父目录必须已存在（不自动创建），写出时先写同目录临时文件再替换（`boss/make_brief.py:364-397`） |
 | `--goal` | 否 | `DEFAULT_GOALS` 四条（`boss/make_brief.py:47-53`） | 覆盖「目标」；可重复给出，按出现顺序写入 |
 | `--month` | 否 | `2026-09`（`boss/make_brief.py:36`） | 覆盖观察月份，格式 `YYYY-MM`；数据截止与期次锚点随之推算（`boss/make_brief.py:113-143`） |
 
 ### 2.2 输入 / 输出
 
 - **输入**：无文件输入；口径、问题、字段映射与禁止事项全部内置（`boss/make_brief.py:40-110`）。
-- **输出**：`brief.json`，`ensure_ascii=False`、`indent=2`、键序固定（`boss/make_brief.py:211-218`）。
+- **输出**：`brief.json`，`ensure_ascii=False`、`indent=2`、键序固定（`boss/make_brief.py:346-349`）。
 - **自检**：写出前按 `boss/brief.schema.json` 校验，不通过则不写文件（`boss/make_brief.py:206-208`、`:246-251`）。
 
 ### 2.3 退出码
@@ -64,7 +64,7 @@ python3 boss/make_brief.py --out <brief.json> [--goal 文本 ...] [--month YYYY-
 | --- | --- | --- |
 | `0` | 成功 | 已写出任务书（`boss/make_brief.py:257-258`） |
 | `1` | 任务书不符合 `brief.schema.json` | `validate_brief` 返回错误（`boss/make_brief.py:31-32`、`:246-251`） |
-| `2` | 用法错误 | `--month` 不是 `YYYY-MM`（`boss/make_brief.py:243-245`）或写文件失败（`:252-256`） |
+| `2` | 用法错误 | `--month` 不是 `YYYY-MM`（`boss/make_brief.py:460-464`）或写文件失败（`:471-476`） |
 
 ### 2.4 `brief.json` 关键字段
 

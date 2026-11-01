@@ -10,14 +10,20 @@
 2026-09-30、指标标题与顺序同站点的 metrics。--goal 覆盖“目标”，--month 覆盖
 观察月份（数据截止与期次锚点随之推算）。结构定义见同目录 brief.schema.json，
 校验复用上一级目录的 validate.py；只使用 Python 标准库。
+
+写出任务书时先写同目录临时文件再替换目标文件：替换成功前旧任务书保持原样，
+写出失败不会留下半个任务书。输出路径的父目录必须已存在，缺失或不可写时报错。
 """
 from __future__ import annotations
 
 import argparse
 import calendar
 import json
+import os
 import re
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -337,13 +343,57 @@ def validate_brief(brief: object) -> list[str]:
     return errors
 
 
+def serialize_brief(brief: dict) -> str:
+    """把任务书序列化成 JSON 文本。键序固定，同样输入的字节稳定。"""
+    return json.dumps(brief, ensure_ascii=False, indent=2) + "\n"
+
+
+def brief_file_mode(path: Path) -> int:
+    """返回写出任务书时的文件权限：已有文件沿用原权限，新文件按当前 umask 取默认值。"""
+    try:
+        info = path.stat()
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISREG(info.st_mode):
+        return stat.S_IMODE(info.st_mode)
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
 def write_brief(brief: dict, path: Path) -> None:
-    """把任务书写成 JSON 文件。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(brief, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    """把任务书写成 JSON 文件：先写同目录临时文件，再替换目标文件。
+
+    替换成功前目标文件保持原样：写出失败时旧任务书不会被截断或覆盖，
+    临时文件也会被清理，不留下半个任务书。父目录必须已存在。
+    """
+    path = Path(path)
+    text = serialize_brief(brief)
+    parent = path.parent
+    if not parent.is_dir():
+        raise NotADirectoryError(f"输出目录不存在：{parent}")
+    mode = brief_file_mode(path)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    except BaseException:
+        # 任何一步失败都要清掉临时文件：目标位置要么是旧任务书，要么什么都没有。
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 def load_brief(path: Path) -> object:
@@ -421,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         write_brief(brief, args.out)
     except OSError as cause:
+        # 写出失败时目标位置保持原样：已有任务书不会被截断或覆盖，也不会留下临时文件。
         print(f"无法写出 {args.out}：{cause}", file=sys.stderr)
         return EXIT_USAGE
     print(f"已写出任务书：{args.out}")
