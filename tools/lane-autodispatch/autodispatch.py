@@ -161,6 +161,12 @@ def dispatch(lane, cfg, item, base):
     if rc or not m: raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
     return m.group(1), ver
 
+def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
+    """Build the harvest fetch argv without splitting SSH option values twice."""
+    ssh_command = shlex.join(["ssh", *ssh_options])
+    return ["git", "-c", f"core.sshCommand={ssh_command}", "-C", local_repo,
+            "fetch", "-q", remote, f"+{branch}:refs/fleet/{lane}"]
+
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
 
@@ -168,7 +174,7 @@ def finish(lane, cfg, st, info, state):
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
-        fetch = ["git", "-c", "core.sshCommand=ssh " + " ".join(SSHO), "-C", LOCAL, "fetch", "-q", f"{cfg['host']}:{info['repo']}", f"+{info['branch']}:refs/fleet/{lane}"]
+        fetch = git_fetch_command(SSHO, LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         rc, _, err = sh(fetch, timeout=180)
         if rc and re.search(r"Permission denied|Connection closed|timed out|banner", err):
             log(f"{lane} #{n} fetch transient ({err.strip()[-90:]}); retrying in 20s", brain=False); time.sleep(20); rc, _, err = sh(fetch, timeout=180)
