@@ -198,6 +198,7 @@ class RetroTests(unittest.TestCase):
             {"id": "third", "backend": "codex", "model": "model", "card_type": "fix"},
             {"id": "fourth", "backend": "codex", "model": "model", "card_type": "fix"},
             {"id": "missing-fields"},
+            {"id": "null-fields", "backend": None, "model": None, "card_type": None},
         ]
 
         groups = xs.retro_groups(entries)
@@ -212,7 +213,7 @@ class RetroTests(unittest.TestCase):
         ])
         self.assertEqual([[entry["id"] for entry in items] for _, items in groups], [
             ["first"], ["second"], ["third", "fourth"], ["zeta"], ["unknown"],
-            ["missing-fields"],
+            ["missing-fields", "null-fields"],
         ])
 
     def test_retro_routing_rows_filters_window_and_marks_advice_outcome(self):
