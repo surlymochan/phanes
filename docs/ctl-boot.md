@@ -289,6 +289,15 @@ Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft ale
 `PAUSE-HOST-*` file. The disk boundary contract is checked offline with
 `python3 tools/check-health-disk-soft.py`.
 
+For low-memory `govpn2`-class hosts, the offline contract uses
+`HEALTH_MEM_HARD_MB=256` and `HEALTH_MEM_SOFT_MB=512`. A `health.json` snapshot
+below hard writes `auto:host_hard` to `PAUSE-HOST-govpn2` and `auto:mem_hard`
+to each lane pause on that host. When a later snapshot recovers to soft or
+above, the health loop self-heals by removing those auto pauses together, so
+the same host's lanes become dispatchable again; manual pause bodies are
+retained. The executable set/clear contract uses fake health snapshots and a
+temporary pause directory: `python3 tools/check-health-pause.py`.
+
 During dual-mode cooldown, the production pause set is restricted to
 `PAUSE-HOST-ib1`, `PAUSE-HOST-ib2`, `PAUSE-M1`, and `PAUSE-M2`. The offline
 check uses a fake pause directory and never changes the real state:
