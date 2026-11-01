@@ -227,10 +227,13 @@ time.sleep(30)
             '--boss', str(ROOT / 'boss' / 'make_brief.py'),
             '--da', str(ROOT / 'da' / 'build_diagnosis.py'),
             '--builder', str(ROOT / 'builder' / 'build_site.py'),
-            '--checker', str(blocker), '--timeout', '0.2',
+            '--checker', str(blocker), '--timeout', '5',
         ]
 
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        # 超时预算按每步计算：真实 Boss/DA/Builder 必须跑在预算内，
+        # 只有阻塞检查器该被超时回收。预算太小（早先用 0.2 秒）时，
+        # 慢机器上上游步骤会被误判成超时，上游产物随之缺失，CI 上偶发红。
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertTrue((self.workdir / 'brief.json').is_file())
@@ -1399,8 +1402,10 @@ class RunE2EReviewSummaryTest(unittest.TestCase):
 class RunE2ERoleScriptTest(unittest.TestCase):
     """真实角色脚本回归：用真实子进程跑完整流水线，不靠空桩绕过角色脚本。
 
-    两条路径都覆盖：Builder 失败时保留上游产物、写出步骤状态且不调用 Reviewer；
-    Builder 成功时进入 Reviewer 并生成最终报告。
+    三条路径都覆盖：Builder 失败时保留上游产物、写出步骤状态且不调用 Reviewer；
+    Builder 成功时进入 Reviewer 并生成最终报告；
+    Builder 产出的站点损坏（页面被改写或缺关键文件）时整体非零退出，
+    并保留 brief/diagnosis 与站点证据便于排障。
     """
 
     def setUp(self):
@@ -1462,6 +1467,81 @@ class RunE2ERoleScriptTest(unittest.TestCase):
         self.assertFalse((self.workdir / REVIEW_REPORT).exists())
         self.assertNotIn('[审查] 命令', result.stdout)
         self.assertIn('审查角色未调用', result.stderr)
+
+    def corrupting_builder(self, name, corruption):
+        """写一个包装 Builder 的脚本：先跑真实 build_site.py，再按 corruption 破坏站点产物。
+
+        corruption 是在真实构建之后执行的一条 Python 语句，变量 out 指向站点目录。
+        """
+        script = self.root / f'{name}.py'
+        script.write_text(
+            """import subprocess
+import sys
+from pathlib import Path
+
+builder = Path(%r)
+result = subprocess.run([sys.executable, str(builder), *sys.argv[1:]])
+if result.returncode:
+    raise SystemExit(result.returncode)
+out = Path(sys.argv[sys.argv.index('--out') + 1])
+%s
+""" % (str(ROOT / 'builder' / 'build_site.py'), corruption),
+            encoding='utf-8',
+        )
+        return script
+
+    def run_with_builder(self, builder):
+        """用指定的 Builder 脚本跑一次完整流水线，返回子进程结果。"""
+        command = self.command(ROOT / 'demo' / 'vendor' / 'app.bundle.js')
+        command[command.index('--builder') + 1] = str(builder)
+        return subprocess.run(command, capture_output=True, text=True, timeout=120)
+
+    def assert_intermediate_artifacts_kept(self):
+        """中间诊断产物保留且完整可解析：任务书、诊断快照都能读出内容。"""
+        brief = json.loads((self.workdir / 'brief.json').read_text(encoding='utf-8'))
+        self.assertTrue(brief['目标'], '任务书被截断')
+        diagnosis = json.loads((self.workdir / 'diagnosis.json').read_text(encoding='utf-8'))
+        self.assertTrue(diagnosis['insights'], '诊断快照被截断')
+
+    def test_corrupt_site_html_returns_nonzero_and_keeps_intermediate_artifacts(self):
+        """Builder 生成合法站点后页面被改写：E2E 失败且保留 brief/diagnosis 便于排障。"""
+        corrupt_builder = self.corrupting_builder(
+            'corrupt_html_builder',
+            "(out / 'index.html').write_text('<html><body>损坏的站点', encoding='utf-8')")
+
+        result = self.run_with_builder(corrupt_builder)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 检查', result.stderr)
+        # 钉在失败文案上：通过文案也提到 sha256，只断言它分不清检出还是通过。
+        self.assertIn('失败：index.html 的 sha256 与 build-report.json 不一致', result.stdout)
+        # 中间诊断保留且可解析，站点里留着损坏后的页面作为证据。
+        self.assert_intermediate_artifacts_kept()
+        site = self.workdir / 'dist' / 'index.html'
+        self.assertTrue(site.is_file(), '站点损坏证据未保留')
+        self.assertIn('损坏的站点', site.read_text(encoding='utf-8'))
+        status = self.status()
+        self.assertEqual(status['failed_step'], 'checker')
+        self.assertEqual(status['status'], 'failed')
+
+    def test_corrupt_site_missing_file_returns_nonzero_and_keeps_intermediate_artifacts(self):
+        """Builder 生成合法站点后缺少关键文件：E2E 失败且保留 brief/diagnosis 便于排障。"""
+        corrupt_builder = self.corrupting_builder(
+            'missing_index_builder', "(out / 'index.html').unlink()")
+
+        result = self.run_with_builder(corrupt_builder)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 检查', result.stderr)
+        # 缺文件与内容损坏是两条不同的失败路径：这里钉在“文件不存在”的失败文案上。
+        self.assertIn('失败：index.html 不存在', result.stdout)
+        # 中间诊断保留且可解析，构建报告留着登记信息作为损坏证据。
+        self.assert_intermediate_artifacts_kept()
+        self.assertTrue((self.workdir / 'dist' / 'build-report.json').is_file(), '站点损坏证据未保留')
+        self.assertFalse((self.workdir / 'dist' / 'index.html').exists(), '缺文件的站点仍有 index.html')
+        status = self.status()
+        self.assertEqual(status['failed_step'], 'checker')
+        self.assertEqual(status['status'], 'failed')
 
     def test_builder_success_runs_reviewer_and_writes_final_report(self):
         """真实 Builder 成功后进入 Reviewer，生成最终报告并写出成功状态。"""
