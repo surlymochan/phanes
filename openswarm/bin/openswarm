@@ -10220,11 +10220,19 @@ def run_digest(rid):
                     cmds += 1
                 if kind == "msg":
                     last = text
-    end = st.get("finished") or now
+    def timestamp(value):
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+    end = timestamp(st.get("finished"))
+    if end is None:
+        end = now
+    started = timestamp(st.get("started"))
+    if started is None:
+        started = end
     out = {"id": rid, "state": state, "status": st.get("status") or r.get("status"), "title": st.get("title"),
            "backend": st.get("backend"), "model": st.get("model"), "effort": st.get("effort"),
            "provider": st.get("provider"), "concurrency_keys": st.get("concurrency_keys") or [],
-           "elapsed_min": round((end - st.get("started", end)) / 60, 1), "budget_min": st.get("budget_minutes"),
+           "elapsed_min": round((end - started) / 60, 1), "budget_min": st.get("budget_minutes"),
            "cmds": cmds, "last_msg": short(last, 200), "commit": st.get("commit"),
            "idle_min": round((now - os.path.getmtime(st["events"])) / 60, 1) if st.get("events") and os.path.exists(st["events"]) and state == "running" else None}
     lane = st.get("lane") or r.get("lane")
@@ -10280,7 +10288,8 @@ def cmd_resume(args):
             recent_finished.append({"id": rid, "finished": finished,
                                     "status": status.get("status") or result.get("status"),
                                     "result_path": result_path})
-    recent_finished.sort(key=lambda row: row["finished"], reverse=True)
+    active_runs.sort(key=lambda row: row["id"], reverse=True)
+    recent_finished.sort(key=lambda row: (-row["finished"], row["id"]))
     try:
         lanes = lane_status_rows()
         config_error = None
