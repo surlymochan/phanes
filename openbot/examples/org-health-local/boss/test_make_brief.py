@@ -1103,6 +1103,55 @@ class DiagnosisPeriodsAlignmentTest(unittest.TestCase):
             )
         self.assertIn(f"期次字段 {mismatched_period} 必须能在 diagnosis periods 中找到", str(ctx.exception))
 
+    def test_cli_非空诊断夹具写出任务书(self) -> None:
+        """非空 diagnosis periods 与默认任务书对齐时允许写出 brief。"""
+        with temporary_directory() as folder:
+            brief_path = Path(folder) / "brief.json"
+            diagnosis_path = Path(folder) / "diagnosis.json"
+            diagnosis_path.write_text(
+                json.dumps(self.example, ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "make_brief.py"),
+                    "--out",
+                    str(brief_path),
+                    "--diagnosis",
+                    str(diagnosis_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertGreater(brief_path.stat().st_size, 0)
+
+    def test_cli_空诊断夹具非零且不写出任务书(self) -> None:
+        """diagnosis metrics 为空时指出 periods 字段并拒绝写出空 brief。"""
+        with temporary_directory() as folder:
+            brief_path = Path(folder) / "brief.json"
+            diagnosis_path = Path(folder) / "diagnosis-empty.json"
+            empty_diagnosis = copy.deepcopy(self.example)
+            empty_diagnosis["metrics"] = []
+            diagnosis_path.write_text(
+                json.dumps(empty_diagnosis, ensure_ascii=False), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "make_brief.py"),
+                    "--out",
+                    str(brief_path),
+                    "--diagnosis",
+                    str(diagnosis_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("periods", result.stderr)
+            self.assertFalse(brief_path.exists())
+
 
 class OutputFileConsistencyTest(unittest.TestCase):
     """--out 的输出文件一致性：先写临时文件再替换，失败时给出稳定错误。
