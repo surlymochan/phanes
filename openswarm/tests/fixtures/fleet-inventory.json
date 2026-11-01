@@ -1,0 +1,49 @@
+{
+  "hosts": {
+    "gorelay": {
+      "kind": "ssh",
+      "ssh": "gorelay",
+      "lanes": [
+        {
+          "name": "A1",
+          "backend": "codex",
+          "model": "gpt-5-codex",
+          "effort": "high",
+          "repo": "/home/me/work/phanes"
+        },
+        {
+          "name": "A2",
+          "backend": "cursor",
+          "model": "composer-2.5",
+          "repo": "/home/me/work/phanes",
+          "memory_max": "700M"
+        }
+      ]
+    },
+    "ib1": {
+      "kind": "instabox",
+      "box": "ib1",
+      "lanes": [
+        {
+          "name": "M11",
+          "backend": "codex",
+          "model": "gpt-5-codex",
+          "effort": "medium",
+          "repo": "/home/me/work/phanes"
+        }
+      ]
+    },
+    "local": {
+      "kind": "local",
+      "lanes": [
+        {
+          "name": "K1",
+          "backend": "codex",
+          "model": "gpt-5-codex",
+          "effort": "high",
+          "repo": "/home/me/work/phanes"
+        }
+      ]
+    }
+  }
+}

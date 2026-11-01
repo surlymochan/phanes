@@ -18,7 +18,7 @@ Subcommands:
   lessons          preview, propose, and escalate executor lessons
   patterns         propose reusable patterns and check active patterns for retirement
   lane             manage long-lived Codex app-server / Cursor ACP / Pi RPC executor lanes
-  fleet            inspect hosts and forward openswarm commands over local / SSH / instabox transports
+  fleet            inspect hosts, forward openswarm commands, render lanes.json from one fleet inventory
   batch            queue task cards across fleet hosts and collect their branches
   verify-remote    verify a fleet run on another host in a temporary worktree
   bus              initialize or inspect a GitHub issue bus repository
@@ -10589,9 +10589,176 @@ def cmd_fleet_harvest(args):
         raise SystemExit(1)
 
 
+# ---------------------------------------------------------------- fleet inventory: one manifest, many lanes.json
+
+# The lane fields a lanes.json entry may carry (the schema `lane_config` reads).
+LANE_CONFIG_FIELDS = ("name", "backend", "model", "repo", "effort", "fallback_models",
+                      "provider", "binary", "memory_max", "env_file", "env", "mode")
+LANE_CONFIG_BACKENDS = ("codex", "cursor", "agy", "pi", "hermes", "copilot")
+# The host fields an inventory entry may carry on top of its lane list.
+FLEET_INVENTORY_HOST_FIELDS = ("kind", "ssh", "box", "openswarm", "lanes_file", "lanes")
+FLEET_INVENTORY_REMOTE_LANES_FILE = "~/.claude/openswarm/lanes.json"
+
+
+def fleet_inventory_load(path):
+    """Read the fleet inventory: {"hosts": {host: {ssh..., lanes: [...]}}}."""
+    try:
+        with open(path, encoding="utf-8") as stream:
+            inventory = json.load(stream)
+    except (OSError, ValueError, UnicodeError) as error:
+        raise ValueError(f"invalid fleet inventory {path!r}: {error}") from error
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("hosts"), dict):
+        raise ValueError(f"invalid fleet inventory {path!r}: expected {{\"hosts\":{{host: ...}}}}")
+    return inventory["hosts"]
+
+
+def fleet_inventory_unknown_fields(where, fields, allowed):
+    """Reject a field the schema does not know, so a typo cannot silently drop a lane setting."""
+    for field in fields:
+        if field not in allowed:
+            raise ValueError(f"invalid fleet inventory {where}: unknown field {field!r} "
+                             f"(allowed: {', '.join(allowed)})")
+
+
+def fleet_inventory_render_lanes(entry, where):
+    """Validate one inventory host entry and return the lanes.json lanes it describes."""
+    if not isinstance(entry, dict):
+        raise ValueError(f"invalid fleet inventory {where}: expected an object")
+    fleet_inventory_unknown_fields(where, entry, FLEET_INVENTORY_HOST_FIELDS)
+    lanes = entry.get("lanes")
+    if not isinstance(lanes, list):
+        raise ValueError(f"invalid fleet inventory {where}: lanes must be a list of lane entries")
+    names, out = set(), []
+    for i, lane in enumerate(lanes):
+        lane_where = f"{where}: lanes[{i}]"
+        if not isinstance(lane, dict):
+            raise ValueError(f"invalid fleet inventory {lane_where}: expected an object")
+        fleet_inventory_unknown_fields(lane_where, lane, LANE_CONFIG_FIELDS)
+        name = lane.get("name")
+        if not isinstance(name, str) or not LANE_NAME_RE.fullmatch(name):
+            raise ValueError(f"invalid fleet inventory {lane_where}: name must match {LANE_NAME_RE.pattern}")
+        if name in names:
+            raise ValueError(f"invalid fleet inventory {lane_where}: duplicate lane name {name!r}")
+        names.add(name)
+        backend = lane.get("backend")
+        if backend not in LANE_CONFIG_BACKENDS:
+            raise ValueError(f"invalid fleet inventory {lane_where}: unsupported backend {backend!r}")
+        repo = lane.get("repo")
+        if not isinstance(repo, str) or not os.path.isabs(repo):
+            raise ValueError(f"invalid fleet inventory {lane_where}: repo must be an absolute path")
+        if backend != "hermes" and (not isinstance(lane.get("model"), str) or not lane["model"].strip()):
+            raise ValueError(f"invalid fleet inventory {lane_where}: model is required")
+        if backend == "codex" and (not isinstance(lane.get("effort"), str) or not lane["effort"].strip()):
+            raise ValueError(f"invalid fleet inventory {lane_where}: codex effort is required")
+        out.append({field: lane[field] for field in LANE_CONFIG_FIELDS if field in lane})
+    return out
+
+
+def fleet_inventory_transport(name, entry, where):
+    """Build the transport descriptor of one inventory host (local / ssh / instabox)."""
+    kind = entry.get("kind")
+    if kind is None:
+        kind = "ssh" if entry.get("ssh") else ("instabox" if entry.get("box") else "local")
+    if kind not in ("local", "ssh", "instabox"):
+        raise ValueError(f"invalid fleet inventory {where}: unsupported kind {kind!r}")
+    host = {"name": name, "kind": kind}
+    if kind == "ssh":
+        target = entry.get("ssh")
+        if not isinstance(target, str) or not target or target.startswith("-"):
+            raise ValueError(f"invalid fleet inventory {where}: ssh host must be a non-empty name")
+        host["ssh"] = target
+    if kind == "instabox":
+        box = entry.get("box")
+        if not isinstance(box, str) or not box:
+            raise ValueError(f"invalid fleet inventory {where}: instabox host requires a box name")
+        host["box"] = box
+    if entry.get("openswarm"):
+        host["openswarm"] = entry["openswarm"]
+    return host
+
+
+def fleet_inventory_read_lanes(host, entry, where):
+    """Read the lanes.json a fleet host currently has; None when the host has none."""
+    path = entry.get("lanes_file")
+    if host["kind"] == "local":
+        target = os.path.expanduser(path or envvar("LANES_FILE", os.path.join(DATA, "lanes.json")))
+        try:
+            with open(target, encoding="utf-8") as stream:
+                raw = stream.read()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"invalid fleet inventory {where}: cannot read lanes file {target!r}: {error}") from error
+    else:
+        target = path or FLEET_INVENTORY_REMOTE_LANES_FILE
+        rc, out, err = host_run(host, "cat " + shell_path(target), timeout=30)
+        if rc:
+            detail = err.decode("utf-8", errors="replace").strip()
+            raise ValueError(f"invalid fleet inventory {where}: cannot read lanes file on {host['name']} "
+                             f"(rc={rc}): {detail}")
+        raw = out.decode("utf-8", errors="replace")
+    try:
+        config = json.loads(raw)
+    except (ValueError, UnicodeError) as error:
+        raise ValueError(f"invalid fleet inventory {where}: invalid lanes JSON: {error}") from error
+    if not isinstance(config, dict) or not isinstance(config.get("lanes"), list):
+        raise ValueError(f"invalid fleet inventory {where}: expected {{\"lanes\":[...]}}")
+    return config["lanes"]
+
+
+def fleet_lanes_diff(expected, actual):
+    """Compare rendered lanes with the lanes a host has: extra, missing, and changed lanes."""
+    expected_by_name = {lane["name"]: lane for lane in expected}
+    actual_by_name = {lane["name"]: lane for lane in (actual or [])
+                      if isinstance(lane, dict) and isinstance(lane.get("name"), str)}
+    extra = sorted(set(actual_by_name) - set(expected_by_name))
+    missing = sorted(set(expected_by_name) - set(actual_by_name))
+    changed = []
+    for name in sorted(set(expected_by_name) & set(actual_by_name)):
+        want, have = expected_by_name[name], actual_by_name[name]
+        fields = sorted(field for field in set(want) | set(have) if want.get(field) != have.get(field))
+        if fields:
+            changed.append({"lane": name, "fields": fields})
+    return {"extra": extra, "missing": missing, "changed": changed}
+
+
+def cmd_fleet_render_lanes(args):
+    """Render every host's lanes.json from one fleet inventory, or check the hosts for drift."""
+    hosts = fleet_inventory_load(args.inventory)
+    selected = list(hosts)
+    if args.host:
+        if args.host not in hosts:
+            raise ValueError(f"unknown fleet host in inventory: {args.host}")
+        selected = [args.host]
+    rendered, transports = {}, {}
+    for name in selected:
+        where = f"{args.inventory!r}: hosts[{name!r}]"
+        rendered[name] = {"lanes": fleet_inventory_render_lanes(hosts[name], where)}
+        transports[name] = fleet_inventory_transport(name, hosts[name], where)
+    if not args.check:
+        print(json.dumps({"hosts": rendered}, indent=2, ensure_ascii=False))
+        return
+    report = {"ok": True, "status": "ok", "hosts": {}}
+    for name in selected:
+        where = f"{args.inventory!r}: hosts[{name!r}]"
+        host = transports[name]
+        diff = fleet_lanes_diff(rendered[name]["lanes"],
+                                fleet_inventory_read_lanes(host, hosts[name], where))
+        ok = not (diff["extra"] or diff["missing"] or diff["changed"])
+        report["hosts"][name] = {"ok": ok, **diff}
+        report["ok"] = report["ok"] and ok
+    report["status"] = "ok" if report["ok"] else "failed"
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def cmd_fleet(args):
     if args.fleet_cmd == "harvest":
         cmd_fleet_harvest(args)
+        return
+    if args.fleet_cmd == "render-lanes":
+        cmd_fleet_render_lanes(args)
         return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
@@ -13122,6 +13289,11 @@ def main():
     fp.add_argument("--hosts", help="comma-separated fleet host names")
     fp.add_argument("--into", help="destination directory for harvested result bundles")
     fp.add_argument("--json", action="store_true", help="print the harvest manifest as JSON")
+    fp = fleet_sub.add_parser("render-lanes", help="render or check every host's lanes.json from one fleet inventory")
+    fp.add_argument("--inventory", required=True, help="fleet inventory JSON path")
+    fp.add_argument("--host", help="only this host of the inventory")
+    fp.add_argument("--check", action="store_true",
+                    help="compare the inventory with the lanes.json each host has and exit non-zero on drift")
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")

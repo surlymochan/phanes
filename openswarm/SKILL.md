@@ -148,11 +148,17 @@ and authenticated executors on the hosts. Full config example: [README](README.m
 ```bash
 $XS fleet status --json                  # never wakes paused instaboxes
 $XS fleet exec worker -- lane status     # arbitrary openswarm arguments, stdout/rc forwarded
+$XS fleet render-lanes --inventory fleet-inventory.json --check   # one inventory, every host's lanes.json
 $XS batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
   --backend pi --model cheap-model --budget-minutes 20 --detach
 $XS batch status <batch-id>
 $XS verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'
 ```
+
+`fleet render-lanes` reads one inventory (`{"hosts": {"<host>": {"ssh": "<alias>", "lanes": [ ... ]}}}`) and
+renders each host's `lanes.json`; every lane entry uses the `lanes.json` lane schema. `--check` compares the
+inventory with the `lanes.json` each host has (local file, or `cat` over the host transport) and lists the extra,
+missing, and changed lanes, exiting non-zero on drift. It renders and compares only, and never writes to a host.
 
 Batch wakes each chosen instabox once, checks repos, syncs `--base` (default local HEAD), queues sorted cards
 round-robin, polls without Monitor, and fetches each result branch before deleting it on the executor host.
@@ -306,6 +312,7 @@ and exits `1` when it rejects the card or the diff.
 | `fleet status` | Show reachability, paused hosts, lanes, and active runs. | `$XS fleet status --json` |
 | `fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `$XS fleet exec worker -- lane status` |
 | `fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `$XS fleet ledger pull --hosts worker,sandbox` |
+| `fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `$XS fleet render-lanes --inventory fleet-inventory.json --check` |
 
 ### Learn
 
