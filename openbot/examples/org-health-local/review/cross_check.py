@@ -4,10 +4,11 @@
 用法：
     python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>]
                                     [--out <report.md>]
+                                    [--json-out <results.json>]
 
 逐条输出 PASS/FAIL，任一 FAIL 时退出码非 0；输入不可读或不是 JSON 对象时退出码为 2。
-只使用 Python 3.9+ 标准库；除 `--out` 指定的报告文件外不写任何文件，
-`--out` 的父目录不存在时自动创建。
+只使用 Python 3.9+ 标准库；除 `--out`/`--json-out` 指定的报告文件外不写任何文件，
+两个输出路径的父目录不存在时自动创建。
 
 检查项：
 
@@ -473,6 +474,24 @@ def markdown_report(results: list[Result]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def json_report(results: list[Result]) -> str:
+    """将检查结果格式化为稳定的 JSON 报告。"""
+    failed = sum(not result.ok for result in results)
+    payload = {
+        "ok": failed == 0,
+        "checks": [
+            {"name": result.name, "ok": result.ok, "detail": result.detail}
+            for result in results
+        ],
+        "summary": {
+            "total": len(results),
+            "passed": len(results) - failed,
+            "failed": failed,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     """核对三方一致性。返回进程退出码。"""
     parser = argparse.ArgumentParser(
@@ -487,6 +506,12 @@ def main(argv: list[str] | None = None) -> int:
         help="站点产物目录；给出时核对 `data/diagnosis.json` 与 `--data` 是否字节相同。",
     )
     parser.add_argument("--out", type=Path, default=None, help="可选的 Markdown 报告输出路径。")
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        default=None,
+        help="可选的 JSON 结果输出路径。",
+    )
     args = parser.parse_args(argv)
     try:
         brief = load_json(args.brief)
@@ -501,6 +526,13 @@ def main(argv: list[str] | None = None) -> int:
             args.out.write_text(markdown_report(results), encoding="utf-8")
         except OSError as cause:
             print(f"无法写入报告 {args.out}：{cause}", file=sys.stderr)
+            return EXIT_USAGE
+    if args.json_out is not None:
+        try:
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json_report(results), encoding="utf-8")
+        except OSError as cause:
+            print(f"无法写入 JSON 结果 {args.json_out}：{cause}", file=sys.stderr)
             return EXIT_USAGE
     failed = 0
     for result in results:

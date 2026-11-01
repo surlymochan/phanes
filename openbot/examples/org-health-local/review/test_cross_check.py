@@ -167,7 +167,11 @@ def rename_period_key(node: dict, old: str, new: str) -> None:
 
 
 def run_script(
-    brief: Path, data: Path, dist: Path | None = None, out: Path | None = None
+    brief: Path,
+    data: Path,
+    dist: Path | None = None,
+    out: Path | None = None,
+    json_out: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """调用命令行脚本，返回进程结果。"""
     argv = [sys.executable, str(SCRIPT), "--brief", str(brief), "--data", str(data)]
@@ -175,6 +179,8 @@ def run_script(
         argv.extend(["--dist", str(dist)])
     if out is not None:
         argv.extend(["--out", str(out)])
+    if json_out is not None:
+        argv.extend(["--json-out", str(json_out)])
     return subprocess.run(argv, capture_output=True, text=True)
 
 
@@ -489,7 +495,7 @@ class CrossCheckTest(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for argument in ("--brief", "--data", "--dist", "--out"):
+        for argument in ("--brief", "--data", "--dist", "--out", "--json-out"):
             self.assertIn(argument, result.stdout)
 
     def test_command_line_missing_required_arguments_exits_two(self) -> None:
@@ -521,6 +527,23 @@ class CrossCheckTest(unittest.TestCase):
         self.assertIn("- **PASS 期间一致**", content)
         self.assertIn("- **PASS 隐私边界**", content)
         self.assertNotIn("- **FAIL ", content)
+
+    def test_command_line_writes_successful_json_report(self) -> None:
+        """合法输入带 --json-out 时写出稳定的逐条 JSON 结果。"""
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            json_out = base / "review.json"
+            result = run_script(brief, data, json_out=json_out)
+            payload = json.loads(json_out.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, cross_check.EXIT_OK, result.stdout + result.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["summary"], {"total": 5, "passed": 5, "failed": 0})
+        self.assertTrue(payload["checks"])
+        self.assertTrue(
+            all(set(check) == {"name", "ok", "detail"} for check in payload["checks"])
+        )
 
     def test_command_line_missing_recommendations_passes_and_writes_markdown_report(self) -> None:
         """快照缺少可选 recommendations 段时命令行正常退出并写出完整 Markdown 报告。"""
@@ -564,6 +587,21 @@ class CrossCheckTest(unittest.TestCase):
             data = write_json(base / "diagnosis.json", self.diagnosis)
             result = run_script(brief, data)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_command_line_writes_failed_json_report(self) -> None:
+        """失败检查带 --json-out 时写出失败 JSON 且退出码为 1。"""
+        self.brief["schema版本"] = 3
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", self.brief)
+            data = write_json(base / "diagnosis.json", self.diagnosis)
+            json_out = base / "review.json"
+            result = run_script(brief, data, json_out=json_out)
+            payload = json.loads(json_out.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["summary"]["failed"], 1)
+        self.assertTrue(any(not check["ok"] for check in payload["checks"]))
 
     def test_command_line_empty_questions_fails_with_report_summary(self) -> None:
         """任务书必答问题为空时命令行失败并在报告汇总中计数。"""
