@@ -252,6 +252,8 @@ ls "$workdir/brief.json" "$workdir/diagnosis.json" "$workdir/dist" \
 `brief.json`/`diagnosis.json`、`--raw` 目录、bundle 或 `dist/`。若已进入审查，查看
 `$workdir/review.md` 中的 FAIL 条目；上游失败时不会调用审查角色，也不会生成该报告。
 
+角色脚本路径不存在时同样以非零退出，并在 stderr 点名角色与该路径（例如 `步骤失败: 审查 (Reviewer 脚本文件不存在: <path>)`）；失败步骤之前已生成的产物保留在工作目录，审查步骤未启动时不会写出空的 `review.md`。
+
 从仓库根目录运行、只使用 Python 标准库的测试命令：
 
 ```bash
@@ -316,7 +318,8 @@ python3 validate.py <diagnosis.json>
 - 任务书可用 DA 格式 `观察期间.起始期次/参考期次/截止期次`，或 Boss 格式 `观察期间.期次`、`观察月份`、`数据截止`。Boss 格式按列表顺序取首个“实际”为起始、首个含“参考”的期次为参考、与观察月份匹配的“实际”为截止。`口径` 提供指标定义；汇率可写在任务书，缺省时从 `fx.csv` 读取。
 - 原始数据目录放 `cost.csv`（月度技术人力成本与运维设施成本）、`heads.csv`（月度折算人头）、`revenue.csv`（月度收入）、`forecast.csv`（年末测算与年末目标）和汇率缺省时使用的 `fx.csv`（`人民币每美元` 列）。`da/sample-raw/` 包含纯合成样本，含合成汇率 7.2，数值与 `data/diagnosis.json` 同量级。
 - 缺列、缺文件、缺汇率、表头出现重复列名或数据行缺少必需列的取值时退出码非 0，错误信息指出原始数据文件与列名；缺数据的期次写 `null`，不填估算值。输出确定性：同一份任务书与原始数据得到同一份 JSON，键序固定。
-- `da/write_method.py` 生成只讲口径、不复述诊断数值的说明文档：给 `--raw` 原始数据目录时，文档里的“数据来源”小节按文件名列出每个 CSV 及其数据行数（不含表头）；不给 `--raw` 时该小节写明未提供原始数据目录。
+- 脏数据可恢复：数据行里的单元格取值是占位文本（不含数字，如 `待补`、`N/A`）时整行跳过，快照照常生成；被跳过的行记进可审计警告（文件、行号、期次、列名、取值与原因），写进快照的 `口径说明`、`insights`、`risks` 与 `recommendations`，命令行在 stderr 提示一次；严格模式（`--strict`）仍因期次缺口失败。带数字但不是合法数值（如 `$11.2`）或不是有限数值（`nan`、`inf`）说明来源文件的单位或格式有问题，仍按输入错误退出码非 0 并指出文件与行号；同一行里既有占位文本又有这类非法数值时按非法数值报出（错误信息带文件名、行号与列名），不按脏行跳过掩盖。
+- `da/write_method.py` 生成只讲口径、不复述诊断数值的说明文档：给 `--raw` 原始数据目录时，文档里的“数据来源”小节按文件名列出每个 CSV 及其数据行数（不含表头）；不给 `--raw` 时该小节写明未提供原始数据目录。任务书可用 Boss 格式（`观察期间` 与 `口径` 为嵌套对象）：文档按字段展开观察期间与口径，每个指标小节按指标标题引用任务书 `口径` 里的同名条目，并写明字段路径与 `null` 期次。
 
 ```bash
 python3 da/write_method.py --brief <brief.json> --data <diagnosis.json> --raw da/sample-raw --out <method.md>
@@ -340,6 +343,8 @@ python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  #
 ```
 
 退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
+
+结构定义里每个键的含义、单位、计算口径与来源角色见 [`docs/scenario/org-diagnosis/data-definitions.md`](../../../docs/scenario/org-diagnosis/data-definitions.md)；键名与该文档的一致性由 `python3 -m unittest test_data_definitions -v` 断言（只用标准库）。
 
 ## Review 角色：独立交叉审查
 

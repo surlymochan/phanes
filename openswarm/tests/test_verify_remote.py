@@ -38,6 +38,7 @@ class VerifyRemoteTests(FakeFleetFixture, unittest.TestCase):
         result = json.loads((self.data / "remote-results" / (rid + ".json")).read_text())
         self.assertEqual(result["commit"], original["commit"])
         self.assertEqual(result["verify_remote"]["host"], "local")
+        self.assertIn("test -f", result["verify_remote"]["cmd"])
         self.assertEqual(result["verify_remote"]["rc"], 0)
         self.assertEqual(result["verify_remote"]["failing"], [])
         self.assertGreater(result["verify_remote"]["seconds"], 0)
@@ -55,9 +56,11 @@ class VerifyRemoteTests(FakeFleetFixture, unittest.TestCase):
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
         target = self.root / "b2" / "repo"
         before = self.git(target, "worktree", "list", "--porcelain")
-        rc, reply = self.verify(rid, "b2", "printf 'FAILED test_case\nprivate-output\n'; exit 3")
+        command = "printf 'FAILED test_case\\n'; printf 'private-%s\\n' output; exit 3"
+        rc, reply = self.verify(rid, "b2", command)
         self.assertEqual(rc, 1)
         self.assertEqual(reply["verify_remote"]["rc"], 3)
+        self.assertEqual(reply["verify_remote"]["cmd"], command)
         self.assertEqual(reply["verify_remote"]["host"], "b2")
         self.assertEqual(reply["verify_remote"]["failing"], ["test_case"])
         self.assertNotIn("private-output", json.dumps(reply))

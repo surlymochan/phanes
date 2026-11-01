@@ -770,6 +770,28 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"),
                          (self.data / "lanes" / self.lane_name / "wt" / "lane_result.txt").read_text().rstrip("\n"))
 
+    def test_cursor_failed_verify_keeps_auditable_commit(self):
+        self.set_config("cursor")
+        self.start_lane()
+        command = "test -s lane_result.txt && printf 'FAILED lane_check\\n' && exit 7"
+        run_id = self.assign("LANE_TEST_AGENT_COMMIT make the change", "--verify", command)
+        self.assertEqual(self.wait_run(run_id)["status"], "partial")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertTrue(result["commit"])
+        self.assertIn("lane_result.txt", result["diffstat"])
+        self.assertIn(command, result["verify_note"])
+        self.assertEqual(result["verify"]["cmd"], command)
+        self.assertEqual(self.git("rev-parse", f"openswarm/{run_id}"), result["commit"])
+
+    def test_cursor_empty_change_is_not_successful_commit(self):
+        self.set_config("cursor")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_NO_CHANGE leave the tree alone", "--verify", "true")
+        self.assertNotEqual(self.wait_run(run_id)["status"], "done")
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertIsNone(result["commit"])
+        self.assertIn("no_change_evidence", result["verify_note"])
+
     def test_cursor_systemd_unit_is_printed_not_installed(self):
         self.set_config("cursor")
         unit = self.cli("lane", "systemd-unit", self.lane_name).stdout

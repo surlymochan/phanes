@@ -34,9 +34,20 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      It contains `_busy` (lanes currently assigned work), `_ready` (open GH
      `lane-ready` issues not marked `in-progress`, `lane-pr`, or
      `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
-     is the dispatchable count after `_blocked` is removed. `_stale_stripped_n`
-     is the non-negative count of stale-search-index entries stripped by the
-     current autodispatch process.
+     is the dispatchable count after `_blocked` is removed. `_ready` follows the
+     authoritative issue labels (the bool `fresh_ready` check), not the lagging search index:
+     a stale search row (e.g. an issue that really carries `lane-failed`) is
+     skipped and logged as `skip #<n>: stale search index (already claimed/done)`,
+     never counted as dispatchable. A failed authoritative read is NOT stale:
+     the row is kept and logged as `skip #<n>: label read failed (...)`, so a
+     transient `gh` error can neither drive `_ready` to a false 0 nor trigger a
+     needless refill. Each issue is read authoritatively at most once per tick
+     (`AD_FRESH_BUDGET`, default 60 reads/tick, keeps the GraphQL quota safe).
+     `_stale_stripped_n` (also exposed as `_stale_search_skips`) is the
+     non-negative count of stale-search-index entries stripped by the current
+     autodispatch process; `_stale_lane_failed_skips` counts the subset of those
+     stale hits whose issue still carries both `lane-failed` and `lane-ready`
+     (Refs #985).
    - Failed work is not retried by leaving a stale `lane-ready` label: after a
      failure, an operator must manually re-add `lane-ready` and remove
      `lane-failed` (and `lane-pr`, if present) before it can be dispatched again.
@@ -48,6 +59,14 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      build their SSH command from the same `git_ssh_command`/`shlex` path, so a
      `ProxyCommand` or `ProxyJump` value containing spaces remains one argv item.
      Check offline with `python3 tools/check-ssh-opts-quote.py`.
+   - **Jump host ProxyCommand contract (Refs #907)**: a host listed in the AD jump
+     table gets its `ProxyCommand` injected by `ssh_opts(host)`; the value carries
+     spaces and is `shlex.quote`d before it reaches `core.sshCommand`, so `ssh`
+     never sees a split option. The jump table is runtime configuration
+     (`$AD_JUMP_HOSTS` or `~/phanes-ctl/autodispatch/jump-hosts.json`), not code —
+     the box ssh config owns the topology (see
+     [`docs/dual-mode-ssh.md`](dual-mode-ssh.md)).
+     Check offline with `python3 tools/check-ad-ssh-command.py`.
    - **Chunked sleep heartbeat contract (Refs #906)**: between ticks, autodispatch sleeps
      in chunks of ≤ 5s (`sleep(5)`) and refreshes `autodispatch/heartbeat` at each step.
      This prevents host suspend / nanosleep freeze from creating ~40-minute silent heartbeat
@@ -58,6 +77,7 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &`; script: `merge-loop.sh`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/merge-heartbeat`
+   - **Idle heartbeat contract (Refs #955)**: when idle (no PR pending or no open PR in queue), `merge-loop.sh` skips the merge step (no `gh pr merge` call) but still updates the `merge-heartbeat` timestamp on each tick to prevent false-positive stall detection. Check with `python3 tools/check-merge-idle-heartbeat.py`.
 
 4. **`bus-worker-loop`** (GitHub issue bus executor loop):
    - **Startup command**: `~/phanes-ctl/bin/bus-worker-loop`  
@@ -123,6 +143,28 @@ contract check `python3 tools/check-ib-cert-reuse.py` uses fake TTLs and the
 environment variable to cover both branches, and never invokes a real renewal
 command or touches a machine certificate.
 
+### Merge loop idle heartbeat (Refs #955)
+
+When no open PR is waiting to merge (`idle`), the `lane-merge` loop (`merge-loop.sh`)
+must skip the merge step but still touch/refresh
+`~/phanes-ctl/autodispatch/merge-heartbeat`. Updating the heartbeat while idle prevents
+watchdog monitors from misinterpreting an idle period (no PR activity) as a wedged
+or stalled merge loop.
+
+`bin/merge-loop.sh` writes the heartbeat before the PR query and again on an idle
+tick (empty `gh pr list` result), so an empty queue never looks like a dead loop.
+The offline contract check replays that real script with a fake `gh` stub inside a
+fake directory: while the queue is empty no `gh pr merge` call may happen (the
+merge step is skipped), and `merge-heartbeat` must still be refreshed. The check
+does not model merge policy: `merge-loop.sh` delegates the merge decision to the
+host's `gh` configuration and branch protections.
+
+The contract is asserted offline with fake directory fixtures:
+
+```bash
+python3 tools/check-merge-idle-heartbeat.py
+```
+
 ## Smoke (safe, no restart) (Refs #777)
 
 ```bash
@@ -162,6 +204,15 @@ Check scripts (no SSH):
   read, compare the live snapshot with the filtered GH list (dependency
   blockers are shown separately as `_blocked`):
   `watch -n 30 "jq -c '{busy:._busy,ready:._ready,blocked:._blocked,at:._at}' ~/phanes-ctl/autodispatch/lanes-status.json; gh issue list --state open --label lane-ready --limit 100 --json number,labels --jq '[.[] | select(([.labels[].name] | index(\"in-progress\") | not) and ([.labels[].name] | index(\"lane-pr\") | not) and ([.labels[].name] | index(\"lane-failed\") | not))] | length'"`.
+  That `gh issue list` is a search-index view while `_ready` follows the
+  authoritative labels: in a stale scenario (an issue that really carries
+  `lane-failed`) the two numbers differ on purpose.
+- `python3 tools/check-ad-ready-count.py` — offline #950 contract check. It
+  drives the shipped dispatcher with fake search results plus authoritative
+  issue labels: a stale `lane-failed` search row is skipped and `_ready`
+  matches the fresh count, a failed authoritative read keeps the row instead of
+  shrinking `_ready`, and every issue is read at most once per tick;
+  it never calls `gh`.
 - `python3 tools/check-soak-summary.py` — offline dual-mode soak summary
   contract. It reads fake `lanes-status` and `ib-refresh.status` rows and
   prints the `busy`, `ready`, `hosts_ok`, and `min_exp` values for polling.
@@ -169,6 +220,7 @@ Check scripts (no SSH):
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-ad-heartbeat-chunk.py` — offline #906 contract check asserting that lane-autodispatch's main loop sleeps in chunks of ≤ 5s (`sleep(5)`) between ticks and updates `autodispatch/heartbeat` on each step, preventing host suspend / nanosleep freeze false stalls.
+- `python3 tools/check-ad-ssh-command.py` — offline #907 contract check. The fleet host list is parsed from `docs/fleet-topology-expected.md` and the jump-host table from the AD runtime configuration (`$AD_JUMP_HOSTS` / `~/phanes-ctl/autodispatch/jump-hosts.json`), so the script keeps no second copy of the topology; it asserts that a `ProxyCommand` containing spaces stays one `shlex.quote`d argv item and that the `core.sshCommand` of the harvest fetch has no unquoted space breakage. It also fails if the AD source hardcodes a fleet host name.
 - `python3 tools/check-ad-queue-filter.py` — offline #903 contract check using fake issue JSON; issues carrying `lane-ready` together with `lane-failed` or `lane-pr` are not dispatchable.
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
@@ -182,6 +234,8 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1260 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
 - `python3 tools/check-ghost-in-progress.py` — offline ghost in-progress check (Refs #922). Fake fixtures only: an open issue carrying `in-progress` with no lane entry in `state.json` counts as a ghost only when the label is older than **10 minutes** (a dispatch in flight still has no lane record), `lane-pr` issues are protected, and a `lane-failed` ghost is only re-labelled `lane-ready` when `state.json` has no lane occupancy and the issue body keeps its acceptance command (#960). It prints the recommended `gh issue edit` commands and never touches GitHub.
+- `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
+- `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
 ### Roll back a failed assign (Refs #968)
 
@@ -197,6 +251,24 @@ was rejected. The control plane must compare the remote lane with its local
   real runner or invent a local state entry;
 - the check is deliberately offline and uses fake state only:
   `python3 tools/check-ad-assign-rollback.py`.
+
+### Stale search results and residual labels (Refs #985)
+
+`gh issue list --label lane-ready` uses a search index that can briefly retain a
+failed issue after it was changed to `lane-failed`. `fresh_ready` re-reads the
+issue and rejects the stale hit, so it is not dispatched in that tick. When the
+re-read labels still contain both `lane-failed` and `lane-ready`, the log says
+`stale search hit lane-failed + lane-ready` and asks the operator to remove the
+residual `lane-ready` label; the status snapshot exposes `_stale_search_skips`
+and `_stale_lane_failed_skips` for monitoring. Operators can clear the residual
+with:
+
+```bash
+gh issue edit <N> --remove-label lane-ready
+```
+
+Re-add `lane-ready` only after the failure has been reviewed and the issue is
+ready for another attempt.
 
 ### Orphan runner window after assign (Refs #961)
 
@@ -467,6 +539,34 @@ python3 tools/check-ghost-in-progress.py --state-file ~/ghost-check-state.json -
 ```
 
 `--min-age-seconds` 可调陈旧度门槛（默认 600s），`--now` 可固定“现在”以复现判定结果。
+## Autodispatch git_ssh_command 与 ProxyCommand 引用保护 (Refs #907)
+
+Autodispatch 在 harvest 阶段通过 `core.sshCommand` 拉取各 host 分支。若某 host 需要经跳板访问，AD 会给它注入一条含空格的 `ProxyCommand`（如 `ssh -W %h:%p <跳板别名>`）。
+
+写入 `core.sshCommand` 必须经 `shlex.quote`（`shlex.join` 对每个参数逐一引用）。如果未引用，git 在调用 shell 解析命令串时会将 `ProxyCommand` 拆碎（如拆出独立的 `-o ProxyCommand=ssh` 与孤立参数），导致 `ssh` 打印 usage 并使 harvest 失败。
+
+- 跳板拓扑不在代码里写死：AD 从运行配置读跳板表 `$AD_JUMP_HOSTS`（JSON）或
+  `~/phanes-ctl/autodispatch/jump-hosts.json`，默认空表 → 完全依赖 box 端 ssh config 的
+  `ProxyJump`。事实来源与核对依据见 [`docs/dual-mode-ssh.md`](dual-mode-ssh.md)（含
+  “命令行 `-o ProxyCommand=` 会先于 config 里的 `ProxyJump` 生效”这条优先级）。
+- 引用路径：`ssh_opts(host)` 生成选项向量 → `git_ssh_command(opts)` 用 `shlex.join` 引用；
+  `git_fetch_command()` 复用同一路径写 `core.sshCommand`；`ssh_argv()` 反解回 argv，
+  状态探针（`remote()`）与 dispatch（`dispatch()`）都走这一条 argv 构造路径。
+- 校验工具：`python3 tools/check-ad-ssh-command.py` 对样例 host 生成命令串并断言不含未引用空格破损；跳板主机集合取自 AD 运行配置，脚本里不另抄一份。
+
+### 部署说明（仓库镜像 ≠ 运行副本）
+
+本改动落在仓库镜像 `tools/lane-autodispatch/autodispatch.py`；box 上真正运行的是
+`~/phanes-ctl/bin/autodispatch.py`。不同步到运行副本，线上 harvest 行为不变：
+
+```bash
+cp tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+```
+
+若 box 需要 AD 自己注入跳板（而不是用 ssh config 的 `ProxyJump`），另外在运行副本的
+状态目录放 `~/phanes-ctl/autodispatch/jump-hosts.json`（JSON 对象
+`{"<host>": "<ProxyCommand>"}`），格式与取值见
+[`docs/dual-mode-ssh.md`](dual-mode-ssh.md)。
 
 ## Manual one-shots
 

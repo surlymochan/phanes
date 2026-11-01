@@ -258,6 +258,8 @@ class LocalServeBoundaryTests(unittest.TestCase):
 
     def test_query_string_on_allowed_paths_is_served(self):
         # 查询串不参与白名单判定：路径部分仍在 ALLOWED_PATHS 内即可照常服务。
+        # app.bundle.js 是 bun 构建产物（被 .gitignore 排除），仓库里并不存在，
+        # 它的查询串行为由 DistRootServeTests 用真实产物单独覆盖。
         cases = (
             ('/?x=1', INDEX.read_bytes()),
             ('/index.html?x=1', INDEX.read_bytes()),
@@ -269,6 +271,7 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 status, body = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertEqual(body, expected_body)
+                self.assertNotIn(b'Traceback', body)
 
     def test_query_string_on_unknown_paths_is_not_found(self):
         # 白名单外的路径即使带查询串依然 404。
@@ -444,6 +447,17 @@ class DistRootServeTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def request_with_type(self, path, method='GET', host=None, port=None):
+        """发起一次请求并返回 (状态码, Content-Type, body)；用于核对诊断快照的响应头。"""
+        connection = http.client.HTTPConnection('127.0.0.1', port or self.port, timeout=5)
+        try:
+            headers = {} if host is None else {'Host': host}
+            connection.request(method, path, headers=headers)
+            response = connection.getresponse()
+            return response.status, response.getheader('Content-Type'), response.read()
+        finally:
+            connection.close()
+
     def test_dist_whitelisted_files_are_served(self):
         cases = (
             ('/index.html', self.index.read_bytes()),
@@ -539,6 +553,26 @@ class DistRootServeTests(unittest.TestCase):
             switcher.join(timeout=5)
             server.server_close()
         self.assertFalse(thread.is_alive())
+
+    def test_incomplete_snapshot_returns_json_error_then_recovers(self):
+        """切换窗口读到不完整 JSON 时不返回半截正文，恢复后继续提供新快照。"""
+        old_body = b'{"snapshot":"old","version":1}'
+        new_body = b'{"snapshot":"new","version":2}'
+        self.data.write_bytes(old_body)
+
+        status, content_type, body = self.request_with_type('/data/diagnosis.json')
+        self.assertEqual((status, content_type), (200, 'application/json'))
+        self.assertEqual(json.loads(body), {'snapshot': 'old', 'version': 1})
+
+        self.data.write_bytes(b'{"snapshot":"new"')
+        status, content_type, body = self.request_with_type('/data/diagnosis.json')
+        self.assertEqual((status, content_type), (503, 'application/json'))
+        self.assertIsInstance(json.loads(body), dict)
+
+        self.data.write_bytes(new_body)
+        status, content_type, body = self.request_with_type('/api/diagnosis')
+        self.assertEqual((status, content_type), (200, 'application/json'))
+        self.assertEqual(json.loads(body), {'snapshot': 'new', 'version': 2})
 
     def test_dist_data_option_overrides_default_dist_data(self):
         override_data = Path(self.tmp.name) / 'override.json'
@@ -642,9 +676,13 @@ class DistRootServeTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
     def test_dist_query_string_on_allowed_paths_is_served(self):
+        # 静态白名单路径附加无关查询串：仍是 200、正文原样，且响应里没有 traceback。
+        # app.bundle.js 只在这里覆盖，因为它是 bun 构建产物，仓库检出里并不存在。
         cases = (
             ('/?x=1', self.index.read_bytes()),
             ('/index.html?x=1', self.index.read_bytes()),
+            ('/app.bundle.js?x=1', self.bundle.read_bytes()),
+            ('/styles.css?x=1', self.styles.read_bytes()),
             ('/data/diagnosis.json?x=1', self.data.read_bytes()),
         )
         for path, expected_body in cases:
@@ -652,6 +690,7 @@ class DistRootServeTests(unittest.TestCase):
                 status, body = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertEqual(body, expected_body)
+                self.assertNotIn(b'Traceback', body)
 
     def test_dist_query_string_on_unknown_paths_is_not_found(self):
         for path in ('/build-report.json?x=1', '/secret.txt?x=1', '/app.js?x=1'):
