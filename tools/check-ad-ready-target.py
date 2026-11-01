@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for refilling AD's ready queue to TARGET (Refs #1061).
+"""Offline contract for refilling AD's ready queue to TARGET (Refs #1123).
 
 The fixture is entirely local: this check must not invoke gh, git, SSH, or
 any other network-backed command.
@@ -15,7 +15,7 @@ TARGET = 20
 
 
 def refill_need(ready: int, low: int = LOW, target: int = TARGET, starved: int = 0) -> int:
-    """Return the number of cards to request for a low or backend-starved queue."""
+    """Return need=max(TARGET-ready, starved, 0) while the queue is low."""
     if ready < low:
         return max(target - ready, starved, 0)
     return max(starved, 0)
@@ -42,6 +42,7 @@ def local_candidates(directory: Path) -> list[str]:
 def main() -> None:
     assert refill_need(6, low=8, target=15) == 9
     assert refill_need(6, low=8, target=15, starved=10) == 10
+    assert refill_need(7, low=8, target=15, starved=4) == 8
     assert refill_need(8, low=8, target=15) == 0
     assert refill_need(0) == 20
     assert refill_need(9) == 11
