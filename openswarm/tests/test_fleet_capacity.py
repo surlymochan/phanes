@@ -232,6 +232,76 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertIsNone(recovered['fleet_reservation_token'])
         self.assertEqual(self.call('gocc', op='status')['reservations'], [])
 
+    def test_live_acquire_pending_is_not_reconciled_after_ttl(self):
+        """A live runner may still receive or retry its delayed acquire reply."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'live-acquire'
+        rdir.mkdir(parents=True)
+        token = 'a' * 32
+        self.assertTrue(self.call('gocc', op='acquire', token=token, run_id='live-acquire',
+                                  backend='pi', provider='minimax-cn')['admitted'])
+        xs.set_status(str(rdir), id='live-acquire', state='queued', runner_pid=12345,
+                      fleet_host='gocc', fleet_reserved_at=0.0, fleet_reservation_token=token,
+                      fleet_reservation_pending=True)
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
+             mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'NOW', return_value=601.0), \
+             mock.patch.object(xs, 'pid_alive', return_value=True):
+            self.assertEqual(xs.recover_expired_fleet_slots([str(BIN), 'gocc'],
+                                                             {'fleet': {'recovery_ttl_seconds': 600}}), [])
+        self.assertEqual(len(self.call('gocc', op='status')['reservations']), 1)
+        self.assertTrue(self.call('gocc', op='release', token=token, run_id='live-acquire')['released'])
+
+    def test_reacquire_clears_legacy_recovered_marker_for_later_dead_runner(self):
+        """A previously reconciled live runner must remain eligible after reacquiring."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        rdir = runs / 'retry-after-reconcile'
+        rdir.mkdir(parents=True)
+        command = [str(BIN), 'gocc']
+        policy = {'concurrency': {'total': 8}, 'fleet': {'recovery_ttl_seconds': 600}}
+        xs.set_status(str(rdir), id='retry-after-reconcile', state='queued', runner_pid=12345,
+                      fleet_host='gocc', fleet_reserved_at=0.0, fleet_reservation_pending=True,
+                      fleet_recovered_at=1.0, fleet_recovery_outcome='acquire-reconciled')
+        with mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=command), \
+             mock.patch.object(xs, 'fleet_guard_call', return_value={'admitted': True}), \
+             mock.patch.object(xs, 'NOW', return_value=10.0):
+            self.assertTrue(xs.reserve_provider_slot(str(rdir), 'pi', 'minimax-cn', policy,
+                                                      keep_waiting=lambda: True))
+        status = json.loads((rdir / 'status.json').read_text())
+        self.assertIsNone(status['fleet_recovered_at'])
+        xs.set_status(str(rdir), runner_pid=12345, executor_pid=23456, executor_pgid=23456,
+                      executor_identity='test-executor', fleet_reserved_at=0.0)
+        with mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'NOW', return_value=601.0), \
+             mock.patch.object(xs, 'pid_alive', return_value=False), \
+             mock.patch.object(xs, 'executor_stopped', side_effect=[False, True]), \
+             mock.patch.object(xs, 'stop_orphaned_executor', return_value=True) as stop, \
+             mock.patch.object(xs, 'fleet_guard_call', return_value={'recovered': 1}) as call:
+            self.assertEqual(xs.recover_expired_fleet_slots(command, policy), ['retry-after-reconcile'])
+        stop.assert_called_once_with(str(rdir))
+        self.assertEqual(call.call_args.args[1]['op'], 'recover')
+
+    def test_recovery_prioritizes_unchecked_candidate_after_failed_release_retry(self):
+        """A repeatedly failing oldest release cannot starve later stale records."""
+        runs = pathlib.Path(self.temp.name, 'runs')
+        first, second = runs / 'first', runs / 'second'
+        first.mkdir(parents=True); second.mkdir(parents=True)
+        pending = lambda run: {'token': run * 32, 'host': 'gocc', 'run_id': run}
+        xs.set_status(str(first), id='a', fleet_host='gocc', fleet_reserved_at=0.0,
+                      fleet_release_pending=pending('a'))
+        xs.set_status(str(second), id='b', fleet_host='gocc', fleet_reserved_at=1.0,
+                      fleet_release_pending=pending('b'))
+        command = [str(BIN), 'gocc']
+        policy = {'fleet': {'recovery_ttl_seconds': 10}}
+        with mock.patch.object(xs, 'RUNS', str(runs)), \
+             mock.patch.object(xs, 'release_fleet_slot', side_effect=[False, True]) as release:
+            with mock.patch.object(xs, 'NOW', return_value=20.0):
+                self.assertEqual(xs.recover_expired_fleet_slots(command, policy, max_candidates=1), [])
+            with mock.patch.object(xs, 'NOW', return_value=21.0):
+                self.assertEqual(xs.recover_expired_fleet_slots(command, policy, max_candidates=1), ['b'])
+        self.assertEqual([pathlib.Path(call.args[0]).name for call in release.call_args_list], ['first', 'second'])
+
     def test_finished_release_failure_recovers_after_process_restart(self):
         """A confirmed release retry must not kill a resident lane child."""
         runs = pathlib.Path(self.temp.name, 'runs')

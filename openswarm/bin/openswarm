@@ -3434,23 +3434,26 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
                 or not isinstance(reserved_at, (int, float)) or isinstance(reserved_at, bool)
                 or now - reserved_at < ttl):
             continue
+        checked = status.get("fleet_recovery_checked_at")
+        priority = checked if isinstance(checked, (int, float)) and not isinstance(checked, bool) else reserved_at
         # `release_pending` is only persisted by a call site that has already
         # established it is safe to release this exact token. Retrying it never
         # inspects or signals a resident lane process.
         if has_release_pending:
-            candidates.append((reserved_at, path, status, rdir, run_id, "release-pending"))
+            candidates.append((priority, path, status, rdir, run_id, "release-pending"))
             continue
         # A lost acquire reply is recorded before a worker starts. Reconcile it
-        # only while it is still explicitly pending and no executor was recorded.
+        # only after its runner has stopped and no executor was recorded. A
+        # live runner can retry the same acquire after a delayed reply; its
+        # capacity must not be released underneath it.
         # Every other record retains the dead-runner/tree checks below.
         if acquire_pending:
-            if not recorded_executor_records(rdir):
-                candidates.append((reserved_at, path, status, rdir, run_id, "acquire-pending"))
+            if not pid_alive(status.get("runner_pid")) and not recorded_executor_records(rdir):
+                candidates.append((priority, path, status, rdir, run_id, "acquire-pending"))
             continue
         if pid_alive(status.get("runner_pid")):
             continue
-        checked = status.get("fleet_recovery_checked_at", reserved_at)
-        candidates.append((checked if isinstance(checked, (int, float)) else reserved_at, path, status, rdir, run_id,
+        candidates.append((priority, path, status, rdir, run_id,
                            "dead-runner"))
     for _, path, status, rdir, run_id, recovery_kind in sorted(candidates, key=lambda row: row[0])[:max_candidates]:
         set_status(rdir, fleet_recovery_checked_at=now)
@@ -3629,7 +3632,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                     # idempotent; the TTL path still requires a dead runner and stopped executors.
                     set_status(rdir, fleet_host=fleet_guard_host(command), fleet_reserved_at=NOW(),
                                fleet_reservation_token=token, fleet_reservation_pending=True,
-                               fleet_reservation_error=None)
+                               fleet_reservation_error=None, fleet_recovered_at=None,
+                               fleet_recovery_outcome=None)
                     try:
                         admitted = bool(fleet_guard_call(command, payload).get("admitted"))
                     except RuntimeError as error:
