@@ -6,7 +6,17 @@ import re
 
 
 RESULT_RE = re.compile(r"```openswarm-result\s*\n(.*?)\n```", re.S)
-REQUIRED = ("status", "run_id", "summary", "files_changed", "tests", "followups", "branch", "commit", "error_class")
+REQUIRED = (
+    "status",
+    "run_id",
+    "summary",
+    "files_changed",
+    "tests",
+    "followups",
+    "branch",
+    "commit",
+    "error_class",
+)
 SUCCESS = {"done", "partial"}
 ERROR_CLASSES = {
     "none",
@@ -46,9 +56,9 @@ def parse_result(comment):
         raise AssertionError("result is missing a required field")
     status = payload["status"]
     error_class = payload["error_class"]
-    if status not in SUCCESS | {"failed"}:
+    if not isinstance(status, str) or status not in SUCCESS | {"failed"}:
         raise AssertionError(f"unsupported status: {status!r}")
-    if error_class not in ERROR_CLASSES:
+    if not isinstance(error_class, str) or error_class not in ERROR_CLASSES:
         raise AssertionError(f"unsupported error_class: {error_class!r}")
     if status == "failed" and error_class == "none":
         raise AssertionError("failed result requires a non-none error_class")
@@ -74,6 +84,15 @@ def main():
         pass
     else:
         raise AssertionError("missing error_class must be rejected")
+
+    unsupported_error_class = failure.replace('"verify_failed"', '"unknown_failure"')
+    try:
+        parse_result(unsupported_error_class)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unsupported error_class must be rejected")
+
     print("bus result error_class contract: success, failure, and missing-field samples passed")
 
 
