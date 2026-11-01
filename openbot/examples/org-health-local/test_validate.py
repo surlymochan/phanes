@@ -428,6 +428,38 @@ class ValidateTest(unittest.TestCase):
         self.assertIn("必须是对象", result.stderr)
         self.assertNotIn("Traceback", output)
 
+    def test_command_line_schema_unsupported_keyword_reports_exit_code_two(self) -> None:
+        """--schema 含不支持的关键字时退出码为 2，stderr 指出关键字名且不打印 traceback。"""
+        with temporary_directory() as folder:
+            unsupported = Path(folder) / "unsupported-schema.json"
+            unsupported.write_text(
+                json.dumps(
+                    {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "type": "object",
+                        "unevaluatedProperties": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "validate.py"),
+                    "--schema",
+                    str(unsupported),
+                    str(EXAMPLE_PATH),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, validate.EXIT_USAGE)
+        self.assertIn("不支持的关键字", result.stderr)
+        self.assertIn("unevaluatedProperties", result.stderr)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_command_line_json_accepts_example(self) -> None:
         """JSON 输出包含通过状态及 schema 版本。"""
         result = subprocess.run(
