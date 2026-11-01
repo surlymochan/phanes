@@ -157,5 +157,58 @@ class HarvestFetchBackoffTests(unittest.TestCase):
         self.assertFalse(autodispatch.lane_in_fetch_backoff({}))
 
 
+class LanePickTests(unittest.TestCase):
+    """Refs #1360: the dispatch lane order (`dispatch.lane_pick`: lru|first) and its state."""
+
+    def test_lru_tie_prefers_unseen_lanes_then_preserves_config_order(self):
+        lanes = {"a": {}, "b": {}, "c": {}, "d": {}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_HOME": directory}):
+            pathlib.Path(directory, "lane-lru.json").write_text(json.dumps({"recent": ["a", "b"]}))
+            self.assertEqual([name for name, _ in autodispatch.order_idle_lanes(lanes)], ["c", "d", "a", "b"])
+
+    def test_lru_updates_successful_lane_and_survives_new_lanes(self):
+        lanes = {"a": {}, "b": {}, "c": {}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_HOME": directory}):
+            autodispatch.touch_lane_lru("a")
+            autodispatch.touch_lane_lru("b")
+            autodispatch.touch_lane_lru("a")
+            self.assertEqual([name for name, _ in autodispatch.order_idle_lanes(lanes)], ["c", "b", "a"])
+
+    def test_first_strategy_preserves_order_and_paused_lanes_are_skipped(self):
+        lanes = {"a": {}, "b": {}, "c": {}}
+        self.assertEqual([name for name, _ in autodispatch.order_idle_lanes(
+            lanes, strategy="first", paused={"b"})], ["a", "c"])
+
+    def test_paused_lanes_are_skipped_in_lru_order(self):
+        lanes = {"a": {}, "b": {}, "c": {}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_HOME": directory}):
+            autodispatch.touch_lane_lru("a")
+            autodispatch.touch_lane_lru("b")
+            self.assertEqual([name for name, _ in autodispatch.order_idle_lanes(lanes, paused={"b"})], ["c", "a"])
+
+    def test_lane_pick_policy_is_read_from_openswarm_home(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_HOME": directory}):
+            pathlib.Path(directory, "policy.local.json").write_text(json.dumps({"dispatch": {"lane_pick": "first"}}))
+            self.assertEqual(autodispatch.lane_pick_strategy(), "first")
+
+    def test_an_unknown_lane_pick_value_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_HOME": directory}):
+            pathlib.Path(directory, "policy.local.json").write_text(json.dumps({"dispatch": {"lane_pick": "random"}}))
+            with self.assertRaises(ValueError):
+                autodispatch.lane_pick_strategy()
+
+    def test_the_lane_lru_state_is_written_in_openswarm_home(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"OPENSWARM_HOME": directory}):
+            autodispatch.touch_lane_lru("lane-a")
+            state = json.loads(pathlib.Path(directory, "lane-lru.json").read_text())
+            self.assertEqual(state["recent"], ["lane-a"])
+
+
 if __name__ == "__main__":
     unittest.main()

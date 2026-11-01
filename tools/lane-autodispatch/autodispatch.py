@@ -8,6 +8,7 @@ State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/aut
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
 import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import fcntl
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -169,10 +170,92 @@ def ssh_argv(ssh_options, *args):
     return shlex.split(git_ssh_command(ssh_options)) + list(args)
 
 def load(p, d):
-    try: return json.load(open(p))
+    try:
+        with open(p) as stream: return json.load(stream)
     except Exception: return d
 def save_state(s):
     tmp = f"{D}/state.json.tmp"; json.dump(s, open(tmp, "w"), indent=1, ensure_ascii=False); os.replace(tmp, f"{D}/state.json")
+
+# Refs #1360: which idle lane gets the next card. `lru` hands it to the lane that was
+# dispatched longest ago (a lane that never ran counts as never dispatched), so the lane
+# that has been idle the longest eats the backlog; `first` keeps the lanes.json order.
+# The dispatch state lives in OPENSWARM_HOME (lane-lru.json), not in the AD state dir.
+LANE_PICK_STRATEGIES = ("lru", "first")
+LANE_PICK_DEFAULT = "lru"
+LANE_LRU_FILE = "lane-lru.json"
+
+def openswarm_home():
+    """The openswarm data directory: $OPENSWARM_HOME (or $XSWARM_HOME), else ~/.claude/openswarm."""
+    return os.path.expanduser(os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+                              or f"{HOME}/.claude/openswarm")
+
+def lane_pick_policy_paths():
+    """The policy files that may carry `dispatch.lane_pick`, most specific first."""
+    home = openswarm_home()
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return [f"{home}/policy.local.json", os.path.join(repo, "openswarm", "policy.json")]
+
+def lane_pick_strategy():
+    """The configured idle-lane order: `lru` (least recently dispatched first) or `first`.
+
+    The operator override (policy.local.json) wins over the shipped default policy.
+    """
+    strategy = None
+    for path in lane_pick_policy_paths():
+        policy = load(path, {})
+        if not isinstance(policy, dict): continue
+        dispatch = policy.get("dispatch") or {}
+        if isinstance(dispatch, dict) and dispatch.get("lane_pick"):
+            strategy = dispatch["lane_pick"]; break
+    strategy = strategy or LANE_PICK_DEFAULT
+    if strategy not in LANE_PICK_STRATEGIES:
+        raise ValueError(f"dispatch.lane_pick must be one of {LANE_PICK_STRATEGIES}, got {strategy!r}")
+    return strategy
+
+def lane_lru_path():
+    """The dispatch order state: OPENSWARM_HOME/lane-lru.json (replaces autodispatch/lane-lru.json)."""
+    return f"{openswarm_home()}/{LANE_LRU_FILE}"
+
+def load_lane_lru():
+    """The dispatched lanes, oldest dispatch first. A missing or broken file means "nothing dispatched"."""
+    try:
+        with open(lane_lru_path()) as stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            try: state = json.load(stream)
+            finally: fcntl.flock(stream, fcntl.LOCK_UN)
+    except (OSError, ValueError): return []
+    recent = state.get("recent", []) if isinstance(state, dict) else []
+    return [lane for lane in recent if isinstance(lane, str)]
+
+def touch_lane_lru(name):
+    """Record a dispatch: the lane becomes the most recently dispatched one (per-file lock)."""
+    path = lane_lru_path(); os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            stream.seek(0)
+            try: state = json.load(stream)
+            except ValueError: state = {}
+            recent = state.get("recent", []) if isinstance(state, dict) else []
+            recent = [lane for lane in recent if lane != name] + [name]
+            stream.seek(0); stream.truncate()
+            json.dump({"recent": recent}, stream); stream.write("\n"); stream.flush()
+        finally: fcntl.flock(stream, fcntl.LOCK_UN)
+
+def order_idle_lanes(lanes, strategy=None, paused=()):
+    """Order the idle lanes for dispatch.
+
+    `lru` puts the lane that was dispatched longest ago first (a lane that never ran
+    counts as never dispatched, so a new lane comes first); `first` keeps the order of
+    the lanes configuration. Paused lanes are dropped.
+    """
+    available = [(name, cfg) for name, cfg in lanes.items() if name not in paused]
+    strategy = strategy or lane_pick_strategy()
+    if strategy == "first": return available
+    order = {name: index for index, name in enumerate(load_lane_lru())}
+    config = {name: index for index, name in enumerate(lanes)}
+    return sorted(available, key=lambda row: (order.get(row[0], -1), config.get(row[0], 0)))
+
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
 
@@ -560,9 +643,17 @@ def tick(lanes, state, last_warn):
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
     base = None
-    for L, cfg in lanes.items():
-        r = res[L]
-        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
+    # Refs #1360: the idle lanes are ordered by `dispatch.lane_pick` (lru|first) and a
+    # paused lane is never dispatched.
+    idle = {L: cfg for L, cfg in lanes.items()
+            if "error" not in res[L] and host_ok(cfg["host"]) and not state.get(L)
+            and res[L].get("lane") == "idle"}
+    paused = {L for L in lanes if os.path.exists(f"{D}/PAUSE-{L}")}
+    try: ordered = order_idle_lanes(idle, paused=paused)
+    except ValueError as e:  # a broken policy must not stop the dispatch loop
+        log(f"lane order: {e}; falling back to the lanes.json order", brain=False)
+        ordered = order_idle_lanes(idle, strategy="first", paused=paused)
+    for L, cfg in ordered:
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])
@@ -581,6 +672,8 @@ def tick(lanes, state, last_warn):
         except Exception as e:
             gh(["issue", "edit", str(pick["n"]), "--remove-label", "in-progress"]); host_fail(cfg["host"], f"dispatch #{pick['n']}: {e}"); continue
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+        try: touch_lane_lru(L)
+        except (OSError, ValueError) as e: log(f"lane LRU state unavailable: {e}", brain=False)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
