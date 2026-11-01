@@ -2,7 +2,9 @@
   "id": "codex",
   "name": "OpenAI Codex CLI (codex exec)",
   "role": "primary executor: implementation, refactor, debug (difficulty 2-5)",
-  "invoke": "codex exec -m <model> -c model_reasoning_effort=<effort> -s workspace-write -C <worktree> --json --output-schema <schema> -o <last>",
+  "invoke": "codex exec -m <model> -c model_reasoning_effort=<effort> -s workspace-write --add-dir <worktree-root> --add-dir <worktree-gitdir> --add-dir <common-dir>/{objects,refs,logs} -C <worktree> --json --output-schema <schema> -o <last>",
+  "sandbox_writable_roots": "per thread, from `git rev-parse --git-dir --git-common-dir`: the worktree root, the worktree's exact gitdir (.git/worktrees/<name>) and the common dir's objects/refs/logs. Lanes pass them in the thread/start config; `codex exec` appends them with --add-dir (a build without --add-dir gets a merged -c override that keeps the roots from ~/.codex/config.toml)",
+  "policy_switch": "codex.worktree_gitdir_writable (default true): false keeps the sandbox's git metadata read-only",
   "binary_resolution": "newest candidate whose `codex features list` loads ~/.codex/config.toml (Homebrew 0.147 cannot)",
   "models_source": "codex debug models (live); fallback ~/.codex/models_cache.json",
   "plan_source": "OPENSWARM_CODEX_PLAN env or policy codex.plan; opt-in: chatgpt_plan_type claim of ~/.codex/auth.json id_token (local_sources.codex_auth_plan, decoded locally, never sent)",
@@ -13,6 +15,7 @@
   "costTier": "subscription",
   "privacyRisk": "model_provider",
   "dataBoundary": "worktree + OpenAI",
+  "ops": "after this ships, drop the hard-coded writable_roots hotfix from ~/.codex/config.toml on govpn/govpn2/box: a pinned worktree name goes stale as soon as a lane rebuilds its worktree",
   "never": [
     "effort=ultra (self-delegation)",
     "danger-full-access sandbox"
