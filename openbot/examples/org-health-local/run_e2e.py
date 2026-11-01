@@ -15,9 +15,23 @@ REVIEW_REPORT = 'review.md'
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--workdir', required=True, type=Path)
-    parser.add_argument('--raw', type=Path, default=ROOT / 'da' / 'sample-raw')
-    parser.add_argument('--bundle', type=Path)
+    parser.add_argument(
+        '--workdir',
+        required=True,
+        type=Path,
+        help='工作目录路径（相对当前工作目录解析，存放 brief、diagnosis、dist 等产物）',
+    )
+    parser.add_argument(
+        '--raw',
+        type=Path,
+        default=ROOT / 'da' / 'sample-raw',
+        help='原始数据目录路径（相对当前工作目录解析，透传给 DA；默认使用 sample-raw）',
+    )
+    parser.add_argument(
+        '--bundle',
+        type=Path,
+        help='前端 bundle 文件路径（相对当前工作目录解析，透传给 Builder；默认优先使用 demo bundle）',
+    )
     parser.add_argument('--boss', type=Path, default=ROOT / 'boss' / 'make_brief.py')
     parser.add_argument('--da', type=Path, default=ROOT / 'da' / 'build_diagnosis.py')
     parser.add_argument('--builder', type=Path, default=ROOT / 'builder' / 'build_site.py')
