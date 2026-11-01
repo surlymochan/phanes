@@ -6257,7 +6257,7 @@ def bus_claim_state(comments, allowed, lease_seconds=300, now=None):
             active = claim
         elif bus_claim(claim).casefold() == bus_claim(active).casefold():
             active = claim
-    return active
+    return active if active and now < bus_claim_expiry(active, lease_seconds) else None
 
 
 def bus_winning_claim(comments, allowed, lease_seconds=300, now=None):
@@ -6671,7 +6671,7 @@ def bus_worker_run(issue, cfg, args, policy):
     if existing_claim and bus_claim(existing_claim).casefold() != str(args.name).casefold():
         return False
     bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels["claimed"]], remove=[labels["queued"]])
-    own_claim = bus_comment(cfg["repo"], issue["number"], f"/claim {args.name}")
+    own_claim = existing_claim or bus_comment(cfg["repo"], issue["number"], f"/claim {args.name}")
     winner = bus_winning_claim(bus_comments(cfg["repo"], issue["number"]), cfg["allowed_executors"],
                                cfg["claim_lease_seconds"])
     if not winner or str(winner.get("id")) != str(own_claim.get("id")):

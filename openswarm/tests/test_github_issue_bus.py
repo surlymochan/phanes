@@ -44,6 +44,19 @@ class GitHubIssueBusLeaseTests(unittest.TestCase):
                                       xs.to_epoch("2026-01-01T00:00:45+00:00"))
         self.assertEqual(winner["id"], 1)
 
+    def test_expired_lone_claim_is_available_for_recovery(self):
+        comments = [claim("worker-a", "2026-01-01T00:00:00+00:00", 1)]
+        winner = xs.bus_winning_claim(comments, {"worker-a", "worker-b"}, 60,
+                                      xs.to_epoch("2026-01-01T00:01:00+00:00"))
+        self.assertIsNone(winner)
+
+    def test_restart_reuses_unexpired_claim_without_creating_another(self):
+        comments = [claim("worker-a", "2026-01-01T00:00:00+00:00", 1)]
+        winner = xs.bus_winning_claim(comments, {"worker-a", "worker-b"}, 60,
+                                      xs.to_epoch("2026-01-01T00:00:30+00:00"))
+        self.assertEqual(winner["id"], comments[0]["id"])
+        self.assertEqual(len(comments), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
