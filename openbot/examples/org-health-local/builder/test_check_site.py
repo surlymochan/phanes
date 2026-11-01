@@ -397,6 +397,117 @@ class CheckSiteTest(unittest.TestCase):
         self.assertEqual(result_cwd.returncode, 0, result_cwd.stdout + result_cwd.stderr)
         self.assertIn("站点检查通过", result_cwd.stdout)
 
+    def load_checker(self):
+        spec = importlib.util.spec_from_file_location("check_site_module", CHECKER)
+        assert spec is not None and spec.loader is not None
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        return checker
+
+    def test_complete_valid_site_reports_zero_defects(self) -> None:
+        """完整合法的站点检查通过，check_site 返回零缺陷且退出码为 0。"""
+        dist = self.make_dist()
+        checker = self.load_checker()
+        failures = checker.check_site(dist)
+        self.assertEqual(failures, [])
+        result = self.run_checker(dist)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("站点检查通过", result.stdout)
+        self.assertNotIn("站点检查失败", result.stdout)
+
+    def test_defective_dist_aggregates_multiple_defects_and_exits_non_zero(self) -> None:
+        """构造缺 CSS/JS、坏 JSON、空章节的残缺 dist，断言 check_site 聚合多条缺陷且退出非零。"""
+        dist = self.make_dist("defective_dist")
+        # 1. 缺 CSS 与 JS
+        (dist / "styles.css").unlink()
+        (dist / "app.bundle.js").unlink()
+        # 2. 坏 JSON（损坏的 diagnosis.json）
+        (dist / "data/diagnosis.json").write_text("{ unclosed bad json content ...", encoding="utf-8")
+        # 3. 空章节（index.html 中包含空的 <section> 标签）
+        (dist / "index.html").write_text(
+            '<section id="overview"><h2>概览</h2></section>\n'
+            '<section id="empty-metrics"></section>\n'
+            '<section class="empty-rules">   \n  </section>',
+            encoding="utf-8",
+        )
+
+        # 直接调用 check_site 验证聚合缺陷列表
+        checker = self.load_checker()
+        failures = checker.check_site(dist)
+        self.assertGreaterEqual(len(failures), 4)
+        self.assertTrue(any("styles.css 不存在" in msg for msg in failures), failures)
+        self.assertTrue(any("app.bundle.js 不存在" in msg for msg in failures), failures)
+        self.assertTrue(any("data/diagnosis.json 无法通过 validate.py" in msg for msg in failures), failures)
+        self.assertTrue(any("index.html 存在空章节" in msg and "empty-metrics" in msg for msg in failures), failures)
+        self.assertTrue(any("index.html 存在空章节" in msg and "empty-rules" in msg for msg in failures), failures)
+
+        # 运行 CLI 验证退出非零、聚合缺陷输出及无 Traceback 崩溃
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：styles.css 不存在", result.stdout)
+        self.assertIn("失败：app.bundle.js 不存在", result.stdout)
+        self.assertIn("失败：data/diagnosis.json 无法通过 validate.py", result.stdout)
+        self.assertIn("失败：index.html 存在空章节", result.stdout)
+        self.assertIn("empty-metrics", result.stdout)
+        self.assertIn(f"站点检查失败：{len(failures)} 项", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_defective_dist_with_empty_data_sections_aggregates_defects(self) -> None:
+        """构造缺 CSS、坏 build-report JSON、空数据章节的残缺 dist，断言缺陷聚合且退出非零。"""
+        dist = self.make_dist("defective_data_sections")
+        # 1. 缺 CSS
+        (dist / "styles.css").unlink()
+        # 2. 坏 JSON（损坏的 build-report.json）
+        (dist / "build-report.json").write_text("not a valid json report", encoding="utf-8")
+        # 3. 空章节（diagnosis.json 中 insights 和 recommendations 章节为空列表）
+        data = json.loads((dist / "data/diagnosis.json").read_text(encoding="utf-8"))
+        data["insights"] = []
+        data["recommendations"] = []
+        (dist / "data/diagnosis.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        checker = self.load_checker()
+        failures = checker.check_site(dist)
+        self.assertGreaterEqual(len(failures), 4)
+        self.assertTrue(any("styles.css 不存在" in msg for msg in failures), failures)
+        self.assertTrue(any("build-report.json" in msg for msg in failures), failures)
+        self.assertTrue(any("data/diagnosis.json 存在空章节" in msg and "insights" in msg for msg in failures), failures)
+        self.assertTrue(any("data/diagnosis.json 存在空章节" in msg and "recommendations" in msg for msg in failures), failures)
+
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：styles.css 不存在", result.stdout)
+        self.assertIn("build-report.json", result.stdout)
+        self.assertIn("data/diagnosis.json 存在空章节（insights 为空）", result.stdout)
+        self.assertIn("data/diagnosis.json 存在空章节（recommendations 为空）", result.stdout)
+        self.assertIn(f"站点检查失败：{len(failures)} 项", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_empty_section_in_html_fails_check(self) -> None:
+        """HTML 页面包含空章节标签时检查失败并精确定位空章节。"""
+        dist = self.make_dist("dist_empty_html_sec")
+        (dist / "index.html").write_text(
+            '<link rel="stylesheet" href="./styles.css">\n'
+            '<section id="empty-content"></section>',
+            encoding="utf-8",
+        )
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：index.html 存在空章节（<section id='empty-content'> 为空）", result.stdout)
+        self.assertIn("站点检查失败：1 项", result.stdout)
+
+    def test_empty_section_in_diagnosis_json_fails_check(self) -> None:
+        """诊断数据中任一核心章节（如 risks）为空时检查失败并精确定位该章节。"""
+        dist = self.make_dist("dist_empty_data_sec")
+        data = json.loads((dist / "data/diagnosis.json").read_text(encoding="utf-8"))
+        data["risks"] = []
+        (dist / "data/diagnosis.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self.refresh_report(dist)
+        result = self.run_checker(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("失败：data/diagnosis.json 存在空章节（risks 为空）", result.stdout)
+        self.assertIn("站点检查失败：1 项", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
