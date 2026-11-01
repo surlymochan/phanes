@@ -295,6 +295,71 @@ class LocalServeBoundaryTests(unittest.TestCase):
         self.assertEqual(json.loads(body), expected)
 
 
+class DiagnosisApiSiteContractTests(unittest.TestCase):
+    """回归 /api/diagnosis、静态页面嵌入数据与站点数据文件的字段契约。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'site'
+        (self.root / 'data').mkdir(parents=True)
+        self.diagnosis = json.loads(BUNDLED_DATA.read_text(encoding='utf-8'))
+        # 用首屏嵌入快照模拟页面契约，同时保留真实站点的 data 文件路径。
+        embedded = json.dumps(self.diagnosis, ensure_ascii=False, separators=(',', ':'))
+        self.index = self.root / 'index.html'
+        self.index.write_text(
+            '<!doctype html><script id="diagnosis" type="application/json">'
+            + embedded + '</script>',
+            encoding='utf-8',
+        )
+        (self.root / 'app.bundle.js').write_text('window.__diagnosis__ = true;', encoding='utf-8')
+        (self.root / 'styles.css').write_text('body { color: #111; }', encoding='utf-8')
+        self.data = self.root / 'data' / 'diagnosis.json'
+        self.data.write_text(json.dumps(self.diagnosis, ensure_ascii=False), encoding='utf-8')
+        args = serve.parse_args(['--port', '0', '--root', str(self.root)])
+        self.server = serve.create_server(args.port, args.data, root=args.root)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.thread.join, 5)
+        self.addCleanup(self.server.shutdown)
+
+    def request(self, path):
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_address[1], timeout=5)
+        try:
+            connection.request('GET', path)
+            response = connection.getresponse()
+            return response.status, response.getheader('Content-Type'), response.read()
+        finally:
+            connection.close()
+
+    def test_api_contains_schema_fields_and_matches_embedded_site_data(self):
+        status, content_type, api_body = self.request('/api/diagnosis')
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, 'application/json; charset=utf-8')
+        api_data = json.loads(api_body)
+        expected_fields = {'scope', 'conclusion', 'origin', 'metrics', 'insights', 'definitions',
+                           'risks', 'recommendations'}
+        self.assertTrue(expected_fields.issubset(api_data))
+        self.assertEqual(api_data['scope']['schema版本'], 4)
+        self.assertEqual(api_data['scope']['观察月份'], '2026-09')
+        self.assertEqual(api_data, json.loads(self.data.read_text(encoding='utf-8')))
+
+        page_status, _, page_body = self.request('/index.html')
+        self.assertEqual(page_status, 200)
+        marker = b'<script id="diagnosis" type="application/json">'
+        embedded = page_body.split(marker, 1)[1].split(b'</script>', 1)[0]
+        self.assertEqual(api_data, json.loads(embedded))
+
+    def test_api_missing_diagnosis_returns_json_404_without_traceback(self):
+        self.data.unlink()
+        status, content_type, body = self.request('/api/diagnosis')
+        self.assertEqual(status, 404)
+        self.assertEqual(content_type, 'application/json; charset=utf-8')
+        self.assertEqual(json.loads(body), {'error': 'diagnosis data not found'})
+        self.assertNotIn(b'Traceback', body)
+
+
 class DistRootServeTests(unittest.TestCase):
     """验证 --root 指定产物目录时的服务边界行为。"""
 
