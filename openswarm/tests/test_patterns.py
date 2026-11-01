@@ -122,6 +122,22 @@ class PatternsTests(unittest.TestCase):
             "body": "# Pattern\n\nValidate the input.",
         })
 
+    def test_parse_pattern_defaults_missing_applies_to_lists(self):
+        text = (
+            "---\n"
+            "id: P-0043\n"
+            "title: Minimal pattern\n"
+            "applies_to:\n"
+            "  card_types: []\n"
+            "source: \"PR #460\"\n"
+            "status: active\n"
+            "---\n"
+            "Body\n"
+        )
+        self.assertEqual(xs.parse_pattern_markdown(text)["applies_to"], {
+            "card_types": [], "paths": [], "backends": [],
+        })
+
     def test_pattern_next_id_scans_ids_and_skips_unreadable_files(self):
         self.assertEqual(xs.pattern_next_id(str(self.knowledge)), 1)
 
@@ -204,6 +220,7 @@ class PatternsTests(unittest.TestCase):
 
     def test_pattern_apply_paths_normalizes_and_collapses_paths(self):
         cases = (
+            ([], []),
             (["README.md"], ["README.md"]),
             (["src/file.py"], ["src/**"]),
             (["src/one.py", "src/two.py"], ["src/**"]),
@@ -214,6 +231,21 @@ class PatternsTests(unittest.TestCase):
         for paths, expected in cases:
             with self.subTest(paths=paths):
                 self.assertEqual(xs.pattern_apply_paths(paths), expected)
+
+    def test_compare_draft_empty_optional_config_uses_defaults_without_mutation(self):
+        report = {"card_type": None, "runs": {}, "diff_notes": []}
+        original = dict(report)
+        title, applies, source, body = xs.pattern_compare_draft(
+            str(self.proposals / "pattern-cmp-empty.md"),
+            str(self.proposals),
+            "cmp-empty",
+            report,
+        )
+        self.assertEqual(title, "Review the winning approach for similar cards")
+        self.assertEqual(applies, {"card_types": [], "paths": [], "backends": []})
+        self.assertEqual(source, "compare cmp-empty")
+        self.assertIn("Inspect the comparison evidence before adopting its approach.", body)
+        self.assertEqual(report, original)
 
     def test_preview_shows_matching_lessons_and_patterns(self):
         self.write_pattern("P-0010", "Preview pattern", card_types="[fix]", backends="[codex]")
