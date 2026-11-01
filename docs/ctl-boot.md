@@ -234,6 +234,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1260 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
 - `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
+- `python3 tools/check-health-hosts-ok-pause.py` — offline #948 contract check. It asserts that a host held by a `PAUSE-HOST-<host>` file is never counted in the `hosts_ok` summary, that it is reported in `skipped_cooldown`, that an expired automatic pause is released, and that a pause that has not expired yet — or a manual one — is never cleared.
 - `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
 ### Roll back a failed assign (Refs #968)
@@ -390,6 +391,51 @@ python3 tools/check-pause-set-cooldown.py
 The SSH cooldown set/hold contract is checked offline with
 `python3 tools/check-health-pause.py`; it uses fake probe output and never
 starts the resident health loop or connects over SSH.
+
+### Host cooldown vs `hosts_ok` (Refs #948)
+
+`health-loop` writes the probe summary to `~/phanes-ctl/autodispatch/health.json`.
+A held host has a `PAUSE-HOST-<host>` file in that same directory. health-loop
+writes those bodies with an `auto:` prefix (automatic cooldown); a manual
+`touch PAUSE-HOST-<host>` carries no `auto:` prefix but holds the host just the
+same.
+
+| `health.json` field | meaning |
+|---|---|
+| `hosts_ok` | healthy probed hosts **minus** every host that has a `PAUSE-HOST-<host>` file |
+| `skipped_cooldown` | healthy hosts skipped from `hosts_ok` because a `PAUSE-HOST-<host>` file exists (automatic cooldown **or** manual hold) |
+| `hosts_degraded` | probed hosts whose probe failed (disk/mem/ssh) |
+
+These are host lists; the `ib-refresh.status` row of the same names carries
+counts instead.
+
+`hosts_ok` and `skipped_cooldown` partition the healthy probes: a held host is
+never reported in `hosts_ok`, and a host without a `PAUSE-HOST-<host>` file is
+never reported in `skipped_cooldown`.  `PAUSE-<LANE>` and `PAUSE-BACKEND-*` files
+are not host pauses and never change `hosts_ok`.
+
+Release rules, mirroring `clear_auto` in `tools/check-health-pause.py`:
+
+- an `auto:`-prefixed `PAUSE-HOST-<host>` is released once it expired
+  (`PAUSE_TTL` = 3600 s in the mirrored spec); an `auto:cooldown:until=<deadline>`
+  body must be past its deadline as well;
+- a manual pause (body not starting with `auto:`) is never cleared at all;
+- the mem hard pauses (`auto:host_hard`, `auto:mem_hard`) are additionally
+  removed by the health self-heal path as soon as the host recovers (see the
+  low-memory `govpn2` paragraph above);
+- a pause that has not expired yet is never cleared.
+
+`clear_auto` has no probe condition: an expired automatic pause is released even
+while the host still probes degraded, and that host is then reported in
+`hosts_degraded` instead of `skipped_cooldown`.
+
+Offline proof (fake `health.json` + fake `PAUSE-HOST-*` files inside a
+temporary directory; the real `~/phanes-ctl/autodispatch/PAUSE-*` files are
+never read, written or removed):
+
+```bash
+python3 tools/check-health-hosts-ok-pause.py
+```
 
 ## ctl-loop child reaping and restart (Refs #951)
 
