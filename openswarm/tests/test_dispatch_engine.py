@@ -209,7 +209,27 @@ class ReviewGate(Base):
         self.assertEqual(len(status), 1)
         self.assertIn("state=success", status[0])
         self.assertIn("context=lane-review", status[0])
+        self.assertIn("description=APPROVE by M5 (pi/m) run r1", status[0])
+        self.assertIn("M5", status[0])
+        self.assertIn("pi", status[0])
+        self.assertIn("r1", status[0])
         self.assertEqual(d.load_reviews()["20"]["verdict"], "APPROVE")
+
+    def test_changes_posts_failure_status(self):
+        verdict = "VERDICT: CHANGES\nSUMMARY: please fix\n"
+        d = self.make([("git -C", (0, verdict, "")),
+                       ("pr view 21", (0, json.dumps({"headRefOid": SHA, "state": "OPEN", "headRefName": "fleet/CX1-issue201-r",
+                                                      "body": "Closes #201"}), "")),
+                       ("issue view 201", (0, json.dumps({"body": "do x"}), ""))])
+        st = {"issue": "PR21", "run": "r2", "review_pr": 21, "review_sha": SHA}
+        info = {"branch": "lane/x", "commit": "c", "backend": "codex", "model": "m2"}
+        self.assertTrue(d.finish_review("CX1", {"host": "box", "backend": "codex"}, st, info, {}))
+        status = self.runner.called(f"statuses/{SHA}")
+        self.assertEqual(len(status), 1)
+        self.assertIn("state=failure", status[0])
+        self.assertIn("context=lane-review", status[0])
+        self.assertIn("description=CHANGES by CX1 (codex/m2) run r2", status[0])
+        self.assertEqual(d.load_reviews()["21"]["verdict"], "CHANGES")
 
     def test_changes_requeues_fix_task_then_needs_human(self):
         verdict = "VERDICT: CHANGES\nSUMMARY: bug\n"
@@ -233,6 +253,57 @@ class ReviewGate(Base):
         st = {"issue": "PR22", "run": "r1", "review_pr": 22, "review_sha": SHA}
         d.finish_review("M5", {"host": "box", "backend": "pi"}, st, {"branch": "x", "commit": "c"}, {})
         self.assertEqual(self.runner.called("statuses/"), [])
+
+    def test_moved_head_does_not_post_status_and_requeues(self):
+        p = pr(22, 220, head=SHA2)
+        d = self.make([("git -C", (0, "VERDICT: APPROVE\n", "")),
+                       ("pr view 22", (0, json.dumps({"headRefOid": SHA2, "state": "OPEN", "headRefName": "fleet/M5-issue220-r", "body": ""}), "")),
+                       ("pr list", (0, json.dumps([p]), ""))])
+        st = {"issue": "PR22", "run": "r1", "review_pr": 22, "review_sha": SHA}
+        done = d.finish_review("M5", {"host": "box", "backend": "pi"}, st, {"branch": "x", "commit": "c"}, {})
+        self.assertTrue(done)
+        self.assertEqual(self.runner.called("statuses/"), [])
+        self.assertNotIn("22", d.load_reviews())
+        # PR with SHA2 is unreviewed and requeued as a candidate
+        candidates = d.review_candidates({}, {}, [])
+        self.assertEqual([c["number"] for c in candidates], [22])
+
+    def test_post_status_failure_does_not_record_approve_in_reviews(self):
+        verdict = "VERDICT: APPROVE\nSUMMARY: looks good\n"
+        d = self.make([("git -C", (0, verdict, "")),
+                       ("pr view 23", (0, json.dumps({"headRefOid": SHA, "state": "OPEN", "headRefName": "fleet/M5-issue230-r",
+                                                      "body": "Closes #230"}), "")),
+                       (f"statuses/{SHA}", (1, "", "gh: API rate limit exceeded"))])
+        st = {"issue": "PR23", "run": "r1", "review_pr": 23, "review_sha": SHA}
+        info = {"branch": "lane/x", "commit": "c", "backend": "pi", "model": "m"}
+        ok = d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {})
+        self.assertFalse(ok)
+        reviews = d.load_reviews()
+        self.assertNotIn("23", reviews)
+
+    def test_dry_run_does_not_post_status(self):
+        verdict = "VERDICT: APPROVE\nSUMMARY: ok\n"
+        d = self.make([("git -C", (0, verdict, "")),
+                       ("pr view 24", (0, json.dumps({"headRefOid": SHA, "state": "OPEN", "headRefName": "fleet/M5-issue240-r",
+                                                      "body": "Closes #240"}), ""))], dry_run=True)
+        st = {"issue": "PR24", "run": "r1", "review_pr": 24, "review_sha": SHA}
+        info = {"branch": "lane/x", "commit": "c", "backend": "pi", "model": "m"}
+        d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {})
+        self.assertEqual(self.runner.called(f"statuses/{SHA}"), [])
+        self.assertNotIn("24", d.load_reviews())
+
+    def test_no_token_skips_status_without_failing_review(self):
+        verdict = "VERDICT: APPROVE\nSUMMARY: ok\n"
+        d = self.make([("git -C", (0, verdict, "")),
+                       ("pr view 25", (0, json.dumps({"headRefOid": SHA, "state": "OPEN", "headRefName": "fleet/M5-issue250-r",
+                                                      "body": "Closes #250"}), "")),
+                       ("auth status", (1, "", "not logged in"))])
+        st = {"issue": "PR25", "run": "r1", "review_pr": 25, "review_sha": SHA}
+        info = {"branch": "lane/x", "commit": "c", "backend": "pi", "model": "m"}
+        ok = d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {})
+        self.assertTrue(ok)
+        self.assertEqual(self.runner.called("statuses/"), [])
+        self.assertEqual(d.load_reviews()["25"]["verdict"], "APPROVE")
 
 
 class RebaseHarvest(Base):

@@ -33,6 +33,7 @@ import calendar  # noqa: E402
 import concurrent.futures as cf
 import copy
 import fnmatch
+import importlib.util
 import json
 import os
 import re
@@ -42,6 +43,24 @@ import subprocess
 import sys
 import threading
 import time
+
+
+def _load_review_status():
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "review", "status.py"),
+        os.path.join(os.getcwd(), "openswarm", "lib", "review", "status.py"),
+        os.path.join(os.getcwd(), "lib", "review", "status.py"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            spec = importlib.util.spec_from_file_location("openswarm_review_status", p)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+status = _load_review_status()
 
 # ---------------------------------------------------------------- config
 
@@ -1014,15 +1033,6 @@ class Dispatcher:
             d[str(pr)] = r
             write_json(self.path("reviews.json"), d)
 
-    def post_review_status(self, sha, state, desc):
-        """Commit status on the reviewed head sha; a branch-protection required check blocks unreviewed heads."""
-        rc, _, err = self.write(["gh", "api", "-X", "POST", f"repos/{self.cfg['repo']}/statuses/{sha}", "-f", f"state={state}",
-                                 "-f", f"context={self.R['status_context']}", "-f", f"description={desc[:139]}"],
-                                timeout=30, what="review-status")
-        if rc:
-            self.log(f"review status {state} on {sha[:8]} failed: {(err or '')[-120:]}", brain=False)
-        return rc == 0
-
     def _checks(self, pr):
         ig = self.R.get("ignore_checks_re") or ""
         red_file = self.R.get("ignored_checks_red_file")
@@ -1177,34 +1187,72 @@ class Dispatcher:
         txt = ""
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
             txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PR-{pr}.md")[1]
-        m = re.search(r"^\s*VERDICT:\s*(APPROVE|CHANGES)", txt or "", re.M)
-        if not m:
+        v, _ = status.parse_verdict(txt)
+        if not v:
             r["fails"] = int(r.get("fails") or 0) + 1
             self.put_review(pr, r)
             self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{info.get('error_class')}); fail #{r['fails']}, will retry")
             return True
-        v = m.group(1)
         rc, cur, _ = self.gh(["pr", "view", str(pr), "--json", "headRefOid,state,headRefName,body"])
         try:
             cj = json.loads(cur)
         except Exception:
             self.log(f"review PR #{pr}: pr view failed; retry next tick", brain=False)
             return False
-        if cj["state"] != "OPEN" or cj["headRefOid"] != sha:
-            self.log(f"review PR #{pr} by {lane}: PR {cj['state']} / head moved ({sha[:8]}→{cj['headRefOid'][:8]}); verdict discarded")
+        if cj.get("state") != "OPEN":
+            self.log(f"review PR #{pr} by {lane}: PR {cj.get('state')}; verdict discarded")
             return True
-        bk = f"{info.get('backend') or lc.get('backend')}/{info.get('model') or '?'}"
+        if status.head_changed(sha, cj.get("headRefOid")):
+            self.log(f"review PR #{pr} by {lane}: PR {cj.get('state')} / head moved ({sha[:8]}→{str(cj.get('headRefOid'))[:8]}); verdict discarded")
+            return True
+        bk_backend = info.get("backend") or lc.get("backend") or "?"
+        bk_model = info.get("model") or "?"
+        bk = f"{bk_backend}/{bk_model}"
         who = f"{lane} ({bk})"
         L = self.L
+
+        try:
+            payload = status.build_status(
+                v,
+                sha,
+                reviewer=lane,
+                backend=bk_backend,
+                model=bk_model,
+                run_id=st.get("run") or "?",
+                context=self.R.get("status_context") or status.DEFAULT_CONTEXT,
+            )
+        except ValueError as e:
+            self.log(f"review PR #{pr}: build status failed: {e}", brain=False)
+            return False
+
+        def _runner(cmd, **kwargs):
+            try:
+                if cmd[:3] == ["gh", "auth", "status"]:
+                    if self.dry_run:
+                        return subprocess.CompletedProcess(cmd, 0, "", "")
+                    res = self.sh(cmd, timeout=30)
+                else:
+                    res = self.write(cmd, timeout=30, what="review-status")
+            except subprocess.TimeoutExpired:
+                res = (124, "", "timeout")
+            if isinstance(res, tuple):
+                return subprocess.CompletedProcess(cmd, res[0], res[1] if len(res) > 1 else "", res[2] if len(res) > 2 else "")
+            return res
+
+        post_res = status.post_status(self.cfg.get("repo"), payload, runner=_runner)
+        if "error" in post_res:
+            self.log(f"review PR #{pr} by {lane}: post status failed ({post_res['error']}); retry next tick", brain=False)
+            return False
+        if "skipped" in post_res:
+            self.log(f"review PR #{pr}: commit status skipped ({post_res['skipped']})", brain=False)
+
         self.gh(["pr", "comment", str(pr), "--body",
                  f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, run `{st['run']}`, "
                  f"head `{sha[:10]}`\n\n{txt.strip()[:60000]}\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0})
         if v == "APPROVE":
-            self.post_review_status(sha, "success", f"APPROVE by lane {lane} ({bk}) run {st['run']}")
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
-            self.post_review_status(sha, "failure", f"CHANGES by lane {lane} ({bk}) run {st['run']}")
             r["rounds"] = int(r.get("rounds") or 0) + 1
             self.gh(["pr", "edit", str(pr), "--add-label", L["needs_changes"], "--remove-label", L["reviewed"]])
             m2 = self.closes_re.search(cj.get("body") or "")
