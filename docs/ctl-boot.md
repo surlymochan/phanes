@@ -35,8 +35,10 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      `lane-ready` issues not marked `in-progress`, `lane-pr`, or
      `lane-failed`), and `_blocked` (ready issues waiting on `依赖`); `_ready`
      is the dispatchable count after `_blocked` is removed. `_stale_stripped_n`
-     is the non-negative count of stale-search-index entries stripped by the
-     current autodispatch process.
+     (also exposed as `_stale_search_skips`) is the non-negative count of
+     stale-search-index entries stripped by the current autodispatch process;
+     `_stale_lane_failed_skips` counts the subset of those stale hits whose
+     issue still carries both `lane-failed` and `lane-ready` (Refs #985).
    - Failed work is not retried by leaving a stale `lane-ready` label: after a
      failure, an operator must manually re-add `lane-ready` and remove
      `lane-failed` (and `lane-pr`, if present) before it can be dispatched again.
@@ -181,6 +183,7 @@ Check scripts (no SSH):
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1260 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
+- `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
 
 ### Roll back a failed assign (Refs #968)
 
@@ -196,6 +199,24 @@ was rejected. The control plane must compare the remote lane with its local
   real runner or invent a local state entry;
 - the check is deliberately offline and uses fake state only:
   `python3 tools/check-ad-assign-rollback.py`.
+
+### Stale search results and residual labels (Refs #985)
+
+`gh issue list --label lane-ready` uses a search index that can briefly retain a
+failed issue after it was changed to `lane-failed`. `fresh_ready` re-reads the
+issue and rejects the stale hit, so it is not dispatched in that tick. When the
+re-read labels still contain both `lane-failed` and `lane-ready`, the log says
+`stale search hit lane-failed + lane-ready` and asks the operator to remove the
+residual `lane-ready` label; the status snapshot exposes `_stale_search_skips`
+and `_stale_lane_failed_skips` for monitoring. Operators can clear the residual
+with:
+
+```bash
+gh issue edit <N> --remove-label lane-ready
+```
+
+Re-add `lane-ready` only after the failure has been reviewed and the issue is
+ready for another attempt.
 
 ### Orphan runner window after assign (Refs #961)
 
