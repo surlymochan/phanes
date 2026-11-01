@@ -444,6 +444,17 @@ class DistRootServeTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def request_with_type(self, path, method='GET', host=None, port=None):
+        """发起一次请求并返回 (状态码, Content-Type, body)；用于核对诊断快照的响应头。"""
+        connection = http.client.HTTPConnection('127.0.0.1', port or self.port, timeout=5)
+        try:
+            headers = {} if host is None else {'Host': host}
+            connection.request(method, path, headers=headers)
+            response = connection.getresponse()
+            return response.status, response.getheader('Content-Type'), response.read()
+        finally:
+            connection.close()
+
     def test_dist_whitelisted_files_are_served(self):
         cases = (
             ('/index.html', self.index.read_bytes()),
@@ -539,6 +550,26 @@ class DistRootServeTests(unittest.TestCase):
             switcher.join(timeout=5)
             server.server_close()
         self.assertFalse(thread.is_alive())
+
+    def test_incomplete_snapshot_returns_json_error_then_recovers(self):
+        """切换窗口读到不完整 JSON 时不返回半截正文，恢复后继续提供新快照。"""
+        old_body = b'{"snapshot":"old","version":1}'
+        new_body = b'{"snapshot":"new","version":2}'
+        self.data.write_bytes(old_body)
+
+        status, content_type, body = self.request_with_type('/data/diagnosis.json')
+        self.assertEqual((status, content_type), (200, 'application/json'))
+        self.assertEqual(json.loads(body), {'snapshot': 'old', 'version': 1})
+
+        self.data.write_bytes(b'{"snapshot":"new"')
+        status, content_type, body = self.request_with_type('/data/diagnosis.json')
+        self.assertEqual((status, content_type), (503, 'application/json'))
+        self.assertIsInstance(json.loads(body), dict)
+
+        self.data.write_bytes(new_body)
+        status, content_type, body = self.request_with_type('/api/diagnosis')
+        self.assertEqual((status, content_type), (200, 'application/json'))
+        self.assertEqual(json.loads(body), {'snapshot': 'new', 'version': 2})
 
     def test_dist_data_option_overrides_default_dist_data(self):
         override_data = Path(self.tmp.name) / 'override.json'
