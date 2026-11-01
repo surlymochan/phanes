@@ -36,6 +36,11 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &`; script: `merge-loop.sh`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/merge-heartbeat`
+   - **Green decision (`merge-green`)**:
+     Evaluates PRs against the `merge-green` contract: candidate `fleet/*` and `brain/*` PRs must be `MERGEABLE` and have passing Linux checks (Linux-green) before squash-merging, without waiting for non-blocking checks (such as macOS).
+   - **Queue contract**:
+     - *No PR skip*: When no PR is ready or the queue is empty, the loop updates `merge-heartbeat` and sleeps for the next poll cycle without erroring.
+     - *Failure non-starvation*: If a PR fails to merge (conflict or checks), it is recorded/skipped and does not starve or block subsequent queue candidates.
 
 4. **`bus-worker-loop`** (GitHub issue bus executor loop):
    - **Startup command**: `~/phanes-ctl/bin/bus-worker-loop`  
@@ -96,6 +101,7 @@ Check scripts (no SSH):
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
+- `python3 tools/check-merge-heartbeat.py` — offline `lane-merge` / `merge-green` / `merge-heartbeat` contract check. Asserts heartbeat path, empty PR queue skipping, and failure non-starvation in a mock fixture directory.
 
 Recommended heartbeat monitoring (no SSH and no restart): run this from the
 repository checkout every five minutes, for example with cron:
