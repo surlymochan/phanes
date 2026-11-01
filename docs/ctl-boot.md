@@ -60,6 +60,7 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &`; script: `merge-loop.sh`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/merge-heartbeat`
+   - **Idle heartbeat contract (Refs #955)**: when idle (no PR pending or no open PR in queue), `merge-loop.sh` skips the merge step (no `gh pr merge` call) but still updates the `merge-heartbeat` timestamp on each tick to prevent false-positive stall detection. Check with `python3 tools/check-merge-idle-heartbeat.py`.
 
 4. **`bus-worker-loop`** (GitHub issue bus executor loop):
    - **Startup command**: `~/phanes-ctl/bin/bus-worker-loop`  
@@ -125,6 +126,28 @@ contract check `python3 tools/check-ib-cert-reuse.py` uses fake TTLs and the
 environment variable to cover both branches, and never invokes a real renewal
 command or touches a machine certificate.
 
+### Merge loop idle heartbeat (Refs #955)
+
+When no open PR is waiting to merge (`idle`), the `lane-merge` loop (`merge-loop.sh`)
+must skip the merge step but still touch/refresh
+`~/phanes-ctl/autodispatch/merge-heartbeat`. Updating the heartbeat while idle prevents
+watchdog monitors from misinterpreting an idle period (no PR activity) as a wedged
+or stalled merge loop.
+
+`bin/merge-loop.sh` writes the heartbeat before the PR query and again on an idle
+tick (empty `gh pr list` result), so an empty queue never looks like a dead loop.
+The offline contract check replays that real script with a fake `gh` stub inside a
+fake directory: while the queue is empty no `gh pr merge` call may happen (the
+merge step is skipped), and `merge-heartbeat` must still be refreshed. The check
+does not model merge policy: `merge-loop.sh` delegates the merge decision to the
+host's `gh` configuration and branch protections.
+
+The contract is asserted offline with fake directory fixtures:
+
+```bash
+python3 tools/check-merge-idle-heartbeat.py
+```
+
 ## Smoke (safe, no restart) (Refs #777)
 
 ```bash
@@ -184,6 +207,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ad-assign-rollback.py` — offline #968 contract check for an `assign` returning non-zero while the remote lane remains `busy` or `queued` without a matching local `state.json` entry. It detects and clears only the fake remote reservation; it never connects to SSH or kills a real runner.
 - `python3 tools/check-ad-mint-cooldown.py` — offline #1260 contract check for seed-mint burst cooling. A fake clock asserts that a second mint whose interval is less than `MINT_COOLDOWN` is skipped and does not refresh `_last_mint`.
 - `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
+- `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
 ### Roll back a failed assign (Refs #968)
 
