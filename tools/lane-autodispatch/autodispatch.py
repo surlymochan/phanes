@@ -361,12 +361,24 @@ def replenish(k, state):
             except Exception as e: log(f"planner issue: {e}", brain=False)
     return out
 
+def sleep_chunk(total=TICK, chunk=5):
+    """Sleep between ticks in chunks <= 5s, refreshing heartbeat on each step to prevent suspend freeze (Refs #906)."""
+    rem = max(0, total)
+    if rem == 0:
+        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+        return
+    while rem > 0:
+        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+        step = min(rem, chunk)
+        time.sleep(step)
+        rem -= step
+    open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
+
 def main():
     lanes = load(f"{D}/lanes.json", {}); last_warn = 0
     if "--once" in sys.argv: tick(lanes, load(f"{D}/state.json", {}), 0); return
     while True:
         try: last_warn = tick(load(f"{D}/lanes.json", lanes), load(f"{D}/state.json", {}), last_warn)
         except Exception as e: log(f"tick error: {e!r}", brain=False)
-        open(f"{D}/heartbeat", "w").write(time.strftime("%F %T") + "\n")
-        time.sleep(TICK)
+        sleep_chunk(TICK, 5)
 if __name__ == "__main__": main()

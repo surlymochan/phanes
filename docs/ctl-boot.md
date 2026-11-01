@@ -45,6 +45,11 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      build their SSH command from the same `git_ssh_command`/`shlex` path, so a
      `ProxyCommand` or `ProxyJump` value containing spaces remains one argv item.
      Check offline with `python3 tools/check-ssh-opts-quote.py`.
+   - **Chunked sleep heartbeat contract (Refs #906)**: between ticks, autodispatch sleeps
+     in chunks of ≤ 5s (`sleep(5)`) and refreshes `autodispatch/heartbeat` at each step.
+     This prevents host suspend / nanosleep freeze from creating ~40-minute silent heartbeat
+     gaps and false-positive supervisor stalls.
+     Check offline with `python3 tools/check-ad-heartbeat-chunk.py`.
 
 3. **`lane-merge`** (merge Linux-green `fleet/*` PRs):
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
@@ -156,6 +161,7 @@ Check scripts (no SSH):
 - `bash docs/check-ctl-boot.sh` — offline path and heartbeat existence verification under `~/phanes-ctl` (or `bash docs/check-ctl-boot.sh --self-test` to test in an offline fixture)
 - `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
+- `python3 tools/check-ad-heartbeat-chunk.py` — offline #906 contract check asserting that lane-autodispatch's main loop sleeps in chunks of ≤ 5s (`sleep(5)`) between ticks and updates `autodispatch/heartbeat` on each step, preventing host suspend / nanosleep freeze false stalls.
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
 - `python3 tools/check-ctl-hb-refresh.py` — offline #1263 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
@@ -239,6 +245,20 @@ For a manual check, run `python3 tools/check-ad-heartbeat-stall.py` (or pass
 `--heartbeat-file PATH --threshold-minutes 20`). Offline smoke fixtures are
 `python3 tools/check-ad-heartbeat-stall.py --fixture-old` (expected non-zero)
 and `python3 tools/check-ad-heartbeat-stall.py --fixture-fresh` (expected 0).
+
+### Autodispatch chunked sleep and heartbeat refresh (Refs #906)
+
+Drawing from the ~40-minute silence lesson (`brain/lessons-37min-silence.md`) caused by host suspend
+freezing nanosleep, `lane-autodispatch` must never perform a single monolithic `sleep(AD_TICK)`.
+Instead, the main loop steps between ticks in increments of ≤ 5s (`sleep(5)`), refreshing
+`autodispatch/heartbeat` at every step. Even if the host suspends or sleeps, the heartbeat
+is continuously refreshed while awake and promptly updated upon resume.
+
+Verify offline (without connecting to SSH or touching running processes):
+
+```bash
+python3 tools/check-ad-heartbeat-chunk.py
+```
 
 ### Codex provider throttling queue recovery (Refs #988)
 
