@@ -253,7 +253,9 @@ class FleetTests(unittest.TestCase):
                 "PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
                 "OPENSWARM_TEST_SSH_ROOT": str(self.root),
             }), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                xs.main()
+                with self.assertRaises(SystemExit) as partial:
+                    xs.main()
+            self.assertEqual(partial.exception.code, 1)
             rows = [json.loads(line) for line in destination.read_text().splitlines()]
             first_pull = destination.read_bytes()
             sys.argv = ["openswarm", "fleet", "ledger", "pull"]
@@ -261,7 +263,9 @@ class FleetTests(unittest.TestCase):
                 "PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
                 "OPENSWARM_TEST_SSH_ROOT": str(self.root),
             }), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                xs.main()
+                with self.assertRaises(SystemExit) as repeated_partial:
+                    xs.main()
+            self.assertEqual(repeated_partial.exception.code, 1)
             self.assertEqual(destination.read_bytes(), first_pull)
 
             custom_destination = self.root / "custom.jsonl"
@@ -289,6 +293,61 @@ class FleetTests(unittest.TestCase):
         self.assertIn("down: unreachable", errors.getvalue())
         # The --fleet reader uses the merged file, not the local source ledger.
         self.assertEqual(json.loads(ledger_output.getvalue()), rows)
+
+    def test_ledger_pull_json_manifest_marks_partial_and_retry_is_idempotent(self):
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        ssh = fake_bin / "ssh"
+        ssh.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            "if sys.argv[1] == 'down': raise SystemExit(255)\n"
+            "path = pathlib.Path(os.environ['OPENSWARM_TEST_SSH_ROOT']) / (sys.argv[1] + '.jsonl')\n"
+            "sys.stdout.buffer.write(path.read_bytes())\n"
+        )
+        ssh.chmod(0o755)
+        self.config([{"name": "good", "kind": "ssh", "ssh": "good"},
+                     {"name": "down", "kind": "ssh", "ssh": "down"}])
+        (self.root / "good.jsonl").write_text(json.dumps({"run_id": "task-1", "status": "done"}) + "\n")
+        destination = self.root / "harvest.jsonl"
+        original_argv = sys.argv
+        try:
+            sys.argv = ["openswarm", "fleet", "ledger", "pull", "--json", "--into", str(destination)]
+            with mock.patch.dict(xs.os.environ, {"PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
+                                                  "OPENSWARM_TEST_SSH_ROOT": str(self.root)}), \
+                    contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as partial:
+                    xs.main()
+            report = json.loads(output.getvalue())
+            self.assertEqual(partial.exception.code, 1)
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["entries"][0]["run_id"], "task-1")
+            self.assertEqual(report["failures"][0]["lane"], "down")
+            sys.argv = ["openswarm", "fleet", "ledger", "pull", "--json", "--hosts", "good",
+                        "--into", str(destination)]
+            with mock.patch.dict(xs.os.environ, {"PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
+                                                  "OPENSWARM_TEST_SSH_ROOT": str(self.root)}), \
+                    contextlib.redirect_stdout(io.StringIO()) as retry_output:
+                xs.main()
+            self.assertEqual(len(destination.read_text().splitlines()), 1)
+            self.assertEqual(json.loads(retry_output.getvalue())["status"], "success")
+        finally:
+            sys.argv = original_argv
+
+    def test_ledger_pull_json_unknown_lane_is_non_retryable(self):
+        self.config([{"name": "good", "kind": "ssh", "ssh": "good"}])
+        original_argv = sys.argv
+        try:
+            sys.argv = ["openswarm", "fleet", "ledger", "pull", "--json", "--hosts", "missing"]
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as error:
+                    xs.main()
+            report = json.loads(output.getvalue())
+            self.assertEqual(error.exception.code, 2)
+            self.assertEqual(report["failures"][0]["lane"], "missing")
+            self.assertFalse(report["failures"][0]["retryable"])
+        finally:
+            sys.argv = original_argv
 
     def test_ledger_pull_fails_when_every_host_is_unreachable(self):
         fake_bin = self.root / "bin"
