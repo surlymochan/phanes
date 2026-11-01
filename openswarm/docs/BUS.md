@@ -70,6 +70,7 @@ The worker checks out the requested base, runs openswarm's regular local run mac
 ```json
 {
   "status": "done",
+  "error_class": "none",
   "summary": "<summary>",
   "files_changed": ["<path>"],
   "tests": "<commands and outcomes>",
@@ -80,7 +81,7 @@ The worker checks out the requested base, runs openswarm's regular local run mac
 }
 ```
 
-`status`, `summary`, `files_changed`, `tests`, and `followups` follow openswarm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. The planner takes the terminal status from a valid `openswarm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `openswarm/<run_id>`; `branch_hint` is informational and ignored.
+The result comment is a machine-readable contract: it must contain `status=<done|partial|failed>` and `error_class=<class|none|empty>` (JSON keys are `"status"` and `"error_class"`). Both success and failure comments include both fields; successful runs may use `none` or an empty value for `error_class`, while failures must provide a non-empty error class. `status`, `summary`, `files_changed`, `tests`, and `followups` follow openswarm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. The planner takes the terminal status from a valid `openswarm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `openswarm/<run_id>`; `branch_hint` is informational and ignored.
 
 ## Trust and cancellation
 
