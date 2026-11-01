@@ -497,7 +497,7 @@ class BuildDiagnosisTest(unittest.TestCase):
                 result = run_cli(self.brief_path, raw_dir, out_path)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("forecast.csv", result.stderr)
-                self.assertIn(missing_col, result.stderr)
+                self.assertIn(f"缺少必需列：{missing_col}", result.stderr)
                 self.assertFalse(out_path.exists())
 
     def test_missing_file_exits_nonzero(self) -> None:
