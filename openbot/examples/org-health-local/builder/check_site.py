@@ -20,6 +20,7 @@ REQUIRED_FILES = (
     "data/diagnosis.json",
     "build-report.json",
 )
+STATIC_ASSET_FILES = ("app.bundle.js", "styles.css")
 DIAGNOSIS_CORE_SECTIONS = (
     "metrics",
     "insights",
@@ -205,7 +206,12 @@ def check_site(dist: Path) -> list[str]:
         path = dist / relative
         paths[relative] = path
         if not path.is_file():
-            failures.append(f"失败：{relative} 不存在")
+            if relative in STATIC_ASSET_FILES:
+                failures.append(
+                    f"失败：{relative} 不存在（静态资源路径：{path}） [missing_asset]"
+                )
+            else:
+                failures.append(f"失败：{relative} 不存在")
         elif path.stat().st_size == 0:
             failures.append(f"失败：{relative} 为空")
         else:
