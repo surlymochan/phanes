@@ -119,6 +119,15 @@ class CtlBootDocumentationTests(unittest.TestCase):
             self.assertIn(item, self.content, f"docs/ctl-boot.md missing {item}")
             self.assertIn(item, tool_content, f"tools/check-ctl-boot.sh missing {item}")
 
+    def test_check_merge_idle_heartbeat_contract(self):
+        """Refs #955: tools/check-merge-idle-heartbeat.py 离线契约与假目录断言通过。"""
+        merge_check = ROOT / "tools" / "check-merge-idle-heartbeat.py"
+        self.assertTrue(merge_check.is_file(), f"Expected {merge_check} to exist")
+        self.assertIn("merge-heartbeat", self.content, "docs/ctl-boot.md missing merge-heartbeat")
+        res = subprocess.run([sys.executable, str(merge_check)], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("OK: merge-loop idle heartbeat contract passed", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
