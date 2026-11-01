@@ -126,7 +126,7 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 - **产物路径**：`<workdir>/review.md`——由 `run_e2e.py` 捕获审查者的标准输出写入（`openbot/examples/org-health-local/run_e2e.py:11`、`:70`），内容是逐条 `PASS`/`FAIL` 行加一行汇总（例如「共 10 项检查：10 项通过，0 项失败」）。
 - **失败行为**：审查不通过时审查者返回非 0，`run_e2e.py` 中断并返回 1，但 `<workdir>/review.md` **照常保留**（含 FAIL 行）便于核对失败原因；若在站点自检阶段就已中断，则本步骤不执行、也不生成该报告。
 - **审查内容**（见 `review/cross_check.py:10-39`）：
-  - **期间一致**：核对任务书 `观察期间` 与诊断快照 `scope.观察月份`、`scope.数据截止` 严格一致。
+  - **期间一致**：核对任务书 `观察期间` 与诊断快照 `scope.观察月份`、`scope.数据截止` 严格一致，并核对快照 `metrics[*].数值` 的期次键（全口径成本率的键去掉「整体」前缀）与任务书期次锚点（Boss 格式的 `期次` 列表，或起止/参考期次）一致；缺哪些键、多哪些键都在这一行里说明。
   - **版本一致**：核对任务书与快照的 `schema版本` 均为 4。
   - **必答问题覆盖**：检查任务书中的 6 个必答问题在快照的 `insights` 或 `recommendations` 中均有明确提及（通过 ID、原文或关键词匹配）。
   - **站点数据一致**：若指定 `--dist`，核验 `<workdir>/dist/data/diagnosis.json` 与 `<workdir>/diagnosis.json` 的字节 sha256 完全相同。
