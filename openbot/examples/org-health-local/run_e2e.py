@@ -117,7 +117,7 @@ def undecodable_reason(path):
 
 
 def write_timings(workdir, timings):
-    """写出耗时记录；写不进去时给出可读提示并返回提示文本，可用时返回 None。"""
+    """写出已执行步骤的耗时记录；失败路径也由调用方在 finally 中调用。"""
     path = workdir / 'timings.json'
     try:
         path.write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
