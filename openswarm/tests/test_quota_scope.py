@@ -32,6 +32,26 @@ class BreakerKeyScope(unittest.TestCase):
         self.assertNotIn("ocgo/m2", xs.breakers())
         xs.jsave(xs.BREAKERS, {})
 
+    def test_rate_limited_model_recovers_after_hold_expiry(self):
+        st = copy.deepcopy(BASE)
+        notes = []
+        decision = {"backend": "ocgo", "model": "mid-coder"}
+        error = "429 too many requests"
+
+        self.assertEqual(xs.executor_error_class(75, None, error, "ocgo"), "rate_limit")
+        key = xs.rate_limit_breaker_key("ocgo", decision, error)
+        self.assertEqual(key, "ocgo/mid-coder")
+        xs.trip_breaker(key, POLICY, error)
+
+        blocked, why = xs.plan_ocgo(PROF, st, POLICY, False, notes)
+        self.assertEqual(why, None)
+        self.assertEqual(blocked["model"], "big-pro")
+
+        xs.jsave(xs.BREAKERS, {key: xs.NOW() - 1})
+        recovered, why = xs.plan_ocgo(PROF, st, POLICY, False, notes)
+        self.assertEqual(why, None)
+        self.assertEqual(recovered["model"], "mid-coder")
+
 
 class UnknownState(unittest.TestCase):
     def setUp(self):
