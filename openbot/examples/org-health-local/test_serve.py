@@ -107,6 +107,23 @@ class LocalServeBoundaryTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, INDEX.read_bytes())
 
+    def test_non_get_head_methods_return_stable_405_and_allow(self):
+        for method in ('POST', 'PUT', 'OPTIONS', 'PATCH'):
+            with self.subTest(method=method):
+                status, content_type, body = self.request_with_type('/', method=method)
+                self.assertEqual(status, 405)
+                self.assertEqual(content_type, 'text/plain; charset=utf-8')
+                self.assertEqual(body, b'Method Not Allowed\n')
+
+                connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
+                try:
+                    connection.request(method, '/')
+                    response = connection.getresponse()
+                    self.assertEqual(response.getheader('Allow'), 'GET, HEAD')
+                    response.read()
+                finally:
+                    connection.close()
+
     def test_head_matches_get_status_and_content_type(self):
         # HEAD 只回响应头：状态码与 Content-Type 与 GET 一致，body 为空。
         for path in ('/', '/index.html', '/styles.css', '/data/diagnosis.json'):
@@ -766,6 +783,19 @@ class MissingDiagnosisDataTests(unittest.TestCase):
             code = serve.main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def request_with_type(self, path, method='GET', port=None):
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request(method, path)
+            response = connection.getresponse()
+            return response.status, response.getheader('Content-Type'), response.read()
+        finally:
+            connection.close()
+
+    def request(self, path, port=None):
+        status, _, body = self.request_with_type(path, port=port)
+        return status, body
+
     def test_main_exits_nonzero_when_root_missing_diagnosis_data(self):
         with patch.object(serve, 'create_server') as mock_create:
             code, out, err = self.run_main(['--port', '0', '--root', str(self.dist)])
@@ -850,6 +880,39 @@ class MissingDiagnosisDataTests(unittest.TestCase):
             self.assertEqual(json.loads(response.read()), {'error': 'diagnosis data not found'})
         finally:
             conn.close()
+
+    def test_missing_static_diagnosis_has_explicit_error_content_type(self):
+        args = serve.parse_args(['--port', '0', '--root', str(self.dist)])
+        server = serve.create_server(args.port, args.data, root=args.root)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+
+        status, content_type, body = self.request_with_type('/data/diagnosis.json', port=server.server_address[1])
+        self.assertEqual(status, 404)
+        self.assertEqual(content_type, 'text/html;charset=utf-8')
+        self.assertIn(b'404', body)
+
+    def test_client_disconnect_does_not_prevent_followup_request(self):
+        server = serve.create_server(0, root=self.dist)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            sock = socket.create_connection(('127.0.0.1', port), timeout=5)
+            sock.sendall(f'GET /data/diagnosis.json HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n'.encode())
+            sock.close()
+
+            status, body = self.request('/index.html', port=port)
+            self.assertEqual(status, 200)
+            self.assertEqual(body, self.index.read_bytes())
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
 
     def test_root_missing_diagnosis_data_succeeds_with_explicit_data_option(self):
         override_data = Path(self.tmp.name) / 'custom.json'
