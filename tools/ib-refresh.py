@@ -20,10 +20,29 @@ def _status_line(ok, hosts_ok, skipped_cooldown, min_ttl, min_exp):
     return " ".join(f"{key}={value}" for key, value in zip(STATUS_KEYS, values))
 
 
-def _status_for(result, hosts, config_path, now):
+def _is_cooldown(row):
+    return row.get("cooldown") is True or row.get("status") in {"cooldown", "skipped_cooldown"}
+
+
+def _usable_hosts(rows):
+    return [row for row in rows
+            if row.get("final_status", row.get("status")) == "valid" and not _is_cooldown(row)]
+
+
+def _need_ok(hosts_ok, skipped_cooldown, need_ok):
+    """Allow the gate when enough hosts are usable; cooldown is not a failure."""
+    if need_ok < 0:
+        raise ValueError("need_ok must be non-negative")
+    return hosts_ok >= need_ok
+
+
+def _status_for(result, hosts, config_path, now, need_ok=None):
     rows = result.get("hosts", [])
-    hosts_ok = sum(row.get("final_status", row.get("status")) == "valid" for row in rows)
-    skipped = sum(row.get("status") == "valid" for row in rows)
+    hosts_ok = len(_usable_hosts(rows))
+    skipped = sum(_is_cooldown(row) for row in rows)
+    required = len(hosts) if need_ok is None else need_ok
+    result["ok"] = bool(result["ok"] and _need_ok(hosts_ok, skipped, required))
+    result["start_lane_autodispatch"] = bool(result.get("start_lane_autodispatch") and result["ok"])
     expiries = []
     for host in hosts:
         cert_name = host.get("cert") or host.get("certificate") or host.get("ssh_cert")
@@ -100,6 +119,7 @@ def refresh(config_path, renew_command, threshold, output_path=None):
         hosts = config["hosts"]
         if not isinstance(hosts, list):
             raise ValueError("fleet config hosts must be a list")
+        need_ok = int(config.get("need_ok", len(hosts)))
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         return {"ok": False, "start_lane_autodispatch": False, "error": f"fleet config: {exc}",
                 "status_line": _status_line(False, 0, 0, -1, -1)}
@@ -109,6 +129,9 @@ def refresh(config_path, renew_command, threshold, output_path=None):
     config_errors = []
     for host in hosts:
         name = host.get("name")
+        if _is_cooldown(host):
+            rows.append({"host": name, "status": "cooldown"})
+            continue
         cert_name = host.get("cert") or host.get("certificate") or host.get("ssh_cert")
         if not name or not cert_name:
             rows.append({"host": name, "status": "missing", "error": "certificate path missing"})
@@ -122,7 +145,7 @@ def refresh(config_path, renew_command, threshold, output_path=None):
 
     if config_errors:
         return _status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
-                            "renewed": [], "errors": config_errors}, hosts, config_path, now)
+                            "renewed": [], "errors": config_errors}, hosts, config_path, now, need_ok)
 
     errors = []
     renewed = []
@@ -153,7 +176,7 @@ def refresh(config_path, renew_command, threshold, output_path=None):
 
         if errors:
             return _status_for({"ok": False, "start_lane_autodispatch": False, "hosts": rows,
-                                "renewed": [], "errors": errors}, hosts, config_path, now)
+                                "renewed": [], "errors": errors}, hosts, config_path, now, need_ok)
 
         for cert, staged_cert in replacements:
             if cert is None:
@@ -163,7 +186,9 @@ def refresh(config_path, renew_command, threshold, output_path=None):
         if output_path != config_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             staged_config = staged / "fleet.json"
-            staged_config.write_text(json.dumps(config, indent=2) + "\n")
+            written_hosts = [host for host, row in zip(hosts, rows) if not _is_cooldown(row)]
+            written_config = {**config, "hosts": written_hosts}
+            staged_config.write_text(json.dumps(written_config, indent=2) + "\n")
             os.replace(staged_config, output_path)
 
     # Re-read after replacement so the result is useful as a boot gate.
@@ -174,7 +199,7 @@ def refresh(config_path, renew_command, threshold, output_path=None):
         final = _state(_cert_path(config_path, cert_name), now, threshold) if cert_name else "missing"
         result_rows.append({**row, "final_status": final})
     return _status_for({"ok": True, "start_lane_autodispatch": True, "hosts": result_rows,
-                        "renewed": renewed, "errors": []}, hosts, config_path, now)
+                        "renewed": renewed, "errors": []}, hosts, config_path, now, need_ok)
 
 
 def main(argv=None):
