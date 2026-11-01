@@ -21,6 +21,8 @@ PRIO = {"p0": 0, "p1": 1, "p2": 2}
 SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ControlMaster=auto",
         "-o", f"ControlPath={HOME}/.ssh/cm/%r@%h:%p", "-o", "ControlPersist=600"]
 BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
+FETCH_ATTEMPTS = 3  # bounded harvest retries; the failed attempt count is reported in the result summary
+TRANSIENT_FETCH_RE = re.compile(r"Permission denied|Connection closed|timed out|banner", re.I)
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
@@ -164,23 +166,45 @@ def dispatch(lane, cfg, item, base):
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
 
+def plural(n, word): return f"{n} {word}" + ("" if n == 1 else "s")
+
+def fetch_with_retry(fetch, lane, issue, sleep=20):
+    """Harvest a lane branch from its executor host. A transient SSH failure (Connection closed,
+    banner exchange) is retried a bounded number of times; returns (rc, error, failed attempts)."""
+    failures = 0
+    while True:
+        rc, _, err = sh(fetch, timeout=180)
+        err = err or ""
+        if not rc: return rc, err, failures
+        failures += 1
+        if failures >= FETCH_ATTEMPTS or not TRANSIENT_FETCH_RE.search(err or ""): return rc, err, failures
+        log(f"{lane} #{issue} fetch transient ({err.strip()[-90:]}); attempt {failures + 1}/{FETCH_ATTEMPTS} in {sleep}s", brain=False)
+        time.sleep(sleep)
+
 def finish(lane, cfg, st, info, state):
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = ["git", "-c", "core.sshCommand=ssh " + " ".join(SSHO), "-C", LOCAL, "fetch", "-q", f"{cfg['host']}:{info['repo']}", f"+{info['branch']}:refs/fleet/{lane}"]
-        rc, _, err = sh(fetch, timeout=180)
-        if rc and re.search(r"Permission denied|Connection closed|timed out|banner", err):
-            log(f"{lane} #{n} fetch transient ({err.strip()[-90:]}); retrying in 20s", brain=False); time.sleep(20); rc, _, err = sh(fetch, timeout=180)
-        if not rc: rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
+        rc, err, failures = fetch_with_retry(fetch, lane, n)
+        if rc:
+            st["fetch_failures"] = st.get("fetch_failures", 0) + failures
+            if not st.get("fetch_reported"):
+                st["fetch_reported"] = True
+                gh(["issue", "comment", str(n), "--body", f"Lane {lane} ({cfg['host']}, run `{run}`) could not fetch the result branch after {plural(failures, 'attempt')}: {err.strip()[-200:]}\n\nExecutor summary: {info.get('summary')}\n\nThe harvest is retried on the next tick."])
+            save_state(state)
+            return log(f"{lane} #{n} run {run}: fetch failed after {plural(failures, 'attempt')}: {err.strip()[-200:]}") or False
+        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return log(f"{lane} #{n} run {run}: push failed: {err.strip()[-200:]}") or False
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n); return True
         _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", f"refs/fleet/{lane}"])
+        failed = st.get("fetch_failures", 0)
         body = (f"Closes #{n}\n\nAutodispatched to lane **{lane}** on **{cfg['host']}** ({info.get('backend')}/{info.get('model')}), run `{run}`, "
-                f"base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`.\n\nExecutor summary: {info.get('summary')}")
+                f"base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`.\n\nExecutor summary: {info.get('summary')}"
+                + (f"\n\nResult harvest failed {plural(failed, 'attempt')} before this fetch succeeded." if failed else ""))
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", (subj.strip() or f"#{n}")[:200], "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])

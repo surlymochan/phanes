@@ -9455,12 +9455,40 @@ print(sha)
 """
 
 
-def transfer_ref(source, source_repo, rev, target, target_repo, destination=""):
+FLEET_FETCH_ATTEMPTS = 3
+SSH_TRANSIENT_ERRORS = ("connection closed", "banner exchange", "connection reset", "broken pipe",
+                         "kex_exchange_identification", "timed out")
+
+
+def ssh_transient_error(text):
+    """True when a transport failure is a transient SSH problem (Connection closed, banner exchange)
+    that a bounded retry can clear."""
+    lowered = (text if isinstance(text, str) else "").lower()
+    return any(marker in lowered for marker in SSH_TRANSIENT_ERRORS)
+
+
+def attempt_phrase(attempts):
+    return f"{attempts} attempt" + ("" if attempts == 1 else "s")
+
+
+def transfer_ref(source, source_repo, rev, target, target_repo, destination="", attempts=FLEET_FETCH_ATTEMPTS):
+    """Move one ref between hosts. Harvesting a lane result from an executor host can fail with a
+    transient SSH error (Connection closed, banner exchange); that is retried a bounded number of
+    times and the final error names how many attempts failed."""
     ref = "refs/openswarm-transfer/" + uuid.uuid4().hex
-    bundle = host_require(source, host_python(source, BUNDLE_EXPORT, [source_repo, rev, ref], timeout=300),
-                          "bundle export")
-    return host_require(target, host_python(target, BUNDLE_IMPORT, [target_repo, ref, destination],
-                                           timeout=300, input=bundle), "bundle import").decode().strip()
+    for attempt in range(1, max(1, attempts) + 1):
+        rc, bundle, error = host_python(source, BUNDLE_EXPORT, [source_repo, rev, ref], timeout=300)
+        failed = source
+        if not rc:
+            rc, out, error = host_python(target, BUNDLE_IMPORT, [target_repo, ref, destination],
+                                         timeout=300, input=bundle)
+            failed = target
+            if not rc:
+                return out.decode().strip()
+        detail = (error or b"").decode(errors="replace").strip() or f"rc={rc}"
+        if attempt >= attempts or not ssh_transient_error(detail):
+            raise RuntimeError(f"{failed['name']}: result transfer failed after {attempt_phrase(attempt)}: "
+                               f"{detail[:200]}")
 
 
 def instabox_states(hosts):

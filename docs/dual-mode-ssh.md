@@ -51,6 +51,8 @@ ssh -F ~/.ssh/openswarm-hub/config gocc -- true
 
 box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持该循环。
 
+从 executor 主机回收 lane 结果（`git fetch`）时若出现 `Connection closed` 或 banner exchange，autodispatch/fleet 侧会做有界重试（最多 3 次尝试）并把失败次数写进结果摘要。
+
 ## Fleet 主机和十 lane 拓扑
 
 自动路由的主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、

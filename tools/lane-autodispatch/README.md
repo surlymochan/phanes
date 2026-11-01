@@ -5,4 +5,5 @@ Backend starvation rules: [`../autodispatch-backend-fallback.md`](../autodispatc
 
 ```bash
 python3 tools/lane-autodispatch/test_can_take.py
+python3 tools/lane-autodispatch/test_fetch_retry.py
 ```

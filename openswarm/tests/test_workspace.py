@@ -1,4 +1,4 @@
-"""Regression tests for worktrees, dependency links, host-side verification, risk rules and credential opt-ins."""
+"""Regression tests for worktrees, dependency links, host-side verification, risk rules, credential opt-ins and the bounded SSH harvest retry."""
 import base64, json, os, shlex, shutil, subprocess, sys, tempfile, threading, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -315,6 +315,22 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(xs.adjust_status_for_change_evidence(
             "done", None, commit=None, workspace_changed=False, changed=False, read_only=False, verify=verify),
             ("done", None))
+
+
+class LaneHarvestRetryTest(unittest.TestCase):
+    """Harvesting a lane result from an executor host must retry a transient SSH failure a bounded
+    number of times and name the failed attempt count."""
+
+    def test_transient_ssh_failures_are_recognised(self):
+        self.assertTrue(xs.ssh_transient_error("ssh: connect to host ib1: Connection closed by remote host"))
+        self.assertTrue(xs.ssh_transient_error("kex_exchange_identification: Connection timed out during banner exchange"))
+        self.assertFalse(xs.ssh_transient_error("fatal: repository not found"))
+        self.assertFalse(xs.ssh_transient_error(""))
+
+    def test_harvest_retries_are_bounded_and_counted(self):
+        self.assertEqual(xs.FLEET_FETCH_ATTEMPTS, 3)
+        self.assertEqual(xs.attempt_phrase(1), "1 attempt")
+        self.assertEqual(xs.attempt_phrase(3), "3 attempts")
 
 
 class CredentialOptInTest(unittest.TestCase):

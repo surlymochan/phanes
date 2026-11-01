@@ -23,6 +23,9 @@ gateway_errors = ('no available fleet lane', 'available lanes changed or rejecte
                   'local lane status unavailable', 'local dispatch acknowledgement unavailable',
                   'gocc dispatch gateway unavailable', 'gocc dispatch gateway rejected request',
                   'fleet command returned invalid JSON', 'fleet command rejected request')
+RESULT_FETCH_ATTEMPTS = 3
+SSH_TRANSIENT_ERRORS = ('connection closed', 'banner exchange', 'connection reset', 'broken pipe',
+                         'kex_exchange_identification', 'timed out')
 
 class NoAvailableLane(RuntimeError):
     pass
@@ -31,16 +34,41 @@ class PreDispatchRejected(RuntimeError):
     """No executor was contacted, so the handoff can safely be rejected."""
     pass
 
+class FleetTransportError(RuntimeError):
+    """A fleet transport failure; `transient` marks the ones a bounded retry can clear."""
+
+    def __init__(self, message, transient=False):
+        super().__init__(message)
+        self.transient = transient
+
+class ResultFetchFailed(RuntimeError):
+    """The executor-host result could not be fetched; `attempts` counts the failed tries."""
+
+    def __init__(self, message, attempts):
+        super().__init__(message)
+        self.attempts = attempts
+
+def transient_transport_error(text):
+    """True when a transport error is a transient SSH problem (Connection closed, banner exchange)
+    that a bounded retry can clear."""
+    lowered = (text if isinstance(text, str) else '').lower()
+    return any(marker in lowered for marker in SSH_TRANSIENT_ERRORS)
+
+def attempt_phrase(attempts):
+    return f'{attempts} attempt' + ('' if attempts == 1 else 's')
+
 def gateway(payload):
     proc = subprocess.run(transport, input=json.dumps(payload), text=True, capture_output=True,
                           timeout=150 if payload.get('op') == 'bundle' else 100)
     try: data = json.loads(proc.stdout)
-    except ValueError: raise RuntimeError('fleet gateway response unavailable; handoff requires reconciliation')
+    except ValueError: raise FleetTransportError('fleet gateway response unavailable; handoff requires reconciliation',
+                                                 transient=transient_transport_error(proc.stderr))
     if proc.returncode or not data.get('ok'):
         reason = data.get('error')
         if payload.get('op') == 'submit' and reason in ('no available fleet lane', 'available lanes changed or rejected the task'):
             raise NoAvailableLane(reason)
-        raise RuntimeError(reason if reason in gateway_errors else 'fleet gateway rejected request')
+        raise FleetTransportError(reason if reason in gateway_errors else 'fleet gateway rejected request',
+                                  transient=transient_transport_error(reason) or transient_transport_error(proc.stderr))
     return data['result']
 
 def local_router_enabled():
@@ -78,7 +106,8 @@ def local_command(command, payload=None, timeout=100):
         if isinstance(data, dict) and isinstance(data.get('error'), str) and \
                 data['error'].startswith('fleet lane discovery unavailable:'):
             raise PreDispatchRejected(data['error'])
-        raise RuntimeError('local fleet command rejected request')
+        raise FleetTransportError('local fleet command rejected request',
+                                  transient=transient_transport_error(process.stderr))
     return data
 
 def local_host_command(host, command, payload=None, timeout=100):
@@ -215,19 +244,35 @@ def fetch_result(run_id, host, result, route):
     repo = json.loads(config_path.read_text())['repo']
     exists = subprocess.run(['git', '-C', repo, 'cat-file', '-e', commit + '^{commit}'], capture_output=True)
     if exists.returncode:
-        payload = dispatch_gateway({'op': 'bundle', 'id': run_id, 'host': host}, legacy=route != 'fleet')
-        if payload.get('branch') != branch or payload.get('commit') != commit:
-            raise ValueError('result bundle does not match the completed task')
-        with tempfile.TemporaryDirectory(prefix='openswarm-result-') as directory:
-            bundle = Path(directory) / 'result.bundle'
-            bundle.write_bytes(base64.b64decode(payload['bundle'], validate=True))
-            subprocess.run(['git', '-C', repo, 'fetch', '--no-tags', str(bundle),
-                            'refs/heads/' + branch + ':refs/openswarm/' + run_id],
-                           capture_output=True, check=True, timeout=130)
+        fetch_result_bundle(run_id, host, branch, commit, repo, route)
     else:
         subprocess.run(['git', '-C', repo, 'update-ref', 'refs/openswarm/' + run_id, commit],
                        capture_output=True, check=True, timeout=20)
     result['local_review_ref'] = 'refs/openswarm/' + run_id
+
+def fetch_result_bundle(run_id, host, branch, commit, repo, route):
+    """Harvest the executor host's result bundle into the local review repo. A transient SSH failure
+    (Connection closed, banner exchange) is retried a bounded number of times; when the retries are
+    exhausted the error carries the failed attempt count so the summary can name it."""
+    for attempt in range(1, RESULT_FETCH_ATTEMPTS + 1):
+        try:
+            payload = dispatch_gateway({'op': 'bundle', 'id': run_id, 'host': host}, legacy=route != 'fleet')
+            if payload.get('branch') != branch or payload.get('commit') != commit:
+                raise ValueError('result bundle does not match the completed task')
+            with tempfile.TemporaryDirectory(prefix='openswarm-result-') as directory:
+                bundle = Path(directory) / 'result.bundle'
+                bundle.write_bytes(base64.b64decode(payload['bundle'], validate=True))
+                subprocess.run(['git', '-C', repo, 'fetch', '--no-tags', str(bundle),
+                                'refs/heads/' + branch + ':refs/openswarm/' + run_id],
+                               capture_output=True, check=True, timeout=130)
+            return
+        except (ValueError, KeyError, OSError, subprocess.SubprocessError, RuntimeError) as error:
+            transient = getattr(error, 'transient', False) or transient_transport_error(str(error))
+            if not transient:
+                raise
+            if attempt >= RESULT_FETCH_ATTEMPTS:
+                raise ResultFetchFailed(f'result fetch failed after {attempt_phrase(attempt)}: {str(error)[:200]}',
+                                         attempt) from error
 
 
 def mapped(run_id, op):
@@ -240,10 +285,12 @@ def mapped(run_id, op):
         res=data['result']; final=res.get('result')
         try:
             fetch_result(run_id, row[0], res, row[1])
-        except (ValueError, KeyError, OSError, subprocess.SubprocessError, RuntimeError):
-            res['local_review_error'] = 'The completed result could not be fetched for local review.'
+        except (ValueError, KeyError, OSError, subprocess.SubprocessError, RuntimeError) as error:
+            attempts = getattr(error, 'attempts', 0)
+            failed = f' after {attempt_phrase(attempts)}' if attempts else ''
+            res['local_review_error'] = 'The completed result could not be fetched for local review' + failed + '.'
             if isinstance(final, dict) and isinstance(final.get('summary'), str):
-                final['summary'] += ' Local review could not fetch the result.'
+                final['summary'] += ' Local review could not fetch the result' + failed + '.'
         if isinstance(final,dict) and isinstance(final.get('summary'),str):
             final['summary']='Executor host: '+row[0]+'. '+final['summary']
     print(json.dumps(data,ensure_ascii=False)); return True

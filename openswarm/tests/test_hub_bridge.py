@@ -160,6 +160,19 @@ class HubBridgeTests(unittest.TestCase):
             MOD['local_command'](['auto', '--type', 'impl'])
 
     def test_finished_remote_commit_is_fetched_for_local_review(self):
+        info, gateway = self.remote_result()
+        with mock.patch.dict(G, {'gateway': gateway}), contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['run_submit'](self.args)
+            output.seek(0); output.truncate()
+            self.assertTrue(MOD['mapped']('run-1', 'info'))
+            result = json.loads(output.getvalue())['result']
+        self.assertEqual(result['local_review_ref'], 'refs/openswarm/run-1')
+        actual = subprocess.check_output(['git', '-C', str(self.repo), 'show', 'refs/openswarm/run-1:a'], text=True)
+        self.assertEqual(actual, 'remote result')
+        self.assertEqual((self.repo / 'a').read_text(), 'x')
+
+    def remote_result(self):
+        """A finished remote run plus a gateway that serves its result bundle."""
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)
         base = subprocess.check_output(['git', '-C', str(remote), 'rev-parse', 'HEAD'], text=True).strip()
@@ -173,21 +186,49 @@ class HubBridgeTests(unittest.TestCase):
                                            'result': {'summary': 'done'}}}
         def gateway(req):
             if req['op'] == 'submit':
-                return {'id':'run-1','state':'queued','host':'gores1','backend':'pi','model':'MiniMax'}
+                return {'id': 'run-1', 'state': 'queued', 'host': 'gores1', 'backend': 'pi', 'model': 'MiniMax'}
             if req['op'] == 'info':
                 return info
             bundle = subprocess.run([sys.executable, str(ROOT / 'bin/fleet-result-bundle')],
                                     input=json.dumps(info), text=True, capture_output=True, check=True)
             return json.loads(bundle.stdout)
-        with mock.patch.dict(G, {'gateway': gateway}), contextlib.redirect_stdout(io.StringIO()) as output:
+        return info, gateway
+
+    def test_transient_result_fetch_is_retried_and_then_succeeds(self):
+        info, gateway = self.remote_result()
+        calls = []
+        def flaky(req):
+            if req['op'] == 'bundle':
+                calls.append(req)
+                if len(calls) < 2:
+                    raise MOD['FleetTransportError']('local fleet command rejected request', transient=True)
+            return gateway(req)
+        with mock.patch.dict(G, {'gateway': flaky}), contextlib.redirect_stdout(io.StringIO()) as output:
             MOD['run_submit'](self.args)
             output.seek(0); output.truncate()
             self.assertTrue(MOD['mapped']('run-1', 'info'))
             result = json.loads(output.getvalue())['result']
+        self.assertEqual(len(calls), 2)
         self.assertEqual(result['local_review_ref'], 'refs/openswarm/run-1')
-        actual = subprocess.check_output(['git', '-C', str(self.repo), 'show', 'refs/openswarm/run-1:a'], text=True)
-        self.assertEqual(actual, 'remote result')
-        self.assertEqual((self.repo / 'a').read_text(), 'x')
+        self.assertNotIn('could not fetch', result['result']['summary'])
+
+    def test_exhausted_result_fetch_reports_the_failed_attempt_count(self):
+        info, gateway = self.remote_result()
+        calls = []
+        def failing(req):
+            if req['op'] == 'bundle':
+                calls.append(req)
+                raise MOD['FleetTransportError']('local fleet command rejected request', transient=True)
+            return gateway(req)
+        with mock.patch.dict(G, {'gateway': failing}), contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['run_submit'](self.args)
+            output.seek(0); output.truncate()
+            self.assertTrue(MOD['mapped']('run-1', 'info'))
+            result = json.loads(output.getvalue())['result']
+        self.assertEqual(len(calls), 3)
+        self.assertIn('after 3 attempts', result['local_review_error'])
+        self.assertIn('after 3 attempts', result['result']['summary'])
+        self.assertIn('done', result['result']['summary'])
 
     def test_result_fetch_failure_keeps_completed_result_visible(self):
         def gateway(req):

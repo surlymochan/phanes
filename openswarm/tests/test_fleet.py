@@ -314,6 +314,59 @@ class FleetTests(unittest.TestCase):
         self.assertEqual([row["run_id"] for row in xs.ledger_records(oversized + valid, "h")], ["kept"])
         self.assertEqual(xs.ledger_records(b"\n" * xs.LEDGER_MAX_HOST_LINES + valid, "h"), [])
 
+    def test_result_transfer_retries_a_transient_ssh_failure(self):
+        """Harvesting a lane result from an executor host can hit `Connection closed`; the transfer
+        is retried a bounded number of times and then succeeds."""
+        source = {"name": "executor", "kind": "ssh", "ssh": "alias"}
+        target = {"name": "local", "kind": "local"}
+        calls = []
+
+        def host_python(host, script, args=(), timeout=60, input=None):
+            calls.append(host["name"])
+            if host["name"] == "executor" and calls.count("executor") < 3:
+                return 255, b"", b"ssh: connect to host executor: Connection closed by remote host"
+            if host["name"] == "executor":
+                return 0, b"bundle", b""
+            return 0, b"a" * 40, b""
+
+        with mock.patch.object(xs, "host_python", side_effect=host_python):
+            sha = xs.transfer_ref(source, "/remote/repo", "openswarm/run-1", target, "/local/repo",
+                                 "refs/heads/openswarm/run-1")
+        self.assertEqual(sha, "a" * 40)
+        self.assertEqual(calls.count("executor"), 3)
+        self.assertEqual(calls.count("local"), 1)
+
+    def test_result_transfer_reports_the_failed_attempt_count(self):
+        source = {"name": "executor", "kind": "ssh", "ssh": "alias"}
+        target = {"name": "local", "kind": "local"}
+        calls = []
+
+        def host_python(host, script, args=(), timeout=60, input=None):
+            calls.append(host["name"])
+            return 255, b"", b"kex_exchange_identification: Connection closed during banner exchange"
+
+        with mock.patch.object(xs, "host_python", side_effect=host_python):
+            with self.assertRaises(RuntimeError) as raised:
+                xs.transfer_ref(source, "/remote/repo", "openswarm/run-1", target, "/local/repo")
+        self.assertIn("after 3 attempts", str(raised.exception))
+        self.assertIn("executor", str(raised.exception))
+        self.assertEqual(len(calls), 3)
+
+    def test_result_transfer_does_not_retry_a_permanent_failure(self):
+        source = {"name": "executor", "kind": "ssh", "ssh": "alias"}
+        target = {"name": "local", "kind": "local"}
+        calls = []
+
+        def host_python(host, script, args=(), timeout=60, input=None):
+            calls.append(host["name"])
+            return 128, b"", b"fatal: repository not found"
+
+        with mock.patch.object(xs, "host_python", side_effect=host_python):
+            with self.assertRaises(RuntimeError) as raised:
+                xs.transfer_ref(source, "/remote/repo", "openswarm/run-1", target, "/local/repo")
+        self.assertIn("after 1 attempt", str(raised.exception))
+        self.assertEqual(len(calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
