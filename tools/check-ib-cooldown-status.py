@@ -15,7 +15,9 @@ SPEC.loader.exec_module(IB_REFRESH)
 def main():
     hosts = [{"name": f"ib{i}", "cert": f"certs/ib{i}.crt"} for i in range(1, 6)]
     rows = [
-        {"host": "ib1", "status": "cooldown"},
+        # A cooldown host may still have a valid certificate; it is not reachable
+        # for this refresh and must remain outside hosts_ok.
+        {"host": "ib1", "status": "cooldown", "final_status": "valid"},
         {"host": "ib2", "status": "skipped_cooldown"},
         {"host": "ib3", "status": "valid", "final_status": "valid"},
         {"host": "ib4", "status": "valid", "final_status": "valid"},
