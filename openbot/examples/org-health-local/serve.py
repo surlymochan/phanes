@@ -68,18 +68,24 @@ class LocalOnlyHandler(SimpleHTTPRequestHandler):
         return super().send_head()
 
     def _serve_diagnosis_api(self, head=False):
-        """返回与 builder 产出的 diagnosis.json 相同字段的 JSON 响应。"""
+        """返回与静态页面使用的 diagnosis.json 相同字段的 JSON 响应。"""
+        payload, status = self._read_diagnosis()
+        self._send_json(payload, status, head=head)
+
+    def _read_diagnosis(self):
+        """读取诊断快照，确保 API 错误是稳定 JSON 而不是请求线程 traceback。"""
         if not self.data_file.is_file():
-            payload = {'error': 'diagnosis data not found'}
-            status = 404
-        else:
-            try:
-                payload = json.loads(self.data_file.read_text(encoding='utf-8'))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                payload = {'error': 'diagnosis data is invalid'}
-                status = 500
-            else:
-                status = 200
+            return {'error': 'diagnosis data not found'}, 404
+        try:
+            payload = json.loads(self.data_file.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {'error': 'diagnosis data is invalid'}, 500
+        if not isinstance(payload, dict):
+            return {'error': 'diagnosis data must be a JSON object'}, 422
+        return payload, 200
+
+    def _send_json(self, payload, status, head=False):
+        """发送 API JSON；HEAD 与 GET 保持状态和头部契约但不发送正文。"""
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
