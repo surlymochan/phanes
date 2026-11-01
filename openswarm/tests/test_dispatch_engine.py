@@ -291,6 +291,39 @@ class FreshReads(Base):
         self.assertEqual(len(self.runner.called("issue view")), 2)
 
 
+class Round2(Base):
+    def test_pr_without_closes_is_still_reviewed_with_stale_skips_in_state(self):
+        prs = [pr(40, 400)]
+        prs[0]["body"] = "no issue reference"
+        d = self.make([("pr list", (0, json.dumps(prs), ""))])
+        state = {"_stale_skips": {"9": 1}, "M5": {"issue": 3}}
+        self.assertEqual([p["number"] for p in d.review_candidates({}, state, [])], [40])
+
+    def test_moved_head_removes_only_present_labels(self):
+        p = pr(41, 401, head=SHA2, labels=("lane-reviewed",))
+        d = self.make([("pr list", (0, json.dumps([p]), "")), ("issue view", (0, json.dumps({"state": "OPEN", "body": ""}), ""))])
+        d.review_candidates({}, {}, [])
+        edit = self.runner.called("pr edit 41")[0]
+        self.assertIn("--remove-label lane-reviewed", edit)
+        self.assertNotIn("needs-changes", edit)
+
+    def test_failed_write_is_logged(self):
+        d = self.make([("issue edit", (1, "", "HTTP 502"))])
+        logged = []
+        d.log = lambda msg, brain=True: logged.append(msg)
+        d.relabel(5, "lane-pr", ["in-progress"])
+        self.assertTrue(any("WRITE FAILED" in m and "HTTP 502" in m for m in logged))
+
+    def test_stale_strip_skips_in_progress(self):
+        self.cfg["stale_strip_after"] = 1
+        d = self.make([("issue view", (0, json.dumps({"state": "OPEN", "labels": [{"name": "lane-ready"}, {"name": "in-progress"}]}), ""))])
+        d.note_stale_skip(6, {})
+        self.assertEqual(self.runner.called("issue edit"), [])
+        d = self.make([("issue view", (0, json.dumps({"state": "OPEN", "labels": [{"name": "lane-ready"}, {"name": "lane-pr"}]}), ""))])
+        d.note_stale_skip(6, {})
+        self.assertEqual(len(self.runner.called("issue edit 6 --remove-label lane-ready")), 1)
+
+
 class Assign(Base):
     def test_idempotency_key_reused_on_transport_retry(self):
         calls = {"n": 0}

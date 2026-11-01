@@ -302,7 +302,15 @@ class Dispatcher:
         return self.sh(["gh"] + args + ["-R", self.cfg["repo"]], timeout=timeout)
 
     def gh_write(self, args, timeout=60):
-        return self.write(["gh"] + args + ["-R", self.cfg["repo"]], timeout=timeout, what="gh " + " ".join(args[:2]))
+        """Every GitHub write (labels, bodies, comments, statuses): a failure is logged, never silent."""
+        try:
+            rc, out, err = self.write(["gh"] + args + ["-R", self.cfg["repo"]], timeout=timeout, what="gh " + " ".join(args[:2]))
+        except subprocess.TimeoutExpired:
+            rc, out, err = 124, "", "timeout"
+        if rc:
+            flags = " ".join(a for a in args if a.startswith("--") and a != "--body")
+            self.log(f"WRITE FAILED rc={rc}: gh {' '.join(args[:3])} {flags[:120]}: {(err or out or '').strip()[-160:]}", brain=False)
+        return rc, out, err
 
     def git(self, *args, timeout=120):
         return self.sh(["git", "-C", self.cfg["local_repo"]] + list(args), timeout=timeout)
@@ -575,9 +583,11 @@ class Dispatcher:
         st, labels = self.issue_labels(n)
         if st is None:
             return
-        if self.L["ready"] in labels:
-            self.gh_write(["issue", "edit", str(n), "--remove-label", self.L["ready"]])
-            self.log(f"stale-skip auto-strip {self.L['ready']} #{n} after {count} skips (state={st} labels={sorted(labels)})")
+        # Strip only residual `ready` next to a finished state (pr/failed/closed). An issue that is in progress
+        # (e.g. a rebase/fix run) keeps its labels; harvest settles them.
+        if self.L["ready"] in labels and self.L["in_progress"] not in labels:
+            if not self.gh_write(["issue", "edit", str(n), "--remove-label", self.L["ready"]])[0]:
+                self.log(f"stale-skip auto-strip {self.L['ready']} #{n} after {count} skips (state={st} labels={sorted(labels)})")
         skips.pop(key, None)
         self.save_state(state)
 
@@ -1054,7 +1064,8 @@ class Dispatcher:
         revs = self.load_reviews()
         busy_pr = {(s or {}).get("review_pr") for s in state.values() if isinstance(s, dict)}
         busy_pr |= {(s or {}).get("rebase_pr") for s in state.values() if isinstance(s, dict)}
-        pending = {i["n"] for i in q} | {(s or {}).get("issue") for s in state.values() if isinstance(s, dict)}
+        pending = {i["n"] for i in q} | {s.get("issue") for k, s in state.items()
+                                          if not k.startswith("_") and isinstance(s, dict) and s.get("issue") is not None}
         L, fix = self.L, self.R["fix_ref_prefix"]
         out_l = []
         for p in sorted(json.loads(out), key=lambda p: p["number"]):
@@ -1062,9 +1073,13 @@ class Dispatcher:
                 continue
             labs = {l["name"] for l in p["labels"]}
             r = revs.get(str(p["number"])) or {}
-            if labs & {L["reviewed"], L["needs_changes"]} and r.get("sha") != p["headRefOid"]:
-                self.gh_write(["pr", "edit", str(p["number"]), "--remove-label", L["reviewed"], "--remove-label", L["needs_changes"]])
-                self.log(f"review: PR #{p['number']} head moved since review; stale labels removed", brain=False)
+            stale = sorted(labs & {L["reviewed"], L["needs_changes"]})
+            if stale and r.get("sha") != p["headRefOid"]:
+                args = ["pr", "edit", str(p["number"])]
+                for lab in stale:                 # only labels that are present: gh fails on absent ones
+                    args += ["--remove-label", lab]
+                if not self.gh_write(args)[0]:
+                    self.log(f"review: PR #{p['number']} head moved since review; removed {', '.join(stale)}", brain=False)
             if L["needs_human"] in labs or p["number"] in busy_pr:
                 continue
             m = self.closes_re.search(p["body"] or "")
