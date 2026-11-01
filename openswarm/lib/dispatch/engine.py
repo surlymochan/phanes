@@ -62,6 +62,52 @@ def _load_review_status():
 
 status = _load_review_status()
 
+
+_DISPATCH_MODULES = {}
+
+
+def dispatch_module(name):
+    """Load siblings by path without adding dispatch/ to the stdlib search path.
+
+    Lazy loading also keeps standalone check-config usable without runtime modules.
+    """
+    if name not in _DISPATCH_MODULES:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+        spec = importlib.util.spec_from_file_location("openswarm_dispatch_" + name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _DISPATCH_MODULES[name] = module
+    return _DISPATCH_MODULES[name]
+
+
+def compatible_lru_picker(path):
+    module = dispatch_module("lane_pick")
+
+    class CompatiblePicker(module.LruPicker):
+        def state(self):
+            current = super().state()
+            if current["lanes"] or current["counter"]:
+                return current
+            try:
+                with open(self.state_path, encoding="utf-8") as stream:
+                    raw = json.load(stream)
+                if not isinstance(raw, dict) or not raw:
+                    return current
+                if not all(isinstance(name, str) and name.strip() and isinstance(stamp, str)
+                           for name, stamp in raw.items()):
+                    return current
+                # Flat timestamp maps were written by the old dispatcher. Validate
+                # every entry before translating; a damaged history is never partial.
+                stamps = {name: time.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+                          for name, stamp in raw.items()}
+            except (OSError, ValueError, TypeError):
+                return current
+            ranks = {stamp: index + 1 for index, stamp in enumerate(sorted(set(stamps.values())))}
+            return {"version": module.STATE_VERSION, "counter": len(ranks),
+                    "lanes": {name: ranks[stamp] for name, stamp in stamps.items()}}
+
+    return CompatiblePicker(path)
+
 # ---------------------------------------------------------------- config
 
 DEFAULTS = {
@@ -105,6 +151,8 @@ DEFAULTS = {
         "author_lane_re": r"fleet/([A-Za-z]+\d+)-issue", "diff_limit": 60000, "verdict_dir": ".lane-review",
         "cifix_needs_burn": True,
     },
+    # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
+    # A legacy file marker remains supported when no timed parameters are supplied.
     "burn": {"file": "", "backend": ""},
     "local_hosts": [],
     "local_env": {},
@@ -302,6 +350,7 @@ class Dispatcher:
         self.hot_limits = dict(cfg["hot_files"].get("limits") or {})
         self.local_hosts = set(cfg.get("local_hosts") or [])
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
+        self._lru_picker = None
 
     # ------------------------------------------------------------ io helpers
     def path(self, name):
@@ -435,12 +484,24 @@ class Dispatcher:
         be = lc.get("backend") or ""
         return bool(be and os.path.exists(self.path(f"PAUSE-BACKEND-{be}")))
 
-    def burning(self):
-        f = (self.cfg.get("burn") or {}).get("file")
-        return bool(f) and os.path.exists(self.path(f))
-
-    def burn_backend(self):
-        return (self.cfg.get("burn") or {}).get("backend") or ""
+    def burn_state(self):
+        """Return the selected backend and factor, with legacy marker compatibility."""
+        cfg = self.cfg.get("burn") or {}
+        backend = cfg.get("backend") or ""
+        now = self.clock()
+        window = cfg.get("window")
+        factor_cfg = cfg
+        if window is None and not any(key in cfg for key in ("burn_before_reset_h", "factor")):
+            marker = cfg.get("file")
+            if not marker or not os.path.exists(self.path(marker)):
+                return backend, 1
+            # A legacy marker is an explicit operator-requested window. Keep its
+            # review ceiling, while delegating the multiplier calculation as well.
+            window = {"resets_at": now}
+            factor_cfg = {"burn_before_reset_h": 1,
+                          "factor": max(2, int(self.R["burn_max"]) / max(1, int(self.R["max"])))}
+        factor = dispatch_module("burn").burn_factor(backend, now, window, {backend: factor_cfg})
+        return backend, factor
 
     # ------------------------------------------------------------ remote status
     def remote_multi(self, h, items):
@@ -634,15 +695,10 @@ class Dispatcher:
             self.log(f"leak-sweep: #{n} had {self.L['in_progress']} but no lane holds it (idle {int(age)}s) → removed")
 
     # ------------------------------------------------------------ LRU
-    def load_lru(self):
-        return load_json(self.path("lane-lru.json"), {})
-
-    def touch_lru(self, L):
-        if self.dry_run:
-            return
-        d = self.load_lru()
-        d[L] = time.strftime("%F %T")
-        write_json(self.path("lane-lru.json"), d, indent=None)
+    def lru_picker(self):
+        if self._lru_picker is None:
+            self._lru_picker = compatible_lru_picker(self.path("lane-lru.json"))
+        return self._lru_picker
 
     # ------------------------------------------------------------ dispatch one task
     def task_text(self, item):
@@ -1061,7 +1117,15 @@ class Dispatcher:
         return m.group(1) if m else None
 
     def review_max(self):
-        return max(int(self.R["max"]), int(self.R["burn_max"])) if self.burning() else int(self.R["max"])
+        _, factor = self.burn_state()
+        limits = {"review": int(self.R["max"]),
+                  "max_review": max(int(self.R["max"]), int(self.R["burn_max"]))}
+        cfg = self.cfg.get("burn") or {}
+        if (factor > 1 and limits["review"] == 0 and cfg.get("window") is None
+                and not any(key in cfg for key in ("burn_before_reset_h", "factor"))):
+            # Legacy markers could enable burn review capacity even with normal reviews off.
+            limits["review"] = 1
+        return dispatch_module("burn").apply(limits, factor)["review"]
 
     def review_candidates(self, lanes, state, q):
         """Open fleet PRs to act on: conflicting → rebase task (checked BEFORE the already-reviewed skip, so an approved
@@ -1102,7 +1166,7 @@ class Dispatcher:
                 continue
             if r.get("sha") == p["headRefOid"]:
                 continue
-            if ((self.burning() or not self.R.get("cifix_needs_burn", True)) and p["mergeable"] == "MERGEABLE"
+            if ((self.burn_state()[1] > 1 or not self.R.get("cifix_needs_burn", True)) and p["mergeable"] == "MERGEABLE"
                     and not self.green(p) and p["issue"] and p["headRefName"].startswith(fix)
                     and r.get("cifix_sha") != p["headRefOid"] and self.ci_red(p)):
                 self.queue_fix(p, revs, "cifix")
@@ -1155,12 +1219,18 @@ class Dispatcher:
         c = [L for L in idle if L != author]
         if not c:
             return None
-        lru = self.load_lru()
-        pref = self.R["pref"]
-        if self.burning():
-            bb = self.burn_backend()
-            return min(c, key=lambda L: (lanes[L]["backend"] != bb, lanes[L]["backend"] == ab, lru.get(L, ""), L))
-        return min(c, key=lambda L: (lanes[L]["backend"] == ab, lru.get(L, ""), pref.get(lanes[L]["backend"], 9), L))
+        backend, factor = self.burn_state()
+        def priority(lane):
+            return (factor > 1 and lanes[lane]["backend"] != backend, lanes[lane]["backend"] == ab)
+        best_priority = min(map(priority, c))
+        available = [lane for lane in c if priority(lane) == best_priority]
+        picker = self.lru_picker()
+        oldest = picker.pick(available)
+        if factor > 1:
+            return oldest
+        history = picker.state()["lanes"]
+        tied = [lane for lane in available if history.get(lane) == history.get(oldest)]
+        return min(tied, key=lambda lane: (self.R["pref"].get(lanes[lane]["backend"], 9), lane))
 
     def review_item(self, p):
         pr = p["number"]
@@ -1308,7 +1378,7 @@ class Dispatcher:
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
                         "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
             self.save_state(state)
-            self.touch_lru(L)
+            self.lru_picker().touch(L)
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
                      f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run}")
             self.heartbeat()
@@ -1409,9 +1479,18 @@ class Dispatcher:
             ex.shutdown(wait=False)
 
     def lane_order(self, lanes):
-        lru = self.load_lru()
-        bm, bb = self.burning(), self.burn_backend()
-        return sorted(lanes.items(), key=lambda kv: ((bm and kv[1].get("backend") != bb), lru.get(kv[0], ""), kv[0]))
+        backend, factor = self.burn_state()
+        groups = (False, True) if factor > 1 else (False,)
+        ordered = []
+        picker = self.lru_picker()
+        for other_backend in groups:
+            remaining = [name for name, lane in lanes.items()
+                         if (factor > 1 and lane.get("backend") != backend) == other_backend]
+            while remaining:
+                lane = picker.pick(remaining)
+                ordered.append((lane, lanes[lane]))
+                remaining.remove(lane)
+        return ordered
 
     def assign_issues(self, lanes, res, state, q):
         base = None
@@ -1461,7 +1540,7 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
-            self.touch_lru(L)
+            self.lru_picker().touch(L)
             rb = self.rebase_of(pick["body"])
             if hot:
                 state[L]["hot"] = sorted(hot)
