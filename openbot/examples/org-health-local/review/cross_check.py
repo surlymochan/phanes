@@ -57,6 +57,7 @@ EXIT_USAGE = 2
 
 SCHEMA_VERSION = 4
 FINDING_SEVERITIES = frozenset({"error", "warning", "info"})
+DEFAULT_FINDING_SEVERITY = "error"
 
 MONTH_PATTERN = re.compile(r"\d{4}-\d{2}")
 DATE_PATTERN = re.compile(r"\d{4}-\d{2}(?:-\d{2})?")
@@ -157,6 +158,7 @@ class Result:
     name: str
     detail: str
     finding: dict[str, object] | None = None
+    severity: str | None = None
 
 
 def first_text(source: dict, *names: str) -> str | None:
@@ -595,10 +597,15 @@ def findings_report(results: list[Result]) -> list[dict[str, object]]:
         if result.ok:
             continue
         finding: dict[str, object] = {
-            "severity": "error",
+            # 失败检查未声明告警级别时使用稳定的默认枚举值，避免输出缺字段。
+            "severity": result.severity or DEFAULT_FINDING_SEVERITY,
             "path": finding_path(result),
             "message": result.detail,
         }
+        if finding["severity"] not in FINDING_SEVERITIES:
+            raise ValueError(
+                f"finding severity {finding['severity']!r} 不是合法枚举，路径：{finding['path']}"
+            )
         if result.finding:
             finding["context"] = result.finding
         findings.append(finding)

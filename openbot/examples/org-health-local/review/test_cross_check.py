@@ -621,6 +621,26 @@ class CrossCheckTest(unittest.TestCase):
             self.assertTrue(finding["message"])
         self.assertTrue(any(finding["severity"] == "error" for finding in payload["findings"]))
 
+    def test_finding_without_severity_uses_default_and_path(self) -> None:
+        """缺少 severity 的非空失败 finding 使用默认枚举并保留告警路径。"""
+        result = cross_check.Result(False, "版本一致", "schema 版本不一致")
+
+        findings = cross_check.findings_report([result])
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], cross_check.DEFAULT_FINDING_SEVERITY)
+        self.assertEqual(findings[0]["path"], "/schema版本")
+
+    def test_finding_with_legal_severity_is_preserved(self) -> None:
+        """合法 severity 枚举在非空 finding 中保留且路径可定位。"""
+        result = cross_check.Result(False, "隐私边界", "发现敏感字段：/diagnosis/岗位", severity="warning")
+
+        findings = cross_check.findings_report([result])
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "warning")
+        self.assertEqual(findings[0]["path"], "/diagnosis/岗位")
+
     def test_command_line_missing_recommendations_passes_and_writes_markdown_report(self) -> None:
         """快照缺少可选 recommendations 段时命令行正常退出并写出完整 Markdown 报告。"""
         self.diagnosis["insights"].append(
