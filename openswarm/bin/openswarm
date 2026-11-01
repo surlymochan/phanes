@@ -2058,6 +2058,15 @@ def recent_ledger(n=50, path=None):
         return []
 
 
+def ledger_timestamp(entry):
+    """Return the best available timestamp for current and legacy records."""
+    for field in ("ts", "finished_at", "created_at"):
+        timestamp = to_epoch(entry.get(field))
+        if timestamp is not None:
+            return timestamp
+    return 0
+
+
 # ---------------------------------------------------------------- routing
 
 def ledger_entries():
@@ -12031,7 +12040,7 @@ def main():
                 print(json.dumps(entries, indent=2, ensure_ascii=False))
             else:
                 for e in entries:
-                    print(f"{iso(e['ts'])}  {e.get('status'):<10} {e.get('backend') or '-':<8} {e.get('model') or '-':<20} "
+                    print(f"{iso(ledger_timestamp(e))}  {e.get('status') or '-':<10} {e.get('backend') or '-':<8} {e.get('model') or '-':<20} "
                           f"{e.get('effort') or '-':<7} {e.get('card_type') or '-':<16} {e.get('seconds', 0):>6}s  "
                           f"{e.get('title', '')[:60]}")
 
