@@ -332,6 +332,30 @@ class ConsultTests(unittest.TestCase):
                 self.assertEqual(consult.parse_answer(raw), (answer, None))
         self.assertIn("Do not invoke tools or commands", consult.make_prompt("question", []))
 
+    def test_parser_keeps_missing_body_or_status_readable(self):
+        answer = {"opinion": "Keep it", "confidence": "high", "evidence": [], "risks": []}
+        cases = (
+            ({"type": "result", "status": "SUCCESS"}, None),
+            ({"type": "result", "response": json.dumps(answer)}, answer),
+            ({"type": "result", "status": None, "response": None}, None),
+        )
+        for event, expected in cases:
+            with self.subTest(event=event):
+                raw = consult._response_text("agy", json.dumps(event))
+                parsed, error = consult.parse_answer(raw)
+                if expected is None:
+                    self.assertIsNone(parsed)
+                    self.assertIsInstance(error, str)
+                else:
+                    self.assertEqual(parsed, expected)
+                    self.assertIsNone(error)
+
+    def test_parser_rejects_none_schema_fields_without_key_error(self):
+        raw = json.dumps({"opinion": None, "confidence": None, "evidence": None, "risks": None})
+        answer, error = consult.parse_answer(raw)
+        self.assertIsNone(answer)
+        self.assertEqual(error, "opinion must be a non-empty string")
+
     def test_agy_permission_denial_is_not_treated_as_a_format_retry(self):
         raw = json.dumps({"response": "", "denied_actions": [{"action": "command"}]})
         self.assertIn("tool action was denied", consult._agy_execution_error(
