@@ -7,6 +7,8 @@
 指出字段名且不打印 traceback。
 
 观察期间的期次顺序、重复期次与起止倒置按当前行为断言：已支持的情形直接断言。
+另含观察月份的命令行回归：00 月、13 月与非法日期格式都应退出码非 0、
+stderr 指出观察月份或 YYYY-MM 约束，且失败时不留下伪造任务书。
 """
 from __future__ import annotations
 
@@ -245,7 +247,7 @@ class MakeBriefTest(unittest.TestCase):
 
     def test_invalid_month_rejected(self) -> None:
         """非法观察月份被拒绝。"""
-        for month in ("2026-13", "2026-1", "26-01", ""):
+        for month in ("2026-00", "2026-13", "2026-1", "26-01", ""):
             with self.subTest(month=month):
                 with self.assertRaises(ValueError):
                     make_brief.build_brief(month=month)
@@ -265,12 +267,17 @@ class MakeBriefTest(unittest.TestCase):
         self.assertEqual(self.errors(written), [])
 
     def test_command_line_rejects_invalid_month(self) -> None:
-        """非法观察月份时退出码非 0，且不写文件。"""
-        with temporary_directory() as folder:
-            path = Path(folder) / "brief.json"
-            code = make_brief.main(["--out", str(path), "--month", "2026-13"])
-            self.assertNotEqual(code, 0)
-            self.assertFalse(path.exists())
+        """非法观察月份时退出码非 0，stderr 指出观察月份约束，且不写文件。"""
+        for month in ("2026-00", "2026-13"):
+            with self.subTest(month=month), temporary_directory() as folder:
+                path = Path(folder) / "brief.json"
+                error = StringIO()
+                with redirect_stderr(error):
+                    code = make_brief.main(["--out", str(path), "--month", month])
+                self.assertNotEqual(code, 0)
+                self.assertIn("观察月份", error.getvalue())
+                self.assertIn("YYYY-MM", error.getvalue())
+                self.assertFalse(path.exists())
 
     def test_command_line_requires_out(self) -> None:
         """缺少 --out 时命令行报错退出。"""
@@ -421,6 +428,91 @@ class MakeBriefTest(unittest.TestCase):
         self.assertIn(str(path), output)
         self.assertNotIn("Traceback", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
+
+
+class MonthBoundaryCommandLineTest(unittest.TestCase):
+    """观察月份的命令行回归：期次边界越界与日期格式非法。
+
+    要求：退出码非 0、stderr 指出观察月份或 YYYY-MM 约束，
+    并且失败时不留下伪造任务书；合法月份与闰年二月的既有行为保持不变。
+    """
+
+    # 月份越界：00 月与 13 月都不在 01-12 之间。
+    OUT_OF_RANGE_MONTHS = ("2026-00", "2026-13")
+    # 格式非法：位数不对、分隔符不对、多带日期、全角数字、结尾带换行。
+    INVALID_MONTH_FORMATS = (
+        "2026-1",
+        "26-01",
+        "2026/09",
+        "2026-09-01",
+        "202609",
+        "2026-1a",
+        "",
+        "2026-01\n",
+        "２０２６-09",
+    )
+
+    def run_cli(self, month: str, folder: str) -> tuple[subprocess.CompletedProcess, Path]:
+        """在指定目录里跑一次带 --month 的命令行，返回进程结果与输出路径。"""
+        path = Path(folder) / "brief.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "make_brief.py"),
+                "--out",
+                str(path),
+                "--month",
+                month,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return result, path
+
+    def assert_rejected(self, month: str, folder: str) -> None:
+        """断言一次非法月份的命令行调用被拒绝，且没有留下伪造任务书。"""
+        result, path = self.run_cli(month, folder)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("观察月份", result.stderr)
+        self.assertIn("YYYY-MM", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(path.exists())
+        self.assertEqual(list(Path(folder).iterdir()), [], "失败时留下了伪造任务书")
+
+    def test_cli_rejects_out_of_range_month(self) -> None:
+        """00 月与 13 月越界时退出码非 0，stderr 指出观察月份与 YYYY-MM 约束。"""
+        for month in self.OUT_OF_RANGE_MONTHS:
+            with self.subTest(month=month), temporary_directory() as folder:
+                self.assert_rejected(month, folder)
+
+    def test_cli_rejects_invalid_month_format(self) -> None:
+        """非法日期格式时退出码非 0，stderr 指出观察月份与 YYYY-MM 约束。"""
+        for month in self.INVALID_MONTH_FORMATS:
+            with self.subTest(month=month), temporary_directory() as folder:
+                self.assert_rejected(month, folder)
+
+    def test_failed_run_leaves_no_brief(self) -> None:
+        """失败时不留下伪造任务书：输出目录里不产生任何文件。"""
+        for month in self.OUT_OF_RANGE_MONTHS + self.INVALID_MONTH_FORMATS:
+            with self.subTest(month=month), temporary_directory() as folder:
+                result, path = self.run_cli(month, folder)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(path.exists())
+                self.assertEqual(list(Path(folder).iterdir()), [], "失败时留下了伪造任务书")
+
+    def test_valid_month_and_leap_year_still_write_brief(self) -> None:
+        """合法月份与闰年二月的既有行为不变：退出码 0 且写出符合结构的任务书。"""
+        cases = {"2026-01": "2026-01-31", "2026-09": "2026-09-30", "2024-02": "2024-02-29"}
+        for month, last_day in cases.items():
+            with self.subTest(month=month), temporary_directory() as folder:
+                result, path = self.run_cli(month, folder)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(path.exists())
+                written = load_json(path)
+                self.assertEqual(written["观察期间"]["观察月份"], month)
+                self.assertEqual(written["观察期间"]["数据截止"], last_day)
+                self.assertEqual(make_brief.validate_brief(written), [])
 
 
 class MissingRequiredFieldTest(unittest.TestCase):
