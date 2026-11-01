@@ -189,6 +189,64 @@ class RetroTests(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in xs.retro_rejected(entries)],
                          ["not-accepted", "status-rejected"])
 
+    def test_retro_groups_sorts_case_insensitively_and_preserves_group_order(self):
+        entries = [
+            {"id": "zeta", "backend": "PI", "model": "m", "card_type": "docs"},
+            {"id": "first", "backend": "Codex", "model": "model", "card_type": "fix"},
+            {"id": "unknown", "model": "m", "card_type": "docs"},
+            {"id": "second", "backend": "codex", "model": "MODEL", "card_type": "fix"},
+            {"id": "third", "backend": "codex", "model": "model", "card_type": "fix"},
+            {"id": "fourth", "backend": "codex", "model": "model", "card_type": "fix"},
+            {"id": "missing-fields"},
+        ]
+
+        groups = xs.retro_groups(entries)
+
+        self.assertEqual([key for key, _ in groups], [
+            ("Codex", "model", "fix"),
+            ("codex", "MODEL", "fix"),
+            ("codex", "model", "fix"),
+            ("PI", "m", "docs"),
+            ("unknown", "m", "docs"),
+            ("unknown", "unknown", "unknown"),
+        ])
+        self.assertEqual([[entry["id"] for entry in items] for _, items in groups], [
+            ["first"], ["second"], ["third", "fourth"], ["zeta"], ["unknown"],
+            ["missing-fields"],
+        ])
+
+    def test_retro_routing_rows_filters_window_and_marks_advice_outcome(self):
+        cutoff, end = 1_000, 2_000
+        entries = [
+            {"id": "old", "ts": cutoff - 1, "routing_advice": {}, "card_type": "old"},
+            {"id": "late", "ts": end + 1, "routing_advice": {}, "card_type": "late"},
+            {"id": "not-object", "ts": 1_900, "routing_advice": ["codex", "gpt"],
+             "card_type": "ignored"},
+            {"id": "match", "ts": cutoff, "backend": "codex", "model": "gpt",
+             "card_type": "fix", "accepted": True,
+             "routing_advice": {"backend": "codex", "model": "gpt"}},
+            {"id": "mismatch", "ts": 1_500, "backend": "pi", "model": "pi-model",
+             "card_type": "docs", "status": "failed", "exec_pass": False, "routing_advice": {
+                 "backend": "codex", "model": "gpt"}},
+            {"id": "end", "ts": end, "backend": "pi", "model": "pi-model",
+             "card_type": "review", "exec_pass": False,
+             "routing_advice": {"backend": "pi", "model": "pi-model"}},
+        ]
+
+        rows = xs.retro_routing_rows(entries, cutoff, end)
+
+        self.assertEqual([row[-1]["id"] for row in rows], ["end", "mismatch", "match"])
+        self.assertEqual(rows[0][1:6], ("review", ("pi", "pi-model"), "fail/unknown",
+                                         ("pi", "pi-model"), "fail/unknown"))
+        self.assertEqual(rows[1][1:6], ("docs", ("codex", "gpt"), "not run",
+                                         ("pi", "pi-model"), "fail/failed"))
+        self.assertEqual(rows[2][1:6], ("fix", ("codex", "gpt"), "pass",
+                                         ("codex", "gpt"), "pass"))
+        self.assertTrue(rows[1][6])
+        self.assertFalse(rows[0][6])
+        self.assertEqual([row[-1]["id"] for row in xs.retro_routing_rows(entries, cutoff)],
+                         ["late", "end", "mismatch", "match"])
+
     def test_failure_counts_fall_back_to_last_attempt_error_class(self):
         entries = [
             {"id": "direct", "status": "failed", "error_class": "exec_error"},
