@@ -287,8 +287,13 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
     if not exit_code and reason is not None:
         # 步骤本身返回 0 但产物已损坏：按数据错误记 2，耗时记录里不留成功。
         exit_code = 2
-    timings.append({'name': name, 'command': list(map(str, command)),
-                    'duration_seconds': elapsed, 'exit_code': exit_code})
+    entry = {'name': name, 'command': list(map(str, command)),
+             'duration_seconds': elapsed, 'exit_code': exit_code}
+    if exit_code is not None and exit_code < 0:
+        # 被信号终止：把稳定的信号名一并记进耗时记录，
+        # 失败原因不必再翻 stderr 或日志才能核对。
+        entry['reason'] = exit_reason(exit_code)
+    timings.append(entry)
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
         print(f'步骤失败: {name} ({exit_reason(result.returncode)})', file=sys.stderr, flush=True)
