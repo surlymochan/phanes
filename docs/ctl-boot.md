@@ -20,6 +20,29 @@ That script starts (if not already running):
 
 The `start-control-plane` suite manages five resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), with their startup commands and heartbeat/status files:
 
+### Reboot-safe pid state
+
+The bridge and automatic dispatcher use `OPENSWARM_CTL_STATE_DIR` when it is set
+(otherwise `~/phanes-ctl/state`) and keep `bus-worker.pid` and
+`autodispatch.pid` there.  Each file is JSON with the live process `pid` and its
+`started_at` Unix timestamp.  Boot first removes a missing, malformed, or exited
+pid; a live pid is reused, so a repeated boot never launches a duplicate worker.
+The worker command can be overridden for an offline fixture with
+`OPENSWARM_BUS_WORKER_COMMAND` or `OPENSWARM_AUTODISPATCH_COMMAND`.
+
+For example, a restart-safe boot check can use a temporary state directory and
+fake worker commands:
+
+```sh
+OPENSWARM_CTL_STATE_DIR="$TMPDIR/ctl-state" \
+OPENSWARM_BUS_WORKER_COMMAND="$TMPDIR/fake-bus-worker" \
+OPENSWARM_AUTODISPATCH_COMMAND="$TMPDIR/fake-autodispatch" \
+~/phanes-ctl/bin/start-control-plane
+```
+
+The persisted pid is only a guard, not proof of identity; the boot helper checks
+the process with `kill -0` before deciding that it is still running.
+
 1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
    - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --status-file ~/phanes-ctl/ib-refresh.status`)

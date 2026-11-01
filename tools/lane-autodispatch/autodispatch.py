@@ -27,6 +27,51 @@ HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 
+def ctl_state_dir():
+    directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    return directory
+
+def worker_state_path():
+    return os.path.join(ctl_state_dir(), "autodispatch.pid")
+
+def worker_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+def start_autodispatch(command=None):
+    """Start autodispatch once, removing a stale pid left by a reboot."""
+    state_path = worker_state_path()
+    try:
+        with open(state_path) as stream:
+            state = json.load(stream)
+        if worker_alive(state["pid"]):
+            return state
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        os.unlink(state_path)
+    except FileNotFoundError:
+        pass
+    command = command or os.environ.get("OPENSWARM_AUTODISPATCH_COMMAND", f"{HOME}/phanes-ctl/bin/lane-autodispatch")
+    argv = shlex.split(command) if isinstance(command, str) else list(command)
+    if not argv:
+        raise ValueError("worker command must not be empty")
+    process = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    state = {"pid": process.pid, "started_at": time.time()}
+    temporary = state_path + ".tmp"
+    with open(temporary, "w") as stream:
+        json.dump(state, stream)
+        stream.write("\n")
+    os.replace(temporary, state_path)
+    return state
+
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
     b = BACKOFF.setdefault(h, {"n": 0, "until": 0}); b["n"] += 1
