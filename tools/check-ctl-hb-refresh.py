@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1161).
+"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1226).
 
 对照 37min 静默课（brain/lessons-37min-silence.md）：
 `ctl-loop` 在执行 `ib-refresh` 续签 instabox 证书期间，墙钟等待循环（受 REFRESH_CAP 约束，默认 420s）
@@ -54,6 +54,34 @@ def sanitize_shell_line(line: str) -> str:
             out.append(" ")
         i += 1
     return "".join(out)
+
+
+def strip_shell_comment(line: str) -> str:
+    """Strip shell comment starting with unquoted # while preserving strings."""
+    i = 0
+    n = len(line)
+    state = "normal"
+    while i < n:
+        c = line[i]
+        if state == "normal":
+            if c == '"':
+                state = "double"
+            elif c == "'":
+                state = "single"
+            elif c == "\\":
+                i += 1
+            elif c == "#":
+                return line[:i]
+        elif state == "single":
+            if c == "'":
+                state = "normal"
+        elif state == "double":
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                state = "normal"
+        i += 1
+    return line
 
 
 def extract_loops(source: str) -> list[tuple[str, str]]:
@@ -141,13 +169,19 @@ def scan_ctl_loop_source(source: str) -> None:
 
     refresh_wait_loop_found = False
     for header, body in loops:
+        # Ignore outer enclosing loops that contain nested while/until loops
+        body_clean = "\n".join(sanitize_shell_line(line) for line in body.splitlines())
+        if re.search(r"\b(while|until)\b", body_clean):
+            continue
         combined = header + "\n" + body
         is_refresh_wait = any(token in combined.lower() for token in ("refresh", "refresh_cap"))
         if is_refresh_wait:
-            # Require the timestamp command and heartbeat path on the same line so
-            # unrelated date calculations and heartbeat references cannot pass.
-            has_heartbeat_write = bool(
-                re.search(r"(?:\bdate\b[^\n]*heartbeat|heartbeat[^\n]*\bdate\b)", body, re.IGNORECASE)
+            # Require the timestamp command and heartbeat path on the same active line so
+            # unrelated date calculations, comments, and heartbeat references cannot pass.
+            body_code_lines = [strip_shell_comment(line) for line in body.splitlines()]
+            has_heartbeat_write = any(
+                re.search(r"(?:\bdate\b[^\n]*heartbeat|heartbeat[^\n]*\bdate\b)", line, re.IGNORECASE)
+                for line in body_code_lines
             )
             if has_heartbeat_write:
                 refresh_wait_loop_found = True
@@ -250,6 +284,50 @@ done
     else:
         raise AssertionError("预期拦截未用 date 写 heartbeat 的脚本")
 
+    # 负例 5: 外层守护循环有心跳，但内层 ib-refresh 等待循环漏写心跳
+    nested_hb_outside_inner_loop = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+while true; do
+    while kill -0 "$refresh_pid" 2>/dev/null; do
+        now=$(date +%s)
+        if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+            break
+        fi
+        sleep 5
+    done
+    date +%s > "$HEARTBEAT_PATH"
+done
+"""
+    try:
+        scan_ctl_loop_source(nested_hb_outside_inner_loop)
+    except AssertionError as err:
+        assert "37min静默课" in str(err)
+    else:
+        raise AssertionError("预期拦截内层 refresh 等待循环漏写心跳的脚本")
+
+    # 负例 6: 循环体内仅有包含 date 和 heartbeat 的注释行，没有实际执行写心跳
+    commented_out_heartbeat = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+while kill -0 "$refresh_pid" 2>/dev/null; do
+    # date +%s > "$HEARTBEAT_PATH"
+    now=$(date +%s)
+    if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+        break
+    fi
+    sleep 5
+done
+"""
+    try:
+        scan_ctl_loop_source(commented_out_heartbeat)
+    except AssertionError as err:
+        assert "37min静默课" in str(err)
+    else:
+        raise AssertionError("预期拦截仅有注释伪装心跳写入的脚本")
+
     # 正例 2: 含有注释行的 bash 脚本能正确解析并判定
     valid_with_comments = """#!/usr/bin/env bash
 # ctl-loop ib-refresh supervisor
@@ -286,6 +364,41 @@ while kill -0 "$refresh_pid" 2>/dev/null; do # wait loop
 done # finished
 """
     scan_ctl_loop_source(valid_with_inline_comments)
+
+    # 正例 4: 支持 until 等待循环模式
+    valid_with_until = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+start_ts=$(date +%s)
+until ! kill -0 "$refresh_pid" 2>/dev/null; do
+    date +%s > "$HEARTBEAT_PATH"
+    now=$(date +%s)
+    if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+        break
+    fi
+    sleep 5
+done
+"""
+    scan_ctl_loop_source(valid_with_until)
+
+    # 正例 5: 嵌套于外层守护循环内的 ib-refresh 等待循环能够正确判定
+    valid_with_nested_loop = """#!/usr/bin/env bash
+REFRESH_CAP=420
+HEARTBEAT_PATH="ctl-loop.heartbeat"
+while true; do
+    start_ts=$(date +%s)
+    while kill -0 "$refresh_pid" 2>/dev/null; do
+        date +%s > "$HEARTBEAT_PATH"
+        now=$(date +%s)
+        if [ $(( now - start_ts )) -ge "$REFRESH_CAP" ]; then
+            break
+        fi
+        sleep 5
+    done
+    date +%s > "$HEARTBEAT_PATH"
+done
+"""
+    scan_ctl_loop_source(valid_with_nested_loop)
 
 
 def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
