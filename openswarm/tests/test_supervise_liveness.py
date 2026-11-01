@@ -97,6 +97,41 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(liveness.verdict("M12", run, at(5, 13), pauses, 1200), liveness.STALLED)
 
 
+class QuotaStalledTests(unittest.TestCase):
+    def sample(self, statuses, start_minute=50):
+        return [{"ts": "2026-11-02T05:%02d:00Z" % (start_minute + i),
+                 "lane": "MiniMax", "status": status,
+                 "http_status": 200 if i == 0 else 429}
+                for i, status in enumerate(statuses)]
+
+    def test_incident_sample_429s_classify_as_rate_limit(self):
+        rows = self.sample(["429"] * 5)
+        result = liveness.classify_lane("MiniMax", {}, "2026-11-02T06:00:00Z", [], 1200,
+                                        rows)
+        self.assertTrue(result["quota_stalled"]["stalled"])
+        self.assertEqual(result["quota_stalled"]["count"], 5)
+        self.assertEqual(result["error_class"], "rate_limit")
+        self.assertEqual(result["verdict"], liveness.STALLED)
+
+    def test_mixed_success_is_not_quota_stalled(self):
+        result = liveness.quota_stalled(self.sample(["429", "429", "200", "429", "429"]),
+                                        "MiniMax", "2026-11-02T06:00:00Z")
+        self.assertFalse(result["stalled"])
+
+    def test_too_few_rows_is_not_quota_stalled(self):
+        result = liveness.quota_stalled(self.sample(["429"] * 4), "MiniMax",
+                                        "2026-11-02T06:00:00Z")
+        self.assertFalse(result["stalled"])
+
+    def test_paused_time_does_not_age_the_window_or_count_paused_rows(self):
+        rows = self.sample(["429"] * 5, 40)
+        rows.append({"ts": "2026-11-02T05:50:00Z", "lane": "MiniMax", "status": "429"})
+        pauses = [{"started": "2026-11-02T05:45:00Z", "resumed": "2026-11-02T05:55:00Z"}]
+        result = liveness.quota_stalled(rows, "MiniMax", "2026-11-02T06:00:00Z",
+                                        pauses=pauses)
+        self.assertTrue(result["stalled"])
+        self.assertEqual(result["count"], 5)
+
 class LoadPausesTests(unittest.TestCase):
     """The pause log is read defensively: a broken line must not stop the watchdog."""
 

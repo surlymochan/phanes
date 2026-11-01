@@ -43,6 +43,8 @@ from datetime import datetime, timezone
 
 __all__ = [
     "evaluate",
+    "quota_stalled",
+    "classify_lane",
     "load_pauses",
     "main",
     "silence_s",
@@ -192,6 +194,48 @@ def _lane_pauses(pauses, lane_name):
                 continue
         kept.append(record)
     return kept
+
+
+def quota_stalled(rows, lane, now, window_s=600, min_rows=5, pauses=None):
+    """Detect a lane repeatedly receiving provider quota responses while awake."""
+    lane_name = _lane_name(lane)
+    moment = _epoch(now)
+    if moment is None:
+        return {"stalled": False, "since": None, "count": 0}
+    scoped = _lane_pauses(pauses, lane_name)
+    matching = []
+    for row in rows or []:
+        if not isinstance(row, dict) or str(row.get("lane")) != str(lane_name):
+            continue
+        ts = _epoch(row.get("ts"))
+        if ts is None or ts > moment:
+            continue
+        # Ignore requests made while the box was paused, and measure the window
+        # in awake seconds so a pause does not age out evidence.
+        if any(start <= ts and (end is None or ts < end)
+               for start, end in _merged_pauses(scoped)):
+            continue
+        if silence_s(ts, ts, moment, scoped) <= window_s:
+            matching.append((ts, str(row.get("status", "")).strip()))
+    matching.sort()
+    count = len(matching)
+    all_limited = count >= min_rows and all(status == "429" for _, status in matching)
+    return {"stalled": all_limited,
+            "since": matching[0][0] if all_limited else None,
+            "count": count}
+
+
+def classify_lane(lane, run, now, pauses, limit_s, broker_rows=None,
+                  window_s=600, min_rows=5,
+                  resume_grace_s=DEFAULT_RESUME_GRACE_S):
+    """Classify lane liveness, giving repeated provider 429s quota precedence."""
+    result = evaluate(lane, run, now, pauses, limit_s, resume_grace_s)
+    quota = quota_stalled(broker_rows, lane, now, window_s, min_rows, pauses)
+    result["quota_stalled"] = quota
+    result["error_class"] = "rate_limit" if quota["stalled"] else None
+    if quota["stalled"]:
+        result["verdict"] = STALLED
+    return result
 
 
 def _run_times(run):
