@@ -7047,8 +7047,90 @@ def lane_config():
             raise ValueError(f"invalid lane config {where}: binary override is not executable")
         if lane.get("memory_max") is not None and parse_memory_bytes(lane["memory_max"]) is None:
             raise ValueError(f"invalid lane config {where}: memory_max must be a size such as 900M")
+        error = lane_env_config_error(lane)
+        if error:
+            raise ValueError(f"invalid lane config {where}: {error}")
         out.append(dict(lane))
     return out
+
+
+LANE_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+LANE_ENV_RESERVED = ("OPENSWARM_HOME", "OPENSWARM_LANES_FILE")
+
+
+def lane_env_files(lane):
+    value = lane.get("env_file")
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def lane_env_config_error(lane):
+    """Validate the per-lane environment: "env_file" (absolute path or list) and "env" (string map)."""
+    files = lane.get("env_file")
+    if files is not None and not (isinstance(files, str) or isinstance(files, list)):
+        return "env_file must be an absolute path or a list of absolute paths"
+    for path in lane_env_files(lane):
+        if not isinstance(path, str) or not os.path.isabs(path) or "\n" in path:
+            return "env_file must be an absolute path or a list of absolute paths"
+    env = lane.get("env")
+    if env is None:
+        return None
+    if not isinstance(env, dict):
+        return "env must be an object of string values"
+    for key, value in env.items():
+        if not LANE_ENV_KEY_RE.fullmatch(key) or not isinstance(value, str) or "\n" in value:
+            return f"env entry {key!r} must be NAME: string"
+        if key in LANE_ENV_RESERVED:
+            return f"env must not override {key}"
+    return None
+
+
+def parse_env_file(path):
+    """Read a systemd-style EnvironmentFile: NAME=VALUE lines, # or ; comments, optional quotes."""
+    out = {}
+    with open(path, encoding="utf-8") as stream:
+        for raw in stream:
+            line = raw.strip()
+            if not line or line[0] in "#;":
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, sep, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if not sep or not LANE_ENV_KEY_RE.fullmatch(key):
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            out[key] = value
+    return out
+
+
+def lane_environment(lane):
+    """The extra environment a lane's executor runs with: env_file entries, then env overrides.
+
+    Unreadable files are reported, not fatal: under systemd the unit's EnvironmentFile= has
+    already applied them (systemd reads them before dropping privileges).
+    """
+    out, problems = {}, []
+    for path in lane_env_files(lane):
+        try:
+            out.update(parse_env_file(path))
+        except (OSError, UnicodeError) as error:
+            problems.append(f"{path}: {error.__class__.__name__}")
+    out.update(lane.get("env") or {})
+    for key in LANE_ENV_RESERVED:
+        out.pop(key, None)
+    return out, problems
+
+
+def lane_apply_environment(lane):
+    """Export the lane environment into this lane supervisor so every executor child inherits it."""
+    extra, problems = lane_environment(lane)
+    os.environ.update(extra)
+    for problem in problems:
+        print(f"openswarm: warning: lane {lane['name']} env_file not applied: {problem}", file=sys.stderr)
+    return sorted(extra), problems
 
 
 def lanes_by_name(names=None):
@@ -8571,6 +8653,7 @@ def agy_quota_available(lane, child):
 
 def cmd_lane_serve(lane, policy):
     name = lane["name"]
+    lane_apply_environment(lane)
     server = lane_ctl_listener(name)
     current, child = {}, None
     started, backoff, next_start = NOW(), 1, 0
@@ -8895,9 +8978,11 @@ def generate_lane_service_definition(lane, service_manager):
     if service_manager == "launchd-plist":
         import plistlib
         log = os.path.join(lane_root(name), "supervisor.log")
+        # launchd has no EnvironmentFile=; env_file is read by the lane supervisor at start
+        # (lane_apply_environment), so secrets in it never land in the plist.
         obj = {"Label": f"com.openswarm.lane.{name}", "ProgramArguments": command,
                "RunAtLoad": True, "KeepAlive": True, "StandardOutPath": log, "StandardErrorPath": log,
-               "EnvironmentVariables": environment}
+               "EnvironmentVariables": {**(lane.get("env") or {}), **environment}}
         if memory_source != "default":
             # launchd has no MemoryMax=; the resource limit is the closest equivalent and
             # is only written when a limit was requested, because RLIMIT_AS caps address
@@ -8929,6 +9014,8 @@ def generate_lane_service_definition(lane, service_manager):
                  "CPUQuota=150%", "Nice=10"]
         if "OPENSWARM_LANES_FILE" in environment:
             lines.append(f"Environment={systemd_quote('OPENSWARM_LANES_FILE=' + environment['OPENSWARM_LANES_FILE'])}")
+        lines.extend(f"EnvironmentFile={path}" for path in lane_env_files(lane))
+        lines.extend(f"Environment={systemd_quote(key + '=' + value)}" for key, value in (lane.get("env") or {}).items())
         lines.extend(["", "[Install]", "WantedBy=multi-user.target", ""])
         return "\n".join(lines)
 

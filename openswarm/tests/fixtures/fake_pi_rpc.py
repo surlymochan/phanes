@@ -38,6 +38,7 @@ for line in sys.stdin:
         sessions = sys.argv[sys.argv.index("--session-dir") + 1]
         if os.path.commonpath([os.path.realpath(sessions), os.getcwd()]) == os.getcwd():
             raise RuntimeError("session directory inside worktree")
+        record({"type": "env_probe", "env": {k: v for k, v in os.environ.items() if k.startswith("LANE_ENV_")}})
         response(req, kind)
     elif kind == "prompt":
         prompt = req.get("message", "")
