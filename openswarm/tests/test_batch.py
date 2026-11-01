@@ -142,9 +142,14 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(summary["base"], self.initial)
         self.assertEqual(summary["state"], "finished")
         self.assertEqual(summary["cards"], [])
+        counts = {"cards": len(summary["cards"]),
+                  "done": sum(row.get("status") == "done" for row in summary["cards"]),
+                  "failed": sum(row.get("status") == "failed" for row in summary["cards"])}
+        self.assertEqual(counts, {"cards": 0, "done": 0, "failed": 0})
         markdown = (self.data / "batches" / summary["id"] / "summary.md").read_text()
         self.assertIn("State: finished", markdown)
         self.assertIn("| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |", markdown)
+        self.assertEqual(markdown.count("| --- | --- | --- | --- | --- | --- | --- | --- |"), 1)
         self.assertNotIn("runner_pid", summary)
 
     def test_empty_result_finishes_without_fleet_access(self):
@@ -155,8 +160,12 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
             self.assertEqual(xs.execute_batch({"hosts": {}, "card_type": None}, summary), 0)
         self.assertEqual(summary["state"], "finished")
         self.assertEqual(summary["cards"], [])
+        self.assertEqual({"cards": len(summary["cards"]),
+                          "done": sum(row.get("status") == "done" for row in summary["cards"])},
+                         {"cards": 0, "done": 0})
         markdown = (self.data / "batches" / "empty" / "summary.md").read_text()
         self.assertIn("State: finished", markdown)
+        self.assertNotIn("| empty |", markdown)
 
     def test_distribution_queueing_bundle_fetch_failure_and_summaries(self):
         for i, text in enumerate(("card zero", "FAIL card one", "card two", "card three", "card four")):
