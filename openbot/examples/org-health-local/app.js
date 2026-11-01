@@ -2,6 +2,7 @@ import { resolveLocale, translateFor } from "@openbot/i18n";
 
 const locale = resolveLocale("system", new URLSearchParams(location.search).get("lang") || "zh-CN");
 const t = translateFor(locale);
+const EMPTY_PLACEHOLDER = locale === "zh" ? "暂无数据" : "No data";
 document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
 for (const element of document.querySelectorAll("[data-i18n]")) element.textContent = t(element.dataset.i18n);
 for (const element of document.querySelectorAll("[data-i18n-aria]"))
@@ -326,9 +327,9 @@ fetch("./data/diagnosis.json", { cache: "no-store" })
   })
   .then(normalizeSnapshot)
   .then(render)
-  .catch((error) => {
+  .catch(() => {
     ["metric-grid", "insight-grid", "definitions-grid", "risk-grid", "recommendations"].forEach((id) => {
-      document.getElementById(id).replaceChildren();
+      document.getElementById(id).textContent = EMPTY_PLACEHOLDER;
     });
     const panel = $("#calibration-panel");
     if (panel) {
@@ -336,9 +337,9 @@ fetch("./data/diagnosis.json", { cache: "no-store" })
       $("#calibration-content")?.replaceChildren();
     }
     ["scope-month", "scope-date", "scope-source", "footer-source", "stage-title", "stage-note"].forEach((id) => {
-      document.getElementById(id).textContent = "—";
+      document.getElementById(id).textContent = EMPTY_PLACEHOLDER;
     });
-    $("#stage-list").replaceChildren();
+    $("#stage-list").textContent = EMPTY_PLACEHOLDER;
     $("#asof-short").textContent = t("orgHealthDemo.loadFailed");
-    $("#conclusion").textContent = error.message || t("orgHealthDemo.genericError");
+    $("#conclusion").textContent = EMPTY_PLACEHOLDER;
   });
