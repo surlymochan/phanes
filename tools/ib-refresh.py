@@ -24,9 +24,11 @@ def _is_cooldown(row):
     return row.get("cooldown") is True or row.get("status") in {"cooldown", "skipped_cooldown"}
 
 
-def _usable_hosts(rows):
+def _usable_hosts(rows, known_hosts=None):
     return [row for row in rows
-            if row.get("final_status", row.get("status")) == "valid" and not _is_cooldown(row)]
+            if (known_hosts is None or row.get("host") in known_hosts)
+            and row.get("final_status", row.get("status")) == "valid"
+            and not _is_cooldown(row)]
 
 
 def _need_ok(hosts_ok, skipped_cooldown, need_ok):
@@ -38,7 +40,15 @@ def _need_ok(hosts_ok, skipped_cooldown, need_ok):
 
 def _status_for(result, hosts, config_path, now, need_ok=None):
     rows = result.get("hosts", [])
-    hosts_ok = len(_usable_hosts(rows))
+    known_hosts = {host.get("name") for host in hosts}
+    unknown = [row for row in rows if row.get("host") not in known_hosts]
+    if unknown:
+        result.setdefault("errors", []).extend(
+            {"host": row.get("host"), "status": "unknown", "error": "host absent from topology"}
+            for row in unknown
+        )
+        result["ok"] = False
+    hosts_ok = len(_usable_hosts(rows, known_hosts))
     skipped = sum(_is_cooldown(row) for row in rows)
     required = len(hosts) if need_ok is None else need_ok
     result["ok"] = bool(result["ok"] and _need_ok(hosts_ok, skipped, required))
