@@ -292,7 +292,7 @@ def load_data(path: Path) -> object:
         return json.loads(text)
     except json.JSONDecodeError as cause:
         raise ValueError(
-            f"数据文件 {path} 不是合法 JSON：第 {cause.lineno} 行第 {cause.colno} 列 {cause.msg}"
+            f"数据文件 {path} 不是合法 JSON（解析失败）：第 {cause.lineno} 行第 {cause.colno} 列 {cause.msg}"
         ) from cause
 
 

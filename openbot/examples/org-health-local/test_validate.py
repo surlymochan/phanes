@@ -800,6 +800,8 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertRegex(result.stderr, r"第 \d+ 行第 \d+ 列")
         self.assertIn(str(broken), result.stderr)
+        self.assertIn("不是合法 JSON", result.stderr)
+        self.assertIn("解析失败", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_command_line_json_nonexistent_file_reports_exit_code_two_and_json_errors(self) -> None:
@@ -843,6 +845,8 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(len(output["errors"]), 1)
         self.assertEqual(output["errors"][0]["path"], str(broken))
         self.assertRegex(output["errors"][0]["message"], r"第 \d+ 行第 \d+ 列")
+        self.assertIn("不是合法 JSON", output["errors"][0]["message"])
+        self.assertIn("解析失败", output["errors"][0]["message"])
         self.assertEqual(result.stderr, "")
 
     def test_command_line_multiple_valid_files_reports_exit_code_zero_and_passed(self) -> None:
