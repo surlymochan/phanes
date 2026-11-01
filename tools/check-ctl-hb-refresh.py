@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1161).
+"""Offline static contract check for ctl-loop ib-refresh heartbeat maintenance (Refs #1207).
 
 对照 37min 静默课（brain/lessons-37min-silence.md）：
 `ctl-loop` 在执行 `ib-refresh` 续签 instabox 证书期间，墙钟等待循环（受 REFRESH_CAP 约束，默认 420s）
