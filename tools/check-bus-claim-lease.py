@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Executable contract check for issue bus claim lease expiry and takeover (Refs #1008).
+"""Executable contract check for issue bus claim lease expiry and takeover (Refs #1069).
 
-对齐 BUS.md：过期 claim 不永久锁死。
+对齐 BUS.md：过期 claim 不永久锁死。`tools/check-bus-claim-lease.py` 假时钟+假评论。
 使用假时钟（fake clock）+ 假评论（fake comments）验证：
 1. 初始有效 claim 在租约期内为胜出者。
 2. 租约未过期时，同一 worker 可通过重复发表 /claim 进行续约。
