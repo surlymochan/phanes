@@ -61,9 +61,25 @@
 
 ## 3. 建议观察命令
 
-### Harvest fetch 的有界重试
+### Harvest fetch 的有界重试与 lane-failed 阈值（Refs #947）
 
-`tools/lane-autodispatch/autodispatch.py` 在收集（harvest）完成分支时，对 `Connection closed`、`broken pipe`、banner 超时等 SSH 瞬时错误最多尝试 **3 次**（初次 + 2 次重试），每次间隔 20 秒；达到上限后停止重试，不会无限等待。日志会记录每次失败的 `attempt x/3`，并在放弃时记录 `failed after x/3 attempts`。非瞬时错误不重试。
+`tools/lane-autodispatch/autodispatch.py` 在收集（harvest）完成分支时，先把 fetch 失败分类（`classify_harvest_fetch_error`）：
+
+- **transient（瞬时）**：传输或 SSH 抖动，M4#904 现场的 `fetch-pack: unexpected disconnect`、`bad pack header` 即属此类；此外还有 `early eof`、`index-pack failed`、`RPC failed`、`Connection reset`、`Connection closed`、`broken pipe`、banner/超时、`Permission denied`。
+- **fatal（致命）**：其它错误（例如 `could not read from remote repository`），重试无意义。
+
+一次 harvest 周期内最多尝试 **3 次**（初次 + 2 次重试），每次间隔 20 秒（`HARVEST_FETCH_MAX_ATTEMPTS` / `HARVEST_FETCH_RETRY_DELAY`）；达到上限后停止重试，不会无限等待。日志会记录每次失败的 `attempt x/3`，并在放弃时记录 `failed after x/3 attempts`。
+
+transient 失败的处置（Refs #947）：
+
+- 前 N 次（默认 **3** 次，`HARVEST_FETCH_MAX_TRANSIENT_FAILURES`，可用 `AD_HARVEST_MAX_FAILURES` 覆盖）连续 transient 失败**只记日志并指数退避** `min(600, 30 * 2 ** (失败次数 - 1))` 秒（30s → 60s → 120s → 240s → 480s → 600s 封顶）；issue 保持 `in-progress`，lane 在 `fetch_backoff_until` 到期前不再发起 harvest。
+- 超过阈值（第 N+1 次失败）或遇到 fatal 错误才把 issue 标成 `lane-failed` 并附说明评论；fetch 成功后计数器清零。
+
+离线契约检查（不连 SSH、不触碰真实 lane state）：
+
+```bash
+python3 tools/check-ad-harvest-backoff.py
+```
 
 在高并发运行或疑似发生连接退避时，应通过以下两组核心命令观察系统状态：
 

@@ -115,5 +115,47 @@ class GitSSHCommandTests(unittest.TestCase):
         live.wait()
 
 
+class HarvestFetchBackoffTests(unittest.TestCase):
+    """Refs #947: a broken harvest fetch is transient until the threshold is exceeded."""
+
+    def test_field_transfer_errors_are_transient(self):
+        for error in (
+            "fetch-pack: unexpected disconnect while reading sideband packet",
+            "fatal: bad pack header at offset 0",
+            "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly",
+            "ssh: connect to host instabox port 22: Connection reset by peer",
+        ):
+            self.assertEqual(autodispatch.classify_harvest_fetch_error(error), "transient", error)
+            self.assertTrue(autodispatch.should_retry_harvest_fetch(error, 1), error)
+
+    def test_other_errors_are_fatal_and_not_retried(self):
+        error = "fatal: could not read from remote repository"
+
+        self.assertEqual(autodispatch.classify_harvest_fetch_error(error), "fatal")
+        self.assertFalse(autodispatch.should_retry_harvest_fetch(error, 1))
+
+    def test_backoff_is_exponential_and_capped(self):
+        ladder = [autodispatch.harvest_fetch_backoff_seconds(n) for n in range(1, 6)]
+
+        self.assertEqual(ladder, [30, 60, 120, 240, 480])
+        self.assertEqual(autodispatch.harvest_fetch_backoff_seconds(0), 0)
+        self.assertEqual(autodispatch.harvest_fetch_backoff_seconds(9), 600)
+
+    def test_transient_failures_up_to_the_threshold_stay_transient(self):
+        threshold = autodispatch.HARVEST_FETCH_MAX_TRANSIENT_FAILURES
+
+        self.assertEqual(autodispatch.harvest_fetch_outcome(threshold - 1, "transient"), "transient")
+        self.assertEqual(autodispatch.harvest_fetch_outcome(threshold, "transient"), "transient")
+        self.assertEqual(autodispatch.harvest_fetch_outcome(threshold + 1, "transient"), "lane-failed")
+        self.assertEqual(autodispatch.harvest_fetch_outcome(1, "fatal"), "lane-failed")
+
+    def test_lane_backoff_gate_uses_the_stored_deadline(self):
+        state = {"fetch_backoff_until": autodispatch.time.time() + 600}
+
+        self.assertTrue(autodispatch.lane_in_fetch_backoff(state))
+        self.assertFalse(autodispatch.lane_in_fetch_backoff({"fetch_backoff_until": 1}))
+        self.assertFalse(autodispatch.lane_in_fetch_backoff({}))
+
+
 if __name__ == "__main__":
     unittest.main()
