@@ -871,6 +871,17 @@ class LaneTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("drain must be true or false", result.stderr)
 
+    def test_unreadable_lanes_json_refuses_new_work_with_the_reason(self):
+        with mock.patch.object(xs, "lane_config", side_effect=ValueError("invalid lane config 'x': broken")):
+            refusal = xs.lane_drain_check("L1")
+        self.assertNotIn("draining", refusal)
+        self.assertIn("cannot read its lanes.json drain setting", refusal["error"])
+        self.assertIn("broken", refusal["error"])
+        with mock.patch.object(xs, "lane_config", return_value=[{"name": "L1", "drain": True}]):
+            self.assertTrue(xs.lane_drain_check("L1")["draining"])
+        with mock.patch.object(xs, "lane_config", return_value=[{"name": "L1"}]):
+            self.assertIsNone(xs.lane_drain_check("L1"))
+
     def test_systemd_unit_without_lane_env_is_unchanged(self):
         unit = self.cli("lane", "systemd-unit", self.lane_name).stdout
         self.assertNotIn("EnvironmentFile=", unit)

@@ -471,7 +471,10 @@ systemd would let it override `Environment=`). `pi` lanes reject both fields bec
 environment; their egress is the broker's.
 
 `"drain": true` on a lane keeps it running (a turn in progress finishes) but makes it refuse new assignments; `lane
-status` shows `"drain": true`. It is read on every assignment, so draining or undraining needs no restart.
+status` shows `"drain": true` (the key is left out for lanes that are not draining). It is read on every assignment, so
+draining or undraining needs no restart. `drain` must be a JSON boolean; anything else fails at config load, and a
+lanes.json that no longer loads makes the lane refuse new work with that reason. `fleet render-lanes` carries a `drain`
+set in the inventory; `--check` lists a host lane drained by hand under `"draining"` rather than calling it drift.
 
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
