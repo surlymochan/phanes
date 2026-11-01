@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract check for the seed-mint burst cooldown (Refs #1041).
+"""Offline contract check for the seed-mint burst cooldown (Refs #1062).
 
 The small model below mirrors the control-plane guard: a successful seed mint
 records its timestamp, and another mint is skipped until ``MINT_COOLDOWN``
@@ -30,7 +30,8 @@ def main() -> None:
         fake_now = 1_000_000.0
         assert seed_mint(fake_now), "the first seed mint must be allowed"
         fake_now += MINT_COOLDOWN - 1
-        assert fake_now - 1_000_000.0 < MINT_COOLDOWN
+        interval = fake_now - 1_000_000.0
+        assert interval < MINT_COOLDOWN, "the second mint must be inside the cooldown"
         assert not seed_mint(fake_now), "a burst mint must be skipped"
         assert _last_mint == 1_000_000.0, "a skipped mint must not refresh the timestamp"
 
