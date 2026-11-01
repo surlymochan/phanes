@@ -597,6 +597,29 @@ class CrossCheckTest(unittest.TestCase):
         self.assertTrue(
             all(set(check) == {"name", "ok", "detail"} for check in payload["checks"])
         )
+        self.assertEqual(payload["findings"], [])
+
+    def test_json_findings_use_severity_path_message_contract(self) -> None:
+        """冲突样本输出非空 findings，且每条都有统一契约字段。"""
+        brief_data = copy.deepcopy(self.brief)
+        brief_data["必答问题"] = ["整体成本如何？", "整体成本是多少？"]
+        diagnosis_data = copy.deepcopy(self.diagnosis)
+        diagnosis_data["insights"] = [{"标题": "整体成本分析", "内容": "等待补充证据。"}]
+        diagnosis_data["recommendations"] = []
+        with temporary_directory() as folder:
+            base = Path(folder)
+            brief = write_json(base / "brief.json", brief_data)
+            data = write_json(base / "diagnosis.json", diagnosis_data)
+            json_out = base / "review.json"
+            result = run_script(brief, data, json_out=json_out)
+            payload = json.loads(json_out.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
+        self.assertTrue(payload["findings"])
+        for finding in payload["findings"]:
+            self.assertIn(finding["severity"], cross_check.FINDING_SEVERITIES)
+            self.assertTrue(finding["path"])
+            self.assertTrue(finding["message"])
+        self.assertTrue(any(finding["severity"] == "error" for finding in payload["findings"]))
 
     def test_command_line_missing_recommendations_passes_and_writes_markdown_report(self) -> None:
         """快照缺少可选 recommendations 段时命令行正常退出并写出完整 Markdown 报告。"""

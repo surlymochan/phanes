@@ -56,6 +56,7 @@ EXIT_FAIL = 1
 EXIT_USAGE = 2
 
 SCHEMA_VERSION = 4
+FINDING_SEVERITIES = frozenset({"error", "warning", "info"})
 
 MONTH_PATTERN = re.compile(r"\d{4}-\d{2}")
 DATE_PATTERN = re.compile(r"\d{4}-\d{2}(?:-\d{2})?")
@@ -571,11 +572,45 @@ def markdown_report(results: list[Result]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def finding_path(result: Result) -> str:
+    """返回失败检查对应的稳定逻辑路径。"""
+    paths = {
+        "期间一致": "/观察期间",
+        "版本一致": "/schema版本",
+        "必答问题覆盖": "/必答问题",
+        "站点数据一致": "/dist/data/diagnosis.json",
+        "隐私边界": "/diagnosis",
+    }
+    if result.name == "隐私边界":
+        match = re.search(r"(/[^（、]+)", result.detail)
+        if match:
+            return match.group(1)
+    return paths.get(result.name, f"/{result.name}")
+
+
+def findings_report(results: list[Result]) -> list[dict[str, object]]:
+    """序列化失败项为统一的 finding 契约。"""
+    findings: list[dict[str, object]] = []
+    for result in results:
+        if result.ok:
+            continue
+        finding: dict[str, object] = {
+            "severity": "error",
+            "path": finding_path(result),
+            "message": result.detail,
+        }
+        if result.finding:
+            finding["context"] = result.finding
+        findings.append(finding)
+    return findings
+
+
 def json_report(results: list[Result]) -> str:
     """将检查结果格式化为稳定的 JSON 报告。"""
     failed = sum(not result.ok for result in results)
     payload = {
         "ok": failed == 0,
+        "findings": findings_report(results),
         "checks": [
             {"name": result.name, "ok": result.ok, "detail": result.detail}
             for result in results
