@@ -1742,6 +1742,84 @@ def codex_executor_flags():
     return ["--disable", "computer_use"]
 
 
+CODEX_GITDIR_SUBDIRS = ("objects", "refs", "logs")
+_CODEX_ADD_DIR_SUPPORT = {}
+
+
+def codex_gitdir_writable_roots(wd, policy=None):
+    """Writable roots that let a workspace-write Codex sandbox commit inside the worktree ``wd``.
+
+    Codex mounts a worktree's git metadata read-only even under workspace-write, and a writable root on
+    ``.git`` or ``.git/worktrees`` does not lift that. Only the worktree's exact gitdir
+    (``.git/worktrees/<name>``) plus the shared ``objects``, ``refs`` and ``logs`` directories of the
+    common dir work. The worktree root itself is listed as well, so a lane that lost write access to its
+    workspace can still edit files. They are computed per thread because the worktree name changes when a
+    lane rebuilds it. Disabled by ``codex.worktree_gitdir_writable: false`` or any sandbox other than
+    workspace-write.
+    """
+    cx = (policy if policy is not None else load_policy()).get("codex") or {}
+    if not cx.get("worktree_gitdir_writable", True) or cx.get("sandbox", "workspace-write") != "workspace-write":
+        return []
+    rc, out, _ = sh(["git", "rev-parse", "--git-dir", "--git-common-dir"], timeout=15, cwd=wd)
+    lines = [x for x in out.splitlines() if x.strip()]
+    if rc or len(lines) != 2:
+        return []
+    gitdir, common = (os.path.realpath(os.path.join(wd, x.strip())) for x in lines)
+    roots = [os.path.realpath(wd), gitdir]
+    if common != gitdir:
+        roots += [os.path.join(common, sub) for sub in CODEX_GITDIR_SUBDIRS if os.path.isdir(os.path.join(common, sub))]
+    return roots
+
+
+def codex_config_writable_roots():
+    """Writable roots already configured in ``~/.codex/config.toml`` (read for the ``-c`` fallback only)."""
+    try:
+        with open(f"{HOME}/.codex/config.toml", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return []
+    table = re.search(r"^\[sandbox_workspace_write\]\s*\n(.*?)(?=^\[|\Z)", text, re.S | re.M)
+    if table:
+        arr = re.search(r"^\s*writable_roots\s*=\s*\[(.*?)\]", table.group(1), re.S | re.M)
+    else:
+        arr = re.search(r"^\s*sandbox_workspace_write\.writable_roots\s*=\s*\[(.*?)\]", text, re.S | re.M)
+    if not arr:
+        return []
+    return [double or single for double, single in re.findall(r'"([^"]*)"|\'([^\']*)\'', arr.group(1))]
+
+
+def codex_exec_supports_add_dir(binary, resume=False):
+    """Whether this codex build takes ``--add-dir`` (appends writable roots instead of replacing them)."""
+    if not binary:
+        return False
+    key = (os.path.realpath(binary), bool(resume))
+    if key not in _CODEX_ADD_DIR_SUPPORT:
+        cmd = [binary, "exec", "resume", "--help"] if resume else [binary, "exec", "--help"]
+        rc, out, err = sh(cmd, timeout=15)
+        _CODEX_ADD_DIR_SUPPORT[key] = bool(rc == 0 and "--add-dir" in out + err)
+    return _CODEX_ADD_DIR_SUPPORT[key]
+
+
+def codex_writable_roots_flags(wd, policy=None, binary=None, resume=False):
+    """``codex exec`` flags that make the worktree gitdir writable without dropping configured roots.
+
+    ``--add-dir`` appends to the writable roots, so the roots the user configured in
+    ``~/.codex/config.toml`` stay writable. Builds without ``--add-dir`` fall back to a ``-c`` override
+    that merges the configured roots with the new ones, so the list only ever grows.
+    """
+    roots = codex_gitdir_writable_roots(wd, policy)
+    if not roots:
+        return []
+    if codex_exec_supports_add_dir(binary, resume):
+        flags = []
+        for root in roots:
+            flags += ["--add-dir", root]
+        return flags
+    configured = codex_config_writable_roots()
+    merged = configured + [root for root in roots if root not in configured]
+    return ["-c", "sandbox_workspace_write.writable_roots=" + json.dumps(merged)]
+
+
 def codex_resolved_binary(policy, lane=None):
     if lane:
         binary = envvar("CODEX_APP_SERVER_BIN") or lane.get("binary") or find_codex(policy)[0]
@@ -4549,16 +4627,19 @@ def exec_codex(d, st, prompt, wd, rdir, timeout, evp):
     schema = f"{rdir}/schema.json"
     jsave(schema, RESULT_SCHEMA)
     last = f"{rdir}/last.json"
-    if d.get("_resume_session"):
-        sandbox = load_policy()["codex"]["sandbox"]
+    policy = load_policy()
+    sandbox = policy["codex"]["sandbox"]
+    resume = bool(d.get("_resume_session"))
+    roots_flags = codex_writable_roots_flags(wd, policy, st["codex"]["binary"], resume=resume)
+    if resume:
         cmd = [st["codex"]["binary"], *codex_executor_flags(), "exec", "resume", d["_resume_session"], "-m", d["model"],
                "-c", f'model_reasoning_effort="{d["effort"]}"', "-c", f'sandbox_mode="{sandbox}"',
-               "-c", 'approval_policy="never"', "--json", "--skip-git-repo-check",
+               "-c", 'approval_policy="never"', *roots_flags, "--json", "--skip-git-repo-check",
                "--output-schema", schema, "-o", last, prompt]
     else:
         cmd = [st["codex"]["binary"], *codex_executor_flags(), "exec", "-m", d["model"],
                "-c", f'model_reasoning_effort="{d["effort"]}"',
-               "-s", load_policy()["codex"]["sandbox"], "-C", wd, "--json", "--skip-git-repo-check",
+               "-s", sandbox, *roots_flags, "-C", wd, "--json", "--skip-git-repo-check",
                "--output-schema", schema, "-o", last, prompt]
     rc = run_proc(cmd, wd, os.environ.copy(), timeout, evp)
     usage, thread, errors = {}, None, []
@@ -8176,10 +8257,14 @@ def lane_agy_stop(child):
 def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
     if lane["backend"] == "codex":
         req_id = "thread-" + uuid.uuid4().hex
-        child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start",
-                    "params": {"cwd": worktree, "model": lane["model"], "approvalPolicy": "never",
-                               "sandbox": load_policy().get("codex", {}).get("sandbox", "workspace-write"),
-                               "ephemeral": True}})
+        policy = load_policy()
+        params = {"cwd": worktree, "model": lane["model"], "approvalPolicy": "never",
+                  "sandbox": policy.get("codex", {}).get("sandbox", "workspace-write"), "ephemeral": True}
+        roots = codex_gitdir_writable_roots(worktree, policy)
+        if roots:
+            params["config"] = {"sandbox_workspace_write.writable_roots": roots}
+            lane_record_event(event_file, {"type": "codex_writable_roots", "roots": roots})
+        child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start", "params": params})
         reply = child.wait_response(req_id, 60, event_file)
         if reply.get("error"):
             raise RuntimeError(f"codex thread/start failed: {short(reply['error'], 300)}")

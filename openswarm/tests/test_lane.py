@@ -631,6 +631,31 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["branch"], f"openswarm/{run_id}")
         self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"), "completed")
 
+    def test_codex_thread_start_makes_the_worktree_gitdir_writable(self):
+        self.env["FAKE_APP_SERVER_LOG"] = str(self.root / "fake-app-server.jsonl")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        starts = [json.loads(line) for line in pathlib.Path(self.env["FAKE_APP_SERVER_LOG"]).read_text().splitlines()]
+        params = next(row["params"] for row in starts if row["method"] == "thread/start")
+        roots = params["config"]["sandbox_workspace_write.writable_roots"]
+        wt = params["cwd"]
+        gitdir = os.path.realpath(os.path.join(wt, self.git("-C", wt, "rev-parse", "--git-dir")))
+        common = os.path.realpath(os.path.join(wt, self.git("-C", wt, "rev-parse", "--git-common-dir")))
+        self.assertNotEqual(gitdir, common)
+        self.assertEqual(roots, [os.path.realpath(wt), gitdir]
+                         + [os.path.join(common, d) for d in ("objects", "refs", "logs")])
+
+    def test_codex_thread_start_omits_writable_roots_when_disabled(self):
+        self.env["FAKE_APP_SERVER_LOG"] = str(self.root / "fake-app-server.jsonl")
+        (self.data / "policy.local.json").write_text(json.dumps({"codex": {"worktree_gitdir_writable": False}}))
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        starts = [json.loads(line) for line in pathlib.Path(self.env["FAKE_APP_SERVER_LOG"]).read_text().splitlines()]
+        params = next(row["params"] for row in starts if row["method"] == "thread/start")
+        self.assertNotIn("config", params)
+
     def test_pi_session_leak_is_excluded_even_when_staged(self):
         self.set_config("pi")
         self.start_lane()

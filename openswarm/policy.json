@@ -155,7 +155,8 @@
       "gpt-reserve": "base_model_inference"
     },
     "default_limit_id": "codex",
-    "sandbox": "workspace-write"
+    "sandbox": "workspace-write",
+    "worktree_gitdir_writable": true
   },
   "ocgo": {
     "plan": "auto",

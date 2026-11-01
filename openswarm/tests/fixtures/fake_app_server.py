@@ -38,6 +38,9 @@ for line in sys.stdin:
     elif method == "thread/start":
         cwd = params.get("cwd", cwd)
         model = params.get("model")
+        if os.environ.get("FAKE_APP_SERVER_LOG"):
+            with open(os.environ["FAKE_APP_SERVER_LOG"], "a") as log:
+                log.write(json.dumps({"method": method, "params": params}) + "\n")
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
         response(req, {"thread": {"id": thread_id}, "model": params.get("model")})
     elif method == "turn/start":

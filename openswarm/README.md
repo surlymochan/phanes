@@ -730,6 +730,14 @@ workspaces: linked `node_modules` can otherwise resolve workspace packages back 
 openswarm only emits `workspace_note` when it detects `package.json` workspaces plus `bun.lock`; it preserves existing
 link behavior.
 
+`codex.worktree_gitdir_writable` (default `true`) lets a `workspace-write` Codex sandbox commit inside a lane
+worktree: on every thread openswarm recomputes the worktree's exact gitdir and the shared git directories
+(`git rev-parse --git-dir --git-common-dir`) and adds them — plus the worktree root — to the sandbox's writable
+roots. Lanes pass them in the `thread/start` config, `codex exec` appends them with `--add-dir` so the roots already
+configured in `~/.codex/config.toml` stay writable. Set the switch to `false` in `policy.local.json` to keep the git
+metadata read-only. The hard-coded `writable_roots` hotfix in `~/.codex/config.toml` on govpn, govpn2 and box can be
+dropped once this ships: a pinned worktree name goes stale as soon as a lane rebuilds its worktree.
+
 | Environment variable | Purpose |
 | --- | --- |
 | `OPENSWARM_HOME` | Runtime data dir (default `~/.claude/openswarm`) |
