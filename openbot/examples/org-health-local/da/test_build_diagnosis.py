@@ -6,8 +6,8 @@
 异常原始数据（缺期次、负数、重复行、CSV 多余列）按当前行为断言：已支持的情形断言
 退出码与错误信息，已知 bug 用 `unittest.expectedFailure` 标注并写明原因，不改实现。
 
-输入错误（必需数字列为空、CSV 出现重复列名）另用最小 raw fixture 覆盖：命令行退出码
-非 0，错误信息指出文件与列名。
+输入错误（必需数字列为空、CSV 出现重复列名、缺少必需列）另用最小 raw fixture 覆盖：
+命令行退出码非 0，错误信息指出文件与列名。
 """
 from __future__ import annotations
 
@@ -106,6 +106,17 @@ def write_csv_lines(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def drop_csv_column(text: str, column: str) -> str:
+    """从 CSV 文本里删掉一列：表头与每行的取值一起去掉。"""
+    lines = text.splitlines()
+    index = lines[0].split(",").index(column)
+    kept = []
+    for line in lines:
+        cells = line.split(",")
+        kept.append(",".join(cells[:index] + cells[index + 1:]))
+    return "\n".join(kept) + "\n"
+
+
 # 最小 raw fixture：只保留观察期间的起止两个月与年末两行，表头按必需列写全。
 MINIMAL_COST_CSV = (
     "月份,整体技术人力成本万元,营收业务技术人力成本万元,运维设施成本万元\n"
@@ -127,6 +138,14 @@ MINIMAL_FORECAST_CSV = (
     "年末测算,13.4,10.7,13.4,10.7,,14.8\n"
     "年末目标,,,,,,15.2\n"
 )
+
+# 最小 raw fixture 的四张 CSV，按文件名索引。
+MINIMAL_RAW_FILES = {
+    "cost.csv": MINIMAL_COST_CSV,
+    "heads.csv": MINIMAL_HEADS_CSV,
+    "revenue.csv": MINIMAL_REVENUE_CSV,
+    "forecast.csv": MINIMAL_FORECAST_CSV,
+}
 
 
 class ParsePeriodsTest(unittest.TestCase):
@@ -939,7 +958,7 @@ class AbnormalRawDataTest(unittest.TestCase):
 
 
 class MinimalRawInputErrorTest(unittest.TestCase):
-    """最小 raw fixture：必需数字列为空与 CSV 出现重复列名两种输入错误。
+    """最小 raw fixture：必需数字列为空、CSV 出现重复列名与缺少必需列三种输入错误。
 
     fixture 只有起止两个月与年末两行，其余按必需表头写全，用来断言输入错误路径，
     不依赖 `da/sample-raw/` 的合成样本。
@@ -959,12 +978,7 @@ class MinimalRawInputErrorTest(unittest.TestCase):
         """写出最小 raw 目录；`files` 里给出要覆盖的 CSV 文件名与文本。"""
         raw_dir = self.folder / name
         raw_dir.mkdir(parents=True, exist_ok=True)
-        content = {
-            "cost.csv": MINIMAL_COST_CSV,
-            "heads.csv": MINIMAL_HEADS_CSV,
-            "revenue.csv": MINIMAL_REVENUE_CSV,
-            "forecast.csv": MINIMAL_FORECAST_CSV,
-        }
+        content = dict(MINIMAL_RAW_FILES)
         content.update(files or {})
         for filename, text in content.items():
             (raw_dir / filename).write_text(text, encoding="utf-8")
@@ -1033,6 +1047,45 @@ class MinimalRawInputErrorTest(unittest.TestCase):
         self.assertIn("cost.csv", message)
         self.assertIn("整体技术人力成本万元", message)
         self.assertFalse(self.out_path.exists())
+
+    def test_missing_required_column_exits_nonzero_with_column_and_file(self) -> None:
+        """删掉必需列后构建失败，错误信息点出缺失列名与输入文件。
+
+        四张 CSV 各删一个必需列：失败信息必须写明缺哪一列、来自哪个文件，
+        不能只留通用 KeyError 或裸 Traceback。
+        """
+        cases = (
+            ("cost.csv", "运维设施成本万元"),
+            ("heads.csv", "营收业务折算人头"),
+            ("revenue.csv", "收入万美元"),
+            ("forecast.csv", "整体技术人力成本万元"),
+        )
+        for filename, column in cases:
+            with self.subTest(file=filename, column=column):
+                raw_dir = self.write_minimal_raw(
+                    f"raw-missing-column-{filename}",
+                    {filename: drop_csv_column(MINIMAL_RAW_FILES[filename], column)},
+                )
+                result = run_cli(self.brief_path, raw_dir, self.out_path)
+                self.assertNotEqual(result.returncode, 0)
+                message = result.stdout + result.stderr
+                self.assertIn(filename, message)
+                self.assertIn(f"缺少必需列：{column}", message)
+                self.assertNotIn("KeyError", message)
+                self.assertNotIn("Traceback", message)
+                self.assertFalse(self.out_path.exists())
+
+    def test_missing_required_column_raises_readable_raw_data_error(self) -> None:
+        """模块接口在缺列时抛 RawDataError，消息里带文件名与列名。"""
+        raw_dir = self.write_minimal_raw(
+            "raw-missing-column-module",
+            {"cost.csv": drop_csv_column(MINIMAL_COST_CSV, "整体技术人力成本万元")},
+        )
+        with self.assertRaises(build_diagnosis.RawDataError) as caught:
+            build_diagnosis.build_from_files(self.brief_path, raw_dir)
+        message = str(caught.exception)
+        self.assertIn("cost.csv", message)
+        self.assertIn("缺少必需列：整体技术人力成本万元", message)
 
 
 if __name__ == "__main__":
