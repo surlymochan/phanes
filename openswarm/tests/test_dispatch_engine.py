@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location("dispatch_engine_under_test",
@@ -300,7 +301,8 @@ class ReviewGate(Base):
                        ("auth status", (1, "", "not logged in"))])
         st = {"issue": "PR25", "run": "r1", "review_pr": 25, "review_sha": SHA}
         info = {"branch": "lane/x", "commit": "c", "backend": "pi", "model": "m"}
-        ok = d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {})
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+            ok = d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {})
         self.assertTrue(ok)
         self.assertEqual(self.runner.called("statuses/"), [])
         self.assertEqual(d.load_reviews()["25"]["verdict"], "APPROVE")
