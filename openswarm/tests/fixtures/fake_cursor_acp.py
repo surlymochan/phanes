@@ -80,6 +80,8 @@ while True:
         prompt = "".join(block.get("text", "") for block in params.get("prompt", [])
                         if isinstance(block, dict) and block.get("type") == "text")
         if "LANE_TEST_CRASH" in prompt:
+            if "LANE_TEST_LATE_FORK" in prompt:
+                time.sleep(4)  # crash after the lane's eager descendant-scan window has closed
             os._exit(17)
         if "LANE_TEST_SIGNAL_WITH_CHILD" in prompt:
             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
@@ -113,8 +115,10 @@ while True:
                 with open(marker, "w") as stream:
                     stream.write(str(child.pid))
             # Keep the ACP parent observable long enough for the lane to record this
-            # detached group before the ordinary non-zero parent exit.
-            time.sleep(.4)
+            # detached group before the ordinary non-zero parent exit (unless the test
+            # wants the fork-and-exit-at-once shape).
+            if "LANE_TEST_NO_GRACE" not in prompt:
+                time.sleep(.4)
             os._exit(17)
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id,
               "update": {"sessionUpdate": "plan", "entries": [{"content": "Apply the requested change"}]}}})

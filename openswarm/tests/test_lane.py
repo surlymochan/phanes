@@ -1125,6 +1125,17 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(state["status"], "failed")
         self.assertEqual(self.fleet_reservations(), [])
 
+    def test_late_crash_without_descendants_releases_shared_fleet_slot(self):
+        """A crash long after the last descendant scan with nothing left behind frees the slot."""
+        self.set_config("cursor")
+        self.enable_fleet_guard()
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_CRASH LANE_TEST_LATE_FORK")
+        state = self.wait_run(run_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(self.fleet_reservations(), [])
+        self.assertFalse(state.get("executor_descendants"), state)
+
     def test_signal_terminated_lane_child_retains_shared_fleet_slot(self):
         """Do not reuse a lane slot while a SIGKILLed parent's child is still alive."""
         self.set_config("cursor")
@@ -1194,18 +1205,22 @@ class LaneTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
-    def test_late_detached_child_still_retains_shared_fleet_slot(self):
-        """A detached child forked late in the turn (after the eager scan window) is still seen."""
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the lane supervisor is a subreaper on Linux only")
+    def test_detached_child_forked_late_and_left_at_once_retains_shared_fleet_slot(self):
+        """Fork after the eager scan window and exit immediately: no scan can see the child while
+        its parent lives, so the adopted orphan must be what keeps the slot."""
         self.set_config("cursor")
         self.enable_fleet_guard()
         child_marker = self.root / "late-detached-child.pid"
         self.env["FAKE_CURSOR_CHILD_PID"] = str(child_marker)
         self.start_lane()
-        run_id = self.assign("LANE_TEST_EXIT_WITH_DETACHED_CHILD LANE_TEST_LATE_FORK")
+        run_id = self.assign("LANE_TEST_EXIT_WITH_DETACHED_CHILD LANE_TEST_LATE_FORK LANE_TEST_NO_GRACE")
         try:
             state = self.wait_run(run_id)
             self.assertEqual(state["status"], "failed")
-            self.assertTrue(process_alive(int(child_marker.read_text())))
+            child_pid = int(child_marker.read_text())
+            self.assertTrue(process_alive(child_pid))
+            self.assertIn(child_pid, [row.get("pid") for row in state.get("executor_descendants") or []], state)
             reservations = self.fleet_reservations()
             self.assertEqual([row["run_id"] for row in reservations], [run_id])
         finally:
