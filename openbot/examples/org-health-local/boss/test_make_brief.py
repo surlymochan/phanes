@@ -848,6 +848,22 @@ class NonEmptyBriefSchemaViolationTest(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_period与summary内容非法时非零退出(self) -> None:
+        """非空样本的 period 必须为 YYYY-MM，summary 必须为非空字符串。"""
+        cases = [
+            ("period 为空", "period", "", "/period"),
+            ("period 月份非法", "period", "2026-13", "/period"),
+            ("summary 为空", "summary", "", "/summary"),
+        ]
+        for desc, field, value, pointer in cases:
+            with self.subTest(scenario=desc):
+                sample = copy.deepcopy(self.valid_sample())
+                sample[field] = value
+                self.assertGreater(len(json.dumps(sample, ensure_ascii=False)), 200)
+                errors = make_brief.validate_brief(sample)
+                self.assertTrue(errors, f"{desc} 未报出校验错误")
+                self.assertTrue(any(pointer in error for error in errors), errors)
+
     def test_错误类型字段_非零退出且指出路径与字段名(self) -> None:
         """非空样本包含错误类型字段时，make_brief 以非 0 退出并指出 JSON pointer 与字段名。"""
         cases = [
