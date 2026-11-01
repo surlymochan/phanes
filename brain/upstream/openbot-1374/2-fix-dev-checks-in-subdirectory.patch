@@ -1,0 +1,376 @@
+From e966744a6db8d2d699931d88e1aa313103274922 Mon Sep 17 00:00:00 2001
+From: Chao Chen <209239467+surlymochan@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 00:47:12 +0800
+Subject: [PATCH] fix(dev): run the pre-commit hook and dev checks from a
+ subdirectory or worktree
+
+The pre-commit hook, staged-typecheck, dev-verify, prepare-dev-environment
+and check-release-notes assumed that OpenBot is the root of its git
+repository. When OpenBot is checked out as a subdirectory of a larger
+repository, git reports paths from the repository root, so the checks
+missed every staged file. In a linked worktree the hook also staged a
+second copy of each Biome-fixed file, because git gives a hook GIT_DIR
+without GIT_WORK_TREE and the hook changes directory before git add.
+
+- The hook unsets GIT_DIR and GIT_WORK_TREE, finds the project from its own
+  location, and lists staged and unstaged paths relative to the project.
+- staged-typecheck and dev-verify scope git output to the project and strip
+  the prefix; prepare-dev-environment finds the main checkout's project
+  directory, not the repository root; check-release-notes reads staged
+  files with ./-relative object names.
+- scripts/pre-commit-subdirectory-e2e.sh (bun run
+  test:pre-commit-subdirectory) commits through the real hook in four
+  layouts (root or subdirectory, normal checkout or linked worktree) and
+  fails on the current main hook.
+
+A checkout with OpenBot at the repository root behaves as before.
+---
+ .githooks/pre-commit                   | 43 ++++++++++--
+ package.json                           |  1 +
+ scripts/check-release-notes.ts         | 11 +--
+ scripts/dev-verify.ts                  | 20 +++++-
+ scripts/pre-commit-subdirectory-e2e.sh | 94 ++++++++++++++++++++++++++
+ scripts/prepare-dev-environment.ts     |  9 ++-
+ scripts/staged-typecheck.ts            | 15 +++-
+ 7 files changed, 175 insertions(+), 18 deletions(-)
+ create mode 100755 scripts/pre-commit-subdirectory-e2e.sh
+
+diff --git a/.githooks/pre-commit b/.githooks/pre-commit
+index 40800321..8766e858 100755
+--- a/.githooks/pre-commit
++++ b/.githooks/pre-commit
+@@ -1,8 +1,31 @@
+ #!/bin/sh
+ set -eu
+ 
+-repository_root=$(git rev-parse --show-toplevel)
+-cd "$repository_root"
++# Git gives a hook GIT_DIR but not GIT_WORK_TREE. In a linked worktree GIT_DIR points at the
++# worktree's own git directory, so git takes the current directory as the top of the working tree.
++# After the hook changes into a project subdirectory, `git add -- <path>` would then stage the file
++# under a second path, relative to that subdirectory. Without both variables git finds the working
++# tree itself, as in a normal checkout. GIT_INDEX_FILE stays: the hook must use the same index.
++unset GIT_DIR GIT_WORK_TREE
++
++# The project is the directory that holds this hook's .githooks. It is the repository root in a
++# normal checkout, and a subdirectory when OpenBot is checked out inside a larger repository.
++repository_root=$(cd -- "$(git rev-parse --show-toplevel)" && pwd -P)
++project_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
++project_path=""
++case "$project_root" in
++  "$repository_root"/*) project_path=${project_root#"$repository_root"/} ;;
++  *) project_root="$repository_root" ;;
++esac
++cd "$project_root"
++
++git_diff() {
++  if [ -n "$project_path" ]; then
++    git -C "$repository_root" -c core.quotePath=false diff "$@" --relative="$project_path" -- "$project_path"
++  else
++    git -c core.quotePath=false diff "$@"
++  fi
++}
+ 
+ work=$(mktemp -d)
+ trap 'rm -rf "$work"' EXIT
+@@ -10,8 +33,8 @@ trap 'rm -rf "$work"' EXIT
+ # Biome fixes the working-tree copy, and staging that copy again would also stage the edits the
+ # author left unstaged. Only fully staged files are staged again; a partly staged file that Biome
+ # changes stops the commit so the author can choose which fixes to stage.
+-git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR >"$work/staged"
+-git -c core.quotePath=false diff --name-only >"$work/unstaged"
++git_diff --cached --name-only --diff-filter=ACMR >"$work/staged"
++git_diff --name-only >"$work/unstaged"
+ grep -Fx -f "$work/unstaged" "$work/staged" >"$work/partly-staged" || true
+ grep -Fxv -f "$work/partly-staged" "$work/staged" >"$work/fully-staged" || true
+ 
+@@ -37,7 +60,7 @@ if ! cmp -s "$work/before" "$work/after"; then
+   exit 1
+ fi
+ 
+-staged_paths=$(git diff --cached --name-only --diff-filter=ACMRD)
++staged_paths=$(git_diff --cached --name-only --diff-filter=ACMRD)
+ 
+ # A version bump is a release: its CHANGELOG.md section is the /changelog page. It runs first
+ # because it takes less time than the type checks.
+@@ -53,8 +76,14 @@ if printf '%s\n' "$staged_paths" | grep -Fxq apps/mobile/app.json; then
+ fi
+ 
+ # The release copies each fragment into its changelog, so a malformed one stops it later.
+-git diff --cached --name-only -z --diff-filter=ACMR -- 'changelog.d/*.md' 'apps/mobile/changelog.d/*.md' \
+-  ':(exclude)changelog.d/README.md' ':(exclude)apps/mobile/changelog.d/README.md' |
++if [ -n "$project_path" ]; then
++  git -C "$repository_root" -c core.quotePath=false diff --cached --name-only -z --diff-filter=ACMR \
++    --relative="$project_path" -- "$project_path/changelog.d/*.md" "$project_path/apps/mobile/changelog.d/*.md" \
++    ":(exclude)$project_path/changelog.d/README.md" ":(exclude)$project_path/apps/mobile/changelog.d/README.md"
++else
++  git diff --cached --name-only -z --diff-filter=ACMR -- 'changelog.d/*.md' 'apps/mobile/changelog.d/*.md' \
++    ':(exclude)changelog.d/README.md' ':(exclude)apps/mobile/changelog.d/README.md'
++fi |
+   xargs -0 -r bun scripts/check-release-notes.ts --staged --fragments
+ 
+ # Text-only commits, such as docs and AGENTS.md, cannot change a type or a UI rule. Data JSON is
+diff --git a/package.json b/package.json
+index 7c4a8085..afd15474 100644
+--- a/package.json
++++ b/package.json
+@@ -295,6 +295,7 @@
+     "test:imagegen": "bun scripts/filesystem-smoke.ts --provider codex --imagegen",
+     "test:workspace-only": "bun scripts/filesystem-smoke.ts --workspace-only",
+     "test:provider-detection": "bun scripts/provider-detection-e2e.ts",
++    "test:pre-commit-subdirectory": "bash scripts/pre-commit-subdirectory-e2e.sh",
+     "test:storage-live": "bun scripts/provider-storage-smoke.ts",
+     "test:grok-live": "bun scripts/provider-storage-smoke.ts --grok-only",
+     "test:team-live": "electron scripts/team-webrtc-live-smoke-app",
+diff --git a/scripts/check-release-notes.ts b/scripts/check-release-notes.ts
+index d018d10d..ab9e8362 100644
+--- a/scripts/check-release-notes.ts
++++ b/scripts/check-release-notes.ts
+@@ -36,12 +36,15 @@ const show = (object: string): string | undefined => {
+   }
+ };
+ 
++const stagedObject = (path: string): string => `:./${path}`;
++const headObject = (path: string): string => `HEAD:./${path}`;
++
+ const fragmentsFlag = process.argv.indexOf("--fragments");
+ if (fragmentsFlag !== -1) {
+   const problems = process.argv
+     .slice(fragmentsFlag + 1)
+     .flatMap((path) =>
+-      fragmentProblems((staged ? show(`:${path}`) : readFileSync(path, "utf8")) ?? "").map(
++      fragmentProblems((staged ? show(stagedObject(path)) : readFileSync(path, "utf8")) ?? "").map(
+         (problem) => `- ${path}: ${problem}`,
+       ),
+     );
+@@ -62,15 +65,15 @@ function version(json: string | undefined): string | undefined {
+   return typeof value === "string" ? value : undefined;
+ }
+ 
+-const nextVersion = version(staged ? show(`:${versionFile}`) : readFileSync(versionFile, "utf8"));
++const nextVersion = version(staged ? show(stagedObject(versionFile)) : readFileSync(versionFile, "utf8"));
+ if (nextVersion === undefined) {
+   process.stderr.write(`${versionFile} has no version.\n`);
+   process.exit(1);
+ }
+-if (staged && version(show(`HEAD:${versionFile}`)) === nextVersion) process.exit(0);
++if (staged && version(show(headObject(versionFile))) === nextVersion) process.exit(0);
+ 
+ const problems = releaseNotesProblems(
+-  (staged ? show(`:${changelogFile}`) : readFileSync(changelogFile, "utf8")) ?? "",
++  (staged ? show(stagedObject(changelogFile)) : readFileSync(changelogFile, "utf8")) ?? "",
+   nextVersion,
+   // A new mobile version waits for store review before `/changelog` shows it.
+   { storeReview: mobile },
+diff --git a/scripts/dev-verify.ts b/scripts/dev-verify.ts
+index a0646c5a..e279ebef 100644
+--- a/scripts/dev-verify.ts
++++ b/scripts/dev-verify.ts
+@@ -1,6 +1,6 @@
+ import { execFileSync, spawnSync } from "node:child_process";
+ import { existsSync } from "node:fs";
+-import { extname, resolve } from "node:path";
++import { extname, relative, resolve, sep } from "node:path";
+ import { supportedBunVersion } from "./prepare-dev-environment";
+ import { readScriptArguments } from "./script-arguments";
+ 
+@@ -197,16 +197,30 @@ function createVerificationCommandPlan(
+ }
+ 
+ function changedFiles(projectRoot: string): string[] {
+-  const tracked = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: projectRoot, encoding: "utf8" });
+-  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
++  const repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+     cwd: projectRoot,
+     encoding: "utf8",
++  }).trim();
++  const projectPath = relative(repositoryRoot, resolve(projectRoot)).split(sep).join("/");
++  // Git names paths from the repository root, which is above the project when OpenBot is a
++  // subdirectory of a larger repository. Scope the listing to the project and remove the prefix.
++  const pathspec = projectPath || ".";
++  const tracked = execFileSync("git", ["diff", "--name-only", "HEAD", "--", pathspec], {
++    cwd: repositoryRoot,
++    encoding: "utf8",
++  });
++  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", pathspec], {
++    cwd: repositoryRoot,
++    encoding: "utf8",
+   });
++  const prefix = projectPath ? `${projectPath}/` : "";
+   return [
+     ...new Set(
+       `${tracked}\n${untracked}`
+         .split("\n")
+         .map((file) => file.trim())
++        .filter((file) => !prefix || file.startsWith(prefix))
++        .map((file) => (prefix ? file.slice(prefix.length) : file))
+         .filter(Boolean),
+     ),
+   ].sort();
+diff --git a/scripts/pre-commit-subdirectory-e2e.sh b/scripts/pre-commit-subdirectory-e2e.sh
+new file mode 100755
+index 00000000..06ede95d
+--- /dev/null
++++ b/scripts/pre-commit-subdirectory-e2e.sh
+@@ -0,0 +1,94 @@
++#!/bin/bash
++# Checks that the pre-commit hook stages each file under its own path, in four layouts:
++# OpenBot as the repository root or as a subdirectory of a larger repository, each in a normal
++# checkout and in a linked worktree.
++#
++# Git runs a hook with GIT_DIR set and without GIT_WORK_TREE. In a linked worktree GIT_DIR points
++# at the worktree's own git directory, so git takes the current directory as the top of the working
++# tree. A hook that changes into a project subdirectory and runs `git add -- examples/x.json` then
++# stages a second copy at `examples/x.json` instead of `<subdirectory>/examples/x.json`.
++#
++# The test copies the real hook into throwaway repositories, stubs `bun` so it needs no runtime,
++# and commits one file in each layout. Each commit must contain exactly that file, and the hook must
++# have seen it as staged. The report is written to .openbot-build/pre-commit-subdirectory.json.
++#
++# Usage: bash scripts/pre-commit-subdirectory-e2e.sh
++set -euo pipefail
++
++project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
++report="$project_root/.openbot-build/pre-commit-subdirectory.json"
++
++fail() {
++  echo "FAIL: $*" >&2
++  exit 1
++}
++
++work=$(mktemp -d)
++trap 'rm -rf "$work"' EXIT
++
++# The stub stands in for every `bun` call of the hook. For `bun run check:staged` it records the
++# staged paths that the hook sees, relative to the project, and changes nothing.
++mkdir -p "$work/bin"
++cat >"$work/bin/bun" <<'STUB'
++#!/bin/sh
++if [ "${1:-}" = "run" ] && [ "${2:-}" = "check:staged" ]; then
++  git diff --cached --name-only --relative >>"$BUN_STAGED_LOG"
++fi
++exit 0
++STUB
++chmod +x "$work/bin/bun"
++export PATH="$work/bin:$PATH"
++export BUN_STAGED_LOG="$work/staged.log"
++
++results=()
++
++# Builds a repository whose OpenBot project is at `$2` ("" for the root) and commits one example
++# file there, in a normal checkout and in a linked worktree.
++check_layout() {
++  local name=$1 subdirectory=$2
++  local main="$work/$name/main" worktree="$work/$name/worktree"
++  local project="$main${subdirectory:+/$subdirectory}"
++  local expected="${subdirectory:+$subdirectory/}examples/x.json"
++
++  mkdir -p "$project/.githooks" "$project/examples"
++  cp "$project_root/.githooks/pre-commit" "$project/.githooks/pre-commit"
++  chmod +x "$project/.githooks/pre-commit"
++  echo '{}' >"$project/package.json"
++  printf '{\n  "name": "example"\n}\n' >"$project/examples/x.json"
++
++  git -C "$main" init -q -b main
++  git -C "$main" config user.email "hook-test@example.com"
++  git -C "$main" config user.name "Hook Test"
++  git -C "$main" add -A
++  git -C "$main" commit -qm "initial commit"
++  git -C "$main" config core.hooksPath "${subdirectory:+$subdirectory/}.githooks"
++  git -C "$main" worktree add -q -b feature "$worktree"
++
++  local checkout kind committed
++  for kind in checkout worktree; do
++    if [ "$kind" = checkout ]; then checkout=$main; else checkout=$worktree; fi
++    : >"$BUN_STAGED_LOG"
++    printf '{\n  "name": "%s"\n}\n' "$kind" >"$checkout/$expected"
++    git -C "$checkout" add -- "$expected"
++    git -C "$checkout" commit -qm "change the example" || fail "$name $kind: the commit failed"
++    committed=$(git -C "$checkout" show --pretty=format: --name-only HEAD | sed '/^$/d' | sort | tr '\n' ' ')
++    [ "$committed" = "$expected " ] || fail "$name $kind: committed [$committed], expected [$expected]"
++    grep -Fxq "examples/x.json" "$BUN_STAGED_LOG" || fail "$name $kind: the hook did not see the staged file"
++    if [ -n "$subdirectory" ] && git -C "$checkout" ls-files --cached | grep -Fxq "examples/x.json"; then
++      fail "$name $kind: the hook staged a second copy at the repository root"
++    fi
++    results+=("{\"layout\":\"$name\",\"checkout\":\"$kind\",\"committed\":\"$expected\",\"passed\":true}")
++  done
++  git -C "$main" worktree remove --force "$worktree"
++}
++
++check_layout root ""
++check_layout subdirectory "vendor/openbot"
++
++mkdir -p "$(dirname "$report")"
++{
++  printf '{"generatedAt":"%s","checks":[' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
++  (IFS=,; printf '%s' "${results[*]}")
++  printf ']}\n'
++} >"$report"
++echo "PASS: the pre-commit hook staged each file under its own path in ${#results[@]} layouts. Report: $report"
+diff --git a/scripts/prepare-dev-environment.ts b/scripts/prepare-dev-environment.ts
+index cc2e704e..ee704868 100644
+--- a/scripts/prepare-dev-environment.ts
++++ b/scripts/prepare-dev-environment.ts
+@@ -1,7 +1,7 @@
+ import { execFileSync } from "node:child_process";
+ import { createHash } from "node:crypto";
+ import { constants, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+-import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
++import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { developmentInstanceIdForWorktree } from "../src/main/development-profile";
+ import { type DevelopmentStateOutcome, ensureDevelopmentState } from "./development-secrets";
+@@ -207,7 +207,12 @@ function findMainCheckoutRoot(projectRoot: string): string | undefined {
+       cwd: projectRoot,
+       encoding: "utf8",
+     }).trim();
+-    return dirname(commonDir);
++    const worktreeRoot = execFileSync("git", ["rev-parse", "--path-format=absolute", "--show-toplevel"], {
++      cwd: projectRoot,
++      encoding: "utf8",
++    }).trim();
++    const projectPath = relative(worktreeRoot, resolve(projectRoot));
++    return isInsideCheckout(projectPath) ? resolve(dirname(commonDir), projectPath) : undefined;
+   } catch {
+     // A source archive has no git metadata, so there is nothing to copy from.
+     return undefined;
+diff --git a/scripts/staged-typecheck.ts b/scripts/staged-typecheck.ts
+index 39d2a36c..8a9e30eb 100644
+--- a/scripts/staged-typecheck.ts
++++ b/scripts/staged-typecheck.ts
+@@ -15,7 +15,7 @@
+ 
+ import { execFileSync } from "node:child_process";
+ import { existsSync, readdirSync, readFileSync } from "node:fs";
+-import { join, posix, relative, resolve } from "node:path";
++import { join, posix, relative, resolve, sep } from "node:path";
+ import { MOBILE_CODEGEN_INPUTS } from "./mobile-codegen";
+ 
+ const ROOT = resolve(import.meta.dirname, "..");
+@@ -151,11 +151,22 @@ function selectTypechecks(paths: string[]): Map<string, string> {
+ 
+ function stagedPaths(): string[] {
+   // Without renames, a moved file lists its old path too: the files that imported it now fail.
++  const repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
++    cwd: ROOT,
++    encoding: "utf8",
++  }).trim();
++  // Git names staged paths from the repository root, which is above the project when OpenBot is
++  // a subdirectory of a larger repository. Project selectors are relative to OpenBot.
++  const projectPath = relative(repositoryRoot, ROOT).split(sep).join("/");
++  const prefix = projectPath ? `${projectPath}/` : "";
+   const output = execFileSync("git", ["diff", "--cached", "--name-only", "--no-renames", "-z"], {
+     cwd: ROOT,
+     encoding: "utf8",
+   });
+-  return output.split("\0").filter(Boolean);
++  return output
++    .split("\0")
++    .filter((path) => !prefix || path.startsWith(prefix))
++    .map((path) => (prefix ? path.slice(prefix.length) : path));
+ }
+ 
+ if (import.meta.main) {
+-- 
+2.47.3
+
