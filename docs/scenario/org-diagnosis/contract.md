@@ -13,6 +13,8 @@ Refs #6、#142（本文由 #142 新增）。
 - `docs/scenario/org-diagnosis/pipeline.md` 与 `openswarm/examples/org-diagnosis-pipeline.json`
   规定**编排方式**；
 - `docs/scenario/org-diagnosis/review-checklist.md` 规定**人工审查清单**；
+- `docs/scenario/org-diagnosis/data-definitions.md` 规定**diagnosis.json 的指标键名口径**
+  （含义、单位、计算口径、来源角色）；
 - 本文只补齐**接口级契约**：命令行、输入输出、退出码、字段归属，以及已知契约缺口。
 
 边界沿用 `docs/scenario/org-diagnosis/README.md:5`：真实组织数据只经仓库外的绝对路径进入，
