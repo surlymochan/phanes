@@ -259,6 +259,9 @@ def main(argv=None):
                                    output_path=report_path, timeout=args.timeout):
                         failed.append('审查')
                         status = 1
+                        # 同时标出稳定的角色名，便于调用方不依赖本地化步骤名定位 review 失败。
+                        print('review 角色失败：审查报告已保留，请检查该报告和 timings.json',
+                              file=sys.stderr, flush=True)
                         print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
     finally:
         if failed:

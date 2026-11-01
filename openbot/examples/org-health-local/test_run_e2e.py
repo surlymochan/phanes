@@ -799,6 +799,25 @@ time.sleep(30)
         self.assertEqual(set(timings[-1]), {'name', 'command', 'duration_seconds', 'exit_code'})
         self.assertEqual(timings[-1]['exit_code'], 2)
 
+    def test_review_partial_report_failure_is_observable_in_timings_and_error(self):
+        """审查器写出部分报告后失败：报告保留，timings 含失败审查段且错误明确指向 review。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 4), exit_code=6,
+                            echo='部分审查报告')
+        result = subprocess.run(self.command() + ['--review', '--reviewer', str(self.scripts[4])],
+                                capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('review 角色失败', result.stderr)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        report = self.workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file())
+        self.assertIn('部分审查报告', report.read_text(encoding='utf-8'))
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertEqual(timings[-1]['exit_code'], 6)
+        self.assertEqual(set(timings[-1]), {'name', 'command', 'duration_seconds', 'exit_code'})
+
     def test_review_failure_keeps_reviewer_error_in_default_report(self):
         """审查脚本参数失败时，默认报告里保留脚本的错误输出，不留下空报告。"""
         for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
