@@ -112,7 +112,12 @@ class RunE2ETest(unittest.TestCase):
 
     def write_stub(self, path, role, failing=False, probe=False, exit_code=7, echo=None,
                    report_path=None, report_body=None, error_text=None, raw_output=None,
-                   fail_after_output=False):
+                   fail_after_output=False, damage=None):
+        """写一个临时角色桩脚本。
+
+        damage 只作用于 Builder 桩：'missing-index' 造出缺 index.html 的站点目录，
+        'broken-json' 造出 data/diagnosis.json 损坏的站点目录；None 时保持默认产物。
+        """
         if report_path is not None and report_body is None:
             report_body = '{}'
         source = '''import json, pathlib, sys
@@ -138,7 +143,16 @@ elif role == 'da':
 elif role == 'builder':
     out = pathlib.Path(args[args.index('--out') + 1])
     out.mkdir(parents=True, exist_ok=True)
-    if PROBE:
+    if DAMAGE == 'missing-index':
+        (out / 'data').mkdir(parents=True, exist_ok=True)
+        (out / 'data' / 'diagnosis.json').write_text('{}', encoding='utf-8')
+        (out / 'build-report.json').write_text('{}', encoding='utf-8')
+    elif DAMAGE == 'broken-json':
+        (out / 'data').mkdir(parents=True, exist_ok=True)
+        (out / 'index.html').write_text('ok', encoding='utf-8')
+        (out / 'data' / 'diagnosis.json').write_text('{broken', encoding='utf-8')
+        (out / 'build-report.json').write_text('{}', encoding='utf-8')
+    elif PROBE:
         bundle = pathlib.Path(args[args.index('--bundle') + 1])
         (out / 'index.html').write_text(bundle.read_text(encoding='utf-8'), encoding='utf-8')
         (out / 'build-report.json').write_text(json.dumps({'status': 'ok'}), encoding='utf-8')
@@ -166,6 +180,34 @@ if FAIL:
         source = source.replace('RPT_BODY', repr(report_body))
         source = source.replace('ERR_TEXT', repr(error_text))
         source = source.replace('RAW_OUTPUT', repr(raw_output))
+        source = source.replace('DAMAGE', repr(damage))
+        path.write_text(source, encoding='utf-8')
+
+    def write_site_stub(self, path):
+        """写一个产出完整站点的 Builder 桩：真实站点自检应当通过（成功路径对照）。"""
+        source = '''import hashlib, json, pathlib, shutil, sys
+role = 'builder'
+args = sys.argv[1:]
+with open(LOG, 'a', encoding='utf-8') as stream:
+    stream.write(json.dumps([role, args]) + "\\n")
+out = pathlib.Path(args[args.index('--out') + 1])
+bundle = pathlib.Path(args[args.index('--bundle') + 1])
+(out / 'data').mkdir(parents=True, exist_ok=True)
+shutil.copyfile(pathlib.Path(INDEX), out / 'index.html')
+shutil.copyfile(pathlib.Path(STYLES), out / 'styles.css')
+shutil.copyfile(pathlib.Path(DATA), out / 'data' / 'diagnosis.json')
+shutil.copyfile(bundle, out / 'app.bundle.js')
+files = []
+for relative in ('index.html', 'app.bundle.js', 'styles.css', 'data/diagnosis.json'):
+    item = out / relative
+    files.append({'路径': relative, '字节数': item.stat().st_size,
+                  'sha256': hashlib.sha256(item.read_bytes()).hexdigest()})
+(out / 'build-report.json').write_text(json.dumps({'文件清单': files}, ensure_ascii=False), encoding='utf-8')
+'''
+        source = source.replace('LOG', repr(str(self.log)))
+        source = source.replace('INDEX', repr(str(ROOT / 'index.html')))
+        source = source.replace('STYLES', repr(str(ROOT / 'styles.css')))
+        source = source.replace('DATA', repr(str(ROOT / 'data' / 'diagnosis.json')))
         path.write_text(source, encoding='utf-8')
 
     def write_signal_stub(self, path, signal_name):
@@ -783,6 +825,65 @@ time.sleep(30)
         # 后续步骤（站点自检）不再执行
         self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder'])
         self.assertNotIn('[检查] 命令', result.stdout)
+
+    def test_corrupt_builder_output_fails_check_site_and_keeps_upstream_artifacts(self):
+        """Builder 产物损坏（缺 index 或 JSON 损坏）时，真实 check_site 失败且保留中间诊断。
+
+        角色仍是临时桩：只有站点自检用真实的 builder/check_site.py，
+        这样失败原因指向真实的站点检查，而不是桩的行为。
+        """
+        for damage in ('missing-index', 'broken-json'):
+            with self.subTest(damage=damage):
+                # 每个子用例独立记录角色调用，避免上一轮日志混入。
+                self.log.unlink(missing_ok=True)
+                workdir = self.root / f'out-{damage}'
+                for path, role in zip(self.scripts[:2], ('boss', 'da')):
+                    self.write_stub(path, role)
+                self.write_stub(self.scripts[2], 'builder', damage=damage)
+
+                command = self.command(workdir)
+                command[command.index('--checker') + 1] = str(ROOT / 'builder' / 'check_site.py')
+                result = subprocess.run(command, capture_output=True, text=True)
+
+                # 整流程非零退出：失败步骤与实际执行的自检脚本都被点名。
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('步骤失败: 检查', result.stderr)
+                self.assertIn('check_site.py', result.stderr)
+                self.assertNotIn('预览命令', result.stdout)
+                # 失败点在站点自检：Builder 已经跑完并写出了站点目录。
+                self.assertIn('[Builder] 命令', result.stdout)
+                self.assertIn('Builder', result.stdout)
+                # 站点自检用真实脚本，不写桩日志；用命令行输出确认它确实跑过。
+                self.assertIn('[检查] 命令', result.stdout)
+                self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder'])
+                # 中间诊断保留在临时 root：任务书、诊断快照与站点里的快照都不被清理。
+                self.assertTrue((workdir / 'brief.json').is_file(), '任务书被删除')
+                self.assertTrue((workdir / 'diagnosis.json').is_file(), '诊断快照被删除')
+                self.assertTrue((workdir / 'dist' / 'data' / 'diagnosis.json').is_file(), '站点内诊断快照被删除')
+                # 状态文件能直接定位失败角色与原因。
+                status = json.loads((workdir / STATUS_FILE).read_text(encoding='utf-8'))
+                self.assertEqual(status['status'], 'failed')
+                self.assertEqual(status['failed_step'], 'checker')
+                self.assertIn('check_site.py', status['error'])
+
+    def test_intact_builder_output_passes_check_site(self):
+        """Builder 产物完整时，真实 check_site 通过：成功路径不受新增失败判定影响。"""
+        for path, role in zip(self.scripts[:2], ('boss', 'da')):
+            self.write_stub(path, role)
+        self.write_site_stub(self.scripts[2])
+
+        command = self.command()
+        command[command.index('--checker') + 1] = str(ROOT / 'builder' / 'check_site.py')
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('预览命令', result.stdout)
+        self.assertIn('[检查] 命令', result.stdout)
+        self.assertEqual([call[0] for call in self.calls()], ['boss', 'da', 'builder'])
+        self.assertTrue((self.workdir / 'dist' / 'index.html').is_file())
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'ok')
+        self.assertIsNone(status['failed_step'])
 
     def test_missing_explicit_bundle_stops_at_builder(self):
         """显式 bundle 不存在时，Builder 失败并阻断检查与审查。"""

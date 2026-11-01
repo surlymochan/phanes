@@ -206,6 +206,20 @@ def exit_reason(exit_code):
     return f'退出码 {exit_code}'
 
 
+def script_name(command):
+    """返回角色脚本文件名；失败时用于指出实际执行的是哪个 Builder/check_site 实现。"""
+    if len(command) > 1:
+        return Path(command[1]).name
+    return None
+
+
+def failure_detail(command, exit_code):
+    """失败详情：先点名实际执行的脚本文件，再给出退出原因。"""
+    reason = exit_reason(exit_code)
+    script = script_name(command)
+    return f'{script}, {reason}' if script else reason
+
+
 def run_step(name, command, timings, stdout=None, stderr=None, output_path=None, timeout=None):
     """运行一个角色步骤；返回 (成功与否, 失败原因, 子进程是否启动)。
 
@@ -296,12 +310,12 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
     timings.append(entry)
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
-        print(f'步骤失败: {name} ({exit_reason(result.returncode)})', file=sys.stderr, flush=True)
+        print(f'步骤失败: {name} ({failure_detail(command, result.returncode)})', file=sys.stderr, flush=True)
     if reason is not None:
         print(f'步骤失败: {name} (输出含非 UTF-8 字节: {output_path}, {reason})', file=sys.stderr, flush=True)
         text = f'步骤失败: {name} (输出含非 UTF-8 字节: {output_path}, {reason})'
     elif exit_code:
-        text = f'步骤失败: {name} ({exit_reason(exit_code)})'
+        text = f'步骤失败: {name} ({failure_detail(command, exit_code)})'
     else:
         text = None
     error_text = failure_reason(text, captured) if text is not None else None
