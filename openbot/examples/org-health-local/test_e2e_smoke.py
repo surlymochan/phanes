@@ -61,7 +61,10 @@ class E2ESmokeTest(unittest.TestCase):
                         connection.request("GET", path)
                         response = connection.getresponse()
                         self.assertEqual(response.status, 200)
-                        self.assertTrue(response.read())
+                        body = response.read()
+                        self.assertTrue(body)
+                        if path == "/data/diagnosis.json":
+                            self.assertEqual(response.getheader("Content-Type"), "application/json")
                     finally:
                         connection.close()
 
