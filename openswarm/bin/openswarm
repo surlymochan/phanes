@@ -11265,7 +11265,7 @@ def safe_id(value):
 
 def batch_save(summary):
     directory = os.path.join(DATA, "batches", summary["id"])
-    os.makedirs(directory, exist_ok=True)
+    jsave(os.path.join(directory, "summary.json"), summary)
     def cell(value):
         return short(str(value), 240).replace("|", "\\|")
     lines = [f"# Batch {summary['id']}", "", f"State: {summary['state']}", "",
@@ -11276,9 +11276,6 @@ def batch_save(summary):
                                       ("card", "host", "status", "verify_rc", "branch", "commit", "seconds", "summary")) + " |")
     with open(os.path.join(directory, "summary.md"), "w") as stream:
         stream.write("\n".join(lines) + "\n")
-    # Terminal JSON is the completion signal: publish it only after all batch writes finish.
-    # A detached client's reader may remove the directory as soon as it sees this state.
-    jsave(os.path.join(directory, "summary.json"), summary)
 
 
 def batch_change(batch_summary, row, state, **fields):

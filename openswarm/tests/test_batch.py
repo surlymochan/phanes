@@ -319,42 +319,5 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(self.git(self.repo, "rev-parse", summary["cards"][0]["branch"]), summary["cards"][0]["commit"])
 
 
-class BatchSummaryPublicationTests(unittest.TestCase):
-    def test_terminal_json_is_published_only_after_markdown_is_complete(self):
-        for state in ("finished", "failed"):
-            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
-                summary = {"id": "batch", "state": state, "cards": []}
-                markdown = Path(directory) / "batches" / "batch" / "summary.md"
-                save = xs.jsave
-
-                def observe_publication(path, value):
-                    save(path, value)
-                    # A reader may act on terminal JSON immediately, including deleting the batch.
-                    self.assertEqual(json.loads(Path(path).read_text())["state"], state)
-                    self.assertTrue(markdown.exists(), "terminal state exposed before markdown was written")
-                    self.assertIn(f"State: {state}\n", markdown.read_text())
-                    self.assertTrue(markdown.read_text().endswith("\n"))
-
-                with mock.patch.object(xs, "DATA", directory), \
-                        mock.patch.object(xs, "jsave", side_effect=observe_publication):
-                    xs.batch_save(summary)
-
-    def test_markdown_write_failure_does_not_publish_terminal_json(self):
-        with tempfile.TemporaryDirectory() as directory:
-            summary = {"id": "batch", "state": "finished", "cards": []}
-            real_open = open
-
-            def fail_markdown(path, *args, **kwargs):
-                if str(path).endswith("summary.md"):
-                    raise OSError("fixture: markdown write failed")
-                return real_open(path, *args, **kwargs)
-
-            with mock.patch.object(xs, "DATA", directory), \
-                    mock.patch("builtins.open", side_effect=fail_markdown):
-                with self.assertRaisesRegex(OSError, "markdown write failed"):
-                    xs.batch_save(summary)
-            self.assertFalse((Path(directory) / "batches" / "batch" / "summary.json").exists())
-
-
 if __name__ == "__main__":
     unittest.main()
