@@ -367,9 +367,16 @@ python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir
 | # | 缺口 | 证据 | 影响 | 对应 issue |
 | --- | --- | --- | --- | --- |
 | 3 | **DA 口径说明脚本把口径文字里的数字误判为泄漏**：`write_method.py` 会把任务书 `口径` 原文写进「统一口径」段（`da/write_method.py:20-31`、`:96-140`），再拿快照里的数值做泄漏比对（`da/write_method.py:163-181`） | 对 Boss 自己产出的任务书（含 `demo/brief.json`）执行即报「生成文档包含诊断数值：0、2026」，退出码 1，不产出 `da-method.md` | 编排里 DA 阶段的仓库内产物无法生成 | 本 issue #142 记录，尚未单独立项 |
-| 5 | **编排 spec 的 `--verify` 命令与实际 CLI 不符**：spec 里 DA 阶段仍用 `validate.py --data <path>`（`openswarm/examples/org-diagnosis-pipeline.json` 的 `stages[1].verify`），Builder 阶段用 `test_serve.py --data <path>`；当前 `validate.py` 接受位置参数与 `--schema`/`--json`（`validate.py:300-320`），`test_serve.py` 是 unittest 模块、无 `--data` | 直接执行 `validate.py <path>` 退出码 0；spec 中的 `validate.py --data <path>` 与 `test_serve.py --data <path>` 仍被拒绝，退出码 2 | 编排 spec 的 DA/Builder 门禁不可执行 | 本 issue #142 记录，尚未单独立项 |
 | 6 | **期次键名与观察月份写死在结构定义和页面上**：schema 的期次键是 `2026-01实际`/`2026-05H1参考`/`2026-09实际`/`年末测算`/`年末目标`（`schema/diagnosis.schema.json:184-228`），页面要求 `scope.观察月份 === "2026-09"`（`app.js:73-82`、`:110`） | `--month 2026-06` 生成的任务书即使补齐 DA 所需字段，DA 也以「生成的快照未通过结构校验」退出 1（缺 `2026-09实际`） | 除 2026-09 外的观察月份不可用 | 本 issue #142 记录，尚未单立项 |
-| 7 | **文档漂移**：`pipeline.md` 与编排 spec 仍写「`validate.py` / `test_serve.py` 当前仓库还没有这个文件」（`docs/scenario/org-diagnosis/pipeline.md:80-84`、`:104-105`；`openswarm/examples/org-diagnosis-pipeline.json` 的 `pending`），`review-checklist.md` 写「`cross_check.py` 当前不在仓库中」（`docs/scenario/org-diagnosis/review-checklist.md:51`） | 这三个文件现在都在仓库里 | 读者按文档判断会走错 | 本 issue #142 记录，尚未单独立项 |
+
+### 已修复的缺口
+
+以下缺口已不再成立，保留在此记录修复证据：
+
+| # | 缺口 | 修复证据 | 对应 issue |
+| --- | --- | --- | --- |
+| 5 | **编排 spec 的 `--verify` 命令曾与实际 CLI 不符** | DA 阶段已改为 `python3 openbot/examples/org-health-local/validate.py "${DIAGNOSIS}" && test -s ...`，使用位置参数（`openswarm/examples/org-diagnosis-pipeline.json:156-158`）；Builder 阶段已改为 `python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'`（`:210-212`）。 | 本 issue #142 记录 |
+| 7 | **文档与仓库内容曾发生漂移** | `pipeline.md` 已说明 `validate.py`、`test_serve.py` 已在仓库内（`docs/scenario/org-diagnosis/pipeline.md:80-84`、`:102-105`）；`review-checklist.md` 已说明三个脚本均已在仓库内（`docs/scenario/org-diagnosis/review-checklist.md:51`）；编排 spec 的 `pending` 条目也写明仓库已有（`openswarm/examples/org-diagnosis-pipeline.json:268-275`）。 | 本 issue #142 记录 |
 
 ## 9. 复现命令与本地实测
 
@@ -393,7 +400,7 @@ python3 da/write_method.py --brief "$W/brief.json" --data "$W/diagnosis.json" --
 # 5. Reviewer 三方核对：10 项全 PASS（退出码 0）
 python3 review/cross_check.py --brief "$W/brief.json" --data "$W/diagnosis.json" --dist "$W/dist"
 
-# 6. validate.py 当前使用位置参数；编排 spec 的旧命令与 test_serve 命令仍失败 → 缺口 5
+# 6. validate.py 当前使用位置参数；以下两条旧写法仍失败（仅作旧写法演示，编排 spec 已不再使用）
 python3 validate.py "$W/diagnosis.json"
 python3 validate.py --data "$W/diagnosis.json"
 python3 test_serve.py --data "$W/diagnosis.json"
@@ -415,7 +422,7 @@ python3 run_e2e.py --workdir "$W/e2e" --bundle "$W/app.bundle.js" --review
 | `builder/check_site.py`（build_site 产物） | 0 | 站点检查通过，文件清单 sha256 全部一致 |
 | `review/cross_check.py` | 0 | 10 项检查全部通过 |
 | `validate.py …` | 0 | 校验通过（位置参数） |
-| `validate.py --data …` / `test_serve.py --data …` | 2 | unrecognized arguments: --data |
+| `validate.py --data …` / `test_serve.py --data …` | 2 | unrecognized arguments: --data；这是旧写法的演示，编排 spec 已不再使用这两条命令 |
 | `run_e2e.py --workdir … --review` | 0 | 审查完成并写出 `review.md` |
 
 仓库现有单测（CI 口径见 `.github/workflows/phanes.yml:77-87`）的验收命令为：
