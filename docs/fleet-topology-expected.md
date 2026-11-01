@@ -5,6 +5,28 @@
 
 ## Host 限额
 
+机器可读的 topology 约定如下。`hosts` 是自动派发允许使用的 lane host
+集合；每个 host 都必须有对应的 `host:<name>` 限额键，避免文档中的 host
+在容量控制面没有限额。
+
+```json
+{
+  "hosts": ["ib1", "ib2", "ib3", "ib4", "ib5", "gocc", "gorelay", "govpn", "govpn2"],
+  "limits": {
+    "total": 11,
+    "host:ib1": 1,
+    "host:ib2": 1,
+    "host:ib3": 1,
+    "host:ib4": 1,
+    "host:ib5": 2,
+    "host:gocc": 1,
+    "host:gorelay": 1,
+    "host:govpn": 1,
+    "host:govpn2": 2
+  }
+}
+```
+
 | Host | 最大 lane 数 |
 |---|---:|
 | `gocc` | 1 |
