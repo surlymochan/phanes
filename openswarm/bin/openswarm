@@ -6003,6 +6003,20 @@ def bus_redact(value):
     return BUS_SECRET_RE.sub("[REDACTED]", str(value))
 
 
+def bus_error_class(value):
+    """Classify common non-interactive GitHub push/PR failures without exposing secrets."""
+    text = bus_redact(value).lower()
+    if re.search(r"(?:authentication|unauthori[sz]ed|bad credentials|invalid (?:credential|username|token)|password authentication|permission denied|publickey|access denied|http 401|http 403|not authorized)", text):
+        return "auth"
+    if re.search(r"(?:non-fast-forward|non fast forward|fetch first|updates were rejected)", text):
+        return "non-fast-forward"
+    if re.search(r"(?:repository not found|repo(?:sitory)? .*not found|http 404|could not read from remote)", text):
+        return "repo-missing"
+    if re.search(r"(?:network|timed out|timeout|could not resolve host|connection (?:reset| refused| timed out)|temporary failure|proxy)", text):
+        return "network"
+    return "bus_error"
+
+
 def bus_sanitize(value):
     if isinstance(value, str):
         return bus_redact(value)
@@ -6254,6 +6268,8 @@ def bus_parse_result(body):
         return None
     if result.get("pr_url") is not None and not isinstance(result["pr_url"], str):
         return None
+    if result.get("error_class") is not None and not isinstance(result["error_class"], str):
+        return None
     return result
 
 
@@ -6344,8 +6360,9 @@ def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, stat
             status = "failed"
     bus_info = {"issue_url": (issue or {}).get("html_url"), "executor": executor,
                 "pr_url": (result or {}).get("pr_url")}
+    result_error_class = (result or {}).get("error_class")
     output = {
-        "id": rid, "status": status, "error_class": "bus_error" if error else None, "title": title,
+        "id": rid, "status": status, "error_class": (bus_error_class(error) if error else result_error_class), "title": title,
         "backend": "github-issue", "model": None, "effort": None, "usage": None,
         "seconds": elapsed, "verify": verify, "verify_note": verify_note,
         "result": {key: result.get(key) for key in ("status", "summary", "files_changed", "tests", "followups")}
@@ -6354,7 +6371,7 @@ def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, stat
         "worktree": None, "merge_hint": f"git merge --no-ff {branch}" if branch else None,
         "workspace": {"mode": "github-issue", "repo": root, "base": task.get("base")},
         "attempts": [{"backend": "github-issue", "model": None, "seconds": elapsed,
-                      "error_class": "bus_error" if error else None}],
+                      "error_class": (bus_error_class(error) if error else result_error_class)}],
         "bus": bus_info, "run_dir": rdir,
     }
     if error:
@@ -6681,6 +6698,7 @@ def bus_worker_run(issue, cfg, args, policy):
         branch, commit = f"openswarm/{task['run_id']}", local.get("commit")
         report_status = nested.get("status") or local.get("status") or "failed"
         summary = nested.get("summary") or local.get("error") or f"worker run ended with {report_status}"
+        error_class = nested.get("error_class") or local.get("error_class")
         pr_url = None
         if labels["cancelled"] in issue_label_names(gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")):
             return False
@@ -6688,9 +6706,15 @@ def bus_worker_run(issue, cfg, args, policy):
             code, _, push_error = sh(["git", "push", "origin", f"{branch}:{branch}"], cwd=repo_path, timeout=300)
             if code:
                 report_status = "failed"
+                error_class = bus_error_class(push_error)
                 summary += f"; push failed: {bus_redact(push_error.strip())[:180]}"
             elif (policy.get("bus") or {}).get("open_pr"):
-                pr_url = bus_worker_open_pr(task["repo"], branch, issue.get("title", "openswarm task"), task)
+                try:
+                    pr_url = bus_worker_open_pr(task["repo"], branch, issue.get("title", "openswarm task"), task)
+                except Exception as pr_error:
+                    report_status = "failed"
+                    error_class = bus_error_class(pr_error)
+                    summary += f"; PR creation failed: {bus_redact(str(pr_error))[:180]}"
         if labels["cancelled"] in issue_label_names(gh_transport(f"repos/{cfg['repo']}/issues/{issue['number']}")):
             return False
         followups = nested.get("followups") or []
@@ -6699,7 +6723,8 @@ def bus_worker_run(issue, cfg, args, policy):
         report = bus_sanitize({"status": report_status if report_status in ("done", "partial", "failed") else "failed",
                   "summary": summary, "files_changed": nested.get("files_changed") or [],
                   "tests": nested.get("tests") or "not run: executor did not return a test report",
-                  "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url})
+                  "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url,
+                  "error_class": error_class})
         terminal = "failed" if report["status"] == "failed" else "done"
         body = "```openswarm-result\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```"
         bus_comment(cfg["repo"], issue["number"], body)
@@ -6712,7 +6737,7 @@ def bus_worker_run(issue, cfg, args, policy):
             return False
         report = {"status": "failed", "summary": bus_redact(str(error))[:500], "files_changed": [],
                   "tests": "not run: worker failed before verification", "followups": [], "branch": None,
-                  "commit": None, "pr_url": None}
+                  "commit": None, "pr_url": None, "error_class": bus_error_class(error)}
         bus_comment(cfg["repo"], issue["number"], "```openswarm-result\n" + json.dumps(report, indent=2) + "\n```")
         bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels["failed"]],
                              remove=[labels["queued"], labels["claimed"]])
