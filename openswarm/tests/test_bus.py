@@ -192,7 +192,7 @@ class BusTests(unittest.TestCase):
         path.write_text(
             "#!/usr/bin/env python3\n"
             "import json, time\n"
-            f"open({str(started)!r}, 'w').write('started\\n')\n"
+            f"open({str(started)!r}, 'a').write('started\\n')\n"
             f"time.sleep({sleep!r})\n"
             f"open({str(finished)!r}, 'w').write('finished\\n')\n"
             "with open('worker.txt', 'w') as stream:\n"
@@ -389,6 +389,19 @@ class BusTests(unittest.TestCase):
         self.assertEqual(comments[-1]["body"], xs.bus_task_digest_comment(fence))
         self.assertTrue(xs.bus_worker_task_is_trusted(issue, extracted, comments, ["planner"]))
         self.assertFalse(xs.bus_worker_task_is_trusted(issue, extracted, comments[:1], ["planner"]))
+
+    def test_duplicate_digest_publication_is_idempotent_and_json_order_is_canonical(self):
+        metadata = {"run_id": "canonical-digest", "repo": "org/target", "base": self.base,
+                    "branch_hint": "openswarm/canonical-digest", "budget_minutes": 1,
+                    "report_schema": xs.RESULT_SCHEMA}
+        created = xs.bus_create_issue("org/bus", self.cfg, "canonical digest", "write worker.txt", metadata)
+        first = self.issue(created["number"])["comments"][0]
+        reordered = json.dumps({key: metadata[key] for key in reversed(list(metadata))}, indent=2)
+        self.assertEqual(xs.bus_task_digest(metadata), xs.bus_task_digest(reordered))
+        self.assertEqual(xs.bus_task_digest_comment(metadata), xs.bus_task_digest_comment(reordered))
+        xs.bus_publish_task_digest("org/bus", created["number"], reordered)
+        comments = self.issue(created["number"])["comments"]
+        self.assertEqual([comment["body"] for comment in comments], [first["body"]])
 
     def test_cancel_comment_redacts_provider_credentials(self):
         created = xs.bus_create_issue("org/bus", self.cfg, "cancel", "test cancel", {
@@ -593,6 +606,8 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         results = [comment for comment in comments if xs.bus_parse_result(comment["body"])]
         self.assertEqual(len(results), 1, "only the winning claim may report a result")
         self.assertEqual(results[0]["user"]["login"], winner["user"]["login"])
+        self.assertEqual((self.root / "fake-pi.started").read_text().splitlines(), ["started"],
+                         "the losing worker must not execute the task")
         report = xs.bus_parse_result(results[0]["body"])
         self.assertEqual(report["status"], "done")
         self.assertEqual(report["branch"], "openswarm/claim-race")
