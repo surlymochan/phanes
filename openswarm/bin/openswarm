@@ -14001,6 +14001,61 @@ def doctor_disk_check(lane):
     return doctor_check("disk", "ok", detail)
 
 
+def doctor_pi_broker(lane):
+    """Check the local Pi broker and its audit log without making a provider request."""
+    socket_path = (lane.get("broker_socket") or envvar("OPENSWARM_PI_BROKER_SOCKET")
+                   or "/run/openswarm-pi/broker.sock")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1.0)
+            client.connect(socket_path)
+    except OSError as error:
+        return doctor_check("pi_broker", "fail",
+                            f"broker socket is not reachable: {socket_path} ({error})",
+                            "start the Pi broker or correct OPENSWARM_PI_BROKER_SOCKET")
+
+    log_path = os.environ.get("PI_BROKER_LOG") or (socket_path + ".requests.jsonl")
+    parent = os.path.dirname(os.path.abspath(log_path))
+    if os.path.exists(log_path):
+        writable = os.access(log_path, os.W_OK)
+    else:
+        writable = os.path.isdir(parent) and os.access(parent, os.W_OK)
+    if not writable:
+        return doctor_check("pi_broker", "warn", f"broker request log cannot be written: {log_path}",
+                            "make the broker request log or its parent directory writable")
+
+    cutoff = time.time() - 600
+    requests, rate_limits, first_429 = 0, 0, None
+    try:
+        # An absent log is normal for a newly started or idle broker.
+        if os.path.exists(log_path):
+            with open(log_path, encoding="utf-8") as log:
+                for line in log:
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    stamp = lane_activity_timestamp(row.get("ts")) if isinstance(row, dict) else None
+                    if stamp is None or stamp < cutoff:
+                        continue
+                    requests += 1
+                    if row.get("status") == 429:
+                        rate_limits += 1
+                        first_429 = first_429 or row.get("ts")
+    except OSError:
+        return doctor_check("pi_broker", "warn", f"broker request log cannot be read: {log_path}",
+                            "check the broker request log permissions")
+    if requests >= 5 and rate_limits / requests >= 0.8:
+        return doctor_check("pi_broker", "warn",
+                            f"provider quota or rate limit: {rate_limits}/{requests} requests returned 429; "
+                            f"first 429 at {first_429}",
+                            "check provider quota or rate limits")
+    if not requests:
+        return doctor_check("pi_broker", "ok", "broker connected; request log idle")
+    return doctor_check("pi_broker", "ok",
+                        f"broker connected; {requests} recent request(s), {rate_limits} returned 429")
+
+
 def doctor_lane_report(lane, policy, system=None):
     """Every prerequisite of one lane, in report order."""
     system = sys.platform if system is None else system
@@ -14011,6 +14066,8 @@ def doctor_lane_report(lane, policy, system=None):
     if env_file_check:
         checks.append(env_file_check)
     checks.append(doctor_proxy_check(doctor_lane_environment(lane)))
+    if lane.get("backend") == "pi":
+        checks.append(doctor_pi_broker(lane))
     checks.append(doctor_disk_check(lane))
     status = "fail" if any(c["status"] == "fail" for c in checks) else (
         "warn" if any(c["status"] == "warn" for c in checks) else "ok")
