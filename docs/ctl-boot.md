@@ -10,33 +10,44 @@ That script starts (if not already running):
 
 | Loop | Script | Role | Heartbeat / status |
 |------|--------|------|--------------------|
-| ib-refresh | `ctl-loop` → `ib-refresh` | renew instabox SSH certs before expiry | `~/phanes-ctl/ctl-loop.heartbeat`, `ib-refresh.status` |
+| ib-refresh-loop (`ib-refresh`) | `ctl-loop` → `ib-refresh` | renew instabox SSH certs before expiry | `~/phanes-ctl/ctl-loop.heartbeat`, `ib-refresh.status` |
 | lane-autodispatch | `lane-autodispatch` | SSH fleet dispatch + backlog refill | `~/phanes-ctl/autodispatch/heartbeat` |
 | lane-merge | `lane-merge` → `merge-loop.sh` | merge Linux-green `fleet/*` PRs | `~/phanes-ctl/autodispatch/merge-heartbeat` |
-| bus-worker | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
+| bus-worker-loop (`bus-worker`) | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
 | health-loop | `health-loop` → `health-check.py` | disk/mem/ssh/quota probes; auto PAUSE-* | `~/phanes-ctl/autodispatch/health.heartbeat`, `health.json`, `health.alert` |
 
 ## Key loops: startup commands & heartbeats
 
-The three core control-plane loops and their startup commands and heartbeat/status files are:
+The `start-control-plane` suite manages five resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), with their startup commands and heartbeat/status files:
 
-1. **`lane-autodispatch`** (fleet SSH dispatch + backlog refill):
+1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
+   - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
+     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --status-file ~/phanes-ctl/ib-refresh.status`)
+   - **Heartbeat path**: `~/phanes-ctl/ctl-loop.heartbeat`
+   - **Status path**: `~/phanes-ctl/ib-refresh.status` (contains `start_lane_autodispatch` boolean gate)
+
+2. **`lane-autodispatch`** (fleet SSH dispatch + backlog refill):
    - **Startup command**: `~/phanes-ctl/bin/lane-autodispatch`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-autodispatch >/dev/null 2>&1 &`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/heartbeat`
    - **Status snapshot**: `~/phanes-ctl/autodispatch/lanes-status.json` (inspect with `~/phanes-ctl/bin/lane-autodispatch-status`)
 
-2. **`bus-worker-loop`** (GitHub issue bus executor loop):
+3. **`lane-merge`** (merge Linux-green `fleet/*` PRs):
+   - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
+     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &`; script: `merge-loop.sh`)
+   - **Heartbeat path**: `~/phanes-ctl/autodispatch/merge-heartbeat`
+
+4. **`bus-worker-loop`** (GitHub issue bus executor loop):
    - **Startup command**: `~/phanes-ctl/bin/bus-worker-loop`  
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &`; CLI: `openswarm bus-worker --bus <bus-repo> --name <worker-name> --backend <backend>`)
    - **Heartbeat path**: `~/phanes-ctl/bus-worker/heartbeat`
    - **Status / work directory**: `~/phanes-ctl/bus-worker/`
 
-3. **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
-   - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
-     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &`; repo CLI: `python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json --renew-command ~/phanes-ctl/bin/renew-cert --status-file ~/phanes-ctl/ib-refresh.status`)
-   - **Heartbeat path**: `~/phanes-ctl/ctl-loop.heartbeat`
-   - **Status path**: `~/phanes-ctl/ib-refresh.status` (contains `start_lane_autodispatch` boolean gate)
+5. **`health-loop`** (disk/mem/ssh/quota probes; auto PAUSE-*):
+   - **Startup command**: `~/phanes-ctl/bin/health-loop`  
+     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &`; probe: `python3 ~/phanes-ctl/bin/health-check.py`)
+   - **Heartbeat path**: `~/phanes-ctl/autodispatch/health.heartbeat`
+   - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
 
 `ib-refresh` must run its renewal preflight before starting `lane-autodispatch`.
 The repository implementation is `tools/ib-refresh.py`; it reads a temporary
@@ -69,16 +80,20 @@ Single executable check verifying control-plane binaries and heartbeat/status pa
 ```bash
 test -f ~/phanes-ctl/bin/lane-autodispatch \
   -a -f ~/phanes-ctl/bin/bus-worker-loop \
+  -a -f ~/phanes-ctl/bin/lane-merge \
+  -a -f ~/phanes-ctl/bin/health-loop \
   -a \( -f ~/phanes-ctl/bin/ib-refresh -o -f ~/phanes-ctl/bin/ctl-loop \) \
   -a -f ~/phanes-ctl/bin/start-control-plane \
   -a -f ~/phanes-ctl/autodispatch/heartbeat \
+  -a -f ~/phanes-ctl/autodispatch/merge-heartbeat \
+  -a -f ~/phanes-ctl/autodispatch/health.heartbeat \
   -a \( -f ~/phanes-ctl/bus-worker/heartbeat -o -d ~/phanes-ctl/bus-worker \) \
   -a \( -f ~/phanes-ctl/ctl-loop.heartbeat -o -f ~/phanes-ctl/ib-refresh.status \)
 ```
 
 Check scripts (no SSH):
 - `bash docs/check-ctl-boot.sh` — offline path and heartbeat existence verification under `~/phanes-ctl` (or `bash docs/check-ctl-boot.sh --self-test` to test in an offline fixture)
-- `bash tools/check-ctl-boot.sh` — offline control-plane check asserting `PAUSE-BACKEND-*` naming conventions and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
+- `bash tools/check-ctl-boot.sh` — offline control-plane smoke check asserting start-control-plane 五件套 (`ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), four heartbeat paths (`autodispatch/heartbeat`, `merge-heartbeat`, `ctl-loop.heartbeat`, `health.heartbeat`), `PAUSE-BACKEND-*` naming conventions, and replaying backend gate offline (`bash tools/check-ctl-boot.sh --gate-only`).
 - `python3 tools/check-ad-heartbeat-stall.py` — read-only autodispatch heartbeat stall check. The default threshold is **20 minutes**; a missing, unreadable, or older heartbeat emits a clear `WARNING` and exits non-zero. It never kills or restarts the real AD.
 
 Recommended heartbeat monitoring (no SSH and no restart): run this from the
