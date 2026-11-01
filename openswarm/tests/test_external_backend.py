@@ -1,0 +1,170 @@
+"""Dispatcher side of GitHub-only external lanes (bin/openswarm_external.py) + the SDK test-suite under CI."""
+import argparse
+import os
+import sys
+import tempfile
+import types
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+SDK = os.path.join(ROOT, "sdk", "external-lane")
+sys.path[:0] = [os.path.join(ROOT, "bin"), SDK, os.path.join(SDK, "tests")]
+import openswarm_external as X  # noqa: E402
+from external_lane import contract as C  # noqa: E402
+from fakes import issue  # noqa: E402
+
+NOW = 1_800_000_000
+H = 3600
+
+
+def iso(t):
+    import time
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def cfg(**kw):
+    raw = {"repo": "o/r", "max_inflight": 2, "auto_assign": True, "branch_prefixes": ["fleet/chatgpt-"],
+           "assign_exclude_hot": ["openswarm/bin/openswarm"], "assign_from_backends": ["codex", "pi"]}
+    raw.update(kw)
+    return X.backend_configs({"external_backends": {"_doc": "x", "chatgpt-agent": raw}})["chatgpt-agent"]
+
+
+def pr(num, head, body="", sha="s1", updated=NOW):
+    return {"number": num, "head": {"ref": head, "sha": sha}, "body": body, "updated_at": iso(updated)}
+
+
+READY_BODY = "实现 x\n\n验收：`python3 -m pytest -q`"
+FAT = [{"filename": "tools/a.py", "additions": 40}]
+
+
+class ConfigTest(unittest.TestCase):
+    def test_defaults_and_validation(self):
+        c = cfg()
+        self.assertEqual(c["label"], "backend:chatgpt-agent")
+        self.assertEqual(c["claim_timeout_s"], 6 * H)
+        self.assertEqual(c["branch_prefixes"], ["fleet/chatgpt-", "fleet/chatgpt-agent-"])
+        for bad in ({"repo": "nope"}, {"max_inflight": -1}, {"claim_timeout_s": "6h"}):
+            with self.assertRaises(X.ExternalError):
+                cfg(**bad)
+        with self.assertRaises(ValueError):
+            X.backend_configs({"external_backends": {"Bad Name": {"repo": "o/r"}}})
+
+    def test_reserved_labels_for_fleet_dispatchers(self):
+        cfgs = X.backend_configs({"external_backends": {"dot": {"repo": "o/r"}, "off": {"repo": "o/r", "enabled": False}}})
+        self.assertEqual(X.reserved_labels(cfgs), ["backend:dot", "lane-claimed"])
+
+
+class AssignTest(unittest.TestCase):
+    def test_refills_to_max_inflight_with_eligible_cards_only(self):
+        ready = [issue(1, ["lane-ready", "p1"], "热文件：openswarm/bin/openswarm\n" + READY_BODY),  # hot
+                 issue(2, ["lane-ready", "p2", "backend:agy"], READY_BODY),                       # pinned elsewhere
+                 issue(3, ["lane-ready", "p1", "in-progress"], READY_BODY),                       # fleet owns it
+                 issue(4, ["lane-ready", "p1"], "重基PR：#9 fleet/M1-issue4-x\n" + READY_BODY),    # rework
+                 issue(5, ["lane-ready", "p1"], "no acceptance line"),
+                 issue(6, ["lane-ready", "p2", "backend:codex"], READY_BODY),
+                 issue(7, ["lane-ready", "p1"], READY_BODY),
+                 issue(8, ["lane-ready", "p0"], READY_BODY)]
+        own = [issue(20, ["lane-pr", "backend:chatgpt-agent"])]  # PR stage does not count against max_inflight
+        acts = X.plan(cfg(), own, ready, [], lambda n: FAT, {}, NOW)
+        assigned = [a["n"] for a in acts if a["op"] == "labels"]
+        self.assertEqual(assigned, [8, 7])
+        self.assertIn("backend:chatgpt-agent", acts[0]["labels"])
+        six = X.plan(cfg(max_inflight=3), own, ready, [], lambda n: FAT, {}, NOW)
+        self.assertEqual([a["n"] for a in six], [8, 7, 6])
+        self.assertNotIn("backend:codex", six[2]["labels"])
+        self.assertIn("was backend:codex", six[2]["comment"])
+
+    def test_no_assign_when_full_or_disabled(self):
+        own = [issue(1, ["lane-ready", "backend:chatgpt-agent"]), issue(2, ["lane-claimed", "backend:chatgpt-agent"], updated_at=iso(NOW))]
+        ready = [issue(7, ["lane-ready"], READY_BODY)]
+        self.assertEqual(X.plan(cfg(), own, ready, [], lambda n: FAT, {}, NOW), [])
+        self.assertEqual(X.plan(cfg(auto_assign=False), [], ready, [], lambda n: FAT, {}, NOW), [])
+
+
+class PullRequestTest(unittest.TestCase):
+    def test_links_pr_by_closes_and_posts_contract_status_once_per_head(self):
+        own = [issue(7, ["lane-claimed", "backend:chatgpt-agent"], updated_at=iso(NOW))]
+        prs = [pr(70, "fleet/chatgpt-issue7-20261102-0200", "Closes #7"), pr(71, "fleet/M5-issue7-x", "Closes #7")]
+        mem = {}
+        acts = X.plan(cfg(auto_assign=False), own, [], prs, lambda n: FAT, mem, NOW)
+        self.assertEqual(acts[0], {"op": "status", "sha": "s1", "pr": 70, "state": "success", "desc": "contract ok (issue #7)"})
+        self.assertEqual(acts[1]["labels"], ["backend:chatgpt-agent", "lane-pr"])
+        self.assertEqual(mem["prs"]["70"]["issue"], 7)  # tracked by PR number
+        self.assertNotIn("71", mem["prs"])               # fleet lane PRs are not ours
+        again = X.plan(cfg(auto_assign=False), [], [], prs, lambda n: FAT, mem, NOW)
+        self.assertEqual(again, [])                       # same head sha -> no duplicate status
+
+    def test_thin_pr_gets_failing_status(self):
+        acts = X.plan(cfg(auto_assign=False), [], [], [pr(70, "fleet/chatgpt-agent-issue7-1", "Closes #7")],
+                      lambda n: [{"filename": "a.py", "additions": 4}], {}, NOW)
+        self.assertEqual(acts[0]["state"], "failure")
+        self.assertIn("thin", acts[0]["desc"])
+
+    def test_pr_without_closes_uses_branch_or_fails(self):
+        acts = X.plan(cfg(auto_assign=False), [], [], [pr(70, "fleet/chatgpt-agent-issue7-20261102-010203")], lambda n: FAT, {}, NOW)
+        self.assertEqual(acts[0]["state"], "success")
+        acts = X.plan(cfg(auto_assign=False), [], [], [pr(71, "fleet/chatgpt-fix-things")], lambda n: FAT, {}, NOW)
+        self.assertEqual(acts[0]["state"], "failure")
+        self.assertIn("Closes", acts[0]["desc"])
+
+    def test_rework_claim_is_not_relabelled_by_its_own_pr(self):
+        own = [issue(7, ["lane-claimed", "backend:chatgpt-agent"], "重基PR：#70 fleet/chatgpt-issue7-1", updated_at=iso(NOW))]
+        acts = X.plan(cfg(auto_assign=False), own, [], [pr(70, "fleet/chatgpt-issue7-1", "Closes #7")], lambda n: FAT, {}, NOW)
+        self.assertEqual([a["op"] for a in acts], ["status"])
+
+
+class StaleClaimTest(unittest.TestCase):
+    def test_requeue_then_give_up_without_flapping(self):
+        mem = {}
+        stale = [issue(7, ["lane-claimed", "backend:chatgpt-agent", "p1"], updated_at=iso(NOW - 7 * H))]
+        c = cfg(auto_assign=False)
+        self.assertEqual(X.plan(c, [issue(7, ["lane-claimed", "backend:chatgpt-agent"], updated_at=iso(NOW - 5 * H))],
+                                [], [], lambda n: FAT, mem, NOW), [])
+        for k in (1, 2):
+            a = X.plan(c, stale, [], [], lambda n: FAT, mem, NOW)[0]
+            self.assertEqual(a["labels"], ["backend:chatgpt-agent", "lane-ready", "p1"])
+            self.assertIn(f"requeue {k}/2", a["comment"])
+        a = X.plan(c, stale, [], [], lambda n: FAT, mem, NOW)[0]
+        self.assertEqual(a["labels"], ["backend:chatgpt-agent", "lane-failed", "needs-human", "p1"])
+
+    def test_recent_pr_push_keeps_claim_alive(self):
+        own = [issue(7, ["lane-claimed", "backend:chatgpt-agent"], "重基PR：#70 fleet/chatgpt-issue7-1", updated_at=iso(NOW - 9 * H))]
+        prs = [pr(70, "fleet/chatgpt-issue7-1", "Closes #7", updated=NOW - H)]
+        acts = X.plan(cfg(auto_assign=False), own, [], prs, lambda n: FAT, {}, NOW)
+        self.assertEqual([a["op"] for a in acts], ["status"])
+
+
+class TickTest(unittest.TestCase):
+    def host(self):
+        calls = []
+        pages = {"repos/o/r/issues?state=open&labels=backend%3Achatgpt-agent": [],
+                 "repos/o/r/issues?state=open&labels=lane-ready": [issue(8, ["lane-ready", "p1"], READY_BODY)],
+                 "repos/o/r/pulls?state=open": []}
+        return calls, types.SimpleNamespace(DATA=tempfile.mkdtemp(), gh_pages=lambda e: pages[e],
+                                            gh_transport=lambda e, m="GET", p=None, allow_not_found=False: calls.append((m, e, p)))
+
+    def test_dry_run_writes_nothing_and_real_run_relabels(self):
+        calls, host = self.host()
+        out = X.tick(host, cfg(), dry_run=True, now=NOW)
+        self.assertEqual([a["n"] for a in out["actions"]], [8])
+        self.assertEqual(calls, [])
+        X.tick(host, cfg(), now=NOW)
+        self.assertEqual([c[:2] for c in calls], [("PUT", "repos/o/r/issues/8/labels"), ("POST", "repos/o/r/issues/8/comments")])
+        self.assertTrue(os.path.exists(X.memory_path(host, "chatgpt-agent")))
+
+    def test_cli_reserved(self):
+        args = argparse.Namespace(external_cmd="reserved", name=None)
+        out = X.cmd_external(args, None, {"external_backends": {"dot": {"repo": "o/r"}}})
+        self.assertEqual(out["skip_labels"], ["backend:dot", "lane-claimed"])
+        self.assertEqual(C.CLAIMED, "lane-claimed")
+
+
+def load_tests(loader, tests, pattern):
+    """Also run sdk/external-lane/tests so the agent-side SDK is covered by the OpenSwarm CI job."""
+    tests.addTests(loader.discover(os.path.join(SDK, "tests"), top_level_dir=os.path.join(SDK, "tests")))
+    return tests
+
+
+if __name__ == "__main__":
+    unittest.main()

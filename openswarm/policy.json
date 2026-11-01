@@ -328,6 +328,9 @@
     "labels_prefix": "openswarm",
     "open_pr": false
   },
+  "external_backends": {
+    "_doc": "GitHub-only external lanes (agents with repo write access but no SSH). Add <name>: {repo, max_inflight, claim_timeout_s, max_requeues, auto_assign, assign_exclude_hot, assign_from_backends, branch_prefixes} in policy.local.json; the agent side is sdk/external-lane. See docs/EXTERNAL-LANES.md."
+  },
   "workspace": {
     "_doc": "prepare maps a repo absolute path or basename to a command run in its worktree. When configured, prepare_replaces_links are installed locally instead of symlinked from the base checkout.",
     "prepare": {},

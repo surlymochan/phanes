@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openswarm-external-lane"
+version = "0.1.0"
+description = "Plug a GitHub-only agent (no SSH) into an openswarm lane queue: claim issues, branch, open PRs."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+external-lane = "external_lane.cli:main"
+
+[tool.setuptools]
+packages = ["external_lane"]

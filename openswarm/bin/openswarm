@@ -12355,6 +12355,21 @@ def cmd_status(policy, refresh):
     print(f"Claude review mode: {mode} — {why}")
 
 
+def external_module():
+    """Dispatcher side of GitHub-only external lanes (bin/openswarm_external.py)."""
+    module = sys.modules.get("openswarm_external")
+    if module is not None:
+        return module
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "openswarm_external.py")
+    spec = importlib.util.spec_from_file_location("openswarm_external", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load external-lane helper from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def consult_module():
     module = sys.modules.get("openswarm_consult")
     if module is not None:
@@ -13436,6 +13451,8 @@ def main():
     bp.add_argument("--repo", help="override policy.bus.repo")
     bp.add_argument("--json", action="store_true")
 
+    external_module().add_parser(sub)
+
     sp = sub.add_parser("bus-worker", help="run the reference GitHub issue bus worker")
     sp.add_argument("--bus", required=True, help="bus repository owner/name")
     sp.add_argument("--name", required=True, help="executor name used in /claim comments")
@@ -13627,6 +13644,13 @@ def main():
                 cmd_bus_status(a, policy)
         except (BusError, ValueError) as error:
             print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+    elif a.cmd == "external":
+        ext = external_module()
+        try:
+            print(json.dumps(ext.cmd_external(a, sys.modules[__name__], policy), ensure_ascii=False, indent=1))
+        except (ext.ExternalError, BusError, ValueError) as error:
+            print(json.dumps({"ok": False, "error": bus_redact(str(error))}, ensure_ascii=False), file=sys.stderr)
             sys.exit(2)
     elif a.cmd == "bus-worker":
         try:
