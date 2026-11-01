@@ -196,3 +196,15 @@ grep -h '"fetch_fails"' ~/.claude/openswarm-executor-candidate/harvest/*/*.json
 
 `fetch_fails` 为 0 表示远端结果一次就抓回来了；大于 0 表示该 host 的 SSH 抓取发生过
 瞬时失败；等于尝试上限（3）表示有界重试已经放弃，必须人工确认该 lane 的结果是否已收回。
+
+## BatchMode 探测与 hosts_ok 汇总契约 (Refs #954)
+
+fleet 探活（probe）与容量汇总统一使用 `ssh -o BatchMode=yes` 探测受控 host。
+探测开关在 `ib-refresh`（生产汇总路径）：fleet JSON 里写
+`"ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/openswarm-hub/config"}`，
+或命令行 `--ssh-probe --ssh-config ~/.ssh/openswarm-hub/config`。
+
+若探测非零退出（含 `Permission denied` / `Connection closed` / 超时），该 host 记为
+`probe_status: failed`，并且**不计入** `hosts_ok`；只有退出码 0 才 +1 `hosts_ok`。
+离线契约断言见 `tools/check-fleet-batchmode-probe.py`（用假探测输出驱动同一条生产路径，
+勿连真实 instabox）。
