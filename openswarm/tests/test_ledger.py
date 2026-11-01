@@ -158,6 +158,39 @@ class LedgerTests(unittest.TestCase):
             sys.argv = original_argv
         self.assertEqual(json.loads(output.getvalue()), old_records)
 
+    def test_legacy_jsonl_without_time_fields_or_metadata_exports_without_traceback(self):
+        legacy_records = [
+            {"id": "legacy-created", "created_at": "2026-10-31T00:00:00Z", "status": "done",
+             "backend": "pi", "metadata": {}},
+            {"id": "legacy-finished", "finished_at": "2026-10-31T00:01:00Z", "status": "failed",
+             "backend": "pi", "metadata": {}},
+            {"id": "legacy-empty", "status": "done", "backend": "pi", "metadata": {}},
+        ]
+        Path(xs.LEDGER).parent.mkdir(parents=True)
+        Path(xs.LEDGER).write_text("".join(json.dumps(record) + "\n" for record in legacy_records))
+
+        self.assertEqual(list(xs.ledger_entries()), legacy_records)
+        original_argv = sys.argv
+        try:
+            sys.argv = ["openswarm", "ledger", "--json", "-n", str(len(legacy_records))]
+            output, error = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                xs.main()
+        finally:
+            sys.argv = original_argv
+        self.assertEqual(json.loads(output.getvalue()), legacy_records)
+        self.assertNotIn("Traceback", error.getvalue())
+
+        try:
+            sys.argv = ["openswarm", "ledger", "-n", str(len(legacy_records))]
+            output, error = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                xs.main()
+        finally:
+            sys.argv = original_argv
+        self.assertEqual(error.getvalue(), "")
+        self.assertNotIn("Traceback", output.getvalue())
+
     def test_known_card_types_reject_unknown_before_creating_run(self):
         knowledge = self.root / "knowledge"
         knowledge.mkdir()
