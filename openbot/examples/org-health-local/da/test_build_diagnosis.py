@@ -561,6 +561,14 @@ class BuildDiagnosisTest(unittest.TestCase):
                 self.assertTrue(recommendation[field].strip())
         self.assertTrue(any("缺口" in risk["标题"] for risk in data["risks"]))
 
+    def test_overall_heads_insight_has_equivalent_headcount_units(self) -> None:
+        """整体折算人头洞察的起止数值均带人（当量）单位。"""
+        data = self.build()
+        insight = next(item for item in data["insights"] if "整体折算人头" in item["标题"])
+        content = insight["内容"]
+        self.assertIn("10.4 人（当量）（2026-01）", content)
+        self.assertIn("12.4 人（当量）（2026-09）", content)
+
     def test_cost_change_question_answers_amount_and_percentage(self) -> None:
         """成本增减问题除期初期末绝对值外，还给出增减金额与增减百分比。"""
         brief = json.loads(json.dumps(BRIEF))

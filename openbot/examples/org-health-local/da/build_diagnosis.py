@@ -707,8 +707,8 @@ def build_insights(plan: dict, facts: dict, raw: dict) -> list[dict]:
             "类型": "事实",
             "标题": f"整体折算人头 {periods['start']} → {periods['end']}",
             "内容": (
-                f"整体折算人头由 {fmt_number(heads['start'])}（{periods['start']}）"
-                f"变为 {fmt_number(heads['end'])}（{periods['end']}）；"
+                f"整体折算人头由 {fmt_number(heads['start'])} 人（当量）（{periods['start']}）"
+                f"变为 {fmt_number(heads['end'])} 人（当量）（{periods['end']}）；"
                 f"年末测算 {fmt_number(heads['forecast'])}（当量折算，非自然人数）。"
             ),
         }
