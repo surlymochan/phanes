@@ -91,6 +91,34 @@ class CtlBootDocumentationTests(unittest.TestCase):
         res = subprocess.run(["bash", str(TOOL_CHECK), "--gate-only"], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_tools_check_ctl_boot_self_test(self):
+        """tools/check-ctl-boot.sh --self-test 离线自检通过（含五件套与心跳路径）。"""
+        self.assertTrue(TOOL_CHECK.is_file())
+        res = subprocess.run(["bash", str(TOOL_CHECK), "--self-test"], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("OK start-control-plane loop health-loop", res.stdout)
+        self.assertIn("OK heartbeat health.heartbeat", res.stdout)
+
+    def test_five_loops_and_four_heartbeats_asserted(self):
+        """Refs #847: 文档与脚本均点名五件套命令与四条心跳路径。"""
+        tool_content = TOOL_CHECK.read_text(encoding="utf-8")
+        loops = [
+            "ib-refresh-loop",
+            "lane-autodispatch",
+            "lane-merge",
+            "bus-worker-loop",
+            "health-loop",
+        ]
+        heartbeats = [
+            "autodispatch/heartbeat",
+            "merge-heartbeat",
+            "ctl-loop.heartbeat",
+            "health.heartbeat",
+        ]
+        for item in loops + heartbeats:
+            self.assertIn(item, self.content, f"docs/ctl-boot.md missing {item}")
+            self.assertIn(item, tool_content, f"tools/check-ctl-boot.sh missing {item}")
+
 
 if __name__ == "__main__":
     unittest.main()
