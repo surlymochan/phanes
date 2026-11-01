@@ -115,6 +115,99 @@ class GitSSHCommandTests(unittest.TestCase):
         live.wait()
 
 
+class DispatchSelectionTests(unittest.TestCase):
+    """Refs #1359: the push-mode dispatch decisions, aligned with the box autodispatch."""
+
+    def test_dispatch_sorts_priority_then_issue_number(self):
+        issues = [
+            {"number": 9, "labels": ["lane-ready", "p1"]},
+            {"number": 4, "labels": ["lane-ready", "p0"]},
+            {"number": 2, "labels": ["lane-ready", "p1"]},
+        ]
+        planned = autodispatch.select_dispatches(issues, [{"name": "a", "backend": "codex"}], {})
+        self.assertEqual(planned[0][0]["number"], 4)
+
+    def test_dispatch_lane_order_follows_priority_then_number(self):
+        issues = [
+            {"number": 9, "labels": ["lane-ready", "p1"]},
+            {"number": 4, "labels": ["lane-ready", "p0"]},
+            {"number": 2, "labels": ["lane-ready", "p1"]},
+        ]
+        lanes = [{"name": "a", "backend": "codex"}, {"name": "b", "backend": "codex"}]
+        planned = autodispatch.select_dispatches(issues, lanes, {})
+        self.assertEqual([(entry[0]["number"], entry[1]["name"]) for entry in planned],
+                         [(4, "a"), (2, "b")])
+
+    def test_dispatch_prefers_the_lane_that_owns_the_backend_pin(self):
+        issues = [
+            {"number": 1, "labels": ["lane-ready"]},
+            {"number": 2, "labels": ["lane-ready", "backend:pi"]},
+        ]
+        lanes = [{"name": "codex-lane", "backend": "codex"}, {"name": "pi-lane", "backend": "pi"}]
+        planned = autodispatch.select_dispatches(issues, lanes, {})
+        self.assertEqual([(entry[0]["number"], entry[1]["name"]) for entry in planned],
+                         [(1, "codex-lane"), (2, "pi-lane")])
+
+    def test_dispatch_falls_back_to_another_backend_like_the_box_ad(self):
+        issue = {"number": 4, "labels": ["lane-ready", "backend:pi"]}
+        lanes = [{"name": "codex-lane", "backend": "codex"}]
+        planned = autodispatch.select_dispatches([issue], lanes, {})
+        self.assertEqual([entry[1]["name"] for entry in planned], ["codex-lane"])
+
+    def test_dispatch_refuses_cross_backend_for_strict_backend_cards(self):
+        issue = {"number": 4, "labels": ["lane-ready", "backend:pi", "strict-backend"]}
+        lanes = [{"name": "codex-lane", "backend": "codex"}, {"name": "pi-lane", "backend": "pi"}]
+        self.assertEqual(autodispatch.select_dispatches([issue], [lanes[0]]), [])
+        planned = autodispatch.select_dispatches([issue], lanes, {})
+        self.assertEqual([entry[1]["name"] for entry in planned], ["pi-lane"])
+
+    def test_dispatch_strict_label_name_is_configurable(self):
+        issue = {"number": 4, "labels": ["lane-ready", "backend:pi", "keep-backend"]}
+        lanes = [{"name": "codex-lane", "backend": "codex"}]
+        self.assertEqual([entry[1]["name"] for entry in autodispatch.select_dispatches([issue], lanes, {})],
+                         ["codex-lane"])
+        self.assertEqual(autodispatch.select_dispatches([issue], lanes, {"strict_label": "keep-backend"}), [])
+
+    def test_dispatch_uses_configured_label_names(self):
+        issue = {"number": 4, "labels": ["ready-now", "urgent"]}
+        planned = autodispatch.select_dispatches([issue], [{"name": "lane", "backend": "codex"}], {
+            "ready_label": "ready-now", "priorities": {"urgent": 0}})
+        self.assertEqual([entry[0]["number"] for entry in planned], [4])
+
+    def test_dispatch_skips_claimed_issues(self):
+        issues = [{"number": 1, "labels": ["lane-ready", "in-progress"]}]
+        self.assertEqual(autodispatch.select_dispatches(issues, [{"name": "lane", "backend": "codex"}]), [])
+
+    def test_dispatch_with_no_available_lanes_returns_no_assignments(self):
+        issue = {"number": 1, "labels": ["lane-ready"]}
+        self.assertEqual(autodispatch.select_dispatches([issue], []), [])
+
+    def test_dispatch_waits_for_open_dependencies(self):
+        issue = {"number": 1, "labels": ["lane-ready"], "body": "依赖：#12"}
+        lanes = [{"name": "lane", "backend": "codex"}]
+        self.assertEqual(autodispatch.select_dispatches([issue], lanes, {}), [])
+        planned = autodispatch.select_dispatches([issue], lanes, {"closed_issues": {12}})
+        self.assertEqual([entry[0]["number"] for entry in planned], [1])
+
+    def test_dispatch_dependencies_are_read_from_the_card_body(self):
+        self.assertEqual(autodispatch.dispatch_dependencies("依赖：#12 #34"), [12, 34])
+        self.assertEqual(autodispatch.dispatch_dependencies("Depends on: #5"), [5])
+        self.assertEqual(autodispatch.dispatch_dependencies("no dependency here"), [])
+
+    def test_dispatch_skip_reason_explains_why_a_card_waited(self):
+        config = {"ready_label": "lane-ready"}
+        issue = {"number": 1, "labels": ["lane-ready"], "body": "依赖：#12"}
+        item = autodispatch.dispatch_item(issue, config)
+        self.assertEqual(autodispatch.dispatch_skip_reason(item, [], {**config, "closed_issues": set()}),
+                         "waiting on dependencies")
+        self.assertEqual(autodispatch.dispatch_skip_reason(item, [], {**config, "closed_issues": {12}}),
+                         "no idle lane")
+
+    def test_dispatch_labels_accept_strings_and_objects(self):
+        issue = {"number": 1, "labels": [{"name": "lane-ready"}, "p0"]}
+        self.assertEqual(autodispatch.dispatch_labels(issue), {"lane-ready", "p0"})
+
+
 class HarvestFetchBackoffTests(unittest.TestCase):
     """Refs #947: a broken harvest fetch is transient until the threshold is exceeded."""
 

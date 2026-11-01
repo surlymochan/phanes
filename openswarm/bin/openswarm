@@ -23,6 +23,7 @@ Subcommands:
   verify-remote    verify a fleet run on another host in a temporary worktree
   bus              initialize or inspect a GitHub issue bus repository
   bus-worker       run the reference GitHub issue bus executor
+  dispatch         push lane-ready GitHub issues to idle resident lanes (shadow mode included)
   card-lint        reject thin cards and thin PRs, with reason codes
   watch            stream actionable events (progress, risk, stalls) for one or more runs
   runs / report    snapshot of recent runs / compact scheduled check-in
@@ -7171,6 +7172,210 @@ def cmd_bus_worker(args, policy):
         time.sleep(cfg["poll_seconds"])
 
 
+DISPATCH_HELPER = None
+
+
+def dispatch_config(policy):
+    """Validated push-dispatch settings: the target repository plus the policy overrides."""
+    cfg = dict(policy.get("dispatch") or {})
+    repo = cfg.get("repo") or (policy.get("bus") or {}).get("repo")
+    if not BUS_REPO_RE.fullmatch(str(repo or "")):
+        raise ValueError("configure policy.dispatch.repo as owner/repo")
+    cfg["repo"] = repo
+    # `impl` is a bench task type, not a knowledge base card type: only a configured card
+    # type may be sent, and it is validated against the card types of the knowledge base.
+    validate_card_type(policy, cfg.get("card_type"))
+    return cfg
+
+
+def dispatch_helper_path(cfg):
+    """Path of the autodispatch helper that owns the dispatch decisions."""
+    configured = str(cfg.get("helper") or "").strip()
+    if configured:
+        return os.path.expanduser(configured)
+    return os.path.join(os.path.dirname(SKILL_DIR), "tools", "lane-autodispatch", "autodispatch.py")
+
+
+def load_dispatch_helper(cfg):
+    """Load the dispatch helper once per process: its module level work runs once, not per tick."""
+    global DISPATCH_HELPER
+    if DISPATCH_HELPER is not None:
+        return DISPATCH_HELPER
+    path = dispatch_helper_path(cfg)
+    if not os.path.isfile(path):
+        raise ValueError(f"dispatch helper not found: {path}; set policy.dispatch.helper to the autodispatch helper")
+    loader = importlib.util.spec_from_file_location("openswarm_autodispatch", path)
+    if loader is None or loader.loader is None:
+        raise ValueError(f"dispatch helper is not importable: {path}")
+    helper = importlib.util.module_from_spec(loader)
+    try:
+        loader.loader.exec_module(helper)
+    except Exception as error:
+        raise ValueError(f"dispatch helper {path} failed to load: {error}") from error
+    for name in ("select_dispatches", "dispatch_ready_issues", "dispatch_item", "dispatch_labels",
+                 "dispatch_dependencies", "dispatch_skip_reason", "verify_of"):
+        if not hasattr(helper, name):
+            raise ValueError(f"dispatch helper {path} has no {name}(); update it or set policy.dispatch.helper")
+    DISPATCH_HELPER = helper
+    return helper
+
+
+def dispatch_closed_issues(repo, issues, helper):
+    """Resolve the `依赖：#n` dependencies of the ready cards (the AD's deps gate).
+
+    A dependency that cannot be read counts as open, so the card waits instead of running early."""
+    numbers = []
+    for issue in issues or []:
+        for number in helper.dispatch_dependencies(issue.get("body") or ""):
+            if number not in numbers:
+                numbers.append(number)
+    closed = set()
+    for number in numbers:
+        try:
+            payload = gh_transport(f"repos/{repo}/issues/{number}", allow_not_found=True)
+        except BusError:
+            continue  # an unreadable dependency counts as open
+        if isinstance(payload, dict) and str(payload.get("state") or "").upper() == "CLOSED":
+            closed.add(number)
+    return closed
+
+
+def dispatch_task_text(issue, helper):
+    """The task text a lane receives: issue number, title, body, then the shared rules.
+
+    Returns None when the card carries neither a title nor a body: there is nothing to run."""
+    number = issue.get("number")
+    title = (issue.get("title") or "").strip()
+    body = (issue.get("body") or "").strip()
+    if not title:
+        title = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    if not title and not body:
+        return None
+    rules = str(getattr(helper, "RULES", "") or "")
+    if rules and number is not None:
+        try:
+            rules = rules.format(n=number)
+        except (IndexError, KeyError):
+            pass
+    return f"# #{number} {title}\n\n{body}\n\n{rules}\n"
+
+
+def dispatch_base_sha(repo, cfg):
+    """The commit the lane branches from: the target repository's main tip."""
+    configured = str(cfg.get("base") or "").strip()
+    if configured:
+        return configured
+    payload = gh_transport(f"repos/{repo}/commits/main", allow_not_found=True)
+    sha = payload.get("sha") if isinstance(payload, dict) else None
+    if not sha:
+        meta = gh_transport(f"repos/{repo}")
+        branch = meta.get("default_branch") if isinstance(meta, dict) else None
+        if branch:
+            payload = gh_transport(f"repos/{repo}/commits/{branch}", allow_not_found=True)
+            sha = payload.get("sha") if isinstance(payload, dict) else None
+    if not sha:
+        raise ValueError(f"cannot resolve the base commit of {repo}")
+    return str(sha)
+
+
+def dispatch_tick(policy, shadow=False, helper=None):
+    """Plan and run one push-dispatch tick; shadow mode plans without any side effect.
+
+    The card-to-lane decisions come from the autodispatch helper, so the shadow output can be
+    compared tick by tick with the box AD (Refs #1359)."""
+    cfg = dispatch_config(policy)
+    repo = cfg["repo"]
+    helper = helper or load_dispatch_helper(cfg)
+    issues = [issue for issue in gh_pages(f"repos/{repo}/issues?state=open") if "pull_request" not in issue]
+    available = []
+    for lane in lanes_by_name():
+        state = jload(lane_state_path(lane["name"]), {}) or {}
+        if state.get("state") == "idle" and lane_call(lane["name"], {"op": "ping"}).get("ok"):
+            available.append(lane)
+    ready = helper.dispatch_ready_issues(issues, cfg)
+    select_cfg = dict(cfg)
+    select_cfg["closed_issues"] = dispatch_closed_issues(repo, ready, helper)
+    assignments = helper.select_dispatches(issues, available, select_cfg)
+    results, base = [], None
+    for issue, lane in assignments:
+        number = issue.get("number")
+        row = {"issue": number, "title": issue.get("title"), "lane": lane["name"],
+               "backend": lane.get("backend"), "shadow": bool(shadow), "planned": True}
+        try:
+            if shadow:
+                results.append(row)
+                continue
+            task = dispatch_task_text(issue, helper)
+            if task is None:
+                row["assigned"] = False
+                row["error_class"] = "empty_task"
+                row["error"] = "the card has neither a title nor a body"
+                results.append(row)
+                continue
+            if base is None:
+                base = dispatch_base_sha(repo, cfg)
+            rid = new_run_id()
+            response = lane_call(lane["name"], {"op": "assign", "run_id": rid, "task": task,
+                "title": f"#{number} {(issue.get('title') or '').strip()}"[:120],
+                "verify": helper.verify_of(issue.get("body") or ""),
+                "budget_minutes": float(cfg.get("budget_minutes", 45)),
+                "base": base, "card_type": cfg.get("card_type"), "paths": [],
+                "idempotency_key": f"github-issue-{number}"}, timeout=8)
+            row["assigned"] = bool(response.get("ok"))
+            row["run_id"] = rid
+            if not response.get("ok"):
+                # The lane's own words stay visible: "lane X is busy" and "invalid run id"
+                # are the difference between a retry and a stuck card.
+                row["error_class"] = bus_error_class(response.get("error", ""))
+                row["error"] = bus_redact(response.get("error", ""))
+            else:
+                labels = helper.dispatch_labels(issue)
+                labels.discard(cfg.get("ready_label", "lane-ready"))
+                labels.add(cfg.get("assigned_label", "in-progress"))
+                try:
+                    gh_transport(f"repos/{repo}/issues/{number}/labels", method="PUT",
+                                 payload={"labels": sorted(labels)})
+                except BusError as error:
+                    row["error_class"] = bus_error_class(error)
+                    row["label_error"] = bus_redact(str(error))
+        except Exception as error:  # one broken card must not end the tick
+            row["assigned"] = False
+            row["error_class"] = bus_error_class(error)
+            row["error"] = bus_redact(str(error))
+        results.append(row)
+    planned = {row["issue"] for row in results}
+    # A card is settled when it reached a lane: shadow mode settles the plan, a live tick
+    # settles the assignment. Everything else is reported with the reason it waited.
+    settled = planned if shadow else {row["issue"] for row in results if row.get("assigned")}
+    unassigned = []
+    for issue in ready:
+        number = issue.get("number")
+        if number in settled:
+            continue
+        row = next((item for item in results if item.get("issue") == number), None)
+        reason = (row or {}).get("error") or (row or {}).get("error_class") or ""
+        if not reason:
+            reason = helper.dispatch_skip_reason(helper.dispatch_item(issue, cfg), available, select_cfg)
+        unassigned.append({"issue": number, "reason": reason})
+    return {"shadow": bool(shadow), "repo": repo, "available_lanes": [lane["name"] for lane in available],
+            "assignments": results, "unassigned_issues": unassigned}
+
+
+def cmd_dispatch(args, policy):
+    cfg = dispatch_config(policy)
+    helper = load_dispatch_helper(cfg)  # a missing helper must fail before the loop starts
+    while True:
+        try:
+            print(json.dumps(dispatch_tick(policy, args.shadow, helper=helper), ensure_ascii=False), flush=True)
+        except Exception as error:
+            if args.once:
+                raise
+            print(json.dumps({"error_class": bus_error_class(error), "error": bus_redact(str(error))}), flush=True)
+        if args.once:
+            return
+        time.sleep(max(1, int(cfg.get("poll_seconds", 60))))
+
+
 # ---------------------------------------------------------------- resident lanes
 
 LANE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
@@ -13448,6 +13653,13 @@ def main():
                            rework_of_help="run id this task reworks")
     sp.add_argument("--once", action="store_true", help="claim at most one queued issue, then exit")
 
+    sp = sub.add_parser("dispatch", help="push ready GitHub issues to idle resident lanes")
+    dispatch_mode = sp.add_mutually_exclusive_group(required=True)
+    dispatch_mode.add_argument("--once", action="store_true", help="run one dispatch tick")
+    dispatch_mode.add_argument("--loop", action="store_true", help="run dispatch ticks continuously")
+    sp.add_argument("--shadow", action="store_true",
+                    help="print which card would go to which lane, without assigning or relabelling")
+
     sp = sub.add_parser("card-lint", help="reject thin cards and thin PRs with reason codes")
     sp.add_argument("card", nargs="?", help="card file to lint, or - to read the card from stdin")
     sp.add_argument("--pr-diff", nargs=2, metavar=("BASE", "REF"),
@@ -13633,6 +13845,13 @@ def main():
             cmd_bus_worker(a, policy)
         except (BusError, ValueError) as error:
             print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+    elif a.cmd == "dispatch":
+        try:
+            cmd_dispatch(a, policy)
+        except Exception as error:
+            print(json.dumps({"ok": False, "error_class": bus_error_class(error),
+                              "error": bus_redact(str(error))}, ensure_ascii=False), file=sys.stderr)
             sys.exit(2)
     elif a.cmd in ("fleet", "batch", "verify-remote"):
         try:

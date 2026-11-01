@@ -103,3 +103,27 @@ openswarm watch <run-id>
 ```
 
 受控主机仍应使用 SSH fleet；只有需要跨信任边界派发时才采用这里的 GitHub issue bus。
+
+## 推模式派发与影子比对
+
+受控主机上的常驻车道（`openswarm lane`）不拉 issue bus，而是由推模式派发器主动派单：
+
+```sh
+openswarm dispatch --once --shadow   # 只打印“哪张卡会派给哪条车道”，不改 label、不派单
+openswarm dispatch --once            # 真正派单
+openswarm dispatch --loop            # 按 policy.dispatch.poll_seconds 持续派单
+```
+
+`policy.dispatch.*` 在 planner 与派发主机的 `policy.local.json` 里配置，其中 `repo` 必填
+（默认取 `policy.bus.repo`）。完整键说明见 `openswarm/docs/BUS.md` 的 “Push-mode dispatch to
+resident lanes”。
+
+影子模式与 box 上的 `~/phanes-ctl/bin/autodispatch.py` 用同一套决策规则（车道顺序、后端钉选、
+`strict-backend` 跨后端兜底、`依赖：#n` 依赖门、p0–p2 排序），因此可以逐 tick 比对：
+
+1. 在 box 上跑 AD（`lane-autodispatch`）与 planner 上的 `openswarm dispatch --once --shadow`；
+2. 比对两边“卡 → 车道”的映射与未派发原因（AD 看 `lanes-status.json`，影子看
+   `unassigned_issues`）；
+3. 连续一周一致后，再切到不带 `--shadow` 的真派发。
+
+真派发会写 label（去掉 `ready_label`、加上 `assigned_label`），所以比对期间只用影子模式。

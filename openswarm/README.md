@@ -193,6 +193,7 @@ Every subcommand, grouped by what it does. `openswarm <command> --help` lists al
 | `openswarm bus init` | Create the bus labels, issue template, and protocol README. | `openswarm bus init acme/openswarm-bus` |
 | `openswarm bus status` | Show open bus issues with their executor and age. | `openswarm bus status --json` |
 | `openswarm bus-worker` | Run the reference bus executor; `--once` claims at most one queued issue. | `openswarm bus-worker --bus acme/openswarm-bus --name runner-1 --backend codex --once` |
+| `openswarm dispatch` | Push ready GitHub issues to idle resident lanes; `--shadow` only prints the plan. | `openswarm dispatch --once --shadow` |
 | `openswarm verify-remote` | Verify a fleet run's commit in a temporary worktree on another host. | `openswarm verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'` |
 
 ### Gate
@@ -698,7 +699,7 @@ unless you add it to `routing.default_order`.
 
 | Path | What |
 | --- | --- |
-| `bin/openswarm` | The CLI: `probe`, `status`, `route`, `run`, `lane`, `batch`, `bus`, `bus-worker`, `verify-remote`, `watch`, `runs`, `resume`, `report`, `budget`, `stop`, `fleet`, `consult`, `review`, `compare`, `regress`, `routing`, `lessons`, `patterns`, `retro`, `ingest-claude`, `ledger` |
+| `bin/openswarm` | The CLI: `probe`, `status`, `route`, `run`, `lane`, `batch`, `bus`, `bus-worker`, `dispatch`, `verify-remote`, `watch`, `runs`, `resume`, `report`, `budget`, `stop`, `fleet`, `consult`, `review`, `compare`, `regress`, `routing`, `lessons`, `patterns`, `retro`, `ingest-claude`, `ledger` |
 | `SKILL.md` | Claude Code skill: the planner's operating manual |
 | `policy.json` | Defaults: thresholds, difficulty map, model caps, local data sources |
 | `backends/*.json` | One manifest per executor: invocation, quota source, data boundary |

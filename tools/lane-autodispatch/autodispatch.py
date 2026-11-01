@@ -50,6 +50,121 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
 
+# Push-mode dispatch (Refs #1359): the decisions of this AD as pure functions, so that
+# `openswarm dispatch` can shadow them tick by tick. The names carry a `dispatch_` prefix
+# because the AD's own helpers (can_take, rank, deps_met) keep their meaning here.
+DISPATCH_PRIORITIES = {"p0": 0, "p1": 1, "p2": 2}
+DISPATCH_EXCLUDING = {"in-progress", "lane-pr", "lane-failed"}
+DISPATCH_BACKEND_PREFIX = "backend:"
+DISPATCH_STRICT_LABEL = "strict-backend"
+
+def dispatch_labels(issue):
+    """The label names of a card (GitHub returns objects, callers may use plain strings)."""
+    names = set()
+    for label in issue.get("labels") or []:
+        if isinstance(label, str): names.add(label)
+        elif isinstance(label, dict) and label.get("name"): names.add(label["name"])
+    return names
+
+def dispatch_ranks(config=None):
+    """Label -> priority rank, from `priorities` (a map or an ordered list of label names)."""
+    config = config or {}
+    priorities = config.get("priorities", DISPATCH_PRIORITIES)
+    if isinstance(priorities, list):
+        return {str(label): rank for rank, label in enumerate(priorities)}
+    return {str(label): rank for label, rank in priorities.items()} if isinstance(priorities, dict) else {}
+
+def dispatch_priority(issue, config=None):
+    """Return configured priority rank, with issue number as a stable tie breaker."""
+    ranks = dispatch_ranks(config)
+    matching = [ranks[label] for label in dispatch_labels(issue) if label in ranks]
+    try: number = int(issue.get("number") or 0)
+    except (TypeError, ValueError): number = 0
+    return (min(matching) if matching else len(ranks), number)
+
+def dispatch_item(issue, config=None):
+    """Normalize one card into the row the dispatch decisions work on (like an AD queue row)."""
+    config = config or {}
+    labels = dispatch_labels(issue)
+    pin_prefix = config.get("backend_label_prefix", DISPATCH_BACKEND_PREFIX)
+    strict_label = config.get("strict_label", DISPATCH_STRICT_LABEL)
+    priority, number = dispatch_priority(issue, config)
+    return {"issue": issue, "n": number, "title": (issue.get("title") or "").strip(),
+            "body": issue.get("body") or "", "labels": labels, "prio": priority,
+            "backend": next((label[len(pin_prefix):] for label in labels if label.startswith(pin_prefix)), None),
+            "strict": strict_label in labels,
+            "ready": config.get("ready_label", "lane-ready") in labels}
+
+def dispatch_ready_issues(issues, config=None):
+    """The ready cards of one tick: the ready label, minus the excluded labels."""
+    config = config or {}
+    excluded = set(config.get("excluding_labels", DISPATCH_EXCLUDING))
+    return [issue for issue in (issues or [])
+            if dispatch_item(issue, config)["ready"] and not dispatch_labels(issue) & excluded]
+
+def dispatch_dependencies(body):
+    """Issue numbers a card waits for (`依赖：#12 #34` or `Depends on: #12`), like AD's deps gate."""
+    match = re.search(r"^\s*(?:依赖|Depends on)\s*[:：](.*)$", body or "", re.M)
+    return [int(number) for number in re.findall(r"#(\d+)", match.group(1))] if match else []
+
+def dispatch_deps_met(item, closed=None):
+    """AD's dependency gate: every dependency of the card must be closed already.
+
+    `closed` holds the dependency numbers the caller resolved as closed, so the decision
+    stays a pure function and the caller owns the GitHub reads (AD's deps_met does them)."""
+    closed = set(closed or ())
+    return all(number in closed for number in dispatch_dependencies(item.get("body", "")))
+
+def dispatch_can_take(backend, item):
+    """AD's can_take: the card's own pin or no pin always, another backend only without strict-backend."""
+    if item.get("backend") in (None, backend): return True
+    if item.get("strict"): return False
+    if backend == "codex" and SOCKET_RE.search((item.get("title") or "") + "\n" + (item.get("body") or "")): return False
+    return True
+
+def dispatch_rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, number
+    return (0 if item.get("backend") == backend else 1 if item.get("backend") is None else 2,
+            item.get("prio", 0), item.get("n", 0))
+
+def select_dispatches(issues, lanes, config=None):
+    """Match ready cards to idle lanes exactly like the box AD does (Refs #1359).
+
+    Lanes are served in order and every lane takes the best card it may run: its own
+    backend pin first, then unpinned cards, then cross-pinned ones, each group ordered by
+    priority and issue number. A `strict-backend` card never leaves its backend, and a card
+    whose `依赖：#n` dependencies are still open is not dispatchable."""
+    config = config or {}
+    closed = set(config.get("closed_issues") or ())
+    queue = []
+    for issue in dispatch_ready_issues(issues, config):
+        item = dispatch_item(issue, config)
+        if dispatch_deps_met(item, closed): queue.append(item)
+    queue.sort(key=lambda item: (item["prio"], item["n"]))
+    selected = []
+    for lane in lanes or []:
+        backend = lane.get("backend")
+        candidates = sorted((item for item in queue if dispatch_can_take(backend, item)),
+                            key=lambda item: dispatch_rank(backend, item))
+        if not candidates: continue
+        pick = candidates[0]
+        selected.append((pick["issue"], lane))
+        queue.remove(pick)
+    return selected
+
+def dispatch_skip_reason(item, lanes, config=None):
+    """Why a ready card was not handed to a lane (the dispatch summary explains every skip)."""
+    config = config or {}
+    if not dispatch_deps_met(item, set(config.get("closed_issues") or ())):
+        return "waiting on dependencies"
+    if not lanes:
+        return "no idle lane"
+    backend = item.get("backend")
+    if backend and item.get("strict") and not any(lane.get("backend") == backend for lane in lanes):
+        return f"strict-backend pin {backend} has no idle lane"
+    if not any(dispatch_can_take(lane.get("backend"), item) for lane in lanes):
+        return f"no idle lane may take backend {backend}"
+    return "no idle lane"
+
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)

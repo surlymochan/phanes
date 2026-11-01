@@ -47,6 +47,71 @@ openswarm run --backend github-issue --cwd <target-repo> --base <commit> \
 
 Use `--detach` for a background planner run and `openswarm watch <run-id>` to follow it. `openswarm bus status` shows open issue state, claimant, and age.
 
+## Push-mode dispatch to resident lanes
+
+The issue bus is pull mode: an executor claims a card from the bus repository. Resident lanes
+(`openswarm lane`) are push mode: `openswarm dispatch` hands a ready card to an idle lane
+without waiting for the lane to ask for it.
+
+```sh
+openswarm dispatch --once            # one dispatch tick
+openswarm dispatch --loop            # one tick per policy.dispatch.poll_seconds
+openswarm dispatch --once --shadow   # print the plan only, change nothing
+```
+
+`--shadow` reports which card would go to which lane and changes neither labels nor lanes.
+Compare its output tick by tick with the box autodispatch before switching the real dispatch on.
+
+Configure the dispatch in `policy.local.json` under `$OPENSWARM_HOME`:
+
+```json
+{
+  "dispatch": {
+    "repo": "<owner>/<repo>",
+    "ready_label": "lane-ready",
+    "excluding_labels": ["in-progress", "lane-pr", "lane-failed"],
+    "priorities": {"p0": 0, "p1": 1, "p2": 2},
+    "backend_label_prefix": "backend:",
+    "strict_label": "strict-backend",
+    "assigned_label": "in-progress",
+    "budget_minutes": 45,
+    "card_type": null,
+    "base": "",
+    "helper": "",
+    "poll_seconds": 60
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `repo` | The repository whose open issues are dispatched. Required; it defaults to `policy.bus.repo` when set there. |
+| `ready_label` | The label of a card that may be dispatched. |
+| `excluding_labels` | Labels that take a card out of the queue (a card that is already running, has a PR, or failed). |
+| `priorities` | Label to priority rank; lower ranks are dispatched first, unlabelled cards come last. |
+| `backend_label_prefix` | Prefix of the label that pins a card to one backend family (`backend:pi`). |
+| `strict_label` | Label that forbids the cross-backend fallback: a strict card never leaves its backend. |
+| `assigned_label` | Label written to a card after it was handed to a lane. |
+| `budget_minutes` | Hard wall-clock budget of the lane run. |
+| `card_type` | Optional task card type, validated against the card types of the knowledge base. |
+| `base` | Commit the lane branches from; the target repository's `main` tip when empty. |
+| `helper` | Path of the autodispatch helper that owns the decisions; the phanes layout default is `tools/lane-autodispatch/autodispatch.py`. |
+| `poll_seconds` | Delay between two ticks of `--loop`. |
+
+A tick reads the open issues of `dispatch.repo` (pull requests are ignored), keeps the cards
+that carry `ready_label` and none of `excluding_labels`, and hands them to idle lanes in lane
+order. Every lane takes the best card it may run: its own backend pin first, then unpinned
+cards, then cards pinned to another backend. A card whose `依赖：#n` dependencies are still open
+waits. The task text is the issue number, the title, the body and the shared executor rules;
+the acceptance command is taken from the `验收`/`Verify:` line of the body. A dispatched card
+loses `ready_label` and gains `assigned_label`; the run id is reported in the tick output.
+
+The dispatch reads the authoritative issue list. The box autodispatch reads the search index
+(`gh issue list --label`) and re-reads every candidate it picks, so it skips a card whose
+search row lags behind. Expect that one tick to differ; everything else — the lane order, the
+backend pin, the `strict-backend` refusal, the dependency gate and the priority order — is
+the same rule set.
+
 ## Task card protocol
 
 An issue is one task card. Its title is `[openswarm] <run title>`. The task description is followed by a fenced `openswarm-task` JSON block:
