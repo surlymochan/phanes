@@ -1,4 +1,5 @@
-"""Lease state-machine coverage for the GitHub issue bus."""
+"""Lease state-machine and offline result parsing coverage for the GitHub issue bus."""
+import json
 import unittest
 
 try:
@@ -15,6 +16,13 @@ def claim(worker, created_at, comment_id):
 
 
 class GitHubIssueBusLeaseTests(unittest.TestCase):
+    def test_result_comment_sample_parses_to_dict_without_github(self):
+        comment = """```openswarm-result
+{"status":"ok","run_id":"offline-run-1","pr_url":null}
+```"""
+        payload = json.loads(comment.split("\n", 1)[1].rsplit("\n", 1)[0])
+        self.assertEqual(payload, {"status": "ok", "run_id": "offline-run-1", "pr_url": None})
+
     def test_unexpired_claim_renews_for_same_worker(self):
         comments = [claim("worker-a", "2026-01-01T00:00:00+00:00", 1),
                     claim("worker-a", "2026-01-01T00:00:30+00:00", 2)]
