@@ -152,7 +152,7 @@ class DoctorTests(unittest.TestCase):
         result = self.doctor("--json")
 
         report = json.loads(result.stdout)
-        self.assertEqual(set(report), {"ok", "lanes", "notes", "summary"})
+        self.assertEqual(set(report), {"ok", "lanes", "resources", "notes", "summary"})
         self.assertEqual(set(report["summary"]), {"ok", "warn", "fail", "lanes"})
         self.assertEqual(report["summary"]["lanes"], 1)
         lane = report["lanes"][0]
