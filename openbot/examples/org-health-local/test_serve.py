@@ -295,7 +295,7 @@ class LocalServeBoundaryTests(unittest.TestCase):
                 status, content_type, body = self.request_with_type(path)
                 self.assertEqual(status, 200)
                 self.assertEqual(content_type, 'application/json')
-                self.assertTrue(body)
+                self.assertGreater(len(body), 0)
 
     def test_diagnosis_api_matches_builder_data_fields(self):
         status, content_type, body = self.request_with_type('/api/diagnosis')
