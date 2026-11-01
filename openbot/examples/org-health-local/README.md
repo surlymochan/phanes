@@ -342,6 +342,8 @@ python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  #
 
 退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
 
+结构定义里每个键的含义、单位、计算口径与来源角色见 [`docs/scenario/org-diagnosis/data-definitions.md`](../../../docs/scenario/org-diagnosis/data-definitions.md)；键名与该文档的一致性由 `python3 -m unittest test_data_definitions -v` 断言（只用标准库）。
+
 ## Review 角色：独立交叉审查
 
 `review/` 是独立交叉审查角色：核对任务书（brief）、诊断快照（diagnosis）与站点产物（dist）三方一致性，逐条输出 PASS/FAIL，任一 FAIL 时退出码非 0。
