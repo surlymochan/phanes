@@ -23,6 +23,7 @@ SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInte
 BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
+STALE_STRIPPED_N = 0  # stale-search candidates removed by this process
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):
@@ -212,6 +213,7 @@ def finish(lane, cfg, st, info, state):
     return True
 
 def tick(lanes, state, last_warn):
+    global STALE_STRIPPED_N
     if os.path.exists(f"{D}/PAUSE"): return last_warn
     state.setdefault("_done", [])
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
@@ -243,7 +245,8 @@ def tick(lanes, state, last_warn):
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
             if fresh_ready(c["n"], state): pick = c; break
-            q.remove(c); log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
+            q.remove(c); STALE_STRIPPED_N += 1
+            log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)  # try the next one this tick
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
@@ -265,7 +268,8 @@ def tick(lanes, state, last_warn):
         elif time.time() - last_warn > 600:
             log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     st = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
-    st["_busy"] = sum(1 for L in lanes if state.get(L)); st["_ready"] = ready; st["_blocked"] = blocked; st["_at"] = time.strftime("%F %T")
+    st["_busy"] = sum(1 for L in lanes if state.get(L)); st["_ready"] = ready; st["_blocked"] = blocked
+    st["_stale_stripped_n"] = STALE_STRIPPED_N; st["_at"] = time.strftime("%F %T")
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
 

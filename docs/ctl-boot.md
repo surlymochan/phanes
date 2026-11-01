@@ -145,6 +145,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
 - `python3 tools/check-ready-refill-contract.py` — offline ready/refill contract check. It uses a fake directory to assert `filed N issue(s)` for a local card and `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
+- `python3 tools/check-ad-stale-obs.py` — offline stale-skip observation check. It uses fake `lanes-status` state to assert `_stale_stripped_n` exists and is a non-negative integer; the live field counts candidates stripped by the current process.
 - `python3 tools/check-orphan-runner-window.py` — offline #961 contract check for an assignment whose remote `runner_alive` remains false. After the window expires while `run_state=running`, the assignment is recycled as `orphaned` and the task is relabelled `lane-ready`; the exact window boundary is not expired.
 
 ### Orphan runner window after assign (Refs #961)
