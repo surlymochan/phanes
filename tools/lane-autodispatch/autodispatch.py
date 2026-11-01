@@ -17,6 +17,7 @@ RULES = ("Rules: work only inside this repository worktree (the current director
          "installs. Keep the change small and factual; cite file paths and line numbers you checked. Commit your result with a "
          "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue.")
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
+DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
 SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ControlMaster=auto",
         "-o", f"ControlPath={HOME}/.ssh/cm/%r@%h:%p", "-o", "ControlPersist=600"]
@@ -62,6 +63,18 @@ def save_state(s):
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
 
+def label_names(issue):
+    return {
+        label if isinstance(label, str) else label["name"]
+        for label in issue.get("labels", [])
+        if isinstance(label, str) or isinstance(label, dict) and "name" in label
+    }
+
+def dispatchable_issue(issue):
+    labels = label_names(issue)
+    return (issue.get("state", "OPEN") == "OPEN" and "lane-ready" in labels
+            and not labels & DISPATCH_EXCLUDING_LABELS)
+
 REMOTE_STATUS = r'''
 import json,os,sys
 O=os.path.expanduser("~/.claude/openswarm-executor-candidate"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
@@ -99,8 +112,8 @@ def queue():
     if rc: raise RuntimeError(err)
     items = []
     for i in json.loads(out):
-        labels = {l["name"] for l in i["labels"]}
-        if "in-progress" in labels: continue
+        labels = label_names(i)
+        if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
         be = next((l.split(":", 1)[1] for l in labels if l.startswith("backend:")), None)
         items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "", "prio": pr, "backend": be, "strict": "strict-backend" in labels})
@@ -148,9 +161,7 @@ def fresh_ready(n, state):
     # labels from `gh issue view` are authoritative; `_done` alone no longer blocks (a re-labelled lane-ready issue is retried)
     rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
     if rc: return False
-    j = json.loads(out); labels = {l["name"] for l in j["labels"]}
-    if not (j["state"] == "OPEN" and "lane-ready" in labels and not labels & {"in-progress", "lane-pr", "lane-failed"}): return False
-    return True
+    return dispatchable_issue(json.loads(out))
 
 def note_stale_skip():
     global STALE_STRIPPED_N
