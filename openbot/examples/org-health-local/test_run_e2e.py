@@ -110,7 +110,7 @@ class RunE2ETest(unittest.TestCase):
         self.scripts = [self.root / f'{name}.py' for name in ('boss', 'da', 'builder', 'checker', 'reviewer')]
 
     def write_stub(self, path, role, failing=False, probe=False, exit_code=7, echo=None,
-                   report_path=None, report_body=None, error_text=None):
+                   report_path=None, report_body=None, error_text=None, raw_output=None):
         if report_path is not None and report_body is None:
             report_body = '{}'
         source = '''import json, pathlib, sys
@@ -143,7 +143,10 @@ elif role == 'builder':
     else:
         (out / 'index.html').write_text('ok', encoding='utf-8')
 elif role == 'reviewer':
-    if PROBE:
+    if RAW_OUTPUT is not None:
+        sys.stdout.buffer.write(RAW_OUTPUT)
+        sys.stdout.buffer.flush()
+    elif PROBE:
         brief = pathlib.Path(args[args.index('--brief') + 1])
         data = pathlib.Path(args[args.index('--data') + 1])
         dist = pathlib.Path(args[args.index('--dist') + 1])
@@ -157,6 +160,7 @@ elif role == 'reviewer':
         source = source.replace('RPT_PATH', repr(report_path))
         source = source.replace('RPT_BODY', repr(report_body))
         source = source.replace('ERR_TEXT', repr(error_text))
+        source = source.replace('RAW_OUTPUT', repr(raw_output))
         path.write_text(source, encoding='utf-8')
 
     def command(self):
@@ -729,6 +733,54 @@ elif role == 'reviewer':
         report = self.workdir / REVIEW_REPORT
         self.assertTrue(report.is_file(), '审查失败时未写出审查记录')
         self.assertIn('审查参数错误', report.read_text(encoding='utf-8'))
+
+    def test_review_output_with_undecodable_bytes_reports_readable_failure(self):
+        """审查器输出不可解码字节时给出可读失败：非零退出、报告仍在、耗时记录写明失败步骤。
+
+        审查器输出原始字节（非法 UTF-8），运行器不能把它当成功，也不该只留下裸 Traceback。
+        """
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role, raw_output=(b'\xff\xfe \xe5\xae\xa1\xe6\x9f\xa5\xe6\xa1\xa9\xe8\xbe\x93\xe5\x87\xba\n'
+                                                   if role == 'reviewer' else None))
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # 失败结果明确：非零退出并点名失败步骤，不裸抛 Traceback
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: 审查', result.stderr)
+        self.assertIn('非 UTF-8', result.stderr)
+        self.assertIn('失败步骤: 审查', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        # 失败不误报为成功：不再打印成功路径才有的预览命令
+        self.assertNotIn('预览命令', result.stdout)
+        # 审查记录仍写出，原始字节保留在报告里，便于事后核对
+        report = self.workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file(), '审查输出不可解码时未写出审查记录')
+        self.assertIn(b'\xff', report.read_bytes())
+        # 耗时记录写出失败步骤，退出码非 0
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertNotEqual(timings[-1]['exit_code'], 0)
+
+    def test_review_report_keeps_utf8_content_and_path_when_output_is_decodable(self):
+        """审查器输出可解码时：报告路径与 UTF-8 内容不变，整体仍返回 0。"""
+        for path, role in zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer')):
+            self.write_stub(path, role)
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = self.workdir / REVIEW_REPORT
+        self.assertTrue(report.is_file())
+        # 报告仍是可解码的 UTF-8 文本，内容与路径不受影响
+        content = report.read_text(encoding='utf-8')
+        self.assertIn('# 组织诊断交叉审查报告', content)
+        self.assertIn('PASS', content)
+        timings = json.loads((self.workdir / 'timings.json').read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss', 'DA', 'Builder', '检查', '审查'])
+        self.assertEqual(timings[-1]['exit_code'], 0)
 
     def test_workdir_occupied_by_file_reports_readable_error(self):
         """工作目录被同名文件占用时给出可读提示并非零退出，不裸抛 Traceback。"""

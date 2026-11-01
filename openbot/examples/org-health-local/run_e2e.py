@@ -79,6 +79,19 @@ def open_report(path):
         return None
 
 
+def undecodable_reason(path):
+    """返回报告不可按 UTF-8 解码的原因；报告可解码（或读不出来）时返回 None。"""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        data.decode('utf-8')
+    except UnicodeDecodeError as error:
+        return f'偏移 {error.start} 处无法解码'
+    return None
+
+
 def write_timings(workdir, timings):
     """写出耗时记录；写不进去时给出可读提示并返回 False。"""
     path = workdir / 'timings.json'
@@ -90,7 +103,7 @@ def write_timings(workdir, timings):
     return True
 
 
-def run_step(name, command, timings, stdout=None, stderr=None):
+def run_step(name, command, timings, stdout=None, stderr=None, output_path=None):
     print(f'[{name}] 命令: {" ".join(map(str, command))}', flush=True)
     started = time.monotonic()
     try:
@@ -108,13 +121,21 @@ def run_step(name, command, timings, stdout=None, stderr=None):
         print(f'步骤失败: {name} (文件不存在: {error.filename})', file=sys.stderr, flush=True)
         return False
     elapsed = time.monotonic() - started
+    # 步骤输出写进报告时校验编码：审查器输出不可解码时也算这一步失败，
+    # 免得报告已损坏却仍然报成功。
+    reason = undecodable_reason(output_path) if output_path is not None else None
+    exit_code = result.returncode
+    if not exit_code and reason is not None:
+        # 步骤本身返回 0 但产物已损坏：按数据错误记 2，耗时记录里不留成功。
+        exit_code = 2
     timings.append({'name': name, 'command': list(map(str, command)),
-                    'duration_seconds': elapsed, 'exit_code': result.returncode})
+                    'duration_seconds': elapsed, 'exit_code': exit_code})
     print(f'[{name}] 耗时: {elapsed:.2f}s', flush=True)
     if result.returncode:
         print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr, flush=True)
-        return False
-    return True
+    if reason is not None:
+        print(f'步骤失败: {name} (输出含非 UTF-8 字节: {output_path}, {reason})', file=sys.stderr, flush=True)
+    return result.returncode == 0 and reason is None
 
 
 def source_commit():
@@ -185,7 +206,8 @@ def main(argv=None):
             else:
                 with report:
                     # 审查脚本的 stdout 与 stderr 都写进报告：参数失败等信息留在产物里，便于核对。
-                    if not run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT):
+                    if not run_step('审查', review, timings, stdout=report, stderr=subprocess.STDOUT,
+                                   output_path=report_path):
                         failed.append('审查')
                         status = 1
                         print(f'审查报告: {report_path}', file=sys.stderr, flush=True)
