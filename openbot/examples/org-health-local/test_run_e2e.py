@@ -36,6 +36,18 @@ class RunE2EArgumentContractTest(unittest.TestCase):
                        '--reviewer', '--review'):
             self.assertIn(option, result.stdout)
 
+    def test_help_describes_custom_path_options_relative_to_cwd(self):
+        """直接调用 --help，确保 --raw、--bundle、--workdir 的用途说明与相对当前工作目录解析均出现在帮助中。"""
+        result = subprocess.run([sys.executable, str(RUNNER), '--help'], capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for option in ('--raw', '--bundle', '--workdir'):
+            self.assertIn(option, result.stdout)
+        self.assertIn('相对当前工作目录解析', result.stdout)
+        self.assertIn('工作目录路径', result.stdout)
+        self.assertIn('原始数据目录路径', result.stdout)
+        self.assertIn('前端 bundle 文件路径', result.stdout)
+
     def test_workdir_is_required(self):
         result = subprocess.run([sys.executable, str(RUNNER)], capture_output=True, text=True)
 
