@@ -8785,11 +8785,15 @@ def cmd_lane_status():
 def cmd_lane_assign(args):
     validate_card_type(load_policy(), getattr(args, "card_type", None))
     lane = lanes_by_name([args.name])[0]
-    task = args.prompt if args.prompt is not None else open(args.task_file).read()
+    task_bytes = (args.prompt.encode("utf-8") if args.prompt is not None
+                  else open(args.task_file, "rb").read())
+    task_sha256 = hashlib.sha256(task_bytes).hexdigest()
+    task = task_bytes.decode("utf-8")
     if not task.strip():
-        print(json.dumps({"ok": False, "error": "empty task"}))
+        print(json.dumps({"ok": False, "status": "rejected", "assigned": False,
+                          "error": "empty task"}))
         sys.exit(1)
-    rid = new_run_id()
+    rid = args.run_id or new_run_id()
     title = args.title or task.strip().splitlines()[0][:72]
     budget = args.budget_minutes if args.budget_minutes is not None else load_policy()["run"]["timeout_seconds"] / 60
     if not math.isfinite(budget) or budget < 0:
@@ -8807,10 +8811,12 @@ def cmd_lane_assign(args):
                                          "paths": getattr(args, "paths", None) or [],
                                          "read_only": getattr(args, "read_only", False)})
     if response.get("ok"):
-        response.update({"lane": lane["name"], "watch": f"openswarm watch {rid}",
+        response.update({"lane": lane["name"], "run_id": rid, "status": "assigned", "assigned": True,
+                         "task_sha256": task_sha256, "watch": f"openswarm watch {rid}",
                          "result": os.path.join(RUNS, rid, "result.json")})
         print(json.dumps(response, indent=2, ensure_ascii=False))
     else:
+        response.update({"run_id": rid, "status": "rejected", "assigned": False})
         print(json.dumps(response, indent=2, ensure_ascii=False))
         sys.exit(3 if response.get("error") == "budget_exceeded_daily" else 1)
 
@@ -9570,6 +9576,80 @@ def host_require(host, response, operation):
     return out
 
 
+def fleet_lane_assign(host, command):
+    """Copy a task card to a fleet host, verify its digest there, then assign it."""
+    if len(command) < 3 or command[:2] != ["lane", "assign"]:
+        return None
+    try:
+        task_index = command.index("--task-file")
+        task_path = command[task_index + 1]
+    except (ValueError, IndexError):
+        return None
+    with open(task_path, "rb") as stream:
+        card = stream.read()
+    digest = hashlib.sha256(card).hexdigest()
+    run_id = None
+    if "--run-id" in command:
+        index = command.index("--run-id")
+        if index + 1 >= len(command):
+            raise ValueError("--run-id requires a value")
+        run_id = safe_id(command[index + 1])
+    else:
+        # The card digest is the retry key: a transport retry must not create a
+        # second remote reservation for the same lane/task pair.
+        key = (host["name"] + "\0" + command[2] + "\0").encode() + card
+        run_id = "fleet-" + hashlib.sha256(key).hexdigest()[:24]
+        command = command + ["--run-id", run_id]
+    if not card.strip():
+        result = {"ok": False, "status": "rejected", "state": "rejected", "assigned": False, "run_id": run_id,
+                  "error": "empty task", "task_sha256": digest}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+
+    source = ("import hashlib, os, sys, tempfile\n"
+              "data = sys.stdin.buffer.read()\n"
+              "expected = sys.argv[1]\n"
+              "actual = hashlib.sha256(data).hexdigest()\n"
+              "if actual != expected: raise SystemExit('task digest mismatch')\n"
+              "fd, path = tempfile.mkstemp(prefix='openswarm-card-', suffix='.md')\n"
+              "with os.fdopen(fd, 'wb') as stream: stream.write(data)\n"
+              "print(path + '\\t' + actual)")
+    rc, out, err = host_run(host, shlex.join(["python3", "-c", source, digest]), timeout=60, input=card)
+    if rc:
+        result = {"ok": False, "status": "transfer_failed", "assigned": False, "run_id": run_id,
+                  "state": "transfer_failed", "error": "task transfer verification failed", "task_sha256": digest,
+                  "exit_code": rc, "stderr": harvest_stderr_tail(err)}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+    try:
+        remote_path, remote_digest = out.decode().strip().split("\t", 1)
+    except (UnicodeError, ValueError):
+        remote_path, remote_digest = "", ""
+    if remote_digest != digest or not remote_path:
+        result = {"ok": False, "status": "transfer_failed", "assigned": False, "run_id": run_id,
+                  "state": "transfer_failed", "error": "task transfer verification failed", "task_sha256": digest}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+    try:
+        rc, out, err = host_run(host, host_openswarm(host, command[:task_index] + ["--task-file", remote_path] +
+                                                     command[task_index + 2:]), timeout=60)
+        if out:
+            try:
+                result = json.loads(out)
+            except (ValueError, UnicodeError):
+                result = {"ok": False, "error": "remote lane assign returned invalid JSON"}
+        else:
+            result = {"ok": False, "error": harvest_stderr_tail(err) or "remote lane assign failed"}
+        result.update({"run_id": run_id, "task_sha256": digest,
+                       "status": "assigned" if rc == 0 and result.get("ok") else "rejected",
+                       "state": result.get("state") if rc == 0 and result.get("ok") else "rejected",
+                       "assigned": bool(rc == 0 and result.get("ok"))})
+        print(json.dumps(result, ensure_ascii=False))
+        return rc or (0 if result.get("ok") else 1)
+    finally:
+        host_python(host, "import os,sys; os.unlink(sys.argv[1])", [remote_path], timeout=30)
+
+
 def host_git(host, repo, args, timeout=60):
     return host_run(host, "git -C " + shell_path(repo) + " " + shlex.join(args), timeout=timeout)
 
@@ -9915,6 +9995,8 @@ def cmd_fleet(args):
         command = args.args[1:] if args.args[:1] == ["--"] else args.args
         if not command:
             raise ValueError("fleet exec requires openswarm arguments after --")
+        if command[:2] == ["lane", "assign"] and "--task-file" in command:
+            raise SystemExit(fleet_lane_assign(host, command))
         rc, out, err = host_run(host, host_openswarm(host, command), timeout=args.timeout)
         sys.stdout.buffer.write(out)
         sys.stderr.buffer.write(err)
@@ -12252,6 +12334,7 @@ def main():
     add_dispatch_arguments(lp, "task-source", "title", "verify", "verify-baseline", "budget",
                            task_source_required=True)
     lp.add_argument("--base")
+    lp.add_argument("--run-id", help=argparse.SUPPRESS)
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")
