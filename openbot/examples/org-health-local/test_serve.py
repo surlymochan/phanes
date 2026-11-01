@@ -6,6 +6,7 @@ import errno
 import http.client
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -458,6 +459,53 @@ class DistRootServeTests(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(timeout=5)
+            server.server_close()
+        self.assertFalse(thread.is_alive())
+
+    def test_hot_reload_gets_see_one_complete_diagnosis_snapshot(self):
+        """原子切换 diagnosis 文件时，并发 GET 只能看到旧版或新版快照。"""
+        old_body = json.dumps({'snapshot': 'old', 'items': list(range(80))}).encode()
+        new_body = json.dumps({'snapshot': 'new', 'items': list(range(120))}).encode()
+        source = self.dist / 'next-diagnosis.json'
+        self.data.write_bytes(old_body)
+
+        server = serve.create_server(0, root=self.dist)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={'poll_interval': 0.01},
+            daemon=True,
+        )
+        thread.start()
+        port = server.server_address[1]
+        stop = threading.Event()
+
+        def hot_reload():
+            use_new = True
+            for _ in range(100):
+                replacement = new_body if use_new else old_body
+                source.write_bytes(replacement)
+                os.replace(source, self.data)
+                use_new = not use_new
+            stop.set()
+
+        switcher = threading.Thread(target=hot_reload, daemon=True)
+        switcher.start()
+        try:
+            def get_diagnosis():
+                return self.request('/data/diagnosis.json', port=port)
+
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                responses = list(executor.map(lambda _: get_diagnosis(), range(120)))
+            switcher.join(timeout=5)
+            self.assertTrue(stop.is_set())
+            for status, body in responses:
+                with self.subTest(status=status):
+                    self.assertEqual(status, 200)
+                    self.assertIn(body, (old_body, new_body))
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            switcher.join(timeout=5)
             server.server_close()
         self.assertFalse(thread.is_alive())
 
