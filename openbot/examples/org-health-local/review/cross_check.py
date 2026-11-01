@@ -210,6 +210,36 @@ def brief_period(brief: dict) -> tuple[set[str], str | None, str | None, str | N
     return months, end, as_of, observed
 
 
+def brief_period_anchors(brief: dict) -> set[str]:
+    """返回任务书显式列出的期次锚点。"""
+    window = brief.get("观察期间")
+    values = window.get("期次") if isinstance(window, dict) else None
+    if not isinstance(values, list):
+        return set()
+    return {value.strip() for value in values if isinstance(value, str) and value.strip()}
+
+
+def diagnosis_period_paths(diagnosis: dict) -> dict[str, list[str]]:
+    """收集指标中的期次键及路径，日期前的口径前缀不参与比较。"""
+    paths: dict[str, list[str]] = {}
+
+    def visit(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_text = str(key)
+                match = DATE_PATTERN.search(key_text)
+                canonical = key_text[match.start() :] if match else key_text
+                if match or canonical in {"年末测算", "年末目标"}:
+                    paths.setdefault(canonical, []).append(f"{path}/{key_text}")
+                visit(value, f"{path}/{key_text}")
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                visit(item, f"{path}/{index}")
+
+    visit(diagnosis.get("metrics"), "/metrics")
+    return paths
+
+
 def check_period(brief: dict, diagnosis: dict) -> Result:
     """核对任务书观察期间与快照 scope 是否一致。"""
     name = "期间一致"
@@ -235,6 +265,25 @@ def check_period(brief: dict, diagnosis: dict) -> Result:
     cutoff = scope.get("数据截止")
     if as_of and isinstance(cutoff, str) and as_of != cutoff:
         problems.append(f"任务书 `观察期间.数据截止`={as_of} 与 `scope.数据截止`={cutoff} 不一致")
+    anchors = brief_period_anchors(brief)
+    period_paths = diagnosis_period_paths(diagnosis)
+    unexpected = sorted(set(period_paths) - anchors) if anchors and period_paths else []
+    if unexpected:
+        conflict_paths = [path for item in unexpected for path in period_paths[item]]
+        problems.append("诊断快照期次锚点与任务书不一致：" + "、".join(unexpected))
+        return Result(
+            False,
+            name,
+            "；".join(problems),
+            finding={
+                "field": "期次",
+                "brief_path": "/观察期间/期次",
+                "diagnosis_path": conflict_paths[0],
+                "expected": sorted(anchors),
+                "actual": unexpected,
+            },
+            severity="error",
+        )
     if problems:
         return Result(False, name, "；".join(problems))
     return Result(True, name, f"`scope.观察月份`={observed} 在任务书观察期间（{listed}）内")
@@ -587,6 +636,8 @@ def finding_path(result: Result) -> str:
         match = re.search(r"(/[^（、]+)", result.detail)
         if match:
             return match.group(1)
+    if result.finding and isinstance(result.finding.get("diagnosis_path"), str):
+        return result.finding["diagnosis_path"]
     return paths.get(result.name, f"/{result.name}")
 
 
