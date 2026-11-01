@@ -25,7 +25,7 @@ HOST_BACKOFF_BASE = 30
 HOST_BACKOFF_MAX = 600
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
-STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
+STALE_STRIPPED_N = 0  # stale search-index entries removed by this process (Refs #1221)
 
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
 def host_fail(h, why):

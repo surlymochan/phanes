@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for stale autodispatch observations (Refs #1085)."""
+"""Offline contract for stale autodispatch observations (Refs #1221)."""
 
 import importlib.util
 from pathlib import Path
