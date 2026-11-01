@@ -16,7 +16,7 @@ def claim(worker, created_at, comment_id):
             "user": {"login": worker}, "created_at": created_at}
 
 
-def result(status="ok", run_id="offline-run-1", branch=None, error_class="protocol_error"):
+def result(status="done", run_id="offline-run-1", branch=None, error_class="none"):
     return {"status": status, "run_id": run_id, "summary": "worker result",
             "files_changed": [], "tests": "not run", "followups": [],
             "branch": branch if branch is not None else f"openswarm/{run_id}",
@@ -44,10 +44,35 @@ class GitHubIssueBusLeaseTests(unittest.TestCase):
 
     def test_result_comment_sample_parses_to_dict_without_github(self):
         comment = """```openswarm-result
-{"status":"ok","run_id":"offline-run-1","pr_url":null}
+{"status":"done","run_id":"offline-run-1","error_class":"none","pr_url":null}
 ```"""
         payload = json.loads(comment.split("\n", 1)[1].rsplit("\n", 1)[0])
-        self.assertEqual(payload, {"status": "ok", "run_id": "offline-run-1", "pr_url": None})
+        self.assertEqual(payload, {"status": "done", "run_id": "offline-run-1", "error_class": "none", "pr_url": None})
+
+    def test_claim_result_contract_migrates_labels_and_keeps_first_valid_claim(self):
+        issue = {"labels": ["openswarm:queued"], "comments": []}
+        issue["comments"].append(claim("worker-a", "2026-01-01T00:00:00+00:00", 1))
+        issue["labels"] = [label for label in issue["labels"] if label != "openswarm:queued"]
+        issue["labels"].append("openswarm:claimed")
+        issue["comments"].append(claim("worker-b", "2026-01-01T00:00:01+00:00", 2))
+        winner = xs.bus_winning_claim(issue["comments"], {"worker-a", "worker-b"}, 300,
+                                      xs.to_epoch("2026-01-01T00:00:02+00:00"))
+        self.assertEqual(winner["id"], 1)
+        self.assertEqual(issue["labels"], ["openswarm:claimed"])
+
+    def test_illegal_claim_and_result_contract_are_rejected(self):
+        comments = [claim("worker-a", "2026-01-01T00:00:00+00:00", 1),
+                    {"id": 2, "body": "/claim worker/a", "user": {"login": "worker-a"},
+                     "created_at": "2026-01-01T00:00:01+00:00"}]
+        self.assertIsNone(xs.bus_claim(comments[1]))
+        self.assertEqual(xs.bus_winning_claim(comments, {"worker-a"}, 300,
+                                               xs.to_epoch("2026-01-01T00:00:02+00:00"))["id"], 1)
+        for invalid in (
+                {**result(), "error_class": None},
+                {**result(), "error_class": "not-a-contract-error"},
+                {**result(), "status": "failed", "error_class": "none"},
+                {key: value for key, value in result().items() if key != "error_class"}):
+            self.assertIsNone(xs.bus_parse_result(result_comment(invalid), "offline-run-1"))
 
     def test_invalid_result_fields_are_not_terminal_results(self):
         missing_run_id = result()

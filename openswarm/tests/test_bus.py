@@ -198,7 +198,7 @@ class BusTests(unittest.TestCase):
             "with open('worker.txt', 'w') as stream:\n"
             "    stream.write('worker result\\n')\n"
             "report = {'status':'done','summary':'worker completed','files_changed':['worker.txt'],"
-            "'tests':'fake executor','followups':[]}\n"
+            "'tests':'fake executor','followups':[],'error_class':'none'}\n"
             "message = {'role':'assistant','content':[{'type':'text','text':json.dumps(report)}], "
             "'usage':{'input':2,'output':3}}\n"
             "print(json.dumps({'type':'message_end','message':message}), flush=True)\n")
@@ -259,7 +259,7 @@ class BusTests(unittest.TestCase):
     def report(status, branch=None, commit=None):
         return {"status": status, "summary": "external work", "files_changed": ["worker.txt"],
                 "tests": "fake verify", "followups": [], "branch": branch, "commit": commit,
-                "pr_url": None, "error_class": "executor_failed" if status == "failed" else None}
+                "pr_url": None, "error_class": "executor_failed" if status == "failed" else "none"}
 
     def send_result(self, number, report, label="done", login="executor"):
         report.setdefault("run_id", xs.bus_extract_task(self.issue(number)["body"])["run_id"])
@@ -415,7 +415,7 @@ class BusTests(unittest.TestCase):
 
     def test_result_branch_validation_matches_run_id_pattern(self):
         report = {"status": "done", "run_id": "a_B-9", "summary": "ok", "files_changed": [], "tests": "",
-                  "followups": [], "branch": "openswarm/a_B-9", "commit": None}
+                  "followups": [], "branch": "openswarm/a_B-9", "commit": None, "error_class": "none"}
         body = lambda value: "```openswarm-result\n" + json.dumps({**report, "branch": value}) + "\n```"
         self.assertIsNotNone(xs.bus_parse_result(body(report["branch"])))
         self.assertIsNone(xs.bus_parse_result(body("openswarm/a.b")))
@@ -455,7 +455,7 @@ class BusTests(unittest.TestCase):
 import json
 with open('worker.txt', 'w') as stream:
     stream.write('worker result\\n')
-report = {'status':'done','summary':'worker completed','files_changed':['worker.txt'],'tests':'fake executor','followups':[]}
+report = {'status':'done','summary':'worker completed','files_changed':['worker.txt'],'tests':'fake executor','followups':[],'error_class':'none'}
 message = {'role':'assistant','content':[{'type':'text','text':json.dumps(report)}], 'usage':{'input':2,'output':3}}
 print(json.dumps({'type':'message_end','message':message}), flush=True)
 """)
