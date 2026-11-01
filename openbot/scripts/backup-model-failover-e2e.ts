@@ -9,7 +9,11 @@
 //   3. A turn that did nothing yet runs again on the backup model, with a note and no error.
 //   4. read_agent shows the backup model, and the model to go back to with the provider error as cause.
 //   5. After a restart, the agent goes back to its own model, with a note.
-// Also checks continuation after a usage limit interrupts partial work.
+// Also checks continuation after a usage limit interrupts partial work. The stand-in reports a spent
+// plan window the way the CLI does, in a `rate_limit_event` that names the window, so the product holds
+// the model family of that window alone and the backup of the other family takes the work over.
+// Every check has its own limit and names the stage it reached, so a stuck check fails on its own
+// instead of the whole run timing out.
 // `bun run test:backup-model-failover`. Writes .openbot-build/backup-model-failover-e2e/report.json.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -47,8 +51,11 @@ const codexExecutable = join(root, "codex");
 const codexLog = join(root, "codex-turns.jsonl");
 const workLog = join(root, "work.jsonl");
 const CODEX_MODEL = defaultProviderModel("codex");
-const PRIMARY: AgentModelId = defaultProviderModel("claude");
-const BACKUP: AgentModelId = PRIMARY === "claude-sonnet-5-5" ? "claude-opus-5-5" : "claude-sonnet-5-5";
+// Two Claude models of different families. A spent weekly window holds the family of the model that
+// ran the turn, so the other family is free and can take the work over. The default Claude model has
+// no family of its own: a window for it holds the whole account, and no model of that account is free.
+const PRIMARY: AgentModelId = "claude-sonnet-5-5";
+const BACKUP: AgentModelId = "claude-opus-5-5";
 // The text the Claude CLI writes in an outage. It names no HTTP status phrase, only the 529 and its type.
 const PROVIDER_ERROR =
   'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"request_id":"req_e2e"}';
@@ -112,15 +119,28 @@ const assistant = (text) =>
   write({ type: "assistant", message: { id: "msg_" + randomUUID(), type: "message", role: "assistant", model,
     content: [{ type: "text", text }], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } },
     parent_tool_use_id: null, session_id: sessionId, uuid: randomUUID() });
+// The window a model runs out of. The CLI names the window it spent, and the product reads the model
+// family from that name: a weekly window holds one family, a session window the whole account.
+const limitType = (name) => (name.includes("opus") ? "seven_day_opus" : name.includes("sonnet") ? "seven_day_sonnet" : "five_hour");
+// The models that reported their window as spent in this process. A model reports it once, so a check
+// that does not move to the backup fails on its own assertion instead of waiting for a timeout.
+const spentWindows = new Set();
 const turn = (message) => {
   record(message);
   const failing = JSON.parse(fs.readFileSync(${JSON.stringify(failingFile)}, "utf8"));
   const fails = failing.includes(model);
   const input = JSON.stringify(message);
   const acts = input.includes("act-then-fail");
-  fs.appendFileSync(${JSON.stringify(turnLog)}, JSON.stringify({ model, failed: fails, input }) + "\\n");
-  if ((input.includes("usage-work") || input.includes("usage-chain") || input.includes("usage-exhausted")) &&
-      (model === ${JSON.stringify(PRIMARY)} || input.includes("usage-exhausted"))) {
+  const spent = (input.includes("usage-work") || input.includes("usage-chain") || input.includes("usage-exhausted")) &&
+    (model === ${JSON.stringify(PRIMARY)} || input.includes("usage-exhausted")) && !spentWindows.has(model);
+  if (spent) {
+    spentWindows.add(model);
+    // The CLI reports the spent window before the turn ends, and names the window it covers.
+    write({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: limitType(model),
+      resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
+  }
+  fs.appendFileSync(${JSON.stringify(turnLog)}, JSON.stringify({ model, failed: fails, spent, input }) + "\\n");
+  if (spent) {
     if (!input.includes("usage-chain-empty")) assistant("Checkpoint saved. Only the final step remains.");
     result({ is_error: true, result: "You've hit your limit. Try again later." });
     return;
@@ -392,7 +412,7 @@ async function waitFor<T>(label: string, read: () => T | null | undefined | fals
   }
 }
 
-function turns(): { model: string; failed: boolean; input: string }[] {
+function turns(): { model: string; failed: boolean; spent: boolean; input: string }[] {
   try {
     return readFileSync(turnLog, "utf8")
       .split("\n")
@@ -463,17 +483,25 @@ function errorsFor(agentId: string, since: number) {
   return events.slice(since).filter((event) => event.type === "error" && event.agentId === agentId);
 }
 
+/** The stage the run reached, so a check that runs out names the step that did not finish. */
+let stage = "the first turn";
+
+/** The time one check may take. A check that runs out names the stage it reached. */
+const CHECK_TIMEOUT_MS = 90_000;
+
 /** Sends a message and waits for its delivery to end. */
 async function send(agentId: string, text: string, sourcePaths?: string[]) {
+  stage = `the delivery of "${text}"`;
   const attachments = await runCauseEffect(mailbox.prepareAttachments(sourcePaths ?? []));
   const receipt = await runCauseEffect(
     service.sendMessage({ agentId, text, attachmentDraftIds: attachments.map((attachment) => attachment.id) }),
   );
   const deliveryId = receipt.deliveries[0]?.id;
   assert.ok(deliveryId, "The message has a delivery.");
+  // A spent plan stops the work and waits for the reset, so "interrupted" ends a delivery too.
   const status = await waitFor(`"${text}" to end`, () => {
     const value = mailbox.getDelivery(deliveryId)?.delivery.status;
-    return value === "completed" || value === "failed" ? value : null;
+    return value === "completed" || value === "failed" || value === "interrupted" ? value : null;
   });
   return { deliveryId, status, error: mailbox.getDelivery(deliveryId)?.delivery.error ?? null };
 }
@@ -509,17 +537,35 @@ async function callTool(tool: string, args: unknown) {
 }
 
 async function check(name: string, run: () => Promise<unknown>) {
-  const detail = await run();
-  report.checks.push({ name, passed: true, detail });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The check has its own limit, so a stuck check names itself and its stage instead of the run
+  // waiting for the whole script to time out.
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`The check "${name}" did not finish in ${CHECK_TIMEOUT_MS} ms. Stage: ${stage}.`)),
+      CHECK_TIMEOUT_MS,
+    );
+  });
+  try {
+    const detail = await Promise.race([run(), limit]);
+    report.checks.push({ name, passed: true, detail });
+  } catch (error) {
+    report.checks.push({ name, passed: false, detail: error instanceof Error ? error.message : String(error) });
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function restart() {
+  stage = "the service to restart";
   await runCauseEffect(service.stop());
   ({ store, mailbox, service } = startService());
   await runCauseEffect(service.initialize());
 }
 
 async function createCodex(name: string, backupModels?: AgentBackupModels) {
+  stage = `the first turn of ${name}`;
   const agent = await runCauseEffect(
     service.createAgent({
       name,
@@ -695,10 +741,27 @@ try {
     const outcome = await send(mover.id, "usage-work: save a checkpoint, then finish the last step.", [attachment]);
     assert.equal(outcome.status, "completed", `The interrupted task completes: ${outcome.error}`);
     const ran = turns().slice(before);
+    // The stages of the failover: the own model reports the spent window, the backup of the other
+    // family takes the rest of the work over, and the delivery ends as completed.
     assert.deepEqual(
-      ran.map((turn) => turn.model),
-      [PRIMARY, BACKUP],
+      ran.map((turn) => [turn.model, turn.spent]),
+      [
+        [PRIMARY, true],
+        [BACKUP, false],
+      ],
+      "The own model reports the spent window, and the backup runs the rest.",
     );
+    const agent = agentOf(mover.id);
+    assert.equal(agent.model, BACKUP, "The agent is on the backup model.");
+    assert.equal(agent.usageLimitReturn?.model, PRIMARY, "The agent keeps its own model to go back to.");
+    assert.ok(
+      events
+        .slice(since)
+        .some((event) => event.type === "usage-limit-reached" && event.agentId === mover.id),
+      "The spent window is reported for the agent.",
+    );
+    const notes = await markers(mover.id, MODEL_SWITCH_ITEM_TYPES["usage-limit"]);
+    assert.deepEqual(notes, [sourceText("status.agent.modelSwitchedForLimit", { model: modelName(BACKUP) })]);
     assert.ok(ran[1]?.input.includes("Continue the unfinished task"), "The backup gets a continuation request.");
     assert.ok(ran[1]?.input.includes("requirements.txt"), "The original attachment still reaches the backup.");
     const snapshot = await runCauseEffect(service.readConversation(mover.id));
@@ -781,7 +844,7 @@ try {
   for (const automatic of [false, true]) {
     await check(
       automatic
-        ? "without a backup, partial work fails without replay"
+        ? "without a backup, partial work stops without replay"
         : "automatic fallback off leaves partial work stopped",
       async () => {
         await restart();
@@ -792,7 +855,9 @@ try {
         const before = turns().length;
         const beforeCodex = readLog<CodexTurn>(codexLog).length;
         const outcome = await send(agent.id, "usage-partial case:stopped");
-        assert.equal(outcome.status, "failed");
+        // A spent plan stops the work that started and waits for the reset, so the delivery ends as
+        // interrupted, as in `token-budget-e2e.ts`.
+        assert.equal(outcome.status, "interrupted", "The work stops at the limit.");
         assert.equal(turns().length, before, "No backup runs.");
         assert.equal(readLog<CodexTurn>(codexLog).length, beforeCodex + 1, "The original action is not replayed.");
         assert.equal(agentOf(agent.id).provider, "codex");
@@ -807,7 +872,8 @@ try {
     const before = turns().length;
     const beforeCodex = readLog<CodexTurn>(codexLog).length;
     const outcome = await send(agent.id, "usage-exhausted case:exhausted");
-    assert.equal(outcome.status, "failed");
+    // Every model of the chain reported a spent window, so the work stops and waits for the reset.
+    assert.equal(outcome.status, "interrupted", "The chain ends without an answer.");
     assert.deepEqual(
       turns()
         .slice(before)
