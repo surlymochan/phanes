@@ -415,7 +415,10 @@ def check_dist(data_path: Path, dist: Path) -> Result:
 
 
 def forbidden_paths(node: object, path: str = "") -> list[str]:
-    """返回命中隐私边界黑名单的键名路径。"""
+    """返回命中隐私边界黑名单的键名路径。
+
+    仅递归检查键名，嵌套数组与对象中的多行文本值不作为路径，避免输出被换行截断。
+    """
     hits: list[str] = []
     if isinstance(node, dict):
         for key, value in node.items():
