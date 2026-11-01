@@ -17,6 +17,29 @@ ALLOWED_PATHS = ('/', '/index.html', '/app.bundle.js', '/styles.css', '/data/dia
 DEFAULT_PORT = 8765
 JSON_CONTENT_TYPE = 'application/json'
 
+# The browser page reads these canonical top-level keys from data/diagnosis.json.
+# ``stage`` and ``口径说明`` are optional page extensions; the remaining keys are
+# the schema-backed data contract used by app.js.
+STATIC_PAGE_REQUIRED_KEYS = frozenset(
+    ('scope', 'conclusion', 'origin', 'metrics', 'insights', 'definitions', 'risks', 'recommendations')
+)
+STATIC_PAGE_OPTIONAL_KEYS = frozenset(('stage', '口径说明'))
+
+
+def diagnosis_contract_error(payload):
+    """Return a readable static-page contract error, or ``None`` when valid.
+
+    The API and the static page intentionally use the same JSON object.  This
+    helper keeps that mapping executable without changing the endpoint's
+    backwards-compatible handling of arbitrary JSON files used by callers.
+    """
+    if not isinstance(payload, dict):
+        return '诊断数据契约错误：顶层必须是 JSON 对象'
+    missing = sorted(STATIC_PAGE_REQUIRED_KEYS - payload.keys())
+    if missing:
+        return f"诊断数据契约错误：静态页缺少字段：{', '.join(missing)}"
+    return None
+
 
 def parse_port(value):
     """解析并校验监听端口，返回 argparse 可读的范围错误。"""
