@@ -24,12 +24,19 @@ a project override on top of it.  A ``stopped``/``partial`` run without an error
 class counts as ``exec_error``.
 
 ``decide`` returns ``(action, counted)``.  ``counted`` is False for error classes
-in ``UNCOUNTED_CLASSES`` (a VM pause killed by the watchdog is not a failed try).
+in ``UNCOUNTED_CLASSES`` (a VM pause killed by the watchdog is not a failed try,
+and a quota failure must not burn a retry).
+
+The error class is normalized before the table lookup: case and hyphen
+differences do not matter (``RATE-LIMIT`` is ``rate_limit``) and the known
+aliases of a class are folded into their canonical name -- ``rate_limit``,
+``usage_limit``, ``quota_exhausted`` and ``insufficient_quota`` are all
+``quota``, ``budget_exceeded_daily`` is ``budget_exceeded`` (#1540).
 
 The module is pure: it reads no files, touches no labels and knows nothing
 about lanes, so the wiring stays with the caller (#1365).
 
-Refs #1401 (part of #1365).
+Refs #1401 (part of #1365), #1540.
 """
 from __future__ import annotations
 
@@ -45,7 +52,16 @@ DEFAULT_CLASS = "default"
 EXEC_ERROR_STATUSES = ("stopped", "partial")
 
 #: Error classes whose attempts do not count towards the retry limit.
-UNCOUNTED_CLASSES = frozenset({"vm_paused"})
+UNCOUNTED_CLASSES = frozenset({"vm_paused", "quota"})
+
+#: Reported error classes that are another class under a different name.
+ERROR_CLASS_ALIASES: Dict[str, str] = {
+    "rate_limit": "quota",
+    "usage_limit": "quota",
+    "quota_exhausted": "quota",
+    "insufficient_quota": "quota",
+    "budget_exceeded_daily": "budget_exceeded",
+}
 
 #: The project default retry table.
 DEFAULT_TABLE: Dict[str, Any] = {
@@ -62,6 +78,36 @@ DEFAULT_TABLE: Dict[str, Any] = {
 def _action_names() -> str:
     """The known actions, for error messages."""
     return ", ".join(ACTIONS)
+
+
+def _normalize_form(raw: str) -> str:
+    """Return the class with a stable spelling: lower case, underscores."""
+    return raw.strip().lower().replace("-", "_")
+
+
+def normalize_error_class(raw: Any) -> Any:
+    """Return the canonical error class for ``raw``.
+
+    The reported class is normalized before the table lookup: case and hyphen
+    differences do not matter (``RATE-LIMIT`` is ``rate_limit``) and the known
+    aliases of a class are folded into their canonical name -- ``rate_limit``,
+    ``usage_limit``, ``quota_exhausted`` and ``insufficient_quota`` are all
+    ``quota``, ``budget_exceeded_daily`` is ``budget_exceeded``.
+
+    Args:
+        raw: the reported error class.
+
+    Returns:
+        The canonical error class; a class without an alias is returned with
+        its spelling normalized only.
+
+    Raises:
+        ValueError: the class is not a string.
+    """
+    if not isinstance(raw, str):
+        raise ValueError(f"error_class must be a string, got {raw!r}")
+    key = _normalize_form(raw)
+    return ERROR_CLASS_ALIASES.get(key, key)
 
 
 def _validate_action(value: Any, where: str) -> str:
@@ -113,14 +159,40 @@ def _validate_attempts(attempts: Any) -> int:
 def merge_table(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
     """Return ``base`` with the ``override`` entries replacing matching keys.
 
-    Keys the override does not mention keep their base policy.  The result is
-    validated like any table; raise ValueError if it is invalid.
+    Keys the override does not mention keep their base policy.  An override key
+    is normalized before it is merged, so ``rate_limit`` replaces the canonical
+    ``quota`` entry.  The result is validated like any table; raise ValueError
+    if it is invalid.
     """
     if not isinstance(override, Mapping):
         raise ValueError(f"override must be a dict, got {override!r}")
     merged = dict(base)
+    aliased = {}
+    for error_class, policy in override.items():
+        if not isinstance(error_class, str):
+            continue  # a broken key is reported by the table validation
+        canonical = normalize_error_class(error_class)
+        if canonical != error_class:
+            aliased[canonical] = policy
+    merged.update(aliased)
     merged.update(override)
     return _validate_table(merged)
+
+
+def _lookup_policy(policies: Mapping[str, Any], error_class: str) -> Any:
+    """Return the policy for ``error_class``; ``None`` when the table has none.
+
+    The class is looked up under its reported spelling first, so a table that
+    mentions ``rate_limit`` wins over the canonical ``quota`` entry, and under
+    its canonical name second.
+    """
+    alias = _normalize_form(error_class)
+    if alias in policies:
+        return policies[alias]
+    canonical = normalize_error_class(error_class)
+    if canonical in policies:
+        return policies[canonical]
+    return None
 
 
 def decide(
@@ -134,7 +206,9 @@ def decide(
     Args:
         error_class: the class the run ended with; unknown classes use the
             ``default`` policy of the table.  ``None`` or ``""`` with a
-            ``stopped``/``partial`` status counts as ``exec_error``.
+            ``stopped``/``partial`` status counts as ``exec_error``.  The class
+            is normalized first, so ``rate_limit`` and the other quota aliases
+            use the ``quota`` policy.
         attempts: how many attempts were already made for this issue.
         table: the retry table, see the module docstring for its shape.
         status: the run status, used only to classify a missing error class.
@@ -153,15 +227,13 @@ def decide(
     if not isinstance(error_class, str):
         raise ValueError(f"error_class must be a string, got {error_class!r}")
 
-    counted = error_class not in UNCOUNTED_CLASSES
-    if error_class in policies:
-        selected = error_class
-    elif DEFAULT_CLASS in policies:
-        selected = DEFAULT_CLASS
-    else:
-        return "close", counted
+    counted = normalize_error_class(error_class) not in UNCOUNTED_CLASSES
+    policy = _lookup_policy(policies, error_class)
+    if policy is None:
+        if DEFAULT_CLASS not in policies:
+            return "close", counted
+        policy = policies[DEFAULT_CLASS]
 
-    policy = policies[selected]
     if isinstance(policy, str):
         return policy, counted
     if attempts < policy["max"]:
