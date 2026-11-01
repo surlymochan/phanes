@@ -8883,7 +8883,14 @@ def cmd_fleet_ledger_pull(args):
             raise ValueError("--hosts requires at least one host name")
         unknown = [name for name in requested if name not in hosts]
         if unknown:
-            raise ValueError("unknown fleet host: " + ", ".join(unknown))
+            report = {"ok": False, "status": "failed", "entries": [], "succeeded": 0,
+                      "failures": [{"lane": name, "task": None, "error": "unknown fleet host",
+                                    "retryable": False} for name in unknown]}
+            if getattr(args, "json", False):
+                print(json.dumps(report, ensure_ascii=False))
+            else:
+                print("unknown fleet host: " + ", ".join(unknown), file=sys.stderr)
+            raise SystemExit(2)
         selected = [hosts[name] for name in dict.fromkeys(requested)]
     else:
         selected = list(hosts.values())
@@ -8905,6 +8912,7 @@ def cmd_fleet_ledger_pull(args):
         pass
 
     succeeded = 0
+    failures = []
     for host in selected:
         if host["kind"] == "local":
             try:
@@ -8917,14 +8925,16 @@ def cmd_fleet_ledger_pull(args):
                             merged.append(record)
             except OSError as error:
                 succeeded -= 1
-                print(f"{host['name']}: unreachable ({error})", file=sys.stderr)
+                failures.append({"lane": host["name"], "task": None, "error": str(error),
+                                 "retryable": True})
             continue
         else:
             ledger_file = '"$HOME"/.claude/openswarm/ledger.jsonl'
             rc, data, error = host_run(host, "cat " + ledger_file, timeout=60)
             if rc:
                 detail = error.decode(errors="replace").strip() or f"transport failed (rc={rc})"
-                print(f"{host['name']}: unreachable ({detail})", file=sys.stderr)
+                failures.append({"lane": host["name"], "task": None, "error": detail,
+                                 "retryable": True})
                 continue
             records = iter(ledger_records(data, host["name"]))
         succeeded += 1
@@ -8935,7 +8945,14 @@ def cmd_fleet_ledger_pull(args):
                 merged.append(record)
 
     if not succeeded:
-        print("no fleet host ledger could be read", file=sys.stderr)
+        report = {"ok": False, "status": "failed", "entries": [], "failures": failures,
+                  "succeeded": 0, "path": destination}
+        if getattr(args, "json", False):
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            for failure in failures:
+                print(f"{failure['lane']}: unreachable ({failure['error']})", file=sys.stderr)
+            print("no fleet host ledger could be read", file=sys.stderr)
         raise SystemExit(1)
 
     os.makedirs(os.path.dirname(os.path.abspath(destination)), exist_ok=True)
@@ -8944,7 +8961,17 @@ def cmd_fleet_ledger_pull(args):
         for record in merged:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
     os.replace(temporary, destination)
-    print(f"pulled {len(merged)} ledger entries into {destination}")
+    status = "partial" if failures else "success"
+    report = {"ok": not failures, "status": status, "entries": merged,
+              "failures": failures, "succeeded": succeeded, "path": destination}
+    if getattr(args, "json", False):
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        for failure in failures:
+            print(f"{failure['lane']}: unreachable ({failure['error']})", file=sys.stderr)
+        print(f"pulled {len(merged)} ledger entries into {destination} (status={status})")
+    if failures:
+        raise SystemExit(1)
 
 
 GH_INGEST_CACHE_TTL = 3600
@@ -11925,6 +11952,7 @@ def main():
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")
     fp.add_argument("--hosts", help="comma-separated fleet host names")
     fp.add_argument("--into", help="destination JSONL path")
+    fp.add_argument("--json", action="store_true", help="print the harvest result manifest as JSON")
     fleet_sub.add_parser("_snapshot", help=argparse.SUPPRESS)
     fp = fleet_sub.add_parser("_run-info", help=argparse.SUPPRESS)
     fp.add_argument("run_id")
