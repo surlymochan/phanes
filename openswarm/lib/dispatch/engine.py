@@ -80,6 +80,14 @@ def dispatch_module(name):
     return _DISPATCH_MODULES[name]
 
 
+def _load_ci_checks():
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ci", "checks.py")
+    spec = importlib.util.spec_from_file_location("openswarm_ci_checks", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def compatible_lru_picker(path):
     module = dispatch_module("lane_pick")
 
@@ -1203,27 +1211,41 @@ class Dispatcher:
             write_json(self.path("reviews.json"), d)
 
     def _checks(self, pr):
-        ig = self.R.get("ignore_checks_re") or ""
+        return [c for c in pr.get("statusCheckRollup") or []
+                if (c.get("context") or c.get("name") or c.get("workflowName")) != self.R["status_context"]]
+
+    def _ci_policy(self, pr):
+        ignore_re = self.R.get("ignore_checks_re") or None
         red_file = self.R.get("ignored_checks_red_file")
         count_ignored = bool(red_file and os.path.exists(self.path(red_file))
                              and re.search(self.R.get("ignored_checks_red_title_re") or "$^", pr.get("title") or "", re.I))
-        out = []
-        for c in pr.get("statusCheckRollup") or []:
-            if c.get("context") == self.R["status_context"]:
-                continue
-            if ig and re.search(ig, c.get("name") or "", re.I):
-                # ignored checks are slow to schedule and never gate, except a concluded failure in count_ignored mode
-                if not (count_ignored and (c.get("conclusion") or c.get("state")) in ("FAILURE", "ERROR", "TIMED_OUT")):
-                    continue
-            out.append(c)
-        return out
+        cfg = {"ignore_red_re": ignore_re,
+               "advisory_checks": self.R.get("advisory_checks", ["Check upstream drift"]),
+               "advisory_file": self.R.get("advisory_file")}
+        if red_file:
+            cfg["ignore_red_when_file"] = [{"path": self.path(red_file), "re": ignore_re or "$^"}]
+        if count_ignored:
+            # Preserve the legacy marker: matching concluded macOS failures count as red.
+            cfg["ignore_red_re"] = None
+        return _load_ci_checks().IgnorePolicy.from_cfg(cfg), count_ignored
+
+    def _ci_result(self, pr):
+        checks = _load_ci_checks()
+        policy, count_ignored = self._ci_policy(pr)
+        result = checks.gate_classify(self._checks(pr), policy)
+        if count_ignored:
+            # The marker opts matching red ignored checks back into the gate.
+            result["red"].extend(result["ignored"])
+            result["ignored"] = []
+            if result["red"]:
+                result["state"] = checks.RED
+        return result
 
     def green(self, pr):
-        cs = [(c.get("conclusion") or c.get("state") or "PENDING") for c in self._checks(pr)]
-        return bool(cs) and all(c in ("SUCCESS", "SKIPPED", "NEUTRAL") for c in cs)
+        return self._ci_result(pr)["state"] == _load_ci_checks().GREEN
 
     def ci_red(self, pr):
-        return any((c.get("conclusion") or c.get("state")) in ("FAILURE", "ERROR", "TIMED_OUT") for c in self._checks(pr))
+        return bool(self._ci_result(pr)["red"])
 
     def author_lane(self, branch):
         m = re.match(self.R["author_lane_re"], branch or "")
@@ -1249,6 +1271,17 @@ class Dispatcher:
             self.log(f"review: pr list failed: {(err or '')[-120:]}", brain=False)
             return []
         revs = self.load_reviews()
+        sources = dispatch_module("sources")
+        inflight = []
+        prs_by_number = {p["number"]: p for p in json.loads(out)}
+        for s in state.values():
+            if not isinstance(s, dict) or not s.get("rebase_pr"):
+                continue
+            pr_number = s["rebase_pr"]
+            pr_info = prs_by_number.get(pr_number) or {}
+            sha = s.get("rebase_head") or pr_info.get("headRefOid")
+            if sha:
+                inflight.append(("rebase", pr_number, sha))
         busy_pr = {(s or {}).get("review_pr") for s in state.values() if isinstance(s, dict)}
         busy_pr |= {(s or {}).get("rebase_pr") for s in state.values() if isinstance(s, dict)}
         pending = {i["n"] for i in q} | {s.get("issue") for k, s in state.items()
@@ -1275,14 +1308,20 @@ class Dispatcher:
                 continue
             if (p["mergeable"] == "CONFLICTING" and p["issue"] and p["headRefName"].startswith(fix)
                     and r.get("rebase_sha") != p["headRefOid"]):
-                self.queue_fix(p, revs, "rebase")
+                tasks = sources.rebase_source([p], inflight, issue_for_pr=lambda pr: pr.get("issue"))
+                if tasks:
+                    self.queue_fix(p, revs, "rebase")
                 continue
             if r.get("sha") == p["headRefOid"]:
                 continue
             if ((self.burn_state()[1] > 1 or not self.R.get("cifix_needs_burn", True)) and p["mergeable"] == "MERGEABLE"
                     and not self.green(p) and p["issue"] and p["headRefName"].startswith(fix)
-                    and r.get("cifix_sha") != p["headRefOid"] and self.ci_red(p)):
-                self.queue_fix(p, revs, "cifix")
+                    and r.get("cifix_sha") != p["headRefOid"]):
+                tasks = sources.ci_fix_source([p], inflight,
+                                              eligible=lambda pr: self.ci_red(pr),
+                                              issue_for_pr=lambda pr: pr.get("issue"))
+                if tasks:
+                    self.queue_fix(p, revs, "cifix")
                 continue
             if p["mergeable"] != "MERGEABLE" or not self.green(p):
                 continue
@@ -1311,8 +1350,7 @@ class Dispatcher:
         title = T[f"{kind}_section_title"]
         bad = ""
         if kind == "cifix":
-            bad = ", ".join(sorted({c.get("name") or "?" for c in self._checks(p)
-                                    if (c.get("conclusion") or c.get("state")) in ("FAILURE", "ERROR", "TIMED_OUT")}))[:400]
+            bad = ", ".join(sorted(set(self._ci_result(p)["red"])))[:400]
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
         ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
         L = self.L
