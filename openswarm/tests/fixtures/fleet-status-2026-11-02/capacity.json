@@ -1,0 +1,8 @@
+{
+ "ok": true,
+ "reservations": [
+  {"host": "gocc", "run_id": "20261102-2011-a41c", "backend": "codex", "provider": null, "created": 1793622660.0},
+  {"host": "gores1", "run_id": "20261102-2038-7f02", "backend": "pi", "provider": "minimax-cn", "created": 1793624280.0},
+  {"host": "local", "run_id": "20261102-2102-1d90", "backend": "agy", "provider": null, "created": 1793624520.0}
+ ]
+}
