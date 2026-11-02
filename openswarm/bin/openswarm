@@ -11675,6 +11675,9 @@ def cmd_fleet_render_lanes(args):
 FLEET_HEALTH_PAUSE_TTL = 1800
 FLEET_HEALTH_TIMEOUT = 30
 FLEET_HEALTH_STATE_FILE = "fleet-health.json"
+# The box channel state (tools/box-channel.py): the current tunnel channel,
+# the last success of each channel and the switch count (Refs #1717).
+FLEET_HEALTH_CHANNEL_FILE = "box-channel.json"
 FLEET_HEALTH_REASON = "auto:health"
 FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "unreachable": 2, "hard": 3}
 
@@ -11795,6 +11798,29 @@ def fleet_health_apply(store, row, active, moment):
     return "none"
 
 
+def fleet_health_channel_path(args=None, home=None):
+    """The channel state file: --channels, else <home>/box-channel.json."""
+    requested = getattr(args, "channels", None)
+    if requested:
+        return os.path.expanduser(requested)
+    return os.path.join(home or DATA, FLEET_HEALTH_CHANNEL_FILE)
+
+
+def fleet_health_channels(args=None, home=None):
+    """The box channel state for the health report, or None when there is none.
+
+    The channel keeper (tools/box-channel.py) writes the current channel, the
+    last success of the primary and the backup channel and the number of
+    switches; the watchdog reads them straight from the health output. A
+    missing or broken state file is no channel state, never a failed health
+    check.
+    """
+    state = jload(fleet_health_channel_path(args, home), None)
+    if not isinstance(state, dict) or not state:
+        return None
+    return state
+
+
 def fleet_health_status(rows):
     """The worst status of the probed hosts."""
     worst = "ok"
@@ -11856,6 +11882,9 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits,
               "hosts": rows}
+    channels = fleet_health_channels(args, home)
+    if channels is not None:
+        report["channels"] = channels
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -11866,6 +11895,9 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
             print(f"  metrics: {metrics}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
+    if channels is not None:
+        print(f"channel: {channels.get('current')} target={channels.get('target')} "
+              f"switches={channels.get('switch_count')}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")
     return report
 
@@ -15514,6 +15546,8 @@ def main():
     fp.add_argument("--json", action="store_true", help="print the health report as JSON")
     fp.add_argument("--apply", action="store_true",
                     help="pause the unhealthy hosts and release the recovered ones")
+    fp.add_argument("--channels",
+                    help="box channel state file to report (default: <home>/%s)" % FLEET_HEALTH_CHANNEL_FILE)
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")

@@ -196,6 +196,30 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(row["status"], "unreachable")
         self.assertEqual(row["error"], "unknown fleet host")
 
+    def test_the_channel_state_is_part_of_the_health_report(self):
+        """The watchdog reads the current channel and the switch count (Refs #1717)."""
+        state = {"current": "backup", "target": "127.0.0.1:8766", "switch_count": 2,
+                 "channels": {"primary": {"last_success_at": 1762000000.0},
+                              "backup": {"last_success_at": 1762000100.0}}}
+        (self.home / "box-channel.json").write_text(json.dumps(state), encoding="utf-8")
+        report = self.health()
+        self.assertEqual(report["channels"]["current"], "backup")
+        self.assertEqual(report["channels"]["switch_count"], 2)
+        self.assertEqual(report["channels"]["channels"]["backup"]["last_success_at"], 1762000100.0)
+
+    def test_the_channel_state_file_can_be_named_explicitly(self):
+        path = self.root / "channel-state.json"
+        path.write_text(json.dumps({"current": "primary", "switch_count": 0}), encoding="utf-8")
+        args = argparse.Namespace(hosts="worker-a", json=True, apply=False, channels=str(path))
+        report = xs.cmd_fleet_health(args, runner=self.runner(),
+                                     hosts={"worker-a": {"name": "worker-a", "kind": "local"}},
+                                     now=self.now, home=self.home)
+        self.assertEqual(report["channels"]["current"], "primary")
+
+    def test_no_channel_state_means_no_channel_section(self):
+        report = self.health()
+        self.assertNotIn("channels", report)
+
 
 if __name__ == "__main__":
     unittest.main()
