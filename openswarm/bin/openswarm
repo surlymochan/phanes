@@ -14854,6 +14854,17 @@ def cmd_merge_gate(args, policy=None, runner=None, sleep=None):
 def main():
     ap = argparse.ArgumentParser(prog="openswarm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    pause_parser = sub.add_parser("pause", help="manage dispatch pauses")
+    pause_sub = pause_parser.add_subparsers(dest="pause_cmd", required=True)
+    pause_set = pause_sub.add_parser("set")
+    pause_set.add_argument("scope")
+    pause_set.add_argument("--ttl")
+    pause_set.add_argument("--reason", default="")
+    pause_clear = pause_sub.add_parser("clear")
+    pause_clear.add_argument("scope")
+    pause_list = pause_sub.add_parser("list")
+    pause_list.add_argument("--json", action="store_true")
+    pause_list.add_argument("--legacy-dir")
     consult_module().add_parser(sub)
 
     dispatch_load_error = None
@@ -15230,6 +15241,47 @@ def main():
                     help="command to run once per new sha of main after a merge landed")
 
     a = ap.parse_args()
+    if a.cmd == "pause":
+        pause_path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                                  "lib", "dispatch", "pause.py")
+        pause_spec = importlib.util.spec_from_file_location("openswarm_dispatch_pause", pause_path)
+        pause_module = importlib.util.module_from_spec(pause_spec)
+        pause_spec.loader.exec_module(pause_module)
+        PauseStore, legacy_markers, parse_ttl = (pause_module.PauseStore,
+                                                  pause_module.legacy_markers,
+                                                  pause_module.parse_ttl)
+        home = os.environ.get("OPENSWARM_HOME", DATA)
+        store = PauseStore(home)
+        try:
+            if a.pause_cmd == "set":
+                ttl = parse_ttl(a.ttl) if a.ttl is not None else None
+                record = store.pause(a.scope, ttl_s=ttl, reason=a.reason, now=time.time())
+                print(json.dumps(record, ensure_ascii=False))
+            elif a.pause_cmd == "clear":
+                if not store.resume(a.scope):
+                    print("openswarm: pause not found: {}".format(a.scope), file=sys.stderr)
+                    sys.exit(1)
+            else:
+                now = time.time()
+                records = store.active(now)
+                if a.legacy_dir:
+                    records += [dict(row, legacy=True) for row in legacy_markers(a.legacy_dir)]
+                for row in records:
+                    row.setdefault("legacy", False)
+                    row["remaining_ttl_s"] = (None if row["expires_at"] is None else
+                                               max(0, row["expires_at"] - now))
+                if a.json:
+                    print(json.dumps(records, ensure_ascii=False, indent=2))
+                else:
+                    for row in records:
+                        remaining = "forever" if row["remaining_ttl_s"] is None else "{:.0f}s".format(row["remaining_ttl_s"])
+                        label = " legacy" if row["legacy"] else ""
+                        print("{}  ttl={}  reason={}  created_at={}{}".format(
+                            row["scope"], remaining, row["reason"], row["created_at"], label))
+        except ValueError as error:
+            print("openswarm: {}".format(error), file=sys.stderr)
+            sys.exit(2)
+        return
     if a.cmd == "dispatch":
         if dispatch_load_error is not None:
             print(f"openswarm: {dispatch_load_error}", file=sys.stderr)

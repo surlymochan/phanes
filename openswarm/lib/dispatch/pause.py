@@ -15,6 +15,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def parse_ttl(value: Any) -> float:
+    """Parse a positive duration expressed in seconds, minutes, or hours."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        ttl = float(value)
+    elif isinstance(value, str):
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*", value, re.I)
+        if not match:
+            raise ValueError("invalid TTL: {!r}".format(value))
+        ttl = float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
+    else:
+        raise ValueError("invalid TTL: {!r}".format(value))
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError("TTL must be positive")
+    return ttl
+
+
 def _time(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("{} must be a number, got {!r}".format(name, value))
@@ -152,6 +168,8 @@ def legacy_markers(directory: Any) -> List[Dict[str, Any]]:
             scope = "all"
         elif path.name == "PAUSE-MINT":
             scope = "mint"
+        elif path.name.startswith("PAUSE-BACKEND-") and len(path.name) > len("PAUSE-BACKEND-"):
+            scope = "backend:" + path.name[len("PAUSE-BACKEND-"):]
         elif path.name.startswith("PAUSE-") and len(path.name) > len("PAUSE-"):
             scope = "lane:" + path.name[len("PAUSE-"):]
         else:
