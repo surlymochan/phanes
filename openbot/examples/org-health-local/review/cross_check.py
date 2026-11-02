@@ -1160,10 +1160,15 @@ def main(argv: list[str] | None = None) -> int:
         site_summary=summary_data,
         site_summary_path=summary_path,
     )
+    markdown_output = markdown_report(results)
     try:
         json_output = json_report(results, repo_root=root)
-        markdown_output = markdown_report(results)
-    except (CheckError, ValueError) as cause:
+    except CheckError as cause:
+        # Keep readable check evidence without writing an invalid file-path report.
+        print(markdown_output, end="", file=sys.stderr)
+        print(str(cause), file=sys.stderr)
+        return EXIT_USAGE
+    except ValueError as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
     if args.out is not None:

@@ -503,6 +503,16 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
     return result.returncode == 0 and reason is None, error_text, True
 
 
+def source_repo_root():
+    """Find the source checkout root without using the artifact directory or cwd."""
+    source = ROOT.resolve()
+    for candidate in (source, *source.parents):
+        marker = candidate / '.git'
+        if marker.is_dir() or marker.is_file():
+            return candidate
+    return source
+
+
 def source_commit():
     """返回当前 git 仓库提交；不在仓库内时返回 None。"""
     try:
@@ -603,13 +613,13 @@ def main(argv=None):
         if status == 0 and args.review:
             review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist),
                       '--json-out', str(results_stage)]
-            # Only the bundled reviewer accepts the artifact root option.
+            # Only the bundled reviewer accepts the source repository root option.
             try:
                 bundled_reviewer = scripts['reviewer'].resolve() == (ROOT / 'review' / 'cross_check.py').resolve()
             except (OSError, RuntimeError):
                 bundled_reviewer = False
             if bundled_reviewer:
-                review.extend(['--repo-root', str(workdir)])
+                review.extend(['--repo-root', str(source_repo_root())])
             # 上一次运行留下的结论不能当成本次的：先清掉结果文件。
             try:
                 results_stage.unlink(missing_ok=True)
