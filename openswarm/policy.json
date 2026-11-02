@@ -265,7 +265,15 @@
     "_doc": "Opt-in executor: Pi coding agent (pi -p --mode json). Not in routing.default_order. provider/default_model null means Pi's own default. OPENSWARM_PI_BIN may point at a wrapper that takes the same flags. Quota is unknown; usage is summed from message_end events.",
     "provider": "minimax-cn",
     "default_model": "MiniMax-M3.1-Flash",
-    "require_isolation": true
+    "require_isolation": true,
+    "broker": {
+      "_doc": "Broker socket recovery (Refs #1714): the executor probes the broker socket before every dispatch, restarts a dead broker with a capped backoff and verifies the fresh broker with a minimal session (no run budget). restart_cmd is the local command that starts the broker again; without it a dead broker can only be reported, not restarted. alert_failures is the number of consecutive failed reconnects before the health output warns about the host (the number of attempts by default). brain_log is the file the reconnect events are written to (default <home>/brain.log).",
+      "attempts": 5,
+      "backoff_base_s": 1,
+      "backoff_cap_s": 30,
+      "restart_cmd": "",
+      "brain_log": ""
+    }
   },
   "deepseek": {
     "_doc": "API key: DEEPSEEK_API_KEY env, or list macOS Keychain items you created for openswarm, e.g. [\"openswarm-deepseek-api-key\"].",

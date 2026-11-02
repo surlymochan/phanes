@@ -5,6 +5,7 @@ recovery policy (for example, retrying SSH and clearing its failure streak).
 """
 
 import re
+import shlex
 
 
 DEFAULT_THRESHOLDS = {
@@ -169,6 +170,28 @@ def next_ssh_streak(previous, reachable):
     except (TypeError, ValueError):
         count = 0
     return count + 1
+
+
+# The Pi channel of a host: the broker socket its Pi lanes talk to.  The socket
+# lives on the host, so the probe runs there too.
+PI_SOCKET_PROBE = ("python3 -c 'import socket,sys;s=socket.socket(socket.AF_UNIX);"
+                   "s.settimeout(%(timeout)g);s.connect(sys.argv[1])' %(socket)s")
+
+
+def pi_channel_probe(host, socket_path, runner, timeout=1.5):
+    """Probe the Pi broker socket of a host.  Returns (ok, detail).
+
+    A host whose Pi broker is gone keeps its other backends: the health output
+    only warns that the Pi channel of that host is interrupted (Refs #1714).
+    """
+    if not socket_path:
+        return False, "no Pi broker socket is configured for this host"
+    command = PI_SOCKET_PROBE % {"timeout": float(timeout), "socket": shlex.quote(socket_path)}
+    try:
+        runner(host, command)
+    except OSError as error:
+        return False, str(error)
+    return True, "broker socket answers"
 
 
 def check_host(host, runner, thresholds=None, paused=False, ssh_fail_streak=0):
