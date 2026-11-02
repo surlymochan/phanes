@@ -94,10 +94,65 @@ class QueueAndRank(Base):
         d = self.make()
         hot = d.hot_of("x\n热文件：`bin/big`， docs/log.md, src/a.py\n")
         self.assertEqual(hot, {"bin/big", "src/a.py"})  # union-merged doc is never locked
-        self.assertFalse(d.hot_blocked({"bin/big"}, {"bin/big": 1}))
-        self.assertTrue(d.hot_blocked({"bin/big"}, {"bin/big": 2}))
-        self.assertTrue(d.hot_blocked({"src/a.py"}, {"src/a.py": 1}))
+        self.assertFalse(d.hot_lock.blocked({"bin/big"}, {"bin/big": 1}))
+        self.assertTrue(d.hot_lock.blocked({"bin/big"}, {"bin/big": 2}))
+        self.assertTrue(d.hot_lock.blocked({"src/a.py"}, {"src/a.py": 1}))
         self.assertEqual(d.hot_of("Hot-files: a.py b.py"), {"a.py", "b.py"})
+
+
+class HotDispatch(Base):
+    def dispatch_items(self, d, state, lanes, items):
+        d.main_sha = lambda: SHA
+        d.label_state = lambda n: "fresh"
+        d.dispatch = lambda lane, lc, item, base: (f"run-{item['n']}", "verify")
+        d.assign_issues(lanes, {lane: {"lane": "idle"} for lane in lanes}, state, list(items))
+
+    @staticmethod
+    def lane_names(count):
+        return {f"P{i}": {"host": "box", "backend": "pi"} for i in range(count)}
+
+    @staticmethod
+    def hot_item(n, hot="src/shared.py"):
+        return {"n": n, "title": f"task {n}", "body": f"热文件：{hot}",
+                "backend": None, "strict": False, "prio": 1}
+
+    def test_limit_one_blocks_second_dispatch(self):
+        d = self.make()
+        lanes, state = self.lane_names(2), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(1), self.hot_item(2)])
+        self.assertEqual([st["issue"] for st in state.values()], [1])
+
+    def test_limit_three_blocks_fourth_dispatch(self):
+        self.cfg["hot_shared"] = {"src/shared.py": 3}
+        d = self.make()
+        lanes, state = self.lane_names(4), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 5)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2, 3])
+
+    def test_docs_do_not_consume_hot_lock(self):
+        d = self.make()
+        lanes, state = self.lane_names(2), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(1, "docs/guide.md"),
+                                               self.hot_item(2, "docs/guide.md")])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+        self.assertEqual(d.hot_lock.inflight(), {})
+
+    def test_harvest_releases_hot_lock_for_next_assignment(self):
+        d = self.make()
+        lanes, state = self.lane_names(2), {}
+        self.dispatch_items(d, state, {"P0": lanes["P0"]}, [self.hot_item(1)])
+        d.finish = lambda lane, lc, st, info, state: True
+        d.harvest({"P0": lanes["P0"]}, {"P0": {"run": {"status": "done"}}}, state)
+        self.dispatch_items(d, state, {"P1": lanes["P1"]}, [self.hot_item(2)])
+        self.assertEqual(state["P1"]["issue"], 2)
+
+    def test_state_hot_counts_are_restored_after_restart(self):
+        lanes = self.lane_names(2)
+        state = {"P0": {"issue": 9, "hot": ["./src/shared.py"]}}
+        restarted = self.make()
+        self.dispatch_items(restarted, state, lanes, [self.hot_item(1)])
+        self.assertNotIn("P1", state)
+        self.assertEqual(restarted.hot_lock.inflight(), {"src/shared.py": 1})
 
     def test_verify_rebase_parsing(self):
         d = self.make()
