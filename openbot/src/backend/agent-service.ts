@@ -286,6 +286,8 @@ export interface AgentServiceOptions {
   requestTimeoutMs?: number;
   /** How long a Codex context compaction runs before OpenBot stops it. Tests make it short. */
   contextCompactionTimeoutMs?: number;
+  /** Fraction of the provider context window used to trigger automatic compaction. */
+  contextCompactionThreshold?: number;
   preferredProvider?: AgentProvider;
   /** The model chosen beside `preferredProvider`, or `null` for that provider's own default. */
   preferredModel?: AgentModelId | null;
@@ -826,6 +828,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     });
     this.#compaction = new ContextCompaction({
       timeoutMs: options.contextCompactionTimeoutMs,
+      threshold: options.contextCompactionThreshold,
       changed: () => this.#emitRuntimeSnapshot(),
       store,
       providers: this.#providers,

@@ -26,6 +26,8 @@ const CONTEXT_COMPACTION_TIMEOUT_MS = 120_000;
 const USAGE_CHANGE_DELAY_MS = 250;
 
 export interface ContextCompactionOptions {
+  /** Fraction of the provider context window that triggers automatic compaction. */
+  threshold?: number | undefined;
   /** How long a compaction runs before OpenBot stops it. Tests make it short. */
   timeoutMs?: number | undefined;
   store: AgentStore;
@@ -85,6 +87,7 @@ export class ContextCompaction {
   readonly #compacting = new Map<string, { agentId: string; client: AgentClient | null }>();
   readonly #refusals = new Map<string, RefusalHold>();
   readonly #timeoutMs: number;
+  readonly #threshold: number;
   /** How long a stopped compaction, or a refused queue, waits for the turn to end. */
   readonly #graceMs: number;
   readonly #display = new Map<string, Omit<AgentContextState, "agentId" | "threadId">>();
@@ -100,6 +103,7 @@ export class ContextCompaction {
     this.#changed = options.changed ?? (() => {});
     this.#compacted = options.compacted ?? (() => {});
     this.#timeoutMs = options.timeoutMs ?? CONTEXT_COMPACTION_TIMEOUT_MS;
+    this.#threshold = Math.min(1, Math.max(0, options.threshold ?? CONTEXT_COMPACTION_THRESHOLD));
     this.#graceMs = Math.ceil(this.#timeoutMs / 4);
     this.#store = options.store;
     this.#providers = options.providers;
@@ -240,7 +244,7 @@ export class ContextCompaction {
     budget.contextWindow = contextWindow;
     this.#budgets.set(threadId, budget);
 
-    const pressured = usedTokens / contextWindow >= CONTEXT_COMPACTION_THRESHOLD;
+    const pressured = usedTokens / contextWindow >= this.#threshold;
     if (!pressured) {
       budget.pending = false;
       budget.lastCompactedTokens = null;
