@@ -164,7 +164,7 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["applied", "hosts", "leases", "ok", "status", "thresholds"])
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
         self.assertEqual(report["thresholds"]["inode_pause_pct"], 95)
@@ -195,6 +195,60 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(row["host"], "worker-b")
         self.assertEqual(row["status"], "unreachable")
         self.assertEqual(row["error"], "unknown fleet host")
+
+    def test_the_lease_numbers_are_part_of_the_health_report(self):
+        # a lease that expired and was never reclaimed: a ghost lease
+        (self.home / "leases.json").write_text(json.dumps({"version": 1, "leases": {
+            "1795": {"issue": 1795, "run_id": "run-a", "lane": "M1",
+                     "granted_at": self.now - 5000, "expires_at": self.now - 4400, "ttl_s": 600},
+        }}), encoding="utf-8")
+
+        report = self.health()
+        leases = report["leases"]
+        self.assertEqual(leases["metrics"]["ghost_leases"], 1)
+        self.assertEqual(leases["metrics"]["dual_claims"], 0)
+        self.assertEqual(len(leases["alerts"]), 1)
+        self.assertEqual(leases["alerts"][0]["kind"], "expired_lease")
+        self.assertEqual(leases["window_24h"]["window_s"], 86400.0)
+        # the host health is not mixed with the lease verdict
+        self.assertTrue(report["ok"])
+        self.assertFalse(leases["ok"])
+
+    def test_without_a_lease_store_the_health_report_has_no_findings(self):
+        report = self.health()
+        self.assertEqual(report["leases"]["metrics"]["ghost_leases"], 0)
+        self.assertEqual(report["leases"]["alerts"], [])
+        self.assertTrue(report["leases"]["ok"])
+
+    def test_the_lease_numbers_are_written_into_the_health_state_file(self):
+        (self.home / "leases.json").write_text(json.dumps({"version": 1, "leases": {
+            "1795": {"issue": 1795, "run_id": "run-a", "lane": "M1",
+                     "granted_at": self.now - 5000, "expires_at": self.now - 4400, "ttl_s": 600},
+        }}), encoding="utf-8")
+
+        report = self.health()
+
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["leases"]["metrics"]["ghost_leases"], 1)
+        self.assertEqual(state["leases"]["metrics"], report["leases"]["metrics"])
+        self.assertEqual(state["leases"]["alerts"][0]["kind"], "expired_lease")
+
+    def test_every_lease_store_of_the_home_is_read(self):
+        # two hosts, two lease stores: the card 1795 was claimed by both of them
+        (self.home / "leases.json").write_text(json.dumps({"version": 1, "leases": {
+            "1795": {"issue": 1795, "run_id": "run-a", "lane": "M1",
+                     "granted_at": self.now - 100, "expires_at": self.now + 500, "ttl_s": 600},
+        }}), encoding="utf-8")
+        (self.home / "leases-host2.json").write_text(json.dumps({"version": 1, "leases": {
+            "1795": {"issue": 1795, "run_id": "run-b", "lane": "M2",
+                     "granted_at": self.now - 50, "expires_at": self.now + 550, "ttl_s": 600},
+        }}), encoding="utf-8")
+
+        report = self.health()
+
+        self.assertEqual(report["leases"]["metrics"]["dual_claims"], 1)
+        self.assertEqual([alert["kind"] for alert in report["leases"]["alerts"]],
+                         ["dual_claim"])
 
 
 if __name__ == "__main__":
