@@ -10071,6 +10071,208 @@ def cmd_lane_systemd(args):
     print(generate_lane_service_definition(lane, "systemd-unit"))
 
 
+def shell_quote(value):
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def generate_process_supervisor(name, command, broker_socket=None, lane_name=None):
+    """Render a POSIX shell restart supervisor for a lane or the Pi broker.
+
+    The script keeps one pidfile per supervised process, restarts a crashed command with an
+    exponential backoff capped at 60 seconds, rotates its log, and stops the whole process
+    group of the command so an executor the command started does not survive as an orphan.
+    """
+    home = os.environ.get("OPENSWARM_HOME", DATA)
+    state_dir = os.path.join(home, "supervise")
+    log_dir = os.path.join(home, "logs")
+    pidfile = os.path.join(state_dir, name + ".pid")
+    childfile = os.path.join(state_dir, name + ".child.pid")
+    logfile = os.path.join(log_dir, name + ".log")
+    command_text = " ".join(shell_quote(x) for x in command)
+    broker_prep = ""
+    broker_call = ""
+    if broker_socket:
+        broker_prep = f'''broker_prepare() {{
+  BROKER_SOCKET=${{OPENSWARM_PI_BROKER_SOCKET:-"{broker_socket}"}}
+  mkdir -p "$(dirname "$BROKER_SOCKET")"
+  python3 - "$BROKER_SOCKET" <<'PYBROKER'
+import os, socket, stat, sys
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+except FileNotFoundError:
+    sys.exit(0)
+if not stat.S_ISSOCK(info.st_mode):
+    sys.exit('refusing to remove a non-socket broker path: ' + path)
+probe = socket.socket(socket.AF_UNIX)
+try:
+    probe.settimeout(1)
+    probe.connect(path)
+except OSError:
+    os.unlink(path)
+    sys.exit(0)
+probe.close()
+sys.exit('broker socket is already active: ' + path)
+PYBROKER
+}}
+'''
+        broker_call = '''    if ! broker_prepare; then
+      echo "broker socket check failed; not starting the broker" >&2
+      cleanup
+      exit 1
+    fi
+'''
+        if command and command[0] == "node":
+            command_text = ('"${OPENSWARM_PI_NODE:-$HOME/.local/node-v24.14.1/bin/node}" '
+                            + " ".join(shell_quote(x) for x in command[1:])
+                            + ' "$BROKER_SOCKET"'
+                            + ' "${OPENSWARM_PI_AUTH_MODULE:-$(find "$HOME/.local" -path \'*/node_modules/@mariozechner/pi-coding-agent/dist/core/auth-storage.js\' -print -quit)}"'
+                            + ' "${OPENSWARM_PI_BROKER_MODEL:-MiniMax-M3.1-Flash}"')
+        else:
+            command_text = " ".join('"$BROKER_SOCKET"' if x == "{socket}" else shell_quote(x) for x in command)
+    return f'''#!/bin/sh
+set -u
+NAME={shell_quote(name)}
+SCRIPT_PATH=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+STATE_DIR={shell_quote(state_dir)}
+LOG_DIR={shell_quote(log_dir)}
+PIDFILE={shell_quote(pidfile)}
+CHILDFILE={shell_quote(childfile)}
+LOG={shell_quote(logfile)}
+MAX_LOG_BYTES=10485760
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+rotate_log() {{
+  if [ -f "$LOG" ]; then
+    size=$(wc -c < "$LOG" | tr -d ' ')
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    if [ "$size" -ge "$MAX_LOG_BYTES" ]; then mv -f "$LOG" "$LOG.1"; fi
+  fi
+}}
+is_alive() {{
+  _p=$1
+  [ -n "$_p" ] || return 1
+  kill -0 "$_p" 2>/dev/null || return 1
+  if [ -f "/proc/$_p/stat" ]; then
+    case "$(cat "/proc/$_p/stat" 2>/dev/null)" in
+      *") Z "*) return 1 ;;
+    esac
+  elif command -v ps >/dev/null 2>&1; then
+    case "$(ps -o state= -p "$_p" 2>/dev/null)" in
+      *Z*|*z*) return 1 ;;
+    esac
+  fi
+  return 0
+}}
+stop_group() {{
+  _pgid=$1
+  [ -n "$_pgid" ] || return 0
+  python3 - "$_pgid" <<'PYTREE' 2>/dev/null || :
+import os, signal, time, pathlib, sys
+root = int(sys.argv[1])
+parents = {{}}
+for entry in pathlib.Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        parents[int(entry.name)] = int(fields[1])
+    except (OSError, ValueError, IndexError):
+        pass
+tree = {{root}}
+while True:
+    children = {{pid for pid, parent in parents.items() if parent in tree}}
+    if children <= tree:
+        break
+    tree.update(children)
+for pid in sorted(tree - {{root}}, reverse=True):
+    try: os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError: pass
+time.sleep(0.5)
+for pid in sorted(tree - {{root}}, reverse=True):
+    try: os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+PYTREE
+  kill -TERM "-$_pgid" 2>/dev/null || kill -TERM "$_pgid" 2>/dev/null || :
+  _t=0
+  while is_alive "$_pgid" && [ "$_t" -lt 10 ]; do
+    sleep 1
+    _t=$((_t + 1))
+  done
+  if is_alive "$_pgid"; then
+    kill -KILL "-$_pgid" 2>/dev/null || kill -KILL "$_pgid" 2>/dev/null || :
+  fi
+}}
+cleanup() {{
+  if [ -f "$CHILDFILE" ]; then
+    stop_group "$(cat "$CHILDFILE")"
+    rm -f "$CHILDFILE"
+  fi
+  rm -f "$PIDFILE"
+}}
+{broker_prep}run_loop() {{
+  trap 'cleanup; exit 0' TERM INT
+  trap '' HUP
+  echo $$ > "$PIDFILE"
+  delay=1
+  while :; do
+    rotate_log
+{broker_call}    python3 -c 'import os,sys
+try:
+    os.setsid()
+except OSError:
+    os.setpgid(0, 0)
+os.execvp(sys.argv[1], sys.argv[1:])' {command_text} >> "$LOG" 2>&1 &
+    child=$!
+    echo "$child" > "$CHILDFILE"
+    wait "$child" || :
+    rm -f "$CHILDFILE"
+    sleep "$delay"
+    [ "$delay" -ge 60 ] || delay=$((delay * 2))
+    [ "$delay" -le 60 ] || delay=60
+  done
+}}
+case "${{1:-}}" in
+  run) run_loop ;;
+  start)
+    if [ -f "$PIDFILE" ] && is_alive "$(cat "$PIDFILE" 2>/dev/null)"; then exit 0; fi
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup sh "$SCRIPT_PATH" run </dev/null >> "$LOG" 2>&1 &
+    else
+      nohup sh "$SCRIPT_PATH" run </dev/null >> "$LOG" 2>&1 &
+    fi
+    echo $!
+    ;;
+  stop)
+    {f"python3 {shell_quote(os.path.realpath(__file__))} lane down {shell_quote(lane_name)} >/dev/null 2>&1 || :" if lane_name else ":"}
+    _sup=""
+    if [ -f "$PIDFILE" ]; then _sup=$(cat "$PIDFILE"); fi
+    if [ -n "$_sup" ] && is_alive "$_sup"; then
+      kill -TERM "$_sup" 2>/dev/null || :
+      n=0
+      while [ -f "$PIDFILE" ] && [ "$n" -lt 12 ]; do sleep 1; n=$((n + 1)); done
+    fi
+    if [ -f "$PIDFILE" ] || [ -f "$CHILDFILE" ]; then cleanup; fi
+    ;;
+  status) if [ -f "$PIDFILE" ] && is_alive "$(cat "$PIDFILE" 2>/dev/null)"; then exit 0; else exit 1; fi ;;
+  *) echo "usage: $0 {{start|run|stop|status}}" >&2; exit 2 ;;
+esac
+'''
+
+
+def cmd_lane_supervise(args):
+    if args.broker:
+        home = os.environ.get("OPENSWARM_HOME", DATA)
+        socket_path = "$HOME/Library/Caches/openswarm-pi-broker/broker.sock"
+        broker = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-minimax-broker.mjs")
+        # The broker takes socket, auth module and model; the model must match the one the
+        # isolated Pi runtime asks for, otherwise the broker refuses every request.
+        print(generate_process_supervisor("pi-broker", ["node", broker], socket_path))
+    else:
+        lane = lanes_by_name([args.name])[0]
+        command = [sys.executable, os.path.realpath(__file__), "lane", "serve", lane["name"]]
+        print(generate_process_supervisor(lane["name"], command, lane_name=lane["name"]))
+
+
 # ---------------------------------------------------------------- fleet
 
 # One SSH option vector for every fleet command: the same multiplexing, jump chain,
@@ -14949,6 +15151,10 @@ def main():
     lp.add_argument("name")
     lp = lane_sub.add_parser("systemd-unit", help="print an uninstalled system systemd unit")
     lp.add_argument("name")
+    lp = lane_sub.add_parser("supervise", help="print a POSIX process supervisor script")
+    lp.add_argument("name", nargs="?", help="lane name (omit with --broker)")
+    lp.add_argument("--broker", action="store_true", help="supervise the Pi broker")
+    lp.add_argument("--print", action="store_true", help="print the generated script")
     lp = lane_sub.add_parser("serve", help=argparse.SUPPRESS)
     lp.add_argument("name")
 
@@ -15173,6 +15379,10 @@ def main():
                 cmd_lane_plist(a)
             elif a.lane_cmd == "systemd-unit":
                 cmd_lane_systemd(a)
+            elif a.lane_cmd == "supervise":
+                if a.broker == bool(a.name):
+                    raise ValueError("specify a lane name or --broker")
+                cmd_lane_supervise(a)
             elif a.lane_cmd == "serve":
                 lane = lanes_by_name([a.name])[0]
                 cmd_lane_serve(lane, policy)
