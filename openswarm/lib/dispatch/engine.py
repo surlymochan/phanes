@@ -1460,6 +1460,17 @@ class Dispatcher:
             d[str(pr)] = r
             write_json(self.path("reviews.json"), d)
 
+    def merge_review(self, pr, fields):
+        """Merge a few keys into ONE review entry under the lock (keeps the other keys of that PR)."""
+        if self.dry_run:
+            return
+        with self.rev_lock:
+            d = self.load_reviews()
+            cur = d.get(str(pr)) or {}
+            cur.update(fields)
+            d[str(pr)] = cur
+            write_json(self.path("reviews.json"), d)
+
     def _checks(self, pr):
         return [c for c in pr.get("statusCheckRollup") or []
                 if (c.get("context") or c.get("name") or c.get("workflowName")) != self.R["status_context"]]
@@ -1550,6 +1561,13 @@ class Dispatcher:
                     args += ["--remove-label", lab]
                 if not self.gh_write(args)[0]:
                     self.log(f"review: PR #{p['number']} head moved since review; removed {', '.join(stale)}", brain=False)
+            if (L["needs_human"] in labs and r.get("needs_human_reason") == "fails"
+                    and r.get("needs_human_sha") and r["needs_human_sha"] != p["headRefOid"]):
+                # only the failure-limit label is ours to lift (a CHANGES-round escalation stays for a human)
+                if self.gh_write(["pr", "edit", str(p["number"]), "--remove-label", L["needs_human"]])[0] == 0:
+                    labs.discard(L["needs_human"])
+                    self.merge_review(p["number"], {"needs_human_sha": None, "needs_human_reason": None})
+                    self.log(f"review: PR #{p['number']} head moved; removed {L['needs_human']} (failure limit starts over)", brain=False)
             if L["needs_human"] in labs or p["number"] in busy_pr:
                 continue
             m = self.closes_re.search(p["body"] or "")
@@ -1685,7 +1703,14 @@ class Dispatcher:
                 r["budget_backends"] = backends
                 self.log(f"review PR #{pr} by {lane}: budget exceeded ({backend or 'unknown'}); not counted, will retry on another backend")
             else:
+                if r.get("fails_sha", sha) != sha:      # new head: the counter of the old sha does not count
+                    r["fails"] = 0
+                    r["fail_classes"] = []
+                r["fails_sha"] = sha
                 r["fails"] = int(r.get("fails") or 0) + 1
+                classes = list(r.get("fail_classes") or [])
+                classes.append(error_class or "unknown")
+                r["fail_classes"] = classes[-4:]
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); fail #{r['fails']}, will retry")
             self.put_review(pr, r)
             return True
@@ -1745,7 +1770,8 @@ class Dispatcher:
         self.gh(["pr", "comment", str(pr), "--body",
                  f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, run `{st['run']}`, "
                  f"head `{sha[:10]}`\n\n{txt.strip()[:60000]}\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"])
-        r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0})
+        r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
+                  "fails_sha": sha, "fail_classes": []})
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -1755,6 +1781,8 @@ class Dispatcher:
             n = int(m2.group(1)) if m2 else None
             if r["rounds"] > int(self.R["rounds"]) or not n:
                 self.gh(["pr", "edit", str(pr), "--add-label", L["needs_human"]])
+                r["needs_human_reason"] = "rounds"    # a human escalation: never lifted automatically
+                r["needs_human_sha"] = sha
                 self.log(f"review PR #{pr}: CHANGES round {r['rounds']} (issue {n}) → {L['needs_human']}")
             else:
                 iv = self.gh(["issue", "view", str(n), "--json", "body"])[1]
@@ -1774,6 +1802,28 @@ class Dispatcher:
         return [L for L, lc in lanes.items() if "error" not in res[L] and self.host_ok(lc["host"]) and not state.get(L)
                 and res[L].get("lane") == "idle" and not self.paused_lane(L, lc) and not lc.get("drain")]
 
+    def notify_review_fails(self, p, review, fails):
+        """Say once per head sha why the review keeps failing, then park the PR for a human.
+        The counter lives on the head sha, so a new head starts over (the label is lifted in review_candidates)."""
+        head = p["headRefOid"]
+        if review.get("fails_notified_sha") != head:
+            classes = ", ".join(review.get("fail_classes") or []) or "unknown"
+            body = (f"PR #{p['number']} 在头部 `{head[:10]}` 上连续审查失败 {fails} 次，"
+                    f"失败类型：{classes}。请人工排查后再重试。\n\n"
+                    f"<!-- lane-review-fails pr={p['number']} sha={head} -->")
+            if self.gh_write(["pr", "comment", str(p["number"]), "--body", body])[0] != 0:
+                return                      # comment failed: keep the one-shot notice for the next tick
+            review["fails_notified_sha"] = head
+            self.merge_review(p["number"], {"fails_notified_sha": head})
+        if review.get("needs_human_sha") == head:
+            return                          # already parked on this head
+        if self.gh_write(["pr", "edit", str(p["number"]), "--add-label", self.L["needs_human"]])[0] == 0:
+            review["needs_human_sha"] = head
+            fields = {"needs_human_sha": head}
+            if review.get("needs_human_reason") != "rounds":
+                fields["needs_human_reason"] = "fails"   # ours to lift once the head moves
+            self.merge_review(p["number"], fields)
+
     def dispatch_reviews(self, lanes, res, state, q):
         if not self.R.get("enabled", True) or os.path.exists(self.path("NO-LANE-REVIEW")):
             return
@@ -1785,9 +1835,12 @@ class Dispatcher:
         for p in self.review_candidates(lanes, state, q):
             if inflight >= self.review_max() or not idle:
                 break
-            if int((revs.get(str(p["number"])) or {}).get("fails") or 0) >= int(self.R["max_fails"]):
-                continue
             review = revs.get(str(p["number"])) or {}
+            fails_sha = review.get("fails_sha", p["headRefOid"])   # legacy rows count on the current head
+            fails = int(review.get("fails") or 0) if fails_sha == p["headRefOid"] else 0
+            if fails >= int(self.R["max_fails"]):
+                self.notify_review_fails(p, review, fails)
+                continue
             timed_out = set(review.get("budget_backends") or [])
             alternatives = [lane for lane in idle if lanes[lane].get("backend") not in timed_out]
             eligible = alternatives or idle  # retry without exclusions if every idle backend timed out
