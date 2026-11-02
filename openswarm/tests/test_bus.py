@@ -500,6 +500,78 @@ class BusTests(unittest.TestCase):
         self.assertIsNotNone(xs.bus_parse_result(body(report["branch"])))
         self.assertIsNone(xs.bus_parse_result(body("openswarm/a.b")))
 
+    def test_rate_limit_resets_at_validation(self):
+        report = {"status": "failed", "run_id": "limit-reset", "summary": "limited", "files_changed": [],
+                  "tests": "", "followups": [], "branch": None, "commit": None,
+                  "error_class": "rate_limit"}
+        body = lambda value: "```openswarm-result\n" + json.dumps(value) + "\n```"
+        self.assertIsNotNone(xs.bus_parse_result(body({**report, "resets_at": "2026-11-02T09:00:00Z"})))
+        self.assertIsNotNone(xs.bus_parse_result(body(report)))
+        self.assertIsNone(xs.bus_parse_result(body({**report, "resets_at": "not-a-time"})))
+        self.assertIsNone(xs.bus_parse_result(body({**report, "error_class": "network",
+                                                    "resets_at": "2026-11-02T09:00:00Z"})))
+
+    def test_backend_cooldown_expires(self):
+        xs.bus_worker_set_cooldown("pi", xs.NOW() + 30)
+        self.assertTrue(xs.bus_worker_cooling("pi"))
+        self.assertFalse(xs.bus_worker_cooling("codex"))
+        cooldown_path = xs.bus_worker_cooldown_path()
+        Path(cooldown_path).write_text(json.dumps({"pi": xs.NOW() - 1}))
+        self.assertFalse(xs.bus_worker_cooling("pi"))
+
+    def test_rate_limit_resets_at_uses_policy_cooldown(self):
+        rate_limit = {"error_class": "rate_limit"}
+        now = xs.NOW()
+        self.assertIsNone(xs.bus_worker_resets_at(self.policy, {"error_class": "network"}))
+        self.assertAlmostEqual(xs.bus_worker_resets_at(self.policy, rate_limit), now + 300, delta=5)
+        custom = xs.deep_merge(self.policy, {"bus": {"rate_limit_cooldown_s": 42}})
+        self.assertAlmostEqual(xs.bus_worker_resets_at(custom, rate_limit), now + 42, delta=5)
+        written = xs.dt.datetime.fromtimestamp(xs.bus_worker_resets_at(custom, rate_limit), xs.dt.timezone.utc) \
+            .isoformat().replace("+00:00", "Z")
+        report = {"status": "failed", "run_id": "limit-written", "summary": "limited", "files_changed": [],
+                  "tests": "", "followups": [], "branch": None, "commit": None,
+                  "error_class": "rate_limit", "resets_at": written}
+        body = "```openswarm-result\n" + json.dumps(report) + "\n```"
+        self.assertIsNotNone(xs.bus_parse_result(body))
+        bad = xs.deep_merge(self.policy, {"bus": {"rate_limit_cooldown_s": "soon"}})
+        with self.assertRaises(xs.BusError):
+            xs.bus_worker_resets_at(bad, rate_limit)
+
+    def test_cooling_backend_does_not_claim_once(self):
+        xs.bus_worker_set_cooldown("pi", xs.NOW() + 60)
+        args = self.worker_args()
+        with mock.patch.object(xs, "gh_pages") as pages, mock.patch.object(xs, "bus_worker_run") as worker_run:
+            self.assertEqual(xs.cmd_bus_worker(args, self.policy), "cooling")
+        pages.assert_not_called()
+        worker_run.assert_not_called()
+
+    def test_cooldown_set_mid_batch_stops_claiming_same_backend(self):
+        issues = [{"number": 1, "title": "first", "labels": [], "body": ""},
+                  {"number": 2, "title": "second", "labels": [], "body": ""}]
+
+        def hit_rate_limit(issue, cfg, args, policy):
+            xs.bus_worker_set_cooldown(args.backend, xs.NOW() + 60)
+            return False
+
+        args = self.worker_args()
+        with mock.patch.object(xs, "gh_pages", return_value=issues), \
+                mock.patch.object(xs, "bus_worker_run", side_effect=hit_rate_limit) as worker_run:
+            self.assertEqual(xs.cmd_bus_worker(args, self.policy), "cooling")
+        self.assertEqual([call.args[0]["number"] for call in worker_run.call_args_list], [1])
+
+    def test_cooldown_expiry_resumes_claiming(self):
+        xs.bus_worker_set_cooldown("pi", xs.NOW() + 60)
+        args = self.worker_args()
+        issues = [{"number": 7, "title": "resume", "labels": [], "body": ""}]
+        with mock.patch.object(xs, "gh_pages", return_value=issues), \
+                mock.patch.object(xs, "bus_worker_run", return_value=True) as worker_run:
+            self.assertEqual(xs.cmd_bus_worker(args, self.policy), "cooling")
+            worker_run.assert_not_called()
+            Path(xs.bus_worker_cooldown_path()).write_text(json.dumps({"pi": xs.NOW() - 1}))
+            self.assertIsNone(xs.cmd_bus_worker(args, self.policy))
+        worker_run.assert_called_once()
+        self.assertEqual(worker_run.call_args.args[0]["number"], 7)
+
     def test_cmd_run_redacts_github_bus_errors_in_result_and_ledger(self):
         secret = "github_pat_12345678901234567890"
         args = self.run_args()
