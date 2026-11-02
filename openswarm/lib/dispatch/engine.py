@@ -362,7 +362,7 @@ class DryRun(Exception):
 class Dispatcher:
     """One dispatcher over one repo. `runner(cmd, timeout, inp, env)` is injectable for tests."""
 
-    def __init__(self, cfg, runner=None, dry_run=False, clock=time.time, out=None):
+    def __init__(self, cfg, runner=None, dry_run=False, clock=time.time, out=None, sleep=time.sleep):
         self.cfg = cfg
         self.D = cfg["state_dir"]
         if not dry_run:                       # shadow mode creates nothing
@@ -371,6 +371,7 @@ class Dispatcher:
         self.dry_run = dry_run
         self.label_cache, self.label_reads = {}, 0
         self.clock = clock
+        self.sleep = sleep
         self.out = out or sys.stdout
         self.L = cfg["labels"]
         self.R = cfg["review"]
@@ -414,6 +415,54 @@ class Dispatcher:
             flags = " ".join(a for a in args if a.startswith("--") and a != "--body")
             self.log(f"WRITE FAILED rc={rc}: gh {' '.join(args[:3])} {flags[:120]}: {(err or out or '').strip()[-160:]}", brain=False)
         return rc, out, err
+
+    def gh_write_retry(self, args, attempts=3, backoff_s=(2, 5, 10), timeout=60):
+        last = (1, "", "not attempted")
+        for attempt in range(max(1, attempts)):
+            try:
+                last = self.write(["gh"] + args + ["-R", self.cfg["repo"]], timeout=timeout,
+                                  what="gh " + " ".join(args[:2]))
+            except subprocess.TimeoutExpired:
+                last = (124, "", "timeout")
+            if not last[0]:
+                return last
+            if attempt + 1 < attempts:
+                delays = tuple(backoff_s)
+                self.sleep(delays[min(attempt, len(delays) - 1)] if delays else 0)
+        rc, out, err = last
+        flags = " ".join(a for a in args if a.startswith("--") and a != "--body")
+        self.log(f"WRITE FAILED rc={rc}: gh {' '.join(args[:3])} {flags[:120]}: {(err or out or '').strip()[-160:]}", brain=False)
+        return last
+
+    def record_label_debt(self, state, n, add, remove):
+        with self.state_lock:
+            debt = state.setdefault("_label_debt", {})
+            debt[str(n)] = {"add": add, "remove": list(remove)}
+        self.save_state(state)
+
+    def replay_label_debt(self, state):
+        with self.state_lock:
+            debt = state.get("_label_debt") or {}
+            snapshot = copy.deepcopy(debt)
+        for n, action in snapshot.items():
+            args = ["issue", "edit", str(n)]
+            for label in action.get("remove", []):
+                args += ["--remove-label", label]
+            if action.get("add"):
+                args += ["--add-label", action["add"]]
+            if not args[3:]:
+                continue
+            if self.gh_write_retry(args)[0] == 0:
+                cleared = False
+                with self.state_lock:
+                    current = (state.get("_label_debt") or {}).get(n)
+                    if current == action:
+                        state["_label_debt"].pop(n, None)
+                        if not state["_label_debt"]:
+                            state.pop("_label_debt", None)
+                        cleared = True
+                if cleared:
+                    self.save_state(state)
 
     def git(self, *args, timeout=120):
         return self.sh(["git", "-C", self.cfg["local_repo"]] + list(args), timeout=timeout)
@@ -727,6 +776,7 @@ class Dispatcher:
             return
         self.last_leak_sweep = self.clock()
         held = {st.get("issue") for L, st in state.items() if not L.startswith("_") and isinstance(st, dict)}
+        held.update(int(n) if str(n).isdigit() else n for n in (state.get("_label_debt") or {}))
         rc, out, _ = self.gh(["issue", "list", "--state", "open", "--label", self.L["in_progress"], "--limit", "100",
                               "--json", "number,updatedAt"])
         if rc:
@@ -859,12 +909,15 @@ class Dispatcher:
         except Exception:
             return 1e9
 
-    def relabel(self, n, add, remove):
+    def relabel(self, n, add, remove, state=None):
         args = ["issue", "edit", str(n)]
         for l in remove:
             args += ["--remove-label", l]
         args += ["--add-label", add]
-        return self.gh_write(args)
+        result = self.gh_write_retry(args)
+        if result[0] and state is not None:
+            self.record_label_debt(state, n, add, remove)
+        return result
 
     def reconcile(self, L, lc, st, r, state):
         """Local state busy but the remote lane is idle on another run with a dead runner: the run was orphaned."""
@@ -880,7 +933,7 @@ class Dispatcher:
         if sst is None:
             return False
         if sst == "OPEN" and self.L["pr"] not in labels:
-            self.relabel(n, self.L["ready"], [self.L["in_progress"]])
+            self.relabel(n, self.L["ready"], [self.L["in_progress"]], state)
             what = f"requeued ({self.L['ready']})"
         else:
             what = f"already {sst.lower()}/{self.L['pr'] if self.L['pr'] in labels else '-'}; dropped"
@@ -1055,7 +1108,7 @@ class Dispatcher:
             if rc:
                 st["fetch_fails"] = int(st.get("fetch_fails") or 0) + 1
                 if st["fetch_fails"] >= 3 and re.search(self.GIVEUP, err or "", re.I):
-                    self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
+                    self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                     self.gh_write(["issue", "comment", str(n), "--body",
                                    f"Lane {lane} harvest gave up after {st['fetch_fails']} fetch failures "
                                    f"(last: `{(err or '').strip()[-160:]}`). Labelled `{L['failed']}`; re-add `{L['ready']}` to retry."])
@@ -1073,7 +1126,7 @@ class Dispatcher:
                     # nothing usable to push: the PR is still conflicting, so do not report it as rebased
                     why = (f"not based on {self.cfg['base_branch']} {st['base'][:8]}" if anc != 0
                            else f"empty diff vs {self.cfg['base_branch']}")
-                    self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
+                    self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                     self.gh_write(["issue", "comment", str(n), "--body",
                                    f"Lane {lane} rebase of PR #{pr} (run `{run}`) produced nothing to push ({why}). "
                                    f"Labelled `{L['failed']}`; re-add `{L['ready']}` to retry."])
@@ -1097,7 +1150,7 @@ class Dispatcher:
                         return False
                     if rc and st.get("rebase_head") and ("stale info" in (err or "") or "rejected" in (err or "")):
                         # someone pushed a newer head (manual fix) while the lane ran: keep it, don't clobber
-                        self.relabel(n, L["pr"], [L["in_progress"], L["ready"]])
+                        self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
                         self.log(f"{lane} rebase #{n} PR#{pr}: PR head moved during the run (not {st['rebase_head'][:8]}); "
                                  "kept the newer head, not force-pushing")
                         self.mark_done(state, n)
@@ -1109,7 +1162,7 @@ class Dispatcher:
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
                              f"Force-pushed to `{ob}`; it is merged after a fresh lane review and green CI."])
-                self.relabel(n, L["pr"], [L["in_progress"], L["ready"]])
+                self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
                 self.log(f"{lane} rebased #{n} → PR #{pr} ({ob}, run {run}, {info.get('status')})")
                 self.mark_done(state, n)
                 return True
@@ -1139,7 +1192,7 @@ class Dispatcher:
             thin = self.pr_diff_too_thin(st["base"], f"refs/fleet/{lane}")
             if thin:
                 mn = (self.cfg.get("thin_pr") or {}).get("min_effective_diff")
-                self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
+                self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                 self.gh(["issue", "comment", str(n), "--body",
                          f"Lane {lane} run `{run}` produced a thin diff (`{thin}`): effective code <{mn} lines or mostly docs. "
                          f"Labelled `{L['failed']}`; PR not opened."])
@@ -1153,13 +1206,13 @@ class Dispatcher:
             title = self.upstream_title(subj.strip() or f"#{n}", st["base"], f"refs/fleet/{lane}")[:200]
             rc, out, err = self.gh(["pr", "create", "--base", self.cfg["base_branch"], "--head", b, "--title", title, "--body", body])
             url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
-            self.relabel(n, L["pr"], [L["in_progress"], L["ready"]])
+            self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
             self.log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}")
             self.mark_done(state, n)
             self.quota_backend_guard(lane, lc, info)
         elif run in self.watchdog_requeue():
             why = self.watchdog_requeue().get(run) or "watchdog"
-            self.relabel(n, L["ready"], [L["in_progress"], L["failed"]])
+            self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
             self.gh(["issue", "comment", str(n), "--body", f"Lane {lane} run `{run}` was aborted by the liveness watchdog ({why}). "
                      f"Requeued as `{L['ready']}`."])
             self.mark_done(state, n)
@@ -1168,13 +1221,13 @@ class Dispatcher:
             error_class = info.get("error_class") or ""
             requeue_classes = (self.cfg.get("quota") or {}).get("requeue_classes", ["rate_limit", "quota"])
             if error_class in requeue_classes:
-                self.relabel(n, L["ready"], [L["in_progress"], L["failed"]])
+                self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
                 self.gh(["issue", "comment", str(n), "--body",
                          f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
                          f"because of backend quota/rate limiting (`{error_class}`), not a card failure. "
                          f"Requeued as `{L['ready']}`.\n\nExecutor summary: {info.get('summary')}"])
             else:
-                self.relabel(n, L["failed"], [L["in_progress"], L["ready"]])
+                self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                 self.gh(["issue", "comment", str(n), "--body",
                          f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
                          f"(error_class `{error_class}`).\n\nExecutor summary: {info.get('summary')}\n\n"
@@ -1650,12 +1703,18 @@ class Dispatcher:
                     self.log(f"{e}; skip further dispatch this tick", brain=False)
                     break
             self.heartbeat()
-            self.gh_write(["issue", "edit", str(pick["n"]), "--add-label", self.L["in_progress"]])
+            tagged = self.gh_write_retry(["issue", "edit", str(pick["n"]), "--add-label", self.L["in_progress"]])
+            if tagged[0]:
+                self.log(f"skip #{pick['n']}: could not add {self.L['in_progress']} after retries", brain=False)
+                q.remove(pick)
+                continue
             host_started = self.clock()
             try:
                 run, ver = self.dispatch(L, lc, pick, base)
             except Exception as e:
-                self.gh_write(["issue", "edit", str(pick["n"]), "--remove-label", self.L["in_progress"]])
+                removed = self.gh_write_retry(["issue", "edit", str(pick["n"]), "--remove-label", self.L["in_progress"]])
+                if removed[0]:
+                    self.record_label_debt(state, pick["n"], None, [self.L["in_progress"]])
                 self.host_fail(lc["host"], f"dispatch #{pick['n']}: {e}", host_started, 120)
                 continue
             q.remove(pick)
@@ -1712,6 +1771,7 @@ class Dispatcher:
         except Exception:
             pass
         state.setdefault("_done", [])
+        self.replay_label_debt(state)
         cm = os.path.expanduser(self.cfg["ssh"]["control_dir"])
         for name in os.listdir(cm):
             try:

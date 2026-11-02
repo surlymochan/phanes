@@ -590,6 +590,58 @@ class Round2(Base):
 
 
 class Assign(Base):
+    def assignment_fixture(self, d):
+        d.main_sha = lambda: SHA
+        d.label_state = lambda n: "fresh"
+        calls = []
+        d.dispatch = lambda *args: (calls.append(args[0]) or "run-1", "")
+        lanes = {"P1": {"host": "box", "backend": "pi"}}
+        item = {"n": 1, "title": "task", "body": "", "backend": None, "strict": False, "prio": 2}
+        d.assign_issues(lanes, {"P1": {"lane": "idle"}}, {}, [item])
+        return calls
+
+    def test_in_progress_write_retries_before_assigning(self):
+        outcomes = iter([(1, "", "502"), (1, "", "502"), (0, "", "")])
+        d = self.make([("issue edit 1", lambda _: next(outcomes))])
+        d.sleep = lambda _: None
+        self.assertEqual(self.assignment_fixture(d), ["P1"])
+        self.assertEqual(len(self.runner.called("issue edit 1")), 3)
+
+    def test_three_failed_in_progress_writes_skip_lane_assignment(self):
+        d = self.make([("issue edit 1", (1, "", "502"))])
+        d.sleep = lambda _: None
+        self.assertEqual(self.assignment_fixture(d), [])
+
+    def test_relabel_debt_is_replayed_and_only_matching_snapshot_is_cleared(self):
+        outcomes = iter([(1, "", "502"), (1, "", "502"), (1, "", "502"), (0, "", "")])
+        d = self.make([("issue edit 5", lambda _: next(outcomes))])
+        d.sleep = lambda _: None
+        state = {}
+        self.assertNotEqual(d.relabel(5, "lane-pr", ["in-progress"], state)[0], 0)
+        self.assertIn("5", state["_label_debt"])
+        d.replay_label_debt(state)
+        self.assertNotIn("_label_debt", state)
+
+    def test_leak_sweep_preserves_label_debt_issue(self):
+        issue_list = [{"number": 5, "updatedAt": "2020-01-01T00:00:00Z"}]
+        d = self.make([("issue list", (0, json.dumps(issue_list), ""))])
+        d.clock = lambda: 2_000_000_000
+        state = {"_label_debt": {"5": {"add": "lane-pr", "remove": ["in-progress"]}}}
+        d.sweep_leaked_inprogress(state)
+        self.assertEqual(self.runner.called("issue edit 5"), [])
+
+    def test_debt_replay_keeps_action_added_during_write(self):
+        state = {"_label_debt": {"5": {"add": "lane-pr", "remove": ["in-progress"]}}}
+        d = self.make()
+
+        def concurrent_write(*args, **kwargs):
+            state["_label_debt"]["5"] = {"add": "lane-failed", "remove": ["in-progress"]}
+            return 0, "", ""
+
+        d.gh_write_retry = concurrent_write
+        d.replay_label_debt(state)
+        self.assertEqual(state["_label_debt"]["5"]["add"], "lane-failed")
+
     def test_idempotency_key_reused_on_transport_retry(self):
         calls = {"n": 0}
 
