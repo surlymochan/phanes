@@ -526,6 +526,9 @@ class Dispatcher:
     def paused_lane(self, lane, lc):
         if os.path.exists(self.path(f"PAUSE-{lane}")):
             return True
+        if dispatch_module("pause").PauseStore(self.D).is_paused(lane=lane, host=lc.get("host"),
+                                                                  backend=lc.get("backend"), now=self.clock()):
+            return True
         host = lc.get("host") or ""
         if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
             return True
@@ -1021,6 +1024,11 @@ class Dispatcher:
             return False
         n, run = st["issue"], st["run"]
         self.quota_lane_guard(lane, lc, info)
+        model_unavailable = (info.get("error_class") == "model_unavailable")
+        if model_unavailable:
+            model = info.get("model") or "unknown"
+            dispatch_module("pause").PauseStore(self.D).pause(
+                "lane:" + lane, ttl_s=3600, reason="auto:model_unavailable " + str(model), now=self.clock())
         has_commit = info.get("branch") and info["branch"] != "None" and info.get("commit")
         if st.get("review_pr"):
             if has_commit:
@@ -1166,6 +1174,13 @@ class Dispatcher:
             self.log(f"{lane} #{n} run {run} watchdog-aborted ({why}) → requeued {L['ready']}")
         else:
             error_class = info.get("error_class") or ""
+            if model_unavailable:
+                self.relabel(n, L["ready"], [L["in_progress"], L["failed"]])
+                self.gh(["issue", "comment", str(n), "--body",
+                         f"Lane {lane} model `{info.get('model') or 'unknown'}` is unavailable; paused lane for 3600 seconds and requeued as `{L['ready']}`."])
+                self.mark_done(state, n)
+                self.log(f"{lane} #{n} model unavailable ({info.get('model') or 'unknown'}) → {L['ready']}")
+                return True
             requeue_classes = (self.cfg.get("quota") or {}).get("requeue_classes", ["rate_limit", "quota"])
             if error_class in requeue_classes:
                 self.relabel(n, L["ready"], [L["in_progress"], L["failed"]])
@@ -1373,7 +1388,7 @@ class Dispatcher:
         v, _ = status.parse_verdict(txt)
         if not v:
             error_class = info.get("error_class") or ""
-            if error_class in {"rate_limit", "quota", "vm_paused"}:
+            if error_class in {"rate_limit", "quota", "vm_paused", "model_unavailable"}:
                 r["quota_backend"] = info.get("backend") or lc.get("backend")
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry")
             else:

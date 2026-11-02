@@ -3479,10 +3479,22 @@ TASK:
 
 """ + REPORT_INSTRUCTION
 
-MODEL_UNAVAILABLE_RE = re.compile(r"(at capacity|server.?overloaded|overloaded|try a different model|model is not supported|not supported when using|model .{0,40}not (found|available))", re.I)
+MODEL_UNAVAILABLE_RE = re.compile(r"(at capacity|server.?overloaded|overloaded|try a different model|model is not supported|not supported when using|model .{0,40}(not (found|available)|is unavailable))", re.I)
 OPENCODE_ABORT_RE = re.compile(r"stream error.*(usage limit exceeded|insufficient balance|quota exceeded|rate.?limit)", re.I)
 RATE_LIMIT_RE = re.compile(r"(\b429\b|resource[_ -]?exhausted|rate.?limit|usage limit|quota|too many requests|insufficient balance|spend.?control)", re.I)
 AUTH_ERROR_RE = re.compile(r"(authentication required|not authenticated|unauthenticated|not logged in|please log ?in|login required|auth(?:entication)? error|FatalAuthenticationError)", re.I)
+
+
+def classify_lane_failure(text, model=None, risk_blocks=False):
+    """Classify a lane turn failure and retain the configured model in its detail."""
+    text = text or ""
+    if AUTH_ERROR_RE.search(text):
+        return "auth", text
+    if MODEL_UNAVAILABLE_RE.search(text):
+        return "model_unavailable", f"{text}\nConfigured model: {model or 'unknown'}"
+    if RATE_LIMIT_RE.search(text):
+        return "rate_limit", text
+    return ("risk_blocked" if risk_blocks else "exec_error"), text
 
 
 def set_status(rdir, **kw):
@@ -8872,11 +8884,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         text = detail or ""
         if lane_headless(lane):
             text = child.stderr_text()[-600:] or text
-        if AUTH_ERROR_RE.search(text):
-            return "auth", text
-        if RATE_LIMIT_RE.search(text):
-            return "rate_limit", text
-        return ("risk_blocked" if spec.get("risk_blocks") else "exec_error"), text
+        return classify_lane_failure(text, lane.get("model"), spec.get("risk_blocks"))
 
     def turn_failed(error_class, rc, detail):
         """Classify a turn that ended without a report; a stalled turn keeps its own class."""

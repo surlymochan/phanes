@@ -60,6 +60,12 @@ class DispatchRetryTests(unittest.TestCase):
     def test_unknown_error_class_without_default_is_closed(self):
         self.assertEqual(retry.decide("new_error", 0, {"stalled": "requeue"})[0], "close")
 
+    def test_model_unavailable_pauses_lane_without_counting(self):
+        for attempts in (0, 1, 5):
+            with self.subTest(attempts=attempts):
+                self.assertEqual(retry.decide("model_unavailable", attempts, retry.DEFAULT_TABLE),
+                                 ("pause_lane", False))
+
     def test_invalid_tables_raise_value_error(self):
         invalid = (
             None,
