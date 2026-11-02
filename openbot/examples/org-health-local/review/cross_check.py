@@ -6,6 +6,10 @@
                                     [--summary <site-summary.json>]
                                     [--out <report.md>]
                                     [--json-out <results.json>]
+                                    [--repo-root <root>]
+
+File findings use repository-relative paths. The default root is the nearest
+repository above the current directory, or the current directory if none is found.
 
 逐条输出 PASS/FAIL，任一 FAIL 时退出码非 0；输入不可读或不是 JSON 对象时退出码为 2。
 只使用 Python 3.9+ 标准库；除 `--out`/`--json-out` 指定的报告文件外不写任何文件，
@@ -66,7 +70,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -1009,16 +1013,57 @@ def finding_path(result: Result) -> str:
     return paths.get(result.name, f"/{result.name}")
 
 
-def findings_report(results: list[Result]) -> list[dict[str, object]]:
+def repository_root(repo_root: Path | str | None = None) -> Path:
+    """Use an explicit root, or find the repository that contains the current directory."""
+    try:
+        if repo_root is not None:
+            root = Path(repo_root).resolve()
+            if not root.is_dir():
+                raise CheckError(f"Repository root is not a directory: {repo_root}")
+            return root
+        current = Path.cwd().resolve()
+        for candidate in (current, *current.parents):
+            if (candidate / ".git").exists():
+                return candidate
+        return current
+    except (OSError, RuntimeError, ValueError) as cause:
+        raise CheckError("Cannot resolve the repository root") from cause
+
+
+def normalize_finding_path(path: Path | str, repo_root: Path | str | None = None) -> str:
+    """Convert a file path to a root-relative POSIX path, rejecting paths outside it."""
+    if not isinstance(path, (str, Path)):
+        raise CheckError("Finding file path must be a string or Path")
+    text = str(path)
+    if not text.strip() or any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise CheckError(f"Invalid finding file path: {text!r}")
+    if "\\" in text or PureWindowsPath(text).drive:
+        raise CheckError(f"Unsupported finding file path: {text!r}")
+    root = repository_root(repo_root)
+    try:
+        candidate = Path(text)
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        relative = resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError) as cause:
+        raise CheckError(f"Finding file path is outside the repository or cannot be resolved: {text!r}") from cause
+    if relative == Path("."):
+        raise CheckError("Finding file path must name a file below the repository root")
+    return relative.as_posix()
+
+
+def findings_report(results: list[Result], repo_root: Path | str | None = None) -> list[dict[str, object]]:
     """序列化失败项为统一的 finding 契约。"""
     findings: list[dict[str, object]] = []
     for result in results:
         if result.ok:
             continue
+        path = finding_path(result)
+        if result.finding is not None and "path" in result.finding:
+            path = normalize_finding_path(result.finding["path"], repo_root)
         finding: dict[str, object] = {
             # 失败检查未声明告警级别时使用稳定的默认枚举值，避免输出缺字段。
             "severity": result.severity or DEFAULT_FINDING_SEVERITY,
-            "path": finding_path(result),
+            "path": path,
             "message": result.detail,
         }
         if finding["severity"] not in FINDING_SEVERITIES:
@@ -1031,12 +1076,12 @@ def findings_report(results: list[Result]) -> list[dict[str, object]]:
     return findings
 
 
-def json_report(results: list[Result]) -> str:
+def json_report(results: list[Result], repo_root: Path | str | None = None) -> str:
     """将检查结果格式化为稳定的 JSON 报告。"""
     failed = sum(not result.ok for result in results)
     payload = {
         "ok": failed == 0,
-        "findings": findings_report(results),
+        "findings": findings_report(results, repo_root=repo_root),
         "checks": [
             {"name": result.name, "ok": result.ok, "detail": result.detail}
             for result in results
@@ -1073,6 +1118,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out", type=Path, default=None, help="可选的 Markdown 报告输出路径。")
     parser.add_argument(
+        "--repo-root", type=Path, default=None,
+        help="Root for finding file paths; defaults to the nearest repository above the current directory, or the current directory.",
+    )
+    parser.add_argument(
         "--json-out",
         type=Path,
         default=None,
@@ -1082,7 +1131,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         brief = load_json(args.brief)
         diagnosis = load_json(args.data)
-    except CheckError as cause:
+    except (CheckError, OSError, RuntimeError, ValueError) as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
     summary_data = None
@@ -1092,7 +1141,14 @@ def main(argv: list[str] | None = None) -> int:
             summary_data = load_json(summary_path)
         elif args.dist is not None:
             summary_data, summary_path = discover_site_summary(args.dist)
-    except CheckError as cause:
+        root = repository_root(args.repo_root)
+        args.brief = args.brief.resolve()
+        args.data = args.data.resolve()
+        if args.dist is not None:
+            args.dist = args.dist.resolve()
+        if summary_path is not None:
+            summary_path = summary_path.resolve()
+    except (CheckError, OSError, RuntimeError, ValueError) as cause:
         print(str(cause), file=sys.stderr)
         return EXIT_USAGE
     results = run_checks(
@@ -1104,17 +1160,23 @@ def main(argv: list[str] | None = None) -> int:
         site_summary=summary_data,
         site_summary_path=summary_path,
     )
+    try:
+        json_output = json_report(results, repo_root=root)
+        markdown_output = markdown_report(results)
+    except (CheckError, ValueError) as cause:
+        print(str(cause), file=sys.stderr)
+        return EXIT_USAGE
     if args.out is not None:
         try:
             args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(markdown_report(results), encoding="utf-8")
+            args.out.write_text(markdown_output, encoding="utf-8")
         except OSError as cause:
             print(f"无法写入报告 {args.out}：{cause}", file=sys.stderr)
             return EXIT_USAGE
     if args.json_out is not None:
         try:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
-            args.json_out.write_text(json_report(results), encoding="utf-8")
+            args.json_out.write_text(json_output, encoding="utf-8")
         except OSError as cause:
             print(f"无法写入 JSON 结果 {args.json_out}：{cause}", file=sys.stderr)
             return EXIT_USAGE

@@ -194,9 +194,11 @@ def run_script(
     out: Path | None = None,
     json_out: Path | None = None,
     summary: Path | None = None,
+    repo_root: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """调用命令行脚本，返回进程结果。"""
     argv = [sys.executable, str(SCRIPT), "--brief", str(brief), "--data", str(data)]
+    argv.extend(["--repo-root", str(repo_root if repo_root is not None else brief.parent)])
     if dist is not None:
         argv.extend(["--dist", str(dist)])
     if summary is not None:
@@ -1495,7 +1497,7 @@ class CrossCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, cross_check.EXIT_FAIL, result.stdout + result.stderr)
         self.assertFalse(payload["ok"])
         findings = [
-            item for item in payload["findings"] if item["path"] == str(brief_file)
+            item for item in payload["findings"] if item["path"] == "brief.json"
         ]
         self.assertTrue(findings)
         finding = findings[0]
