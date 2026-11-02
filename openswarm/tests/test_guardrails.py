@@ -293,7 +293,7 @@ class PromptRuleTests(unittest.TestCase):
         self.assertTrue(xs.lane_risk_deniable(lane, {"risk": "rm outside worktree"}, {}))
         self.assertFalse(xs.lane_risk_deniable(lane, {"risk": "push"}, {}))
         self.assertFalse(xs.lane_risk_deniable({"backend": "cursor"}, {"risk": "rm outside worktree"}, {}))
-        full = {"risk_denials": [{}] * xs.MAX_RISK_DENIALS}
+        full = {"risk_denials": [{"risk": "rm outside worktree"}] * xs.MAX_RISK_DENIALS}
         self.assertFalse(xs.lane_risk_deniable(lane, {"risk": "rm outside worktree"}, full))
 
 
