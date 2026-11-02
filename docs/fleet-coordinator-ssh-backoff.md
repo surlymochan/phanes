@@ -7,8 +7,9 @@
 - `brain/autopilot.md:20-22,34`（10+ 路并行拓扑与状态监控脚本）
 - `docs/fleet-topology-expected.md:6-18`（Fleet topology 各主机并发限额约定）
 - `docs/dual-mode-ssh.md:32-41,53-75`（ControlMaster 配置与 SSH fleet 拓扑）
-- `openswarm/bin/openswarm:3345-3354`（`fleet_guard_call` 超时与 fail-closed 准入）
-- `openswarm/bin/openswarm:3370-3375`（`fleet_recovery_ttl_seconds` 600s 保护）
+- `openswarm/bin/openswarm:3628-3666`（`fleet_guard_call` 8 秒硬超时与 fail-closed 准入）
+- `openswarm/bin/openswarm:3668-3699`（`fleet_guard_call_retry` 有限重试与指数退避）
+- `openswarm/bin/openswarm:3845-3852`（`fleet_recovery_ttl_seconds` 600s 保护）
 - `openswarm/bin/fleet-capacity:12-34,90-115`（`fleet-capacity` 限额、status 与 recover 机制）
 
 ---
@@ -46,16 +47,52 @@
    - 若连接持续失败，重试间隔按阶梯或指数退避倍增（30s → 60s → 120s → 240s → 600s），单次最大重试等待上限封顶为 **600 秒**（600s / 10 分钟）。
 
 2. **调用超时与 Fail-Closed 保证**：
-   - 依据 `openswarm/bin/openswarm:3345-3354`，单次 `fleet_guard_call` 设定了 15 秒（`timeout=15`）硬超时。
+   - 依据 `openswarm/bin/openswarm:3628-3666`，单次 `fleet_guard_call` 设定了 8 秒（`FLEET_CALL_TIMEOUT_SECONDS`）硬超时，并杀掉子进程组，隧道挂死不会拖住调用方。
    - 一旦协调器不可达或超时，立即捕获异常抛出 `fleet capacity coordinator unavailable`，采取严格的 **fail-closed** 策略。
    - 任务保留在排队或重试状态，绝不会在未取得协调器 reservation 的情况下误启动执行器。
 
 3. **TTL 超时回收对齐（600s）**：
-   - 依据 `openswarm/bin/openswarm:3370-3375`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。
+   - 依据 `openswarm/bin/openswarm:3845-3852`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。
    - 该 600s TTL 与退避上限窗口一致。即使 runner 因隧道断开崩溃或长时间处于最大退避，协调器上的孤儿记录在 600s 超时后仍可经本地存活检测通过 `op: "recover"` 正常清理（`openswarm/bin/fleet-capacity:103-115`），避免 slot 被永久占用。
 
 4. **派发节拍平缓**：
    - box 上的 `lane-autodispatch` 循环按 60s 一 tick 运行（`brain/autopilot.md:10-11`），保证派发层不会对正在退避的主机产生密集连接冲击。
+
+---
+
+## 2.1 执行器侧容量调用的超时与重试（Refs #1694）
+
+2026-11-02 晚实测：经同一路径人工查询容量 90 秒无返回，runner 无限期挂在 `acquire` 上，车道显示 busy 实则零请求，且没有重试与降级路径。为此 executor 侧全部容量调用点（`acquire` / `release` / `recover` / `status`）统一收敛到 `fleet_guard_call_retry`（`openswarm/bin/openswarm:3668-3699`）：
+
+| 项目 | 取值 | 位置 |
+| --- | --- | --- |
+| 单次调用超时 | 8 秒（`FLEET_CALL_TIMEOUT_SECONDS`，可用 `OPENSWARM_FLEET_CALL_TIMEOUT` 覆盖） | `openswarm/bin/openswarm:3542-3560` |
+| 单次调用重试 | 最多 3 次（`FLEET_CALL_MAX_ATTEMPTS`，可用 `OPENSWARM_FLEET_CALL_ATTEMPTS` 覆盖） | 同上 |
+| 退避 | 指数退避 0.5s → 1.0s（`FLEET_CALL_BACKOFF_SECONDS`） | `openswarm/bin/openswarm:3668-3699` |
+| 不可达阈值 | 持续 60 秒后标记 `capacity-unreachable`（`FLEET_CAPACITY_UNREACHABLE_SECONDS`） | `openswarm/bin/openswarm:3727-3744` |
+
+行为约定：
+
+- **超时不拖死 runner**：单次调用硬超时（8s）并杀掉子进程组（`fleet_guard_kill`），调用方最多等 3 次尝试 + 2 次退避（≈25.5s）后让出，run 保持 `state=queued`。
+- **不误判为容量不足**：`queue_reason` 区分三种情形——本地并发上限 `provider concurrency limit`、协调器明确拒绝 `fleet capacity limit reached`、协调器不可达 `capacity coordinator unreachable`。
+- **不丢弃已获预留**：acquire 超时后仍保留 `fleet_reservation_token` / `fleet_reservation_pending`，交由 TTL 清扫（`recover_expired_fleet_slots`，`openswarm/bin/openswarm:3888-3990`）对账。
+- **明确日志**：run 目录新增 `capacity.jsonl`，记录调用点（`op`）、耗时（`seconds`）、重试次数（`attempts`）与错误；run 状态新增 `capacity_unreachable` / `capacity_unreachable_since` / `fleet_capacity_last`，供 #1687 的阻塞诊断直接引用。lane 状态（`lanes/<lane>/state.json`）同步写入 `capacity_unreachable`，并在协调器不可达时附 `fleet_capacity_visible`（协调器可见的预约数）。
+- **release 不阻塞 run 结束**：run 结束路径只做 1 次有界尝试（`attempts=1`）；失败则写入待重发队列 `$OPENSWARM_HOME/fleet-release-queue.json`，由预留清扫 `flush_fleet_release_queue`（`openswarm/bin/openswarm:3793-3830`）补发（与 #1685 的清扫口径一致），run 状态里的 `fleet_release_pending` 仍作为兜底。
+- **正常路径无额外开销**：协调器亚秒返回时只发起 1 次调用、无退避、不写 `capacity.jsonl`。
+
+观察命令：
+
+```bash
+# 最近一次容量调用记录（调用点 / 耗时 / 重试次数）
+tail -n 5 "$OPENSWARM_HOME/runs/<run-id>/capacity.jsonl"
+
+# run 状态里的不可达标记（供 #1687 引用）
+python3 -c 'import json,os;print(json.load(open(os.path.join(os.environ["OPENSWARM_HOME"],"runs","<run-id>","status.json"))))' \
+  | grep -E 'capacity_unreachable|queue_reason|fleet_capacity_last'
+
+# 待重发的 release 队列
+cat "$OPENSWARM_HOME/fleet-release-queue.json"
+```
 
 ---
 
