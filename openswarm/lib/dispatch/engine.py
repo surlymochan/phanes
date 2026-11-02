@@ -1785,10 +1785,27 @@ class Dispatcher:
                 r["needs_human_sha"] = sha
                 self.log(f"review PR #{pr}: CHANGES round {r['rounds']} (issue {n}) → {L['needs_human']}")
             else:
-                iv = self.gh(["issue", "view", str(n), "--json", "body"])[1]
-                ib = (json.loads(iv)["body"] or "") if iv else ""
+                rc, iv, _ = self.gh(["issue", "view", str(n), "--json", "body,state,labels"])
+                try:
+                    issue_data = json.loads(iv)
+                except (TypeError, ValueError):
+                    issue_data = {}
+                if rc or issue_data.get("state") not in (None, "OPEN"):
+                    self.log(f"review PR #{pr}: CHANGES round {r['rounds']} skipped; issue #{n} unavailable")
+                    self.put_review(pr, r)
+                    return True
+                # A previous CHANGES task remains in the shared issue body until it is
+                # completed. Never replace it with a newer round while it is dispatchable
+                # or held by a lane; that would make the lane work against stale evidence.
+                labels = {x.get("name") if isinstance(x, dict) else x for x in issue_data.get("labels", [])}
                 T = self.cfg["templates"]
-                ib = self.with_rebase_line(self.section_strip(ib, T["changes_section_title"]), pr, cj["headRefName"])
+                prior = issue_data.get("body") or ""
+                title = T["changes_section_title"]
+                if title in prior and labels & {L["ready"], L["in_progress"]}:
+                    self.log(f"review PR #{pr}: CHANGES round {r['rounds']} deduplicated; issue #{n} already has an in-flight fix card")
+                    self.put_review(pr, r)
+                    return True
+                ib = self.with_rebase_line(self.section_strip(prior, title), pr, cj["headRefName"])
                 ib += (f"\n\n## {T['changes_section_title']}\n\n" +
                        T["changes_section"].format(round=r["rounds"], who=who, pr=pr, sha10=sha[:10], branch=cj["headRefName"],
                                                    notes=txt.strip()[:8000]) + "\n")
