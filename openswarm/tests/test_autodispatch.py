@@ -115,6 +115,91 @@ class GitSSHCommandTests(unittest.TestCase):
         live.wait()
 
 
+class DispatchBudgetTests(unittest.TestCase):
+    """Refs #1686: the dispatch budget is tiered per card — large cards get 90 minutes."""
+
+    def item(self, **kwargs):
+        card = {"n": 1686, "title": "budget card", "body": "", "labels": ["lane-ready"],
+                "prio": 1, "backend": None, "strict": False}
+        card.update(kwargs)
+        return card
+
+    def dispatch_command(self, card):
+        """Run dispatch() against a fake shell and return the remote command it built."""
+        calls = []
+
+        def fake_sh(cmd, timeout=120, inp=None):
+            calls.append(cmd)
+            return 0, '{"id":"run-1"}', ""
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(autodispatch, "D", directory), \
+                mock.patch.object(autodispatch, "sh", fake_sh):
+            autodispatch.dispatch("C1", {"host": "instabox", "fleet": "fleet", "repo": "repo"},
+                                  card, "b" * 40)
+        return " ".join(calls[-1])
+
+    def test_a_large_card_is_dispatched_with_90_minutes(self):
+        command = self.dispatch_command(self.item(labels=["lane-ready", "budget:large"]))
+
+        self.assertIn("--budget-minutes 90", command)
+
+    def test_a_card_without_a_marker_keeps_the_default_budget(self):
+        command = self.dispatch_command(self.item())
+
+        self.assertIn("--budget-minutes 45", command)
+
+    def test_a_body_marker_selects_the_large_budget(self):
+        command = self.dispatch_command(self.item(body="实现大卡。\n预算：90\n"))
+
+        self.assertIn("--budget-minutes 90", command)
+
+    def test_a_malformed_marker_falls_back_to_45_and_warns(self):
+        card = self.item(body="实现大卡。\n预算：九十\n")
+        decision = autodispatch.budget_for(card)
+
+        self.assertEqual(decision["minutes"], 45)
+        self.assertTrue(decision["warn"])
+        self.assertIn("--budget-minutes 45", self.dispatch_command(card))
+
+    def test_an_unknown_budget_label_falls_back_to_45_and_warns(self):
+        decision = autodispatch.budget_for(self.item(labels=["lane-ready", "budget:huge"]))
+
+        self.assertEqual(decision["minutes"], 45)
+        self.assertTrue(decision["warn"])
+
+    def test_the_budget_decision_records_its_reason(self):
+        label = autodispatch.budget_for(self.item(labels=["budget:large"]))
+        body = autodispatch.budget_for(self.item(body="预算：90"))
+        plain = autodispatch.budget_for(self.item())
+
+        self.assertEqual(label["minutes"], 90)
+        self.assertIn("budget:large", label["basis"])
+        self.assertEqual(body["minutes"], 90)
+        self.assertIn("预算：90", body["basis"])
+        self.assertEqual(plain["minutes"], 45)
+        self.assertFalse(plain["warn"])
+
+    def test_the_dispatch_log_line_carries_the_issue_the_budget_and_the_reason(self):
+        card = self.item(labels=["budget:large"])
+        budget = autodispatch.budget_for(card)
+
+        line = autodispatch.dispatch_log_line("C1", {"host": "instabox"}, card, "run-1", "b" * 40, budget)
+
+        self.assertIn("#1686", line)
+        self.assertIn("C1", line)
+        self.assertIn("budget 90m", line)
+        self.assertIn("budget:large", line)
+
+    def test_only_the_budget_differs_between_the_two_tiers(self):
+        # The stall watchdog, the verify command and the base stay the same for both tiers:
+        # the no-progress kill must hit a 45-minute card and a 90-minute card alike.
+        small = self.dispatch_command(self.item())
+        large = self.dispatch_command(self.item(labels=["budget:large"]))
+
+        self.assertEqual(small.replace("--budget-minutes 45", "B"), large.replace("--budget-minutes 90", "B"))
+
+
 class HarvestFetchBackoffTests(unittest.TestCase):
     """Refs #947: a broken harvest fetch is transient until the threshold is exceeded."""
 

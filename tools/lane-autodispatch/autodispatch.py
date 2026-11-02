@@ -8,9 +8,27 @@ State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/aut
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
 import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+
+def _minutes(value, default):
+    """Parse a budget in minutes; a broken environment value falls back to the default."""
+    try: return int(value)
+    except (TypeError, ValueError): return default
+
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
-TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
+TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = _minutes(os.environ.get("AD_BUDGET"), 45); LOW = int(os.environ.get("AD_LOW", "10"))
+# Refs #1686: the dispatch budget is tiered per card.  A card labelled `budget:large` or carrying the
+# body marker `预算：90` gets BUDGET_LARGE minutes; every other card keeps the default budget.  A
+# malformed marker falls back to the default budget and is reported in the dispatch log.  The tier
+# only changes the wall clock of the run: the stall watchdog (lane.stall_after_s) and the harvest
+# statistics (budget_exceeded vs completed) stay the same for both tiers.
+BUDGET_DEFAULT = BUDGET; BUDGET_LARGE = _minutes(os.environ.get("AD_BUDGET_LARGE"), 90)
+BUDGET_LARGE_LABEL = "budget:large"
+BUDGET_MARKER_RE = re.compile(r"(?:^|\n)[ \t]*(?:预算|budget)[ \t]*[:：][ \t]*([^\n]*)", re.I)
+BUDGET_VALUE_RE = re.compile(r"^(\d{1,3})\s*(?:分钟|分鐘|分|min(?:ute)?s?)?$", re.I)
+# A planner card whose body is longer than this looks like a large card; the marker is only
+# hinted then, never added automatically (Refs #1686).
+LARGE_BODY_HINT_CHARS = 800
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
          "files outside it — not the main repo, not $HOME, not /tmp; for scratch files use $TMPDIR (inside the worktree, cleaned "
          "automatically) and leave cleanup to the executor. Do not push, do not open PRs, do not touch credentials, no network "
@@ -244,7 +262,8 @@ def queue():
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
         be = next((l.split(":", 1)[1] for l in labels if l.startswith("backend:")), None)
-        items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "", "prio": pr, "backend": be, "strict": "strict-backend" in labels})
+        items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "", "labels": sorted(labels),
+                      "prio": pr, "backend": be, "strict": "strict-backend" in labels})
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
@@ -283,6 +302,73 @@ def verify_of(body):
             cmds = re.findall(r"`([^`]+)`", line)
             if cmds: return " && ".join(cmds) if len(cmds) > 1 and all(not c.startswith("cd ") for c in cmds[1:]) else cmds[0]
     return None
+
+def budget_marker(body):
+    """The raw budget marker of a card body ("" when the body carries none)."""
+    match = BUDGET_MARKER_RE.search(body or "")
+    return match.group(1).strip() if match else ""
+
+def budget_for(item):
+    """The dispatch budget of one card: {"minutes", "basis", "warn"} (Refs #1686).
+
+    A card labelled `budget:large` or carrying the body marker `预算：90` gets the large
+    budget; every other card keeps the default budget.  A malformed marker (or one that
+    asks for a tier that does not exist) falls back to the default budget and asks for a
+    warning — a broken marker must never silently buy a longer run."""
+    labels = set(item.get("labels") or [])
+    if BUDGET_LARGE_LABEL in labels:
+        return {"minutes": BUDGET_LARGE, "basis": f"label {BUDGET_LARGE_LABEL}", "warn": False}
+    unknown = sorted(label for label in labels if label.startswith("budget:"))
+    if unknown:
+        return {"minutes": BUDGET_DEFAULT, "basis": f"invalid label {', '.join(unknown)}", "warn": True}
+    raw = budget_marker(item.get("body"))
+    if not raw:
+        return {"minutes": BUDGET_DEFAULT, "basis": "default (no marker)", "warn": False}
+    value = BUDGET_VALUE_RE.match(raw)
+    if not value:
+        return {"minutes": BUDGET_DEFAULT, "basis": f"invalid marker 预算：{raw[:30]}", "warn": True}
+    minutes = int(value.group(1))
+    if minutes in (BUDGET_DEFAULT, BUDGET_LARGE):
+        return {"minutes": minutes, "basis": f"body marker 预算：{minutes}", "warn": False}
+    return {"minutes": BUDGET_DEFAULT, "basis": f"unsupported marker 预算：{minutes}", "warn": True}
+
+def dispatch_log_line(lane, cfg, item, run, base, budget):
+    """The dispatch log line: lane, issue, the chosen budget and the reason for it (Refs #1686)."""
+    return (f"dispatched #{item['n']} → {lane} ({cfg['host']}) run {run} base {base[:8]} "
+            f"budget {budget['minutes']}m ({budget['basis']})")
+
+def card_labels(text):
+    """The labels of a planner card (its second line); [] when the card has no labels line."""
+    lines = text.splitlines()
+    if len(lines) < 2 or ":" not in lines[1]: return []
+    return [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
+
+def card_body(text):
+    """The body of a planner card: everything after the title and the labels line."""
+    lines = text.splitlines()
+    return "\n".join(lines[2:]).strip() + "\n"
+
+def card_budget(text):
+    """The budget decision of a planner card: {"tier", "basis", "error"} (Refs #1686).
+
+    `error` is set when the card carries a malformed marker (an unknown `budget:*` label or an
+    unparsable `预算：…` value): such a card is reported instead of being filed with a silent
+    fallback, so the planner can fix the marker."""
+    decision = budget_for({"labels": card_labels(text), "body": card_body(text)})
+    return {"tier": "large" if decision["minutes"] == BUDGET_LARGE else "default",
+            "basis": decision["basis"], "error": decision["basis"] if decision["warn"] else None}
+
+def card_budget_hint(text):
+    """Hint that an unmarked planner card looks like a large card (Refs #1686).
+
+    The hint never promotes the card: only the `budget:large` label or the `预算：90` marker
+    buys the large budget."""
+    decision = card_budget(text)
+    if decision["error"] or decision["tier"] != "default": return None
+    size = len(card_body(text))
+    if size < LARGE_BODY_HINT_CHARS: return None
+    return (f"card body is {size} chars: it may be a large card — add the `{BUDGET_LARGE_LABEL}` label "
+            f"(or a `预算：{BUDGET_LARGE}` line) when it really needs more than the default {BUDGET_DEFAULT} minutes")
 
 def read_issue(n):
     """One authoritative read of an issue; returns (status, payload).
@@ -429,7 +515,7 @@ def deps_met(item):
         if rc or json.loads(out)["state"] != "CLOSED": return False
     return True
 
-def dispatch(lane, cfg, item, base):
+def dispatch(lane, cfg, item, base, budget=None):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/openswarm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
@@ -437,8 +523,9 @@ def dispatch(lane, cfg, item, base):
         rc, _, err = sh(ssh_argv(ssh_opts(h), h, f"cat > /tmp/task-{lane}.md"), timeout=60, inp=task_file.read())
     if rc: raise RuntimeError(f"task upload: {err.strip()[-200:]}")
     ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
+    budget = budget or budget_for(item)
     cmd = (f"git -C {R} fetch -q https://github.com/{REPO}.git main && git -C {R} cat-file -e {base}^{{commit}} && "
-           f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
+           f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {budget['minutes']} --title {shlex.quote(title)}"
            + (f" --verify {shlex.quote(ver)}" if ver else ""))
     rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
     m = re.search(r'"id":\s*"([^"]+)"', out)
@@ -591,12 +678,16 @@ def tick(lanes, state, last_warn):
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
+        budget = budget_for(pick)
+        if budget["warn"]:
+            log(f"WARNING #{pick['n']}: {budget['basis']}; falling back to the {budget['minutes']}m budget")
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
-        try: run, ver = dispatch(L, cfg, pick, base)
+        try: run, ver = dispatch(L, cfg, pick, base, budget)
         except Exception as e:
             gh(["issue", "edit", str(pick["n"]), "--remove-label", "in-progress"]); host_fail(cfg["host"], f"dispatch #{pick['n']}: {e}"); continue
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
-        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
+        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"),
+                                   "verify": ver, "budget": budget["minutes"], "budget_basis": budget["basis"]}
+        save_state(state); log(dispatch_log_line(L, cfg, pick, run, base, budget))
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
@@ -637,6 +728,8 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
 ```
 
+预算分级（Refs #1686）：每条卡默认 45 分钟预算；只有确属大卡（多文件实现 + 完整测试，45 分钟做不完）时，才在 `labels` 里加 `budget:large`（或在正文加一行 `预算：90`），autodispatch 会给它 90 分钟预算。预算标记写错会回落 45 分钟并告警，所以不要给普通卡加标记，也不要写 `预算：60` 这种没有的档位。
+
 要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（openbot/examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 openswarm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
 
 {open}
@@ -653,7 +746,13 @@ def replenish(k, state):
     bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
         if len(out) >= k: return out
-        try: out.append(file_issue(open(f"{bd}/{f}").read()))
+        try:
+            text = open(f"{bd}/{f}").read()
+            bad = card_budget(text)["error"]
+            if bad: raise RuntimeError(f"bad budget marker: {bad}")
+            out.append(file_issue(text))
+            hint = card_budget_hint(text)
+            if hint: log(f"backlog {f}: {hint}", brain=False)
         except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
         os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
     G = ["git", "-C", "/workspace/phanes-repo"]
@@ -667,7 +766,11 @@ def replenish(k, state):
         imp.append(path); save_state(state)
         try:
             if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
+            bad = card_budget(text)["error"]
+            if bad: raise RuntimeError(f"bad budget marker: {bad}")
             out.append(file_issue(text))
+            hint = card_budget_hint(text)
+            if hint: log(f"repo backlog {path}: {hint}", brain=False)
         except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])

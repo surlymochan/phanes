@@ -3,15 +3,35 @@
 
 The fixture is entirely local: this check must not invoke gh, git, SSH, or
 any other network-backed command.
+
+The planner cards also carry the budget tier of #1686: a large card is marked
+with the `budget:large` label or a `预算：90` line, every other card keeps the
+default budget.  A malformed marker is reported instead of being accepted, and
+an unmarked card that looks large is only hinted — never promoted.
 """
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+AUTODISPATCH_PATH = ROOT / "tools/lane-autodispatch/autodispatch.py"
+
 LOW = 10
 TARGET = 20
+
+
+def load_autodispatch():
+    """Load the dispatcher by path: the budget marker semantics live there (Refs #1686)."""
+    spec = importlib.util.spec_from_file_location("ad_budget_contract", AUTODISPATCH_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+AD = load_autodispatch()
 
 
 def refill_need(ready: int, low: int = LOW, target: int = TARGET, starved: int = 0) -> int:
@@ -30,12 +50,23 @@ def is_thin_card(text: str) -> bool:
     return len(body) < 2 or not any(line.startswith("验收：") for line in body)
 
 
+def card_budget(text: str) -> dict:
+    """The budget decision of a planner card (Refs #1686)."""
+    return AD.card_budget(text)
+
+
+def card_budget_hint(text: str):
+    """The hint that an unmarked card looks like a large card (never a promotion)."""
+    return AD.card_budget_hint(text)
+
+
 def local_candidates(directory: Path) -> list[str]:
-    """Read only local markdown cards and discard thin cards."""
+    """Read only local markdown cards and discard thin or malformed ones."""
     return [
         text
         for path in sorted(directory.glob("*.md"))
         if not is_thin_card(text := path.read_text(encoding="utf-8"))
+        and not card_budget(text)["error"]
     ]
 
 
@@ -82,6 +113,35 @@ def main() -> None:
         (directory / "thin.md").write_text(thin_short, encoding="utf-8")
         (directory / "good.md").write_text(good, encoding="utf-8")
         assert local_candidates(directory) == [good]
+
+    # Budget tier of a planner card (Refs #1686).
+    large = "# Large card\nlabels: p1,backend:codex,budget:large\nImplement the bounded path.\n验收：python3 check.py\n"
+    marked_body = "# Large card\nlabels: p1\nImplement the bounded path.\n预算：90\n验收：python3 check.py\n"
+    broken = "# Large card\nlabels: p1\nImplement the bounded path.\n预算：九十\n验收：python3 check.py\n"
+    broken_label = "# Large card\nlabels: p1,budget:huge\nImplement the bounded path.\n验收：python3 check.py\n"
+    assert card_budget(large)["tier"] == "large"
+    assert card_budget(large)["error"] is None
+    assert card_budget(marked_body)["tier"] == "large"
+    assert card_budget(marked_body)["error"] is None
+    assert card_budget(broken)["tier"] == "default"
+    assert card_budget(broken)["error"]
+    assert card_budget(broken_label)["error"]
+    assert card_budget(good)["tier"] == "default"
+    assert card_budget(good)["error"] is None
+
+    # A long card without a marker is hinted, never promoted (Refs #1686).
+    long_card = "# Long card\nlabels: p1\n" + ("实现正文。" * 300) + "\n验收：python3 check.py\n"
+    assert card_budget(long_card)["tier"] == "default"
+    assert card_budget_hint(long_card)
+    assert card_budget_hint(good) is None
+    assert card_budget_hint(large) is None
+
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        (directory / "good.md").write_text(good, encoding="utf-8")
+        (directory / "large.md").write_text(large, encoding="utf-8")
+        (directory / "broken.md").write_text(broken, encoding="utf-8")
+        assert local_candidates(directory) == [good, large]
 
     print("ad ready/target contract: OK")
 

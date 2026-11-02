@@ -46,6 +46,12 @@ def main() -> None:
             "result is accepted.\n"
             "验收：`python3 -m unittest openswarm.tests.test_github_issue_bus`\n"
         ),
+        "large-budget": (
+            "# Large card with a budget tier\nlabels: p1,backend:codex,budget:large\n"
+            "Implement the bounded dispatch budget tiering and cover the label, the body "
+            "marker and the malformed fallback with unit tests.\n"
+            "验收：`python3 -m unittest openswarm.tests.test_autodispatch`\n"
+        ),
     }
 
     scratch_root = ROOT / ".openswarm-tmp"
@@ -54,6 +60,15 @@ def main() -> None:
         cards_dir = Path(raw)
         for name, text in {**thin_cards, **thick_cards}.items():
             (cards_dir / f"{name}.md").write_text(text, encoding="utf-8")
+        # A malformed budget marker is reported instead of being filed (Refs #1686).
+        broken_budget = (
+            "# Broken budget marker\nlabels: p1,backend:codex\n"
+            "Implement the bounded dispatch budget tiering and cover the label, the body "
+            "marker and the malformed fallback with unit tests.\n"
+            "预算：九十\n"
+            "验收：`python3 -m unittest openswarm.tests.test_autodispatch`\n"
+        )
+        (cards_dir / "broken-budget.md").write_text(broken_budget, encoding="utf-8")
 
         accepted = contract.local_candidates(cards_dir)
         expected = [thick_cards[name] for name in sorted(thick_cards)]
@@ -62,6 +77,8 @@ def main() -> None:
             assert contract.is_thin_card(text), f"thin sample {name} was accepted"
         for name, text in thick_cards.items():
             assert not contract.is_thin_card(text), f"thick sample {name} was rejected"
+        assert contract.card_budget(broken_budget)["error"], "a malformed budget marker must be reported"
+        assert contract.card_budget(thick_cards["large-budget"])["tier"] == "large"
 
     print("planner thin-card rejection: OK")
 

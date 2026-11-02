@@ -72,6 +72,18 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      This prevents host suspend / nanosleep freeze from creating ~40-minute silent heartbeat
      gaps and false-positive supervisor stalls.
      Check offline with `python3 tools/check-ad-heartbeat-chunk.py`.
+   - **Tiered dispatch budget contract (Refs #1686)**: the budget of a dispatched card is
+     tiered per card. A card labelled `budget:large` or carrying the body marker `预算：90`
+     is dispatched with `--budget-minutes 90`; every other card keeps the default 45 minutes
+     (`AD_BUDGET`, `AD_BUDGET_LARGE`). The dispatch log line carries lane, issue, the chosen
+     budget and the reason for it (`budget 90m (label budget:large)`), so the budget of an
+     issue can be looked up by its number; a malformed marker falls back to 45 minutes and is
+     reported as `WARNING #<n>: invalid marker 预算：…`. The label has to exist in the repo:
+     `gh label create budget:large --description "dispatch budget tier" --color 1D76DB`.
+     The tier only changes the wall clock of the run: the stall watchdog
+     (`lane.stall_after_s`, the 90-minute no-progress kill) and the harvest statistics
+     (`budget_exceeded` vs completed) are the same for both tiers.
+     Check offline with `python3 tools/check-ad-budget-tier.py`.
 
 3. **`lane-merge`** (merge Linux-green `fleet/*` PRs):
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  
@@ -284,6 +296,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ctl-hb-refresh.py` — offline #1263 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
 - `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted.
 - `python3 tools/check-ad-ready-target.py` — offline #1242 AD ready-queue contract. With fake `ready`, `LOW`, and `TARGET` values, when `ready < LOW` the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects thin cards. It uses only a local fixture and never calls `gh`.
+- `python3 tools/check-ad-budget-tier.py` — offline #1686 dispatch budget tier contract. A card labelled `budget:large` or marked `预算：90` in the body is dispatched with `--budget-minutes 90`; an unmarked card keeps the 45-minute default; a malformed marker falls back to 45 and is reported. It fakes the shell and never calls `gh`, `git`, or SSH.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 - `python3 tools/check-fleet-batchmode-probe.py` — offline #954 contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner: fake probe outputs with non-zero exit codes (such as `Permission denied` and `Connection closed`) never increment `hosts_ok`, while a zero exit code still does. It opens no SSH connection and touches no live instabox node.
 - `python3 tools/check-lane-failed-requeue.py` — offline #960 contract check. Before restoring `lane-ready` to a `lane-failed` issue, fake labels must have no `in-progress`/`lane-pr`, `state.json` must have no occupied lane entry, and the issue must still contain an inline acceptance command. It never touches the real issue or state.
