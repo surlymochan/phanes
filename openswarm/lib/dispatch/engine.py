@@ -36,6 +36,7 @@ import datetime
 import fnmatch
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
@@ -165,6 +166,8 @@ DEFAULTS = {
     # A legacy file marker remains supported when no timed parameters are supplied.
     "burn": {"file": "", "backend": ""},
     "local_hosts": [],
+    "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
+    "min_gap_s": 120,
     "local_env": {},
     "local_inode": {"pause_pct": 95, "resume_pct": 92, "path": "~"},
     "ssh": {
@@ -254,6 +257,11 @@ def load_config(path):
     if not cfg["repo"]:
         raise SystemExit("dispatch config: `repo` is required")
     cfg["state_dir"] = os.path.expanduser(cfg["state_dir"])
+    cfg["pauses_file"] = (os.path.expanduser(cfg["pauses_file"]) if cfg.get("pauses_file")
+                          else os.path.join(cfg["state_dir"], "box-pauses.jsonl"))
+    gap = cfg.get("min_gap_s")
+    if isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(gap) or gap < 0:
+        raise SystemExit("dispatch config: min_gap_s must be a finite nonnegative number")
     cfg["local_repo"] = os.path.expanduser(cfg["local_repo"] or "")
     if not cfg["lanes_file"]:
         cfg["lanes_file"] = os.path.join(cfg["state_dir"], "lanes.json")
@@ -356,19 +364,28 @@ import json,os,sys
 O=os.path.expanduser(sys.argv[3] if len(sys.argv)>3 and sys.argv[3] else "~/.claude/openswarm"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
 try:
-  ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
+  with open(f"{O}/lanes/{L}/state.json") as stream: ls=json.load(stream)
+  out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
 except Exception as e: out["lane"]="unknown"
 if R:
   p=f"{O}/runs/{R}/result.json"
   if os.path.exists(p):
-    r=json.load(open(p)); res=r.get("result") or {}
+    with open(p) as stream: r=json.load(stream)
+    res=r.get("result") or {}
+    try:
+      with open(f"{O}/runs/{R}/status.json") as stream: rs=json.load(stream)
+    except Exception: rs={}
     out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
+      "started":r.get("started") if r.get("started") is not None else rs.get("started"),
+      "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
+      "seconds":r.get("seconds"),
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
     out["run"]="running"
     try:
-      s=json.load(open(f"{O}/runs/{R}/status.json")); pid=s.get("runner_pid"); out["run_state"]=s.get("state")
+      with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
+      pid=s.get("runner_pid"); out["run_state"]=s.get("state")
       if pid:
         try: os.kill(int(pid),0); out["runner_alive"]=True
         except ProcessLookupError: out["runner_alive"]=False
@@ -1210,12 +1227,30 @@ class Dispatcher:
     TRANSIENT = r"Permission denied|Connection closed|timed out|banner|124|Usage:|hung up|reset by peer"
     GIVEUP = r"Connection closed|Permission denied|timed out|banner|124|hung up|reset by peer|Could not resolve|No route"
 
+    def pause_info(self, lane, lc, st, info):
+        """Reclassify interrupted local runs using their actual execution interval."""
+        if lc.get("host") not in self.local_hosts or info.get("error_class") not in {"exec_error", "stalled"}:
+            return info
+        module = dispatch_module("pause_window")
+        sample = dict(info)
+        if module.run_window(sample) is None and not any(sample.get(key) is not None
+                                                       for key in ("started", "start_ts", "started_at", "start")):
+            sample["started"] = st.get("at")
+        pauses = module.load_pauses(self.cfg.get("pauses_file") or self.path("box-pauses.jsonl"))
+        minimum = self.cfg.get("min_gap_s", 120)
+        error_class = module.classify(sample, lc, pauses, self.local_hosts, min_gap_s=minimum)
+        if error_class != "vm_paused":
+            return info
+        pause = module.overlapping(*module.run_window(sample), pauses, min_gap_s=minimum)
+        self.log(f"{lane} run {st.get('run')}: VM pause {pause['from']} → {pause['to']} "
+                 f"({pause['gap_s']}s); {info['error_class']} → vm_paused")
+        return {**info, "error_class": error_class, "_vm_pause": pause}
+
     def finish(self, lane, lc, st, info, state):
         if self.dry_run:
             self.plan.append({"would": "harvest", "lane": lane, "issue": st.get("issue"), "status": info.get("status")})
             return False
         n, run = st["issue"], st["run"]
-        self.quota_lane_guard(lane, lc, info)
         model_unavailable = (info.get("error_class") == "model_unavailable")
         if model_unavailable:
             model = info.get("model") or "unknown"
@@ -1232,6 +1267,21 @@ class Dispatcher:
                     self.log(f"{lane} review PR#{st['review_pr']} fetch failed ({(ferr or '').strip()[-90:]}); retry next tick", brain=False)
                     return False
             return self.finish_review(lane, lc, st, info, state)
+        info = self.pause_info(lane, lc, st, info)
+        if info.get("error_class") == "vm_paused":
+            rc, _, _ = self.relabel(n, self.L["ready"], [self.L["in_progress"], self.L["failed"]], state)
+            if rc:
+                self.log(f"{lane} #{n} run {run} vm_paused requeue labels failed; retry next tick", brain=False)
+                return False
+            pause = info.get("_vm_pause") or {}
+            self.gh_write(["issue", "comment", str(n), "--body",
+                     f"Lane {lane} ({lc['host']}, run `{run}`): VM 暂停导致，非卡片失败。 "
+                     f"Pause: {pause.get('from', '?')} → {pause.get('to', '?')}. "
+                     f"Requeued as `{self.L['ready']}`; any partial commit is retained in the lane workspace."])
+            self.mark_done(state, n)
+            self.log(f"{lane} #{n} run {run} vm_paused → requeued {self.L['ready']} (not a card failure)")
+            return True
+        self.quota_lane_guard(lane, lc, info)
         self.heartbeat()
         L = self.L
         if has_commit:
@@ -1602,6 +1652,9 @@ class Dispatcher:
         return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True}
 
     def finish_review(self, lane, lc, st, info, state):
+        info = self.pause_info(lane, lc, st, info)
+        if info.get("error_class") != "vm_paused":
+            self.quota_lane_guard(lane, lc, info)
         pr, sha = st["review_pr"], st["review_sha"]
         r = self.load_reviews().get(str(pr)) or {}
         txt = ""
@@ -1610,7 +1663,10 @@ class Dispatcher:
         v, _ = status.parse_verdict(txt)
         if not v:
             error_class = info.get("error_class") or ""
-            if error_class in {"rate_limit", "quota", "vm_paused", "model_unavailable"}:
+            if error_class == "vm_paused":
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/vm_paused); "
+                         "VM pause (not counted), will retry")
+            elif error_class in {"rate_limit", "quota", "model_unavailable"}:
                 r["quota_backend"] = info.get("backend") or lc.get("backend")
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry")
             else:
