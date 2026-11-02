@@ -20,6 +20,7 @@ Subcommands:
   lane             manage long-lived Codex app-server / Cursor ACP / Pi RPC executor lanes
   doctor           report lane sandbox and proxy prerequisites (read-only, installs nothing)
   fleet            inspect hosts, forward openswarm commands, render lanes.json from one fleet inventory
+                   (`fleet health` probes the hosts and pauses the unhealthy ones)
   batch            queue task cards across fleet hosts and collect their branches
   verify-remote    verify a fleet run on another host in a temporary worktree
   bus              initialize or inspect a GitHub issue bus repository
@@ -11665,12 +11666,215 @@ def cmd_fleet_render_lanes(args):
         raise SystemExit(1)
 
 
+# ---------------------------------------------------------------- fleet health: probe the hosts, pause the sick ones
+
+FLEET_HEALTH_PAUSE_TTL = 1800
+FLEET_HEALTH_TIMEOUT = 30
+FLEET_HEALTH_STATE_FILE = "fleet-health.json"
+FLEET_HEALTH_REASON = "auto:health"
+FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "unreachable": 2, "hard": 3}
+
+
+def dispatch_health_module():
+    """The host health module (lib/dispatch/health.py), loaded by path."""
+    name = "openswarm_dispatch_health"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "health.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def dispatch_pause_module():
+    """The pause store (lib/dispatch/pause.py), loaded by path."""
+    name = "openswarm_dispatch_pause"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "pause.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def fleet_health_lane_hosts(home=None):
+    """The host names the lanes.json names, in the order they appear.
+
+    The lanes.json is read leniently: a broken file only means "no host known
+    here", never a failed health check.
+    """
+    path = envvar("LANES_FILE", os.path.join(home or DATA, "lanes.json"))
+    try:
+        with open(path, encoding="utf-8") as stream:
+            config = json.load(stream)
+    except (OSError, ValueError, UnicodeError):
+        return []
+    lanes = config.get("lanes") if isinstance(config, dict) else None
+    names = []
+    for lane in lanes if isinstance(lanes, list) else []:
+        host = lane.get("host") if isinstance(lane, dict) else None
+        if isinstance(host, str) and host.strip() and host.strip() not in names:
+            names.append(host.strip())
+    return names
+
+
+def fleet_health_hosts(args, hosts):
+    """The hosts to probe: --hosts, else the hosts the lanes.json names."""
+    requested = [name.strip() for name in (getattr(args, "hosts", None) or "").split(",") if name.strip()]
+    if requested:
+        return list(dict.fromkeys(requested))
+    named = fleet_health_lane_hosts()
+    return named or list(hosts)
+
+
+def fleet_health_runner(hosts, timeout=FLEET_HEALTH_TIMEOUT):
+    """A probe runner that runs the health commands over the fleet transport."""
+    def runner(host_name, command):
+        host = hosts.get(host_name)
+        if host is None:
+            raise OSError("unknown fleet host: " + str(host_name))
+        rc, out, err = host_run(host, command, timeout=timeout)
+        if rc:
+            detail = err.decode("utf-8", errors="replace").strip().splitlines()
+            raise OSError(f"command failed (rc={rc})" + (f": {detail[-1]}" if detail else ""))
+        return out.decode("utf-8", errors="replace")
+    return runner
+
+
+def fleet_health_state_path(home=None):
+    """The remembered SSH failure streaks: <home>/fleet-health.json."""
+    return os.path.join(home or DATA, FLEET_HEALTH_STATE_FILE)
+
+
+def fleet_health_state_load(home=None):
+    """The remembered SSH failure streak and last status of every host."""
+    state = jload(fleet_health_state_path(home), {}) or {}
+    hosts = state.get("hosts") if isinstance(state, dict) else None
+    return hosts if isinstance(hosts, dict) else {}
+
+
+def fleet_health_state_save(hosts, home=None):
+    jsave(fleet_health_state_path(home), {"hosts": hosts, "updated_at": NOW()})
+
+
+def fleet_health_apply(store, row, active, moment):
+    """Pause or resume one host from its health decision.
+
+    Only the pauses this command wrote (``auto:health ...``) are managed: a
+    manual pause is never rewritten and never cleared.
+    """
+    scope = "host:" + row["host"]
+    record = active.get(scope)
+    if record is not None and not str(record.get("reason", "")).startswith(FLEET_HEALTH_REASON):
+        if row["decision"] == "pause":
+            return "paused-manual"
+        if row["decision"] == "resume":
+            return "kept"
+        if row["status"] == "hard":
+            return "paused-manual"
+        return "none"
+    if row["decision"] == "pause":
+        store.pause(scope, ttl_s=FLEET_HEALTH_PAUSE_TTL,
+                    reason=FLEET_HEALTH_REASON + " " + row["reason"], now=moment)
+        return "paused"
+    if row["decision"] == "resume":
+        if record is None:
+            return "none"
+        if not str(record.get("reason", "")).startswith(FLEET_HEALTH_REASON):
+            return "kept"
+        store.resume(scope)
+        return "resumed"
+    return "none"
+
+
+def fleet_health_status(rows):
+    """The worst status of the probed hosts."""
+    worst = "ok"
+    for row in rows:
+        if FLEET_HEALTH_STATUS_RANK.get(row["status"], 0) > FLEET_HEALTH_STATUS_RANK[worst]:
+            worst = row["status"]
+    return worst
+
+
+def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
+    """Probe every fleet host and report its health; --apply pauses the sick ones.
+
+    The hosts are the ones ``lanes.json`` names (or ``--hosts``); each one is
+    probed with ``lib/dispatch/health.py`` and judged with the policy thresholds
+    (``resources.health``, else the built-in defaults).  ``--apply`` pauses a
+    host that needs it and releases the host that recovered; a manual pause is
+    never touched.
+    """
+    policy = load_policy() if policy is None else policy
+    health = dispatch_health_module()
+    limits = health.thresholds_from_policy(policy)
+    config = fleet_config() if hosts is None else hosts
+    names = fleet_health_hosts(args, config)
+    if not names:
+        raise ValueError("no fleet host to probe")
+    store = dispatch_pause_module().PauseStore(home or DATA)
+    moment = NOW() if now is None else now
+    active = {record["scope"]: record for record in store.active(moment)}
+    previous = fleet_health_state_load(home)
+    probe = runner if runner is not None else fleet_health_runner(config)
+    rows, remembered = [], {}
+    for name in names:
+        scope = "host:" + name
+        record = active.get(scope)
+        streak = int((previous.get(name) or {}).get("ssh_fail_streak") or 0)
+        if name not in config:
+            row = {"host": name, "status": "unreachable", "decision": "none",
+                   "reason": f"{name}: not a configured fleet host", "error": "unknown fleet host",
+                   "metrics": {}, "triggers": []}
+        else:
+            row = health.check_host(name, probe, limits, paused=record is not None,
+                                    ssh_fail_streak=streak)
+        row["paused"] = scope in active
+        row.setdefault("error", None)
+        row["action"] = "none"
+        if getattr(args, "apply", False):
+            row["action"] = fleet_health_apply(store, row, active, moment)
+            if row["action"] == "resumed":
+                active.pop(scope, None)
+            elif row["action"] == "paused":
+                active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
+            row["paused"] = scope in active
+        remembered[name] = {"ssh_fail_streak": row["metrics"].get("ssh_fail_streak", 0),
+                            "status": row["status"], "updated_at": moment}
+        rows.append(row)
+    fleet_health_state_save(remembered, home)
+    report = {"ok": all(row["status"] == "ok" for row in rows),
+              "status": fleet_health_status(rows),
+              "applied": bool(getattr(args, "apply", False)),
+              "thresholds": limits,
+              "hosts": rows}
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return report
+    for row in rows:
+        print(f"{row['host']}  {row['status']:<11}  {row['reason']}")
+        metrics = " ".join(f"{key}={value}" for key, value in row["metrics"].items())
+        if metrics:
+            print(f"  metrics: {metrics}")
+        if row["action"] != "none":
+            print(f"  action: {row['action']}")
+    print(f"{len(rows)} host(s) probed, status={report['status']}")
+    return report
+
+
 def cmd_fleet(args):
     if args.fleet_cmd == "harvest":
         cmd_fleet_harvest(args)
         return
     if args.fleet_cmd == "render-lanes":
         cmd_fleet_render_lanes(args)
+        return
+    if args.fleet_cmd == "health":
+        cmd_fleet_health(args)
         return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
@@ -15178,6 +15382,11 @@ def main():
     fp.add_argument("--host", help="only this host of the inventory")
     fp.add_argument("--check", action="store_true",
                     help="compare the inventory with the lanes.json each host has and exit non-zero on drift")
+    fp = fleet_sub.add_parser("health", help="probe the fleet hosts and pause the unhealthy ones")
+    fp.add_argument("--hosts", help="comma-separated fleet host names (default: the hosts lanes.json names)")
+    fp.add_argument("--json", action="store_true", help="print the health report as JSON")
+    fp.add_argument("--apply", action="store_true",
+                    help="pause the unhealthy hosts and release the recovered ones")
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")
