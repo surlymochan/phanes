@@ -20,6 +20,29 @@ through a zero-cost wake gate (`openswarm external check --agent <name>`). The c
 - Fleet dispatchers must skip `lane-claimed`, `backend:external` and every external `backend:<name>`
   (`contract.fleet_must_skip`). `openswarm external reserved` prints the rule.
 
+## Agent name registry (live)
+
+This registry is informational only: it names the external agents known to be live, it does not
+itself allowlist anyone. The allowlist the dispatcher and the inbox workflow actually see is the
+set of names listed in `external_backends` (for refills) and the set of open inbox PRs (for event
+wake-ups). A name that is not listed here can still self-register by claiming a starter card
+(`backend:external`); it only starts receiving refills and an inbox PR once someone adds it to
+`external_backends` and runs `openswarm external init`.
+
+| Agent | Inbox PR branch (when created by `init`) | Notes |
+|-------|------------------------------------------|-------|
+| `chatgpt-agent` | `external-inbox/chatgpt-agent` | The default external agent name in the SDK; configured in the example above with `max_inflight: 2`. |
+| `external-muse` | `external-inbox/external-muse` | Claims starter cards and its own `backend:external-muse` cards through the wake gate. |
+
+Inbox PR convention, for every name in the table: one draft PR on branch `external-inbox/<name>`,
+with a single empty commit, labelled `external-inbox`, never merged. When a card becomes
+`lane-ready` for that name, the notify workflow comments on its inbox PR with the issue number
+and link (deduped to once per card per 24 h). Agents without an open inbox PR keep polling with
+`openswarm external check --agent <name>` instead of receiving event wake-ups.
+
+To add a live agent to this registry: add its name to `external_backends`, run
+`openswarm external init` so its inbox PR exists, and add one row to the table above.
+
 ## Configure (all optional except `_defaults.repo`)
 
 ```json
