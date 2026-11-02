@@ -181,6 +181,21 @@ class FleetAutoTests(unittest.TestCase):
         self.assertEqual([(row['name'], row['_origin']) for row in rows], [('A1', 'fleet')])
         local.assert_not_called()
 
+    def test_box_allowlist_skips_local_probe_and_never_dispatches_to_box(self):
+        environment = {
+            'OPENSWARM_AUTO_LOCAL_HOST': 'box',
+            'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gores2"]',
+            'OPENSWARM_AUTO_HOST_BACKENDS': '{"box":[],"gores1":["pi"],"gores2":["pi"]}',
+        }
+        local = mock.Mock(side_effect=RuntimeError('local lane status unavailable'))
+        fleet = mock.Mock(return_value=[{'name': 'M1', 'state': 'idle', 'backend': 'pi', 'model': 'MiniMax'}])
+        with mock.patch.dict(os.environ, environment), mock.patch.dict(G, {
+                'local_lanes': local, 'fleet_lanes': fleet}):
+            rows = G['discovered_lanes']()
+        self.assertEqual([row['_fleet_host'] for row in rows], ['gores1', 'gores2'])
+        local.assert_not_called()
+        self.assertEqual([call.args[0] for call in fleet.call_args_list], ['gores1', 'gores2'])
+
     def test_total_remote_discovery_outage_is_not_reported_as_no_lane(self):
         environment = {
             'OPENSWARM_AUTO_LOCAL_HOST': 'local',

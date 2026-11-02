@@ -127,6 +127,12 @@ def gateway(payload):
 def local_router_enabled():
     return os.environ.get('OPENSWARM_HUB_LOCAL_ROUTER') == '1'
 
+def local_auto_host():
+    host = os.environ.get('OPENSWARM_AUTO_LOCAL_HOST', 'gores1')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host):
+        raise RuntimeError('local fleet host configuration invalid')
+    return host
+
 def local_fleet_hosts():
     raw = os.environ.get('OPENSWARM_AUTO_FLEET_HOSTS')
     if raw is None:
@@ -163,7 +169,7 @@ def local_command(command, payload=None, timeout=100):
     return data
 
 def local_host_command(host, command, payload=None, timeout=100):
-    if host == 'local':
+    if host in {'local', local_auto_host()}:
         return local_command([native, *command], payload, timeout)
     if host not in local_fleet_hosts():
         raise RuntimeError('local fleet host is not configured')
@@ -208,7 +214,7 @@ def dispatch_gateway(payload, legacy=False):
     # The opt-in direct route preserves historical handoffs: an unconfigured
     # executor host remains on the legacy gateway instead of being guessed.
     if not legacy and direct_fleet_enabled() and (payload.get('op') == 'submit'
-                                   or payload.get('host') in {'local', *local_fleet_hosts()}):
+                                   or payload.get('host') in {'local', local_auto_host(), *local_fleet_hosts()}):
         return local_gateway(payload)
     return gateway(payload)
 

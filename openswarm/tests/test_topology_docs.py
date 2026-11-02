@@ -47,7 +47,8 @@ class FleetTopologyDocumentationTests(unittest.TestCase):
 
     def test_dual_mode_backend_keys_match_expected_hosts(self):
         backends = exported_json(self.dual_mode_text, "OPENSWARM_AUTO_HOST_BACKENDS")
-        self.assertEqual(set(backends) - {"local"}, set(self.topology["hosts"]))
+        local_host = re.search(r"export OPENSWARM_AUTO_LOCAL_HOST=(\S+)", self.dual_mode_text).group(1)
+        self.assertEqual(set(backends) - {local_host}, set(self.topology["hosts"]))
 
 
 if __name__ == "__main__":
