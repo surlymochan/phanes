@@ -1,0 +1,81 @@
+"""Schema 2 dispatch lane status and legacy-reader compatibility."""
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SPEC = importlib.util.spec_from_file_location(
+    "dispatch_engine_status_test", os.path.join(os.path.dirname(HERE), "lib", "dispatch", "engine.py"))
+E = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(E)
+
+
+class LaneStatus(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg_path = os.path.join(self.tmp.name, "dispatch.json")
+        self.policy_path = os.path.join(self.tmp.name, "policy.json")
+        self.state_dir = os.path.join(self.tmp.name, "state")
+        os.makedirs(self.state_dir)
+        with open(self.policy_path, "w", encoding="utf-8") as stream:
+            json.dump({"claude": {"default_model": "claude-haiku-4.5"}}, stream)
+        with open(self.cfg_path, "w", encoding="utf-8") as stream:
+            json.dump({"repo": "a/b", "local_repo": self.tmp.name, "state_dir": self.state_dir,
+                       "policy_file": self.policy_path,
+                       "ssh": {"control_dir": os.path.join(self.tmp.name, "cm")}}, stream)
+        self.cfg = E.load_config(self.cfg_path)
+        self.d = E.Dispatcher(self.cfg, out=open(os.devnull, "w"))
+        self.addCleanup(self.d.out.close)
+
+    def status(self, configured_model):
+        lanes = {"GH1": {"backend": "claude", "host": "gorelay", "model": configured_model},
+                 "GH2": {"backend": "claude", "host": "gores1", "model": "claude-haiku-5.5"}}
+        result = {name: {"lane": "idle", "run": {"model": "claude-haiku-5.5", "timestamp": "2026-11-02T07:30:00Z"}}
+                  for name in lanes}
+        self.d.probe = lambda _lanes, _state: result
+        self.d.harvest = lambda *_args: None
+        self.d.sweep_leaked_inprogress = lambda *_args: None
+        self.d.queue = lambda: []
+        self.d.dispatch_reviews = lambda *_args: None
+        self.d.assign_issues = lambda *_args: None
+        self.d.replenish = lambda *_args: None
+        self.d.tick(lanes, {})
+        with open(self.d.path("lanes-status.json"), encoding="utf-8") as stream:
+            return json.load(stream)
+
+    def test_matching_config_and_actual_model_has_no_drift(self):
+        data = self.status("claude-haiku-5.5")
+        self.assertEqual(data["schema"], 2)
+        self.assertEqual(data["GH1"]["model_cfg"], "claude-haiku-5.5")
+        self.assertEqual(data["GH1"]["model_last"], "claude-haiku-5.5")
+        self.assertEqual(data["GH1"]["model_last_at"], "2026-11-02T07:30:00Z")
+        self.assertNotIn("model_drift", data["GH1"])
+        self.assertEqual(data["_summary"]["model_drift"], [])
+
+    def test_mismatched_model_is_reported_as_drift(self):
+        data = self.status("claude-haiku-4.5")
+        self.assertTrue(data["GH1"]["model_drift"])
+        self.assertEqual(data["_summary"]["model_drift"], ["GH1"])
+
+    def test_summary_counts_backends_and_states(self):
+        summary = self.status("claude-haiku-5.5")["_summary"]
+        self.assertEqual(summary["by_backend"], {"claude": 2})
+        self.assertEqual((summary["busy"], summary["idle"]), (0, 2))
+
+    def test_legacy_string_entries_are_normalized(self):
+        view = E.lanes_status_view({"GH1": "idle", "GH2": "busy #42", "_busy": 1})
+        self.assertEqual(view, {"GH1": {"state": "idle"}, "GH2": {"state": "busy #42"}})
+
+    def test_schema_2_file_view_excludes_schema_metadata(self):
+        raw = {"schema": 2, "GH1": {"state": "idle", "backend": "claude"},
+               "_summary": {"busy": 0}, "_busy": 0}
+        view = E.lanes_status_view(raw)
+        self.assertNotIn("schema", view)
+        self.assertEqual(view["GH1"], {"state": "idle", "backend": "claude"})
+
+
+if __name__ == "__main__":
+    unittest.main()

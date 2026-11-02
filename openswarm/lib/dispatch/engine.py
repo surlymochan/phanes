@@ -263,6 +263,18 @@ def load_json(path, default):
         return default
 
 
+def lanes_status_view(raw):
+    """Return lane entries from schema 2 or legacy ``lane: state`` status data."""
+    if not isinstance(raw, dict):
+        return {}
+    lanes = raw.get("lanes", raw)
+    if not isinstance(lanes, dict):
+        return {}
+    return {name: (dict(value) if isinstance(value, dict) else {"state": value})
+            for name, value in lanes.items()
+            if not str(name).startswith("_") and name != "schema"}
+
+
 def write_json(path, data, indent=1):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -1941,8 +1953,48 @@ class Dispatcher:
         low, target = int(rp.get("low", 20)), int(rp.get("target", 24))
         if ready < low or starve > 0:
             self.replenish(max(target - ready, starve, 1 if ready < low else 0), lanes, q, blocked)
-        st = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
-        st.update({"_busy": sum(1 for L in lanes if state.get(L)), "_ready": ready, "_blocked": blocked,
+        model_history = state.setdefault("_model_last", {})
+        for L, result in res.items():
+            run = result.get("run")
+            if isinstance(run, dict) and run.get("model"):
+                model_history[L] = {"model": run["model"], "at": run.get("timestamp")}
+        if not self.dry_run:
+            self.save_state(state)
+        policy = {}
+        policy_paths = [os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "policy.json"),
+            self.cfg.get("policy_file") or os.path.expanduser("~/.claude/openswarm/policy.local.json")]
+        for policy_path in policy_paths:
+            try:
+                with open(policy_path, encoding="utf-8") as stream:
+                    policy = deep_merge(policy, json.load(stream))
+            except (OSError, ValueError, TypeError):
+                pass
+        st, by_backend, drift = {}, {}, []
+        busy = idle = 0
+        for L, lc in lanes.items():
+            active = state.get(L)
+            lane_state = ("busy #%s" % active["issue"]) if active else (res.get(L, {}).get("error") or res.get(L, {}).get("lane") or "?")
+            busy += bool(active)
+            idle += not bool(active)
+            backend = lc.get("backend")
+            if backend:
+                by_backend[backend] = by_backend.get(backend, 0) + 1
+            model_cfg = lc.get("model") or (policy.get(backend) or {}).get("default_model")
+            last = model_history.get(L) or {}
+            entry = {"state": lane_state, "issue": active.get("issue") if active else None,
+                     "pr": active.get("review_pr") if active else None, "backend": backend, "host": lc.get("host"),
+                     "model_cfg": model_cfg, "model_last": last.get("model"), "model_last_at": last.get("at"),
+                     "paused_reason": (f"lane:{L}" if os.path.exists(self.path(f"PAUSE-{L}")) else
+                                      f"host:{lc.get('host')}" if os.path.exists(self.path(f"PAUSE-HOST-{lc.get('host')}")) else
+                                      f"backend:{backend}" if backend and os.path.exists(self.path(f"PAUSE-BACKEND-{backend}")) else None)}
+            if model_cfg and last.get("model") and model_cfg != last["model"]:
+                entry["model_drift"] = True
+                drift.append(L)
+            st[L] = entry
+        st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
+                                                "model_drift": drift},
+                   "_busy": busy, "_ready": ready, "_blocked": blocked,
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
