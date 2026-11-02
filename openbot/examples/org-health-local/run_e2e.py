@@ -603,6 +603,13 @@ def main(argv=None):
         if status == 0 and args.review:
             review = [sys.executable, str(scripts['reviewer']), '--brief', str(brief), '--data', str(diagnosis), '--dist', str(dist),
                       '--json-out', str(results_stage)]
+            # Only the bundled reviewer accepts the artifact root option.
+            try:
+                bundled_reviewer = scripts['reviewer'].resolve() == (ROOT / 'review' / 'cross_check.py').resolve()
+            except (OSError, RuntimeError):
+                bundled_reviewer = False
+            if bundled_reviewer:
+                review.extend(['--repo-root', str(workdir)])
             # 上一次运行留下的结论不能当成本次的：先清掉结果文件。
             try:
                 results_stage.unlink(missing_ok=True)
