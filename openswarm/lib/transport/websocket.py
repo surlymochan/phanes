@@ -41,11 +41,17 @@ Wire protocol (JSON text frames, RFC 6455):
     either   -> either:   WebSocket ping/pong frames (heartbeat)
 
 Idempotency: every ``claim`` and ``evidence`` message carries a client
-chosen ``id`` (the delivery id). Replaying a message with the same id
+chosen ``id`` (the delivery id). The response cache is scoped by
+(executor, operation, delivery id): replaying the *identical* message
 returns the original response instead of creating a second assignment or a
-second evidence record. That is what makes reconnect safe: after a drop the
-executor reconnects, re-authenticates, and replays any unacknowledged
-evidence with the same delivery id; the relay stores it exactly once.
+second evidence record, while a different executor -- or the same delivery
+id reused for a different operation or a different request -- never sees
+another request's cached response (reusing an id for a different request
+is refused, and the evidence ledger additionally refuses an id already
+recorded by another executor; retry with a fresh id). That is what makes
+reconnect safe: after a drop the executor reconnects, re-authenticates,
+and replays any unacknowledged evidence with the same delivery id; the
+relay stores it exactly once.
 """
 
 from __future__ import annotations
@@ -96,7 +102,12 @@ class RelayState:
         self.cards = {int(issue): dict(card) for issue, card in cards.items()}
         self._lock = threading.Lock()
         self._assignments: Dict[int, Dict[str, Any]] = {}
-        self._responses: Dict[str, Dict[str, Any]] = {}
+        # Idempotency cache, scoped by (executor, operation, delivery id)
+        # and paired with the request fingerprint it was stored for, so a
+        # replay is only honoured when it is the same request. The evidence
+        # ledger itself stays keyed by delivery id (see submit_evidence).
+        self._responses: Dict[Tuple[str, str, str],
+                              Tuple[Dict[str, Any], Tuple[Any, ...]]] = {}
         self._evidence: Dict[str, Dict[str, Any]] = {}
 
     def authenticate(self, token: Any) -> Optional[str]:
@@ -108,40 +119,76 @@ class RelayState:
                 return executor
         return None
 
+    def _replay(self, executor: str, op: str, delivery_id: str,
+                fingerprint: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
+        """Cached response for an identical replay, else None.
+
+        The cache is scoped by (executor, operation, delivery id): a
+        different executor, or the same delivery id reused for a different
+        operation, never sees this entry -- that request is processed fresh
+        instead. The same executor/operation/id with a *different* request
+        (different issue, run, or evidence pointer) is a client bug, not a
+        replay: it gets an error, never the cached response. Caller must
+        hold ``self._lock``.
+        """
+        entry = self._responses.get((executor, op, delivery_id))
+        if entry is None:
+            return None
+        stored, stored_fingerprint = entry
+        if stored_fingerprint != fingerprint:
+            return {"type": "error",
+                    "payload": {"error": "delivery id already used for a different request"}}
+        if op == "evidence" and stored.get("type") == "ack":
+            replay = dict(stored)
+            replay["payload"] = dict(stored.get("payload", {}))
+            replay["payload"]["duplicate"] = True
+            return replay
+        return stored
+
+    def _store(self, executor: str, op: str, delivery_id: str,
+               fingerprint: Tuple[Any, ...], response: Dict[str, Any]) -> Dict[str, Any]:
+        """Cache ``response`` under its scoped key. Caller must hold the lock."""
+        self._responses[(executor, op, delivery_id)] = (response, fingerprint)
+        return response
+
+    @staticmethod
+    def _number(issue: Any) -> Optional[int]:
+        try:
+            return int(issue)
+        except (TypeError, ValueError):
+            return None
+
     def claim(self, executor: str, issue: Any, delivery_id: str) -> Dict[str, Any]:
-        """Assign ``issue`` to ``executor``; a replay returns the original.
+        """Assign ``issue`` to ``executor``; an identical replay returns the original.
 
         A card already held by another executor is an error, not a steal:
         the lane's lease, not this transport, decides when a card is free.
         """
-        if delivery_id in self._responses:
-            return self._responses[delivery_id]
         with self._lock:
-            if delivery_id in self._responses:
-                return self._responses[delivery_id]
-            try:
-                number = int(issue)
-            except (TypeError, ValueError):
-                response = {"type": "error", "payload": {"error": "issue must be a number"}}
-                self._responses[delivery_id] = response
-                return response
+            number = self._number(issue)
+            fingerprint = (number if number is not None else ("bad-issue", issue),)
+            replay = self._replay(executor, "claim", delivery_id, fingerprint)
+            if replay is not None:
+                return replay
+            if number is None:
+                return self._store(executor, "claim", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": "issue must be a number"}})
             if number not in self.cards:
-                response = {"type": "error", "payload": {"error": f"no such card: {number}"}}
-                self._responses[delivery_id] = response
-                return response
+                return self._store(executor, "claim", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": f"no such card: {number}"}})
             held = self._assignments.get(number)
             if held is not None and held["executor"] != executor:
-                response = {"type": "error",
-                            "payload": {"error": f"card {number} held by {held['executor']}"}}
-                self._responses[delivery_id] = response
-                return response
+                return self._store(executor, "claim", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": f"card {number} held by {held['executor']}"}})
             if held is None:
                 held = {"issue": number, "executor": executor,
                         "run_id": f"run-{number}-{executor}"}
                 self._assignments[number] = held
-            response = {"type": "assigned", "id": delivery_id, "payload": dict(held)}
-            self._responses[delivery_id] = response
-            return response
+            return self._store(executor, "claim", delivery_id, fingerprint,
+                               {"type": "assigned", "id": delivery_id, "payload": dict(held)})
 
     def submit_evidence(self, executor: str, delivery_id: str,
                         issue: Any, run_id: Any, evidence: Any) -> Dict[str, Any]:
@@ -149,44 +196,42 @@ class RelayState:
 
         The pointer is opaque (a URL, a ledger key, a fixture path); the
         relay stores it and never dereferences it, so a replayed pointer
-        cannot double-count a delivery.
+        cannot double-count a delivery. The evidence ledger is keyed by
+        delivery id, so an id already recorded by *another* executor is
+        refused (that executor must retry with a fresh id) rather than
+        silently overwriting the first record.
         """
-        if delivery_id in self._responses:
-            stored = self._responses[delivery_id]
-            replay = dict(stored)
-            replay["payload"] = dict(stored.get("payload", {}))
-            replay["payload"]["duplicate"] = True
-            return replay
         with self._lock:
-            if delivery_id in self._responses:
-                stored = self._responses[delivery_id]
-                replay = dict(stored)
-                replay["payload"] = dict(stored.get("payload", {}))
-                replay["payload"]["duplicate"] = True
+            number = self._number(issue)
+            fingerprint = (number if number is not None else ("bad-issue", issue),
+                           run_id, evidence)
+            replay = self._replay(executor, "evidence", delivery_id, fingerprint)
+            if replay is not None:
                 return replay
-            try:
-                number = int(issue)
-            except (TypeError, ValueError):
-                response = {"type": "error", "payload": {"error": "issue must be a number"}}
-                self._responses[delivery_id] = response
-                return response
+            if number is None:
+                return self._store(executor, "evidence", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": "issue must be a number"}})
             held = self._assignments.get(number)
             if held is None or held["executor"] != executor or held["run_id"] != run_id:
-                response = {"type": "error",
-                            "payload": {"error": f"no assignment for {executor} on {number}"}}
-                self._responses[delivery_id] = response
-                return response
+                return self._store(executor, "evidence", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": f"no assignment for {executor} on {number}"}})
             if not isinstance(evidence, str) or not evidence:
-                response = {"type": "error", "payload": {"error": "evidence pointer must be non-empty"}}
-                self._responses[delivery_id] = response
-                return response
+                return self._store(executor, "evidence", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": "evidence pointer must be non-empty"}})
+            existing = self._evidence.get(delivery_id)
+            if existing is not None and existing["executor"] != executor:
+                return self._store(executor, "evidence", delivery_id, fingerprint,
+                                   {"type": "error",
+                                    "payload": {"error": "delivery id already used by another executor"}})
             record = {"issue": number, "executor": executor, "run_id": run_id,
                       "evidence": evidence}
             self._evidence[delivery_id] = record
-            response = {"type": "ack", "id": delivery_id,
-                        "payload": {"duplicate": False, "record": dict(record)}}
-            self._responses[delivery_id] = response
-            return response
+            return self._store(executor, "evidence", delivery_id, fingerprint,
+                               {"type": "ack", "id": delivery_id,
+                                "payload": {"duplicate": False, "record": dict(record)}})
 
     def evidence_records(self) -> Dict[str, Dict[str, Any]]:
         """A copy of every stored evidence record, keyed by delivery id."""
@@ -452,12 +497,17 @@ class ExecutorClient:
                         delivery_id: str) -> Dict[str, Any]:
         message = {"type": "evidence", "id": delivery_id,
                    "payload": {"issue": issue, "run_id": run_id, "evidence": evidence}}
+        # Register pending *before* sending: if the connection drops after
+        # the frame is sent but before the ACK is read, _read_message
+        # raises and the message would otherwise never be replayed by
+        # reconnect(), even though the relay may already have stored it.
+        # A duplicate ACK also clears pending -- the evidence is stored,
+        # the ACK is just a replay of the original one.
+        self.pending[delivery_id] = message
         self._send(message)
         reply = self._read_message()
-        if reply.get("type") == "ack" and not reply.get("payload", {}).get("duplicate"):
+        if reply.get("type") == "ack":
             self.pending.pop(delivery_id, None)
-        else:
-            self.pending[delivery_id] = message
         return reply
 
     def heartbeat(self) -> bool:

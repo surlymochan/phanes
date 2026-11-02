@@ -14,6 +14,7 @@ import importlib.util
 import pathlib
 import time
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 MODULE = HERE.parent / "lib" / "transport" / "websocket.py"
@@ -76,6 +77,55 @@ class IdempotencyTests(unittest.TestCase):
         self.assertEqual(refused["type"], "error")
         self.assertEqual(state.evidence_records(), {})
 
+    def test_delivery_id_is_scoped_by_executor_and_operation(self):
+        # Review finding 1: the old global delivery-id cache let another
+        # executor, or another operation, see a cached response.
+        state = fresh_state()
+        assigned = state.claim("fake-exec", 9001, "shared-1")
+        run_id = assigned["payload"]["run_id"]
+        # Another executor reusing the same id must not see the assignment.
+        refused = state.claim("other-exec", 9001, "shared-1")
+        self.assertEqual(refused["type"], "error")
+        self.assertNotEqual(refused.get("payload"), assigned["payload"])
+        # The same executor reusing the claim id for evidence must get an
+        # evidence ACK, not the cached claim response.
+        ack = state.submit_evidence("fake-exec", "shared-1", 9001, run_id,
+                                    "evidence://fixture/scoped")
+        self.assertEqual(ack["type"], "ack")
+        self.assertFalse(ack["payload"]["duplicate"])
+
+    def test_same_delivery_id_for_a_different_request_is_refused(self):
+        state = fresh_state()
+        assigned = state.claim("fake-exec", 9001, "d-ev-1")
+        run_id = assigned["payload"]["run_id"]
+        first = state.submit_evidence("fake-exec", "d-ev-1", 9001, run_id,
+                                      "evidence://fixture/1")
+        self.assertEqual(first["type"], "ack")
+        # Same executor/operation/id, different evidence pointer: a client
+        # bug, not a replay -- never return the cached ACK for it.
+        refused = state.submit_evidence("fake-exec", "d-ev-1", 9001, run_id,
+                                        "evidence://fixture/other")
+        self.assertEqual(refused["type"], "error")
+        self.assertEqual(len(state.evidence_records()), 1)
+        self.assertEqual(state.evidence_records()["d-ev-1"]["evidence"],
+                         "evidence://fixture/1")
+
+    def test_evidence_delivery_id_recorded_by_another_executor_is_refused(self):
+        state = ws.RelayState(
+            {"token-a": "exec-a", "token-b": "exec-b"},
+            {9001: {"title": "card a"}, 9002: {"title": "card b"}})
+        run_a = state.claim("exec-a", 9001, "claim-a")["payload"]["run_id"]
+        run_b = state.claim("exec-b", 9002, "claim-b")["payload"]["run_id"]
+        first = state.submit_evidence("exec-a", "ev-shared", 9001, run_a,
+                                      "evidence://fixture/a")
+        self.assertEqual(first["type"], "ack")
+        refused = state.submit_evidence("exec-b", "ev-shared", 9002, run_b,
+                                        "evidence://fixture/b")
+        self.assertEqual(refused["type"], "error")
+        records = state.evidence_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records["ev-shared"]["evidence"], "evidence://fixture/a")
+
 
 class SocketPoCTests(unittest.TestCase):
     def setUp(self):
@@ -137,6 +187,32 @@ class SocketPoCTests(unittest.TestCase):
         # A second replay of the same delivery id still stores nothing new.
         client.report_evidence(9001, run_id, "evidence://fixture/reconnect", "sock-ev-2")
         self.assertEqual(len(self.state.evidence_records()), 1)
+
+    def test_evidence_sent_but_ack_lost_is_replayed_exactly_once(self):
+        # Review finding 2: the old report_evidence registered pending
+        # only *after* a successful read, so a drop between send and ACK
+        # left the message out of pending and reconnect() never replayed
+        # it. Here the frame really is sent, but reading the ACK raises.
+        client = self._client()
+        assigned = client.claim(9001, "sock-claim-3")
+        run_id = assigned["payload"]["run_id"]
+        with mock.patch.object(client, "_read_message",
+                               side_effect=ConnectionError("ack lost")):
+            with self.assertRaises(ConnectionError):
+                client.report_evidence(9001, run_id, "evidence://fixture/ack-lost",
+                                       "sock-ev-3")
+        # The unacked message must already be pending, before any reconnect.
+        self.assertIn("sock-ev-3", client.pending)
+        # Let the relay thread process the frame already sent (the replay
+        # below would still store it exactly once even if it had not).
+        deadline = time.time() + 2.0
+        while len(self.state.evidence_records()) < 1 and time.time() < deadline:
+            time.sleep(0.02)
+        client.reconnect()
+        self.assertEqual(client.pending, {})
+        records = self.state.evidence_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records["sock-ev-3"]["evidence"], "evidence://fixture/ack-lost")
 
 
 if __name__ == "__main__":
