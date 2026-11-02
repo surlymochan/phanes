@@ -139,6 +139,26 @@ DEFAULTS = {
         "strict_backend": "strict-backend", "backend_prefix": "backend:",
     },
     "priorities": {"p0": 0, "p1": 1, "p2": 2},
+    # Dispatch order (Refs #1705): the pool is scored instead of served FIFO, so a big
+    # card (budget 90) is not kept at the tail of the queue by the small cards
+    # (budget 30).  The score only decides the order; the backend constraints and the
+    # capacity checks are unchanged.  `enabled: false` restores the old FIFO order.
+    "priority": {
+        "enabled": True,
+        "wait_weight": 1.0,             # points per minute the card waited in the pool
+        "size_weight": 1.0,             # points per size unit above the small-card baseline
+        "size_unit_minutes": 30.0,      # one size unit: a 30-minute card is the baseline
+        "big_budget_minutes": 90.0,     # a card at or above this budget is a big card
+        "big_bonus": 12.0,              # extra points for a big card
+        "backend_weight": 12.0,         # points for an exact backend match
+        "unpinned_ratio": 0.5,          # share of backend_weight for an unpinned card
+        "fallback_ratio": 0.1,          # share of backend_weight for a cross-backend fallback
+        "starvation_threshold_s": 1800, # a card that waited longer than this is lifted
+        "starvation_boost": 60.0,       # points added to a lifted card
+        "starvation_lift_big_cards": False,  # lift big cards too (they are favoured anyway)
+        "budget_label_prefix": "budget:",      # label that carries the card budget
+        "budget_line_re": r"^\s*(?:预算|Budget)\s*[:：]\s*(\d+)",  # body line that carries it
+    },
     "fallback": {"pi": ["codex", "copilot", "agy"], "codex": ["pi", "copilot", "agy"],
                  "copilot": ["codex", "pi", "agy"], "agy": ["pi", "codex", "copilot"]},
     "never_take_re": {"codex": r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字"},
@@ -425,6 +445,8 @@ class Dispatcher:
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
+        self.priority = dispatch_module("priority")
+        self.P = dict(cfg.get("priority") or {})
         self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
         hot_cfg = cfg["hot_files"]
         hot_caps = dict(hot_cfg.get("limits") or {})
@@ -705,9 +727,9 @@ class Dispatcher:
                 pass
         return skip
 
-    def queue(self):
+    def queue(self, state=None):
         rc, out, err = self.gh(["issue", "list", "--state", "open", "--label", self.L["ready"], "--limit", "100",
-                                "--json", "number,title,labels,body"])
+                                "--json", "number,title,labels,body,createdAt"])
         if rc:
             raise RuntimeError(err)
         pr = self.cfg["priorities"]
@@ -718,11 +740,49 @@ class Dispatcher:
             labels = {l["name"] for l in i["labels"]}
             if self.L["in_progress"] in labels or labels & skip:
                 continue
-            items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "",
-                          "prio": min([pr[l] for l in labels if l in pr] or [len(pr)]),
-                          "backend": next((l[len(bp):] for l in labels if l.startswith(bp)), None),
-                          "strict": self.L["strict_backend"] in labels})
-        return sorted(items, key=lambda x: (x["prio"], x["n"]))
+            card = {"n": i["number"], "title": i["title"], "body": i["body"] or "",
+                    "prio": min([pr[l] for l in labels if l in pr] or [len(pr)]),
+                    "backend": next((l[len(bp):] for l in labels if l.startswith(bp)), None),
+                    "strict": self.L["strict_backend"] in labels,
+                    "labels": sorted(labels),
+                    "created_at": self.priority.created_at(i.get("createdAt"))}
+            card["budget"] = self.priority.budget_minutes(card, self.P)
+            items.append(card)
+        items = sorted(items, key=lambda x: (x["prio"], x["n"]))
+        self.pool_wait(items, state)
+        return items
+
+    def pool_wait(self, items, state):
+        """Attach the in-pool wait time to every card and remember when it entered the pool.
+
+        The wait is measured from the moment the card was first seen in the ready pool,
+        not from its creation: a card created long ago but only labelled ready now has
+        waited for minutes, not for days.  A card that comes back to the pool (a failed
+        run re-labelled ready) starts its wait over, so a re-queued card cannot use its
+        age to jump the queue.
+        """
+        seen = state.setdefault("_pool_seen", {}) if isinstance(state, dict) else {}
+        now = self.clock()
+        for item in items:
+            key = str(item["n"])
+            record = seen.get(key)
+            if not isinstance(record, dict):
+                record = {"at": item.get("created_at") or now}
+                seen[key] = record
+            elif record.get("dispatched"):
+                record = {"at": now}
+                seen[key] = record
+            item["waited_s"] = max(0.0, now - float(record.get("at") or now))
+        if len(seen) > 500:      # the map only holds the cards of the current pool
+            for key in sorted(seen, key=lambda k: float((seen[k] or {}).get("at") or 0))[:len(seen) - 500]:
+                seen.pop(key, None)
+
+    def mark_dispatched(self, state, n):
+        """Remember that a card left the pool, so a re-queued card starts its wait over."""
+        seen = (state or {}).get("_pool_seen")
+        record = seen.get(str(n)) if isinstance(seen, dict) else None
+        if isinstance(record, dict):
+            record["dispatched"] = True
 
     def can_take(self, backend, item):
         if item["backend"] in (None, backend):
@@ -733,14 +793,30 @@ class Dispatcher:
         return not (rx and re.search(rx, item["title"] + "\n" + item["body"], re.I))
 
     def rank(self, backend, item):
-        if item["backend"] == backend:
-            g = 0
-        elif item["backend"] is None:
-            g = 1
-        else:
-            fb = self.cfg["fallback"].get(backend) or []
-            g = 2 + (fb.index(item["backend"]) if item["backend"] in fb else len(fb))
-        return (g, item["prio"], item["n"])
+        """The dispatch order: the priority score first (Refs #1705).
+
+        The score is the wait time, the size of the card and the backend match; the
+        priority label and the issue number only break a tie.  `priority.enabled: false`
+        restores the old order (own backend first, then unpinned, then the fallback
+        chain).  The order never relaxes the backend constraints of `can_take`.
+        """
+        if not self.P.get("enabled", True):
+            return self.fifo_rank(backend, item)
+        score = self.score_of(backend, item)
+        return (-score["score"], item.get("prio", 99), item.get("n", 0))
+
+    def fifo_rank(self, backend, item):
+        """The order the pool was served with before the score: own backend, unpinned, fallback."""
+        return self.priority.fifo_key(item, backend, self.P, self.cfg.get("fallback") or {})
+
+    def score_of(self, backend, item):
+        """The priority score of a card for one lane, with the breakdown for the log."""
+        cached = item.get("_score")
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == backend:
+            return cached[1]
+        score = self.priority.score_card(item, backend, self.clock(), self.P, self.cfg.get("fallback") or {})
+        item["_score"] = (backend, score)
+        return score
 
     def verify_of(self, body):
         rx = re.compile(self.cfg["verify_line_re"])
@@ -2011,6 +2087,7 @@ class Dispatcher:
                 self.note_stale_skip(c["n"], state)
             if not pick:
                 continue
+            score = self.score_of(lc["backend"], pick)
             if base is None:
                 try:
                     base = self.main_sha()
@@ -2033,6 +2110,7 @@ class Dispatcher:
                 self.host_fail(lc["host"], f"dispatch #{pick['n']}: {e}", host_started, 120)
                 continue
             q.remove(pick)
+            self.mark_dispatched(state, pick["n"])
             hot = self.hot_of(pick["body"])
             self.hot_lock.acquire(hot)
             if self.dry_run:
@@ -2052,7 +2130,11 @@ class Dispatcher:
                 except (subprocess.TimeoutExpired, OSError):
                     pass
             self.save_state(state)
-            self.log(f"dispatched #{pick['n']} → {L} ({lc['host']}) run {run} base {base[:8]}")
+            self.log(f"dispatched #{pick['n']} → {L} ({lc['host']}) run {run} base {base[:8]} "
+                     f"score={score['score']:.1f} (wait {score['wait']:.1f} + size {score['size']:.1f} + "
+                     f"backend {score['backend']:.1f} + lift {score['starvation']:.1f}; "
+                     f"{score['backend_match']}, waited {int(score['waited_s'])}s, "
+                     f"budget {score['budget'] if score['budget'] else '-'}m)")
             self.heartbeat()
 
     def replenish(self, need, lanes, q, blocked):
@@ -2102,7 +2184,7 @@ class Dispatcher:
         except Exception as e:
             self.log(f"leak-sweep exc: {e!r}", brain=False)
         try:
-            q = self.queue()
+            q = self.queue(state)
         except Exception as e:
             self.log(f"queue error: {e}", brain=False)
             return res
