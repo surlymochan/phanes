@@ -603,6 +603,44 @@ class Dispatcher:
     def host_ok(self, h):
         return self.clock() >= self.backoff.get(h, {}).get("until", 0)
 
+    def ssh_health_blocked(self, host):
+        """Skip hosts whose fleet health probe still reports an SSH failure streak."""
+        home = (os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+                or os.path.expanduser("~/.claude/openswarm"))
+        try:
+            with open(self.cfg.get("fleet_health_file") or os.path.join(home, "fleet-health.json"),
+                      encoding="utf-8") as stream:
+                health = json.load(stream)
+            hosts = health.get("hosts") if isinstance(health, dict) else None
+            if not isinstance(hosts, dict):
+                return False
+            record = hosts.get(host)
+            metrics = record.get("metrics") if isinstance(record, dict) else None
+            streak = metrics.get("ssh_fail_streak") if isinstance(metrics, dict) else None
+            if not isinstance(streak, (int, float)) or isinstance(streak, bool):
+                return False
+        except (OSError, ValueError, TypeError):
+            return False
+
+        policy = {}
+        paths = [os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "policy.json"),
+            self.cfg.get("policy_file") or os.path.join(home, "policy.local.json")]
+        for path in paths:
+            try:
+                with open(path, encoding="utf-8") as stream:
+                    policy = deep_merge(policy, json.load(stream))
+            except (OSError, ValueError, TypeError):
+                pass
+        health_policy = ((policy.get("resources") or {}).get("health")
+                         if isinstance(policy.get("resources"), dict) else {})
+        threshold = (health_policy or {}).get("ssh_fail_pause_streak", 3)
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = 3
+        return streak >= threshold
+
     def host_fail(self, h, why, started_at=None, timeout_s=None):
         now = self.clock()
         # A command that ran far past its own deadline commonly crossed a VM suspend.
@@ -2410,6 +2448,9 @@ class Dispatcher:
                         self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
         for L, lc in self.lane_order(lanes):
             r = res[L]
+            if self.ssh_health_blocked(lc["host"]):
+                self.log(f"skip {L}: host {lc['host']} SSH failure streak exceeds health threshold", brain=False)
+                continue
             if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
                     or self.paused_lane(L, lc) or lc.get("drain")):
                 continue

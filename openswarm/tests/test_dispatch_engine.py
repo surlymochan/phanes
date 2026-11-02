@@ -247,6 +247,47 @@ class HostHealth(Base):
         self.assertEqual(d.backoff["h1"]["n"], 3)
         self.assertFalse(d.host_ok("h1"))
 
+    def health_dispatch(self, streak, threshold=3, hosts_value=None, expired_backoff=False):
+        home = os.path.join(self.tmp, "custom-home")
+        os.makedirs(home, exist_ok=True)
+        health_path = os.path.join(home, "fleet-health.json")
+        data = {"hosts": hosts_value if hosts_value is not None else {
+            "box": {"metrics": {"ssh_fail_streak": streak}}}}
+        with open(health_path, "w") as stream:
+            json.dump(data, stream)
+        with open(os.path.join(home, "policy.local.json"), "w") as stream:
+            json.dump({"resources": {"health": {"ssh_fail_pause_streak": threshold}}}, stream)
+        d = self.make()
+        d.clock = lambda: 1000
+        d.main_sha = lambda: SHA
+        d.label_state = lambda n: "fresh"
+        d.dispatch = lambda lane, lc, item, base: ("run", "verify")
+        d.gh_write_retry = lambda args, **kwargs: (0, "", "")
+        if expired_backoff:
+            d.backoff["box"] = {"n": 1, "until": 999}
+        lane = {"P0": {"host": "box", "backend": "pi"}}
+        state = {}
+        item = {"n": 1, "title": "task", "body": "", "backend": None,
+                "strict": False, "prio": 1}
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": home}, clear=False):
+            d.assign_issues(lane, {"P0": {"lane": "idle"}}, state, [item])
+        return d, state
+
+    def test_health_streak_blocks_without_or_with_expired_backoff(self):
+        for expired in (False, True):
+            with self.subTest(expired_backoff=expired):
+                d, state = self.health_dispatch(2, threshold=2, expired_backoff=expired)
+                self.assertEqual(state, {})
+                self.assertTrue(d.host_ok("box"))
+
+    def test_health_streak_recovery_allows_dispatch(self):
+        _, state = self.health_dispatch(0, threshold=2)
+        self.assertEqual(state["P0"]["issue"], 1)
+
+    def test_malformed_health_hosts_does_not_interrupt_dispatch(self):
+        _, state = self.health_dispatch(0, threshold=2, hosts_value=["bad", "state"])
+        self.assertEqual(state["P0"]["issue"], 1)
+
 
 class QuotaGuards(Base):
     """The quota guards classify with the pure module lib/dispatch/quota.py (Refs #1499)."""
