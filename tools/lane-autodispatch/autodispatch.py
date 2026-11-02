@@ -7,7 +7,7 @@ then by issue number. Optional `backend:pi|agy|codex` label pins an issue to tha
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
-import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf, importlib.util
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -190,6 +190,111 @@ def save_state(s):
     tmp = f"{D}/state.json.tmp"; json.dump(s, open(tmp, "w"), indent=1, ensure_ascii=False); os.replace(tmp, f"{D}/state.json")
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
+
+# --- hot files: one list, one parser, shared with the dispatch side (Refs #1721) ---
+# The caps live in the dispatch policy (`openswarm/policy.json`, section "dispatch"):
+# the mint side (the backlog import below) and the dispatch side (the lanes) read that
+# one file, so a cap is never written twice and the two sides cannot disagree about
+# it.  The shared modules are loaded from the openswarm checkout; without them the AD
+# keeps working, it just cannot judge hot files.
+HOT_LIB_ENV = "OPENSWARM_DISPATCH_LIB"
+HOT_LIB_DIRS = [
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "openswarm", "lib", "dispatch"),
+    "/workspace/phanes-repo/openswarm/lib/dispatch",
+]
+
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def _load_hot_modules():
+    """Load the shared hot-file modules (hotfiles, hot_policy, card) or (None, None, None)."""
+    for directory in [os.environ.get(HOT_LIB_ENV)] + HOT_LIB_DIRS:
+        if not directory: continue
+        try:
+            return (_load_module("openswarm_hotfiles", os.path.join(directory, "hotfiles.py")),
+                    _load_module("openswarm_hot_policy", os.path.join(directory, "hot_policy.py")),
+                    _load_module("openswarm_dispatch_card", os.path.join(directory, "card.py")))
+        except (OSError, ImportError, AttributeError, SyntaxError):
+            continue
+    return None, None, None
+
+HOTFILES, HOT_POLICY, CARD = _load_hot_modules()
+
+def hot_policy():
+    """The shared hot-file policy: the caps, the exempt files and the default cap."""
+    if HOTFILES is None or HOT_POLICY is None: return None
+    policy = HOT_POLICY.load_hot_policy({})
+    caps = HOTFILES.merge_caps(*(policy.get("caps") or []))
+    default = policy.get("default_limit")
+    if default is None: default = 1
+    union = set(HOTFILES.parse_hot_files("热文件：" + " ".join(policy.get("union") or [])))
+    return {"lock": HOTFILES.HotLock(caps=caps, default_cap=default), "union": union}
+
+HOT = hot_policy()
+
+def hot_files(body):
+    """The hot files a card declares (the shared parser, the one the dispatch side uses)."""
+    if HOTFILES is None or HOT is None: return []
+    return [f for f in HOTFILES.parse_hot_files(body)
+            if f not in HOT["union"] and not HOTFILES.is_doc_file(f)]
+
+def hot_inflight(state):
+    """The hot files in flight right now: one count per file, read from the lane states."""
+    counts = {}
+    for lane, entry in (state or {}).items():
+        if lane.startswith("_") or not isinstance(entry, dict): continue
+        for f in entry.get("hot") or []:
+            for path in hot_files("热文件：" + str(f)):
+                counts[path] = counts.get(path, 0) + 1
+    return counts
+
+def hot_verdict(body, counts):
+    """The verdict for one card: the hot files that sit at their cap, and the advice.
+
+    It is the decision the dispatch side makes for the same card, so the mint side and
+    the dispatch side block the same cards (Refs #1721).
+    """
+    files = hot_files(body)
+    conflicts = []
+    if HOT is not None:
+        for path in files:
+            limit = HOT["lock"].cap_for(path)
+            count = HOT["lock"].count_for(path, counts)
+            if count >= limit: conflicts.append({"file": path, "inflight": count, "limit": limit})
+    return {"blocked": bool(conflicts), "conflicts": conflicts, "files": files,
+            "advice": "改期或换题" if conflicts else "可铸卡"}
+
+def parse_card(text):
+    """The title, the labels and the body of a card (`# title` / `labels: a,b` / body).
+
+    The shared card parser (openswarm/lib/dispatch/card.py) reads the format, so the
+    AD and the dispatch side read a card the same way.
+    """
+    lines = (text or "").splitlines()
+    if len(lines) < 2 or not lines[1].startswith("labels:"): raise RuntimeError("bad format: no labels line")
+    if CARD is not None:
+        parsed = CARD.parse_card(text)
+        if parsed["title"]:
+            body = parsed["body"]
+            return {"title": parsed["title"], "labels": parsed["labels"], "body": body + "\n" if body else body}
+    title = lines[0].lstrip("# ").strip()
+    labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
+    return {"title": title, "labels": labels, "body": "\n".join(lines[2:]).strip() + "\n"}
+
+def record_mint(record):
+    """Write one mint decision into the mint ledger (the trace of the preflight)."""
+    ledger = load(f"{D}/mint-log.json", [])
+    if not isinstance(ledger, list): ledger = []
+    ledger.append(record)
+    try:
+        tmp = f"{D}/mint-log.json.tmp"
+        with open(tmp, "w") as f: json.dump(ledger[-100:], f, ensure_ascii=False, indent=1)
+        os.replace(tmp, f"{D}/mint-log.json")
+    except OSError as e:
+        log(f"mint ledger write failed: {e}", brain=False)
 
 def label_names(issue):
     return {
@@ -409,12 +514,47 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
-def status_snapshot(lanes, state, res, ready, blocked):
+def blocked_details(q, hot_blocked, state):
+    """Describe every blocked card: the reason, the files and the waiting time.
+
+    The waiting time is measured from the first tick the card was seen blocked, and the
+    first observation is kept in the state, so the time survives a restart of the AD.
+    The details go to the lanes status, so the supervisor reads why a card waits and for
+    how long instead of a single blocked total (Refs #1721).
+    """
+    now = time.time()
+    since = state.setdefault("_blocked_since", {})
+    if not isinstance(since, dict): since = {}; state["_blocked_since"] = since
+    details, numbers = [], set()
+    for item in q:
+        number = item["n"]
+        reason, files = None, []
+        if not item.get("deps_ok", True):
+            reason = "deps"
+        elif number in hot_blocked:
+            reason = "hot_file"
+            files = [c["file"] for c in hot_blocked[number]["conflicts"]]
+        if reason is None: continue
+        numbers.add(str(number))
+        try: first = float(since.get(str(number)))
+        except (TypeError, ValueError): first = None
+        if first is None:
+            first = now; since[str(number)] = first
+        details.append({"issue": number, "reason": reason, "files": files,
+                        "wait_seconds": max(0, int(now - first)),
+                        "since": time.strftime("%F %T", time.localtime(first))})
+    for key in list(since):
+        if key not in numbers: since.pop(key, None)
+    return details
+
+def status_snapshot(lanes, state, res, ready, blocked, details=None, reasons=None):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L))
     status["_ready"] = ready
     status["_blocked"] = blocked
+    status["_blocked_reasons"] = reasons or {}
+    status["_blocked_details"] = details or []
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
@@ -575,13 +715,16 @@ def tick(lanes, state, last_warn):
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
     base = None
+    counts = hot_inflight(state)
     for L, cfg in lanes.items():
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])
-            if status == "fresh": pick = c; break
+            if status == "fresh":
+                if hot_verdict(c["body"], counts)["blocked"]: continue  # the hot file is at its cap: the card waits
+                pick = c; break
             if status == "stale":
                 q.remove(c); skip_stale(c["n"], detail)  # try the next one this tick
                 continue
@@ -595,14 +738,23 @@ def tick(lanes, state, last_warn):
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
             gh(["issue", "edit", str(pick["n"]), "--remove-label", "in-progress"]); host_fail(cfg["host"], f"dispatch #{pick['n']}: {e}"); continue
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "hot": hot_files(pick["body"])}
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
+        for path in hot_files(pick["body"]): counts[path] = counts.get(path, 0) + 1
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
-    ready = len(q) - blocked
+    # a card whose hot file is at its cap cannot be handed to a lane: it is blocked, not
+    # ready.  Counting it as ready overstates the supply, and the supervisor reads
+    # `_ready` as the water level (Refs #1721).
+    hot_blocked = {}
+    for i in q:
+        if not i.get("deps_ok", True): continue
+        verdict = hot_verdict(i["body"], counts)
+        if verdict["blocked"]: hot_blocked[i["n"]] = verdict
+    ready = len(q) - blocked - len(hot_blocked)
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
-    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
+    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and i["n"] not in hot_blocked and can_take(b, i))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     if ready < LOW or starve > 0:
@@ -611,19 +763,40 @@ def tick(lanes, state, last_warn):
         if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
         elif time.time() - last_warn > 600:
             log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
-    st = status_snapshot(lanes, state, res, ready, blocked)
+    before = json.dumps(state.get("_blocked_since", {}), sort_keys=True)
+    details = blocked_details(q, hot_blocked, state)
+    if json.dumps(state.get("_blocked_since", {}), sort_keys=True) != before: save_state(state)
+    st = status_snapshot(lanes, state, res, ready, blocked + len(hot_blocked), details,
+                          {"deps": blocked, "hot_file": len(hot_blocked)})
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
 
-def file_issue(text, extra=()):
-    lines = text.splitlines()
-    title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
-    body = "\n".join(lines[2:]).strip() + "\n"
+def file_issue(text, extra=(), state=None, source=None):
+    """Create the issue of one card, after the hot-file preflight.
+
+    A card whose hot file already sits at its cap is refused: minting it would only add
+    a blocked card to the queue, and the AD would never hand it to a lane.  The refusal
+    is written to the mint ledger and the card keeps its place, so the next tick retries
+    it once the hot file is free (Refs #1721).
+    """
+    card = parse_card(text)
+    verdict = hot_verdict(card["body"], hot_inflight(state))
+    if verdict["blocked"]:
+        files = ", ".join(c["file"] for c in verdict["conflicts"])
+        record_mint({"at": time.strftime("%F %T"), "title": card["title"], "issue": None, "minted": False,
+                     "reason": "hot_file_conflict", "source": source, "preflight": verdict})
+        log(f"mint refused '{card['title']}': hot file at its cap ({files}); {verdict['advice']}", brain=False)
+        return None
+    title = card["title"]; labels = card["labels"]
+    body = card["body"]
     args = ["issue", "create", "-t", title, "-b", body]
     for l in ["lane-ready", *labels, *extra]: args += ["-l", l]
     rc, o, e = gh(args)
     if rc: raise RuntimeError(e.strip()[-200:])
-    return "#" + o.strip().rsplit("/", 1)[-1]
+    ref = "#" + o.strip().rsplit("/", 1)[-1]
+    record_mint({"at": time.strftime("%F %T"), "title": title, "issue": ref.lstrip("#"), "minted": True,
+                 "source": source, "preflight": verdict})
+    return ref
 
 PLANNER = """# 规划：为 lane 队列写 {k} 条新任务（{tag}）
 labels: p1,backend:codex,planner
@@ -633,6 +806,8 @@ labels: p1,backend:codex,planner
 # <中文标题>
 labels: <p1 或 p2>,backend:<pi|codex|agy>
 <任务正文：要改的文件路径、具体改动、边界；不得依赖其它未完成任务>
+
+热文件：`<要改的仓库相对路径>`（多个用逗号分隔；只改文档的卡写 `docs/...`）
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
 ```
@@ -649,12 +824,18 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 def replenish(k, state):
     """Queue refill, in order: (1) ~/phanes-ctl/autodispatch/backlog/*.md (`# title` / `labels: a,b` / body; moved to backlog/filed/);
     (2) docs/backlog/next/*.md on origin/main not yet imported (written by planner runs); (3) if still short and no planner
-    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/."""
+    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/.
+
+    Every card goes through the hot-file preflight first (Refs #1721): a card whose hot
+    file is at its cap is not filed, it keeps its place (the local card stays in
+    backlog/, the repo card is not marked as imported) and the next tick retries it."""
     bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
         if len(out) >= k: return out
-        try: out.append(file_issue(open(f"{bd}/{f}").read()))
+        try: ref = file_issue(open(f"{bd}/{f}").read(), state=state, source=f"backlog/{f}")
         except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
+        if ref is None: continue  # refused by the preflight: the card stays for the next tick
+        out.append(ref)
         os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
     G = ["git", "-C", "/workspace/phanes-repo"]
     sh(G + ["fetch", "-q", "origin", "main"], timeout=120)
@@ -664,11 +845,17 @@ def replenish(k, state):
         if len(out) >= k: break
         if path in imp: continue
         rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        imp.append(path); save_state(state)
         try:
             if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
-            out.append(file_issue(text))
-        except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
+        except Exception as e:
+            log(f"repo backlog {path}: {e}", brain=False)
+            imp.append(path); save_state(state)  # malformed: do not retry it every tick
+            continue
+        try: ref = file_issue(text, state=state, source=path)
+        except Exception as e: log(f"repo backlog {path}: {e}", brain=False); continue
+        if ref is None: continue  # refused by the preflight: not imported, the next tick retries it
+        imp.append(path); save_state(state)
+        out.append(ref)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])
         if not rc and json.loads(o) == []:

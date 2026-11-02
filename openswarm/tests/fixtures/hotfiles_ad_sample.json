@@ -1,0 +1,64 @@
+{
+ "_doc": "热文件样本（可核实来源）：卡片是 planner 写入仓库、AD 从 docs/backlog/next/ 导入的真实卡片，`card` 是仓库相对路径，`card_sha256` 是该文件的 sha256（卡片被改动时回放测试会失败，样本不会与仓库脱节），`hot_files` 是该卡正文里声明的热文件（与卡里写明要改的文件一致）。`inflight` 是在途卡占用的热文件计数：上限取自共享清单 openswarm/policy.json 的 dispatch.hot_shared，未单列的文件用 dispatch.hot_default。回放时铸卡预检（mint 侧）、AD 的阻塞判定（dispatch 侧）与样本的 blocked 期望必须一致。",
+ "_source": "2026-11-02 晚 AD 回填：当晚待导入的是 planner 2026-11-01 03:35 批（docs/backlog/next/20261101-0335-*.md）；同一批的 17 与 18 两张卡都改 openswarm/bin/openswarm（共享清单里上限为 1），是当晚真实的热文件冲突；14 号卡只改文档，文档永不阻塞。",
+ "cases": [
+  {
+   "card": "docs/backlog/next/20261101-0335-17.md",
+   "card_sha256": "7bda5bcca7288785efec2bf01a76d7427e45867e398f5001c11fbdefa735fedd",
+   "hot_files": [
+    "openswarm/bin/openswarm",
+    "openswarm/tests/test_lessons.py"
+   ],
+   "inflight": {},
+   "blocked": false
+  },
+  {
+   "card": "docs/backlog/next/20261101-0335-17.md",
+   "card_sha256": "7bda5bcca7288785efec2bf01a76d7427e45867e398f5001c11fbdefa735fedd",
+   "hot_files": [
+    "openswarm/bin/openswarm",
+    "openswarm/tests/test_lessons.py"
+   ],
+   "inflight": {
+    "openswarm/bin/openswarm": 1
+   },
+   "blocked": true
+  },
+  {
+   "card": "docs/backlog/next/20261101-0335-18.md",
+   "card_sha256": "ef39658d28ecc3c8f4fc60a4eb62947a3e2600ab7bb80548a4f2a4d22045624c",
+   "hot_files": [
+    "openswarm/bin/openswarm",
+    "openswarm/tests/test_patterns.py"
+   ],
+   "inflight": {
+    "openswarm/bin/openswarm": 1
+   },
+   "blocked": true
+  },
+  {
+   "card": "docs/backlog/next/20261101-0335-18.md",
+   "card_sha256": "ef39658d28ecc3c8f4fc60a4eb62947a3e2600ab7bb80548a4f2a4d22045624c",
+   "hot_files": [
+    "openswarm/bin/openswarm",
+    "openswarm/tests/test_patterns.py"
+   ],
+   "inflight": {
+    "openswarm/tests/test_patterns.py": 1
+   },
+   "blocked": true
+  },
+  {
+   "card": "docs/backlog/next/20261101-0335-14.md",
+   "card_sha256": "d286027e70f8977b11397da7586f7aca9c5ecc0eb7bec49ec4ebd1ae421d9ea0",
+   "hot_files": [
+    "docs/scenario/org-diagnosis/pipeline.md",
+    "docs/scenario/org-diagnosis/review-checklist.md"
+   ],
+   "inflight": {
+    "docs/scenario/org-diagnosis/pipeline.md": 7
+   },
+   "blocked": false
+  }
+ ]
+}
