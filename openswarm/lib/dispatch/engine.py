@@ -995,10 +995,36 @@ class Dispatcher:
         cfg["quota"]["lane_pause"] (backend -> regex) is still read as a lane-scoped entry.
         """
         q = self.cfg.get("quota") or {}
-        table = {}
+        table = {be: dict(bc) for be, bc in (q.get("backends") or {}).items()
+                 if isinstance(bc, dict)}
+        # Backend quota policy lives in policy.json / policy.local.json.  Merge
+        # field-by-field so local policy can override defaults without erasing
+        # native probe configuration, and translate the public policy name.
+        policy = {}
+        policy_paths = [os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "policy.json"),
+            self.cfg.get("policy_file") or os.path.expanduser("~/.claude/openswarm/policy.local.json")]
+        for policy_path in policy_paths:
+            try:
+                with open(policy_path, encoding="utf-8") as stream:
+                    policy = deep_merge(policy, json.load(stream))
+            except (OSError, ValueError, TypeError):
+                pass
         for be, bc in (q.get("backends") or {}).items():
             if isinstance(bc, dict) and bc.get("quota_error_re"):
-                table[be] = dict(bc)
+                table.setdefault(be, {}).update(bc)
+        for be, bc in (policy.get("backends") or {}).items():
+            if not isinstance(bc, dict):
+                continue
+            target = table.setdefault(be, {})
+            target.update({key: value for key, value in bc.items()
+                           if key in ("quota_error_re", "scope")})
+            if "quota_cooldown_s" in bc:
+                target["cooldown_s"] = bc["quota_cooldown_s"]
+        for be, bc in table.items():
+            if not bc.get("quota_error_re"):
+                table[be] = {}
+        table = {be: bc for be, bc in table.items() if bc.get("quota_error_re")}
         for be, rx in (q.get("lane_pause") or {}).items():
             table.setdefault(be, {"scope": "lane"})
             table[be].setdefault("quota_error_re", rx)
@@ -1054,6 +1080,14 @@ class Dispatcher:
             except Exception:
                 return False
         cd = int(hit.get("cooldown_s") or 0)
+        scope = ("lane:" + lane) if hit.get("scope") == "lane" else name.removeprefix("PAUSE-BACKEND-")
+        scope = scope if scope.startswith("lane:") else "backend:" + scope
+        pause_store = dispatch_module("pause").PauseStore(self.D)
+        existing = next((r for r in pause_store.active(self.clock()) if r["scope"] == scope), None)
+        if existing and not existing.get("reason", "").startswith("auto:quota"):
+            return False
+        if cd > 0:
+            pause_store.pause(scope, ttl_s=cd, reason=f"auto:quota:{lane}:{hit['kind']}", now=self.clock())
         body = f"auto:quota:{lane}:{hit['kind']}"
         if hit.get("until_iso"):
             body += f" until={hit['until_iso']}"
@@ -1185,7 +1219,7 @@ class Dispatcher:
             until = max(until, now + cooldown_s)
             hit["until_iso"] = datetime.datetime.fromtimestamp(until, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             hit["cooldown_s"] = int(until - now)
-        elif hit.get("from_text") and cooldown_s:
+        elif cooldown_s:
             until = now + cooldown_s
             hit["until_iso"] = datetime.datetime.fromtimestamp(until, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             hit["cooldown_s"] = int(until - now)

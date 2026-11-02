@@ -287,6 +287,45 @@ class QuotaGuards(Base):
         self.assertTrue(body.startswith("auto:quota:M5:RESOURCE_EXHAUSTED"), body)
         self.assertIn("until=1970-01-01T00:18:10Z", body)
         self.assertFalse(os.path.exists(d.path("PAUSE-M5")))
+        records = E.dispatch_module("pause").PauseStore(d.D).active(1000)
+        self.assertIn({"scope": "backend:agy", "created_at": 1000.0,
+                       "expires_at": 1090.0, "reason": "auto:quota:M5:RESOURCE_EXHAUSTED"}, records)
+
+    def test_policy_quota_fields_override_defaults_and_local_policy(self):
+        local = os.path.join(self.tmp, "policy.local.json")
+        with open(local, "w") as f:
+            json.dump({"backends": {"agy": {"quota_error_re": "429|RESOURCE_EXHAUSTED",
+                                                 "quota_cooldown_s": 77, "scope": "backend"}}}, f)
+        self.cfg["policy_file"] = local
+        d = self.dispatcher()
+        self.assertEqual(d.quota_hit("M5", {"backend": "agy"},
+                                     {"status": "error", "summary": "429", "timestamp": 1000})["cooldown_s"], 77)
+        d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000,
+                               "summary": "429"})
+        self.assertIn("until=1970-01-01T00:17:57Z", self.read(d.path("PAUSE-BACKEND-agy")))
+
+    def test_plain_backend_quota_error_expires_at_policy_cooldown(self):
+        d = self.dispatcher()
+        d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000,
+                               "summary": "HTTP 429 Too Many Requests"})
+        p = d.path("PAUSE-BACKEND-agy")
+        self.assertIn("until=1970-01-01T00:46:40Z", self.read(p))
+        self.assertTrue(E.dispatch_module("pause").PauseStore(d.D).is_paused(backend="agy", now=1000))
+        d.clock = lambda: 2800.0
+        d.reap_quota_pauses()
+        self.assertFalse(os.path.exists(p))
+        self.assertFalse(E.dispatch_module("pause").PauseStore(d.D).is_paused(backend="agy", now=2800))
+
+    def test_scoped_manual_backend_pause_is_not_replaced(self):
+        d = self.dispatcher()
+        store = E.dispatch_module("pause").PauseStore(d.D)
+        store.pause("backend:agy", reason="operator hold", now=1000)
+        d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000,
+                               "summary": "RESOURCE_EXHAUSTED"})
+        self.assertEqual(store.active(1000)[0]["reason"], "operator hold")
 
     def test_successful_run_mentioning_429_is_not_a_quota_signal(self):
         d = self.dispatcher()
@@ -326,7 +365,7 @@ class QuotaGuards(Base):
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
                               {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "RESOURCE_EXHAUSTED"})
         self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")),
-                         "auto:quota:M5:RESOURCE_EXHAUSTED\n")
+                         "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z\n")
 
     def test_auto_pause_refreshes_with_text_cooldown(self):
         d = self.dispatcher()
