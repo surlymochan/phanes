@@ -52,8 +52,8 @@ __all__ = [
     "status",
 ]
 
-_SERVICE_KEYS = {"name", "cmd", "cwd", "env", "restart_backoff_max", "heartbeat", "heartbeat_max_s"}
-_REQUIRED_SERVICE_KEYS = _SERVICE_KEYS - {"heartbeat", "heartbeat_max_s"}
+_SERVICE_KEYS = {"name", "cmd", "cwd", "env", "restart_backoff_max", "heartbeat", "heartbeat_max_s", "standby"}
+_REQUIRED_SERVICE_KEYS = _SERVICE_KEYS - {"heartbeat", "heartbeat_max_s", "standby"}
 
 # The issue caps the restart backoff at one minute.
 MAX_BACKOFF_SECONDS = 60
@@ -120,6 +120,17 @@ def load_services(cfg):
         heartbeat_max = service.get("heartbeat_max_s", 180)
         if isinstance(heartbeat_max, bool) or not isinstance(heartbeat_max, (int, float)) or heartbeat_max <= 0:
             raise ValueError("%s.heartbeat_max_s must be a positive number" % prefix)
+        if "standby" in service:
+            standby = service["standby"]
+            if not isinstance(standby, dict) or set(standby) - {"check", "interval_s"} or "check" not in standby:
+                raise ValueError("%s.standby must contain check and optional interval_s" % prefix)
+            if not isinstance(standby["check"], list) or not standby["check"] or any(
+                not isinstance(arg, str) or not arg for arg in standby["check"]
+            ):
+                raise ValueError("%s.standby.check must be a non-empty string list" % prefix)
+            interval = standby.get("interval_s", 30)
+            if isinstance(interval, bool) or not isinstance(interval, (int, float)) or interval <= 0:
+                raise ValueError("%s.standby.interval_s must be a positive number" % prefix)
         validated.append(dict(service))
     return validated
 
@@ -215,6 +226,7 @@ def _service_block(service, identifier):
     except (TypeError, ValueError):
         backoff = MAX_BACKOFF_SECONDS
     backoff = max(1, min(backoff, MAX_BACKOFF_SECONDS))
+    standby = service.get("standby")
     body = ["    (", "      cd %s || exit 125" % shlex.quote(str(service.get("cwd") or "."))]
     for key, value in sorted((service.get("env") or {}).items()):
         if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key) or not isinstance(value, str):
@@ -222,7 +234,7 @@ def _service_block(service, identifier):
         body.append("      export %s=%s" % (key, shlex.quote(value)))
     body.append("      %s" % _command_line(str(service.get("cmd") or "true")))
     body.append("    ) >/dev/null 2>&1 &")
-    return [
+    result = [
         "# --- %s ---" % name,
         "_supervise_%s() {" % identifier,
         "  # Background supervisor: restart the service with an exponential backoff.",
@@ -324,7 +336,7 @@ def _service_block(service, identifier):
         "}",
         "status_%s() {" % identifier,
         "  if [ ! -f %s ]; then" % pidfile,
-        "    echo %s:dead >&3" % quoted_name,
+        ('    if _sup_alive %s; then echo %s:standby-waiting >&3; else echo %s:dead >&3; fi' % (supfile, quoted_name, quoted_name)) if standby else "    echo %s:dead >&3" % quoted_name,
         "    return 0",
         "  fi",
         '  _sup_pid=$(cat %s 2>/dev/null || :)' % pidfile,
@@ -339,6 +351,29 @@ def _service_block(service, identifier):
         "}",
         "",
     ]
+    if standby:
+        check_line = " ".join(shlex.quote(arg) for arg in standby["check"])
+        interval = str(standby.get("interval_s", 30))
+        result.insert(result.index("    ("), "    # Wait for the external lease check before starting.")
+        result.insert(result.index("    ("), "    while [ ! -f %s ] && ! ( %s ) >/dev/null 2>&1; do sleep %s; done" % (stopfile, check_line, interval))
+        result.insert(result.index("    ("), "    [ -f %s ] && break" % stopfile)
+        wait_index = result.index('    wait "$_sup_child"')
+        result[wait_index:wait_index + 1] = [
+            "    _sup_misses=0",
+            "    while kill -0 \"$_sup_child\" 2>/dev/null; do",
+            "      sleep %s" % interval,
+            '      if ( %s ) >/dev/null 2>&1; then _sup_misses=0; else _sup_misses=$((_sup_misses + 1)); fi' % check_line,
+            '      if [ "$_sup_misses" -ge 2 ]; then',
+            '        kill "$_sup_child" 2>/dev/null || :',
+            '        _sup_grace=0',
+            '        while [ "$_sup_grace" -lt 20 ] && kill -0 "$_sup_child" 2>/dev/null; do sleep 1; _sup_grace=$((_sup_grace + 1)); done',
+            '        kill -0 "$_sup_child" 2>/dev/null && kill -9 "$_sup_child" 2>/dev/null || :',
+            "        break",
+            "      fi",
+            "    done",
+            '    wait "$_sup_child"',
+        ]
+    return result
 
 
 def render_supervisor(services, state_dir):
@@ -453,7 +488,17 @@ def status(services, state_dir, now=None, resume_file=None):
             if pid <= 0:
                 raise ValueError
         except FileNotFoundError:
-            result[name] = {"state": "dead", "pid": None}
+            state_name = "dead"
+            if service.get("standby"):
+                try:
+                    with open(os.path.join(state, name + ".sup.pid"), encoding="ascii") as stream:
+                        supervisor_pid = int(stream.read().strip())
+                    os.kill(supervisor_pid, 0)
+                except (OSError, ValueError):
+                    pass
+                else:
+                    state_name = "standby-waiting"
+            result[name] = {"state": state_name, "pid": None}
             continue
         except (OSError, ValueError):
             result[name] = {"state": "stale-pid", "pid": None}
