@@ -10,6 +10,7 @@
 - `openswarm/bin/openswarm:3345-3354`（`fleet_guard_call` 超时与 fail-closed 准入）
 - `openswarm/bin/openswarm:3370-3375`（`fleet_recovery_ttl_seconds` 600s 保护）
 - `openswarm/bin/fleet-capacity:12-34,90-115`（`fleet-capacity` 限额、status 与 recover 机制）
+- `openswarm/bin/fleet_certificate.py`（fleet 证书规则；与 `fleet-capacity` 一同部署到协调器）
 
 ---
 
@@ -121,6 +122,15 @@ ssh -F ~/.ssh/openswarm-hub/config gocc -- \
 
 ```bash
 python3 openswarm/bin/fleet-capacity gocc <<< '{"op":"status"}'
+```
+
+**部署要求**：证书准入闸门（`lanes`/`assign`）的判定规则在 `openswarm/bin/fleet_certificate.py`，必须与
+`fleet-capacity` 一起部署到协调器主机（单文件部署时闸门会 fail closed 报 `certificate_invalid`，
+而 `acquire`/`release`/`status`/`recover` 不受影响）：
+
+```bash
+install -m 0755 openswarm/bin/fleet-capacity openswarm/bin/fleet_certificate.py \
+  ~/.claude/openswarm-fleet-capacity/
 ```
 
 **返回结构与重点观察指标**：

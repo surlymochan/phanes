@@ -10079,6 +10079,50 @@ FLEET_SSH_OPTION_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 FLEET_SSH_DURATION = re.compile(r"[0-9]+[smhd]?")
 
 
+def certificate_module():
+    """The shared fleet certificate rules, loaded next to this script.
+
+    The `fleet-capacity` admission gate reads the same module, so one host is
+    judged the same way by `fleet status`, `fleet exec` and the gate. The
+    helper is deployed next to this script; when it is missing the caller
+    judges the host it can see instead of failing every fleet command.
+    """
+    module = sys.modules.get("fleet_certificate")
+    if module is not None:
+        return module
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "fleet_certificate.py")
+    try:
+        spec = importlib.util.spec_from_file_location("fleet_certificate", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError, ValueError):
+        sys.modules.pop("fleet_certificate", None)
+        return None
+    return module
+
+
+def fleet_certificate_status(host, timeout=20):
+    """Renew and check the certificate of one fleet host.
+
+    Returns (ok, error): a failed renewal, a missing expiry and an expiry in
+    the past all leave the host without a usable certificate. The check runs
+    over the transport options of the host, the same ones every other fleet
+    command uses.
+    """
+    module = certificate_module()
+    if module is None:
+        # The shared rules are not deployed next to this script: a host that
+        # asks for a certificate check cannot be verified, so it fails closed.
+        if host.get("renew_command") or host.get("check_certificate"):
+            return False, "certificate check unavailable: deploy fleet_certificate.py next to the CLI"
+        return True, ""
+    prefix = fleet_ssh_argv(host) if host.get("kind") == "ssh" else None
+    return module.host_certificate_status(host["name"], timeout=timeout, host=host, ssh_prefix=prefix)
+
+
 def fleet_ssh_control_path():
     """Return the default ControlPath of the multiplexed fleet connection."""
     return os.path.join(os.path.expanduser("~"), ".ssh", "openswarm", "cm-%C")
@@ -10187,6 +10231,13 @@ def fleet_config():
             raise ValueError(f"invalid fetch_retries for fleet host {name}")
         if "openswarm" in host and (not isinstance(host["openswarm"], str) or not host["openswarm"]):
             raise ValueError(f"invalid openswarm path for fleet host {name}")
+        renew = host.get("renew_command")
+        if renew is not None and (not isinstance(renew, str) or not renew.strip()):
+            raise ValueError(f"invalid renew_command for fleet host {name}")
+        check = host.get("check_certificate")
+        if check is not None and not (isinstance(check, bool)
+                                      or (isinstance(check, str) and check.strip())):
+            raise ValueError(f"invalid check_certificate for fleet host {name}")
         fleet_ssh_validate(host, name, kind)
         hosts[name] = host
     return hosts
@@ -11547,6 +11598,11 @@ def cmd_fleet(args):
         return
     if args.fleet_cmd == "exec":
         host = fleet_host(args.host)
+        certificate_ok, certificate_error = fleet_certificate_status(host, timeout=min(args.timeout, 30))
+        if not certificate_ok:
+            # A host without a usable certificate is never used for a command.
+            sys.stderr.write(f"{host['name']}: certificate_invalid: {certificate_error}\n")
+            raise SystemExit(1)
         command = args.args[1:] if args.args[:1] == ["--"] else args.args
         if not command:
             raise ValueError("fleet exec requires openswarm arguments after --")
@@ -11562,8 +11618,17 @@ def cmd_fleet(args):
     hosts = list(fleet_config().values())
     states = instabox_states(hosts)
     rows = []
+    invalid_certificate = False
     for host in hosts:
         row = {"name": host["name"], "reachable": False, "paused": False, "lanes": [], "active_runs": []}
+        certificate_ok, certificate_error = fleet_certificate_status(host)
+        if not certificate_ok:
+            # A host without a usable certificate never reports capacity.
+            invalid_certificate = True
+            row.update(status="certificate_invalid", certificate_valid=False, error=certificate_error,
+                       reachable=False, lanes=[], active_runs=[])
+            rows.append(row)
+            continue
         state = states.get(host.get("box"), "").lower()
         if host["kind"] == "instabox" and state not in ("running", "ready", "active"):
             row.update(paused=state == "paused", state=state or "unknown")
@@ -11589,7 +11654,9 @@ def cmd_fleet(args):
         for row in rows:
             state = row["status"]
             print(f"{row['name']}  {state}  lanes={len(row['lanes'])} active={len(row['active_runs'])}")
-            if state == "config invalid" and row.get("lane_config_error"):
+            if state == "certificate_invalid" and row.get("error"):
+                print(f"  certificate invalid: {row['error']}")
+            elif state == "config invalid" and row.get("lane_config_error"):
                 print(f"  config invalid: {row['lane_config_error']}")
             agy = (row.get("backends") or {}).get("agy") or {}
             if agy:
@@ -11599,6 +11666,8 @@ def cmd_fleet(args):
                 print(f"  {lane['name']} {lane['state']} {lane.get('model') or '-'} run={lane.get('current_run') or '-'}")
             for run in row["active_runs"]:
                 print(f"  run {run['id']} {run['state']}")
+    if invalid_certificate:
+        raise SystemExit(1)
 
 
 def safe_id(value):

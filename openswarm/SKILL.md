@@ -161,6 +161,13 @@ Hosts can set `seed_strategy` to `fetch` (default) or `push` for bases passed to
 An `ssh` host may add `jump` (hop chain), `connect_timeout`, `control_persist` and an `ssh_options` table;
 every fleet command then uses the same ssh options (the matching quoted `GIT_SSH_COMMAND` value is built
 from them as well).
+An `ssh` host may also declare `renew_command` (the command that renews its certificate and prints it) or
+`check_certificate` (a read-only inspection of the certificate it already carries). `fleet status` and
+`fleet exec` then check the certificate over the same transport options: a failed command, an output without an
+expiry or an expiry that already passed marks the host `certificate_invalid` — no lanes, no dispatchable
+capacity, a non-zero `fleet status` and a refused `fleet exec`. `cert` and `certificate` keep their meaning of
+a certificate file path and never switch the check on. The `fleet-capacity` admission gate applies the same
+rules to `lanes` and `assign`; it needs `fleet_certificate.py` next to `fleet-capacity` on the coordinator.
 Use the same logical repo name on all hosts; local defaults to the current checkout. Install the same CLI version
 and authenticated executors on the hosts. Full config example: [README](README.md#fleet-and-batch-dispatch).
 
