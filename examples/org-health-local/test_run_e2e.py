@@ -14,7 +14,18 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-REPO_ROOT = ROOT.parents[2]
+
+
+def find_repo_root():
+    source = ROOT.resolve()
+    for candidate in (source, *source.parents):
+        marker = candidate / '.git'
+        if marker.is_dir() or marker.is_file():
+            return candidate
+    return ROOT.parents[1]
+
+
+REPO_ROOT = find_repo_root()
 sys.path.insert(0, str(ROOT))
 
 from run_e2e import (REVIEW_REPORT, REVIEW_RESULTS, STATUS_FILE, STEP_ERROR_DIR, TIMINGS_FILE, parse_args,  # noqa: E402  (需要先让示例目录可被导入)

@@ -37,7 +37,7 @@ jobs:
               openswarm/*|.github/*) openswarm=true ;;
             esac
             case "$path" in
-              openbot/*|.github/*) openbot=true ;;
+              openbot/*|examples/*|.github/*) openbot=true ;;
             esac
           done < <(git diff --name-only "$BASE_SHA...HEAD")
           echo "openswarm=$openswarm" >> "$GITHUB_OUTPUT"
@@ -54,7 +54,7 @@ jobs:
               echo "Invalid JSON: $file" >&2
               exit 1
             fi
-          done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
+          done < <(find openswarm/examples examples -name '*.json' -not -path '*/node_modules/*' -print0)
   # Advisory only (Nick: CI gates on Linux tests, no heavy gates). An unmarked PR title is a bookkeeping
   # issue for upstream sync, not a broken build: report it as a warning, never fail the check or block merge.
   upstream-drift:
@@ -146,11 +146,11 @@ jobs:
         run: python openbot/apps/auth-api/scripts/check_migration_numbers.py openbot/apps/auth-api/migrations
       - name: Run scenario unit tests
         run: |
-          find openbot/examples/org-health-local -type f -name 'test_*.py' -print0 |
+          find examples/org-health-local -type f -name 'test_*.py' -print0 |
             while IFS= read -r -d '' test_file; do
               test_dir="$(dirname "$test_file")"
               test_name="$(basename "$test_file" .py)"
               (cd "$test_dir" && python -m unittest "$test_name" -v)
             done
       - name: Validate scenario data
-        run: python openbot/examples/org-health-local/validate.py
+        run: python examples/org-health-local/validate.py

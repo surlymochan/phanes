@@ -1,6 +1,7 @@
 // Exercises the real loopback service and rendered synthetic demo in both languages.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,10 +11,14 @@ const root = resolve(import.meta.dirname, "..");
 const output = join(root, ".openbot-build", "org-health-demo-e2e");
 const temporary = await mkdtemp(join(tmpdir(), "openbot-health-demo-"));
 const data = join(temporary, "diagnosis.json");
-const source = await readFile(join(root, "examples/org-health-local/data/diagnosis.json"), "utf8");
+const exampleRoot = [
+  join(root, "..", "examples", "org-health-local"),
+  join(root, "examples", "org-health-local"),
+].find(existsSync) ?? join(root, "..", "examples", "org-health-local");
+const source = await readFile(join(exampleRoot, "data", "diagnosis.json"), "utf8");
 const snapshot = JSON.parse(source);
 await writeFile(data, source);
-const server = spawn("python3", [join(root, "examples/org-health-local/serve.py"), "--port", "0", "--data", data], {
+const server = spawn("python3", [join(exampleRoot, "serve.py"), "--port", "0", "--data", data], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 const checks: string[] = [];

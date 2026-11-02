@@ -505,6 +505,9 @@ def run_step(name, command, timings, stdout=None, stderr=None, output_path=None,
 
 def source_repo_root():
     """Find the source checkout root without using the artifact directory or cwd."""
+    override = os.environ.get('SOURCE_REPO_ROOT') or os.environ.get('OPENBOT_REPO_ROOT')
+    if override:
+        return Path(override).resolve()
     source = ROOT.resolve()
     for candidate in (source, *source.parents):
         marker = candidate / '.git'

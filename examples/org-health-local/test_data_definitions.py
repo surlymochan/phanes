@@ -82,7 +82,7 @@ def find_doc() -> Path:
         path = candidate / DOC_RELATIVE
         if path.is_file():
             return path
-    return ROOT.parents[2] / DOC_RELATIVE
+    return ROOT.parents[1] / DOC_RELATIVE
 
 
 def collect_schema_keys(schema: dict) -> set[str]:
