@@ -418,6 +418,10 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    idle_since = state.get("_idle_since", {})
+    last_idle = state.get("_last_idle_seconds", {})
+    status["_idle_seconds"] = {L: max(0, int(time.time() - idle_since[L])) if L in idle_since
+                               else last_idle[L] for L in lanes if L in idle_since or L in last_idle}
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -567,7 +571,8 @@ def tick(lanes, state, last_warn):
         if "error" in r: continue
         if st and isinstance(r.get("run"), dict):
             if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
-            if finish(L, lanes[L], st, r["run"], state): state.pop(L); save_state(state)
+            if finish(L, lanes[L], st, r["run"], state):
+                state.pop(L); state.setdefault("_idle_since", {})[L] = time.time(); save_state(state)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
@@ -588,7 +593,14 @@ def tick(lanes, state, last_warn):
             # the authoritative read failed: keep the row (it may still be dispatchable),
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
-        if not pick: continue
+        idle_since = state.setdefault("_idle_since", {}).get(L)
+        idle_seconds = max(0, time.time() - idle_since) if idle_since else 0
+        if not pick:
+            if idle_seconds > 300:
+                eligible = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)]
+                reason = "无卡" if not eligible else "无容量"
+                log(f"{L} idle {int(idle_seconds)}s; 派发未成功：{reason}")
+            continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
@@ -596,6 +608,11 @@ def tick(lanes, state, last_warn):
         except Exception as e:
             gh(["issue", "edit", str(pick["n"]), "--remove-label", "in-progress"]); host_fail(cfg["host"], f"dispatch #{pick['n']}: {e}"); continue
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+        if idle_seconds > 300:
+            log(f"{L} idle {int(idle_seconds)}s; 派发 #{pick['n']}（有卡且容量可用）")
+        if idle_since:
+            state.setdefault("_last_idle_seconds", {})[L] = int(idle_seconds)
+        state["_idle_since"].pop(L, None)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
