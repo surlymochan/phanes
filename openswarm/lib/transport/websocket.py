@@ -37,6 +37,11 @@ Wire protocol (JSON text frames, RFC 6455):
                                     "evidence": "<pointer>"}}
     relay    -> executor: {"type": "ack", "id": "<delivery-id>",
                            "payload": {"duplicate": false}}
+    executor -> relay: {"type": "status",
+                        "payload": {"issue": 1483, "run_id": "run-...",
+                                    "status": "running|completed|failed"}}
+    relay    -> executor: {"type": "status-ack",
+                           "payload": {"status": "running|completed|failed"}}
     either   -> either:   {"type": "error", "payload": {"error": "<reason>"}}
     either   -> either:   WebSocket ping/pong frames (heartbeat)
 
@@ -75,14 +80,32 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 LANE_STATE_FOR_EVENT = {
     "claim": "in-progress",      # card leaves lane-ready, executor holds it
     "heartbeat": "in-progress",  # lease still alive, nothing new to schedule
+    "status": "in-progress",     # generic status event; see lane_state_for_status
     "evidence": "in-progress",   # work reported; review/merge still pending
     "disconnect": "lane-ready",  # lease expiry requeues; never lane-failed
+}
+
+# Execution statuses an executor may report. The transport never promotes
+# a run to lane-failed on its own: a "failed" report only tells the
+# control plane the run ended, and the control plane decides whether to
+# requeue it (lane-ready) or mark it failed.
+VALID_STATUSES = ("running", "completed", "failed")
+
+STATUS_LANE_STATE = {
+    "running": "in-progress",
+    "completed": "in-progress",  # work done; review/merge still pending
+    "failed": "lane-ready",      # requeueable; transport never says lane-failed
 }
 
 
 def lane_state_for(event: str) -> Optional[str]:
     """The lane state a relay event maps to, or None for unknown events."""
     return LANE_STATE_FOR_EVENT.get(event)
+
+
+def lane_state_for_status(status: Any) -> Optional[str]:
+    """The lane state a reported execution status maps to, or None."""
+    return STATUS_LANE_STATE.get(status) if isinstance(status, str) else None
 
 
 # --------------------------------------------------------------------------
@@ -109,6 +132,10 @@ class RelayState:
         self._responses: Dict[Tuple[str, str, str],
                               Tuple[Dict[str, Any], Tuple[Any, ...]]] = {}
         self._evidence: Dict[str, Dict[str, Any]] = {}
+        # Latest reported execution status per issue (latest wins; a
+        # status is point-in-time, so it is deliberately not replayed
+        # from the pending queue on reconnect -- only evidence is).
+        self._statuses: Dict[int, Dict[str, Any]] = {}
 
     def authenticate(self, token: Any) -> Optional[str]:
         """The executor name for ``token``, or None. Constant-time compare."""
@@ -232,6 +259,46 @@ class RelayState:
             return self._store(executor, "evidence", delivery_id, fingerprint,
                                {"type": "ack", "id": delivery_id,
                                 "payload": {"duplicate": False, "record": dict(record)}})
+
+    def report_status(self, executor: str, issue: Any, run_id: Any,
+                      status: Any, delivery_id: str = "") -> Dict[str, Any]:
+        """Record the latest execution status for an assignment.
+
+        Only the executor holding the assignment may report, and only a
+        known status is accepted; anything else is an error and stores
+        nothing. A status report is not an evidence delivery: it carries
+        no idempotency guarantee and is never replayed on reconnect --
+        the executor re-reports its current status after reconnecting if
+        the control plane still needs it.
+        """
+        with self._lock:
+            number = self._number(issue)
+            if number is None:
+                return {"type": "error",
+                        "payload": {"error": "issue must be a number"}}
+            if status not in VALID_STATUSES:
+                return {"type": "error",
+                        "payload": {"error": f"unknown status: {status!r}"}}
+            held = self._assignments.get(number)
+            if held is None or held["executor"] != executor or held["run_id"] != run_id:
+                return {"type": "error",
+                        "payload": {"error": f"no assignment for {executor} on {number}"}}
+            record = {"issue": number, "executor": executor, "run_id": run_id,
+                      "status": status}
+            self._statuses[number] = record
+            response: Dict[str, Any] = {"type": "status-ack",
+                                        "payload": {"status": status,
+                                                    "record": dict(record)}}
+            if delivery_id:
+                response["id"] = delivery_id
+            return response
+
+    def status(self, issue: Any) -> Optional[Dict[str, Any]]:
+        """The latest reported status for ``issue``, or None."""
+        try:
+            return dict(self._statuses[int(issue)])
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def evidence_records(self) -> Dict[str, Dict[str, Any]]:
         """A copy of every stored evidence record, keyed by delivery id."""
@@ -373,6 +440,10 @@ class _RelayHandler(socketserver.BaseRequestHandler):
                 self._reply(self.server.state.submit_evidence(
                     executor, str(message.get("id") or ""),
                     data.get("issue"), data.get("run_id"), data.get("evidence")))
+            elif kind == "status":
+                self._reply(self.server.state.report_status(
+                    executor, data.get("issue"), data.get("run_id"),
+                    data.get("status"), str(message.get("id") or "")))
             else:
                 self._reply({"type": "error", "payload": {"error": f"unknown type: {kind}"}})
 
@@ -446,6 +517,10 @@ class ExecutorClient:
         self.sock: Optional[socket.socket] = None
         self.stream: Any = None
         self.pending: Dict[str, Dict[str, Any]] = {}
+        # Replies to the evidence replays of the last reconnect(), keyed
+        # by delivery id, so a caller can verify a replay was a duplicate
+        # ACK rather than a fresh store.
+        self.last_replay_replies: Dict[str, Dict[str, Any]] = {}
 
     def connect(self) -> Dict[str, Any]:
         """Open the socket, handshake, hello. Returns the welcome message."""
@@ -480,17 +555,35 @@ class ExecutorClient:
         return welcome
 
     def reconnect(self) -> Dict[str, Any]:
-        """Re-authenticate, then replay every unacked evidence message."""
+        """Re-authenticate, then replay every unacked evidence message.
+
+        Status reports are deliberately not replayed here: a status is
+        point-in-time and a stale replay could overwrite a newer one, so
+        the caller re-reports its current status explicitly if needed.
+        """
         welcome = self.connect()
+        self.last_replay_replies = {}
         for delivery_id, message in list(self.pending.items()):
             self._send(message)
             reply = self._read_message()
+            self.last_replay_replies[delivery_id] = reply
             if reply.get("type") == "ack":
                 self.pending.pop(delivery_id, None)
         return welcome
 
     def claim(self, issue: int, delivery_id: str) -> Dict[str, Any]:
         self._send({"type": "claim", "id": delivery_id, "payload": {"issue": issue}})
+        return self._read_message()
+
+    def report_status(self, issue: int, run_id: str, status: str,
+                      delivery_id: str = "") -> Dict[str, Any]:
+        """Report the run's current execution status (running/completed/failed)."""
+        message: Dict[str, Any] = {"type": "status",
+                                   "payload": {"issue": issue, "run_id": run_id,
+                                               "status": status}}
+        if delivery_id:
+            message["id"] = delivery_id
+        self._send(message)
         return self._read_message()
 
     def report_evidence(self, issue: int, run_id: str, evidence: str,

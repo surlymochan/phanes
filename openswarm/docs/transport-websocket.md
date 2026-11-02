@@ -20,6 +20,8 @@
 | 中继 → 执行端 | `assigned {issue, run_id}` | 已派活 |
 | 执行端 → 中继 | `evidence {issue, run_id, evidence}`（带 delivery id） | 回传 Evidence 指针 |
 | 中继 → 执行端 | `ack {duplicate}` | 已收（`duplicate=true` 表示重放） |
+| 执行端 → 中继 | `status {issue, run_id, status}` | 回传执行状态：`running` / `completed` / `failed` |
+| 中继 → 执行端 | `status-ack {status}` | 已收最新状态（最新状态胜出） |
 | 任一方向 | `error {error}` | 拒绝原因 |
 | 任一方向 | ping / pong 帧 | 心跳 |
 
@@ -51,8 +53,15 @@
 | --- | --- |
 | `claim` | `in-progress`（卡离开 `lane-ready`，执行端持有） |
 | 心跳存活 | `in-progress`（租约仍有效） |
+| `status: running` | `in-progress`（运行中） |
+| `status: completed` | `in-progress`（已做完，review/merge 仍待 lane 处理） |
+| `status: failed` | 回 `lane-ready`（可重排重试；是否记 `lane-failed` 由控制面定夺，**中继永不直接记 `lane-failed`**） |
 | `evidence` | `in-progress`（已回传，review/merge 仍待 lane 处理） |
 | 断线且租约过期 | 回 `lane-ready` 重新排队，**绝不直接记 `lane-failed`** |
+
+状态是时点值、最新胜出：只有 evidence 走待确认重放，状态不在重连
+时自动重放（旧状态重放会覆盖更新的状态）；重连后执行端如需同步，
+显式再报一次当前状态。未知状态、非持有者的状态一律拒绝、不存。
 
 ## 明确不做
 
@@ -64,8 +73,9 @@
 ## PoC 验证
 
 最小 PoC（测试即演示）：一个无入站端口的假执行端只向外拨号，
-领取一张 fixture 卡并回传 Evidence 指针；覆盖断线重连、重复投递
-幂等、未授权拒绝：
+领取一张 fixture 卡、回传执行状态并回传 Evidence 指针；覆盖断线
+重连、重复投递幂等、未授权拒绝，以及“已发送、ACK 未收到”时重连
+前中继已存证、重放为重复 ACK 且只存一次：
 
 ```bash
 python3 -m unittest openswarm.tests.test_transport_websocket -v

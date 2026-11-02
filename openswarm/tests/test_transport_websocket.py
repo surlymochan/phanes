@@ -127,6 +127,40 @@ class IdempotencyTests(unittest.TestCase):
         self.assertEqual(records["ev-shared"]["evidence"], "evidence://fixture/a")
 
 
+class StatusTests(unittest.TestCase):
+    def test_report_status_tracks_running_then_completed(self):
+        state = fresh_state()
+        run_id = state.claim("fake-exec", 9001, "d-claim-1")["payload"]["run_id"]
+        running = state.report_status("fake-exec", 9001, run_id, "running")
+        self.assertEqual(running["type"], "status-ack")
+        self.assertEqual(running["payload"]["status"], "running")
+        self.assertEqual(state.status(9001)["status"], "running")
+        # Lane mapping: work in flight or done-but-unreviewed stays
+        # in-progress; only the control plane may ever say lane-failed.
+        self.assertEqual(ws.lane_state_for_status("running"), "in-progress")
+        self.assertEqual(ws.lane_state_for_status("completed"), "in-progress")
+        self.assertEqual(ws.lane_state_for_status("failed"), "lane-ready")
+        self.assertIsNone(ws.lane_state_for_status("stuck"))
+        completed = state.report_status("fake-exec", 9001, run_id, "completed")
+        self.assertEqual(completed["type"], "status-ack")
+        self.assertEqual(state.status(9001)["status"], "completed")
+
+    def test_report_status_refuses_wrong_run_unknown_status_and_strangers(self):
+        state = fresh_state()
+        run_id = state.claim("fake-exec", 9001, "d-claim-1")["payload"]["run_id"]
+        self.assertEqual(state.report_status("fake-exec", 9001, "run-nope",
+                                             "running")["type"], "error")
+        self.assertEqual(state.report_status("fake-exec", 9001, run_id,
+                                             "stuck")["type"], "error")
+        self.assertEqual(state.report_status("other-exec", 9001, run_id,
+                                             "running")["type"], "error")
+        self.assertIsNone(state.status(9001))
+        # A status for a card nobody claimed stores nothing either.
+        self.assertEqual(state.report_status("fake-exec", 9001, "run-nope",
+                                             "failed")["type"], "error")
+        self.assertIsNone(state.status(9001))
+
+
 class SocketPoCTests(unittest.TestCase):
     def setUp(self):
         self.state = fresh_state()
@@ -163,6 +197,22 @@ class SocketPoCTests(unittest.TestCase):
         records = self.state.evidence_records()
         self.assertEqual(len(records), 1)
         self.assertEqual(records["sock-ev-1"]["evidence"], "evidence://fixture/websocket-poc")
+
+    def test_fake_executor_reports_execution_status_over_the_relay(self):
+        client = self._client()
+        assigned = client.claim(9001, "sock-claim-1")
+        run_id = assigned["payload"]["run_id"]
+        running = client.report_status(9001, run_id, "running", "sock-status-1")
+        self.assertEqual(running["type"], "status-ack")
+        self.assertEqual(running["payload"]["status"], "running")
+        self.assertEqual(self.state.status(9001)["status"], "running")
+        failed = client.report_status(9001, run_id, "failed", "sock-status-2")
+        self.assertEqual(failed["type"], "status-ack")
+        self.assertEqual(self.state.status(9001)["status"], "failed")
+        # Latest wins, and a bogus status stores nothing new.
+        bogus = client.report_status(9001, run_id, "stuck", "sock-status-3")
+        self.assertEqual(bogus["type"], "error")
+        self.assertEqual(self.state.status(9001)["status"], "failed")
 
     def test_unauthorized_executor_is_rejected_at_hello(self):
         with self.assertRaises(ConnectionError):
@@ -203,13 +253,26 @@ class SocketPoCTests(unittest.TestCase):
                                        "sock-ev-3")
         # The unacked message must already be pending, before any reconnect.
         self.assertIn("sock-ev-3", client.pending)
-        # Let the relay thread process the frame already sent (the replay
-        # below would still store it exactly once even if it had not).
+        # The old test only waited for the record with a timeout and then
+        # reconnected anyway, so a slow first delivery could pass via
+        # the replay itself instead of via the ACK-lost path. Assert
+        # *before* reconnecting that the relay already stored the frame
+        # that was sent before the ACK was lost.
         deadline = time.time() + 2.0
         while len(self.state.evidence_records()) < 1 and time.time() < deadline:
             time.sleep(0.02)
+        pre_reconnect = self.state.evidence_records()
+        self.assertEqual(len(pre_reconnect), 1,
+                         "relay must already hold the evidence sent before the ACK was lost")
+        self.assertEqual(pre_reconnect["sock-ev-3"]["evidence"],
+                         "evidence://fixture/ack-lost")
         client.reconnect()
         self.assertEqual(client.pending, {})
+        # The replay must be recognised as a duplicate ACK, not a second
+        # store, and the record count must stay at one.
+        replay = client.last_replay_replies.get("sock-ev-3", {})
+        self.assertEqual(replay.get("type"), "ack")
+        self.assertTrue(replay.get("payload", {}).get("duplicate"))
         records = self.state.evidence_records()
         self.assertEqual(len(records), 1)
         self.assertEqual(records["sock-ev-3"]["evidence"], "evidence://fixture/ack-lost")
