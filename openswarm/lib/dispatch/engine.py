@@ -364,6 +364,18 @@ REMOTE_STATUS = r'''
 import json,os,sys
 O=os.path.expanduser(sys.argv[3] if len(sys.argv)>3 and sys.argv[3] else "~/.claude/openswarm"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
+def usage(obj):
+  if not isinstance(obj,dict): return None
+  u=obj.get("usage") or obj.get("token_usage") or obj.get("usage_metadata")
+  if not isinstance(u,dict): return None
+  def pick(*keys):
+    for k in keys:
+      v=u.get(k)
+      if isinstance(v,(int,float)) and not isinstance(v,bool) and v>=0: return int(v)
+    return None
+  result={"input":pick("input_tokens","prompt_tokens","input"),"output":pick("output_tokens","completion_tokens","output"),
+    "cache_read":pick("cache_read_input_tokens","cached_input_tokens","cache_read_tokens"),"cache_write":pick("cache_creation_input_tokens","cache_write_tokens")}
+  return result if any(v is not None for v in result.values()) else None
 try:
   with open(f"{O}/lanes/{L}/state.json") as stream: ls=json.load(stream)
   out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
@@ -376,7 +388,7 @@ if R:
     try:
       with open(f"{O}/runs/{R}/status.json") as stream: rs=json.load(stream)
     except Exception: rs={}
-    out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
+    out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),"usage":usage(r) or usage(res),
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
       "started":r.get("started") if r.get("started") is not None else rs.get("started"),
       "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
@@ -387,6 +399,7 @@ if R:
     try:
       with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
       pid=s.get("runner_pid"); out["run_state"]=s.get("state")
+      out["usage"]=usage(s)
       if pid:
         try: os.kill(int(pid),0); out["runner_alive"]=True
         except ProcessLookupError: out["runner_alive"]=False
@@ -2157,6 +2170,11 @@ class Dispatcher:
                      "paused_reason": (f"lane:{L}" if os.path.exists(self.path(f"PAUSE-{L}")) else
                                       f"host:{lc.get('host')}" if os.path.exists(self.path(f"PAUSE-HOST-{lc.get('host')}")) else
                                       f"backend:{backend}" if backend and os.path.exists(self.path(f"PAUSE-BACKEND-{backend}")) else None)}
+            observed = res.get(L, {}).get("run")
+            usage = observed.get("usage") if isinstance(observed, dict) else res.get(L, {}).get("usage")
+            entry["run_usage"] = usage if isinstance(usage, dict) else "未采集"
+            if isinstance(observed, dict):
+                entry["run_usage_at"] = observed.get("timestamp")
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)
