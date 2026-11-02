@@ -119,6 +119,15 @@ class CtlBootDocumentationTests(unittest.TestCase):
             self.assertIn(item, self.content, f"docs/ctl-boot.md missing {item}")
             self.assertIn(item, tool_content, f"tools/check-ctl-boot.sh missing {item}")
 
+    def test_check_dual_hosts_ok_contract(self):
+        """Refs #1637: tools/check-dual-hosts-ok.py 离线契约与假 status + lanes.json 断言通过。"""
+        dual_check = ROOT / "tools" / "check-dual-hosts-ok.py"
+        self.assertTrue(dual_check.is_file(), f"Expected {dual_check} to exist")
+        self.assertIn("check-dual-hosts-ok.py", self.content, "docs/ctl-boot.md missing check-dual-hosts-ok.py")
+        res = subprocess.run([sys.executable, str(dual_check)], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("dual hosts_ok to reachable lanes: OK", res.stdout)
+
     def test_check_merge_idle_heartbeat_contract(self):
         """Refs #955: tools/check-merge-idle-heartbeat.py 离线契约与假目录断言通过。"""
         merge_check = ROOT / "tools" / "check-merge-idle-heartbeat.py"
