@@ -18,6 +18,24 @@ def line(ts, status, lane="m4-1", err=""):
                        "err": err, "ms": 10, "in_tok": 1, "out_tok": 1})
 
 
+def slow_line(ts, status, lane, ms, err=""):
+    return json.dumps({"ts": ts, "id": "r", "lane": lane, "status": status,
+                       "err": err, "ms": ms, "in_tok": 1, "out_tok": 1})
+
+
+# The 07:31 incident: three 502s that hung for 18 minutes across the box pause
+# 07:31:44 -> 07:49:46 (local, UTC+8), one healthy 200 and one fast 429.
+PAUSE_RECORD = {"from": "2026-11-02T07:31:44", "to": "2026-11-02T07:49:46", "tz": "+08:00"}
+PAUSE_WINDOW = "2026-11-02T07:31:44+08:00→2026-11-02T07:49:46+08:00"
+SLOW_FRAGMENT = [
+    slow_line("2026-11-01T23:49:45Z", 502, "M6", 1091840, "provider unavailable"),
+    slow_line("2026-11-01T23:49:47Z", 502, "M7", 1100282, "provider unavailable"),
+    slow_line("2026-11-01T23:49:48Z", 502, "M13", 1093778, "provider unavailable"),
+    slow_line("2026-11-01T23:50:00Z", 200, "M1", 1200),
+    slow_line("2026-11-01T23:50:10Z", 429, "M2", 900, "quota exceeded"),
+]
+
+
 def run_report(lines, tz="+08:00", by="minute", window=10.0, since=None):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "broker0-requests.jsonl"
@@ -122,6 +140,69 @@ class BrokerLogSummaryTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 bls.main([str(path), "--tz", "+08:00"])
         self.assertIn("VERDICT quota_or_rate_limit", out.getvalue().splitlines())
+
+    def test_slow_lists_long_and_failed_requests(self):
+        records = [bls.parse_line(item) for item in SLOW_FRAGMENT]
+        slow = bls.slow_requests(records, 60000)
+        self.assertEqual([rec["lane"] for rec in slow], ["M6", "M7", "M13", "M2"])
+        report = bls.build_report(records, 0, bls.timezone.utc, "minute", 10.0, 60000)
+        self.assertEqual(report["slow_ms"], 60000)
+        self.assertEqual(len(report["slow"]), 4)
+        self.assertEqual(report["slow"][0]["start"], "2026-11-01T23:31:33+00:00")
+        self.assertEqual(report["slow"][0]["end"], "2026-11-01T23:49:45+00:00")
+        self.assertEqual(report["slow"][0]["ms"], 1091840)
+        self.assertEqual(report["slow"][0]["err"], "provider unavailable")
+
+    def test_slow_marks_the_pause_window(self):
+        records = [bls.parse_line(item) for item in SLOW_FRAGMENT]
+        pauses = bls.parse_pause_lines([json.dumps(PAUSE_RECORD)])
+        rows = bls.slow_entries(records, 60000, pauses, bls.timezone.utc)
+        self.assertEqual([row["during_pause"] for row in rows[:3]], [PAUSE_WINDOW] * 3)
+        self.assertIsNone(rows[3]["during_pause"])
+
+    def test_pause_overlap_counts_failed_requests(self):
+        records = [bls.parse_line(item) for item in SLOW_FRAGMENT]
+        pauses = bls.parse_pause_lines([json.dumps(PAUSE_RECORD)])
+        summary = bls.pause_overlap_summary(records, pauses)
+        self.assertEqual(summary["requests"], 3)
+        self.assertEqual(summary["failed"], 3)
+        self.assertEqual(summary["windows"][0]["from"], "2026-11-02T07:31:44+08:00")
+
+    def test_pause_timezone_defaults_to_utc_plus_8(self):
+        default = bls.parse_pause_lines([json.dumps(
+            {"from": PAUSE_RECORD["from"], "to": PAUSE_RECORD["to"]})])[0]
+        self.assertEqual(bls.pause_window_text(default), PAUSE_WINDOW)
+        utc = bls.parse_pause_lines([json.dumps(dict(PAUSE_RECORD, tz="Z"))])[0]
+        self.assertEqual(bls.pause_window_text(utc),
+                         "2026-11-02T07:31:44+00:00→2026-11-02T07:49:46+00:00")
+        record = bls.parse_line(SLOW_FRAGMENT[0])
+        start, end = bls.request_span(record)
+        self.assertIsNone(bls.find_pause_overlap(start, end, [utc]))
+        self.assertIsNotNone(bls.find_pause_overlap(start, end, [default]))
+
+    def test_cli_json_carries_slow_and_pause_overlaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "broker3-requests.jsonl"
+            log.write_text("\n".join(SLOW_FRAGMENT) + "\n", encoding="utf-8")
+            pauses = Path(tmp) / "box-pauses.jsonl"
+            pauses.write_text(json.dumps(PAUSE_RECORD) + "\n", encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = bls.main([str(log), "--json", "--slow", "60000",
+                                 "--pauses", str(pauses)])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(len(data["slow"]), 4)
+        self.assertEqual(data["slow"][0]["during_pause"], PAUSE_WINDOW)
+        self.assertEqual(data["pause_overlaps"]["failed"], 3)
+
+    def test_self_test_runs(self):
+        import subprocess
+        import sys
+        result = subprocess.run([sys.executable, str(SCRIPT), "--self-test"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ok", result.stdout)
 
 
 if __name__ == "__main__":
