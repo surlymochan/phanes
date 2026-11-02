@@ -341,5 +341,16 @@
     "prepare_replaces_links": [
       "node_modules"
     ]
+  },
+  "dispatch": {
+    "_doc": "热文件共享上限（HOT_SHARED）单一数据源：铸卡侧（planner 铸卡前的预检）与 AD 侧（派活时的阻塞判定）读这一份，禁止两处各写一份。hot_shared 是每个文件的同时在途上限，hot_union 是不阻塞的文件，hot_default 是没有单列的文件的默认上限；派发配置可以覆盖，但不能另写一份清单。",
+    "hot_default": 1,
+    "hot_union": [],
+    "hot_shared": {
+      "openswarm/bin/openswarm": 1,
+      "openswarm/lib/dispatch/engine.py": 1,
+      "openswarm/lib/dispatch/hotfiles.py": 1,
+      "openswarm/policy.json": 1
+    }
   }
 }

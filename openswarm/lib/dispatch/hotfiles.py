@@ -8,6 +8,9 @@ there costs nothing.
 
 This module owns no I/O and reads no configuration: the caps come from the caller so the
 dispatcher can wire it in without this module knowing where the policy lives (Refs #1398).
+The caps themselves have one source, the dispatch policy file (see ``hot_policy.py``):
+the mint side and the dispatch side read the same list, so they cannot disagree about
+a cap (Refs #1721).
 """
 import posixpath
 import re
@@ -67,6 +70,24 @@ def parse_hot_files(body):
                 seen.add(path)
                 files.append(path)
     return files
+
+
+def merge_caps(*sources):
+    """Merge per-file cap maps, normalizing the paths before the maps are merged.
+
+    One file can be spelled in several ways (``src/a.py`` and ``./src/a.py``).  Merging
+    the raw maps would keep every spelling, and the normalization in :class:`HotLock`
+    would then let the spelling that happens to come last win instead of the source
+    with the higher precedence.  Normalizing first collapses the equivalent paths, so
+    the later source decides.
+    """
+    merged = {}
+    for source in sources:
+        for path, cap in (source or {}).items():
+            key = _normalize(path)
+            if key:
+                merged[key] = cap
+    return merged
 
 
 class HotLock:
@@ -129,6 +150,29 @@ class HotLock:
             if self.count_for(path, inflight) >= self.cap_for(path):
                 return True
         return False
+
+    def preflight(self, files, inflight=None):
+        """Return the verdict of a card that is about to be minted (Refs #1721).
+
+        The verdict names every hot file that already sits at its cap, so the mint side
+        can tell the planner which file to wait for, and it carries the advice the
+        planner needs: a conflicting card is postponed (改期) or replaced (换题), a free
+        card may be minted.  The verdict is the same decision the dispatch side makes
+        when it hands a card to a lane, so the two sides never disagree.
+        """
+        counts = self.counts if inflight is None else (inflight or {})
+        conflicts, seen = [], set()
+        for path in files or []:
+            key = _normalize(path)
+            if not key or is_doc_file(key) or key in seen:
+                continue
+            seen.add(key)
+            count = self.count_for(key, counts)
+            limit = self.cap_for(key)
+            if count >= limit:
+                conflicts.append({"file": key, "inflight": count, "limit": limit})
+        return {"blocked": bool(conflicts), "conflicts": conflicts, "files": sorted(seen),
+                "advice": "改期或换题" if conflicts else "可铸卡"}
 
     def acquire(self, files):
         """Take the hot files; return False, and change nothing, when a cap is reached."""
