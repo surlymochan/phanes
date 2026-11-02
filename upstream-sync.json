@@ -4,7 +4,9 @@
       "upstream_repo": "https://github.com/surlymochan/openbot.git",
       "base_sha": "2f02a65b1bebebae8640ddf971f1719f33139f53",
       "phanes_only": [
-        "examples/org-health-local/**"
+        "scripts/org-health-demo-e2e.ts",
+        "packages/i18n/src/messages/en/orgHealthDemo.ts",
+        "packages/i18n/src/messages/zh/orgHealthDemo.ts"
       ]
     },
     "openswarm": {

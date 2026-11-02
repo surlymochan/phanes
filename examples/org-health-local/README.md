@@ -16,7 +16,7 @@ diagnosis.json 顶层字段一览（以 schema/diagnosis.schema.json 为准）�
 
 ## 常用命令
 
-在本目录（`openbot/examples/org-health-local`）可直接执行以下三条常用命令：
+在本目录（`examples/org-health-local`）可直接执行以下三条常用命令：
 
 ```bash
 # 校验诊断快照数据
@@ -50,7 +50,7 @@ python3 run_e2e.py --workdir demo --review
 预览（两条命令，都不需要 Bun）：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 builder/build_site.py --data demo/diagnosis.json --out demo/site --bundle demo/vendor/app.bundle.js
 python3 serve.py --root demo/site
 ```
@@ -63,7 +63,7 @@ python3 serve.py --root demo/site
 `demo/site-summary.md`，只用 Python 标准库，只读站点产物，不改动 `demo/site/`：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 demo/make_site_summary.py
 ```
 
@@ -78,7 +78,7 @@ python3 demo/make_site_summary.py
 重新生成整条产物链：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 run_e2e.py --workdir demo --review
 ```
 
@@ -139,7 +139,7 @@ issue bus 的协议与结果格式在 `openswarm/docs/BUS.md`），当前盘点�
 ### 1) 本地跑通
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 run_e2e.py --workdir <workdir> --review
 ```
 
@@ -158,7 +158,7 @@ task=$(mktemp /tmp/openswarm-org-health.XXXXXX.md)
 cat >"$task" <<'EOF'
 Repository: openbot
 Task type: docs
-在 openbot/examples/org-health-local 下运行 python3 run_e2e.py --workdir <目录> --review，
+在 examples/org-health-local 下运行 python3 run_e2e.py --workdir <目录> --review，
 把 brief.json、diagnosis.json、dist/ 和 review.md 的结论写进提交说明；只用合成数据，
 不要提交真实组织数据。
 EOF
@@ -199,7 +199,7 @@ openswarm bus init <bus-owner>/<bus-repo>
 ```bash
 openswarm run --backend github-issue --cwd <target-repo> --base <commit> \
   --budget-minutes 40 \
-  --verify 'python3 -m unittest discover -s openbot/examples/org-health-local -p "test_*.py"' \
+  --verify 'python3 -m unittest discover -s examples/org-health-local -p "test_*.py"' \
   --task-file task.md
 openswarm bus status
 ```
@@ -227,7 +227,7 @@ openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backe
 运行目录内全部单元测试（包括根目录及 boss、da、builder、review 子包）推荐使用：
 
 ```bash
-cd openbot/examples/org-health-local && python3 run_tests.py
+cd examples/org-health-local && python3 run_tests.py
 ```
 
 运行 `python3 run_e2e.py --workdir <workdir>` 可依次执行 Boss、DA、Builder 和站点检查；加 `--review` 时再执行独立审查，审查会核对 `<workdir>/brief.json`、`diagnosis.json` 与 `dist`；任一步失败时整体返回非零。可用 `--boss`、`--da`、`--builder`、`--checker` 和 `--reviewer` 指定角色脚本（`--reviewer` 默认使用 `review/cross_check.py`），用 `--raw` 指定原始 CSV 目录、用 `--bundle` 指定已编译的浏览器包。角色脚本、原始数据和 bundle 的相对路径以示例目录为基准，绝对路径原样使用，因此在仓库外的临时目录里调用时也不依赖 cwd；默认值是示例目录内的绝对路径。无论从哪个目录调用，产物都写入 `--workdir`（相对 `--workdir` 仍以调用时的 cwd 为基准）。
@@ -237,7 +237,7 @@ cd openbot/examples/org-health-local && python3 run_tests.py
 最小复现只使用仓库内的合成 CSV 和预构建的合成示例 bundle；把产物写到仓库外的临时目录，不修改 `demo/`：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 workdir="$(mktemp -d)"
 python3 run_e2e.py --workdir "$workdir" --raw da/sample-raw \
   --bundle demo/vendor/app.bundle.js --review
@@ -257,7 +257,7 @@ ls "$workdir/brief.json" "$workdir/diagnosis.json" "$workdir/dist" \
 从仓库根目录运行、只使用 Python 标准库的测试命令：
 
 ```bash
-python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'
+python3 -m unittest discover -s examples/org-health-local -p 'test_*.py'
 ```
 
 这条命令不需要 Bun、网络或真实组织数据。若未指定 `--bundle`，Builder 在没有可复用的
@@ -279,7 +279,7 @@ python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'
 标准库创建临时目录和假的 bundle；输入是仓库内的合成示例数据，构建产物留在临时目录：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 tmp_dir="$(python3 -c 'import tempfile; print(tempfile.mkdtemp(prefix="org-health-local-"))')"
 python3 -c "from pathlib import Path; Path('$tmp_dir/fake.bundle.js').write_text('/* fake bundle */\\nconsole.log(\"fake\");\\n', encoding='utf-8')"
 python3 builder/build_site.py --data data/diagnosis.json --out "$tmp_dir/dist" --bundle "$tmp_dir/fake.bundle.js"
@@ -308,7 +308,7 @@ python3 boss/make_brief.py --check <brief.json>   # 校验已有任务书，不�
 `da/` 是诊断流水线里的 DA 角色：按任务书（brief）的观察期间与口径，把原始 CSV 归并成 schema v4 诊断快照。
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 da/build_diagnosis.py --brief <brief.json> --raw da/sample-raw --out <diagnosis.json>
 python3 validate.py <diagnosis.json>
 ```
@@ -333,7 +333,7 @@ python3 da/write_method.py --brief <brief.json> --data <diagnosis.json> --raw da
 `validate.py` 只用标准库，按该定义校验数据文件：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 validate.py                            # 校验 data/diagnosis.json
 python3 validate.py /absolute/path/to/diagnosis.json
 python3 validate.py --json data/diagnosis.json  # 输出机器可读的 JSON 结果
@@ -342,14 +342,14 @@ python3 validate.py --schema schema/diagnosis.schema.json data/diagnosis.json  #
 
 退出码契约：`0` 全部通过，`1` 有文件未通过校验，`2` 输入不可读（文件缺失或不是合法 JSON）。校验失败时逐条打印出错路径，例如 `/scope/schema版本`。校验器单元测试包含在 `python3 run_tests.py` 中。
 
-结构定义里每个键的含义、单位、计算口径与来源角色见 [`docs/scenario/org-diagnosis/data-definitions.md`](../../../docs/scenario/org-diagnosis/data-definitions.md)；键名与该文档的一致性由 `python3 -m unittest test_data_definitions -v` 断言（只用标准库）。
+结构定义里每个键的含义、单位、计算口径与来源角色见 [`docs/scenario/org-diagnosis/data-definitions.md`](../../docs/scenario/org-diagnosis/data-definitions.md)；键名与该文档的一致性由 `python3 -m unittest test_data_definitions -v` 断言（只用标准库）。
 
 ## Review 角色：独立交叉审查
 
 `review/` 是独立交叉审查角色：核对任务书（brief）、诊断快照（diagnosis）与站点产物（dist）三方一致性，逐条输出 PASS/FAIL，任一 FAIL 时退出码非 0。
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--dist <dist>] [--summary <site-summary.json>]
 ```
 
@@ -374,7 +374,7 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 `dist/data/diagnosis.json`，并写出 `build-report.json`（输入路径、输入 sha256、文件清单、生成时间）。
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 builder/build_site.py --data data/diagnosis.json --out dist --bundle demo/vendor/app.bundle.js
 ```
 

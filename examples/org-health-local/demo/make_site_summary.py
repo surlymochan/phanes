@@ -5,7 +5,7 @@
     python3 demo/make_site_summary.py [--site demo/site] [--out demo/site-summary.md]
 
 只读取 <site>/index.html 与 <site>/data/diagnosis.json，不改动 site 产物。
-页面渲染规则复现 openbot/examples/org-health-local/app.js 的 render()：指标卡片顺序、
+页面渲染规则复现 examples/org-health-local/app.js 的 render()：指标卡片顺序、
 单位、各期次数值、null 的“未提供”显示，以及口径说明条目与洞察/建议条数，
 供不打开浏览器的审阅者快速核对。只用 Python 3.9+ 标准库。
 """
@@ -325,7 +325,7 @@ def render_summary(data: dict[str, Any], html: str, page_path: Path, data_path: 
         "与 `demo/site/build-report.json` 记录的快照一致）"
     )
     lines.append("- 页面按站点根相对路径读取 `./data/diagnosis.json`（app.js 的 fetch 目标）")
-    lines.append("- 生成命令：`cd openbot/examples/org-health-local && python3 demo/make_site_summary.py`")
+    lines.append("- 生成命令：`cd examples/org-health-local && python3 demo/make_site_summary.py`")
     lines.append("")
     lines.append("## 1. 结论与诊断边界")
     lines.append("")

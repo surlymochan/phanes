@@ -3,7 +3,7 @@
 审查者：独立 Reviewer（本次仅审阅仓库内 demo 产物）  
 审查日期：2026-10-31  
 运行标识：org-health-local 合成 demo  
-审查工件路径：`openbot/examples/org-health-local/demo/`
+审查工件路径：`examples/org-health-local/demo/`
 
 ## 结论：不通过
 
@@ -22,7 +22,7 @@ Builder 交付目录缺少可运行的站点文件，构建完整性检查失败
 
 ### DA 快照与证据
 
-- Schema v4：通过 — `demo/diagnosis.json`，`scope.schema版本`、`metrics`；对照 `schema/diagnosis.schema.json`、`app.js:94-107`。命令 `python3 openbot/examples/org-health-local/validate.py openbot/examples/org-health-local/demo/diagnosis.json` 输出“校验通过”。
+- Schema v4：通过 — `demo/diagnosis.json`，`scope.schema版本`、`metrics`；对照 `schema/diagnosis.schema.json`、`app.js:94-107`。命令 `python3 examples/org-health-local/validate.py examples/org-health-local/demo/diagnosis.json` 输出“校验通过”。
 - 任务书对应：不通过 — `demo/diagnosis.json`，`scope`、`metrics`、`definitions`、`口径说明`；`demo/da-notes.md`“已知问题”。快照日期与任务书一致，但没有逐个指标到原始字段/计算的可审计映射；DA 说明记录 `write_method.py` 失败，且以其自述替代了 `da-method.md` 或同等方法记录。
 - null 含义：不通过 — `demo/diagnosis.json`，`口径说明`、各指标 `数值`；`demo/da-notes.md`“缺失处理”。材料把 null 描述为未统计、未提供或无同口径对比，三者含义不等同；无法据此确认每个 null 都只代表真实期间缺口。
 - 合成与真实数据区分：通过 — `demo/diagnosis.json`，`origin`、`scope.来源`；`demo/da-notes.md:1-6`；`da/sample-raw/`。产物明确标为合成示例，不冒充真实诊断。
@@ -34,7 +34,7 @@ Builder 交付目录缺少可运行的站点文件，构建完整性检查失败
 - 只读本机数据：不适用 — `demo/README.md:1`、`builder/build_site.py`。目录未包含源码副本或验证记录，无法审查实际交付站点的数据加载行为。
 - 无外链/无网络请求：不适用 — `index.html:7-10` 的源模板使用自限 CSP、同目录资源；但 `demo/site/index.html` 缺失，且没有浏览器网络记录，不能据模板确认实际交付站点行为。
 - 页面加载与空值：不通过 — `demo/README.md:1`；缺少 `demo/site/index.html`、`app.bundle.js`、`styles.css`、`data/diagnosis.json`，没有 URL、启动命令、端口或渲染验证记录。无法确认页面加载及 null 呈现。
-- 构建产物完整性：不通过 — `demo/site/build-report.json:1-26` 列出四个产物及 SHA-256；对目录运行 `python3 openbot/examples/org-health-local/builder/check_site.py openbot/examples/org-health-local/demo/site`，四个文件均缺失，检查失败。
+- 构建产物完整性：不通过 — `demo/site/build-report.json:1-26` 列出四个产物及 SHA-256；对目录运行 `python3 examples/org-health-local/builder/check_site.py examples/org-health-local/demo/site`，四个文件均缺失，检查失败。
 - 验证记录可复现：不通过 — `demo/site/build-report.json` 只有构建文件清单与生成时间；`demo/README.md:1` 要求先重建再预览。没有验证目录或 Builder 浏览器验证报告。
 - 隐私边界：通过 — `demo/diagnosis.json` 标记合成来源；`git status` 显示开始审查时工作树干净，当前仅新增本审查文件。未发现真实诊断快照或截图交付。
 
@@ -43,7 +43,7 @@ Builder 交付目录缺少可运行的站点文件，构建完整性检查失败
 命令：
 
 ```text
-python3 openbot/examples/org-health-local/review/cross_check.py --brief openbot/examples/org-health-local/demo/brief.json --data openbot/examples/org-health-local/demo/diagnosis.json --dist openbot/examples/org-health-local/demo/site
+python3 examples/org-health-local/review/cross_check.py --brief examples/org-health-local/demo/brief.json --data examples/org-health-local/demo/diagnosis.json --dist examples/org-health-local/demo/site
 ```
 
 输出摘要：期间一致、版本一致、6 项必答问题覆盖、隐私边界通过；站点数据一致失败，原因是缺少 `demo/site/data/diagnosis.json`。共 10 项检查：9 项通过，1 项失败（退出码 1）。

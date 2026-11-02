@@ -2,17 +2,17 @@
 
 Refs #1332, Refs #6（记录数据口径），依赖 #52。
 
-本文逐个列出诊断快照 `openbot/examples/org-health-local/data/diagnosis.json` 里页面
-`openbot/examples/org-health-local/app.js` 实际读取的键：含义、单位、计算口径与来源角色。
+本文逐个列出诊断快照 `examples/org-health-local/data/diagnosis.json` 里页面
+`examples/org-health-local/app.js` 实际读取的键：含义、单位、计算口径与来源角色。
 
-- 键名口径以结构定义 `openbot/examples/org-health-local/schema/diagnosis.schema.json` 为准
+- 键名口径以结构定义 `examples/org-health-local/schema/diagnosis.schema.json` 为准
   （draft 2020-12，schema 版本 4）。
 - 数据边界与仓库一致：仓库内只有人工构造的合成示例，真实组织数据只在仓库外，
-  由 `serve.py --data` 指向的绝对路径进入（`openbot/examples/org-health-local/README.md:117`）。
-- 一致性由 `openbot/examples/org-health-local/test_data_definitions.py` 断言，验收命令：
+  由 `serve.py --data` 指向的绝对路径进入（`examples/org-health-local/README.md:117`）。
+- 一致性由 `examples/org-health-local/test_data_definitions.py` 断言，验收命令：
 
   ```bash
-  cd openbot/examples/org-health-local && python3 -m unittest test_data_definitions -v
+  cd examples/org-health-local && python3 -m unittest test_data_definitions -v
   ```
 
 ## 1. 读法与来源角色
@@ -22,7 +22,7 @@ Refs #1332, Refs #6（记录数据口径），依赖 #52。
 - **页面读取位置**：`app.js` 里读取该键的行号；写「页面不读取」表示该键只存在于结构定义中，
   由 DA 用于溯源，页面不渲染。
 - **单位**：数值键的单位；文本与容器键写「—」。
-- **计算口径**：DA 写这个值时的取数与计算方式，指向 `openbot/examples/org-health-local/da/build_diagnosis.py`。
+- **计算口径**：DA 写这个值时的取数与计算方式，指向 `examples/org-health-local/da/build_diagnosis.py`。
 - **来源角色**：全部为 **DA**。DA 依据 Boss 任务书的口径与观察期间，从原始 CSV 归并出快照；
   `scope` 四项与 `口径说明` 的口径来自任务书，由 DA 搬运进快照，页面只读快照。
 
@@ -115,7 +115,7 @@ Refs #1332, Refs #6（记录数据口径），依赖 #52。
    页面读到非 null 直接判「加载失败」；其余数值校验见 `app.js:136-153`。
 4. 数值序列的值必须是有限数值或 null；比率序列允许字符串，页面按原文显示（如「约1%」）。
 5. null 表示该期次未统计、未提供或无同口径对比数据，页面显示为「未提供」，不以 0 或推测值替代
-   （`openbot/examples/org-health-local/data/diagnosis.json:13`）。
+   （`examples/org-health-local/data/diagnosis.json:13`）。
 
 ## 4. 不在本文总表内的键
 
@@ -128,6 +128,6 @@ Refs #1332, Refs #6（记录数据口径），依赖 #52。
 ## 5. 维护方式
 
 - 键名增删时，先改 `schema/diagnosis.schema.json`，再改本文总表，最后跑
-  `cd openbot/examples/org-health-local && python3 -m unittest test_data_definitions -v`：
+  `cd examples/org-health-local && python3 -m unittest test_data_definitions -v`：
   该测试从结构定义的 `properties`（递归）收集键名，断言每个键都在本文总表出现、总表里没有
   结构定义之外的键，并核对每一行的含义、单位、计算口径与来源角色（DA）都已填写。

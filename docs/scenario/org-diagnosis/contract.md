@@ -18,23 +18,23 @@ Refs #6、#142（本文由 #142 新增）。
 - 本文只补齐**接口级契约**：命令行、输入输出、退出码、字段归属，以及已知契约缺口。
 
 边界沿用 `docs/scenario/org-diagnosis/README.md:5`：真实组织数据只经仓库外的绝对路径进入，
-仓库内只保留合成示例 `openbot/examples/org-health-local/data/diagnosis.json`。
+仓库内只保留合成示例 `examples/org-health-local/data/diagnosis.json`。
 
 ## 1. 角色与工件总览
 
 | 角色 | 脚本 | 输入 | 输出 | 谁读 |
 | --- | --- | --- | --- | --- |
-| Boss | `openbot/examples/org-health-local/boss/make_brief.py` | 无（内置默认口径与问题） | `brief.json`（任务书） | DA、Reviewer |
-| DA | `openbot/examples/org-health-local/da/build_diagnosis.py` | `brief.json` + `--raw` 目录的四张 CSV | `diagnosis.json`（schema v4 快照） | Builder、Reviewer |
-| DA（口径说明） | `openbot/examples/org-health-local/da/write_method.py` | `brief.json` + `diagnosis.json` | `da-method.md`（不含数值的口径说明） | Boss、Reviewer |
-| Builder | `openbot/examples/org-health-local/builder/build_site.py` | `diagnosis.json` | `dist/`（静态站点 + `build-report.json`） | Reviewer、预览服务 |
-| Builder（自检） | `openbot/examples/org-health-local/builder/check_site.py` | `dist/` | 逐条 PASS/FAIL | Builder、Boss |
-| Reviewer | `openbot/examples/org-health-local/review/cross_check.py` | `brief.json` + `diagnosis.json`（+ `dist/`） | 逐条 PASS/FAIL（只读，不写文件） | Boss、编排 |
-| 编排 | `openbot/examples/org-health-local/run_e2e.py`、`openswarm run/review` | 上面各角色的产物 | 分支提交、`result.json`、`review.json` | 控制面（人） |
+| Boss | `examples/org-health-local/boss/make_brief.py` | 无（内置默认口径与问题） | `brief.json`（任务书） | DA、Reviewer |
+| DA | `examples/org-health-local/da/build_diagnosis.py` | `brief.json` + `--raw` 目录的四张 CSV | `diagnosis.json`（schema v4 快照） | Builder、Reviewer |
+| DA（口径说明） | `examples/org-health-local/da/write_method.py` | `brief.json` + `diagnosis.json` | `da-method.md`（不含数值的口径说明） | Boss、Reviewer |
+| Builder | `examples/org-health-local/builder/build_site.py` | `diagnosis.json` | `dist/`（静态站点 + `build-report.json`） | Reviewer、预览服务 |
+| Builder（自检） | `examples/org-health-local/builder/check_site.py` | `dist/` | 逐条 PASS/FAIL | Builder、Boss |
+| Reviewer | `examples/org-health-local/review/cross_check.py` | `brief.json` + `diagnosis.json`（+ `dist/`） | 逐条 PASS/FAIL（只读，不写文件） | Boss、编排 |
+| 编排 | `examples/org-health-local/run_e2e.py`、`openswarm run/review` | 上面各角色的产物 | 分支提交、`result.json`、`review.json` | 控制面（人） |
 
 同一条流水线的两种入口：
 
-- **仓库内一键跑通（合成数据）**：`python3 openbot/examples/org-health-local/run_e2e.py --workdir <目录>`
+- **仓库内一键跑通（合成数据）**：`python3 examples/org-health-local/run_e2e.py --workdir <目录>`
   （`run_e2e.py:36-57`），依次跑 Boss → DA → Builder → 自检。
 - **OpenSwarm 三阶段编排（真实数据）**：`openswarm run` 每阶段一个独立 worktree，
   下一阶段 `--base` 取上一阶段提交，阶段后 `openswarm review` 做跨族审查
@@ -111,7 +111,7 @@ python3 da/build_diagnosis.py --brief <brief.json> --raw <dir> --out <diagnosis.
   | `revenue.csv` | `月份`、`收入万美元` |
   | `forecast.csv` | `期次`、`整体技术人力成本万元`、`营收业务技术人力成本万元`、`整体折算人头`、`营收业务折算人头`、`运维设施成本万元`、`收入万美元` |
 
-  合成样本见 `openbot/examples/org-health-local/da/sample-raw/`。
+  合成样本见 `examples/org-health-local/da/sample-raw/`。
 
 - **期次与汇率**：DA 可直接消费 Boss 格式的 `观察期间.期次`，按首个实际、首个参考及
   `观察月份`对应的实际期次解析为锚点（`da/build_diagnosis.py:141-186`）；若任务书未提供
@@ -136,7 +136,7 @@ python3 da/build_diagnosis.py --brief <brief.json> --raw <dir> --out <diagnosis.
 | `producer` | 角色元数据：产出方，固定 `da`（`da/build_diagnosis.py:1287`） | Builder 沿用、Reviewer 核（`review/cross_check.py:780-814`） |
 | `periods` | 角色元数据：观察期次，沿用任务书声明的 `periods`（`da/build_diagnosis.py:282-291`、`:1288`） | Builder 沿用、Reviewer 核各交接文件期次是否一致 |
 
-结构定义：`openbot/examples/org-health-local/schema/diagnosis.schema.json`
+结构定义：`examples/org-health-local/schema/diagnosis.schema.json`
 （顶层必需键 `:9`；`scope` `:63-86`；期次键名写死在 `actualSeries` `:184-196`、
 `series` `:197-204`、`revenueSeries` `:205-212`、`ratioSeries` `:213-220`、
 `fullRateSeries` `:221-228`；`insight` `:229-247`、`risk` `:248-262`、
@@ -293,7 +293,7 @@ python3 review/cross_check.py --brief <brief.json> --data <diagnosis.json> [--di
 ### 6.1 仓库内编排：`run_e2e.py`
 
 ```
-python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir>] [--bundle <file>]
+python3 examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir>] [--bundle <file>]
         [--boss <script>] [--da <script>] [--builder <script>] [--checker <script>]
 ```
 
@@ -390,12 +390,12 @@ python3 openbot/examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir
 
 | # | 缺口 | 修复证据 | 对应 issue |
 | --- | --- | --- | --- |
-| 5 | **编排 spec 的 `--verify` 命令曾与实际 CLI 不符** | DA 阶段已改为 `python3 openbot/examples/org-health-local/validate.py "${DIAGNOSIS}" && test -s ...`，使用位置参数（`openswarm/examples/org-diagnosis-pipeline.json:156-158`）；Builder 阶段已改为 `python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_*.py'`（`:210-212`）。 | 本 issue #142 记录 |
+| 5 | **编排 spec 的 `--verify` 命令曾与实际 CLI 不符** | DA 阶段已改为 `python3 examples/org-health-local/validate.py "${DIAGNOSIS}" && test -s ...`，使用位置参数（`openswarm/examples/org-diagnosis-pipeline.json:156-158`）；Builder 阶段已改为 `python3 -m unittest discover -s examples/org-health-local -p 'test_*.py'`（`:210-212`）。 | 本 issue #142 记录 |
 | 7 | **文档与仓库内容曾发生漂移** | `pipeline.md` 已说明 `validate.py`、`test_serve.py` 已在仓库内（`docs/scenario/org-diagnosis/pipeline.md:80-84`、`:102-105`）；`review-checklist.md` 已说明三个脚本均已在仓库内（`docs/scenario/org-diagnosis/review-checklist.md:51`）；编排 spec 的 `pending` 条目也写明仓库已有（`openswarm/examples/org-diagnosis-pipeline.json:268-275`）。 | 本 issue #142 记录 |
 
 ## 9. 复现命令与本地实测
 
-以下命令在 `openbot/examples/org-health-local/` 下执行，全部只读仓库内文件，
+以下命令在 `examples/org-health-local/` 下执行，全部只读仓库内文件，
 输出写到仓库外的工作目录。
 
 ```bash

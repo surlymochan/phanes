@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-REPO_ROOT = ROOT.parents[2]
+REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(ROOT))
 
 from run_e2e import (REVIEW_REPORT, REVIEW_RESULTS, STATUS_FILE, STEP_ERROR_DIR, TIMINGS_FILE, parse_args,  # noqa: E402  (需要先让示例目录可被导入)

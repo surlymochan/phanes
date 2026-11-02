@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""Discover and run all unit tests in this example.
-
-Test modules:
-  - test_run_e2e.py
-  - test_serve.py
-  - test_validate.py
-"""
+"""Discover and run all tests in the example and its child packages."""
 
 import pathlib
 import sys
 import unittest
 
 
-def main():
-    test_dir = pathlib.Path(__file__).resolve().parent
-    suite = unittest.defaultTestLoader.discover(
+def discover_tests(test_dir=None):
+    test_dir = pathlib.Path(test_dir) if test_dir is not None else pathlib.Path(__file__).resolve().parent
+    return unittest.TestLoader().discover(
         start_dir=str(test_dir),
         pattern="test_*.py",
         top_level_dir=str(test_dir),
     )
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+
+
+def main():
+    result = unittest.TextTestRunner(verbosity=2).run(discover_tests())
     failures = len(result.failures) + len(result.errors)
     print(
         f"\nRan {result.testsRun} tests: "

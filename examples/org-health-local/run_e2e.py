@@ -514,10 +514,11 @@ def source_repo_root():
 
 
 def source_commit():
-    """返回当前 git 仓库提交；不在仓库内时返回 None。"""
+    """Return the source checkout commit, or None outside a checkout."""
     try:
         result = subprocess.run(
             ['git', 'rev-parse', 'HEAD'],
+            cwd=source_repo_root(),
             capture_output=True,
             check=True,
             text=True,
