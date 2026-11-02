@@ -1,5 +1,6 @@
 """Integration tests for union conflict merges using disposable Git repos."""
 import importlib.util
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -15,7 +16,10 @@ class UnionMergeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="merge-union-")
         self.addCleanup(self.tmp.cleanup)
-        self.repo = pathlib.Path(self.tmp.name) / "repo"
+        # Canonicalise: on macOS the temp dir sits under symlinked /var, while
+        # `git worktree list` reports the resolved /private/var path. Comparing
+        # the unresolved form would fail even though both name the same repo.
+        self.repo = pathlib.Path(os.path.realpath(self.tmp.name)) / "repo"
         self.repo.mkdir()
         self.git("init", "-q")
         self.git("config", "user.name", "Test")
@@ -43,7 +47,8 @@ class UnionMergeTests(unittest.TestCase):
 
     def worktree_paths(self):
         output = self.git("worktree", "list", "--porcelain").stdout
-        return [line.split(" ", 1)[1] for line in output.splitlines() if line.startswith("worktree ")]
+        return [os.path.realpath(line.split(" ", 1)[1])
+                for line in output.splitlines() if line.startswith("worktree ")]
 
     def test_union_conflict_preserves_both_lines_and_cleans_worktree(self):
         self.branch_change("base", "from-base")
