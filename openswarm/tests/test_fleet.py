@@ -1,5 +1,7 @@
 import argparse
 import contextlib
+import datetime as dt
+import importlib.util
 import io
 import json
 import os
@@ -532,6 +534,230 @@ class FleetTests(unittest.TestCase):
         valid = json.dumps({"run_id": "kept"}).encode() + b"\n"
         self.assertEqual([row["run_id"] for row in xs.ledger_records(oversized + valid, "h")], ["kept"])
         self.assertEqual(xs.ledger_records(b"\n" * xs.LEDGER_MAX_HOST_LINES + valid, "h"), [])
+
+    def certificate(self, expires_in_days):
+        """An SSH certificate inspection, as ssh-keygen -L prints it for a fleet certificate."""
+        now = dt.datetime.now(dt.timezone.utc)
+        return ("Type: ssh-ed25519-cert-v01@openswarm.com user certificate\n"
+                "Public key: ssh-ed25519-cert-v01@openswarm.com AAAAC3NzaC1lZDI1NTE5\n"
+                "Key ID: fake\n"
+                "Serial: 01\n"
+                f"Valid: from {(now - dt.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')} "
+                f"to {(now + dt.timedelta(days=expires_in_days)).strftime('%Y-%m-%dT%H:%M:%S')}\n")
+
+    def fake_certificate_ssh(self):
+        """A fake ssh that answers the certificate command of a fleet host.
+
+        The recorded argv shows which remote command ran, so a bare interactive
+        ssh (which prints no certificate at all) cannot pass unnoticed.
+        """
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        ssh = fake_bin / "ssh"
+        ssh.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            "mode = os.environ.get('FAKE_SSH_MODE', 'valid')\n"
+            "root = pathlib.Path(os.environ['OPENSWARM_TEST_SSH_ROOT'])\n"
+            "with (root / 'ssh-argv.log').open('a') as stream:\n"
+            "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if mode == 'failed':\n"
+            "    sys.stderr.write('renewal failed\\n')\n"
+            "    raise SystemExit(3)\n"
+            "if mode == 'expired':\n"
+            "    sys.stdout.write((root / 'expired.cert').read_text())\n"
+            "elif mode == 'missing_expiry':\n"
+            "    sys.stdout.write('renewed OK without expiry details\\n')\n"
+            "else:\n"
+            "    sys.stdout.write((root / 'valid.cert').read_text())\n"
+        )
+        ssh.chmod(0o755)
+        (self.root / "valid.cert").write_text(self.certificate(10))
+        (self.root / "expired.cert").write_text(self.certificate(-1))
+        return fake_bin
+
+    def certificate_env(self, fake_bin, mode):
+        """The environment a fleet host certificate command runs in."""
+        return {"PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
+                "OPENSWARM_TEST_SSH_ROOT": str(self.root),
+                "FAKE_SSH_MODE": mode}
+
+    def certificate_module(self):
+        """The shared certificate rules, loaded from the bin directory."""
+        path = pathlib.Path(xs.__file__).parent / "fleet_certificate.py"
+        spec = importlib.util.spec_from_file_location("fleet_certificate_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_certificate_invalid_when_missing_expiry_or_expired(self):
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote"}])
+
+        # 1. Missing expiry -> certificate_invalid, exit code 1, empty capacity
+        output = io.StringIO()
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "missing_expiry")), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+            self.assertEqual(exited.exception.code, 1)
+        res = json.loads(output.getvalue())
+        self.assertEqual(res["hosts"][0]["status"], "certificate_invalid")
+        self.assertEqual(res["hosts"][0]["lanes"], [])
+        self.assertIn("expiry", res["hosts"][0]["error"])
+
+        # 2. Expired cert -> certificate_invalid, exit code 1, empty capacity
+        output = io.StringIO()
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "expired")), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+            self.assertEqual(exited.exception.code, 1)
+        res = json.loads(output.getvalue())
+        self.assertEqual(res["hosts"][0]["status"], "certificate_invalid")
+        self.assertEqual(res["hosts"][0]["lanes"], [])
+        self.assertIn("expired", res["hosts"][0]["error"])
+
+        # 3. Valid cert -> reachable, exit code 0, lanes preserved
+        output = io.StringIO()
+        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
+                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        res = json.loads(output.getvalue())
+        self.assertEqual(res["hosts"][0]["status"], "reachable")
+        self.assertEqual(len(res["hosts"][0]["lanes"]), 1)
+
+    def test_certificate_renewal_failure_marks_the_host_invalid(self):
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote renew"}])
+        output = io.StringIO()
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "failed")), \
+                mock.patch.object(xs, "host_json") as snapshot, contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+            self.assertEqual(exited.exception.code, 1)
+            snapshot.assert_not_called()
+        res = json.loads(output.getvalue())
+        self.assertEqual(res["hosts"][0]["status"], "certificate_invalid")
+        self.assertEqual(res["hosts"][0]["lanes"], [])
+        self.assertIn("renewal command failed", res["hosts"][0]["error"])
+
+    def test_fleet_exec_refuses_a_host_without_a_usable_certificate(self):
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote renew"}])
+        errors = io.StringIO()
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "expired")), \
+                mock.patch.object(xs, "host_run") as transport, contextlib.redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd="exec", host="remote", timeout=30,
+                                                args=["--", "lane", "status"]))
+            self.assertEqual(exited.exception.code, 1)
+            transport.assert_not_called()
+        self.assertIn("certificate_invalid", errors.getvalue())
+
+    def test_check_certificate_inspects_the_host_certificate(self):
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "check_certificate": True}])
+        output = io.StringIO()
+        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
+                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        res = json.loads(output.getvalue())
+        self.assertEqual(res["hosts"][0]["status"], "reachable")
+        # The opt-in inspects the certificate, it never opens an interactive ssh.
+        self.assertIn("ssh-keygen -L -f", (self.root / "ssh-argv.log").read_text())
+
+    def test_certificate_file_path_keys_do_not_switch_the_check_on(self):
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "cert": "certs/remote.crt"}])
+        output = io.StringIO()
+        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "expired")), \
+                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        res = json.loads(output.getvalue())
+        self.assertEqual(res["hosts"][0]["status"], "reachable")
+        self.assertFalse((self.root / "ssh-argv.log").exists())
+
+    def test_invalid_certificate_configuration_is_rejected(self):
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": ""}])
+        with self.assertRaises(ValueError) as raised:
+            xs.fleet_config()
+        self.assertIn("renew_command", str(raised.exception))
+
+    def test_certificate_check_reaches_the_host_over_its_transport_options(self):
+        """The check uses the fleet transport options, so a jump host still works."""
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote-alias", "check_certificate": True,
+                      "jump": "jump-host", "ssh_options": {"ProxyCommand": "nc %h %p"},
+                      "connect_timeout": 7, "control_persist": 60}])
+        output = io.StringIO()
+        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
+                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        self.assertEqual(json.loads(output.getvalue())["hosts"][0]["status"], "reachable")
+        argv = (self.root / "ssh-argv.log").read_text()
+        self.assertIn("-o ProxyJump=jump-host", argv)
+        self.assertIn("-o ProxyCommand=nc %h %p", argv)
+        self.assertIn("-o ConnectTimeout=7", argv)
+        self.assertIn("-o ControlPersist=60", argv)
+        self.assertIn("remote-alias ssh-keygen -L -f", argv)
+
+    def test_certificate_check_and_the_fleet_commands_use_one_ssh_argv(self):
+        """The shared rules and the fleet CLI build the very same ssh argv."""
+        host = {"name": "remote", "kind": "ssh", "ssh": "remote-alias", "jump": "jump-host",
+                "ssh_options": {"ProxyCommand": "nc %h %p"}, "connect_timeout": 7, "control_persist": 60}
+        self.assertEqual(self.certificate_module().ssh_argv(host), xs.fleet_ssh_argv(host))
+
+    def test_broken_certificate_command_leaves_the_host_invalid(self):
+        """A command that cannot be split fails closed instead of raising."""
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": 'ssh remote "renew'}])
+        output = io.StringIO()
+        with mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+            self.assertEqual(exited.exception.code, 1)
+        row = json.loads(output.getvalue())["hosts"][0]
+        self.assertEqual(row["status"], "certificate_invalid")
+        self.assertIn("not usable", row["error"])
+        self.assertFalse((self.root / "ssh-argv.log").exists())
+
+    def test_global_renew_command_does_not_reach_a_local_host(self):
+        """The global fallback belongs to the ssh hosts only."""
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "local", "kind": "local"}])
+        output = io.StringIO()
+        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
+        env = self.certificate_env(fake_bin, "expired")
+        env["OPENSWARM_FLEET_RENEW_COMMAND"] = "ssh remote renew"
+        with mock.patch.dict(xs.os.environ, env), \
+                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+        self.assertEqual(json.loads(output.getvalue())["hosts"][0]["status"], "reachable")
+        self.assertFalse((self.root / "ssh-argv.log").exists())
+
+    def test_certificate_check_without_the_shared_rules_fails_closed(self):
+        """A host that asks for a check cannot be verified without the rules."""
+        fake_bin = self.fake_certificate_ssh()
+        self.config([{"name": "remote", "kind": "ssh", "ssh": "remote", "renew_command": "ssh remote"},
+                     {"name": "plain", "kind": "ssh", "ssh": "plain"}])
+        output = io.StringIO()
+        snapshot = {"lanes": [{"name": "GH1", "state": "idle", "model": "m"}], "active_runs": []}
+        with mock.patch.object(xs, "certificate_module", return_value=None), \
+                mock.patch.dict(xs.os.environ, self.certificate_env(fake_bin, "valid")), \
+                mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=True))
+            self.assertEqual(exited.exception.code, 1)
+        rows = json.loads(output.getvalue())["hosts"]
+        self.assertEqual(rows[0]["status"], "certificate_invalid")
+        self.assertIn("unavailable", rows[0]["error"])
+        self.assertEqual(rows[1]["status"], "reachable")
 
 
 if __name__ == "__main__":
