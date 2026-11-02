@@ -1,0 +1,886 @@
+{
+  "1775": [
+    {
+      "id": 6585423416,
+      "url": "https://github.com/surlymochan/phanes/issues/1775#issuecomment-6585423416",
+      "body": "Lane CX10 run `20261103-024712-6f7540` produced a thin diff (`eff<30:0 docs=100 other=0`): effective code <30 lines or mostly docs. Labelled `lane-failed`; PR not opened. Re-add `lane-ready` only with a ≥30-line impl+test change and real pytest/script acceptance.",
+      "at": "2026-11-02T18:48:42Z"
+    }
+  ],
+  "1757": [
+    {
+      "id": 6584133885,
+      "url": "https://github.com/surlymochan/phanes/issues/1757#issuecomment-6584133885",
+      "body": "根因已实证（2026-11-03 01:46，掌控者亲测）：\n\n冒烟测试（gorelay 上以 root 跑 codex exec --model gpt-6-luna）复现出原始错误串：\n「Failed to create session: failed to load AGENTS.md instructions for environment local: fs sandbox helper failed: bwrap: Can't mkdir /var/lib/gorelay-codex/control: Permission denied」→ thread/start 失败。\n\n因果链：\n1. CX11 的 codex 会话创建要经 bwrap fs 沙盒助手，在沙盒状态树 /var/lib/gorelay-codex/（含 control/ 与 .codex/auth.json 镜像）内建文件；\n2. 该树为 drwx------ codex-agent 所有——它是 builder 的 adapter 体系（codex 以 codex-agent 身份运行）专用；\n3. gorelay 的 AppArmor unpriv_bwrap profile 会剥掉 bwrap 进程的 CAP_DAC_OVERRIDE（audit 日志有 DENIED 实录），所以即使 serve/app-server 是 root，沙盒助手也撞 700 权限墙；\n4. 会话在 thread/start 阶段即死，模型调用从未发生——这就是 6/6 exec_error、无提交、零烧量、且 serve 的 last_error 为空（错误只存在于 app-server 的 turn 响应里，执行端错误路径未上浮——这是本卡要顺带修的第二个缺陷：错误不可见）。\n\n排除项：模型/网络/serve 存活/binary 路径/CODEX_HOME 均已实测无关（换 CODEX_HOME 错误路径不变）。逐层放权实验证明是整树权限+能力剥离问题（711 后错误前进到 .codex/auth.json），试验性放权已全部恢复原状（700/无 ACL）。\n\n修复方向（按优先）：(a) 让 CX11 的 codex 以 rig 身份（codex-agent）起会话；(b) 为标准执行端在 gorelay 另设可写的沙盒状态根（先查 codex 构建的配置面）；(c) AppArmor profile 例外（动主机安全姿态，慎）；(d) 兜底：CX11 迁往 codex 栈为标准形态的主机。\n\n与 M9/GH2 的关系：结论是不同病——那边是 pi 栈，与本 rig 无关，维持 #1734/#1747 诊断。",
+      "at": "2026-11-02T17:46:51Z"
+    },
+    {
+      "id": 6584161385,
+      "url": "https://github.com/surlymochan/phanes/issues/1757#issuecomment-6584161385",
+      "body": "ops 运维卡（用户 2026-11-03 01:47 新规）：本卡由掌控者 external-muse 自领解决，不入普通卡池等派。assigner: @surlymochan；lane: external-muse。",
+      "at": "2026-11-02T17:48:09Z"
+    },
+    {
+      "id": 6584818019,
+      "url": "https://github.com/surlymochan/phanes/issues/1757#issuecomment-6584818019",
+      "body": "Lane CX10 (govpn, run `20261103-021804-30d218`) ended `partial` without a commit (error_class `None`).\n\nExecutor summary: 无法在当前工作树内证实 #1757 的主机侧根因：本地没有 CX11 配置、gorelay adapter policy/log、systemd unit 差异或失败 run 的 agent 错误串。已有材料不足以区分模型/车道准入、第二 app-server 冲突和单元配置问题，因此未改代码、未提交，也不建议解除 PAUSE-CX11。检查到的唯一相关配置是测试夹具 [fleet-inventory.json](/root/.claude/openswarm-executor-candidate/lanes/CX10/wt/openswarm/tests/fixtures/fleet-inventory.json:3)，其 gorelay 只有 A1(gpt-5-codex) 和 A2(cursor)，不包含 CX11，不能作为现场证据。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T18:19:30Z"
+    },
+    {
+      "id": 6584969793,
+      "url": "https://github.com/surlymochan/phanes/issues/1757#issuecomment-6584969793",
+      "body": "状态澄清（掌控者）：本卡为 ops 运维卡，由 external-muse 自领（见上条）。刚才被派发并 lane-failed 系因铸卡时误带 lane-ready 标签、被通用池捡走——该次执行不算数，rig 修复仍由掌控者本人推进。本卡禁止回池重排，勿加 lane-ready。",
+      "at": "2026-11-02T18:26:41Z"
+    }
+  ],
+  "1750": [
+    {
+      "id": 6583690482,
+      "url": "https://github.com/surlymochan/phanes/issues/1750#issuecomment-6583690482",
+      "body": "Lane CX10 run `20261103-012430-6a8bca` produced a thin diff (`eff<30:0 docs=100 other=0`): effective code <30 lines or mostly docs. Labelled `lane-failed`; PR not opened. Re-add `lane-ready` only with a ≥30-line impl+test change and real pytest/script acceptance.",
+      "at": "2026-11-02T17:25:50Z"
+    },
+    {
+      "id": 6585316073,
+      "url": "https://github.com/surlymochan/phanes/issues/1750#issuecomment-6585316073",
+      "body": "存量定性（2026-11-03 提速清理）：本卡为批量铸卡规划，与用户不空跑原则及当前入口节流（开放>100、合并停滞期只补水位下限）冲突，关闭；真实需求按预审标准逐张铸。",
+      "at": "2026-11-02T18:43:45Z"
+    }
+  ],
+  "1704": [
+    {
+      "id": 6580266962,
+      "url": "https://github.com/surlymochan/phanes/issues/1704#issuecomment-6580266962",
+      "body": "Lane CX9 (gores2, run `20261102-225355-914d46`) ended `failed` without a commit (error_class `None`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T14:55:13Z"
+    },
+    {
+      "id": 6583625790,
+      "url": "https://github.com/surlymochan/phanes/issues/1704#issuecomment-6583625790",
+      "body": "lane-fault requeue：此前失败属车道/主机瞬时故障（box 冻结、GH2/M9 连挂、CX9/gores2 故障窗或新车道冷启动），无提交、无开放 PR，内容仍有效，返池 lane-ready。（2026-11-03 存量清理盘点）",
+      "at": "2026-11-02T17:22:48Z"
+    },
+    {
+      "id": 6585373856,
+      "url": "https://github.com/surlymochan/phanes/issues/1704#issuecomment-6585373856",
+      "body": "Lane CX10 (govpn, run `20261103-024510-111450`) ended `partial` without a commit (error_class `None`).\n\nExecutor summary: 未修改：当前 worktree 位于 `openswarm/20261103-024510-111450`，而任务要求基于 `rebase-pr-1758`（头 `ad793a1b4`）修改；该分支包含本轮需要修复的实现，但按指示不能切换分支。当前检出的文件没有这些实现，直接修改会落在错误基线上。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T18:46:31Z"
+    }
+  ],
+  "1700": [
+    {
+      "id": 6580993431,
+      "url": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6580993431",
+      "body": "Lane M17 run `20261102-225140-275de0` was aborted by the MiniMax liveness watchdog (no broker request for >15min (last 2026-11-02 21:50:13)). Requeued as `lane-ready`.",
+      "at": "2026-11-02T15:26:52Z"
+    },
+    {
+      "id": 6581950014,
+      "url": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6581950014",
+      "body": "Lane GH2 (gores1, run `20261103-000504-e15b67`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T16:08:39Z"
+    },
+    {
+      "id": 6582853503,
+      "url": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6582853503",
+      "body": "Lane M9 (gores1, run `20261103-004755-d640ba`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T16:49:03Z"
+    },
+    {
+      "id": 6583334669,
+      "url": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6583334669",
+      "body": "lane-fault requeue：该卡在 M9（gores1）上以 failed/exec_error、无提交秒挂，属车道故障而非卡片缺陷，参照 GH2 前例返池 lane-ready。M9 已暂停（PAUSE-M9），根因见诊断卡（待附）。",
+      "at": "2026-11-02T17:09:44Z"
+    },
+    {
+      "id": 6583426424,
+      "url": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6583426424",
+      "body": "Lane CX10 (govpn, run `20261103-011216-b87e05`) ended `partial` without a commit (error_class `None`).\n\nExecutor summary: 当前 worktree 中没有 `box-ws-tunnel-loop` 脚本，也没有可供它写入的 box 隧道状态来源。检查了 `bin/`、`openswarm/`、`tools/` 及相关健康状态代码；现有代码只有 SSH 主机探活和 `lanes-status.json` 输出。缺少实际 loop 和状态生产端，无法安全实现或验收断线重建、退避告警及状态字段。本次未修改文件，也未提交。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T17:13:48Z"
+    },
+    {
+      "id": 6583440762,
+      "url": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6583440762",
+      "body": "清理关闭：box 已于 2026-11-03 00:36 被用户亲令彻底剔除出资源池，本卡前提消失。如 box 未来经用户新令回归，可重开。",
+      "at": "2026-11-02T17:14:27Z"
+    }
+  ],
+  "1670": [
+    {
+      "id": 6576998372,
+      "url": "https://github.com/surlymochan/phanes/issues/1670#issuecomment-6576998372",
+      "body": "Lane A3 run `20261102-201959-cc430b` stopped on a backend quota/rate limit (`failed/rate_limit`), not a card failure. Requeued as `lane-ready`.",
+      "at": "2026-11-02T12:21:26Z"
+    },
+    {
+      "id": 6577620687,
+      "url": "https://github.com/surlymochan/phanes/issues/1670#issuecomment-6577620687",
+      "body": "Lane CX9 (gores2, run `20261102-202150-f8f128`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T12:52:49Z"
+    },
+    {
+      "id": 6583608388,
+      "url": "https://github.com/surlymochan/phanes/issues/1670#issuecomment-6583608388",
+      "body": "清理关闭：内容数据源为 box-pauses，box 已剔除、数据源不复存在。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:59Z"
+    }
+  ],
+  "1662": [
+    {
+      "id": 6576669913,
+      "url": "https://github.com/surlymochan/phanes/issues/1662#issuecomment-6576669913",
+      "body": "Lane M9 (gores1, run `20261102-200048-c0b752`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T12:04:11Z"
+    },
+    {
+      "id": 6583613046,
+      "url": "https://github.com/surlymochan/phanes/issues/1662#issuecomment-6583613046",
+      "body": "lane-fault requeue：此前失败属车道/主机瞬时故障（box 冻结、GH2/M9 连挂、CX9/gores2 故障窗或新车道冷启动），无提交、无开放 PR，内容仍有效，返池 lane-ready。（2026-11-03 存量清理盘点）",
+      "at": "2026-11-02T17:22:13Z"
+    },
+    {
+      "id": 6585420758,
+      "url": "https://github.com/surlymochan/phanes/issues/1662#issuecomment-6585420758",
+      "body": "Lane M17 (gores2, run `20261103-020143-4d85aa`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T18:48:35Z"
+    }
+  ],
+  "1660": [
+    {
+      "id": 6576601579,
+      "url": "https://github.com/surlymochan/phanes/issues/1660#issuecomment-6576601579",
+      "body": "Lane M9 (gores1, run `20261102-195913-a59b94`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T12:00:27Z"
+    },
+    {
+      "id": 6583441799,
+      "url": "https://github.com/surlymochan/phanes/issues/1660#issuecomment-6583441799",
+      "body": "清理关闭：box 已于 2026-11-03 00:36 被用户亲令彻底剔除出资源池，本卡前提消失。如 box 未来经用户新令回归，可重开。",
+      "at": "2026-11-02T17:14:30Z"
+    }
+  ],
+  "1641": [
+    {
+      "id": 6570482468,
+      "url": "https://github.com/surlymochan/phanes/issues/1641#issuecomment-6570482468",
+      "body": "Lane CX2 run `20261102-141429-521dc8` produced a thin diff (`eff<30:26 docs=0 other=0`): effective code <30 lines or mostly docs. Labelled `lane-failed`; PR not opened. Re-add `lane-ready` only with a ≥30-line impl+test change and real pytest/script acceptance.",
+      "at": "2026-11-02T06:15:56Z"
+    },
+    {
+      "id": 6583606960,
+      "url": "https://github.com/surlymochan/phanes/issues/1641#issuecomment-6583606960",
+      "body": "清理关闭：r1412 批次卡已过时；防重复返池的检查已被现行 AD 收割/返池流程吸收。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:55Z"
+    }
+  ],
+  "1639": [
+    {
+      "id": 6570501376,
+      "url": "https://github.com/surlymochan/phanes/issues/1639#issuecomment-6570501376",
+      "body": "Lane CX8 (gocc, run `20261102-141437-f42a81`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T06:17:13Z"
+    },
+    {
+      "id": 6576021457,
+      "url": "https://github.com/surlymochan/phanes/issues/1639#issuecomment-6576021457",
+      "body": "Lane A1 run `20261102-192734-2354e4` stopped on a backend quota/rate limit (`failed/rate_limit`), not a card failure. Requeued as `lane-ready`.",
+      "at": "2026-11-02T11:29:22Z"
+    },
+    {
+      "id": 6576209348,
+      "url": "https://github.com/surlymochan/phanes/issues/1639#issuecomment-6576209348",
+      "body": "Lane M9 (gores1, run `20261102-193832-8b09fe`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T11:39:41Z"
+    },
+    {
+      "id": 6583605090,
+      "url": "https://github.com/surlymochan/phanes/issues/1639#issuecomment-6583605090",
+      "body": "清理关闭：r1412 批次卡且 backend:agy 已暂停非主力，前提消失。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:50Z"
+    }
+  ],
+  "1638": [
+    {
+      "id": 6570501299,
+      "url": "https://github.com/surlymochan/phanes/issues/1638#issuecomment-6570501299",
+      "body": "Lane A3 (gocc, run `20261102-141432-49b867`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T06:17:12Z"
+    },
+    {
+      "id": 6576021272,
+      "url": "https://github.com/surlymochan/phanes/issues/1638#issuecomment-6576021272",
+      "body": "Lane A3 run `20261102-192720-87794d` stopped on a backend quota/rate limit (`failed/rate_limit`), not a card failure. Requeued as `lane-ready`.",
+      "at": "2026-11-02T11:29:21Z"
+    },
+    {
+      "id": 6576181532,
+      "url": "https://github.com/surlymochan/phanes/issues/1638#issuecomment-6576181532",
+      "body": "Lane M9 (gores1, run `20261102-193417-6003b0`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T11:38:10Z"
+    },
+    {
+      "id": 6583603716,
+      "url": "https://github.com/surlymochan/phanes/issues/1638#issuecomment-6583603716",
+      "body": "清理关闭：r1412 批次卡且 backend:agy 已暂停非主力，前提消失。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:46Z"
+    }
+  ],
+  "1633": [
+    {
+      "id": 6570482246,
+      "url": "https://github.com/surlymochan/phanes/issues/1633#issuecomment-6570482246",
+      "body": "Lane CX7 run `20261102-141410-489c03` produced a thin diff (`eff<30:0 docs=120 other=0`): effective code <30 lines or mostly docs. Labelled `lane-failed`; PR not opened. Re-add `lane-ready` only with a ≥30-line impl+test change and real pytest/script acceptance.",
+      "at": "2026-11-02T06:15:55Z"
+    },
+    {
+      "id": 6583602280,
+      "url": "https://github.com/surlymochan/phanes/issues/1633#issuecomment-6583602280",
+      "body": "清理关闭：planner r1412 批次规划卡，r1412 时代已过时。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:42Z"
+    }
+  ],
+  "1478": [
+    {
+      "id": 6564651486,
+      "url": "https://github.com/surlymochan/phanes/issues/1478#issuecomment-6564651486",
+      "body": "Lane CX9 (gores2, run `20261102-052346-0ce1e8`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T22:13:11Z"
+    },
+    {
+      "id": 6583442812,
+      "url": "https://github.com/surlymochan/phanes/issues/1478#issuecomment-6583442812",
+      "body": "清理关闭：box 已于 2026-11-03 00:36 被用户亲令彻底剔除出资源池，本卡前提消失。如 box 未来经用户新令回归，可重开。",
+      "at": "2026-11-02T17:14:32Z"
+    }
+  ],
+  "1432": [
+    {
+      "id": 6562243501,
+      "url": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6562243501",
+      "body": "Lane M10 (gorelay, run `20261102-022513-5ef8c3`) ended `failed` without a commit (error_class `None`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T18:42:38Z"
+    },
+    {
+      "id": 6562332131,
+      "url": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6562332131",
+      "body": "拆卡（phanes builder 02:5x UTC+8）：上一轮 M10 失败不是卡的问题，是 gorelay 上 M10 的 cgroup 被沙箱 tmpfs 顶到 memory.high，`git worktree add` 300 秒超时（详见 #1448）。为了并行，本卡 3 项拆成 3 张子卡：#1444（union 文档合并，`lib/merge/union.py`）、#1445（失败 run 只重跑一次，`lib/merge/rerun.py`）、#1446（合并后 hook，`lib/merge/post_hook.py`）。本卡改为 tracker，撤 lane-failed，不再挂 lane-ready；原 `lib/merge/actions.py` 方案作废。接进 merge-gate 仍由 #1355 做。",
+      "at": "2026-11-01T18:50:24Z"
+    },
+    {
+      "id": 6564228465,
+      "url": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6564228465",
+      "body": "拆卡（phanes builder 05:36 UTC+8）：merge-gate 接线拆为 #1496（rerun once + post-merge hook，codex）、#1504（union 文档自动合并，pi）。",
+      "at": "2026-11-01T21:36:21Z"
+    },
+    {
+      "id": 6572195418,
+      "url": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6572195418",
+      "body": "Lane M5 (box, run `20261102-154520-f5a9ea`) ended `partial` without a commit (error_class `exec_error`).\n\nExecutor summary: 沙箱里 openswarm 仓库不可用、worktree 不可写，因此按 issue 描述从零实现了 lib/merge/actions.py + 单测并放在 scratch 树 /tmp/issue1432（已 git init，提交 35ca0db/04b2bdc/3851772，提交信息带 Refs #1432），16 个用例本地全过。【环境阻塞证据】(1) /home/box/.claude/openswarm-executor-candidate/lanes/M5/wt 是失效挂载：ls -A 为空、无 .git/.git-local，mkdir/touch/open(O_CREAT) 全部 ENOENT；/proc/self/mountinfo 里挂载源为 254:16 .../lanes/M5/wt//deleted（宿主目录已被 unlink，ext4 目录不能再建条目，umount2 返回 EINVAL、mount 被 lock）；.git-local 那个 ro 挂载同样 //deleted 且不可达（open_tree/move_mount 复制子树 ENOENT），所以 PR 头 574b76afe9 的原文件取不到。(2) 无外网（git ls-remote DNS 失败），全盘搜索 openswarm/lib/merge/actions.py 无命中，/\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T08:07:25Z"
+    },
+    {
+      "id": 6583600218,
+      "url": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6583600218",
+      "body": "清理关闭：三项已拆为 #1444/#1496/#1504 取代，PR #1459/#1456/#1509 已合并。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:36Z"
+    }
+  ],
+  "1407": [
+    {
+      "id": 6563552864,
+      "url": "https://github.com/surlymochan/phanes/issues/1407#issuecomment-6563552864",
+      "body": "Lane M5 (box, run `20261102-043458-5afa5e`) ended `stopped` without a commit (error_class `risk_blocked`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T20:37:05Z"
+    }
+  ],
+  "1389": [
+    {
+      "id": 6561718561,
+      "url": "https://github.com/surlymochan/phanes/issues/1389#issuecomment-6561718561",
+      "body": "Lane GH1 (gorelay, run `20261102-015714-8aa918`) ended `partial` without a commit (error_class `None`).\n\nExecutor summary: Not changed. The review fix must be made on branch rebase-pr-1391 (PR head 30d368c16), but this worktree is on openswarm/20261102-015714-8aa918 and the rules forbid switching branches. The unsafe code is on that branch at openswarm/bin/agy-via-local-proxy:111-116: archive_old_conversations() calls shutil.move(str(item), str(archive / item.name)) with no collision check, so a same-named file already in agy-conversation-archive gets overwritten. Proposed fix: if the target exists, pick a unique name (e.g. stem + timestamp/counter) or skip and log, never overwrite. Add a test in openswarm/tests/t\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T17:58:20Z"
+    },
+    {
+      "id": 6576021179,
+      "url": "https://github.com/surlymochan/phanes/issues/1389#issuecomment-6576021179",
+      "body": "Lane A2 run `20261102-192715-f4fd73` stopped on a backend quota/rate limit (`failed/rate_limit`), not a card failure. Requeued as `lane-ready`.",
+      "at": "2026-11-02T11:29:21Z"
+    },
+    {
+      "id": 6576108191,
+      "url": "https://github.com/surlymochan/phanes/issues/1389#issuecomment-6576108191",
+      "body": "Lane M9 (gores1, run `20261102-193250-b4f755`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T11:34:05Z"
+    },
+    {
+      "id": 6585345517,
+      "url": "https://github.com/surlymochan/phanes/issues/1389#issuecomment-6585345517",
+      "body": "存量定性（2026-11-03 提速清理）：agy 后端已于车道定版中整体移除，本卡前提（agy 隔离 HOME 钥匙串弹窗）不复存在，关闭；agy 若恢复入池可重开。",
+      "at": "2026-11-02T18:45:11Z"
+    }
+  ],
+  "1374": [
+    {
+      "id": 6561627489,
+      "url": "https://github.com/surlymochan/phanes/issues/1374#issuecomment-6561627489",
+      "body": "## Lane review: the 3 upstream nightly-labs/openbot PRs (before opening)\n\nAD skipped #1378 because the body has no `Closes #` (in state.json the `_stale_skips` entry has no issue, so `None` is in pending and every PR without Closes gets skipped). I used the fallback the task allows instead: a box pi lane (MiniMax-M3.1-Flash) reviewed the 3 diffs one at a time, with read-only tools.\n\n| PR branch | head sha | verdict |\n|---|---|---|\n| fix/dev-lan-opt-in | 7a2da4de | **APPROVE** |\n| fix/dev-checks-in-subdirectory | e966744a | **APPROVE** |\n| fix/auth-migration-number-check | c84e9cda | **APPROVE** |\n\nNon-blocking findings, handled:\n- PR1: `OPENBOT_API_HOST` changed from `??=` to `=`, so an exported value gets overwritten. Now stated in the description.\n- PR2: the description claimed the old hook double-staged in a worktree. That was wrong and the description is corrected.\n- PR2: the e2e stub could assert more (bun argv, simulating a biome rewrite), and xargs `-r` predates this PR. Left for later.\n- PR3: the check is not wired into CI yet. Planned as a separate follow-up.\n\nThe commits were not changed, so the reviewed SHAs are the ones going upstream.\n",
+      "at": "2026-11-01T17:50:19Z"
+    },
+    {
+      "id": 6561654038,
+      "url": "https://github.com/surlymochan/phanes/issues/1374#issuecomment-6561654038",
+      "body": "## Opened upstream (2026-11-02 01:50 UTC+8)\n\n1. https://github.com/nightly-labs/openbot/pull/4381: fix(dev): binds the dev stack to loopback by default; `--lan` is now opt-in and refuses to start while `AUTH_EXPOSE_DEVELOPMENT_CODE` is on (7a2da4de)\n2. https://github.com/nightly-labs/openbot/pull/4382: fix(dev): the pre-commit hook and its checks work when OpenBot is in a subdirectory or a worktree, with a 4-layout e2e (e966744a)\n3. https://github.com/nightly-labs/openbot/pull/4383: test(auth-api): duplicate migration number check plus smoke test (c84e9cda)\n\n- CLA: SUCCESS on all 3 (surlymochan had already signed). Contribution policy: SUCCESS. Labels: `external`.\n- Head repo: nibiru-labs/openbot (surlymochan/openbot now redirects there). Fork main was left alone (it has diverged and syncing it would need a force-push); each PR is cut from upstream main 7ef25fbc.\n- Waiting on maintainers: #4382 and #4383 need the `no-changelog` label. #4381 changes a dev default and may be asked for an approved issue (`needs-approved-issue`). NorbiAI review needs a maintainer to add the `norbiai` label.\n- Added to Project 6 as In Progress.\n",
+      "at": "2026-11-01T17:52:40Z"
+    },
+    {
+      "id": 6571403308,
+      "url": "https://github.com/surlymochan/phanes/issues/1374#issuecomment-6571403308",
+      "body": "Lane CX10 (govpn, run `20261102-151609-226661`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 无法准备独立的上游补丁：当前工作区中的 openbot 文件已在既有提交中，且没有 nightly-labs/openbot remote 或可用的最新上游 main。未改文件，未提交，未开 PR。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T07:17:28Z"
+    }
+  ],
+  "1366": [
+    {
+      "id": 6561907519,
+      "url": "https://github.com/surlymochan/phanes/issues/1366#issuecomment-6561907519",
+      "body": "拆卡（phanes builder 02:1x UTC+8）：不碰热文件 `openswarm/bin/openswarm` 的纯模块部分已拆成 #1402（lane-ready）。本卡保留为接线 tracker，等 #1402 与 #1394 合入后再挂 lane-ready，避免与子卡重复、挤占热文件。",
+      "at": "2026-11-01T18:14:16Z"
+    },
+    {
+      "id": 6571278517,
+      "url": "https://github.com/surlymochan/phanes/issues/1366#issuecomment-6571278517",
+      "body": "Lane M13 (box, run `20261102-150146-12212d`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T07:09:27Z"
+    }
+  ],
+  "1365": [
+    {
+      "id": 6561906907,
+      "url": "https://github.com/surlymochan/phanes/issues/1365#issuecomment-6561906907",
+      "body": "拆卡（phanes builder 02:1x UTC+8）：不碰热文件 `openswarm/bin/openswarm` 的纯模块部分已拆成 #1401（lane-ready）。本卡保留为接线 tracker，等 #1401 与 #1394 合入后再挂 lane-ready，避免与子卡重复、挤占热文件。",
+      "at": "2026-11-01T18:14:13Z"
+    },
+    {
+      "id": 6564299043,
+      "url": "https://github.com/surlymochan/phanes/issues/1365#issuecomment-6564299043",
+      "body": "拆卡（phanes builder 05:4x UTC+8）：默认重试表（risk_blocked→reroute、vm_paused 不计次）→ #1510。",
+      "at": "2026-11-01T21:42:40Z"
+    },
+    {
+      "id": 6570618728,
+      "url": "https://github.com/surlymochan/phanes/issues/1365#issuecomment-6570618728",
+      "body": "Lane CX5 (govpn, run `20261102-142347-99c67c`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 按 error_class 的重试策略模块及次数上限测试已存在于 openswarm/lib/dispatch/retry.py、openswarm/tests/test_dispatch_retry.py 和 openswarm/tests/test_dispatch_retry_defaults.py（历史提交已标注 Refs #1365）。但该策略尚未接入 tools/lane-autodispatch/autodispatch.py 的失败分流，openswarm/policy.json 也没有 dispatch.retry 配置；本次未完成这些接线，也没有可提交的改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T06:25:09Z"
+    },
+    {
+      "id": 6583599039,
+      "url": "https://github.com/surlymochan/phanes/issues/1365#issuecomment-6583599039",
+      "body": "清理关闭：后继卡 #1510 已由 PR #1516 合并落地。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:33Z"
+    }
+  ],
+  "1363": [
+    {
+      "id": 6561905884,
+      "url": "https://github.com/surlymochan/phanes/issues/1363#issuecomment-6561905884",
+      "body": "拆卡（phanes builder 02:1x UTC+8）：不碰热文件 `openswarm/bin/openswarm` 的纯模块部分已拆成 #1399（lane-ready）。本卡保留为接线 tracker，等 #1399 与 #1394 合入后再挂 lane-ready，避免与子卡重复、挤占热文件。",
+      "at": "2026-11-01T18:14:07Z"
+    },
+    {
+      "id": 6564299387,
+      "url": "https://github.com/surlymochan/phanes/issues/1363#issuecomment-6564299387",
+      "body": "拆卡（phanes builder 05:4x UTC+8）：引擎 CI 修复/重基排队换 lib/dispatch/sources.py → #1515。",
+      "at": "2026-11-01T21:42:42Z"
+    },
+    {
+      "id": 6570958396,
+      "url": "https://github.com/surlymochan/phanes/issues/1363#issuecomment-6570958396",
+      "body": "Lane M7 (box, run `20261102-142722-aec476`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T06:48:01Z"
+    },
+    {
+      "id": 6576828246,
+      "url": "https://github.com/surlymochan/phanes/issues/1363#issuecomment-6576828246",
+      "body": "Lane M17 (gores2, run `20261102-192708-f9c26a`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T12:12:35Z"
+    },
+    {
+      "id": 6583597763,
+      "url": "https://github.com/surlymochan/phanes/issues/1363#issuecomment-6583597763",
+      "body": "清理关闭：内容已由拆分卡 #1515 落地、PR #1529 已合并。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:29Z"
+    }
+  ],
+  "1345": [
+    {
+      "id": 6560794005,
+      "url": "https://github.com/surlymochan/phanes/issues/1345#issuecomment-6560794005",
+      "body": "在途 PR：#1369（upstream: openswarm: fold host-only patches）。",
+      "at": "2026-11-01T16:38:33Z"
+    },
+    {
+      "id": 6561777370,
+      "url": "https://github.com/surlymochan/phanes/issues/1345#issuecomment-6561777370",
+      "body": "Lane CX9 (gores2, run `20261102-015943-ffeec3`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 当前工作树在 `20261102-015943-ffeec3`，而审查要求针对的 PR 头 `8f2df0521e` 位于另一个本地分支 `rebase-pr-1369`。当前检出的 `openswarm/bin/openswarm` 没有该 PR 的 `PI_RETRYABLE_RE`、5 秒扫描节流或 `auto_retry_start` 实现；按要求不能切换分支，因此无法在目标 PR 上完成审查修复或提交。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T18:03:24Z"
+    }
+  ],
+  "1335": [
+    {
+      "id": 6559628335,
+      "url": "https://github.com/surlymochan/phanes/issues/1335#issuecomment-6559628335",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:body:只改文档:OpenBot 架构文档：ARCHITECTURE.md 引用路径存在性检查（#18）`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:58:35Z"
+    }
+  ],
+  "1331": [
+    {
+      "id": 6559626913,
+      "url": "https://github.com/surlymochan/phanes/issues/1331#issuecomment-6559626913",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:body:一行说明:组织诊断：隐私守卫检查——示例目录不得含真实数据痕迹`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:58:28Z"
+    }
+  ],
+  "1268": [
+    {
+      "id": 6557913694,
+      "url": "https://github.com/surlymochan/phanes/issues/1268#issuecomment-6557913694",
+      "body": "Lane CX4 (govpn2, run `20261101-202405-6b0996`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 需求已由现有代码满足：serve.py 固定 JSON Content-Type，test_serve.py 临时夹具断言 GET diagnosis 响应头及非空 body；无需新增改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T12:25:28Z"
+    },
+    {
+      "id": 6558442955,
+      "url": "https://github.com/surlymochan/phanes/issues/1268#issuecomment-6558442955",
+      "body": "triage(2026-11-01 21:14:32 +08): closing as satisfied. Executor: 需求已由现有代码满足…无需新增改动 (run 20261101-202405-6b0996).",
+      "at": "2026-11-01T13:14:34Z"
+    }
+  ],
+  "1229": [
+    {
+      "id": 6557725010,
+      "url": "https://github.com/surlymochan/phanes/issues/1229#issuecomment-6557725010",
+      "body": "Lane CX5 (govpn, run `20261101-200712-b51934`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 仓库现有实现已满足 #1229：未知 host 报错且不计入 hosts_ok（tools/ib-refresh.py:41-66；tools/check-fleet-unknown-host.py:16-82；docs/ctl-boot.md:80-82）。无需修改文件。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T12:08:30Z"
+    },
+    {
+      "id": 6558457606,
+      "url": "https://github.com/surlymochan/phanes/issues/1229#issuecomment-6558457606",
+      "body": "triage(2026-11-01 21:15:49 +08): closing as duplicate. Stem SSH fleet unknown host has lane-pr #1183; executor 无需修改文件.",
+      "at": "2026-11-01T13:15:51Z"
+    }
+  ],
+  "1191": [
+    {
+      "id": 6557331151,
+      "url": "https://github.com/surlymochan/phanes/issues/1191#issuecomment-6557331151",
+      "body": "Lane CX2 (govpn2, run `20261101-192736-dd41c3`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 功能已存在：autodispatch.py:28、165、297 写入累计去标计数，check-ad-stale-obs.py:16-24 用假 state 断言非负整数；docs/ctl-boot.md:37 已说明字段。无需新增改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T11:29:07Z"
+    },
+    {
+      "id": 6558442111,
+      "url": "https://github.com/surlymochan/phanes/issues/1191#issuecomment-6558442111",
+      "body": "triage(2026-11-01 21:14:28 +08): closing as satisfied. Executor: 功能已存在…无需新增改动 (run 20261101-192736-dd41c3).",
+      "at": "2026-11-01T13:14:30Z"
+    }
+  ],
+  "1180": [
+    {
+      "id": 6557745650,
+      "url": "https://github.com/surlymochan/phanes/issues/1180#issuecomment-6557745650",
+      "body": "Lane A1 (gocc, run `20261101-192445-8ae4e6`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T12:10:23Z"
+    },
+    {
+      "id": 6558457693,
+      "url": "https://github.com/surlymochan/phanes/issues/1180#issuecomment-6558457693",
+      "body": "triage(2026-11-01 21:15:49 +08): closing as duplicate. Stem ctl-loop ib-refresh heartbeat has newer open lane-pr (#1226/#1196).",
+      "at": "2026-11-01T13:15:52Z"
+    }
+  ],
+  "1175": [
+    {
+      "id": 6557097463,
+      "url": "https://github.com/surlymochan/phanes/issues/1175#issuecomment-6557097463",
+      "body": "Lane CX4 (govpn2, run `20261101-190425-5c70f9`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 现有代码已完整实现 #1175：累计计数写入 `_stale_stripped_n`，离线假 state 校验非负整数，并有文档说明。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T11:06:18Z"
+    },
+    {
+      "id": 6558457675,
+      "url": "https://github.com/surlymochan/phanes/issues/1175#issuecomment-6558457675",
+      "body": "triage(2026-11-01 21:15:49 +08): closing as duplicate. Stem AD stale-skip obs has lane-pr #1221; executor said现有代码已完整实现.",
+      "at": "2026-11-01T13:15:51Z"
+    }
+  ],
+  "1156": [
+    {
+      "id": 6556905170,
+      "url": "https://github.com/surlymochan/phanes/issues/1156#issuecomment-6556905170",
+      "body": "Lane CX4 (govpn2, run `20261101-184516-f25025`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 该需求已在当前 HEAD 中完整实现，无需新增改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T10:46:43Z"
+    },
+    {
+      "id": 6558441381,
+      "url": "https://github.com/surlymochan/phanes/issues/1156#issuecomment-6558441381",
+      "body": "triage(2026-11-01 21:14:23 +08): closing as satisfied. Executor: 该需求已在当前 HEAD 中完整实现，无需新增改动 (run 20261101-184516-f25025).",
+      "at": "2026-11-01T13:14:26Z"
+    }
+  ],
+  "1138": [
+    {
+      "id": 6556778737,
+      "url": "https://github.com/surlymochan/phanes/issues/1138#issuecomment-6556778737",
+      "body": "Lane CX2 (govpn2, run `20261101-183056-888027`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 当前基线已包含所需实现：autodispatch 累计 stale-skip 并写入 `_stale_stripped_n`，离线脚本用假 state 校验其为非负整数；验收通过，未重复修改文件。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T10:33:16Z"
+    },
+    {
+      "id": 6558449140,
+      "url": "https://github.com/surlymochan/phanes/issues/1138#issuecomment-6558449140",
+      "body": "triage(2026-11-01 21:15:04 +08): closing as duplicate. Stem AD stale-skip obs has lane-pr #1221; executor said基线已包含.",
+      "at": "2026-11-01T13:15:07Z"
+    }
+  ],
+  "1071": [
+    {
+      "id": 6555962383,
+      "url": "https://github.com/surlymochan/phanes/issues/1071#issuecomment-6555962383",
+      "body": "Lane CX5 (govpn, run `20261101-171020-10c376`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 仓库当前已包含 #1071 所需实现：未知 host 会报错且不计入 hosts_ok；未产生额外改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T09:13:11Z"
+    },
+    {
+      "id": 6558446077,
+      "url": "https://github.com/surlymochan/phanes/issues/1071#issuecomment-6558446077",
+      "body": "triage(2026-11-01 21:14:48 +08): closing as duplicate. Stem SSH fleet unknown host has lane-pr #1183; executor also said already implemented.",
+      "at": "2026-11-01T13:14:50Z"
+    }
+  ],
+  "1130": [
+    {
+      "id": 6557281348,
+      "url": "https://github.com/surlymochan/phanes/issues/1130#issuecomment-6557281348",
+      "body": "Lane A1 (gocc, run `20261101-183038-200c2b`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T11:24:13Z"
+    },
+    {
+      "id": 6558448344,
+      "url": "https://github.com/surlymochan/phanes/issues/1130#issuecomment-6558448344",
+      "body": "triage(2026-11-01 21:15:00 +08): closing as duplicate. Stem SSH fleet unknown host has lane-pr #1183.",
+      "at": "2026-11-01T13:15:03Z"
+    }
+  ],
+  "1044": [
+    {
+      "id": 6556106364,
+      "url": "https://github.com/surlymochan/phanes/issues/1044#issuecomment-6556106364",
+      "body": "Lane A1 (gocc, run `20261101-163735-11db8e`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T09:27:42Z"
+    },
+    {
+      "id": 6558445293,
+      "url": "https://github.com/surlymochan/phanes/issues/1044#issuecomment-6558445293",
+      "body": "triage(2026-11-01 21:14:44 +08): closing as duplicate. Stem ctl-loop ib-refresh heartbeat has newer open lane-pr (#1226/#1196/#1143).",
+      "at": "2026-11-01T13:14:46Z"
+    }
+  ],
+  "1043": [
+    {
+      "id": 6555687216,
+      "url": "https://github.com/surlymochan/phanes/issues/1043#issuecomment-6555687216",
+      "body": "Lane CX4 (govpn2, run `20261101-164333-a5dd00`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 目标行为已由现有实现满足：`tools/ib-refresh.py:23-44` 将冷却主机计入 `skipped_cooldown`、仅可达主机计入 `hosts_ok`，并按 `hosts_ok >= need_ok` 保持 ok=1；假输入与文档见 `tools/check-ib-cooldown-status.py:18-33`、`docs/ctl-boot.md:72-78`。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T09:44:58Z"
+    },
+    {
+      "id": 6558444549,
+      "url": "https://github.com/surlymochan/phanes/issues/1043#issuecomment-6558444549",
+      "body": "triage(2026-11-01 21:14:40 +08): closing as duplicate. Stem ib-refresh cooldown already has open lane-pr (#1206/#1195/#1160); also executor said existing impl satisfies.",
+      "at": "2026-11-01T13:14:43Z"
+    }
+  ],
+  "1107": [
+    {
+      "id": 6556747151,
+      "url": "https://github.com/surlymochan/phanes/issues/1107#issuecomment-6556747151",
+      "body": "Lane A1 (gocc, run `20261101-172818-e8f482`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T10:30:00Z"
+    },
+    {
+      "id": 6558447637,
+      "url": "https://github.com/surlymochan/phanes/issues/1107#issuecomment-6558447637",
+      "body": "triage(2026-11-01 21:14:56 +08): closing as duplicate. Stem ctl-loop ib-refresh heartbeat has newer open lane-pr (#1226/#1196).",
+      "at": "2026-11-01T13:14:59Z"
+    }
+  ],
+  "1026": [
+    {
+      "id": 6555603712,
+      "url": "https://github.com/surlymochan/phanes/issues/1026#issuecomment-6555603712",
+      "body": "Lane CX5 (govpn, run `20261101-163422-6a94ed`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 当前 HEAD 已满足 #1026：ib1/ib2 冷却计入 skipped_cooldown=2，hosts_ok 仅计可达主机且 ok=1；实现见 tools/ib-refresh.py:23-56，假输入校验见 tools/check-ib-cooldown-status.py:17-34，文档见 docs/ctl-boot.md:71-78。无需新增改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T09:35:41Z"
+    },
+    {
+      "id": 6558440603,
+      "url": "https://github.com/surlymochan/phanes/issues/1026#issuecomment-6558440603",
+      "body": "triage(2026-11-01 21:14:19 +08): closing as satisfied. Executor: 当前 HEAD 已满足；无需新增改动 (run 20261101-163422-6a94ed).",
+      "at": "2026-11-01T13:14:22Z"
+    }
+  ],
+  "1087": [
+    {
+      "id": 6555983254,
+      "url": "https://github.com/surlymochan/phanes/issues/1087#issuecomment-6555983254",
+      "body": "Lane CX5 (govpn, run `20261101-171357-e08243`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 目标实现已存在：tools/check-ad-mint-cooldown.py 第13–38行使用假时钟断言冷却期内第二次 seed mint 跳过且不更新 _last_mint，docs/ctl-boot.md 第167行已记录验收命令。工作树无新增改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T09:15:13Z"
+    },
+    {
+      "id": 6558446866,
+      "url": "https://github.com/surlymochan/phanes/issues/1087#issuecomment-6558446866",
+      "body": "triage(2026-11-01 21:14:52 +08): closing as duplicate. Stem AD MINT_COOLDOWN has newer lane-pr (#1223/#1193); executor said目标实现已存在.",
+      "at": "2026-11-01T13:14:54Z"
+    }
+  ],
+  "987": [
+    {
+      "id": 6559625656,
+      "url": "https://github.com/surlymochan/phanes/issues/987#issuecomment-6559625656",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `weak-acceptance:AD：budget_exceeded 结束时去掉 lane-ready 仅留 lane-failed`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:58:22Z"
+    },
+    {
+      "id": 6559654907,
+      "url": "https://github.com/surlymochan/phanes/issues/987#issuecomment-6559654907",
+      "body": "Lane A1 (gocc, run `20261101-225725-68a6a2`) ended `failed` without a commit (error_class `exec_error`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T15:00:50Z"
+    }
+  ],
+  "929": [
+    {
+      "id": 6559624403,
+      "url": "https://github.com/surlymochan/phanes/issues/929#issuecomment-6559624403",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `weak-acceptance:lane-merge：merge-heartbeat 与 green 判定路径在文档/脚本中可核对`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:58:15Z"
+    }
+  ],
+  "928": [
+    {
+      "id": 6559623195,
+      "url": "https://github.com/surlymochan/phanes/issues/928#issuecomment-6559623195",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:body:checklist:SSH fleet：未知 host 错误不得计入可用容量的汇总契约`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:58:09Z"
+    }
+  ],
+  "925": [
+    {
+      "id": 6559621855,
+      "url": "https://github.com/surlymochan/phanes/issues/925#issuecomment-6559621855",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `weak-acceptance:org-health serve：静态资源异常不得吞掉 /api/diagnosis 响应`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:58:02Z"
+    }
+  ],
+  "924": [
+    {
+      "id": 6559620585,
+      "url": "https://github.com/surlymochan/phanes/issues/924#issuecomment-6559620585",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `weak-acceptance:org-health Boss：make_brief 期次锚点必须与 diagnosis periods 对齐失败可读`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:55Z"
+    }
+  ],
+  "872": [
+    {
+      "id": 6559619344,
+      "url": "https://github.com/surlymochan/phanes/issues/872#issuecomment-6559619344",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:README:组织诊断 DA：汇率缺失时拒绝混用不同币种金额`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:49Z"
+    }
+  ],
+  "773": [
+    {
+      "id": 6553989511,
+      "url": "https://github.com/surlymochan/phanes/issues/773#issuecomment-6553989511",
+      "body": "Lane CX3 (ib5, run `20261101-041851-a7f4a7`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T05:36:27Z"
+    },
+    {
+      "id": 6558443767,
+      "url": "https://github.com/surlymochan/phanes/issues/773#issuecomment-6558443767",
+      "body": "triage(2026-11-01 21:14:36 +08): closing as duplicate. Same title as closed lane-pr #751; budget_exceeded retry unnecessary.",
+      "at": "2026-11-01T13:14:39Z"
+    }
+  ],
+  "746": [
+    {
+      "id": 6559618181,
+      "url": "https://github.com/surlymochan/phanes/issues/746#issuecomment-6559618181",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:body:文档一句:SSH 模式：lane harvest 在 Connection closed 时有界重试并写明失败次数`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:43Z"
+    }
+  ],
+  "731": [
+    {
+      "id": 6553286581,
+      "url": "https://github.com/surlymochan/phanes/issues/731#issuecomment-6553286581",
+      "body": "Lane M2 (ib2, run `20261101-032922-054df7`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T04:14:48Z"
+    },
+    {
+      "id": 6559616842,
+      "url": "https://github.com/surlymochan/phanes/issues/731#issuecomment-6559616842",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:README:组织诊断 e2e：Builder 站点产物损坏时 run_e2e 失败且保留中间诊断`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:36Z"
+    },
+    {
+      "id": 6559629955,
+      "url": "https://github.com/surlymochan/phanes/issues/731#issuecomment-6559629955",
+      "body": "Lane M7 (box, run `20261101-225446-f10763`) ended `stopped` without a commit (error_class `risk_blocked`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T14:58:43Z"
+    }
+  ],
+  "646": [
+    {
+      "id": 6559334328,
+      "url": "https://github.com/surlymochan/phanes/issues/646#issuecomment-6559334328",
+      "body": "Lane M6 (box, run `20261101-222641-45812d`) ended `stopped` without a commit (error_class `risk_blocked`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T14:32:13Z"
+    },
+    {
+      "id": 6559615397,
+      "url": "https://github.com/surlymochan/phanes/issues/646#issuecomment-6559615397",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:README:组织诊断 e2e：评审报告写入失败的返回值回归`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:29Z"
+    }
+  ],
+  "564": [
+    {
+      "id": 6551650358,
+      "url": "https://github.com/surlymochan/phanes/issues/564#issuecomment-6551650358",
+      "body": "Lane M2 (ib2, run `20261101-002807-932ee3`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T01:15:57Z"
+    },
+    {
+      "id": 6559614140,
+      "url": "https://github.com/surlymochan/phanes/issues/564#issuecomment-6559614140",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `weak-acceptance:组织诊断 index：无数据时面板占位文案的小修`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:22Z"
+    }
+  ],
+  "557": [
+    {
+      "id": 6550876759,
+      "url": "https://github.com/surlymochan/phanes/issues/557#issuecomment-6550876759",
+      "body": "Lane A1 (gocc, run `20261101-072621-c5d3ad`) ended `failed` without a commit (error_class `no_report`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T00:00:20Z"
+    },
+    {
+      "id": 6559612879,
+      "url": "https://github.com/surlymochan/phanes/issues/557#issuecomment-6559612879",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:body:纯单元:OpenSwarm review：peer review 缺必填字段时的可读错误单测`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:16Z"
+    }
+  ],
+  "542": [
+    {
+      "id": 6551141546,
+      "url": "https://github.com/surlymochan/phanes/issues/542#issuecomment-6551141546",
+      "body": "Lane CX2 also finished this issue (run `20261101-080142-4dd49f`, duplicate dispatch); branch `fleet/CX2-issue542-20261101-080142-4dd49f` pushed for comparison, no second PR opened.",
+      "at": "2026-11-01T00:25:14Z"
+    },
+    {
+      "id": 6559611672,
+      "url": "https://github.com/surlymochan/phanes/issues/542#issuecomment-6559611672",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:title:纯单元:OpenSwarm guard：shell_invocations 与 event_commands 纯单元测试`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:10Z"
+    }
+  ],
+  "539": [
+    {
+      "id": 6551207558,
+      "url": "https://github.com/surlymochan/phanes/issues/539#issuecomment-6551207558",
+      "body": "Lane CX1 (ib5, run `20261031-232945-0edbeb`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T00:31:52Z"
+    },
+    {
+      "id": 6559610668,
+      "url": "https://github.com/surlymochan/phanes/issues/539#issuecomment-6559610668",
+      "body": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:title:纯单元:组织诊断 服务：resolve_paths 与路径白名单纯单元测试`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。",
+      "at": "2026-11-01T14:57:05Z"
+    }
+  ],
+  "226": [
+    {
+      "id": 6550058439,
+      "url": "https://github.com/surlymochan/phanes/issues/226#issuecomment-6550058439",
+      "body": "Lane CX3 (ib5, run `20261031-214130-9133e4`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-10-31T22:36:03Z"
+    },
+    {
+      "id": 6553012376,
+      "url": "https://github.com/surlymochan/phanes/issues/226#issuecomment-6553012376",
+      "body": "Path alignment evidence (box probe 2026-11-01 Asia/Singapore): every active host keeps lane state at `~/.claude/openswarm-executor-candidate/lanes/<L>/state.json` and release at `~/tools/openswarm-executor-candidate/current`. Autodispatch `REMOTE_STATUS` already reads that layout.\n\nLanding `tools/check-lane-status-paths.sh` + docs in https://github.com/surlymochan/phanes/pull/767 — will close this issue when that PR merges.",
+      "at": "2026-11-01T03:44:24Z"
+    },
+    {
+      "id": 6553027801,
+      "url": "https://github.com/surlymochan/phanes/issues/226#issuecomment-6553027801",
+      "body": "Closed: path layout documented + `tools/check-lane-status-paths.sh` landed via #767. Autodispatch REMOTE_STATUS already uses `~/.claude/openswarm-executor-candidate/lanes/<L>/state.json` on all fleet hosts.",
+      "at": "2026-11-01T03:46:13Z"
+    }
+  ],
+  "137": [
+    {
+      "id": 6547363354,
+      "url": "https://github.com/surlymochan/phanes/issues/137#issuecomment-6547363354",
+      "body": "Lane CX1 (ib5, run `20261031-182006-a3d309`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 无法落地：当前工作树中没有四张回归卡的 meta.yaml。报告说明卡片位于外部 agent-knowledge 仓库（docs/reviews/issue17-regression-cards.md:42-44），而任务要求只在当前仓库工作，因此未创建或修改卡片文件。另，报告第 5 节是环境记录；建议 verify 命令列在第 3 节汇总表。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-10-31T18:21:22Z"
+    },
+    {
+      "id": 6559061798,
+      "url": "https://github.com/surlymochan/phanes/issues/137#issuecomment-6559061798",
+      "body": "Lane CX8 (gocc, run `20261101-215634-362b6c`) ended `partial` without a commit (error_class `None`).\n\nExecutor summary: 无法落地：当前工作树没有四张回归卡的 meta.yaml。报告确认卡片位于外部 agent-knowledge 仓库（/Users/surlymo/work/agent-knowledge/regression/...），但任务禁止修改当前目录之外的文件。未凭空创建卡片或改动无关文档。\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-01T14:09:21Z"
+    },
+    {
+      "id": 6560410015,
+      "url": "https://github.com/surlymochan/phanes/issues/137#issuecomment-6560410015",
+      "body": "builder triage 00:05: 两次（CX1、CX8）都因四张回归卡的 meta.yaml 在外部 agent-knowledge 仓库，本仓库 lane 无法落地。不再重派，转 needs-human。",
+      "at": "2026-11-01T16:05:54Z"
+    },
+    {
+      "id": 6561879483,
+      "url": "https://github.com/surlymochan/phanes/issues/137#issuecomment-6561879483",
+      "body": "关闭（builder 02:21，用户点名的老卡）：这张卡要改的四张回归卡 meta.yaml 不在 phanes 里，而在外部 agent-knowledge 仓库（用户 Mac 上的 /Users/surlymo/work/agent-knowledge/regression/...）。CX1、CX8 两次都因为“工作树里没有这些文件”而无法落地。现在的规则是代码只动 phanes，车道也碰不到那个仓库。另外，验收只是 `git diff --stat`，按薄卡标准也不合格。如果以后要把这四张回归卡搬进 phanes（比如 openswarm/bench/），再按“基线会失败的 verify + 可运行验收”另开新卡。",
+      "at": "2026-11-01T18:11:54Z"
+    }
+  ],
+  "21": [
+    {
+      "id": 6577888292,
+      "url": "https://github.com/surlymochan/phanes/issues/21#issuecomment-6577888292",
+      "body": "Lane M17 (gores2, run `20261102-201932-328519`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry.",
+      "at": "2026-11-02T13:06:20Z"
+    }
+  ],
+  "7": [
+    {
+      "id": 6559236635,
+      "url": "https://github.com/surlymochan/phanes/issues/7#issuecomment-6559236635",
+      "body": "拆出车道卡：- [ ] #1334 复核 backup-model-failover / steer-interrupt / queue-window e2e 在 main 上的状态。本项保持 open。",
+      "at": "2026-11-01T14:24:07Z"
+    },
+    {
+      "id": 6561913529,
+      "url": "https://github.com/surlymochan/phanes/issues/7#issuecomment-6561913529",
+      "body": "拆卡（02:1x UTC+8）：#1334/#1336 只产出状态文档，没有实际运行 e2e，且 phanes 根 CI 不跑这两条。已拆成 #1408（steer-interrupt-pause）和 #1409（backup-model-failover usage-work 超时），都要求真正 bun install 后运行。本卡保留为 tracker。",
+      "at": "2026-11-01T18:14:46Z"
+    },
+    {
+      "id": 6577708314,
+      "url": "https://github.com/surlymochan/phanes/issues/7#issuecomment-6577708314",
+      "body": "Lane CX10 run `20261102-205536-fbb315` produced a thin diff (`eff<30:0 docs=8 other=0`): effective code <30 lines or mostly docs. Labelled `lane-failed`; PR not opened. Re-add `lane-ready` only with a ≥30-line impl+test change and real pytest/script acceptance.",
+      "at": "2026-11-02T12:57:29Z"
+    },
+    {
+      "id": 6583596654,
+      "url": "https://github.com/surlymochan/phanes/issues/7#issuecomment-6583596654",
+      "body": "清理关闭：点名 E2E 失败已由 PR #1420、#1470 修复、#1336 复核。（2026-11-03 存量清理盘点，如判断有误可重开。）",
+      "at": "2026-11-02T17:21:26Z"
+    }
+  ]
+}

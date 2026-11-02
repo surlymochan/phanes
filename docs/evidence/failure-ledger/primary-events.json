@@ -1,0 +1,442 @@
+[
+  {
+    "issue": 7,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/7#issuecomment-6577708314",
+    "comment_id": 6577708314,
+    "run": "20261102-205536-fbb315",
+    "undetermined": false
+  },
+  {
+    "issue": 21,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/21#issuecomment-6577888292",
+    "comment_id": 6577888292,
+    "run": "20261102-201932-328519",
+    "undetermined": true
+  },
+  {
+    "issue": 137,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/137#issuecomment-6559061798",
+    "comment_id": 6559061798,
+    "run": "20261101-215634-362b6c",
+    "undetermined": false
+  },
+  {
+    "issue": 226,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/226#issuecomment-6550058439",
+    "comment_id": 6550058439,
+    "run": "20261031-214130-9133e4",
+    "undetermined": true
+  },
+  {
+    "issue": 539,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/539#issuecomment-6559610668",
+    "comment_id": 6559610668,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 542,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/542#issuecomment-6559611672",
+    "comment_id": 6559611672,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 557,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/557#issuecomment-6559612879",
+    "comment_id": 6559612879,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 564,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/564#issuecomment-6559614140",
+    "comment_id": 6559614140,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 646,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/646#issuecomment-6559615397",
+    "comment_id": 6559615397,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 731,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/731#issuecomment-6559629955",
+    "comment_id": 6559629955,
+    "run": "20261101-225446-f10763",
+    "undetermined": true
+  },
+  {
+    "issue": 746,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/746#issuecomment-6559618181",
+    "comment_id": 6559618181,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 773,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/773#issuecomment-6553989511",
+    "comment_id": 6553989511,
+    "run": "20261101-041851-a7f4a7",
+    "undetermined": true
+  },
+  {
+    "issue": 872,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/872#issuecomment-6559619344",
+    "comment_id": 6559619344,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 924,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/924#issuecomment-6559620585",
+    "comment_id": 6559620585,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 925,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/925#issuecomment-6559621855",
+    "comment_id": 6559621855,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 928,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/928#issuecomment-6559623195",
+    "comment_id": 6559623195,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 929,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/929#issuecomment-6559624403",
+    "comment_id": 6559624403,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 987,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/987#issuecomment-6559654907",
+    "comment_id": 6559654907,
+    "run": "20261101-225725-68a6a2",
+    "undetermined": true
+  },
+  {
+    "issue": 1026,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1026#issuecomment-6555603712",
+    "comment_id": 6555603712,
+    "run": "20261101-163422-6a94ed",
+    "undetermined": false
+  },
+  {
+    "issue": 1043,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1043#issuecomment-6555687216",
+    "comment_id": 6555687216,
+    "run": "20261101-164333-a5dd00",
+    "undetermined": false
+  },
+  {
+    "issue": 1044,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1044#issuecomment-6556106364",
+    "comment_id": 6556106364,
+    "run": "20261101-163735-11db8e",
+    "undetermined": true
+  },
+  {
+    "issue": 1071,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1071#issuecomment-6555962383",
+    "comment_id": 6555962383,
+    "run": "20261101-171020-10c376",
+    "undetermined": false
+  },
+  {
+    "issue": 1087,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1087#issuecomment-6555983254",
+    "comment_id": 6555983254,
+    "run": "20261101-171357-e08243",
+    "undetermined": false
+  },
+  {
+    "issue": 1107,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1107#issuecomment-6556747151",
+    "comment_id": 6556747151,
+    "run": "20261101-172818-e8f482",
+    "undetermined": true
+  },
+  {
+    "issue": 1130,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1130#issuecomment-6557281348",
+    "comment_id": 6557281348,
+    "run": "20261101-183038-200c2b",
+    "undetermined": true
+  },
+  {
+    "issue": 1138,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1138#issuecomment-6556778737",
+    "comment_id": 6556778737,
+    "run": "20261101-183056-888027",
+    "undetermined": false
+  },
+  {
+    "issue": 1156,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1156#issuecomment-6556905170",
+    "comment_id": 6556905170,
+    "run": "20261101-184516-f25025",
+    "undetermined": false
+  },
+  {
+    "issue": 1175,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1175#issuecomment-6557097463",
+    "comment_id": 6557097463,
+    "run": "20261101-190425-5c70f9",
+    "undetermined": false
+  },
+  {
+    "issue": 1180,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1180#issuecomment-6557745650",
+    "comment_id": 6557745650,
+    "run": "20261101-192445-8ae4e6",
+    "undetermined": true
+  },
+  {
+    "issue": 1191,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1191#issuecomment-6557331151",
+    "comment_id": 6557331151,
+    "run": "20261101-192736-dd41c3",
+    "undetermined": false
+  },
+  {
+    "issue": 1229,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1229#issuecomment-6557725010",
+    "comment_id": 6557725010,
+    "run": "20261101-200712-b51934",
+    "undetermined": false
+  },
+  {
+    "issue": 1268,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1268#issuecomment-6557913694",
+    "comment_id": 6557913694,
+    "run": "20261101-202405-6b0996",
+    "undetermined": false
+  },
+  {
+    "issue": 1331,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1331#issuecomment-6559626913",
+    "comment_id": 6559626913,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 1335,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1335#issuecomment-6559628335",
+    "comment_id": 6559628335,
+    "run": null,
+    "undetermined": false
+  },
+  {
+    "issue": 1345,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1345#issuecomment-6561777370",
+    "comment_id": 6561777370,
+    "run": "20261102-015943-ffeec3",
+    "undetermined": false
+  },
+  {
+    "issue": 1363,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1363#issuecomment-6576828246",
+    "comment_id": 6576828246,
+    "run": "20261102-192708-f9c26a",
+    "undetermined": true
+  },
+  {
+    "issue": 1365,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1365#issuecomment-6570618728",
+    "comment_id": 6570618728,
+    "run": "20261102-142347-99c67c",
+    "undetermined": false
+  },
+  {
+    "issue": 1366,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1366#issuecomment-6571278517",
+    "comment_id": 6571278517,
+    "run": "20261102-150146-12212d",
+    "undetermined": true
+  },
+  {
+    "issue": 1374,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1374#issuecomment-6571403308",
+    "comment_id": 6571403308,
+    "run": "20261102-151609-226661",
+    "undetermined": false
+  },
+  {
+    "issue": 1389,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1389#issuecomment-6576108191",
+    "comment_id": 6576108191,
+    "run": "20261102-193250-b4f755",
+    "undetermined": true
+  },
+  {
+    "issue": 1407,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1407#issuecomment-6563552864",
+    "comment_id": 6563552864,
+    "run": "20261102-043458-5afa5e",
+    "undetermined": true
+  },
+  {
+    "issue": 1432,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6572195418",
+    "comment_id": 6572195418,
+    "run": "20261102-154520-f5a9ea",
+    "undetermined": false
+  },
+  {
+    "issue": 1478,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1478#issuecomment-6564651486",
+    "comment_id": 6564651486,
+    "run": "20261102-052346-0ce1e8",
+    "undetermined": true
+  },
+  {
+    "issue": 1633,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1633#issuecomment-6570482246",
+    "comment_id": 6570482246,
+    "run": "20261102-141410-489c03",
+    "undetermined": false
+  },
+  {
+    "issue": 1638,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1638#issuecomment-6576181532",
+    "comment_id": 6576181532,
+    "run": "20261102-193417-6003b0",
+    "undetermined": true
+  },
+  {
+    "issue": 1639,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1639#issuecomment-6576209348",
+    "comment_id": 6576209348,
+    "run": "20261102-193832-8b09fe",
+    "undetermined": true
+  },
+  {
+    "issue": 1641,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1641#issuecomment-6570482468",
+    "comment_id": 6570482468,
+    "run": "20261102-141429-521dc8",
+    "undetermined": false
+  },
+  {
+    "issue": 1660,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1660#issuecomment-6576601579",
+    "comment_id": 6576601579,
+    "run": "20261102-195913-a59b94",
+    "undetermined": true
+  },
+  {
+    "issue": 1662,
+    "type": "quota",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1662#issuecomment-6585420758",
+    "comment_id": 6585420758,
+    "run": "20261103-020143-4d85aa",
+    "undetermined": true
+  },
+  {
+    "issue": 1670,
+    "type": "exec_error",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1670#issuecomment-6577620687",
+    "comment_id": 6577620687,
+    "run": "20261102-202150-f8f128",
+    "undetermined": true
+  },
+  {
+    "issue": 1700,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1700#issuecomment-6583426424",
+    "comment_id": 6583426424,
+    "run": "20261103-011216-b87e05",
+    "undetermined": false
+  },
+  {
+    "issue": 1704,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1704#issuecomment-6585373856",
+    "comment_id": 6585373856,
+    "run": "20261103-024510-111450",
+    "undetermined": false
+  },
+  {
+    "issue": 1750,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1750#issuecomment-6583690482",
+    "comment_id": 6583690482,
+    "run": "20261103-012430-6a8bca",
+    "undetermined": false
+  },
+  {
+    "issue": 1757,
+    "type": "no-commit",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1757#issuecomment-6584818019",
+    "comment_id": 6584818019,
+    "run": "20261103-021804-30d218",
+    "undetermined": false
+  },
+  {
+    "issue": 1775,
+    "type": "thin-gate",
+    "evidence": "https://github.com/surlymochan/phanes/issues/1775#issuecomment-6585423416",
+    "comment_id": 6585423416,
+    "run": "20261103-024712-6f7540",
+    "undetermined": false
+  }
+]

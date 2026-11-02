@@ -1,0 +1,41 @@
+{
+  "seed": 20261102,
+  "verified_at": "2026-11-02T18:58:04.522578+00:00",
+  "samples": [
+    {
+      "issue": 1365,
+      "url": "https://github.com/surlymochan/phanes/issues/1365#issuecomment-6570618728",
+      "comment_id": 6570618728,
+      "body_matches_snapshot": true,
+      "source_excerpt": "Lane CX5 (govpn, run `20261102-142347-99c67c`) ended `done` without a commit (error_class `None`).\n\nExecutor summary: 按 error_class 的重试策略模块及次数上限测试已存在于 openswarm/lib/dispatch/retry.py、openswarm/tests/test_dispatch_retry.py 和 openswarm/tests/test_dispatch_retry_defaults.py（历史提交已标注 Refs #1365）。但该策略尚未接入 tools/lane-autodispatch/autodispatch.py 的失败分流，openswarm/policy.json 也没有 dispatch.retry 配置；本次未完成这些接线，也没有可提交的改动。\n\nLabel `lane-failed`; re-add `lane-ready` to retry."
+    },
+    {
+      "issue": 539,
+      "url": "https://github.com/surlymochan/phanes/issues/539#issuecomment-6559610668",
+      "comment_id": 6559610668,
+      "body_matches_snapshot": true,
+      "source_excerpt": "薄卡拦截（监督 22:54）：`is_thin_card` → `thin-kw:title:纯单元:组织诊断 服务：resolve_paths 与路径白名单纯单元测试`。\n\n新规则：标题/正文命中文档一句·常用命令·README·playbook·checklist·补充一行·文档-only·失败提示单测·空/缺字段灌水等即拒；有效 diff 须 ≥30 行（实现+测试）；验收禁止只用 `rg | head`。此卡关闭，不计入完成。"
+    },
+    {
+      "issue": 1130,
+      "url": "https://github.com/surlymochan/phanes/issues/1130#issuecomment-6557281348",
+      "comment_id": 6557281348,
+      "body_matches_snapshot": true,
+      "source_excerpt": "Lane A1 (gocc, run `20261101-183038-200c2b`) ended `budget_exceeded` without a commit (error_class `budget_exceeded`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry."
+    },
+    {
+      "issue": 1407,
+      "url": "https://github.com/surlymochan/phanes/issues/1407#issuecomment-6563552864",
+      "comment_id": 6563552864,
+      "body_matches_snapshot": true,
+      "source_excerpt": "Lane M5 (box, run `20261102-043458-5afa5e`) ended `stopped` without a commit (error_class `risk_blocked`).\n\nExecutor summary: None\n\nLabel `lane-failed`; re-add `lane-ready` to retry."
+    },
+    {
+      "issue": 1432,
+      "url": "https://github.com/surlymochan/phanes/issues/1432#issuecomment-6572195418",
+      "comment_id": 6572195418,
+      "body_matches_snapshot": true,
+      "source_excerpt": "Lane M5 (box, run `20261102-154520-f5a9ea`) ended `partial` without a commit (error_class `exec_error`).\n\nExecutor summary: 沙箱里 openswarm 仓库不可用、worktree 不可写，因此按 issue 描述从零实现了 lib/merge/actions.py + 单测并放在 scratch 树 /tmp/issue1432（已 git init，提交 35ca0db/04b2bdc/3851772，提交信息带 Refs #1432），16 个用例本地全过。【环境阻塞证据】(1) /home/box/.claude/openswarm-executor-candidate/lanes/M5/wt 是失效挂载：ls -A 为空、无 .git/.git-local，mkdir/touch/open(O_CREAT) 全部 ENOENT；/proc/self/mountinfo 里挂载源为 254:16 .../lanes/M5/wt//deleted（宿主目录已被 unlink，ext4 目录不能再建条目，umount2 返回 EINVAL、mount 被 lock）；.git-local 那个 ro 挂载同样 //deleted 且不可达（open_tre"
+    }
+  ]
+}
