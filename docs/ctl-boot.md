@@ -294,6 +294,7 @@ Check scripts (no SSH):
 - `python3 tools/check-ghost-in-progress.py` — offline ghost in-progress check (Refs #922). Fake fixtures only: an open issue carrying `in-progress` with no lane entry in `state.json` counts as a ghost only when the label is older than **10 minutes** (a dispatch in flight still has no lane record), `lane-pr` issues are protected, and a `lane-failed` ghost is only re-labelled `lane-ready` when `state.json` has no lane occupancy and the issue body keeps its acceptance command (#960). It prints the recommended `gh issue edit` commands and never touches GitHub.
 - `python3 tools/check-ad-stale-label-skip.py` — offline #985 contract check. A stale search hit whose authoritative labels still contain both `lane-failed` and `lane-ready` is skipped once; the operator should remove the residual `lane-ready` label before retrying.
 - `python3 tools/check-health-hosts-ok-pause.py` — offline #948 contract check. It asserts that a host held by a `PAUSE-HOST-<host>` file is never counted in the `hosts_ok` summary, that it is reported in `skipped_cooldown`, that an expired automatic pause is released, and that a pause that has not expired yet — or a manual one — is never cleared.
+- `python3 tools/check-ad-review-pause-uncounted.py` — offline #1607 contract check. It drives the hotfixed AD's `box_pause_during(cfg, st, path)` and its `finish_review` no-verdict branch: a review failure that happened while the box VM was paused is not counted, a failure outside the pause window is counted. It reads and writes only a temporary tree, never the live `~/phanes-ctl/autodispatch` state.
 - `python3 tools/check-ad-harvest-backoff.py` — offline #947 contract check. It replays a fake harvest fetch failure sequence and asserts the transient/fatal classification, the exponential backoff ladder, and that the first N transient failures only log and back off — the (N+1)-th failure is the one labelled `lane-failed`. It never touches the live lane state.
 - `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
@@ -720,6 +721,42 @@ cp tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
 状态目录放 `~/phanes-ctl/autodispatch/jump-hosts.json`（JSON 对象
 `{"<host>": "<ProxyCommand>"}`），格式与取值见
 [`docs/dual-mode-ssh.md`](dual-mode-ssh.md)。
+
+## 审查失败在 box VM 暂停期间不计 fails（Refs #1607）
+
+11-02 08:3x 控制面 AD（`~/phanes-ctl/bin/autodispatch.py`）热修：本机车道的审查 run 以
+`exec_error` 结束、且 `box-pauses.jsonl` 里有一条 `gap_s ≥ 120`、`from` 落在
+`[派发时间−5s, 现在]` 的暂停时，记 `box VM paused …s (…→…) during run → not counted`，
+**不**增加该 PR 的 fails。起因：07:31→07:49 的暂停打断了 PR #1563/#1572/#1577 三个审查，
+#1572 被记了 2 次失败。
+
+AD 本身不加新功能，只用离线契约检查锁住这个修复：
+
+```bash
+python3 tools/check-ad-review-pause-uncounted.py
+```
+
+脚本用 importlib 加载 `--ad`（默认 `~/phanes-ctl/bin/autodispatch.py`，运行副本见
+[`tools/lane-autodispatch/README.md`](../tools/lane-autodispatch/README.md)），表驱动断言
+`box_pause_during(cfg, st, path)`：
+
+- 暂停落在窗口内（`from = dispatch−3` / `dispatch−4`）→ 返回该条暂停记录；
+- `from = dispatch−5`（窗口端点）与 `gap_s = 120`（阈值）→ 仍命中；
+- `from = dispatch−6`（窗口外）、`gap_s = 119`（低于阈值）、远端车道（host 不在 AD 的本机
+  列表）→ 返回 None；
+- 坏行跳过，其后的合法行仍然命中。
+
+再用临时目录 + 假 `gh`/`ssh` 打桩调用 `finish_review` 的无 verdict 分支：暂停命中时
+`reviews.json` 里该 PR 的 fails 不变、日志含暂停专有标记与 `not counted`；未命中时 fails+1。
+夹具用 AD 真实的 `at` 派发时间（`%F %T` 墙钟串，`tools/lane-autodispatch/autodispatch.py:598`）
+与生产格式的暂停记录（`{"from": "%Y-%m-%d %H:%M:%S", "to": …, "gap_s": N}`，样本见
+`openswarm/tests/test_dispatch_pause_window.py`）。
+
+隔离：脚本在 import 之前把 `HOME` 与 `OPENSWARM_CTL_STATE_DIR` 指向临时目录（AD 在 import
+期就绑定 `D = f"{HOME}/phanes-ctl/autodispatch"`），再断言 AD 的 reviews.json /
+box-pauses.jsonl / 日志路径都落在该目录内，因此不会读写真实控制面状态，也不会往
+`brain/log.md` 写假审查行。热修只存在于 box 运行副本，所以本机没有该副本时脚本输出
+`SKIP`（不假装契约成立），用 `--ad PATH` 可指定别的 AD 文件。
 
 ## Manual one-shots
 
