@@ -308,6 +308,24 @@ another repository never releases a PR, a list record without a repository never
 number is shared by every repository), and a bare number key only counts when the record names the repository
 itself.
 
+### Rerun a failed run once, and the post-merge hook
+
+Two optional flags make the gate do what a hand written merge loop usually does:
+
+| Flag | Effect |
+| --- | --- |
+| `--rerun-failed-once` | Rerun the failed CI run of a PR that is blocked by `ci` -- once per run, never twice. |
+| `--ignore-checks-re REGEX` | Never rerun a run whose name matches `REGEX`. The default is the macOS pattern of `lib/merge/rerun.py`. |
+| `--post-merge-hook CMD` | Run `CMD` once per new sha of `main`, after a merge landed. |
+
+`--rerun-failed-once` reads the runs of the branch of the PR (`gh run list --branch`), keeps only the runs of the
+current head sha (a run of an older commit was superseded by a later push and is left alone), and reruns the failed
+ones with `gh run rerun <id> --failed`. The runs that were rerun are remembered in
+`$OPENSWARM_HOME/merge-reruns.json`, so the next round leaves them alone; a blocked PR is reported as
+`blocked:ci(rerun:<id>)`. `--post-merge-hook` runs the command (without a shell) once per new sha of `main`: the sha
+of the last successful run is kept in `$OPENSWARM_HOME/post-merge-hook.json`, a failed run does not remember the sha
+and is retried by the next round. With `--dry-run` both flags only report what they would do.
+
 ## Learning loop
 
 The loop turns finished runs into better next runs. Each stage has its own command, and the curation commands write

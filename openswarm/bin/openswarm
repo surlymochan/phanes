@@ -14125,6 +14125,13 @@ MERGE_GATE_VERDICT_KEYS = ("verdict", "review_verdict", "decision")
 MERGE_GATE_APPROVED_VERDICTS = ("approve", "approved", "accept", "accepted")
 MERGE_GATE_CHECK_FAILURES = ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE")
 MERGE_GATE_CHECK_PENDING = ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED")
+# The ledger of the runs that were already rerun once, and the state of the
+# post-merge hook; both live next to the other merge gate files.
+MERGE_GATE_RERUN_LEDGER = "merge-reruns.json"
+MERGE_GATE_POST_HOOK_STATE = "post-merge-hook.json"
+# `gh run list` returns 20 rows by default, which would hide the run of the
+# current head behind the runs of the older commits of the same branch.
+MERGE_GATE_RUN_LIST_LIMIT = 100
 
 
 class MergeGateError(RuntimeError):
@@ -14144,6 +14151,21 @@ def merge_gate_gh_runner(argv):
     except (OSError, subprocess.TimeoutExpired) as error:
         return 127, "", str(error)
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def merge_action_module(name, filename):
+    """Load a module of `lib/merge/` by path (it is a namespace package)."""
+    module_path = os.path.join(SKILL_DIR, "lib", "merge", filename)
+    spec = importlib.util.spec_from_file_location(name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def merge_gate_rerun_runner(runner, command):
+    """Adapt the gate's injectable gh runner to rerun_once's subprocess API."""
+    code, out, err = runner(command[1:])
+    return subprocess.CompletedProcess(command, code, out, err)
 
 
 def merge_gate_gh_json(runner, argv):
@@ -14353,13 +14375,14 @@ def merge_gate_check_counts(rollup, policy=None):
 
 def merge_gate_pr_view(runner, repo, number, policy=None):
     """Read the head sha, labels, mergeability, and CI status of one PR."""
-    fields = "number,headRefOid,labels,mergeable,statusCheckRollup"
+    fields = "number,headRefOid,headRefName,labels,mergeable,statusCheckRollup"
     data = merge_gate_gh_json(runner, ["pr", "view", str(number), "--repo", repo, "--json", fields])
     if not isinstance(data, dict):
         raise MergeGateError(f"gh pr view {number} returned no PR data")
     labels = [label.get("name") if isinstance(label, dict) else label
               for label in data.get("labels") or []]
-    return {"pr": int(number), "head_sha": data.get("headRefOid") or "", "labels": labels,
+    return {"pr": int(number), "head_sha": data.get("headRefOid") or "",
+            "head_ref": data.get("headRefName") or "", "labels": labels,
             "mergeable": data.get("mergeable"),
             "checks": merge_gate_check_counts(data.get("statusCheckRollup"), policy)}
 
@@ -14432,6 +14455,114 @@ def merge_gate_merge(runner, repo, number, head_sha):
     return {"action": "merged"}
 
 
+def merge_gate_ignore_re(args):
+    """The ignore pattern of the rerun filter; None means "the library default".
+
+    A broken pattern is a user error, not a crash: it is reported as a
+    MergeGateError instead of letting a `re.error` escape the whole gate.
+    """
+    pattern = getattr(args, "ignore_checks_re", None)
+    if pattern is None or not str(pattern).strip():
+        return None
+    pattern = str(pattern)
+    try:
+        re.compile(pattern)
+    except re.error as error:
+        raise MergeGateError(f"invalid --ignore-checks-re: {error}")
+    return pattern
+
+
+def merge_gate_failed_runs(runner, repo, head_ref, head_sha):
+    """The runs of the current head sha, and the runs of the older commits.
+
+    `gh run list --branch` returns the runs of every commit of the branch, so the
+    runs of an older commit are reported apart: a later push superseded them and
+    they must not be rerun.  The list is capped, because `gh run list` returns
+    20 rows by default, which would hide the run of the current head.
+    """
+    rows = merge_gate_gh_json(runner, ["run", "list", "--repo", repo, "--branch", head_ref,
+                                       "--limit", str(MERGE_GATE_RUN_LIST_LIMIT),
+                                       "--json", "databaseId,conclusion,name,headSha"])
+    runs = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict)]
+
+    def is_current(row):
+        return bool(head_sha) and str(row.get("headSha") or "") == str(head_sha)
+
+    return ([row for row in runs if is_current(row)],
+            [row for row in runs if not is_current(row)])
+
+
+def merge_gate_rerun_failed_once(runner, repo, number, pr_view, detail, ignore_re, dry_run):
+    """Rerun the failed runs of the current head once; returns the record fields.
+
+    The runs that really went through are remembered in the ledger
+    (`$OPENSWARM_HOME/merge-reruns.json`), so the next round does not rerun the
+    same run again.
+    """
+    module = merge_action_module("openswarm_merge_rerun", "rerun.py")
+    head_sha = str(detail.get("head_sha") or "")
+    head_ref = str(pr_view.get("head_ref") or "")
+    try:
+        current, stale = merge_gate_failed_runs(runner, repo, head_ref, head_sha)
+    except MergeGateError as error:
+        # One unreadable run list must not hide the verdict of the PR.
+        return {"rerun_error": bus_redact(str(error))[:300]}
+    ledger = module.RerunLedger(os.path.join(DATA, MERGE_GATE_RERUN_LEDGER))
+    pattern = module.DEFAULT_IGNORE_RE if ignore_re is None else ignore_re
+    try:
+        actions = module.rerun_once(
+            number, current, ledger,
+            runner=lambda command, **kwargs: merge_gate_rerun_runner(runner, command),
+            dry_run=dry_run, ignore_re=pattern)
+    except ValueError as error:
+        raise MergeGateError(f"invalid --ignore-checks-re: {error}")
+    fields = {"reruns": actions}
+    if stale:
+        fields["reruns_skipped"] = [
+            {"run_id": row.get("databaseId"), "head_sha": row.get("headSha"),
+             "reason": "the run belongs to another commit than the current head"}
+            for row in stale]
+    rerun = next((row for row in actions if row.get("action") == "rerun"), None)
+    if rerun:
+        fields["status"] = f"blocked:ci(rerun:{rerun.get('run_id')})"
+    return fields
+
+
+def merge_gate_post_merge_hook(runner, repo, results, hook_cmd, dry_run):
+    """Run the post-merge hook when a merge landed or `main` moved.
+
+    The hook remembers the sha of its last successful run in
+    (`$OPENSWARM_HOME/post-merge-hook.json`): a failed run does not remember the
+    sha, so the next round tries again.
+    """
+    module = merge_action_module("openswarm_merge_post_hook", "post_hook.py")
+    try:
+        argv = shlex.split(hook_cmd)
+    except ValueError as error:
+        raise MergeGateError(f"invalid --post-merge-hook: {error}")
+    if not argv:
+        raise MergeGateError("--post-merge-hook needs a command to run")
+    hook = module.PostMergeHook(argv, os.path.join(DATA, MERGE_GATE_POST_HOOK_STATE))
+    try:
+        data = merge_gate_gh_json(runner, ["api", f"repos/{repo}/commits/main"])
+    except MergeGateError as error:
+        return {"action": "post_merge_hook", "status": "gh_error", "main_sha": None,
+                "error": bus_redact(str(error))[:300]}
+    main_sha = data.get("sha") if isinstance(data, dict) else None
+    if not main_sha:
+        return {"action": "post_merge_hook", "status": "skipped", "main_sha": None,
+                "reason": "the sha of main is unknown"}
+    previous = hook.state().get("last_ok_sha")
+    merged_any = any(row.get("action") == "merged" for row in results)
+    if merged_any or previous != main_sha:
+        # A merge landed, or `main` moved on its own: the workspace is stale.
+        # The hook itself skips a sha it already succeeded on.
+        status = "planned" if dry_run else hook.maybe_run(main_sha)
+    else:
+        status = "skipped"
+    return {"action": "post_merge_hook", "status": status, "main_sha": main_sha}
+
+
 def cmd_merge_gate(args, policy=None, runner=None):
     """Merge pull requests whose reviewed head sha is still current and green."""
     runner = runner or merge_gate_gh_runner
@@ -14439,6 +14570,9 @@ def cmd_merge_gate(args, policy=None, runner=None):
     if not BUS_REPO_RE.fullmatch(repo):
         raise MergeGateError(f"invalid repository: {repo or '(empty)'}; expected owner/name")
     dry_run = bool(getattr(args, "dry_run", False))
+    rerun_enabled = bool(getattr(args, "rerun_failed_once", False))
+    hook_cmd = str(getattr(args, "post_merge_hook", None) or "").strip()
+    ignore_re = merge_gate_ignore_re(args)
     records = jload(merge_gate_reviews_path(), {}) or {}
     numbers = ([int(args.pr)] if getattr(args, "pr", None) else merge_gate_open_prs(runner, repo))
     results = []
@@ -14454,6 +14588,9 @@ def cmd_merge_gate(args, policy=None, runner=None):
         review = merge_gate_find_review(records, repo, number)
         status, detail = merge_gate_evaluate(pr_view, review)
         record = {"pr": number, "repo": repo, "status": status, **detail}
+        if status == "blocked:ci" and rerun_enabled:
+            record.update(merge_gate_rerun_failed_once(runner, repo, number, pr_view, detail,
+                                                       ignore_re, dry_run))
         if status != "mergeable":
             record["action"] = "none"
         elif dry_run:
@@ -14463,9 +14600,14 @@ def cmd_merge_gate(args, policy=None, runner=None):
         results.append(record)
     blocked = [record for record in results if record["status"] != "mergeable"
                or record.get("action") == "merge_failed"]
+    hook_record = None
+    if hook_cmd:
+        hook_record = merge_gate_post_merge_hook(runner, repo, results, hook_cmd, dry_run)
     if getattr(args, "json", False):
-        print(json.dumps({"repo": repo, "dry_run": dry_run, "results": results},
-                         indent=2, ensure_ascii=False))
+        payload = {"repo": repo, "dry_run": dry_run, "results": results}
+        if hook_record is not None:
+            payload["post_merge_hook"] = hook_record
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         for record in results:
             checks = record.get("checks") or {}
@@ -14474,6 +14616,9 @@ def cmd_merge_gate(args, policy=None, runner=None):
                   f"head={(record.get('head_sha') or '-')[:12]}  "
                   f"reviewed={(record.get('reviewed_sha') or '-')[:12]}  "
                   f"checks={checks.get('passed', 0)}/{total}  ignored={len(checks.get('ignored_names', []))}")
+        if hook_record is not None:
+            print(f"post-merge-hook  {hook_record['status']}  "
+                  f"main={(hook_record.get('main_sha') or '-')[:12]}")
     return 1 if blocked else 0
 
 
@@ -14842,6 +14987,13 @@ def main():
     sp.add_argument("--pr", type=int, help="only judge this pull request number")
     sp.add_argument("--dry-run", action="store_true", help="report the gate verdict without merging")
     sp.add_argument("--json", action="store_true", help="print the gate results as JSON")
+    sp.add_argument("--rerun-failed-once", action="store_true",
+                    help="rerun the failed CI run of a blocked PR once")
+    sp.add_argument("--ignore-checks-re",
+                    help="never rerun a CI run whose name matches this pattern "
+                         "(default: the macOS pattern of lib/merge/rerun.py)")
+    sp.add_argument("--post-merge-hook",
+                    help="command to run once per new sha of main after a merge landed")
 
     a = ap.parse_args()
     if a.cmd == "dispatch":
