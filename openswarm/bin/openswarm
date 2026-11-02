@@ -3464,6 +3464,9 @@ REPORT_INSTRUCTION = """When finished, your FINAL message must be ONLY a JSON ob
 status ("done"|"partial"|"failed"), summary (string), files_changed (array of paths), tests (string), followups (array of strings).
 """
 RATE_LIMIT_CONTINUE_PROMPT = "You were interrupted by a provider rate limit. Continue the task from where you stopped; finish with the final JSON report."
+STREAM_RETRY_CONTINUE_PROMPT = ("The upstream provider stream broke before the answer was complete (a transient "
+                                "upstream failure). Continue the task from where you stopped; finish with the final "
+                                "JSON report.")
 
 PROMPT_TMPL = """You are an execution agent dispatched by a planning agent. Complete the task below.
 
@@ -8479,7 +8482,72 @@ def pi_compact_event(msg):
 
 PI_RETRYABLE_RE = re.compile(r"overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504|529)\b|"
                              r"service.?unavailable|server.?error|internal.?error|network.?error|connection.?(?:error|refused|lost)|"
-                             r"fetch failed|socket hang up|ended without|timed? out|timeout|terminated", re.I)
+                             r"fetch failed|socket hang up|ended without|timed? out|timeout|terminated|"
+                             r"stream ended before|message_stop|provider unavailable|ECONNRESET|premature close", re.I)
+
+# #1535: the Token Plan is exhausted.  A quota class error is not transient: retrying the request
+# only burns the run budget, so the lane reports the quota instead of asking for a retry.
+QUOTA_EXHAUSTED_RE = re.compile(r"token plan|用量上限|\b2056\b|\(2056\)|usage limit|insufficient (?:balance|quota)|insufficient_quota|"
+                                r"quota (?:exceeded|exhausted)", re.I)
+
+# #1594: the upstream stream broke before the answer was complete (a VM pause makes the broker
+# answer 502).  Such a turn is transient and may be retried.
+PI_STREAM_RETRY_RE = re.compile(r"stream ended before|message_stop|provider unavailable|ECONNRESET|premature close", re.I)
+
+
+def quota_exhausted_error(text):
+    """Whether a provider error is an exhausted quota (the Token Plan ran out)."""
+    return bool(QUOTA_EXHAUSTED_RE.search(str(text or "")))
+
+
+def pi_retry_kind(text):
+    """The retry class of a provider error: "quota", "stream" or None.
+
+    #1535 wins over #1594: an exhausted quota is not transient and must not be retried; only the
+    stream class errors (a broken upstream stream) are.
+    """
+    text = str(text or "")
+    if not text:
+        return None
+    if quota_exhausted_error(text):
+        return "quota"
+    if PI_STREAM_RETRY_RE.search(text):
+        return "stream"
+    return None
+
+
+def pi_stream_retry_max():
+    """How many times a broken upstream stream may be retried (PI_STREAM_RETRY_MAX, default 3)."""
+    raw = os.environ.get("PI_STREAM_RETRY_MAX") or envvar("PI_STREAM_RETRY_MAX") or 3
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 3
+
+
+def pi_stream_retry_delay(retry):
+    """Backoff before the next stream retry: 5s, 10s, 15s, ... capped at 30s."""
+    return min(30.0, 5.0 * max(1, int(retry)))
+
+
+def pi_stream_retry_decision(backend, error_class, error_tail, retries, max_retries=None, can_retry=True):
+    """What a lane does with a turn whose provider stream broke (#1594).
+
+    Returns ``(action, error_class, detail)``:
+
+    * ``("retry", ...)`` -- the upstream stream broke; the turn is transient and may be retried
+      while the retry budget lasts.
+    * ``("stop", ...)`` -- the turn failed for good.  An exhausted quota (#1535) is never retried;
+      a stream error past its budget keeps ``exec_error`` and the detail names the retries:
+      ``stream_retries=N``.
+    """
+    text = str(error_tail or "")
+    cap = pi_stream_retry_max() if max_retries is None else max(0, int(max_retries))
+    if backend != "pi" or error_class != "exec_error" or pi_retry_kind(text) != "stream":
+        return "stop", error_class, text
+    if can_retry and retries < cap:
+        return "retry", error_class, text
+    return "stop", "exec_error", f"{text} (stream_retries={retries})"
 
 
 def lane_note_executor_exit(rdir, desc_recorded_at):
@@ -8964,6 +9032,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     # pi auto-retry: a deadline (monotonic seconds) by which pi must show the retry progressing.
     pi_retry_wait = None
     pi_retry_started = False
+    pi_retry_error = ""
     while not ended:
         # Scanning descendants costs one pgrep per process plus a status.json rewrite; doing it
         # for every streamed event throttled pi/codex lanes and left the model idle while the
@@ -9018,7 +9087,10 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             return turn_failed("stalled", 124, stall_detail)
         if pi_retry_wait is not None and time.monotonic() >= pi_retry_wait:
             if not errors:
-                errors.append("pi auto-retry did not resume after a transient provider error")
+                # The provider error is the detail of the failed turn: keep it, the lane decides
+                # whether the error is transient (#1594) or a quota to report (#1535).
+                note = "pi auto-retry did not resume after a transient provider error"
+                errors.append(short(f"{pi_retry_error}: {note}" if pi_retry_error else note, 400))
             ended = True
             continue
         msg = child.next_event(0.15)
@@ -9129,9 +9201,16 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                         last_err = (message.get("errorMessage") or "") if message.get("stopReason") == "error" else ""
                 if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
                     continue
-                if last_err and PI_RETRYABLE_RE.search(last_err):
+                if last_err and pi_retry_kind(last_err) == "quota":
+                    # #1535: the Token Plan is exhausted.  A quota class error is not transient, so
+                    # the turn ends now and the lane reports the quota instead of retrying.
+                    if last_err not in errors:
+                        errors.append(short(last_err, 400))
+                    ended = True
+                elif last_err and PI_RETRYABLE_RE.search(last_err):
                     # pi may auto-retry a transient provider error: wait for auto_retry_start (or,
                     # if it already arrived, keep its longer deadline) instead of ending now.
+                    pi_retry_error = last_err
                     wait_until = time.monotonic() + pi_retry_wait_seconds()
                     pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
                 else:
@@ -9256,6 +9335,25 @@ def lane_wait_rate_limit(seconds, lane, spec, child, server, turn, pending):
             return False
         time.sleep(min(0.1, max(0, deadline - NOW())))
     return NOW() < budget_deadline
+
+
+def lane_wait_stream_retry(seconds, lane, spec, child, server, turn, pending):
+    """Wait before the next stream retry (#1594): honour an abort and the run budget."""
+    budget_deadline = spec["started"] + max(0, float(spec.get("budget_minutes") or 0)) * 60
+    deadline = min(NOW() + seconds, budget_deadline)
+    while NOW() < deadline:
+        lane_control_messages(server, lane, spec, child, turn, pending)
+        if spec.get("abort_requested") or spec.get("down_requested") or not child.alive():
+            return False
+        time.sleep(min(0.1, max(0, deadline - NOW())))
+    return NOW() < budget_deadline
+
+
+def lane_note_stream_retry(rdir, event_file, retries, max_retries, error_text, wait_seconds):
+    """Record a stream retry (#1594): the counter goes to status.json, the attempt to the events."""
+    set_status(rdir, stream_retries=retries)
+    lane_record_event(event_file, {"type": "STREAM_RETRY", "retry": retries, "max_retries": max_retries,
+                                   "wait_seconds": round(wait_seconds, 3), "error": error_text})
 
 
 LANE_PROVIDER_CODE_RES = (
@@ -9482,6 +9580,7 @@ def lane_do_run(lane, spec, child, server, current):
         attempt_lane = lane
         attempt_number = 0
         forbidden_retried = False
+        stream_retries = 0
         _, max_rate_retries = rate_limit_policy(load_policy())
         for number, model in enumerate(models, 1):
             attempt_lane = dict(lane, model=model)
@@ -9553,6 +9652,28 @@ def lane_do_run(lane, spec, child, server, current):
                                  "meta": {"usage": usage}, "events": evp, "error_tail": error_tail})
                 if allow_fallback and error_class == "exec_error" and MODEL_UNAVAILABLE_RE.search(error_tail or ""):
                     error_class = attempts[-1]["error_class"] = "model_unavailable"
+                # #1594: the upstream stream broke before the answer was complete (a VM pause makes
+                # the broker answer 502).  Such a turn is transient: retry it instead of failing the
+                # whole run.  The stream retries are counted on their own and the run ends as
+                # exec_error once the budget is used up.
+                can_retry = (child.alive() and not spec.get("abort_requested")
+                             and NOW() + pi_stream_retry_delay(stream_retries + 1) < deadline)
+                action, error_class, error_tail = pi_stream_retry_decision(
+                    attempt_lane["backend"], error_class, error_tail, stream_retries, can_retry=can_retry)
+                attempts[-1]["error_class"] = error_class
+                attempts[-1]["error_tail"] = error_tail
+                if action == "retry":
+                    stream_retries += 1
+                    wait_seconds = pi_stream_retry_delay(stream_retries)
+                    lane_note_stream_retry(rdir, evp, stream_retries, pi_stream_retry_max(),
+                                           error_tail, wait_seconds)
+                    if not lane_wait_stream_retry(wait_seconds, lane, spec, child, server, turn, pending):
+                        error_class = "stopped" if spec.get("abort_requested") or spec.get("down_requested") else "budget_exceeded"
+                        rc = 130 if error_class == "stopped" else 124
+                        break
+                    continuation = True
+                    retry_prompt = STREAM_RETRY_CONTINUE_PROMPT
+                    continue
                 # A transient Google 403 can occur before any work starts. Retry once
                 # only after the old request released its slot and left no edits.
                 if (error_class == "upstream_forbidden" and lane["backend"] == "agy" and not forbidden_retried
@@ -9572,7 +9693,10 @@ def lane_do_run(lane, spec, child, server, current):
                 reset_seconds = agy_quota_reset_seconds(attempt_lane["backend"], error_tail)
                 if reset_seconds is not None and reset_seconds > 0:
                     lane_write_state(lane["name"], quota_model=model, quota_until=NOW() + min(reset_seconds, 3600))
+                # #1535: an exhausted quota (the Token Plan ran out) is not transient, so the lane
+                # reports the quota instead of spending the run budget on retries.
                 can_retry = (retries < max_rate_retries and not spec.get("abort_requested")
+                             and not quota_exhausted_error(error_tail)
                              and (reset_seconds is None or NOW() + reset_seconds < deadline))
                 wait_seconds = max(rate_limit_delay(load_policy(), retries), reset_seconds or 0) if can_retry else 0
                 rate_event = {"type": "RATELIMIT", "retry": retries + 1 if can_retry else retries,
