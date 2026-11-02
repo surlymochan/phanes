@@ -8831,20 +8831,30 @@ def lane_approval_response(child, msg, event_file):
 
 
 MAX_RISK_DENIALS = 3
-DENIABLE_RISKS = ("rm outside worktree",)
+DENIABLE_RISKS = ("rm outside worktree", "secret print")
 
 
 def lane_risk_deniable(lane, block, spec):
     """A risk the lane can refuse per command (and let the model continue) instead of stopping the run."""
-    return (lane["backend"] in ("pi", "codex") and block.get("risk") in DENIABLE_RISKS
-            and len(spec.get("risk_denials") or []) < MAX_RISK_DENIALS and not spec.get("abort_requested"))
+    risk = block.get("risk")
+    denied = sum(1 for prior in spec.get("risk_denials") or [] if prior.get("risk") == risk)
+    return (lane["backend"] in ("pi", "codex") and risk in DENIABLE_RISKS
+            and denied < MAX_RISK_DENIALS and not spec.get("abort_requested"))
 
 
 def risk_denial_prompt(block, wd):
-    return (f"The command you just issued was refused by the OpenSwarm guard ({block.get('risk')}): "
-            f"deleting paths outside the worktree {wd} is not allowed and that command was not run. "
-            "Do not retry it. Stay inside the worktree; for scratch files use $TMPDIR. "
-            "Continue the task from where you stopped.\n\n" + REPORT_INSTRUCTION)
+    risk = block.get("risk")
+    if risk == "rm outside worktree":
+        reason = (f"deleting paths outside the worktree {wd} is not allowed and that command was not run. "
+                  "Stay inside the worktree; for scratch files use $TMPDIR.")
+    elif risk == "secret print":
+        reason = ("printing secrets or configuration file contents is not allowed and that command was not run. "
+                  "Do not print key or config file contents; if you need their structure, print only key names "
+                  "or use a redacted form.")
+    else:
+        reason = f"this command violates the {risk} guard and was not run."
+    return (f"The command you just issued was refused by the OpenSwarm guard ({risk}): {reason} "
+            "Do not retry it. Continue the task from where you stopped.\n\n" + REPORT_INSTRUCTION)
 
 
 def lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
