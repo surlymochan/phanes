@@ -49,6 +49,19 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # GitHub charges one GraphQL point per `gh issue view`: cap the authoritative reads of one
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
+DEFAULT_CODEX_MEMORY_MB = int(os.environ.get("AD_CODEX_MEMORY_MB", "400"))
+MEMORY_PROBE = "awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo"
+
+def memory_available_mb(cfg):
+    """Read host available memory through the configured shim/ssh transport."""
+    try:
+        rc, out, _ = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "sh", "-lc", MEMORY_PROBE), timeout=20)
+        return int(out.strip()) if rc == 0 else None
+    except (subprocess.SubprocessError, ValueError, KeyError):
+        return None
+
+def memory_threshold(cfg):
+    return int(cfg.get("memory_min_mb", DEFAULT_CODEX_MEMORY_MB))
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -572,6 +585,12 @@ def tick(lanes, state, last_warn):
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
+    memory = {}
+    for L, cfg in lanes.items():
+        if cfg.get("backend") == "codex" and res[L].get("lane") == "idle" and not state.get(L) and host_ok(cfg["host"]):
+            h = cfg["host"]
+            if h not in memory: memory[h] = memory_available_mb(cfg)
+    memory_blocks = {}
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
     base = None
@@ -580,6 +599,13 @@ def tick(lanes, state, last_warn):
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
+            if cfg.get("backend") == "codex":
+                available, threshold = memory.get(cfg["host"]), memory_threshold(cfg)
+                if available is None or available < threshold:
+                    why = f"{cfg['host']} available={available if available is not None else 'unknown'}MB threshold={threshold}MB"
+                    memory_blocks.setdefault(c["n"], []).append((cfg["host"], available, threshold))
+                    log(f"skip #{c['n']} on {L}: blocked-by-host-memory ({why})", brain=False)
+                    continue
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
@@ -600,9 +626,21 @@ def tick(lanes, state, last_warn):
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
+    # Count each remaining task once; only lanes usable this tick can make it ready.
+    available_lanes = [(L, cfg) for L, cfg in lanes.items() if "error" not in res[L] and host_ok(cfg["host"])
+                       and not state.get(L) and res[L].get("lane") == "idle" and not os.path.exists(f"{D}/PAUSE-{L}")]
+    memory_only = 0
+    for item in q:
+        if not item["deps_ok"]: continue
+        candidates = [(L, cfg) for L, cfg in available_lanes if can_take(cfg["backend"], item)]
+        if candidates and all(cfg.get("backend") == "codex" and
+                              (memory.get(cfg["host"]) is None or memory[cfg["host"]] < memory_threshold(cfg))
+                              for _, cfg in candidates):
+            memory_only += 1
+    blocked += memory_only
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
-    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
+    short = {b: sum(c["backend"] == b for _, c in available_lanes) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     if ready < LOW or starve > 0:
