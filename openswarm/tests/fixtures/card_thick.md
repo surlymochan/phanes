@@ -47,3 +47,7 @@ Repository: openswarm（Python 3.11+）。先读 `openswarm/CONTRIBUTING.md` 与
 - 如果某个判定条件没有把握，写清楚不确定性，不要含糊过去。
 
 验收：`python3 -m unittest discover -s tests -p 'test_card_lint.py'`
+
+## 失败模式清单
+
+引用 `openswarm/docs/defect-patterns.md`；逐项评估适用模式并记录结果。

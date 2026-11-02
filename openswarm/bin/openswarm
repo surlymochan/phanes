@@ -13219,6 +13219,14 @@ def card_lint_card(text, rules):
         reasons.append({"code": "missing_labels", "detail": "the card has no 'labels:' declaration"})
     if not commands:
         reasons.append({"code": "missing_acceptance", "detail": "the card has no '验收：' acceptance line"})
+    else:
+        for command in commands:
+            # A test command or an explicit, bounded human decision method is auditable.
+            if not re.search(r"(?:\btest\b|\bpytest\b|\bunittest\b|验收|判定|检查|确认|比较|输出|返回码|assert|\bshould\b)", command, re.I):
+                reasons.append({"code": "untestable_acceptance",
+                                "detail": f"不可测验收条目：{command}"})
+    if not re.search(r"^#{1,6}\s*失败模式清单\s*$", text, re.M):
+        reasons.append({"code": "missing_failure_modes", "detail": "卡面缺少「失败模式清单」段"})
     if card_lint_keyword_only(body, rules["thin_keywords"]):
         reasons.append({"code": "thin_keywords", "detail": "the body only lists keywords"})
     if card_lint_weak_acceptance(commands, rules["weak_acceptance_re"]):

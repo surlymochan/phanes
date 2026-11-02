@@ -74,6 +74,18 @@ class CardLintTests(unittest.TestCase):
         self.assertIn("missing_title", codes)
         self.assertIn("missing_labels", codes)
 
+    def test_untestable_acceptance_names_the_specific_item(self):
+        card = "# Task\nlabels: p1\n验收：功能正常\n## 失败模式清单\n引用 defect-patterns.md\n" + "\n".join(f"change {i}" for i in range(20))
+        result, report = self.lint("-", input=card)
+        reason = next(item for item in report["reasons"] if item["code"] == "untestable_acceptance")
+        self.assertEqual(reason["detail"], "不可测验收条目：功能正常")
+
+    def test_missing_failure_modes_is_rejected(self):
+        text = (FIXTURES / "card_thick.md").read_text(encoding="utf-8")
+        text = text[:text.index("## 失败模式清单")]
+        result, report = self.lint("-", input=text)
+        self.assertIn("missing_failure_modes", report["codes"])
+
     def test_a_missing_card_file_is_an_error_not_a_rejection(self):
         result = run_cli("card-lint", str(FIXTURES / "card-does-not-exist.md"))
         self.assertEqual(result.returncode, 2)
@@ -179,7 +191,7 @@ class CardLintPolicyTests(unittest.TestCase):
         self.assertEqual(rules["weak_acceptance_re"], xs.CARD_LINT_DEFAULTS["weak_acceptance_re"])
 
     def test_a_policy_floor_lets_a_small_card_through(self):
-        card = "# Title\nlabels: p1\nImplement the bounded path.\n验收：`python3 -m unittest`\n"
+        card = "# Title\nlabels: p1\nImplement the bounded path.\n验收：`python3 -m unittest`\n## 失败模式清单\n"
         reasons, estimate = xs.card_lint_card(card, xs.card_lint_rules({"acceptance": {"min_effective_diff": 1}}))
         self.assertEqual(reasons, [])
         self.assertEqual(estimate, 1)
