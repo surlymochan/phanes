@@ -802,6 +802,38 @@ class Assign(Base):
         d.sweep_leaked_inprogress(state)
         self.assertEqual(self.runner.called("issue edit 5"), [])
 
+    def test_leak_lease_renews_for_the_matching_live_lane_run(self):
+        d = self.make([("issue list", (0, json.dumps([{"number": 5}]), ""))])
+        d.clock = lambda: 2_000
+        d.lease_store.grant(5, "run-5", "M5", 600, 1_000)
+
+        d.sweep_leaked_inprogress({"M5": {"issue": 5, "run": "run-5"}},
+                                  {"M5": {"lane": "busy", "current_run": "run-5"}})
+
+        self.assertEqual(d.lease_store.get(5)["expires_at"], 2_600)
+        self.assertEqual(self.runner.called("issue edit 5"), [])
+
+    def test_leak_lease_reclaims_after_expiry_when_lane_has_no_run(self):
+        d = self.make([("issue list", (0, json.dumps([{"number": 5}]), ""))])
+        d.clock = lambda: 2_000
+        d.lease_store.grant(5, "run-5", "M5", 600, 1_000)
+
+        d.sweep_leaked_inprogress({}, {"M5": {"lane": "idle", "current_run": None}})
+
+        self.assertEqual(len(self.runner.called("issue edit 5")), 1)
+        self.assertIsNone(d.lease_store.get(5))
+
+    def test_leak_lease_keeps_expired_issue_while_run_is_still_live(self):
+        d = self.make([("issue list", (0, json.dumps([{"number": 5}]), ""))])
+        d.clock = lambda: 2_000
+        d.lease_store.grant(5, "run-5", "M5", 600, 1_000)
+
+        d.sweep_leaked_inprogress({"M5": {"issue": 5, "run": "run-5"}},
+                                  {"M5": {"lane": "busy", "current_run": "run-5"}})
+
+        self.assertEqual(self.runner.called("issue edit 5"), [])
+        self.assertEqual(d.lease_store.get(5)["expires_at"], 2_600)
+
     def test_debt_replay_keeps_action_added_during_write(self):
         state = {"_label_debt": {"5": {"add": "lane-pr", "remove": ["in-progress"]}}}
         d = self.make()
