@@ -8718,6 +8718,9 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
         child.send({"jsonrpc": "2.0", "id": sid, "method": "session/new",
                     "params": {"cwd": worktree, "mcpServers": []}})
         reply = child.wait_response(sid, 60, event_file)
+        if lane["backend"] == "copilot":
+            # wait_response consumes this reply; log it so doctor can check availableModels later.
+            lane_record_event(event_file, reply)
         if reply.get("error"):
             raise RuntimeError(f"cursor-agent ACP session/new failed: {short(reply['error'], 300)}")
         result = reply.get("result") or {}
@@ -14402,6 +14405,61 @@ def doctor_disk_check(lane):
     return doctor_check("disk", "ok", detail)
 
 
+def copilot_models_module():
+    """The Copilot ACP model parser (lib/backends/copilot_models.py), loaded by path like dispatch_quota_module()."""
+    name = "openswarm_copilot_models"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "backends", "copilot_models.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def doctor_latest_copilot_events(lane_name):
+    """The event log of the lane's most recent run, or None. Reads files only."""
+    for path in sorted(glob.glob(os.path.join(RUNS, "*", "status.json")), reverse=True):
+        status = jload(path, {}) or {}
+        if status.get("lane") != lane_name or status.get("backend") != "copilot":
+            continue
+        events = os.path.join(os.path.dirname(path), "events.1.copilot.jsonl")
+        return events if os.path.isfile(events) else None
+    return None
+
+
+def doctor_copilot_models_check(lane, policy):
+    """The lane model must be listed, enabled, and priced within policy copilot.max_usage_multiplier.
+
+    Reads the last run's logged session/new reply; it never sends a request to Copilot.
+    """
+    cfg = policy.get("copilot") or {}
+    try:
+        cap = float(cfg.get("max_usage_multiplier", 1.0))
+    except (TypeError, ValueError):
+        return doctor_check("copilot_models", "fail", "policy copilot.max_usage_multiplier is not a number",
+                            "set copilot.max_usage_multiplier to a number such as 1.0")
+    model = lane.get("model") or cfg.get("default_model")
+    events = doctor_latest_copilot_events(lane["name"])
+    if not events:
+        return doctor_check("copilot_models", "warn",
+                            f"no copilot run for lane {lane['name']} yet; ACP model list not checked",
+                            "run the lane once so events.1.copilot.jsonl records session/new")
+    with open(events, errors="ignore") as stream:
+        models = copilot_models_module().parse_available_models(stream.read())
+    if not models:
+        return doctor_check("copilot_models", "warn", f"no availableModels in {events}",
+                            "run the lane once so events.1.copilot.jsonl records session/new")
+    result = copilot_models_module().check(model, models, cap)
+    if result["status"] == "ok":
+        return doctor_check("copilot_models", "ok", result["detail"])
+    fixes = {"missing": "pick a model listed in the Copilot ACP model list (change the lane model)",
+             "disabled": "pick an enabled model; the account cannot use this one",
+             "too_expensive": "pick a model within copilot.max_usage_multiplier, or raise the cap deliberately"}
+    return doctor_check("copilot_models", "fail", result["detail"], fixes[result["status"]])
+
+
 def doctor_lane_report(lane, policy, system=None):
     """Every prerequisite of one lane, in report order."""
     system = sys.platform if system is None else system
@@ -14413,6 +14471,8 @@ def doctor_lane_report(lane, policy, system=None):
         checks.append(env_file_check)
     checks.append(doctor_proxy_check(doctor_lane_environment(lane)))
     checks.append(doctor_disk_check(lane))
+    if lane.get("backend") == "copilot":
+        checks.append(doctor_copilot_models_check(lane, policy))
     status = "fail" if any(c["status"] == "fail" for c in checks) else (
         "warn" if any(c["status"] == "warn" for c in checks) else "ok")
     return {"name": lane["name"], "backend": lane.get("backend"), "status": status, "checks": checks}
