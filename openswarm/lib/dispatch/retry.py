@@ -52,7 +52,7 @@ DEFAULT_CLASS = "default"
 EXEC_ERROR_STATUSES = ("stopped", "partial")
 
 #: Error classes whose attempts do not count towards the retry limit.
-UNCOUNTED_CLASSES = frozenset({"vm_paused", "quota"})
+UNCOUNTED_CLASSES = frozenset({"vm_paused", "quota", "model_unavailable"})
 
 #: Reported error classes that are another class under a different name.
 ERROR_CLASS_ALIASES: Dict[str, str] = {
@@ -71,6 +71,7 @@ DEFAULT_TABLE: Dict[str, Any] = {
     "vm_paused": "requeue",
     "cli_too_old": "pause_lane",
     "quota": "pause_lane",
+    "model_unavailable": "pause_lane",
     DEFAULT_CLASS: "lane_failed",
 }
 
