@@ -38,14 +38,15 @@ def _inflight_keys(inflight):
     return keys
 
 
-def _pr_tasks(prs, kind, inflight, eligible):
+def _pr_tasks(prs, kind, inflight, eligible, issue_for_pr=None):
     existing = _inflight_keys(inflight)
     tasks, seen = [], set(existing)
     for pr in prs or ():
         if not isinstance(pr, dict) or not eligible(pr):
             continue
         match = _CLOSES_RE.search(pr.get("body") or "")
-        issue = _issue_number(match.group(1)) if match else None
+        issue = (_issue_number(issue_for_pr(pr)) if issue_for_pr else
+                 (_issue_number(match.group(1)) if match else None))
         number = _issue_number(pr.get("number"))
         sha = (pr.get("headRefOid") or pr.get("head_sha") or pr.get("headSha")
                or pr.get("headRefName"))
@@ -92,12 +93,12 @@ def _failed_ci(pr):
     return False
 
 
-def ci_fix_source(prs, inflight=None):
+def ci_fix_source(prs, inflight=None, eligible=None, issue_for_pr=None):
     """Create one CI-fix task for each failed PR head that is not already in flight."""
-    return _pr_tasks(prs, "ci_fix", inflight, _failed_ci)
+    return _pr_tasks(prs, "ci_fix", inflight, eligible or _failed_ci, issue_for_pr)
 
 
-def rebase_source(prs, inflight=None):
+def rebase_source(prs, inflight=None, issue_for_pr=None):
     """Create one rebase task for each conflicting PR head that is not already in flight."""
     return _pr_tasks(prs, "rebase", inflight,
-                     lambda pr: str(pr.get("mergeable") or "").upper() == "CONFLICTING")
+                     lambda pr: str(pr.get("mergeable") or "").upper() == "CONFLICTING", issue_for_pr)
