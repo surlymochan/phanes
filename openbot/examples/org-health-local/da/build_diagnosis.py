@@ -37,6 +37,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -316,23 +317,51 @@ def parse_plan(brief: dict, raw_dir: Path) -> dict:
     }
 
 
-def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
-    """读取 CSV 并检查必需列。缺列时抛出 RawDataError。"""
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except OSError as cause:
-        raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
-    reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-    try:
-        fieldnames = reader.fieldnames or []
-    except csv.Error as cause:
-        raise RawDataError(f"原始数据 {path.name} 表头不是合法 CSV：{cause}") from cause
+def validate_headers(path: Path, fieldnames: list[str], required: tuple[str, ...]) -> None:
+    """Check exact column names without silently repairing source data."""
     missing = [name for name in required if name not in fieldnames]
     if missing:
         raise RawDataError(f"原始数据 {path.name} 缺少必需列：{'、'.join(missing)}")
     duplicated = [name for name, count in Counter(fieldnames).items() if count > 1 and name]
     if duplicated:
         raise RawDataError(f"原始数据 {path.name} 表头出现重复列：{'、'.join(duplicated)}")
+    dirty = [f"column {number} ({name!r})" for number, name in enumerate(fieldnames, start=1)
+             if not name or name != name.strip()
+             or any(unicodedata.category(char).startswith("C") for char in name)]
+    if dirty:
+        raise RawDataError(f"CSV {path.name} has invalid header names: {', '.join(dirty)}")
+
+
+def preflight_headers(raw_dir: Path) -> None:
+    """Check all required table headers before parsing currencies or data values."""
+    for filename, required in REQUIRED_COLUMNS.items():
+        path = raw_dir / filename
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as stream:
+                fieldnames = next(csv.reader(stream, strict=True), [])
+        except OSError as cause:
+            raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
+        except UnicodeError as cause:
+            raise RawDataError(f"CSV {path.name} is not valid utf-8 ({type(cause).__name__})") from cause
+        except csv.Error as cause:
+            raise RawDataError(f"原始数据 {path.name} 表头不是合法 CSV：{cause}") from cause
+        validate_headers(path, fieldnames, required)
+
+
+def read_table(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
+    """Read CSV rows only after the same complete header checks as preflight."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as cause:
+        raise RawDataError(f"无法读取原始数据 {path}：{cause}") from cause
+    except UnicodeError as cause:
+        raise RawDataError(f"CSV {path.name} is not valid utf-8 ({type(cause).__name__})") from cause
+    reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
+    try:
+        fieldnames = reader.fieldnames or []
+    except csv.Error as cause:
+        raise RawDataError(f"原始数据 {path.name} 表头不是合法 CSV：{cause}") from cause
+    validate_headers(path, fieldnames, required)
     rows: list[dict[str, str]] = []
     try:
         for number, row in enumerate(reader, start=2):
@@ -1339,6 +1368,8 @@ def build_from_files(brief_path: Path, raw_dir: Path, warnings: list | None = No
     warnings 给定时，被跳过的问题行警告会写进该列表（命令行据此提示）。
     """
     brief = load_brief(brief_path)
+    if raw_dir.is_dir():
+        preflight_headers(raw_dir)
     validate_currencies(raw_dir)
     plan = parse_plan(brief, raw_dir)
     periods = plan["periods"]
