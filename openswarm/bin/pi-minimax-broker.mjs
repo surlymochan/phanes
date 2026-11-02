@@ -16,6 +16,7 @@ try { key = await AuthStorage.create().getApiKey('minimax-cn'); }
 catch { throw new Error('MiniMax credential unavailable'); }
 if (typeof key !== 'string' || !key || /[\r\n]/.test(key)) throw new Error('MiniMax credential unavailable');
 const maxBytes = 8 * 1024 * 1024;
+const maxErrorBytes = 4096;
 // The upload timeout bounds a slow request body only. It is cleared once the body
 // is complete, so a slow inference may take longer than this value. The default
 // is the production value; the override exists so the test suite can exercise the
@@ -80,12 +81,61 @@ const server = createServer((req, res) => {
     // Forward the parsed value, not the original bytes: duplicate JSON keys must not
     // let the upstream select a different model from the one checked above.
     const payload = Buffer.from(JSON.stringify(parsed));
+    let providerErrorResponded = false;
     const outgoing = https.request({hostname: 'api.minimaxi.com', port: 443, path: '/anthropic' + req.url,
       method: 'POST', timeout: 180000, headers: {'content-type': 'application/json', 'content-length': payload.length,
         'anthropic-version': '2023-06-01', ...(beta === undefined ? {} : {'anthropic-beta': beta}),
         'x-api-key': key, 'authorization': 'Bearer ' + key}}, upstream => {
       if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
-        upstream.resume(); release(); return fail(upstream.statusCode || 502, 'provider request failed');
+        row.status = upstream.statusCode || 502; row.ttfb_ms = Date.now() - t0;
+        const retry = {};
+        for (const [name, value] of Object.entries(upstream.headers || {})) {
+          const lower = name.toLowerCase();
+          if (lower === 'retry-after' || lower.startsWith('x-ratelimit-reset')) retry[lower] = value;
+        }
+        if (Object.keys(retry).length) row.retry_after = retry;
+        // Copy only the bounded prefix, so a large chunk cannot stay retained through
+        // a Buffer slice. A provider that never ends is stopped as soon as the cap fills.
+        const errorBody = Buffer.alloc(maxErrorBytes);
+        let errorBytes = 0;
+        const finishError = () => {
+          if (providerErrorResponded) return;
+          providerErrorResponded = true;
+          const body = errorBody.subarray(0, errorBytes);
+          row.resp_bytes = errorBytes;
+          try {
+            const parsedError = JSON.parse(body.toString('utf8'));
+            const error = parsedError?.error && typeof parsedError.error === 'object'
+              ? parsedError.error : parsedError;
+            if (typeof error?.type === 'string') row.upstream_type = error.type;
+            row.err = typeof error?.message === 'string'
+              ? Array.from(error.message).slice(0, 160).join('') : 'provider request failed';
+            const code = parsedError?.base_resp?.status_code ?? error?.base_resp?.status_code;
+            if (typeof code === 'string' || (typeof code === 'number' && Number.isFinite(code))) row.provider_code = code;
+          } catch { row.err = 'non_json_body'; }
+          release();
+          if (!res.destroyed && !res.writableEnded) {
+            res.writeHead(row.status, {'content-type': 'application/json', 'cache-control': 'no-store'});
+            res.end(body);
+          }
+          done();
+        };
+        upstream.on('data', chunk => {
+          if (providerErrorResponded) return;
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          const take = Math.min(bytes.length, maxErrorBytes - errorBytes);
+          bytes.copy(errorBody, errorBytes, 0, take);
+          errorBytes += take;
+          if (errorBytes === maxErrorBytes) {
+            finishError();
+            upstream.destroy();
+          }
+        });
+        upstream.on('end', finishError);
+        upstream.on('error', finishError);
+        upstream.on('aborted', finishError);
+        upstream.on('close', finishError);
+        return;
       }
       row.status = upstream.statusCode; row.ttfb_ms = Date.now() - t0;
       let tail = '';
@@ -113,7 +163,7 @@ const server = createServer((req, res) => {
       upstream.pipe(res);
     });
     outgoing.on('timeout', () => { row.err = 'upstream timeout'; outgoing.destroy(); });
-    outgoing.on('error', () => { release(); fail(502, 'provider unavailable'); });
+    outgoing.on('error', () => { release(); if (!providerErrorResponded) fail(502, 'provider unavailable'); });
     res.on('close', () => { if (!res.writableEnded) outgoing.destroy(); release(); });
     outgoing.end(payload);
   });
