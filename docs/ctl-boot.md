@@ -486,6 +486,14 @@ check uses a fake pause directory and never changes the real state:
 python3 tools/check-pause-set-cooldown.py
 ```
 
+The #1642 soak check verifies that the ib1/ib2 host pauses match paused M1/M2
+lanes in a fake `lanes-status` snapshot, and that the other lanes can be busy
+up to the cooldown limit of nine:
+
+```bash
+python3 tools/check-soak-nine.py
+```
+
 The SSH cooldown set/hold contract is checked offline with
 `python3 tools/check-health-pause.py`; it uses fake probe output and never
 starts the resident health loop or connects over SSH.
