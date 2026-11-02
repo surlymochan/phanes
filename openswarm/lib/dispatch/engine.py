@@ -16,7 +16,7 @@ The `openswarm dispatch` subcommand wiring (and swapping the inline policy helpe
 lib/dispatch/{queue,lane_pick,fallback,hotfiles,pause,quota,...}.py modules) belongs to #1359.
 
 State, pause markers and logs live in `state_dir`:
-  state.json, reviews.json, lane-lru.json, lanes-status.json, heartbeat, <log_file>
+  state.json, reviews.json, lane-lru.json, review-lru.json, lanes-status.json, heartbeat, <log_file>
   PAUSE (whole loop), PAUSE-<lane>, PAUSE-HOST-<host>, PAUSE-BACKEND-<backend>, NO-LANE-REVIEW,
   and an optional burn marker (config burn.file) that gives burn.backend lanes first pick.
 """
@@ -155,6 +155,10 @@ DEFAULTS = {
     "harvest_cap_s": 100,
     "review": {
         "enabled": True, "max": 8, "burn_max": 12, "rounds": 3, "max_fails": 4,
+        # lane_max: reviews one lane may hold at the same time (0 disables the cap); a lane
+        # over the cap is skipped, the PR waits for a free lane instead of piling up.
+        # lanes: the lanes that may take a review (empty: every lane may).
+        "lane_max": 1, "lanes": [],
         "pref": {"pi": 0, "codex": 1, "copilot": 2, "agy": 3},
         "status_context": "lane-review", "ignore_checks_re": "macos",
         # with this marker file in state_dir, a concluded ignored-check failure counts as red on PRs whose title matches
@@ -435,6 +439,7 @@ class Dispatcher:
         self.local_hosts = set(cfg.get("local_hosts") or [])
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
+        self._review_picker = None
         self._quota_probe_cache = None
 
     # ------------------------------------------------------------ io helpers
@@ -845,6 +850,16 @@ class Dispatcher:
         if self._lru_picker is None:
             self._lru_picker = compatible_lru_picker(self.path("lane-lru.json"))
         return self._lru_picker
+
+    def review_picker(self):
+        """The round-robin history of the review lanes.
+
+        It is a separate file from the task LRU: fix tasks and reviews share the same
+        lanes, and the task history used to decide who reviews next (a lane that only
+        takes reviews keeps the oldest counter and wins every time)."""
+        if self._review_picker is None:
+            self._review_picker = compatible_lru_picker(self.path("review-lru.json"))
+        return self._review_picker
 
     # ------------------------------------------------------------ dispatch one task
     def task_text(self, item):
@@ -1471,6 +1486,14 @@ class Dispatcher:
             d[str(pr)] = cur
             write_json(self.path("reviews.json"), d)
 
+    def release_claim(self, pr):
+        """Drop the review claim of a PR: that lane does not owe it a verdict any more."""
+        entry = self.load_reviews().get(str(pr)) or {}
+        if not entry.get("pending_lane"):
+            return False
+        self.merge_review(pr, {"pending_lane": None})
+        return True
+
     def _checks(self, pr):
         return [c for c in pr.get("statusCheckRollup") or []
                 if (c.get("context") or c.get("name") or c.get("workflowName")) != self.R["status_context"]]
@@ -1594,7 +1617,20 @@ class Dispatcher:
             if p["mergeable"] != "MERGEABLE" or not self.green(p):
                 continue
             out_l.append(p)
+        self.release_stale_claims(revs, out_l, busy_pr)
         return out_l
+
+    def release_stale_claims(self, revs, candidates, busy):
+        """Release the review claims of PRs that left the review pipeline.
+
+        A claim says "this lane still owes this PR a verdict".  A PR that is closed,
+        parked for a human or not a review candidate any more will never be reviewed
+        by that lane, so the claim is dropped and the lane is free again (Refs #1701).
+        """
+        stale = dispatch_module("review_balance").releasable(revs, [p["number"] for p in candidates], busy)
+        for pr in stale:
+            self.release_claim(pr)
+        return stale
 
     def section_strip(self, body, title):
         return re.sub(r"\n*## " + re.escape(title) + r".*?(?=\n## |\Z)", "", body or "", flags=re.S)
@@ -1633,23 +1669,59 @@ class Dispatcher:
         else:
             self.log(f"review: PR #{pr} CI red ({bad[:80]}) → fix task queued on #{n}")
 
-    def pick_reviewer(self, idle, lanes, author):
+    def review_lane_cap(self):
+        """How many reviews one lane may hold at the same time (0 disables the cap)."""
+        try:
+            return max(0, int(self.R.get("lane_max", 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def review_lane_names(self, lanes):
+        """The lanes that may take a review: `review.lanes` when configured, else every lane."""
+        configured = [L for L in (self.R.get("lanes") or []) if L in (lanes or {})]
+        return configured or list(lanes or {})
+
+    def review_backlog(self, lanes, state, reviews=None):
+        """The reviews every lane still owes a verdict for (the running review + the retry queue)."""
+        reviews = self.load_reviews() if reviews is None else reviews
+        counts = dispatch_module("review_balance").backlog(reviews, state)
+        return dispatch_module("review_balance").snapshot(counts, lanes)
+
+    def pick_reviewer(self, idle, lanes, author, backlog=None):
+        """Pick the lane that reviews the next PR.
+
+        The lane with the smallest review backlog wins; lanes with the same backlog are
+        served round-robin (the review lane that waited longest).  A lane that already
+        holds `review.lane_max` reviews is skipped: the PR waits for a free lane
+        instead of piling up on one lane (Refs #1701)."""
         ab = (lanes.get(author) or {}).get("backend")
         c = [L for L in idle if L != author]
         if not c:
             return None
+        balance = dispatch_module("review_balance")
+        counts = backlog if backlog is not None else self.review_backlog(lanes, {})
+        cap = self.review_lane_cap()
+        allowed = [L for L in c if not balance.over_cap(L, counts, cap)]
+        if allowed and len(allowed) < len(c):
+            self.log(f"review: lane(s) at the in-flight cap ({cap}) skipped: "
+                     f"{', '.join(sorted(L for L in c if L not in allowed))}", brain=False)
+        if not allowed:                      # every candidate is at the cap: serve the lightest one
+            allowed = c
+            self.log(f"review: every review lane is at the in-flight cap ({cap}); "
+                     f"the lightest lane takes the PR", brain=False)
         backend, factor = self.burn_state()
         def priority(lane):
             return (factor > 1 and lanes[lane]["backend"] != backend, lanes[lane]["backend"] == ab)
-        best_priority = min(map(priority, c))
-        available = [lane for lane in c if priority(lane) == best_priority]
-        picker = self.lru_picker()
-        oldest = picker.pick(available)
-        if factor > 1:
-            return oldest
-        history = picker.state()["lanes"]
-        tied = [lane for lane in available if history.get(lane) == history.get(oldest)]
-        return min(tied, key=lambda lane: (self.R["pref"].get(lanes[lane]["backend"], 9), lane))
+        best_priority = min(map(priority, allowed))
+        available = [lane for lane in allowed if priority(lane) == best_priority]
+        lightest = balance.least_loaded(available, counts)
+        available = [lane for lane in lightest if counts.get(lane, 0) == counts.get(lightest[0], 0)]
+        history = self.review_picker().state()["lanes"]
+        def turn(lane):
+            counter = history.get(lane)
+            pref = self.R["pref"].get(lanes[lane]["backend"], 9)
+            return (0, 0, pref, lane) if counter is None else (1, counter, pref, lane)
+        return min(available, key=turn)
 
     def review_item(self, p):
         pr = p["number"]
@@ -1722,9 +1794,11 @@ class Dispatcher:
             return False
         if cj.get("state") != "OPEN":
             self.log(f"review PR #{pr} by {lane}: PR {cj.get('state')}; verdict discarded")
+            self.release_claim(pr)                            # the PR is gone: the lane owes nothing
             return True
         if status.head_changed(sha, cj.get("headRefOid")):
             self.log(f"review PR #{pr} by {lane}: PR {cj.get('state')} / head moved ({sha[:8]}→{str(cj.get('headRefOid'))[:8]}); verdict discarded")
+            self.release_claim(pr)                            # the new head needs a new review
             return True
         bk_backend = info.get("backend") or lc.get("backend") or "?"
         bk_model = info.get("model") or "?"
@@ -1771,7 +1845,7 @@ class Dispatcher:
                  f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, run `{st['run']}`, "
                  f"head `{sha[:10]}`\n\n{txt.strip()[:60000]}\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
-                  "fails_sha": sha, "fail_classes": []})
+                  "fails_sha": sha, "fail_classes": [], "pending_lane": None})   # the review is done
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -1823,15 +1897,18 @@ class Dispatcher:
             if review.get("needs_human_reason") != "rounds":
                 fields["needs_human_reason"] = "fails"   # ours to lift once the head moves
             self.merge_review(p["number"], fields)
+            self.release_claim(p["number"])                   # parked for a human: no lane owes it
 
     def dispatch_reviews(self, lanes, res, state, q):
         if not self.R.get("enabled", True) or os.path.exists(self.path("NO-LANE-REVIEW")):
             return
         inflight = sum(1 for s in state.values() if isinstance(s, dict) and s.get("review_pr"))
-        idle = self.idle_lanes(lanes, res, state)
+        allowed_lanes = self.review_lane_names(lanes)
+        idle = [L for L in self.idle_lanes(lanes, res, state) if L in allowed_lanes]
         if inflight >= self.review_max() or not idle:
             return
         revs = self.load_reviews()
+        counts = self.review_backlog(lanes, state, revs)
         for p in self.review_candidates(lanes, state, q):
             if inflight >= self.review_max() or not idle:
                 break
@@ -1844,13 +1921,15 @@ class Dispatcher:
             timed_out = set(review.get("budget_backends") or [])
             alternatives = [lane for lane in idle if lanes[lane].get("backend") not in timed_out]
             eligible = alternatives or idle  # retry without exclusions if every idle backend timed out
-            L = self.pick_reviewer(eligible, lanes, self.author_lane(p["headRefName"]))
+            L = self.pick_reviewer(eligible, lanes, self.author_lane(p["headRefName"]), counts)
             previous_backend = review.get("quota_backend")
             quota_alternatives = [lane for lane in eligible if lanes[lane].get("backend") != previous_backend]
             if previous_backend and quota_alternatives:
-                L = self.pick_reviewer(quota_alternatives, lanes, self.author_lane(p["headRefName"]))
+                L = self.pick_reviewer(quota_alternatives, lanes, self.author_lane(p["headRefName"]), counts)
             if not L:
                 continue
+            snapshot = self.review_snapshot_lanes(lanes, allowed_lanes, idle, counts)
+            backlog_text = dispatch_module("review_balance").render(counts, snapshot)
             host_started = self.clock()
             try:
                 base = self.main_sha()
@@ -1867,9 +1946,21 @@ class Dispatcher:
                         "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
             self.save_state(state)
             self.lru_picker().touch(L)
+            self.review_picker().touch(L)
+            self.merge_review(p["number"], {"pending_lane": L})   # the lane owes this PR a verdict
+            counts[L] = counts.get(L, 0) + 1
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
-                     f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run}")
+                     f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run} "
+                     f"[backlog {backlog_text}]")
             self.heartbeat()
+
+    def review_snapshot_lanes(self, lanes, allowed, idle, counts):
+        """The lanes whose backlog belongs into the dispatch log (the review lanes)."""
+        configured = [L for L in (self.R.get("lanes") or []) if L in (lanes or {})]
+        if configured:
+            return configured
+        named = set(idle) | {L for L, n in (counts or {}).items() if n}
+        return [L for L in (allowed or lanes or {}) if L in named]
 
     # ------------------------------------------------------------ tick
     def probe(self, lanes, state):
