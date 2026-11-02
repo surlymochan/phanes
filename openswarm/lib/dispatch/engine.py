@@ -130,6 +130,7 @@ DEFAULTS = {
     "brain_log_prefix": "dispatch",
     "tick_s": 60,
     "budget_minutes": "45",
+    "review_budget_minutes": "20",
     "base_branch": "main",
     "pr_branch_template": "fleet/{lane}-issue{n}-{run}",
     "labels": {
@@ -906,7 +907,7 @@ class Dispatcher:
                           f"sleep $((_i*2)); done && ")
         cmd = (pre + fetch_main + f"git -C {R} cat-file -e {base}^{{commit}} && "
                f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes "
-               f"{self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
+               f"{self.cfg['review_budget_minutes'] if item.get('review') else self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
         key = None
         if self.cfg.get("assign_idempotency_key"):
             # one key per dispatch attempt: a retry after a dropped transport returns the run that already landed
@@ -1635,9 +1636,16 @@ class Dispatcher:
     def review_item(self, p):
         pr = p["number"]
         diff = self.gh(["pr", "diff", str(pr)], timeout=60)[1]
-        lim = int(self.R["diff_limit"])
-        if len(diff) > lim:
-            diff = diff[:lim] + f"\n... [diff truncated at {lim} chars; read the files in the worktree if needed]\n"
+        lim = int(self.R.get("review_diff_max_kb", 120)) * 1024
+        raw_diff = diff.encode("utf-8")
+        if len(raw_diff) > lim:
+            files = [line[11:] for line in diff.splitlines() if line.startswith("diff --git ")]
+            plus = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+            minus = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+            stat = f"{len(files)} files changed, {plus} insertions(+), {minus} deletions(-)"
+            excerpt = raw_diff[:lim].decode("utf-8", errors="ignore")
+            diff = (f"Diffstat: {stat}\n" + "\n".join(files) + "\n\n" + excerpt +
+                    "\n... [diff excerpt truncated; inspect the remaining changes with `git diff` in the worktree]\n")
         issue = ""
         if p.get("issue"):
             iv = self.gh(["issue", "view", str(p["issue"]), "--json", "title,body"])[1]
@@ -1669,6 +1677,13 @@ class Dispatcher:
             elif error_class in {"rate_limit", "quota", "model_unavailable"}:
                 r["quota_backend"] = info.get("backend") or lc.get("backend")
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry")
+            elif error_class == "budget_exceeded":
+                backend = info.get("backend") or lc.get("backend")
+                backends = list(r.get("budget_backends") or [])
+                if backend and backend not in backends:
+                    backends.append(backend)
+                r["budget_backends"] = backends
+                self.log(f"review PR #{pr} by {lane}: budget exceeded ({backend or 'unknown'}); not counted, will retry on another backend")
             else:
                 r["fails"] = int(r.get("fails") or 0) + 1
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); fail #{r['fails']}, will retry")
@@ -1772,11 +1787,15 @@ class Dispatcher:
                 break
             if int((revs.get(str(p["number"])) or {}).get("fails") or 0) >= int(self.R["max_fails"]):
                 continue
-            L = self.pick_reviewer(idle, lanes, self.author_lane(p["headRefName"]))
-            previous_backend = (revs.get(str(p["number"])) or {}).get("quota_backend")
-            alternatives = [lane for lane in idle if lanes[lane].get("backend") != previous_backend]
-            if previous_backend and alternatives:
-                L = self.pick_reviewer(alternatives, lanes, self.author_lane(p["headRefName"]))
+            review = revs.get(str(p["number"])) or {}
+            timed_out = set(review.get("budget_backends") or [])
+            alternatives = [lane for lane in idle if lanes[lane].get("backend") not in timed_out]
+            eligible = alternatives or idle  # retry without exclusions if every idle backend timed out
+            L = self.pick_reviewer(eligible, lanes, self.author_lane(p["headRefName"]))
+            previous_backend = review.get("quota_backend")
+            quota_alternatives = [lane for lane in eligible if lanes[lane].get("backend") != previous_backend]
+            if previous_backend and quota_alternatives:
+                L = self.pick_reviewer(quota_alternatives, lanes, self.author_lane(p["headRefName"]))
             if not L:
                 continue
             host_started = self.clock()
