@@ -112,13 +112,15 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(set(checks), {"binary", "proxy", "disk"} | SANDBOX_CHECKS)
         for name in {"binary", "proxy"} | SANDBOX_CHECKS:
             self.assertEqual(checks[name]["status"], "ok", checks[name])
-        # The worktree disk is the only check that depends on the host, so the lane status follows it.
+        # The worktree disk and the resource rows depend on the host, so the expected verdict is derived from them.
         disk = self.expected_disk_status()
         self.assertEqual(checks["disk"]["status"], disk)
         self.assertEqual(lane["status"], disk)
-        self.assertEqual(report["ok"], disk != "fail")
-        self.assertEqual(report["summary"]["fail"], 1 if disk == "fail" else 0)
-        self.assertEqual(result.returncode, 1 if disk == "fail" else 0, result.stdout + result.stderr)
+        resource_fail = sum(row["level"] == "FAIL" for row in report["resources"])
+        failing = int(disk == "fail") + resource_fail
+        self.assertEqual(report["ok"], failing == 0)
+        self.assertEqual(report["summary"]["fail"], failing)
+        self.assertEqual(result.returncode, 1 if failing else 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(LINUX, "the Codex sandbox tools are only checked on Linux")
     def test_missing_slirp4netns_fails_with_a_fix_hint(self):
@@ -152,7 +154,7 @@ class DoctorTests(unittest.TestCase):
         result = self.doctor("--json")
 
         report = json.loads(result.stdout)
-        self.assertEqual(set(report), {"ok", "lanes", "notes", "summary"})
+        self.assertEqual(set(report), {"ok", "lanes", "resources", "notes", "summary"})
         self.assertEqual(set(report["summary"]), {"ok", "warn", "fail", "lanes"})
         self.assertEqual(report["summary"]["lanes"], 1)
         lane = report["lanes"][0]

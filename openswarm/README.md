@@ -514,6 +514,11 @@ lane; `{"lane":{"memory_max":"700M"}}` in `policy.local.json` lowers it for ever
 systemd size (an integer with an optional `K`, `M`, `G` or `T` suffix) and an unusable value is rejected when the
 lane config is read.
 
+An optional lane `systemd_unit` (`"openswarm-lane-C1.service"`) names the installed unit of a lane that runs under
+systemd. `openswarm doctor` reads that unit's cgroup memory controller, and a memory.high throttling warning needs
+`memory.events` to grow within the doctor run. `lane systemd-unit` prints the definition but never installs it, so the
+operator picks the name when installing the unit and writes the same name here.
+
 A lane may also carry its own environment, for example a proxy or a token for one backend only (never a global
 proxy). `env_file` is an absolute path or a list of them, in systemd `KEY=value` syntax; `env` is a string map. The
 lane supervisor applies both before it starts the executor, the same way under systemd and launchd: `env` overrides
@@ -555,7 +560,10 @@ openswarm lane systemd-unit K1             # prints a system systemd unit; does 
 is executable, whether Codex's Linux sandbox finds `bwrap`, `slirp4netns`, and `iptables` on `PATH`, whether a lane
 `env_file` exists with mode `600` or stricter, whether the lane environment's `HTTPS_PROXY` accepts a TCP
 connection, and how much space is left on the disk that holds the lane worktree. Every item is `ok`, `warn`, or
-`fail` with a fix hint, and any `fail` exits non-zero. The doctor only reads: it never installs a package, creates a
+`fail` with a fix hint, and any `fail` exits non-zero. A `resources` section lists inode and block-space use of
+`$OPENSWARM_HOME`, each existing lane worktree, and `/tmp` (`used_pct` and free space, with the policy thresholds in
+`policy.local.json` under `resources`), and warns on memory.high throttling of systemd lanes. It counts in the summary
+and the exit code like the lane checks. The doctor only reads: it never installs a package, creates a
 symlink, or writes a file, so the fix hints stay the operator's decision.
 
 ```bash
