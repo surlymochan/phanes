@@ -8694,6 +8694,7 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
         child.send({"jsonrpc": "2.0", "id": req_id, "method": "turn/start",
                     "params": {"threadId": turn["thread_id"], "input": [{"type": "text", "text": prompt}],
                                "effort": lane["effort"], "outputSchema": RESULT_SCHEMA}})
+        turn["prompt_sent_at"] = NOW()
         reply = child.wait_response(req_id, 60, event_file)
         if reply.get("error"):
             raise RuntimeError(f"codex turn/start failed: {short(reply['error'], 300)}")
@@ -8704,11 +8705,13 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
         child.wait_response(sid, 30, event_file)
         pid = "prompt-" + uuid.uuid4().hex
         child.send({"id": pid, "type": "prompt", "message": prompt})
+        turn["prompt_sent_at"] = NOW()
         turn["id"] = pid
     elif lane_headless(lane):
         turn["id"] = "agy-" + uuid.uuid4().hex
         turn["prompt"] = prompt
         child.start(prompt, model=lane["model"], effort=lane.get("effort"))
+        turn["prompt_sent_at"] = NOW()
     else:
         sid = "session-" + uuid.uuid4().hex
         child.send({"jsonrpc": "2.0", "id": sid, "method": "session/new",
@@ -8800,6 +8803,7 @@ def lane_cursor_start_prompt(child, turn, prompt):
     turn["cursor_text"] = []
     child.send({"jsonrpc": "2.0", "id": req_id, "method": "session/prompt",
                 "params": {"sessionId": turn["session_id"], "prompt": [{"type": "text", "text": prompt}]}})
+    turn["prompt_sent_at"] = NOW()
 
 
 def lane_cursor_cancel(child, turn):
@@ -8915,6 +8919,14 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 turn.setdefault("steer_queue", []).append(value)
                 lane_cursor_cancel(child, turn)
     final, usage, errors = None, {}, []
+    timings = spec.setdefault("timings", {"prepare_s": 0.0, "first_event_s": 0.0,
+        "model_s": 0.0, "tools_s": 0.0, "verify_s": 0.0, "push_s": 0.0, "turns": 0,
+        "tools_top": []})
+    turn_started = NOW()
+    tools_started = timings["tools_s"]
+    first_event_started = timings["first_event_s"]
+    timings["turns"] += 1
+    tool_open = {}
     ended = False
     budget_hit = NOW() >= deadline
     risk_policy = load_policy()
@@ -9033,6 +9045,19 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         idle_tick = msg is False
         if msg is not False and msg is not None:
             last_event_at = NOW()
+            if not timings.get("first_event_recorded"):
+                timings["first_event_s"] += max(0.0, NOW() - turn.get("prompt_sent_at", turn_started))
+                timings["first_event_recorded"] = True
+            if lane["backend"] == "codex" and msg.get("method") == "session/update":
+                update = (msg.get("params") or {}).get("update") or {}
+                if update.get("sessionUpdate") in ("tool_call", "tool_call_update"):
+                    ident = update.get("toolCallId") or update.get("id") or update.get("title") or "tool"
+                    if update.get("sessionUpdate") == "tool_call":
+                        tool_open[ident] = (NOW(), update.get("title") or update.get("name") or "tool")
+                    elif str(update.get("status") or "").lower() in ("completed", "failed", "cancelled"):
+                        opened = tool_open.pop(ident, None)
+                        if opened:
+                            lane_timing_record_tool(timings, opened[1], NOW() - opened[0])
         if msg is False:
             if not child.alive():
                 lane_note_executor_exit(rdir, desc_recorded_at)
@@ -9233,6 +9258,10 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     # An end-of-turn event is an acknowledgement that this turn has stopped,
     # including cancelled and failed turns. Clear this marker before each retry.
     spec["_turn_completed"] = True
+    timings["model_s"] += max(0.0, NOW() - turn_started
+                                - (timings["tools_s"] - tools_started)
+                                - (timings["first_event_s"] - first_event_started))
+    timings.pop("first_event_recorded", None)
     if spec.get("risk_blocks"):
         return final, usage, "risk_blocked", 133, event_file, None
     if spec.get("abort_requested"):
@@ -9289,6 +9318,15 @@ def dispatch_quota_module():
     return module
 
 
+def lane_timing_record_tool(timings, command, seconds):
+    """Record a completed tool interval and retain the five slowest redacted labels."""
+    elapsed = max(0.0, float(seconds or 0))
+    timings["tools_s"] = timings.get("tools_s", 0.0) + elapsed
+    top = timings.setdefault("tools_top", [])
+    top.append({"seconds": round(elapsed, 3), "command": bus_redact(str(command or "tool"))[:80]})
+    timings["tools_top"] = sorted(top, key=lambda row: row["seconds"], reverse=True)[:5]
+
+
 def lane_quota_fields(error_class, attempts):
     """resets_at (ISO8601Z) and provider_code from the last provider error of a rate-limited lane run."""
     if error_class != "rate_limit":
@@ -9314,6 +9352,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     title = spec.get("title") or spec["task"].strip().splitlines()[0][:72]
     stopped = bool(spec.get("stop_requested"))
     budget_hit = error_class == "budget_exceeded"
+    timings = spec.setdefault("timings", {"prepare_s": 0.0, "first_event_s": 0.0, "model_s": 0.0,
+        "tools_s": 0.0, "verify_s": 0.0, "push_s": 0.0, "turns": 0, "tools_top": []})
     model = lane.get("resolved_model", lane["model"])
     if attempts is None:
         attempts = [{"backend": lane["backend"], "model": model, "effort": lane.get("effort"), "rc": rc,
@@ -9327,9 +9367,11 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ancestor_rc, _, _ = git(["merge-base", "--is-ancestor", ws["base"], head.strip()], ws["root"])
             changed = changed or ancestor_rc == 0
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
+    push_started = NOW()
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
            if read_only else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
+    timings["push_s"] += max(0.0, NOW() - push_started)
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (final or {}).get("files_changed"))
     if read_only and ws.get("mode") == "worktree":
         for command in (["checkout", "--detach", "-f", ws["base"]],
@@ -9352,7 +9394,9 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         if not prepare_error:
             set_status(rdir, state="verifying")
             timeout = max(60, min(600, int(spec["started"] + max(0, float(spec.get("budget_minutes") or 0)) * 60 - NOW()) + 300))
+            verify_started = NOW()
             verify = run_verify(spec["verify"], ws["path"], timeout)
+            timings["verify_s"] += max(0.0, NOW() - verify_started)
     if verify and verify["rc"] not in (0, 124) and spec.get("verify_baseline"):
         base = verify_against_baseline(spec["verify"], ws, max(60, min(600, int(NOW() - spec["started"]) + 300)))
         if base.get("rc") is not None:
@@ -9404,7 +9448,20 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     quota = lane_quota_fields(error_class, attempts)
     lane_write_state(lane["name"], last_quota=quota or None)
-    out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
+    slowest_text = ""
+    if budget_hit:
+        candidates = {"prepare": timings.get("prepare_s", 0), "first_event": timings.get("first_event_s", 0),
+                      "model": timings.get("model_s", 0),
+                      "tools": timings.get("tools_s", 0), "verify": timings.get("verify_s", 0),
+                      "push": timings.get("push_s", 0)}
+        phase, seconds = max(candidates.items(), key=lambda pair: pair[1])
+        slowest_text = f"slowest={phase} {seconds:.1f}s"
+    error_detail = next((a.get("error_tail") for a in reversed(attempts or [])
+                         if isinstance(a, dict) and a.get("error_tail")), None)
+    if slowest_text:
+        error_detail = (error_detail or "budget exceeded") + "; " + slowest_text
+    out = {"id": rid, "status": status, "error_class": error_class, "error": error_detail,
+           "timings": timings, "title": title, "lane": lane["name"],
            "prepare": ws.get("prepare", []), "workspace_note": ws.get("workspace_note"), "verify": verify,
            "verify_note": verify_note, "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
            **({"resolved_model": model} if lane["backend"] in ("cursor", "copilot") else {}),
@@ -9433,7 +9490,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
-    set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"])
+    set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
+               timings=timings, **({"error": error_detail} if error_detail else {}))
     cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -9450,11 +9508,16 @@ def lane_do_run(lane, spec, child, server, current):
             block = codex_min_version_block(load_policy(), lane)
             if block:
                 raise block
+        spec.setdefault("timings", {"prepare_s": 0.0, "first_event_s": 0.0, "model_s": 0.0,
+            "tools_s": 0.0, "verify_s": 0.0, "push_s": 0.0, "turns": 0, "tools_top": []})
+        prepare_started = NOW()
         ws = lane_prepare_workspace(lane, rid, spec.get("base"))
         if ws.get("workspace_note"):
             set_status(rdir, workspace_note=ws["workspace_note"])
         ws["prepare"] = []
         prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_executor")
+        spec["timings"]["prepare_s"] += max(0.0, NOW() - prepare_started)
+        set_status(rdir, timings=spec["timings"])
         if prepared:
             ws["prepare"].append(prepared)
             if prepared["rc"] != 0:
@@ -12394,6 +12457,7 @@ def run_digest(rid):
            "provider": st.get("provider"), "concurrency_keys": st.get("concurrency_keys") or [],
            "elapsed_min": round((end - started) / 60, 1), "budget_min": st.get("budget_minutes"),
            "cmds": cmds, "last_msg": short(last, 200), "commit": st.get("commit"),
+           "timings": st.get("timings", r.get("timings")),
            "idle_min": round((now - os.path.getmtime(st["events"])) / 60, 1) if st.get("events") and os.path.exists(st["events"]) and state == "running" else None}
     lane = st.get("lane") or r.get("lane")
     if lane:
