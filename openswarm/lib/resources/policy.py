@@ -12,6 +12,16 @@ DEFAULTS = {
     "cgroup": {"high_ratio": 0.95, "high_events_delta": 1000, "shmem_ratio": 0.5},
 }
 
+# The fleet health watermarks (lib/dispatch/health.py) live in their own group:
+# they are kept as supplied, because the dispatch health module owns their
+# defaults and their pause/resume hysteresis.
+KNOWN_GROUPS = frozenset(DEFAULTS) | {"health"}
+
+
+def _is_doc_key(key):
+    """Documentation keys ("_doc") carry no configuration and never warn."""
+    return str(key).startswith("_")
+
 
 def load_resources_policy(obj):
     """Return a copied full policy with resources defaults merged in and warnings."""
@@ -32,10 +42,10 @@ def load_resources_policy(obj):
             values = {}
         resources[group] = {**defaults, **copy.deepcopy(values)}
         for key in values:
-            if key not in defaults:
+            if key not in defaults and not _is_doc_key(key):
                 warnings.append("resources.%s.%s: unknown key" % (group, key))
     for group, values in resources.items():
-        if group not in DEFAULTS:
+        if group not in KNOWN_GROUPS and not _is_doc_key(group):
             warnings.append("resources.%s: unknown key" % group)
     result["resources"] = resources
     return result, warnings

@@ -1,4 +1,7 @@
+import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -6,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -14,6 +18,29 @@ AUTODISPATCH = pathlib.Path(__file__).parents[2] / "tools" / "lane-autodispatch"
 spec = importlib.util.spec_from_file_location("autodispatch", AUTODISPATCH)
 autodispatch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(autodispatch)
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _load  # noqa: E402  (the CLI, loaded with an isolated OPENSWARM_HOME)
+
+ENGINE = pathlib.Path(__file__).resolve().parent.parent / "lib" / "dispatch" / "engine.py"
+
+
+def load_engine():
+    """The openswarm dispatch engine, loaded by path (it loads its own modules lazily)."""
+    spec = importlib.util.spec_from_file_location("dispatch_engine_under_test", str(ENGINE))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SICK_DISK = ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+             "/dev/root 1000 970 30 97% /\n")
+HEALTHY_DISK = ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/root 1000 500 500 50% /\n")
+INODES = ("Filesystem Inodes IUsed IFree IUse% Mounted on\n"
+          "/dev/root 1000 100 900 10% /\n")
+MEMORY = ("              total used free shared buff/cache available\n"
+          "Mem: 8000 3000 2000 100 3000 5000\n")
 
 
 class GitSSHCommandTests(unittest.TestCase):
@@ -155,6 +182,322 @@ class HarvestFetchBackoffTests(unittest.TestCase):
         self.assertTrue(autodispatch.lane_in_fetch_backoff(state))
         self.assertFalse(autodispatch.lane_in_fetch_backoff({"fetch_backoff_until": 1}))
         self.assertFalse(autodispatch.lane_in_fetch_backoff({}))
+
+
+class FleetHealthPauseIntegrationTests(unittest.TestCase):
+    """Refs #1367: `openswarm fleet health --apply` holds a host the AD honours.
+
+    The health check writes the host pause marker into the health marker dir
+    below the openswarm home (``$OPENSWARM_HOME/health``); the lane
+    autodispatcher reads the marker from the same place, so a sick host gets no
+    lane dispatched to it.
+    """
+
+    def setUp(self):
+        self.xs = _load.load()
+        self.now = 1700000000.0
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-fleet-health-ad-")
+        self.addCleanup(self.tmp.cleanup)
+        old_dir = autodispatch.D
+        autodispatch.D = self.tmp.name
+        self.addCleanup(setattr, autodispatch, "D", old_dir)
+        # Every test gets an openswarm home of its own: the holds of one test
+        # (the pause records, the markers) never reach the next one.
+        self.home = tempfile.TemporaryDirectory(prefix="openswarm-fleet-health-home-")
+        self.addCleanup(self.home.cleanup)
+        previous = os.environ.get("OPENSWARM_HOME")
+        os.environ["OPENSWARM_HOME"] = self.home.name
+        self.addCleanup(self.restore_home, previous)
+
+    def restore_home(self, previous):
+        if previous is None:
+            os.environ.pop("OPENSWARM_HOME", None)
+        else:
+            os.environ["OPENSWARM_HOME"] = previous
+
+    def runner(self, disk):
+        """A fake probe runner: the host answers with the given disk usage."""
+        outputs = {"df -P /": disk, "df -Pi /": INODES, "free -m": MEMORY}
+
+        def run(host, command):
+            return outputs[command]
+        return run
+
+    def health(self, disk, now, apply=True):
+        """Run `fleet health --apply` against the fake runner and return the report."""
+        args = argparse.Namespace(hosts=None, json=True, apply=apply)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.xs.cmd_fleet_health(args, runner=self.runner(disk),
+                                            hosts={"worker-a": {"name": "worker-a", "kind": "local"}},
+                                            now=now, home=self.home.name)
+
+    def marker(self, host="worker-a"):
+        return pathlib.Path(self.home.name, "health", "PAUSE-HOST-" + host)
+
+    def shared_marker(self, host="worker-a"):
+        return pathlib.Path(self.home.name, "PAUSE-HOST-" + host)
+
+    def store(self):
+        return self.xs.dispatch_pause_module().PauseStore(self.home.name)
+
+    def test_a_host_paused_by_the_fleet_health_check_is_not_dispatched_to(self):
+        report = self.health(SICK_DISK, self.now)
+        self.assertEqual(report["hosts"][0]["action"], "paused")
+        self.assertTrue(self.marker().exists())
+        self.assertTrue(self.marker().read_text(encoding="utf-8").startswith("auto:health"))
+        self.assertTrue(autodispatch.host_paused("worker-a"))
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        self.assertTrue(autodispatch.host_dispatchable("worker-b"))
+
+    def test_the_pause_survives_the_pause_store_ttl_until_the_host_recovers(self):
+        store = self.store()
+        self.health(SICK_DISK, self.now)
+        self.assertTrue(store.is_paused(host="worker-a", now=self.now))
+        # The host is still sick at the next check: the pause stays in force.
+        later = self.now + 3600
+        report = self.health(SICK_DISK, later)
+        self.assertEqual(report["hosts"][0]["action"], "renewed")
+        self.assertTrue(store.is_paused(host="worker-a", now=later))
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        # The host recovered: the pause ends, the host is dispatchable again.
+        recovered = later + 3600
+        report = self.health(HEALTHY_DISK, recovered)
+        self.assertEqual(report["hosts"][0]["action"], "resumed")
+        self.assertFalse(store.is_paused(host="worker-a", now=recovered))
+        self.assertFalse(self.marker().exists())
+        self.assertTrue(autodispatch.host_dispatchable("worker-a"))
+
+    def test_the_pause_does_not_expire_before_the_host_recovers(self):
+        # The health check owns the pause: the record has no expiry, so the
+        # pause cannot lapse while the host is still sick - not even when the
+        # health check does not run again.
+        store = self.store()
+        self.health(SICK_DISK, self.now)
+        self.assertIsNone(store.active(self.now)[0]["expires_at"])
+        later = self.now + 30 * 24 * 3600
+        self.assertTrue(store.is_paused(host="worker-a", now=later))
+        self.assertTrue(self.marker().exists())
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        # The host recovered: the pause ends.
+        report = self.health(HEALTHY_DISK, later)
+        self.assertEqual(report["hosts"][0]["action"], "resumed")
+        self.assertFalse(store.is_paused(host="worker-a", now=later))
+        self.assertFalse(self.marker().exists())
+        self.assertTrue(autodispatch.host_dispatchable("worker-a"))
+
+    def test_a_foreign_marker_does_not_hide_the_health_pause(self):
+        # Another program holds the host (its own marker) and the host is sick:
+        # the health check takes a hold of its own.  When that other program
+        # removes its marker, the health hold still keeps the host out of the
+        # dispatch until the host recovered.
+        self.shared_marker().write_text("operator hold\n", encoding="utf-8")
+        report = self.health(SICK_DISK, self.now)
+        self.assertEqual(report["hosts"][0]["action"], "paused")
+        self.assertEqual(self.shared_marker().read_text(encoding="utf-8"), "operator hold\n")
+        self.assertTrue(self.marker().exists())
+        # The other program removes its own marker: the health hold stays.
+        self.shared_marker().unlink()
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        # The host recovered: the health check releases its hold.
+        report = self.health(HEALTHY_DISK, self.now + 3600)
+        self.assertEqual(report["hosts"][0]["action"], "resumed")
+        self.assertFalse(self.marker().exists())
+        self.assertTrue(autodispatch.host_dispatchable("worker-a"))
+
+    def test_the_health_hold_outlives_the_manual_pause_of_the_host(self):
+        # The operator pauses the host through the pause store and the health
+        # check finds the host sick: the health check keeps a hold of its own.
+        # The operator removes their pause: the host stays out of the dispatch
+        # and the pause store keeps reporting it as paused until it recovers.
+        store = self.store()
+        store.pause("host:worker-a", reason="operator: maintenance", now=self.now)
+        report = self.health(SICK_DISK, self.now)
+        self.assertEqual(report["hosts"][0]["action"], "paused")
+        scopes = {row["scope"]: row["reason"] for row in store.active(self.now)}
+        self.assertEqual(scopes["host:worker-a"], "operator: maintenance")
+        self.assertTrue(scopes["host:worker-a@health"].startswith("auto:health"))
+        # The operator releases their own pause: the health hold stays.
+        store.resume("host:worker-a")
+        self.assertTrue(store.is_paused(host="worker-a", now=self.now))
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        self.assertTrue(self.marker().exists())
+        # The host recovered: the health check releases its hold.
+        report = self.health(HEALTHY_DISK, self.now + 3600)
+        self.assertEqual(report["hosts"][0]["action"], "resumed")
+        self.assertFalse(store.is_paused(host="worker-a", now=self.now + 3600))
+        self.assertFalse(self.marker().exists())
+        self.assertTrue(autodispatch.host_dispatchable("worker-a"))
+
+
+class FleetHealthPauseDirTests(unittest.TestCase):
+    """Refs #1367: OPENSWARM_PAUSE_DIR names one marker directory for every program.
+
+    The health check writes the host marker into it, and the openswarm dispatch
+    engine and the lane autodispatcher read it from there.
+    """
+
+    def setUp(self):
+        self.xs = _load.load()
+        self.now = 1700000000.0
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-fleet-health-dir-")
+        self.addCleanup(self.tmp.cleanup)
+        self.pause_dir = os.path.join(self.tmp.name, "pauses")
+        os.makedirs(self.pause_dir)
+        old_dir = autodispatch.D
+        autodispatch.D = os.path.join(self.tmp.name, "autodispatch")
+        self.addCleanup(setattr, autodispatch, "D", old_dir)
+        previous = os.environ.get("OPENSWARM_PAUSE_DIR")
+        os.environ["OPENSWARM_PAUSE_DIR"] = self.pause_dir
+        self.addCleanup(self.restore_pause_dir, previous)
+
+    def restore_pause_dir(self, previous):
+        if previous is None:
+            os.environ.pop("OPENSWARM_PAUSE_DIR", None)
+        else:
+            os.environ["OPENSWARM_PAUSE_DIR"] = previous
+
+    def runner(self, disk):
+        outputs = {"df -P /": disk, "df -Pi /": INODES, "free -m": MEMORY}
+
+        def run(host, command):
+            return outputs[command]
+        return run
+
+    def health(self, disk, now):
+        args = argparse.Namespace(hosts=None, json=True, apply=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.xs.cmd_fleet_health(args, runner=self.runner(disk),
+                                            hosts={"worker-a": {"name": "worker-a", "kind": "local"}},
+                                            now=now)
+
+    def marker(self, host="worker-a"):
+        return pathlib.Path(self.pause_dir, "health", "PAUSE-HOST-" + host)
+
+    def shared_marker(self, host="worker-a"):
+        return pathlib.Path(self.pause_dir, "PAUSE-HOST-" + host)
+
+    def dispatcher(self, engine):
+        """A dispatch engine over a temporary state dir."""
+        config = {"repo": "acme/project", "local_repo": self.tmp.name,
+                  "state_dir": os.path.join(self.tmp.name, "state"),
+                  "ssh": {"control_dir": os.path.join(self.tmp.name, "cm")}, "local_hosts": []}
+        path = os.path.join(self.tmp.name, "cfg.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(config, stream)
+        out = open(os.devnull, "w")
+        self.addCleanup(out.close)
+        return engine.Dispatcher(engine.load_config(path),
+                                 runner=lambda *args, **kwargs: (0, "", ""), out=out)
+
+    def test_the_health_check_holds_the_host_in_the_shared_pause_dir(self):
+        report = self.health(SICK_DISK, self.now)
+        self.assertEqual(report["hosts"][0]["action"], "paused")
+        self.assertTrue(self.marker().exists())
+        # The lane autodispatcher reads the marker from the same directory.
+        self.assertTrue(autodispatch.host_paused("worker-a"))
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        # So does the openswarm dispatch engine.
+        engine = load_engine()
+        dispatcher = self.dispatcher(engine)
+        lane = {"host": "worker-a", "backend": "codex"}
+        self.assertTrue(dispatcher.paused_lane("CX1", lane))
+        # The host recovered: the health check releases the hold everywhere.
+        report = self.health(HEALTHY_DISK, self.now + 3600)
+        self.assertEqual(report["hosts"][0]["action"], "resumed")
+        self.assertFalse(self.marker().exists())
+        self.assertFalse(dispatcher.paused_lane("CX1", lane))
+        self.assertTrue(autodispatch.host_dispatchable("worker-a"))
+
+    def test_a_foreign_marker_in_the_shared_pause_dir_does_not_hide_the_health_hold(self):
+        # The marker of another program lives in the shared pause dir; the
+        # health check writes its own marker below it and releases only that
+        # one when the host recovered.
+        self.shared_marker().write_text("operator hold\n", encoding="utf-8")
+        report = self.health(SICK_DISK, self.now)
+        self.assertEqual(report["hosts"][0]["action"], "paused")
+        self.assertEqual(self.shared_marker().read_text(encoding="utf-8"), "operator hold\n")
+        engine = load_engine()
+        dispatcher = self.dispatcher(engine)
+        lane = {"host": "worker-a", "backend": "codex"}
+        self.assertTrue(dispatcher.paused_lane("CX1", lane))
+        # The other program removes its marker: the health hold keeps the host
+        # out of the dispatch.
+        self.shared_marker().unlink()
+        self.assertTrue(dispatcher.paused_lane("CX1", lane))
+        self.assertFalse(autodispatch.host_dispatchable("worker-a"))
+        # The host recovered: the health hold ends, the other marker is gone
+        # already and is never touched.
+        report = self.health(HEALTHY_DISK, self.now + 3600)
+        self.assertEqual(report["hosts"][0]["action"], "resumed")
+        self.assertFalse(self.marker().exists())
+        self.assertFalse(dispatcher.paused_lane("CX1", lane))
+        self.assertTrue(autodispatch.host_dispatchable("worker-a"))
+
+
+class HostPauseTests(unittest.TestCase):
+    """Refs #1367: a health check holds a host with PAUSE-HOST-<host>; the AD skips it."""
+
+    def test_a_host_held_by_a_pause_host_marker_is_not_dispatchable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = autodispatch.D
+            autodispatch.D = directory
+            try:
+                self.assertTrue(autodispatch.host_dispatchable("ib1"))
+                pathlib.Path(directory, "PAUSE-HOST-ib1").write_text("auto:health disk 97% used\n")
+                self.assertTrue(autodispatch.host_paused("ib1"))
+                self.assertFalse(autodispatch.host_dispatchable("ib1"))
+                self.assertTrue(autodispatch.host_dispatchable("ib2"))
+            finally:
+                autodispatch.D = old
+
+    def test_a_host_held_in_the_openswarm_home_is_not_dispatchable(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                tempfile.TemporaryDirectory() as openswarm_home:
+            old = autodispatch.D
+            autodispatch.D = directory
+            previous = os.environ.get("OPENSWARM_HOME")
+            os.environ["OPENSWARM_HOME"] = openswarm_home
+            try:
+                self.assertTrue(autodispatch.host_dispatchable("ib1"))
+                pathlib.Path(openswarm_home, "PAUSE-HOST-ib1").write_text("auto:health disk 97% used\n")
+                self.assertTrue(autodispatch.host_paused("ib1"))
+                self.assertFalse(autodispatch.host_dispatchable("ib1"))
+                self.assertTrue(autodispatch.host_dispatchable("ib2"))
+            finally:
+                autodispatch.D = old
+                if previous is None:
+                    os.environ.pop("OPENSWARM_HOME", None)
+                else:
+                    os.environ["OPENSWARM_HOME"] = previous
+
+    def test_the_pause_dir_override_is_honoured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = autodispatch.D
+            autodispatch.D = directory
+            previous = os.environ.get(autodispatch.PAUSE_DIR_ENV)
+            os.environ[autodispatch.PAUSE_DIR_ENV] = directory
+            try:
+                pathlib.Path(directory, "PAUSE-HOST-ib1").write_text("auto:health disk 97% used\n")
+                self.assertTrue(autodispatch.host_paused("ib1"))
+                self.assertFalse(autodispatch.host_dispatchable("ib1"))
+            finally:
+                autodispatch.D = old
+                if previous is None:
+                    os.environ.pop(autodispatch.PAUSE_DIR_ENV, None)
+                else:
+                    os.environ[autodispatch.PAUSE_DIR_ENV] = previous
+
+    def test_a_host_in_ssh_backoff_is_not_dispatchable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = autodispatch.D
+            autodispatch.D = directory
+            try:
+                autodispatch.BACKOFF["ib1"] = {"n": 1, "until": time.time() + 600}
+                self.assertFalse(autodispatch.host_dispatchable("ib1"))
+                self.assertTrue(autodispatch.host_dispatchable("ib2"))
+            finally:
+                autodispatch.BACKOFF.pop("ib1", None)
+                autodispatch.D = old
 
 
 if __name__ == "__main__":

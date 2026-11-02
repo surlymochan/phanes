@@ -15,6 +15,78 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+# The host-level pause markers are the interchange format between the fleet
+# health check and the dispatchers (Refs #1367): the health check writes
+# ``PAUSE-HOST-<host>`` and every dispatcher reads it from the same place.
+PAUSE_DIR_ENV = "OPENSWARM_PAUSE_DIR"
+HOST_MARKER_PREFIX = "PAUSE-HOST-"
+OPENSWARM_HOME_DEFAULT = "~/.claude/openswarm"
+# The fleet health check writes its own host markers into this directory below
+# the shared pause dir: a hold of the health check never collides with a
+# marker another program owns in the shared dir (Refs #1367).
+HEALTH_DIR_NAME = "health"
+# A program that owns a hold of a dispatch target can keep it under a scope of
+# its own: ``host:<host>@<program>`` (Refs #1367).  The fleet health check
+# uses such a scope when another program already owns the scope of the host,
+# so the health hold never overwrites that pause.  A scope of its own holds
+# the same dispatch target as the scope it derives from, so a caller that asks
+# about the target sees the hold.
+SCOPE_SUFFIX_SEPARATOR = "@"
+
+
+def pause_dir(home: Any = None) -> str:
+    """The directory the host-level pause markers live in.
+
+    ``OPENSWARM_PAUSE_DIR`` names it; without it the openswarm home
+    (``$OPENSWARM_HOME``, default ``~/.claude/openswarm``) holds it.  The
+    fleet health check writes the markers here and the dispatch engine and the
+    lane autodispatcher read them from here, so one directory serves all of
+    them.  ``home`` overrides the openswarm home (the tests use it).
+    """
+    override = os.environ.get(PAUSE_DIR_ENV) or os.environ.get("XSWARM_PAUSE_DIR")
+    if override:
+        return os.path.expanduser(override)
+    default = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or OPENSWARM_HOME_DEFAULT
+    return os.path.expanduser(str(home or default))
+
+
+def health_pause_dir(home: Any = None) -> str:
+    """The directory the fleet health check writes its own host markers into.
+
+    It is a subdirectory of the shared pause dir (``<pause dir>/health``): the
+    health hold of a host never collides with a marker another program owns
+    in the shared dir, and that marker is never rewritten nor removed.
+    """
+    return os.path.join(pause_dir(home), HEALTH_DIR_NAME)
+
+
+def pause_dirs(home: Any = None) -> List[str]:
+    """Every directory a host-level pause marker can live in.
+
+    The shared pause dir holds the markers the programs write there, the
+    health marker directory below it holds the markers the fleet health check
+    owns.  Every dispatcher reads all of them.
+    """
+    shared = pause_dir(home)
+    return [shared, os.path.join(shared, HEALTH_DIR_NAME)]
+
+
+def host_marker_path(directory: Any, host: Any) -> str:
+    """The host-level pause marker of a host: ``<directory>/PAUSE-HOST-<host>``."""
+    return os.path.join(str(directory), HOST_MARKER_PREFIX + str(host))
+
+
+def host_paused(host: Any, directories: Any = None) -> bool:
+    """Whether a host-level pause marker holds the host in one of the directories."""
+    for directory in (directories if directories is not None else [pause_dir()]):
+        try:
+            if os.path.exists(host_marker_path(directory, host)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def parse_ttl(value: Any) -> float:
     """Parse a positive duration expressed in seconds, minutes, or hours."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -54,6 +126,22 @@ def _scope(value: Any) -> str:
 
 def _scope_key(scope: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", scope)
+
+
+def holds_target(scopes: Any, kind: str, value: Any) -> bool:
+    """Whether any of the scopes holds the dispatch target ``kind:value``.
+
+    A scope that derives from the target (``host:<host>@health``) holds it as
+    well: the hold of a program that must not overwrite another program's
+    pause is still seen by the callers that ask about the target, so the
+    pause-store interface reports the host as paused while the health check
+    holds it (Refs #1367).
+    """
+    base = "{}:{}".format(kind, value)
+    if base in scopes:
+        return True
+    prefix = base + SCOPE_SUFFIX_SEPARATOR
+    return any(str(scope).startswith(prefix) for scope in scopes)
 
 
 class PauseStore:
@@ -137,14 +225,20 @@ class PauseStore:
         return sorted(records, key=lambda row: row["scope"])
 
     def is_paused(self, lane: Any = None, host: Any = None, backend: Any = None, now: Any = None) -> bool:
-        """Whether any active pause applies to the supplied dispatch target."""
+        """Whether any active pause applies to the supplied dispatch target.
+
+        A hold of a program that keeps it under a scope of its own
+        (``host:<host>@health``) applies to the target as well, so the host
+        stays paused while the health check holds it, even when another
+        program owned the scope of the host before (Refs #1367).
+        """
         if now is None:
             raise ValueError("now is required")
         scopes = {record["scope"] for record in self.active(now)}
         if "all" in scopes:
             return True
         return any(
-            value is not None and "{}:{}".format(kind, value) in scopes
+            value is not None and holds_target(scopes, kind, value)
             for kind, value in (("lane", lane), ("host", host), ("backend", backend))
         )
 

@@ -195,6 +195,57 @@ class Pauses(Base):
             self.assertTrue(d.paused_lane("CX1", lc), name)
             os.unlink(d.path(name))
 
+    def test_the_host_marker_of_the_shared_pause_dir_holds_the_lane(self):
+        # The fleet health check writes PAUSE-HOST-<host> into the shared pause
+        # dir (OPENSWARM_PAUSE_DIR, else the openswarm home); the engine reads
+        # it from there (Refs #1367).
+        d = self.make()
+        lc = {"host": "h1", "backend": "codex"}
+        with tempfile.TemporaryDirectory() as directory:
+            previous = {name: os.environ.get(name)
+                        for name in ("OPENSWARM_PAUSE_DIR", "OPENSWARM_HOME")}
+            os.environ["OPENSWARM_PAUSE_DIR"] = directory
+            os.environ["OPENSWARM_HOME"] = directory
+            try:
+                self.assertFalse(d.paused_lane("CX1", lc))
+                open(os.path.join(directory, "PAUSE-HOST-h1"), "w").close()
+                self.assertTrue(d.paused_lane("CX1", lc))
+                os.unlink(os.path.join(directory, "PAUSE-HOST-h1"))
+                self.assertFalse(d.paused_lane("CX1", lc))
+            finally:
+                for name, value in previous.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
+    def test_the_health_marker_of_the_shared_pause_dir_holds_the_lane(self):
+        # The fleet health check writes its own PAUSE-HOST-<host> into the
+        # health marker dir below the shared pause dir (OPENSWARM_PAUSE_DIR,
+        # else the openswarm home); the engine reads it from there
+        # (Refs #1367).
+        d = self.make()
+        lc = {"host": "h1", "backend": "codex"}
+        with tempfile.TemporaryDirectory() as directory:
+            previous = {name: os.environ.get(name)
+                        for name in ("OPENSWARM_PAUSE_DIR", "OPENSWARM_HOME")}
+            os.environ["OPENSWARM_PAUSE_DIR"] = directory
+            os.environ["OPENSWARM_HOME"] = directory
+            try:
+                health = os.path.join(directory, "health")
+                os.makedirs(health, exist_ok=True)
+                self.assertFalse(d.paused_lane("CX1", lc))
+                open(os.path.join(health, "PAUSE-HOST-h1"), "w").close()
+                self.assertTrue(d.paused_lane("CX1", lc))
+                os.unlink(os.path.join(health, "PAUSE-HOST-h1"))
+                self.assertFalse(d.paused_lane("CX1", lc))
+            finally:
+                for name, value in previous.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
     def test_inode_hysteresis(self):
         d = self.make()
         self.assertFalse(d.inode_decide(94.0))

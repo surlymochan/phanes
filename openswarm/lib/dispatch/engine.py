@@ -628,12 +628,28 @@ class Dispatcher:
                                                                   backend=lc.get("backend"), now=self.clock()):
             return True
         host = lc.get("host") or ""
-        if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
+        if host and self.host_paused(host):
             return True
         if host in self.local_hosts and self.local_inode_low():
             return True
         be = lc.get("backend") or ""
         return bool(be and os.path.exists(self.path(f"PAUSE-BACKEND-{be}")))
+
+    def host_paused(self, host):
+        """Whether a host-level pause marker holds the host.
+
+        The markers live in the dispatch state dir, in the shared pause dir
+        (``OPENSWARM_PAUSE_DIR``, else the openswarm home) and in the health
+        marker directory below it, where the fleet health check writes its own
+        holds; all of them are honoured, so a host the health check holds gets
+        no lane dispatched to it (Refs #1367).
+        """
+        module = dispatch_module("pause")
+        directories = [self.D]
+        for directory in module.pause_dirs():
+            if directory not in directories:
+                directories.append(directory)
+        return module.host_paused(host, directories)
 
     def burn_state(self):
         """Return the selected backend and factor, with legacy marker compatibility."""
