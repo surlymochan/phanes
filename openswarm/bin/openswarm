@@ -6726,6 +6726,14 @@ def bus_parse_result(body, expected_run_id=None):
         return None
     if result.get("status") == "done" and error_class != "none":
         return None
+    if "resets_at" in result:
+        if error_class != "rate_limit" or not isinstance(result["resets_at"], str) or not re.fullmatch(
+                r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z", result["resets_at"]):
+            return None
+        try:
+            dt.datetime.fromisoformat(result["resets_at"].replace("Z", "+00:00"))
+        except ValueError:
+            return None
     if not isinstance(result.get("files_changed"), list) or not all(isinstance(x, str) for x in result["files_changed"]):
         return None
     if not isinstance(result.get("tests"), str) or not isinstance(result.get("followups"), list):
@@ -7216,6 +7224,46 @@ def bus_sync_terminal_status(rdir, rid, status, error_class=None):
         os.replace(temporary, LEDGER)
 
 
+def bus_worker_cooldown_path():
+    return os.path.join(DATA, "bus-worker-cooldowns.json")
+
+
+def bus_worker_cooling(backend):
+    cooldowns = jload(bus_worker_cooldown_path(), {}) or {}
+    until = cooldowns.get(backend)
+    return isinstance(until, (int, float)) and until > NOW()
+
+
+def bus_worker_cooldown_remaining(backend):
+    cooldowns = jload(bus_worker_cooldown_path(), {}) or {}
+    return max(0.0, float(cooldowns.get(backend, 0)) - NOW())
+
+
+def bus_worker_set_cooldown(backend, resets_at):
+    now = NOW()
+    cooldowns = {name: until for name, until in (jload(bus_worker_cooldown_path(), {}) or {}).items()
+                 if isinstance(until, (int, float)) and until > now}
+    cooldowns[backend] = resets_at
+    jsave(bus_worker_cooldown_path(), cooldowns)
+
+
+def bus_worker_cooldown_seconds(policy):
+    value = (policy.get("bus") or {}).get("rate_limit_cooldown_s", 300)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise BusError("bus.rate_limit_cooldown_s must be a non-negative number")
+    if not seconds >= 0:
+        raise BusError("bus.rate_limit_cooldown_s must be a non-negative number")
+    return seconds
+
+
+def bus_worker_resets_at(policy, result):
+    if result.get("error_class") != "rate_limit":
+        return None
+    return NOW() + bus_worker_cooldown_seconds(policy)
+
+
 def bus_worker_run(issue, cfg, args, policy):
     task, task_card = bus_issue_task(issue)
     if not task:
@@ -7394,6 +7442,10 @@ def bus_worker_run(issue, cfg, args, policy):
                        "tests": tests,
                        "followups": followups, "branch": branch, "commit": commit, "pr_url": pr_url,
                        "error_class": error_class}
+        resets_at = bus_worker_resets_at(policy, report_data)
+        if resets_at is not None:
+            report_data["resets_at"] = dt.datetime.fromtimestamp(
+                resets_at, dt.timezone.utc).isoformat().replace("+00:00", "Z")
         if verify is not None:
             report_data["verify"] = verify
         report = bus_sanitize(report_data)
@@ -7401,6 +7453,8 @@ def bus_worker_run(issue, cfg, args, policy):
         terminal = "failed" if report["status"] == "failed" else "done"
         body = "```openswarm-result\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```"
         bus_comment(cfg["repo"], issue["number"], body)
+        if resets_at is not None:
+            bus_worker_set_cooldown(args.backend, resets_at)
         bus_set_issue_labels(cfg["repo"], issue["number"], cfg, add=[labels[terminal]],
                              remove=[labels["queued"], labels["claimed"]])
         return True
@@ -7420,6 +7474,7 @@ def bus_worker_run(issue, cfg, args, policy):
 def cmd_bus_worker(args, policy):
     validate_card_type(policy, getattr(args, "card_type", None))
     cfg = bus_config(policy, args.bus)
+    bus_worker_cooldown_seconds(policy)
     stop_event = getattr(args, "stop_event", None) or threading.Event()
     is_main_thread = threading.current_thread() is threading.main_thread()
     old_handlers = {}
@@ -7446,6 +7501,11 @@ def cmd_bus_worker(args, policy):
     max_backoff = max(poll_interval, cfg["max_backoff_seconds"])
     try:
         while not stop_event.is_set():
+            if bus_worker_cooling(args.backend):
+                if args.once:
+                    return "cooling"
+                wait_for_stop(min(poll_interval, max(0.0, bus_worker_cooldown_remaining(args.backend))))
+                continue
             try:
                 issues = gh_pages(f"repos/{cfg['repo']}/issues?state=open")
             except (BusError, OSError) as error:
@@ -7459,7 +7519,7 @@ def cmd_bus_worker(args, policy):
                 continue
             consecutive_failures = 0
             for issue in issues:
-                if stop_event.is_set():
+                if stop_event.is_set() or bus_worker_cooling(args.backend):
                     break
                 if "pull_request" in issue:
                     continue
@@ -7469,7 +7529,7 @@ def cmd_bus_worker(args, policy):
                 if stop_event.is_set():
                     break
             if args.once or stop_event.is_set():
-                return
+                return "cooling" if args.once and bus_worker_cooling(args.backend) else None
             wait_for_stop(poll_interval)
     finally:
         if is_main_thread:
@@ -14981,7 +15041,8 @@ def main():
             sys.exit(2)
     elif a.cmd == "bus-worker":
         try:
-            cmd_bus_worker(a, policy)
+            if cmd_bus_worker(a, policy) == "cooling":
+                print(json.dumps({"ok": True, "status": "cooling", "backend": a.backend}, ensure_ascii=False))
         except (BusError, ValueError) as error:
             print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
             sys.exit(2)
