@@ -14563,7 +14563,7 @@ def merge_gate_post_merge_hook(runner, repo, results, hook_cmd, dry_run):
     return {"action": "post_merge_hook", "status": status, "main_sha": main_sha}
 
 
-def cmd_merge_gate(args, policy=None, runner=None):
+def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
     """Merge pull requests whose reviewed head sha is still current and green."""
     runner = runner or merge_gate_gh_runner
     repo = str(getattr(args, "repo", "") or "").strip()
@@ -14600,6 +14600,8 @@ def cmd_merge_gate(args, policy=None, runner=None):
         results.append(record)
     blocked = [record for record in results if record["status"] != "mergeable"
                or record.get("action") == "merge_failed"]
+    if results_out is not None:
+        results_out.extend(results)
     hook_record = None
     if hook_cmd:
         hook_record = merge_gate_post_merge_hook(runner, repo, results, hook_cmd, dry_run)
@@ -14620,6 +14622,58 @@ def cmd_merge_gate(args, policy=None, runner=None):
             print(f"post-merge-hook  {hook_record['status']}  "
                   f"main={(hook_record.get('main_sha') or '-')[:12]}")
     return 1 if blocked else 0
+
+
+def cmd_merge_gate(args, policy=None, runner=None, sleep=None):
+    """Run the merge gate once, or keep polling it when --loop is set."""
+    if not getattr(args, "loop", False):
+        return cmd_merge_gate_once(args, policy, runner)
+    sleep = sleep or time.sleep
+    interval = max(0, float(getattr(args, "interval", 60)))
+    limit = getattr(args, "max_iterations", None)
+    heartbeat = getattr(args, "heartbeat", None)
+    pause_file = getattr(args, "pause_file", None)
+    stopping = False
+
+    def request_stop(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+
+    previous = signal.signal(signal.SIGTERM, request_stop)
+    iteration = 0
+    try:
+        while not stopping and (limit is None or iteration < limit):
+            iteration += 1
+            merged = skipped = 0
+            try:
+                if pause_file and os.path.exists(pause_file):
+                    skipped = 1
+                else:
+                    output = io.StringIO()
+                    results = []
+                    with contextlib.redirect_stdout(output):
+                        code = cmd_merge_gate_once(args, policy, runner, results)
+                    merged = sum(1 for result in results if result.get("action") == "merged")
+                    skipped = len(results) - merged
+                    print(output.getvalue(), end="")
+                    if code:
+                        print(f"merge-gate loop iteration {iteration}: gate returned {code}", file=sys.stderr)
+            except Exception as error:
+                skipped = 1
+                print(f"merge-gate loop iteration {iteration} failed: {error}", file=sys.stderr)
+            if heartbeat:
+                try:
+                    with open(heartbeat, "w", encoding="utf-8") as stream:
+                        json.dump({"ts": time.time(), "iteration": iteration,
+                                   "merged": merged, "skipped": skipped}, stream)
+                        stream.write("\n")
+                except OSError as error:
+                    print(f"merge-gate heartbeat write failed: {error}", file=sys.stderr)
+            if not stopping and (limit is None or iteration < limit):
+                sleep(interval)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    return 0
 
 
 def main():
@@ -14987,6 +15041,11 @@ def main():
     sp.add_argument("--pr", type=int, help="only judge this pull request number")
     sp.add_argument("--dry-run", action="store_true", help="report the gate verdict without merging")
     sp.add_argument("--json", action="store_true", help="print the gate results as JSON")
+    sp.add_argument("--loop", action="store_true", help="repeat the merge gate until stopped")
+    sp.add_argument("--interval", type=float, default=60, help="seconds between loop iterations")
+    sp.add_argument("--max-iterations", type=int, help="stop after this many loop iterations")
+    sp.add_argument("--heartbeat", help="write loop status JSON to this file")
+    sp.add_argument("--pause-file", help="skip merging while this file exists")
     sp.add_argument("--rerun-failed-once", action="store_true",
                     help="rerun the failed CI run of a blocked PR once")
     sp.add_argument("--ignore-checks-re",
