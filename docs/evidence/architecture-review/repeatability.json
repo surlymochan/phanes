@@ -1,0 +1,44 @@
+{
+  "captures": {
+    "a": "2026-11-02T19:15:41.043110Z",
+    "b": "2026-11-02T19:17:09.212207Z",
+    "c": "2026-11-02T19:20:04.194266Z"
+  },
+  "compared_live_runs": [
+    "b",
+    "c"
+  ],
+  "live_commands_exit_codes": [
+    0,
+    0,
+    0
+  ],
+  "metric_sections_equal": {
+    "issue_labels": true,
+    "merges": true,
+    "review_rounds": true,
+    "reviews": true
+  },
+  "prior_observed_change": {
+    "issue": 1716,
+    "lane_pr": [
+      56,
+      57
+    ],
+    "lane_ready": [
+      18,
+      17
+    ],
+    "runs": [
+      "a",
+      "b"
+    ],
+    "url": "https://github.com/surlymochan/phanes/issues/1716"
+  },
+  "snapshot_gzip_sha256": "fa0fb465e634bf17daee5c1cdd637870703490f3cae3b93781a371c0fb932991",
+  "source_json_sha256": "ddc1e4e826c471af6adb8fa736152c3e004b112fc2d5c54149621d4ae9d705c3",
+  "window": {
+    "end": "2026-11-02T19:06:11Z",
+    "start": "2026-10-26T19:06:11Z"
+  }
+}
