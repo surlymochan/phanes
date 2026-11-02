@@ -94,7 +94,7 @@ try:
             result = json.loads(bundle.stdout)
         print(json.dumps({'ok': process.returncode == 0, 'result': result}, separators=(',', ':')))
         sys.exit(0 if process.returncode == 0 else 1)
-    if op not in ('acquire', 'release', 'status', 'recover'):
+    if op not in ('acquire', 'release', 'status', 'recover', 'sweep_release'):
         raise ValueError('invalid operation')
     root = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
                 (Path.home() / '.claude/openswarm-fleet-capacity'))
@@ -104,6 +104,7 @@ try:
     db.execute('PRAGMA busy_timeout=10000')
     db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
     db.execute('BEGIN IMMEDIATE')
+    audit = None
     if op == 'status':
         rows = db.execute('SELECT host,run_id,backend,provider,created FROM reservations ORDER BY created').fetchall()
         out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created'), row)) for row in rows]}
@@ -119,6 +120,30 @@ try:
             raise ValueError('confirmed executor shutdown required')
         count = db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner,run_id)).rowcount
         out = {'ok': True, 'recovered': count}
+    elif op == 'sweep_release':
+        # The sweeper of the owning host proved that the run is gone or long
+        # finished (Refs #1685).  Only the owner may sweep its own reservation,
+        # and the decision (host, run id, age, basis) is written to the audit log.
+        owner, run_id = request.get('host'), request.get('run_id')
+        if owner not in HOSTS or not isinstance(run_id, str) or not run_id or len(run_id) > 128:
+            raise ValueError('invalid reservation owner or run id')
+        if owner != host:
+            raise ValueError('only the reservation owner may sweep a reservation')
+        if request.get('confirm') != 'run-ended-or-missing':
+            raise ValueError('confirmed sweeper decision required')
+        row = db.execute('SELECT backend,provider,created FROM reservations WHERE host=? AND run_id=?',
+                         (owner, run_id)).fetchone()
+        if not row:
+            out = {'ok': True, 'released': False, 'reason': 'no matching reservation'}
+        else:
+            backend, provider, created = row
+            db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner, run_id))
+            age = request.get('age_seconds')
+            audit = {'ts': time.time(), 'host': owner, 'run_id': run_id, 'backend': backend,
+                     'provider': provider, 'created': created,
+                     'age_seconds': age if isinstance(age, (int, float)) and not isinstance(age, bool) else None,
+                     'basis': request.get('basis'), 'actor': host, 'action': 'sweep-release'}
+            out = {'ok': True, 'released': True, 'audit': audit}
     else:
         token, run_id = request.get('token'), request.get('run_id')
         if not isinstance(token, str) or len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
@@ -153,6 +178,15 @@ try:
                     db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)', (token,host,run_id,backend,provider,time.time()))
                     out = {'ok': True, 'admitted': True}
     db.execute('COMMIT')
+    if audit is not None:
+        # The authoritative record of a swept reservation (Refs #1685).
+        path = root / 'audit.jsonl'
+        try:
+            with open(path, 'a') as stream:
+                stream.write(json.dumps(audit, separators=(',',':')) + '\n')
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     print(json.dumps(out, separators=(',',':')))
 except Exception as error:
     try: db.execute('ROLLBACK')

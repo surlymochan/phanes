@@ -3809,6 +3809,197 @@ def release_fleet_slot(rdir, *, confirmed=False, pending_release=None, guard_com
     return True
 
 
+def fleet_audit_log(name):
+    """The path of a fleet capacity log (audit trail or alert) in the run home."""
+    return os.path.join(DATA, name)
+
+
+def fleet_append_audit(path, row):
+    """Append one JSON line to a fleet capacity log; a broken log never breaks a run."""
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def fleet_release_alert(rdir, error, run_id=None, token=None, reason=None):
+    """Record a capacity release that kept failing (Refs #1685).
+
+    The release itself retries three times; when it still fails the slot stays
+    taken, so the leak is written to the alert log instead of only into the
+    run status.
+    """
+    row = {"ts": NOW(), "level": "alert", "kind": "fleet_release_failed", "run_id": run_id,
+           "token": token, "reason": reason, "error": str(error)[:300], "run_dir": rdir}
+    fleet_append_audit(fleet_audit_log("fleet-capacity-alerts.jsonl"), row)
+    print(f"openswarm: fleet capacity release failed for {run_id}: {error}", file=sys.stderr)
+    return row
+
+
+def fleet_slot_release_safe(rdir):
+    """Whether a finished run may give its capacity slot back (Refs #1685).
+
+    A recorded executor or one of its recorded descendants must be gone: a
+    live one still occupies the provider slot, and the lane keeps sharing its
+    slot with the resident child.  Without a subreaper an executor which
+    exited long after the last descendant scan may have left an unrecorded
+    detached child, so such a run keeps its slot until the sweeper decides.
+    """
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    if status.get("executor_scan_stale"):
+        return False
+    return executor_stopped(rdir)
+
+
+def release_fleet_slot_at_run_end(rdir, reason, *, force=False, guard_command=None):
+    """Release the capacity reservation of a run that reached its terminal state.
+
+    Every run end path (done, partial, exec_error, budget_exceeded, rate
+    limit, a stalled turn) ends here, so an abnormal end cannot leave a
+    reservation behind.  A one-shot executor that is still alive keeps its
+    slot: the work may still be running and the TTL recovery path owns that
+    case (``force`` releases it anyway when the caller knows the executor is
+    gone).  The same rule holds for a resident lane: its child belongs to the
+    lane, so the shared slot is only given back once the recorded executor
+    tree is gone.  A runner which was killed never reaches this point: the
+    TTL recovery and the ghost sweeper own that case.
+    """
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    token = status.get("fleet_reservation_token")
+    if os.path.realpath(rdir) not in _FLEET_RESERVATIONS and not token:
+        set_status(rdir, fleet_release_reason=reason)
+        return True
+    if not force and not fleet_slot_release_safe(rdir):
+        set_status(rdir, fleet_reservation_error="retained after abnormal executor exit; inspect descendants")
+        return False
+    if release_fleet_slot(rdir, confirmed=True, guard_command=guard_command):
+        set_status(rdir, fleet_release_reason=reason)
+        return True
+    fleet_release_alert(rdir, (jload(os.path.join(rdir, "status.json"), {}) or {}).get("fleet_reservation_error"),
+                        run_id=status.get("id") or os.path.basename(rdir), token=token, reason=reason)
+    return False
+
+
+def fleet_sweep_module():
+    """The fleet capacity sweeper module (lib/supervise/fleet_sweep.py), loaded by path."""
+    name = "openswarm_fleet_sweep"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "supervise", "fleet_sweep.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def fleet_sweep_setting(policy, key, default):
+    """A fleet.sweep_* policy value; a malformed value falls back to the default."""
+    config = policy.get("fleet") if isinstance(policy, dict) else None
+    value = config.get(key) if isinstance(config, dict) else None
+    if value is None:
+        return default
+    return value
+
+
+def fleet_sweep_grace_seconds(policy):
+    """How long a finished run keeps its slot before the sweeper may reclaim it."""
+    value = fleet_sweep_setting(policy, "sweep_grace_seconds", fleet_sweep_module().GRACE_SECONDS)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("fleet.sweep_grace_seconds must be a positive number")
+    return value
+
+
+def fleet_sweep_interval_seconds(policy):
+    """How often the patrol runs the capacity sweeper."""
+    value = fleet_sweep_setting(policy, "sweep_interval_seconds", 300)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("fleet.sweep_interval_seconds must be a positive number")
+    return value
+
+
+def fleet_sweep_apply(policy):
+    """Whether the sweeper may release a reservation; the first rollout is a dry run."""
+    return fleet_sweep_setting(policy, "sweep_apply", False) is True
+
+
+def fleet_sweep_enabled(policy):
+    """Whether the patrol runs the capacity sweeper at all."""
+    return fleet_sweep_setting(policy, "sweep_enabled", True) is not False
+
+
+def sweep_fleet_reservations(command=None, policy=None, *, dry_run=None, now=None, runs_root=None):
+    """Reclaim the capacity reservations whose run is gone or long finished (Refs #1685).
+
+    Only the reservations this host owns are judged: the sweeper can only
+    prove that a run is gone by reading the run directory of its own host.  A
+    run that is still alive is never touched (see lib/supervise/fleet_sweep.py).
+
+    The decision of every reservation is written to the sweep log; a release
+    is audited by the coordinator as well.
+    """
+    policy = load_policy() if policy is None else policy
+    report = {"ok": True, "dry_run": True, "candidates": [], "released": [], "kept": [], "error": None}
+    try:
+        command = command or fleet_guard_command()
+    except RuntimeError as error:
+        report.update(ok=False, error=short(error, 250))
+        return report
+    if not command:
+        report.update(ok=False, error="no fleet capacity coordinator is configured")
+        return report
+    owner = fleet_guard_host(command)
+    if not owner:
+        report.update(ok=False, error="fleet capacity coordinator owner is unknown")
+        return report
+    if dry_run is None:
+        dry_run = not fleet_sweep_apply(policy)
+    report["dry_run"] = bool(dry_run)
+    try:
+        answer = fleet_guard_call(command, {"op": "status"}, timeout=15)
+    except RuntimeError as error:
+        report.update(ok=False, error=short(error, 250))
+        return report
+    sweep = fleet_sweep_module()
+    moment = NOW() if now is None else now
+    grace = fleet_sweep_grace_seconds(policy)
+    rows = [row for row in (answer.get("reservations") or []) if row.get("host") == owner]
+    log = fleet_audit_log("fleet-capacity-sweep.jsonl")
+    for row in rows:
+        run = sweep.load_run(runs_root or RUNS, row.get("run_id"))
+        decision = sweep.classify(row, run, moment, grace)
+        record = {"ts": moment, "host": owner, "run_id": row.get("run_id"), "backend": row.get("backend"),
+                  "age_s": decision["age_s"], "basis": decision["basis"], "action": decision["action"]}
+        if decision["action"] != sweep.RELEASE:
+            report["kept"].append(record)
+            continue
+        record["action"] = "dry-run" if report["dry_run"] else "release"
+        report["candidates"].append(record)
+        if report["dry_run"]:
+            fleet_append_audit(log, record)
+            continue
+        try:
+            answer = fleet_guard_call(command, {"op": "sweep_release", "host": owner,
+                                                "run_id": row.get("run_id"), "confirm": "run-ended-or-missing",
+                                                "age_seconds": decision["age_s"], "basis": decision["basis"]},
+                                       timeout=15)
+        except RuntimeError as error:
+            record.update(action="failed", error=short(error, 250))
+            report["kept"].append(record)
+            fleet_release_alert(run.get("run_dir") or row.get("run_id") or "", error, run_id=row.get("run_id"),
+                                reason="sweep:" + decision["basis"])
+            fleet_append_audit(log, record)
+            continue
+        record["action"] = "released" if answer.get("released") else "missing"
+        fleet_append_audit(log, record)
+        if answer.get("released"):
+            report["released"].append(record)
+    return report
+
+
 def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_waiting=None, poll=0.1):
     """Atomically admit a turn against provider/backend caps stored in policy.concurrency."""
     keys = concurrency_keys(backend, provider)
@@ -5771,6 +5962,8 @@ def cmd_run(args, policy):
                    "patterns_injected": patterns_injected,
                    "reasons": decision.get("reasons"), **routing_fields})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"))
+    # The run is over: give the capacity slot back, whatever the outcome was.
+    release_fleet_slot_at_run_end(rdir, f"run-finished:{status}")
     if not getattr(args, "no_auto_review", False):
         maybe_schedule_auto_review(rid, card_type, status, fin.get("branch"), fin.get("commit"), policy)
     print(json.dumps(out, indent=2, ensure_ascii=False))
@@ -6150,10 +6343,12 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
             git(["worktree", "remove", "--force", review_worktree], original_repo, timeout=60)
             shutil.rmtree(review_worktree, ignore_errors=True)
         save_raw()
-        if acquired and safe_release and release_fleet_slot(slot_dir, confirmed=True):
-            set_status(slot_dir, state="finished", finished=NOW())
-            shutil.rmtree(slot_dir, ignore_errors=True)
-        elif not acquired:
+        if acquired:
+            # The review is over: the slot goes back even when the reviewer died.
+            if release_fleet_slot_at_run_end(slot_dir, "peer-review-finished", force=safe_release):
+                set_status(slot_dir, state="finished", finished=NOW())
+                shutil.rmtree(slot_dir, ignore_errors=True)
+        else:
             shutil.rmtree(slot_dir, ignore_errors=True)
 
 
@@ -9506,6 +9701,10 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
                timings=timings, **({"error": error_detail} if error_detail else {}))
+    # The turn is over: give the slot of this run back.  A recorded descendant
+    # of the lane child still keeps it, so the shared slot is not freed while
+    # that work is alive (Refs #1685).
+    release_fleet_slot_at_run_end(rdir, f"lane-run-finished:{status}")
     cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -9747,6 +9946,7 @@ def cmd_lane_serve(lane, policy):
     started, backoff, next_start = NOW(), 1, 0
     next_codex_check = NOW()
     next_fleet_recovery = NOW()
+    next_fleet_sweep = NOW()
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
                      started=started, last_error=None, resolved_model=None)
@@ -9808,6 +10008,17 @@ def cmd_lane_serve(lane, policy):
             recovery_policy = load_policy()
             lane_recover_expired_fleet_slots(lane, recovery_policy)
             next_fleet_recovery = NOW() + fleet_recovery_poll_seconds(recovery_policy)
+        # The ghost sweeper runs with the same patrol rhythm: it reclaims the
+        # capacity reservations whose run is gone or long finished (Refs #1685).
+        if NOW() >= next_fleet_sweep:
+            next_fleet_sweep = NOW() + 300
+            try:
+                sweep_policy = load_policy()
+                if fleet_sweep_enabled(sweep_policy):
+                    sweep_fleet_reservations(policy=sweep_policy)
+                next_fleet_sweep = NOW() + fleet_sweep_interval_seconds(sweep_policy)
+            except (RuntimeError, ValueError, OSError) as error:
+                lane_write_state(name, fleet_sweep_error=short(error, 250))
         if child and not child.alive():
             if current.get("run_id"):
                 spec = current
@@ -11870,6 +12081,30 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     return report
 
 
+def cmd_fleet_capacity_sweep(args):
+    """Sweep the capacity reservations of this host (Refs #1685).
+
+    Without ``--apply`` nothing is released: the report names the ghost
+    reservations and the reason of every decision.
+    """
+    try:
+        report = sweep_fleet_reservations(dry_run=not getattr(args, "apply", False))
+    except (RuntimeError, ValueError, OSError) as error:
+        report = {"ok": False, "dry_run": True, "candidates": [], "released": [], "kept": [],
+                  "error": short(error, 250)}
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return report
+    for row in report["candidates"]:
+        age = int(row["age_s"]) if row.get("age_s") is not None else "?"
+        print(f"{row['action']:<8} {row['host']}/{row['run_id']} (age {age}s) - {row['basis']}")
+    print(f"{len(report['candidates'])} candidate(s), {len(report['released'])} released, "
+          f"{len(report['kept'])} kept, dry_run={report['dry_run']}")
+    if report.get("error"):
+        print(f"error: {report['error']}", file=sys.stderr)
+    return report
+
+
 def cmd_fleet(args):
     if args.fleet_cmd == "harvest":
         cmd_fleet_harvest(args)
@@ -11879,6 +12114,9 @@ def cmd_fleet(args):
         return
     if args.fleet_cmd == "health":
         cmd_fleet_health(args)
+        return
+    if args.fleet_cmd == "capacity-sweep":
+        cmd_fleet_capacity_sweep(args)
         return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
@@ -15514,6 +15752,12 @@ def main():
     fp.add_argument("--json", action="store_true", help="print the health report as JSON")
     fp.add_argument("--apply", action="store_true",
                     help="pause the unhealthy hosts and release the recovered ones")
+    fp = fleet_sub.add_parser("capacity-sweep",
+                              help="reclaim the capacity reservations whose run is gone (Refs #1685)")
+    fp.add_argument("--json", action="store_true", help="print the sweep report as JSON")
+    fp.add_argument("--apply", action="store_true",
+                    help="release the ghost reservations (without it the sweep only reports them; "
+                         "the automatic patrol follows fleet.sweep_apply)")
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")

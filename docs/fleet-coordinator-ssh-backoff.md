@@ -148,6 +148,36 @@ python3 openswarm/bin/fleet-capacity gocc <<< '{"op":"status"}'
 
 ---
 
+### 3.3 幽灵预留清扫（capacity sweeper，Refs #1685）
+
+协调器只认显式 `release`：run 异常结束（`exec_error` / `budget_exceeded` / 被 kill）而释放缺失时，预留会一直占着主机槽位。2026-11-02 夜间实测：两条 20 小时前的 `cancel-worker` 占位预留 + 一个凌晨 run 的残留预留占满了 `gores2` 的主机槽位，致 M17 的 run 长时间 queued。
+
+清扫器随 lane 巡查节奏运行（`fleet.sweep_interval_seconds`，默认 300s），只判定**本机自己持有**的预留，逐条对照本机 `runs/` 目录与活体状态：
+
+| 判定依据 | 含义 | 动作 |
+|---|---|---|
+| `run-missing` | run 目录已不存在（占位预留） | 释放 |
+| `run-finished` | run 已发布终态且结束超过 grace（默认 600s） | 释放 |
+| `runner-dead-stale` | runner 进程已死 *且* status 的 `updated` 超过 grace | 释放 |
+| `runner-alive` / `status-fresh` / `status-unreadable` / `runner-unknown` / `executor-scan-stale` / `reservation-fresh` | 证据不足或 run 仍在跑 | 不动 |
+
+**默认 dry-run**：先看清单，再决定是否释放。
+
+```bash
+# 1) dry-run：只点名，不释放
+openswarm fleet capacity-sweep
+openswarm fleet capacity-sweep --json
+
+# 2) 确认无误后释放
+openswarm fleet capacity-sweep --apply
+```
+
+- 自动巡查是否真的释放由 `policy.json` 的 `fleet.sweep_apply` 决定（出厂为 `false`，即巡查只做 dry-run）；`--apply` 是人工显式释放。
+- 审计行：`~/.claude/openswarm/fleet-capacity-sweep.jsonl`（本机判定日志）与协调器侧的 `~/.claude/openswarm-fleet-capacity/audit.jsonl`（真实释放记录，含 host / run_id / 年龄 / 判定依据）。
+- 释放失败会重试 3 次并写入 `~/.claude/openswarm/fleet-capacity-alerts.jsonl` 告警行。
+
+---
+
 ## 4. 辅助排查与应急操作
 
 1. **测试 SSH 与 ControlMaster 状态**：
