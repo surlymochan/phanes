@@ -804,6 +804,100 @@ time.sleep(30)
         for step in ('DA', 'Builder', '检查'):
             self.assertNotIn(f'[{step}] 命令', result.stdout)
 
+    def test_e2e_fail_fast_first_role_failure_skips_subsequent_and_records_timings(self):
+        """首角色（Boss）失败后跳过后续且 timings 含失败角色（Refs #1636）。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 0), exit_code=42, error_text='首角色执行异常')
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: Boss', result.stderr)
+        self.assertIn('退出码 42', result.stderr)
+        self.assertIn('失败步骤: Boss', result.stderr)
+        self.assertIn('审查角色未调用：上游步骤失败', result.stderr)
+
+        # 断言后续角色均未启动（未记录调用，控制台无对应命令）
+        calls = self.calls()
+        self.assertEqual([call[0] for call in calls], ['boss'])
+        for step in ('DA', 'Builder', '检查', '审查'):
+            self.assertNotIn(f'[{step}] 命令', result.stdout)
+
+        # 下游正式产物均未提交生成
+        self.assertFalse((self.workdir / 'brief.json').exists())
+        self.assertFalse((self.workdir / 'diagnosis.json').exists())
+        self.assertFalse((self.workdir / 'dist').exists())
+        self.assertFalse((self.workdir / REVIEW_REPORT).exists())
+        self.assertFalse((self.workdir / REVIEW_RESULTS).exists())
+
+        # timings 耗时记录必须存在且只包含失败的首角色
+        timings_path = self.workdir / TIMINGS_FILE
+        self.assertTrue(timings_path.is_file(), 'timings.json 必须写出')
+        timings = json.loads(timings_path.read_text(encoding='utf-8'))
+        self.assertEqual(len(timings), 1)
+        self.assertEqual(timings[0]['name'], 'Boss')
+        self.assertEqual(timings[0]['exit_code'], 42)
+        self.assertGreaterEqual(timings[0]['duration_seconds'], 0)
+        self.assertIsInstance(timings[0]['command'], list)
+        self.assertIn(str(self.scripts[0]), timings[0]['command'])
+
+        # status.json 记录首角色失败、未调用审查与完整 timings
+        status_path = self.workdir / STATUS_FILE
+        self.assertTrue(status_path.is_file(), 'status.json 必须写出')
+        status = json.loads(status_path.read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'boss')
+        self.assertEqual(len(status['steps']), 1)
+        self.assertEqual(status['steps'][0]['role'], 'boss')
+        self.assertEqual(status['steps'][0]['exit_code'], 42)
+        self.assertEqual([item['name'] for item in status['timings']], ['Boss'])
+        self.assertFalse(status['reviewer_called'])
+        self.assertTrue(status['review_requested'])
+
+        # step-errors 保留首角色错误现场快照
+        error_file = self.workdir / STEP_ERROR_DIR / 'boss.json'
+        self.assertTrue(error_file.is_file(), 'step-errors/boss.json 必须保留')
+        error_data = json.loads(error_file.read_text(encoding='utf-8'))
+        self.assertEqual(error_data['exit_code'], 42)
+        self.assertIn('首角色执行异常', error_data['stderr_tail'])
+
+    def test_e2e_fail_fast_first_role_output_failure_preserves_stage_and_records_timings(self):
+        """首角色写出暂存产物后失败，仍跳过后续且 timings 含失败角色与暂存路径。"""
+        for index, (path, role) in enumerate(zip(self.scripts, ('boss', 'da', 'builder', 'checker', 'reviewer'))):
+            self.write_stub(path, role, failing=(index == 0), fail_after_output=(index == 0),
+                            exit_code=15, error_text='首角色产出后异常')
+        command = self.command() + ['--review', '--reviewer', str(self.scripts[4])]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('步骤失败: Boss', result.stderr)
+        self.assertIn('退出码 15', result.stderr)
+        self.assertIn('失败步骤: Boss', result.stderr)
+
+        # 首角色产出已暂存但未原子提交为正式 brief.json
+        self.assertFalse((self.workdir / 'brief.json').exists())
+        stage = next(self.workdir.glob('.brief.json.boss.*.tmp'))
+        self.assertTrue(stage.is_file())
+        self.assertEqual(stage.read_text(encoding='utf-8'), '{}')
+
+        # 后续角色全部跳过未启动
+        self.assertEqual([call[0] for call in self.calls()], ['boss'])
+        for step in ('DA', 'Builder', '检查', '审查'):
+            self.assertNotIn(f'[{step}] 命令', result.stdout)
+
+        # timings 耗时记录包含首角色且 exit_code 一致
+        timings = json.loads((self.workdir / TIMINGS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual([item['name'] for item in timings], ['Boss'])
+        self.assertEqual(timings[0]['exit_code'], 15)
+
+        # status.json 记录诊断产物暂存路径与失败状态
+        status = json.loads((self.workdir / STATUS_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['failed_step'], 'boss')
+        self.assertIn('诊断产物暂存路径', status['error'])
+
     def test_failure_stops_pipeline_and_returns_nonzero(self):
         for index, (path, role) in enumerate(zip(self.scripts[:4], ('boss', 'da', 'builder', 'checker'))):
             self.write_stub(path, role, failing=(index == 1))
