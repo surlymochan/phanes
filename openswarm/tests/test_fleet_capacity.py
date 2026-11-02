@@ -1,5 +1,9 @@
 """Cross-host admission is atomic and uncertain reservations are never expired."""
+import argparse
 import concurrent.futures
+import contextlib
+import datetime as dt
+import io
 import json
 import os
 import pathlib
@@ -37,6 +41,284 @@ class FleetCapacityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
+
+    def certificate(self, expires_in_days):
+        """An SSH certificate inspection, as ssh-keygen -L prints it for a fleet certificate."""
+        now = dt.datetime.now(dt.timezone.utc)
+        return ("Type: ssh-ed25519-cert-v01@openswarm.com user certificate\n"
+                "Public key: ssh-ed25519-cert-v01@openswarm.com AAAAC3NzaC1lZDI1NTE5\n"
+                "Key ID: fake\n"
+                "Serial: 01\n"
+                f"Valid: from {(now - dt.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')} "
+                f"to {(now + dt.timedelta(days=expires_in_days)).strftime('%Y-%m-%dT%H:%M:%S')}\n")
+
+    def certificate_host(self, root, host='gores1', renew_command='ssh gores1 renew', entry=None):
+        """A fake fleet host: the certificate ssh, the lane CLI and the fleet.json entry."""
+        fake_bin = root / 'bin'
+        fake_bin.mkdir(exist_ok=True)
+        ssh = fake_bin / 'ssh'
+        ssh.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            "mode = os.environ.get('FAKE_SSH_MODE', 'valid')\n"
+            "root = pathlib.Path(os.environ['OPENSWARM_TEST_SSH_ROOT'])\n"
+            "with (root / 'ssh-argv.log').open('a') as stream:\n"
+            "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if mode == 'failed':\n"
+            "    sys.stderr.write('renewal failed\\n')\n"
+            "    raise SystemExit(3)\n"
+            "if mode == 'expired':\n"
+            "    sys.stdout.write((root / 'expired.cert').read_text())\n"
+            "elif mode == 'missing_expiry':\n"
+            "    sys.stdout.write('renewed OK without expiry details\\n')\n"
+            "else:\n"
+            "    sys.stdout.write((root / 'valid.cert').read_text())\n"
+        )
+        ssh.chmod(0o755)
+        (root / 'valid.cert').write_text(self.certificate(10))
+        (root / 'expired.cert').write_text(self.certificate(-1))
+        fake_openswarm = root / '.local/bin/openswarm'
+        fake_openswarm.parent.mkdir(parents=True, exist_ok=True)
+        fake_openswarm.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "if 'status' in sys.argv:\n"
+            "    print(json.dumps({'lanes': [{'name': 'GH1', 'state': 'idle', 'model': 'm'}]}))\n"
+            "elif 'assign' in sys.argv:\n"
+            "    print(json.dumps({'ok': True, 'lane': 'GH1', 'id': 'run-test-cert'}))\n"
+            "else:\n"
+            "    print(json.dumps({'ok': True}))\n"
+        )
+        fake_openswarm.chmod(0o755)
+        entry = entry or {'name': host, 'kind': 'ssh', 'ssh': host}
+        if renew_command and 'renew_command' not in entry:
+            entry['renew_command'] = renew_command
+        (root / 'fleet.json').write_text(json.dumps({'hosts': [entry]}))
+        return dict(self.env, HOME=str(root), OPENSWARM_HOME=str(root),
+                    PATH=str(fake_bin) + os.pathsep + os.environ.get('PATH', ''),
+                    OPENSWARM_TEST_SSH_ROOT=str(root))
+
+    def call_with_rc(self, env, authenticated_host, **payload):
+        p = subprocess.run([str(BIN), authenticated_host], input=json.dumps(payload), text=True,
+                           capture_output=True, env=env, timeout=15)
+        out = json.loads(p.stdout) if p.stdout.strip().startswith('{') else p.stdout
+        return p.returncode, out
+
+    def test_fleet_capacity_certificate_validation_and_lane_filtering(self):
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root)
+
+        # 1. Missing expiry: rc=1, status=certificate_invalid, lanes=[]
+        env['FAKE_SSH_MODE'] = 'missing_expiry'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertEqual(out['lanes'], [])
+
+        rc, out = self.call_with_rc(env, 'gores1', op='assign', lane='GH1', prompt='prompt',
+                                    base='abcdef0', budget_minutes=3)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+
+        # 2. Expired certificate: rc=1, status=certificate_invalid, lanes=[]
+        env['FAKE_SSH_MODE'] = 'expired'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertEqual(out['lanes'], [])
+
+        rc, out = self.call_with_rc(env, 'gores1', op='assign', lane='GH1', prompt='prompt',
+                                    base='abcdef0', budget_minutes=3)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+
+        # A failed renewal command is a broken certificate, not a healthy host.
+        env['FAKE_SSH_MODE'] = 'failed'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertIn('renewal command failed', out['error'])
+
+        # 3. Valid certificate: rc=0, ok=True, non-empty lane assignment allowed
+        env['FAKE_SSH_MODE'] = 'valid'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertIn('result', out)
+
+        rc, out = self.call_with_rc(env, 'gores1', op='assign', lane='GH1', prompt='prompt',
+                                    base='abcdef0', budget_minutes=3)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['result']['lane'], 'GH1')
+
+    def test_fleet_capacity_never_runs_a_renew_command_from_the_request(self):
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root, renew_command=None)
+        env['FAKE_SSH_MODE'] = 'expired'
+
+        # A host without a certificate command keeps its capacity, and the command
+        # the request carries is never executed.
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes', renew_command='ssh gores1 renew')
+        self.assertEqual(rc, 0)
+        self.assertTrue(out['ok'])
+        self.assertFalse((root / 'ssh-argv.log').exists())
+
+        # A host with an unusable certificate stays unusable, even when the request
+        # carries a command that would print a valid certificate.
+        env = self.certificate_host(root)
+        env['FAKE_SSH_MODE'] = 'expired'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes', renew_command='ssh gores1')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+
+    def test_fleet_capacity_reads_the_renew_command_from_the_topology(self):
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root, renew_command=None)
+        pathlib.Path(self.temp.name, 'topology.json').write_text(json.dumps({
+            'hosts': ['gores1', 'gocc'], 'limits': {'total': 8, 'host:gores1': 4, 'pi': 4},
+            'renew_commands': {'gores1': 'ssh gores1 renew'}}))
+        env['FAKE_SSH_MODE'] = 'expired'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertIn('gores1 renew', (root / 'ssh-argv.log').read_text())
+
+    def test_fleet_and_capacity_share_the_renew_command_environment(self):
+        """One environment variable reaches both fleet paths."""
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root, renew_command=None)
+        env['FAKE_SSH_MODE'] = 'expired'
+        env['OPENSWARM_FLEET_RENEW_COMMAND'] = 'ssh gores1 renew'
+
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+
+        with mock.patch.object(xs, 'DATA', str(root)), \
+                mock.patch.dict(os.environ, {'PATH': env['PATH'],
+                                             'OPENSWARM_TEST_SSH_ROOT': str(root),
+                                             'FAKE_SSH_MODE': 'expired',
+                                             'OPENSWARM_FLEET_RENEW_COMMAND': 'ssh gores1 renew'}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as exited:
+                xs.cmd_fleet(argparse.Namespace(fleet_cmd='status', json=True))
+            self.assertEqual(exited.exception.code, 1)
+        rows = json.loads(output.getvalue())['hosts']
+        self.assertEqual(rows[0]['status'], 'certificate_invalid')
+
+    def test_fleet_and_capacity_judge_the_same_host_the_same_way(self):
+        """One fleet.json must not look healthy to one path and broken to the other."""
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root)
+
+        for mode in ('expired', 'missing_expiry'):
+            env['FAKE_SSH_MODE'] = mode
+            rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+            self.assertEqual(rc, 1)
+            self.assertEqual(out['status'], 'certificate_invalid')
+
+            with mock.patch.object(xs, 'DATA', str(root)), \
+                    mock.patch.dict(os.environ, {'PATH': env['PATH'],
+                                                 'OPENSWARM_TEST_SSH_ROOT': str(root),
+                                                 'FAKE_SSH_MODE': mode}), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as exited:
+                    xs.cmd_fleet(argparse.Namespace(fleet_cmd='status', json=True))
+                self.assertEqual(exited.exception.code, 1)
+            rows = json.loads(output.getvalue())['hosts']
+            self.assertEqual(rows[0]['status'], 'certificate_invalid')
+            self.assertEqual(rows[0]['lanes'], [])
+
+        env['FAKE_SSH_MODE'] = 'valid'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 0)
+        snapshot = {'lanes': [{'name': 'GH1', 'state': 'idle', 'model': 'm'}], 'active_runs': []}
+        with mock.patch.object(xs, 'DATA', str(root)), \
+                mock.patch.dict(os.environ, {'PATH': env['PATH'],
+                                             'OPENSWARM_TEST_SSH_ROOT': str(root),
+                                             'FAKE_SSH_MODE': 'valid'}), \
+                mock.patch.object(xs, 'host_json', return_value=snapshot), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            xs.cmd_fleet(argparse.Namespace(fleet_cmd='status', json=True))
+        rows = json.loads(output.getvalue())['hosts']
+        self.assertEqual(rows[0]['status'], 'reachable')
+        self.assertEqual(len(rows[0]['lanes']), 1)
+
+    def test_fleet_capacity_judges_the_fleet_host_of_the_capacity_id(self):
+        """The gate reads the fleet.json entry of the capacity host id."""
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root, renew_command=None,
+                                    entry={'name': 'worker', 'kind': 'ssh', 'ssh': 'gores1',
+                                           'renew_command': 'ssh gores1 renew'})
+        env['FAKE_SSH_MODE'] = 'expired'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertIn('gores1 renew', (root / 'ssh-argv.log').read_text())
+
+    def test_fleet_capacity_certificate_check_uses_the_transport_options(self):
+        """The gate reaches the host over the transport options of that host."""
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root, renew_command=None,
+                                    entry={'name': 'worker', 'kind': 'ssh', 'ssh': 'gores1',
+                                           'check_certificate': True, 'jump': 'jump-host',
+                                           'ssh_options': {'ProxyCommand': 'nc %h %p'},
+                                           'connect_timeout': 7, 'control_persist': 60})
+        env['FAKE_SSH_MODE'] = 'valid'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 0, out)
+        argv = (root / 'ssh-argv.log').read_text()
+        self.assertIn('-o ProxyJump=jump-host', argv)
+        self.assertIn('-o ProxyCommand=nc %h %p', argv)
+        self.assertIn('-o ConnectTimeout=7', argv)
+        self.assertIn('-o ControlPersist=60', argv)
+        self.assertIn('gores1 ssh-keygen -L -f', argv)
+
+    def test_fleet_capacity_broken_certificate_command_fails_closed(self):
+        """A command that cannot be split keeps the host out of the capacity."""
+        root = pathlib.Path(self.temp.name)
+        env = self.certificate_host(root, renew_command='ssh gores1 "renew')
+        env['FAKE_SSH_MODE'] = 'valid'
+        rc, out = self.call_with_rc(env, 'gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertIn('not usable', out['error'])
+        self.assertFalse((root / 'ssh-argv.log').exists())
+
+    def test_fleet_capacity_without_the_shared_rules_keeps_its_operations(self):
+        """The coordinator deploys one file: the capacity operations keep working."""
+        root = pathlib.Path(self.temp.name)
+        solo = root / 'solo'
+        solo.mkdir()
+        (solo / 'fleet-capacity').write_bytes(BIN.read_bytes())
+        (solo / 'fleet-capacity').chmod(0o755)
+        env = dict(self.env, HOME=str(root), OPENSWARM_HOME=str(root))
+
+        def call(authenticated_host, **payload):
+            p = subprocess.run([str(solo / 'fleet-capacity'), authenticated_host], input=json.dumps(payload),
+                               text=True, capture_output=True, env=env, timeout=15)
+            return p.returncode, json.loads(p.stdout) if p.stdout.strip().startswith('{') else p.stdout
+
+        rc, out = call('gocc', op='acquire', token='a' * 32, run_id='run-1', backend='pi')
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out['ok'])
+        rc, out = call('gocc', op='status')
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out['ok'])
+        rc, out = call('gocc', op='release', token='a' * 32, run_id='run-1')
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out['ok'])
+        rc, out = call('gocc', op='recover', host='gocc', run_id='run-1',
+                       confirm='runner-and-executors-stopped-after-ttl')
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out['ok'])
+
+        # The certificate gate cannot run without the rules, so it fails closed.
+        rc, out = call('gores1', op='lanes')
+        self.assertEqual(rc, 1)
+        self.assertEqual(out['status'], 'certificate_invalid')
+        self.assertIn('fleet_certificate.py', out['error'])
 
     def call(self, authenticated_host, **payload):
         p = subprocess.run([str(BIN), authenticated_host], input=json.dumps(payload), text=True,
