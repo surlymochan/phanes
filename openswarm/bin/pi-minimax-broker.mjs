@@ -69,6 +69,29 @@ const noteRequest = () => {
   try { appendFileSync(requestLog, JSON.stringify({ts: Date.now() / 1000}) + '\n'); } catch { /* the log is advisory */ }
 };
 
+const defaultQuotaPattern = 'Token Plan|用量上限|usage limit|\\(2056\\)';
+const getQuotaRe = () => {
+  const env = process.env.PI_BROKER_QUOTA_RE;
+  if (!env) return new RegExp(defaultQuotaPattern);
+  try {
+    return new RegExp(env);
+  } catch {
+    return new RegExp(defaultQuotaPattern);
+  }
+};
+const getQuotaCooldownMs = () => {
+  const s = Number(process.env.PI_BROKER_QUOTA_COOLDOWN_S);
+  return (Number.isFinite(s) && s > 0 ? s : 300) * 1000;
+};
+let breakerState = 'closed';
+let breakerOpenUntil = 0;
+let lastQuotaBody = null;
+let lastQuotaContentType = 'application/json';
+let lastQuotaMsg = '';
+let lastQuotaType = 'rate_limit_error';
+let lastQuotaCode = null;
+let probeInFlight = false;
+
 const server = createServer((req, res) => {
   const t0 = Date.now(); const id = ++seq;
   const row = {ts: new Date(t0).toISOString(), id, lane: '?', req_bytes: 0, resp_bytes: 0, status: 0,
@@ -84,7 +107,6 @@ const server = createServer((req, res) => {
   const length = Number(req.headers['content-length']);
   if (!Number.isSafeInteger(length) || length < 1 || length > maxBytes || req.headers['transfer-encoding']) return fail(400, 'invalid size');
   inFlight += 1;
-  noteRequest();
   req.setTimeout(uploadTimeoutMs, () => req.destroy());
   let settled = false;
   const release = () => {
@@ -105,14 +127,64 @@ const server = createServer((req, res) => {
     if (size !== length || !parsed || parsed.model !== model || !Array.isArray(parsed.messages)) {
       release(); return fail(403, 'model or request refused');
     }
+    const now = Date.now();
+    let isProbe = false;
+    if (breakerState === 'open') {
+      if (now < breakerOpenUntil) {
+        release();
+        row.status = 429;
+        row.breaker = 'open';
+        row.upstream_type = lastQuotaType;
+        if (lastQuotaCode !== null) row.provider_code = lastQuotaCode;
+        row.err = lastQuotaMsg || 'Token Plan quota exhausted';
+        row.resp_bytes = Buffer.byteLength(lastQuotaBody || '');
+        if (!res.headersSent) res.writeHead(429, {'content-type': lastQuotaContentType || 'application/json', 'cache-control': 'no-store'});
+        res.end(lastQuotaBody || JSON.stringify({type: 'rate_limit_error', message: row.err}));
+        done();
+        return;
+      }
+      if (!probeInFlight) {
+        probeInFlight = true;
+        breakerState = 'half-open';
+        isProbe = true;
+        row.breaker = 'half-open';
+      } else {
+        release();
+        row.status = 429;
+        row.breaker = 'open';
+        row.upstream_type = lastQuotaType;
+        if (lastQuotaCode !== null) row.provider_code = lastQuotaCode;
+        row.err = lastQuotaMsg || 'Token Plan quota exhausted';
+        row.resp_bytes = Buffer.byteLength(lastQuotaBody || '');
+        if (!res.headersSent) res.writeHead(429, {'content-type': lastQuotaContentType || 'application/json', 'cache-control': 'no-store'});
+        res.end(lastQuotaBody || JSON.stringify({type: 'rate_limit_error', message: row.err}));
+        done();
+        return;
+      }
+    } else if (breakerState === 'half-open') {
+      release();
+      row.status = 429;
+      row.breaker = 'open';
+      row.upstream_type = lastQuotaType;
+      if (lastQuotaCode !== null) row.provider_code = lastQuotaCode;
+      row.err = lastQuotaMsg || 'Token Plan quota exhausted';
+      row.resp_bytes = Buffer.byteLength(lastQuotaBody || '');
+      if (!res.headersSent) res.writeHead(429, {'content-type': lastQuotaContentType || 'application/json', 'cache-control': 'no-store'});
+      res.end(lastQuotaBody || JSON.stringify({type: 'rate_limit_error', message: row.err}));
+      done();
+      return;
+    }
+    noteRequest();
     // Forward the parsed value, not the original bytes: duplicate JSON keys must not
     // let the upstream select a different model from the one checked above.
     const payload = Buffer.from(JSON.stringify(parsed));
     let providerErrorResponded = false;
+    let upstreamResponded = false;
     const outgoing = https.request({hostname: 'api.minimaxi.com', port: 443, path: '/anthropic' + req.url,
       method: 'POST', timeout: 180000, headers: {'content-type': 'application/json', 'content-length': payload.length,
         'anthropic-version': '2023-06-01', ...(beta === undefined ? {} : {'anthropic-beta': beta}),
         'x-api-key': key, 'authorization': 'Bearer ' + key}}, upstream => {
+      upstreamResponded = true;
       if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
         row.status = upstream.statusCode || 502; row.ttfb_ms = Date.now() - t0;
         const retry = {};
@@ -130,19 +202,41 @@ const server = createServer((req, res) => {
           providerErrorResponded = true;
           const body = errorBody.subarray(0, errorBytes);
           row.resp_bytes = errorBytes;
+          let rawMsg = '';
           try {
             const parsedError = JSON.parse(body.toString('utf8'));
             const error = parsedError?.error && typeof parsedError.error === 'object'
               ? parsedError.error : parsedError;
             if (typeof error?.type === 'string') row.upstream_type = error.type;
-            row.err = typeof error?.message === 'string'
-              ? Array.from(error.message).slice(0, 160).join('') : 'provider request failed';
+            if (typeof error?.message === 'string') rawMsg = error.message;
+            row.err = rawMsg ? Array.from(rawMsg).slice(0, 160).join('') : 'provider request failed';
             const code = parsedError?.base_resp?.status_code ?? error?.base_resp?.status_code;
             if (typeof code === 'string' || (typeof code === 'number' && Number.isFinite(code))) row.provider_code = code;
           } catch { row.err = 'non_json_body'; }
+          const quotaRe = getQuotaRe();
+          const bodyText = body.toString('utf8');
+          const isQuota = row.status === 429 &&
+            (row.upstream_type === 'rate_limit_error' || !row.upstream_type) &&
+            (quotaRe.test(rawMsg) || quotaRe.test(bodyText) || quotaRe.test(row.err));
+          if (isQuota) {
+            breakerState = 'open';
+            breakerOpenUntil = Date.now() + getQuotaCooldownMs();
+            lastQuotaBody = body.length > 0 ? body : Buffer.from(JSON.stringify({type: 'rate_limit_error', message: row.err}));
+            lastQuotaContentType = upstream.headers['content-type'] || 'application/json';
+            lastQuotaMsg = row.err;
+            lastQuotaType = row.upstream_type || 'rate_limit_error';
+            lastQuotaCode = row.provider_code ?? null;
+            probeInFlight = false;
+            row.breaker = isProbe ? 'half-open' : 'open';
+          } else if (isProbe) {
+            breakerState = 'open';
+            breakerOpenUntil = Date.now() + getQuotaCooldownMs();
+            probeInFlight = false;
+            row.breaker = 'half-open';
+          }
           release();
           if (!res.destroyed && !res.writableEnded) {
-            res.writeHead(row.status, {'content-type': 'application/json', 'cache-control': 'no-store'});
+            res.writeHead(row.status, {'content-type': upstream.headers['content-type'] || 'application/json', 'cache-control': 'no-store'});
             res.end(body);
           }
           done();
@@ -164,6 +258,11 @@ const server = createServer((req, res) => {
         upstream.on('close', finishError);
         return;
       }
+      if (breakerState === 'half-open') {
+        breakerState = 'closed';
+        probeInFlight = false;
+        lastQuotaBody = null;
+      }
       row.status = upstream.statusCode; row.ttfb_ms = Date.now() - t0;
       let tail = '';
       upstream.on('data', chunk => {
@@ -179,6 +278,20 @@ const server = createServer((req, res) => {
           row.http_status = row.status; row.status = h ? Number(h[1]) : (map[t && t[1]] || 500);
           row.stream_err = (t && t[1]) || 'sse_error';
           const mm = /"message"\s*:\s*"([^"]{0,160})/.exec(tail); if (mm) row.err = mm[1];
+          if (row.status === 429 && row.stream_err === 'rate_limit_error') {
+            const quotaRe = getQuotaRe();
+            if (row.err && quotaRe.test(row.err)) {
+              breakerState = 'open';
+              breakerOpenUntil = Date.now() + getQuotaCooldownMs();
+              lastQuotaBody = Buffer.from(JSON.stringify({type: 'rate_limit_error', message: row.err}));
+              lastQuotaContentType = 'application/json';
+              lastQuotaMsg = row.err;
+              lastQuotaType = 'rate_limit_error';
+              lastQuotaCode = null;
+              probeInFlight = false;
+              row.breaker = isProbe ? 'half-open' : 'open';
+            }
+          }
         }
       });
       upstream.on('end', () => done());
@@ -189,9 +302,21 @@ const server = createServer((req, res) => {
       upstream.on('close', () => { release(); if (!upstream.complete) res.destroy(); });
       upstream.pipe(res);
     });
-    outgoing.on('timeout', () => { row.err = 'upstream timeout'; outgoing.destroy(); });
-    outgoing.on('error', () => { release(); if (!providerErrorResponded) fail(502, 'provider unavailable'); });
-    res.on('close', () => { if (!res.writableEnded) outgoing.destroy(); release(); });
+    outgoing.on('timeout', () => {
+      if (isProbe) { breakerState = 'open'; breakerOpenUntil = Date.now() + getQuotaCooldownMs(); probeInFlight = false; }
+      row.err = 'upstream timeout'; outgoing.destroy();
+    });
+    outgoing.on('error', () => {
+      if (isProbe) { breakerState = 'open'; breakerOpenUntil = Date.now() + getQuotaCooldownMs(); probeInFlight = false; }
+      release(); if (!providerErrorResponded) fail(502, 'provider unavailable');
+    });
+    res.on('close', () => {
+      if (isProbe && !upstreamResponded) {
+        breakerState = 'open'; breakerOpenUntil = Date.now() + getQuotaCooldownMs(); probeInFlight = false;
+      }
+      if (!res.writableEnded) outgoing.destroy();
+      release();
+    });
     outgoing.end(payload);
   });
 });
