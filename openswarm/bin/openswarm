@@ -14033,13 +14033,26 @@ def doctor_resource_modules():
         return None
 
 
-def doctor_systemd_unit(lane):
-    """Canonical systemd unit name used when installing generated lane services."""
-    return lane.get("systemd_unit") or f"openswarm-lane-{lane['name']}.service"
+DOCTOR_CGROUP_WINDOW_S = 1.0
+DOCTOR_RESOURCE_STATUS = {"OK": "ok", "WARN": "warn", "FAIL": "fail"}
 
 
-def doctor_resources(lanes, policy):
-    """Report per-filesystem capacity and systemd lane memory throttling."""
+def doctor_cgroup_sample(cgroup, unit):
+    """Read one memory controller sample of a systemd unit; raise OSError when none is readable."""
+    sample = cgroup.read_cgroup(cgroup.unit_cgroup(unit))
+    if all(value is None for value in (sample.get("memory_current"), sample.get("memory_high"),
+                                        sample.get("memory_max"))) and not any(
+            value is not None for value in (sample.get("events") or {}).values()):
+        raise OSError("cgroup memory controller data unavailable")
+    return sample
+
+
+def doctor_resources(lanes, policy, sleep=time.sleep):
+    """Report per-filesystem capacity and memory.high throttling of systemd lanes.
+
+    A lane is checked when its lanes.json entry names its unit in ``systemd_unit``. The two memory.events
+    samples are taken ``DOCTOR_CGROUP_WINDOW_S`` apart within this run; nothing is written to disk.
+    """
     modules = doctor_resource_modules()
     if modules is None:
         return [{"path": DATA, "kind": "resources", "used_pct": None,
@@ -14068,31 +14081,24 @@ def doctor_resources(lanes, policy):
             rows.append({"path": path, "kind": "filesystem", "used_pct": None,
                          "level": "WARN", "detail": str(error)})
     for lane in lanes:
-        if lane.get("service_manager") != "systemd-unit":
+        unit = lane.get("systemd_unit")
+        if not unit:
             continue
-        unit = doctor_systemd_unit(lane)
-        state_path = os.path.join(DATA, "resource-cgroup-baselines.json")
-        baselines = jload(state_path, {})
         try:
-            sample = cgroup.read_cgroup(cgroup.unit_cgroup(unit))
-            if all(value is None for value in (sample.get("memory_current"), sample.get("memory_high"),
-                                                sample.get("memory_max"))) and not any(
-                    value is not None for value in (sample.get("events") or {}).values()):
-                raise OSError("cgroup memory controller data unavailable")
-            previous = baselines.get(unit)
-            assessment = cgroup.assess(sample, prev=previous, thresholds={
+            first = doctor_cgroup_sample(cgroup, unit)
+            sleep(DOCTOR_CGROUP_WINDOW_S)
+            sample = doctor_cgroup_sample(cgroup, unit)
+            assessment = cgroup.assess(sample, prev=first, thresholds={
                 "ratio": loaded["resources"]["cgroup"]["high_ratio"],
                 "high_delta": loaded["resources"]["cgroup"]["high_events_delta"],
                 "shmem_ratio": loaded["resources"]["cgroup"]["shmem_ratio"]})
-            baselines[unit] = sample
-            jsave(state_path, baselines)
             level = "WARN" if assessment["state"] != "ok" else "OK"
             rows.append({"path": str(cgroup.unit_cgroup(unit)), "kind": "cgroup.memory_high",
                          "used_pct": (sample["memory_current"] / sample["memory_high"] * 100
                                       if sample.get("memory_current") is not None and sample.get("memory_high") else None),
                          "level": level, "reasons": assessment["reasons"]})
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            rows.append({"path": unit, "kind": "cgroup.memory_high", "used_pct": None,
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+            rows.append({"path": str(unit), "kind": "cgroup.memory_high", "used_pct": None,
                          "level": "WARN", "detail": str(error)})
     return rows
 
@@ -14116,11 +14122,26 @@ def doctor_report(lane_name=None, policy=None, system=None):
     for report in reports:
         for check in report["checks"]:
             counts[check["status"]] = counts.get(check["status"], 0) + 1
+    for row in resources:
+        counts[DOCTOR_RESOURCE_STATUS[row["level"]]] += 1
     if not reports and not notes:
         notes.append("no lanes are configured")
-    return {"ok": counts["fail"] == 0 and not any(row["level"] == "FAIL" for row in resources),
-            "lanes": reports, "resources": resources, "notes": notes,
+    return {"ok": counts["fail"] == 0, "lanes": reports, "resources": resources, "notes": notes,
             "summary": {**counts, "lanes": len(reports)}}
+
+
+def doctor_resource_detail(row):
+    parts = []
+    if row.get("used_pct") is not None:
+        parts.append(f"used={row['used_pct']:.1f}%")
+    free = row.get("free")
+    if free is not None:
+        parts.append(f"free={free:.1f}GB" if row["kind"] == "disk" else f"free={free} inodes")
+    if row.get("reasons"):
+        parts.append("reasons=" + ",".join(row["reasons"]))
+    if row.get("detail"):
+        parts.append(row["detail"])
+    return "  ".join(parts)
 
 
 def doctor_text(report):
@@ -14133,6 +14154,10 @@ def doctor_text(report):
             lines.append(f"  {check['status']:<4} {check['name']:<20} {check['detail']}")
             if check["fix"]:
                 lines.append(f"       fix: {check['fix']}")
+    if report["resources"]:
+        lines.append("resources")
+        for row in report["resources"]:
+            lines.append(f"  {row['level']:<4} {row['kind']:<19} {row['path']}  {doctor_resource_detail(row)}")
     counts = report["summary"]
     lines.append(f"summary ok={counts['ok']} warn={counts['warn']} fail={counts['fail']} "
                  f"lanes={counts['lanes']}")

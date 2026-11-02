@@ -60,19 +60,86 @@ class DoctorResourceTests(unittest.TestCase):
         self.assertEqual(result["inode_used_pct"], 96)
         self.assertEqual(result["disk_used_pct"], 20)
 
-    def test_cgroup_high_event_growth_warns_across_runs(self):
-        lane = {"name": "C1", "service_manager": "systemd-unit"}
+    def cgroup_dir(self):
         cgroup_dir = self.data / "cg"
-        cgroup_dir.mkdir()
+        cgroup_dir.mkdir(exist_ok=True)
         (cgroup_dir / "memory.high").write_text("1000")
         (cgroup_dir / "memory.current").write_text("980")
         (cgroup_dir / "memory.events").write_text("high 0\nmax 0\noom 0\noom_kill 0\n")
+        return cgroup_dir
+
+    def test_cgroup_high_event_growth_within_run_warns(self):
+        cgroup_dir = self.cgroup_dir()
+        lane = {"name": "C1", "systemd_unit": "openswarm-lane-C1.service"}
+        grow = lambda _: (cgroup_dir / "memory.events").write_text("high 1000\nmax 0\noom 0\noom_kill 0\n")
         module_patch, usage_patch = self.modules(10, 10)
         with module_patch, usage_patch, mock.patch.object(self.cgroup, "unit_cgroup", return_value=cgroup_dir):
-            xs.doctor_resources([lane], self.policy_obj)
-            (cgroup_dir / "memory.events").write_text("high 1000\nmax 0\noom 0\noom_kill 0\n")
-            rows = xs.doctor_resources([lane], self.policy_obj)
-        self.assertEqual(next(row for row in rows if row["kind"] == "cgroup.memory_high")["level"], "WARN")
+            rows = xs.doctor_resources([lane], self.policy_obj, sleep=grow)
+        row = next(row for row in rows if row["kind"] == "cgroup.memory_high")
+        self.assertEqual(row["level"], "WARN")
+        self.assertIn("memory_high_throttling", row["reasons"])
+
+    def test_quiet_cgroup_is_ok_and_writes_nothing(self):
+        cgroup_dir = self.cgroup_dir()
+        lane = {"name": "C1", "systemd_unit": "openswarm-lane-C1.service"}
+        before = sorted(os.listdir(self.data))
+        sleeps = []
+        module_patch, usage_patch = self.modules(10, 10)
+        with module_patch, usage_patch, mock.patch.object(self.cgroup, "unit_cgroup", return_value=cgroup_dir):
+            rows = xs.doctor_resources([lane], self.policy_obj, sleep=sleeps.append)
+        self.assertEqual(next(row for row in rows if row["kind"] == "cgroup.memory_high")["level"], "OK")
+        self.assertEqual(sleeps, [xs.DOCTOR_CGROUP_WINDOW_S])
+        self.assertEqual(sorted(os.listdir(self.data)), before)
+
+    def test_lane_without_systemd_unit_skips_cgroup_and_unreadable_unit_warns(self):
+        module_patch, usage_patch = self.modules(10, 10)
+        with module_patch, usage_patch:
+            rows = xs.doctor_resources([{"name": "C1"}], self.policy_obj, sleep=self.fail_if_called)
+            self.assertFalse(any(row["kind"] == "cgroup.memory_high" for row in rows))
+            lane = {"name": "C1", "systemd_unit": "missing.service"}
+            with mock.patch.object(self.cgroup, "unit_cgroup", return_value=self.data / "absent"):
+                rows = xs.doctor_resources([lane], self.policy_obj, sleep=lambda _: None)
+        row = next(row for row in rows if row["kind"] == "cgroup.memory_high")
+        self.assertEqual(row["level"], "WARN")
+        self.assertIn("unavailable", row["detail"])
+
+    def fail_if_called(self, _):
+        self.fail("cgroup window must not be sampled for a lane without systemd_unit")
+
+    def test_systemd_unit_comes_from_real_lanes_json(self):
+        repo = self.data / "repo"
+        repo.mkdir()
+        lane = {"name": "C1", "backend": "codex", "model": "gpt-6-luna", "effort": "xhigh",
+                "repo": str(repo), "systemd_unit": "openswarm-lane-C1.service"}
+        (self.data / "lanes.json").write_text(json.dumps({"lanes": [lane]}))
+        lanes = xs.lanes_by_name(None, check_env_mode=False)
+        cgroup_dir = self.cgroup_dir()
+        units = []
+
+        def unit_path(unit, *args, **kwargs):
+            units.append(unit)
+            return cgroup_dir
+
+        module_patch, usage_patch = self.modules(10, 10)
+        with module_patch, usage_patch, mock.patch.object(self.cgroup, "unit_cgroup", side_effect=unit_path):
+            rows = xs.doctor_resources(lanes, self.policy_obj, sleep=lambda _: None)
+        self.assertTrue(units)
+        self.assertEqual(set(units), {"openswarm-lane-C1.service"})
+        self.assertEqual(next(row for row in rows if row["kind"] == "cgroup.memory_high")["level"], "OK")
+
+    def test_text_report_lists_resources_and_fails(self):
+        module_patch, usage_patch = self.modules(96)
+        with module_patch, usage_patch, mock.patch.object(xs, "doctor_lanes_file", return_value=str(self.data / "none")):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                xs.cmd_doctor(argparse.Namespace(lane=None, json=False), self.policy_obj)
+        text = output.getvalue()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("resources", text)
+        self.assertRegex(text, r"FAIL\s+inode")
+        self.assertIn("used=96.0%", text)
+        self.assertIn("free=4 inodes", text)
+        self.assertNotIn("fail=0", text)
 
     def test_json_has_resource_schema(self):
         module_patch, usage_patch = self.modules(10, 10)
