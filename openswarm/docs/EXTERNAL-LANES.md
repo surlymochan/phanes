@@ -23,11 +23,13 @@ through a zero-cost wake gate (`openswarm external check --agent <name>`). The c
 ## Agent name registry (live)
 
 This registry is informational only: it names the external agents known to be live, it does not
-itself allowlist anyone. The allowlist the dispatcher and the inbox workflow actually see is the
-set of names listed in `external_backends` (for refills) and the set of open inbox PRs (for event
-wake-ups). A name that is not listed here can still self-register by claiming a starter card
-(`backend:external`); it only starts receiving refills and an inbox PR once someone adds it to
-`external_backends` and runs `openswarm external init`.
+itself allowlist anyone. Refills and inbox PRs follow different conditions. Refills go to names
+listed in `external_backends` (the allowlist) or to names that have claimed before, so a name
+that self-registered by claiming a starter card (`backend:external`) is already eligible for
+refills without first being added to `external_backends`. An inbox PR, by contrast, only exists
+after `openswarm external init` runs for that name (init itself is only for allowlisted names);
+until then the agent keeps polling with `openswarm external check --agent <name>` instead of
+receiving event wake-ups.
 
 | Agent | Inbox PR branch (when created by `init`) | Notes |
 |-------|------------------------------------------|-------|
