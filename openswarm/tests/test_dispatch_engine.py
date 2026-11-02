@@ -342,6 +342,39 @@ class ReviewGate(Base):
         d.review_candidates({}, {}, [])
         self.assertEqual(len(self.runner.called("issue edit 105")), 1)
 
+    def test_pending_ignored_macos_check_does_not_block_review(self):
+        p = pr(16, 106, checks=("SUCCESS",))
+        p["statusCheckRollup"][-1] = {"name": "OpenSwarm tests (macos-latest, Python 3.9)", "status": "QUEUED"}
+        d = self.make(self.rules([p]))
+        self.assertTrue(d.green(p))
+        self.assertEqual([c["number"] for c in d.review_candidates({}, {}, [])], [16])
+
+    def test_only_upstream_drift_red_does_not_queue_fix(self):
+        p = pr(17, 107, checks=("SUCCESS",))
+        p["statusCheckRollup"][-1] = {"name": "Check upstream drift", "conclusion": "FAILURE"}
+        d = self.make(self.rules([p]))
+        with open(d.path("BURN-X"), "w"):
+            pass
+        d.review_candidates({}, {}, [])
+        self.assertEqual(d.runner.called("issue edit 107"), [])
+
+    def test_dispatch_sources_use_engine_issue_and_dedupe_inflight(self):
+        sources = E.dispatch_module("sources")
+        p = pr(18, 109, checks=("FAILURE",))
+        p["body"] = "Fix #12\n\nCloses #9"
+        d = self.make(self.rules([p], {9: {"state": "OPEN", "body": "right"},
+                                     12: {"state": "OPEN", "body": "wrong"}}))
+        with open(d.path("BURN-X"), "w"):
+            pass
+        d.review_candidates({}, {}, [])
+        self.assertEqual(len(d.runner.called("issue edit 9")), 1)
+        self.assertEqual(d.runner.called("issue edit 12"), [])
+        p["issue"] = 9
+        tasks = sources.ci_fix_source([p], issue_for_pr=lambda item: item["issue"])
+        self.assertEqual([task["issue"] for task in tasks], [9])
+        self.assertEqual(sources.ci_fix_source([p], [("ci_fix", 18, SHA)],
+                                               issue_for_pr=lambda item: item["issue"]), [])
+
     def test_put_review_parallel_writers_do_not_lose_updates(self):
         d = self.make()
         ts = [threading.Thread(target=d.put_review, args=(i, {"sha": str(i), "verdict": "APPROVE"})) for i in range(30)]

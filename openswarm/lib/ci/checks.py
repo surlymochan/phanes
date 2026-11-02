@@ -175,6 +175,21 @@ def classify(checks, policy):
     return {"state": state, "red": red, "pending": pending, "ignored": ignored, "advisory": advisory}
 
 
+def gate_classify(checks, policy):
+    """Classify checks using merge-gate semantics: ignored pending checks do not gate."""
+    candidates = []
+    ignored_pending = []
+    for item in checks or []:
+        name, bucket = _bucket(item)
+        if policy.ignores(name) and bucket == PENDING:
+            ignored_pending.append(name)
+        else:
+            candidates.append(item)
+    result = classify(candidates, policy)
+    result["ignored_pending"] = ignored_pending
+    return result
+
+
 def rerun_targets(runs, policy):
     """Failed workflow runs worth rerunning, minus the ignored and advisory ones, in input order."""
     targets = []
