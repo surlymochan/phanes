@@ -559,11 +559,13 @@ openswarm lane systemd-unit K1             # prints a system systemd unit; does 
 `openswarm doctor` is the read-only preflight of a lane. It reports whether the lane's executor binary exists and
 is executable, whether Codex's Linux sandbox finds `bwrap`, `slirp4netns`, and `iptables` on `PATH`, whether a lane
 `env_file` exists with mode `600` or stricter, whether the lane environment's `HTTPS_PROXY` accepts a TCP
-connection, and how much space is left on the disk that holds the lane worktree. Every item is `ok`, `warn`, or
-`fail` with a fix hint, and any `fail` exits non-zero. A `resources` section lists inode and block-space use of
-`$OPENSWARM_HOME`, each existing lane worktree, and `/tmp` (`used_pct` and free space, with the policy thresholds in
-`policy.local.json` under `resources`), and warns on memory.high throttling of systemd lanes. It counts in the summary
-and the exit code like the lane checks. The doctor only reads: it never installs a package, creates a
+connection, how much space is left on the disk that holds the lane worktree, and, for a Copilot lane, whether the lane
+model is listed, enabled, and within `copilot.max_usage_multiplier` (default `1.0`) in the ACP model list logged by the
+lane's most recent run (`events.1.copilot.jsonl`; no request is sent, and a warn appears when no run exists yet).
+Every item is `ok`, `warn`, or `fail` with a fix hint, and any `fail` exits non-zero. A `resources` section lists inode
+and block-space use of `$OPENSWARM_HOME`, each existing lane worktree, and `/tmp` (`used_pct` and free space, with the
+policy thresholds in `policy.local.json` under `resources`), and warns on memory.high throttling of systemd lanes. It
+counts in the summary and the exit code like the lane checks. The doctor only reads: it never installs a package, creates a
 symlink, or writes a file, so the fix hints stay the operator's decision.
 
 ```bash

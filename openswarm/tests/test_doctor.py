@@ -166,6 +166,21 @@ class DoctorTests(unittest.TestCase):
         # A lane without the env_file field is skipped instead of reported as missing.
         self.assertNotIn("env_file", self.checks(report))
 
+    def test_copilot_events_do_not_fall_back_when_latest_run_has_no_log(self):
+        runs = self.tmp / "runs"
+        latest = runs / "20261102-120000-latest"
+        older = runs / "20261102-110000-older"
+        latest.mkdir(parents=True)
+        older.mkdir()
+        (latest / "status.json").write_text(json.dumps({"lane": "C1", "backend": "copilot"}))
+        (older / "status.json").write_text(json.dumps({"lane": "C1", "backend": "copilot"}))
+        (older / "events.1.copilot.jsonl").write_text('{"availableModels": []}\n')
+        previous_runs = xs.RUNS
+        self.addCleanup(setattr, xs, "RUNS", previous_runs)
+        xs.RUNS = str(runs)
+
+        self.assertIsNone(xs.doctor_latest_copilot_events("C1"))
+
     def test_env_file_permissions_are_reported(self):
         env_file = self.tmp / "lane.env"
         env_file.write_text("EXAMPLE=value\n")
