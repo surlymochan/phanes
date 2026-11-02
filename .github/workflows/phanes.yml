@@ -121,7 +121,7 @@ jobs:
   openbot:
     name: OpenBot type and language checks
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true' || needs.changes.outputs.scenario == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -133,8 +133,11 @@ jobs:
           bun-version: '1.3.11'
       - run: bun install --frozen-lockfile
       - run: bun run typecheck:node
-      - run: bun run i18n:check
+        if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
+      - run: bun run i18n:check --example-root ../examples/org-health-local
+      - run: bun scripts/i18n-check-e2e.ts --example-root ../examples/org-health-local
       - run: bun run build
+        if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
   openbot-scenario-tests:
     name: OpenBot scenario tests (Python ${{ matrix.python }})
     needs: changes

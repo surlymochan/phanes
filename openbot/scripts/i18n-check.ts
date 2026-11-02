@@ -19,6 +19,7 @@ import { createOpenBotLogger } from "@openbot/logging";
 // are not in the English order. `--fix` puts those keys in the English order; it moves each
 // key with the comments and blank lines above it and does not change the text. `--json` writes the
 // report to .openbot-build/i18n-report.json.
+// Repeat `--example-root PATH` to scan examples outside this workspace. Paths are relative to ROOT.
 
 const ROOT = resolve(import.meta.dirname, "..");
 const MESSAGES = resolve(ROOT, "packages/i18n/src/messages");
@@ -27,7 +28,17 @@ const AGGREGATORS = new Set(["index", "mobile", "source", "shared"]);
 /** Where code that names a key lives. The catalogs themselves are left out. */
 const CODE_ROOTS = ["src", "packages", "apps/mobile/src", "apps/auth-api/src", "scripts"];
 const CODE_EXTENSIONS = /\.(?:ts|tsx)$/;
+const EXAMPLE_EXTENSIONS = /\.(?:ts|tsx|js|html)$/;
 const SKIPPED_DIRECTORIES = new Set(["node_modules", "dist", "build", "out", ".expo"]);
+const exampleRoots: string[] = [];
+const arguments_ = process.argv.slice(2);
+for (let index = 0; index < arguments_.length; index += 1) {
+  if (arguments_[index] !== "--example-root") continue;
+  const path = arguments_[index + 1];
+  if (!path || path.startsWith("--")) throw new Error("--example-root requires a path.");
+  exampleRoots.push(resolve(ROOT, path));
+  index += 1;
+}
 /** Keys that no current code sends, but older hosts still do. Keep them so their text is translated. */
 const RELEASED_SOURCE_KEYS = new Set([
   "error.agent.noStartingModel",
@@ -272,8 +283,28 @@ for (const [name, messages] of english) {
   }
 }
 
+const legacyExamples = resolve(ROOT, "examples");
+let legacyExampleFiles: string[] = [];
+try {
+  legacyExampleFiles = files(legacyExamples, EXAMPLE_EXTENSIONS);
+} catch (error) {
+  // Only the legacy example root is optional. Required roots and explicit paths stay strict.
+  if (
+    !(error instanceof Error) ||
+    !("code" in error) ||
+    error.code !== "ENOENT" ||
+    !("path" in error) ||
+    error.path !== legacyExamples
+  ) {
+    throw error;
+  }
+}
+
 const code = CODE_ROOTS.flatMap((root) => files(resolve(ROOT, root), CODE_EXTENSIONS))
-  .concat(files(resolve(ROOT, "examples"), /\.(?:ts|tsx|js|html)$/))
+  .concat(
+    legacyExampleFiles,
+    exampleRoots.flatMap((root) => files(root, EXAMPLE_EXTENSIONS)),
+  )
   .filter((path) => !path.startsWith(MESSAGES) && !path.endsWith(".bundle.js"))
   .map((path) => readFileSync(path, "utf8"))
   .join("\n");
