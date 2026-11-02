@@ -188,6 +188,7 @@ Every subcommand, grouped by what it does. `openswarm <command> --help` lists al
 | `openswarm lane down` | Stop lane turns, children, and supervisors. | `openswarm lane down C1 K1` |
 | `openswarm lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `openswarm lane launchd-plist C1` |
 | `openswarm lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `openswarm lane systemd-unit K1` |
+| `openswarm lane supervise` | Print a POSIX process supervisor script for a lane or the Pi broker. | `openswarm lane supervise K1 --print` / `openswarm lane supervise --broker --print` |
 | `openswarm batch` | Queue task cards across fleet hosts and collect their branches. | `openswarm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `openswarm batch status` | Show the state of one batch. | `openswarm batch status <batch-id>` |
 | `openswarm bus init` | Create the bus labels, issue template, and protocol README. | `openswarm bus init acme/openswarm-bus` |
@@ -549,7 +550,19 @@ openswarm lane abort C1                  # openswarm stop <run-id> also aborts a
 openswarm lane down C1 K1 M1
 openswarm lane launchd-plist C1           # prints a KeepAlive LaunchAgent plist; does not install it
 openswarm lane systemd-unit K1             # prints a system systemd unit; does not install it
+openswarm lane supervise K1 --print         # prints a POSIX process supervisor script
+openswarm lane supervise --broker --print   # prints the Pi broker supervisor script
 ```
+
+The generated script supports `start`, `stop`, and `status` and can also run in the foreground with
+`run`. It stores pidfiles under `$OPENSWARM_HOME/supervise/`, logs under `$OPENSWARM_HOME/logs/`,
+rotates logs at 10 MiB, and restarts failed commands with exponential backoff capped at 60 seconds.
+`start` detaches the supervisor from the terminal. For a lane, `stop` first runs `openswarm lane down`
+so lane state, control socket, and isolated executor sessions are cleaned up; it then uses process-group
+termination as a fallback. The broker script uses `~/Library/Caches/openswarm-pi-broker/broker.sock`
+by default, creates its socket directory, removes a stale socket after confirming that no broker is
+listening, and starts the broker with the socket, the Pi auth module, and the model. Point the Pi runtime's
+`OPENSWARM_PI_BROKER_SOCKET` at that same socket path.
 
 `openswarm doctor` is the read-only preflight of a lane. It reports whether the lane's executor binary exists and
 is executable, whether Codex's Linux sandbox finds `bwrap`, `slirp4netns`, and `iptables` on `PATH`, whether a lane
