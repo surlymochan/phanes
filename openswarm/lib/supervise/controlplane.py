@@ -476,6 +476,18 @@ def status(services, state_dir, now=None, resume_file=None):
             return value.timestamp()
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
+    def resume_timestamp(value):
+        """Read a resume marker: a bare epoch or an ISO-8601 timestamp.
+
+        The pause detector writes the resume epoch as a bare number, the
+        format the dispatch engine reads, so both are accepted here.
+        """
+        text = str(value).strip()
+        try:
+            return float(text)
+        except ValueError:
+            return timestamp(text)
+
     current = time.time() if now is None else timestamp(now)
     result = {}
     state = os.fspath(state_dir)
@@ -528,7 +540,7 @@ def status(services, state_dir, now=None, resume_file=None):
                     if resume_file:
                         try:
                             with open(resume_file, encoding="utf-8") as stream:
-                                resume_time = timestamp(stream.read().strip())
+                                resume_time = resume_timestamp(stream.read().strip())
                         except (OSError, ValueError, TypeError):
                             pass
                     if resume_time is not None and resume_time > beat_time and current - resume_time < maximum:
