@@ -37,6 +37,7 @@
 - [ ] **3. coordinator**：
   - 命令：`ssh -F ~/.ssh/openswarm-hub/config gocc -- python3 ~/.claude/openswarm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'`
   - 判定：返回 `{"ok": true, "reservations": [...]}`，若报 `coordinator unavailable` 说明协调器或网络退避中。
+  - 部署：协调器主机上的 `fleet-capacity` 需与 `fleet_certificate.py` 一同部署（证书准入闸门 `lanes`/`assign` 的判定规则）；缺文件时闸门 fail closed 报 `certificate_invalid`，容量操作不受影响。
 - [ ] **4. autodispatch heartbeat**：
   - 命令：`cat ~/phanes-ctl/autodispatch/heartbeat`
   - 判定：输出 ISO 时间戳；对比当前时间若滞后超过 3 分钟，表明 `autodispatch.py` 循环可能阻塞或已退出。
