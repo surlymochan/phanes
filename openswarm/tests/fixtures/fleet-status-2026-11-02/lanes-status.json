@@ -1,0 +1,20 @@
+{
+ "M1": "busy #1711",
+ "M2": "busy #1712",
+ "M3": "busy #1713",
+ "M4": "idle",
+ "A1": "idle",
+ "A2": "busy #1715",
+ "CX1": "idle",
+ "CX2": "busy #1716",
+ "CX3": "idle",
+ "CX4": "idle",
+ "CX5": "ssh: Connection timed out",
+ "_busy": 6,
+ "_ready": 9,
+ "_blocked": 1,
+ "_stale_stripped_n": 2,
+ "_stale_search_skips": 2,
+ "_stale_lane_failed_skips": 0,
+ "_at": "2026-11-02 21:04:12"
+}

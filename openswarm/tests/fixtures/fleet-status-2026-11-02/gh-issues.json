@@ -1,0 +1,11 @@
+[
+ {"number": 1711, "state": "OPEN", "title": "pi: 修复烧量统计", "labels": [{"name": "lane-ready"}, {"name": "p1"}, {"name": "backend:pi"}]},
+ {"number": 1712, "state": "OPEN", "title": "pi: 补齐 liveness 回归", "labels": [{"name": "lane-ready"}, {"name": "p0"}, {"name": "backend:pi"}]},
+ {"number": 1713, "state": "OPEN", "title": "agy: 额度回收演练", "labels": [{"name": "lane-ready"}, {"name": "p2"}, {"name": "backend:agy"}]},
+ {"number": 1714, "state": "OPEN", "title": "codex: 队列回填", "labels": [{"name": "lane-ready"}, {"name": "p1"}, {"name": "backend:codex"}]},
+ {"number": 1715, "state": "OPEN", "title": "agy: 宿主机内存水位", "labels": [{"name": "lane-ready"}, {"name": "backend:agy"}]},
+ {"number": 1716, "state": "OPEN", "title": "codex: 合并门禁", "labels": [{"name": "lane-ready"}, {"name": "backend:codex"}]},
+ {"number": 1717, "state": "OPEN", "title": "pi: 池深度口径对齐", "labels": [{"name": "lane-ready"}, {"name": "backend:pi"}]},
+ {"number": 1718, "state": "OPEN", "title": "codex: 已被领走", "labels": [{"name": "lane-ready"}, {"name": "in-progress"}]},
+ {"number": 1719, "state": "OPEN", "title": "pi: 已经开了 PR", "labels": [{"name": "lane-ready"}, {"name": "lane-pr"}]}
+]

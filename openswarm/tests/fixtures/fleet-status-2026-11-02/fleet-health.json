@@ -1,0 +1,9 @@
+{
+ "hosts": {
+  "gocc": {"ssh_fail_streak": 0, "status": "ok", "updated_at": "2026-11-02 21:03:00"},
+  "gores1": {"ssh_fail_streak": 0, "status": "ok", "updated_at": "2026-11-02 21:03:00"},
+  "govpn": {"ssh_fail_streak": 3, "status": "unreachable", "updated_at": "2026-11-02 21:03:00"},
+  "local": {"ssh_fail_streak": 0, "status": "ok", "updated_at": "2026-11-02 21:03:00"}
+ },
+ "updated_at": "2026-11-02 21:03:00"
+}
