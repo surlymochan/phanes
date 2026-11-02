@@ -32,6 +32,7 @@ import argparse  # noqa: E402
 import calendar  # noqa: E402
 import concurrent.futures as cf
 import copy
+import datetime
 import fnmatch
 import importlib.util
 import json
@@ -173,6 +174,8 @@ DEFAULTS = {
     "watchdog_requeue_file": "",
     "quota": {
         "backend_pause": True,
+        "probe_cmd": "",                  # shell command returning JSON {exhausted: bool, resets_at?: ISO-8601}
+        "fresh_s": 900,                   # quota signals older than this (seconds) are ignored as stale
         "lane_pause": {},                 # backend -> regex: matching run errors pause that lane
         "requeue_classes": ["rate_limit", "quota"],
         # Per-backend quota table in lib/dispatch/quota.py's own shape: quota_error_re is
@@ -339,8 +342,8 @@ if R:
   p=f"{O}/runs/{R}/result.json"
   if os.path.exists(p):
     r=json.load(open(p)); res=r.get("result") or {}
-    out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
-      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
+    out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
+      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
     out["run"]="running"
@@ -386,6 +389,7 @@ class Dispatcher:
         self.local_hosts = set(cfg.get("local_hosts") or [])
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
+        self._quota_probe_cache = None
 
     # ------------------------------------------------------------ io helpers
     def path(self, name):
@@ -931,15 +935,18 @@ class Dispatcher:
         if not be or not text:
             return None
         try:
-            res = quota_module().classify(be, text, self.quota_table())
+            qm = quota_module()
+            res = qm.classify(be, text, self.quota_table())
         except Exception as e:
             self.log(f"quota classifier unavailable: {e!r}", brain=False)
             return None
         if not res:
             return None
+        from_text = bool(res.get("from_text")) or (qm.extract_cooldown(text) is not None)
         return {"kind": re.sub(r"\s+", "_", str(res.get("reason") or "quota"))[:40],
                 "scope": str(res.get("scope") or "backend"),
-                "cooldown_s": int(res.get("ttl_s") or 0)}
+                "cooldown_s": int(res.get("ttl_s") or 0),
+                "from_text": from_text}
 
     def quota_pause(self, name, lane, hit):
         """Write the automatic pause file; a manual (non-auto) pause is never overwritten."""
@@ -953,14 +960,110 @@ class Dispatcher:
                 return False
         cd = int(hit.get("cooldown_s") or 0)
         body = f"auto:quota:{lane}:{hit['kind']}"
-        if cd:
+        if hit.get("until_iso"):
+            body += f" until={hit['until_iso']}"
+        elif cd and hit.get("scope") == "lane":
             body += f" until={int(self.clock()) + cd}"
         self.touch_file(name, body + "\n")
         self.log(f"{name} (quota signal from {lane}: {hit['kind']})")
         return True
 
+    def quota_probe(self):
+        if getattr(self, "_quota_probe_cache", None) is not None:
+            return self._quota_probe_cache
+        q = self.cfg.get("quota") or {}
+        cmd = q.get("probe_cmd")
+        if not cmd:
+            self._quota_probe_cache = {}
+            return {}
+        try:
+            rc, out, err = self.runner(cmd, timeout=20)
+            if rc == 0:
+                try:
+                    data = json.loads(out)
+                    res = data if isinstance(data, dict) else {}
+                except (ValueError, TypeError) as e:
+                    self.log(f"quota probe output not json: {e!r}", brain=False)
+                    res = {}
+            else:
+                self.log(f"quota probe returned rc={rc}: {err.strip()[:100]}", brain=False)
+                res = {}
+        except Exception as e:
+            self.log(f"quota probe failed: {e!r}", brain=False)
+            res = {}
+        self._quota_probe_cache = res
+        return res
+
+    @staticmethod
+    def quota_until(value):
+        if value is None:
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            s = str(value).strip()
+            try:
+                return float(s)
+            except ValueError:
+                pass
+            parsed = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            return parsed.timestamp()
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    def reap_quota_pauses(self):
+        try:
+            names = os.listdir(self.D)
+        except OSError:
+            return
+        has_probe_cmd = bool((self.cfg.get("quota") or {}).get("probe_cmd"))
+        for name in names:
+            if not name.startswith("PAUSE-BACKEND-"):
+                continue
+            path = self.path(name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    body = f.read()
+                if not body.startswith("auto:quota:"):
+                    continue
+                match = re.search(r"\buntil=([^\s]+)", body)
+                expiry = self.quota_until(match.group(1)) if match else None
+                if expiry is not None and expiry <= self.clock():
+                    if self.dry_run:
+                        self.plan.append({"would": "unlink", "file": name})
+                    else:
+                        os.unlink(path)
+                    self.log(f"{name} quota pause expired; cleared")
+                    continue
+                if has_probe_cmd:
+                    result = self.quota_probe()
+                    if result.get("exhausted") is False:
+                        if self.dry_run:
+                            self.plan.append({"would": "unlink", "file": name})
+                        else:
+                            os.unlink(path)
+                        self.log(f"{name} quota probe reports available; cleared")
+            except OSError:
+                continue
+
+    def quota_signal_fresh(self, info):
+        info = info or {}
+        stamp = next((info.get(k) for k in ("timestamp", "updated_at", "finished_at", "ended_at") if info.get(k)), None)
+        parsed = self.quota_until(stamp)
+        q = self.cfg.get("quota") or {}
+        fresh_val = q.get("fresh_s")
+        try:
+            fresh_s = float(fresh_val) if fresh_val is not None else 900.0
+        except (ValueError, TypeError):
+            fresh_s = 900.0
+        return parsed is not None and 0 <= self.clock() - parsed <= fresh_s
+
     def quota_lane_guard(self, lane, lc, info):
         """Pause the lane when the run text shows a lane-scoped quota error."""
+        if not self.quota_signal_fresh(info):
+            return
         hit = self.quota_hit(lane, lc, info)
         if not hit or hit["scope"] != "lane":
             return
@@ -970,12 +1073,27 @@ class Dispatcher:
         """Pause the backend when the run text shows a backend-scoped quota error."""
         if not (self.cfg.get("quota") or {}).get("backend_pause"):
             return
+        if not self.quota_signal_fresh(info):
+            return
         hit = self.quota_hit(lane, lc, info)
         if not hit or hit["scope"] != "backend":
             return
         be = (info or {}).get("backend") or (lc or {}).get("backend") or ""
         if not be:
             return
+        probe = self.quota_probe()
+        reset_at = probe.get("resets_at") or (info or {}).get("resets_at")
+        until = self.quota_until(reset_at)
+        now = self.clock()
+        cooldown_s = int(hit.get("cooldown_s") or 0)
+        if until is not None:
+            until = max(until, now + cooldown_s)
+            hit["until_iso"] = datetime.datetime.fromtimestamp(until, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            hit["cooldown_s"] = int(until - now)
+        elif hit.get("from_text") and cooldown_s:
+            until = now + cooldown_s
+            hit["until_iso"] = datetime.datetime.fromtimestamp(until, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            hit["cooldown_s"] = int(until - now)
         self.quota_pause(f"PAUSE-BACKEND-{be}", lane, hit)
 
     def upstream_title(self, subj, base, ref):
@@ -1699,6 +1817,8 @@ class Dispatcher:
             self.log(f"replenish hook exc: {e!r}", brain=False)
 
     def tick(self, lanes, state):
+        self._quota_probe_cache = None
+        self.reap_quota_pauses()
         if os.path.exists(self.path("PAUSE")):
             return
         self.label_cache, self.label_reads = {}, 0
