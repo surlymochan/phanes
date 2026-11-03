@@ -92,6 +92,20 @@ def _load_ci_checks():
     return module
 
 
+_RESOURCE_MODULES = {}
+
+
+def resource_module(name):
+    """Load a lib/resources sibling by path (no package import, no sys.path change)."""
+    if name not in _RESOURCE_MODULES:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", name + ".py")
+        spec = importlib.util.spec_from_file_location("openswarm_resource_" + name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RESOURCE_MODULES[name] = module
+    return _RESOURCE_MODULES[name]
+
+
 def compatible_lru_picker(path):
     module = dispatch_module("lane_pick")
 
@@ -128,8 +142,13 @@ DEFAULTS = {
     "state_dir": "~/.claude/openswarm-dispatch",
     "lanes_file": "",                     # default <state_dir>/lanes.json
     "log_file": "dispatch.log",
-    "brain_log": "",                      # optional markdown log that gets short lines
+    "brain_log": "",                      # markdown log that gets short lines (default: <state_dir>/brain-log.md)
     "brain_log_prefix": "dispatch",
+    # Memory watermark guard: a host below `minimum_available_mb` of available
+    # memory gets no new dispatch; it resumes by itself once the host is back.
+    # `hosts` overrides the watermark per host (e.g. a small shared box).
+    "memory_guard": {"minimum_available_mb": 256, "resume_available_mb": 0,
+                     "probe_interval_s": 60, "hosts": {}},
     "tick_s": 60,
     "budget_minutes": "45",
     "review_budget_minutes": "20",
@@ -271,8 +290,9 @@ def load_config(path):
     if not cfg["lanes_file"]:
         cfg["lanes_file"] = os.path.join(cfg["state_dir"], "lanes.json")
     cfg["lanes_file"] = os.path.expanduser(cfg["lanes_file"])
-    if cfg["brain_log"]:
-        cfg["brain_log"] = os.path.expanduser(cfg["brain_log"])
+    # An unconfigured deployment still needs a real brain log for alerts.
+    cfg["brain_log"] = (os.path.expanduser(cfg["brain_log"]) if cfg["brain_log"]
+                        else os.path.join(cfg["state_dir"], "brain-log.md"))
     return cfg
 
 
@@ -424,6 +444,8 @@ class Dispatcher:
         self.state_lock = threading.Lock()
         self.rev_lock = threading.RLock()
         self.inode = {"t": 0.0, "low": False}
+        self.memory_probe_at = {}
+        self._memory = None
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
@@ -523,6 +545,15 @@ class Dispatcher:
     def now_hm(self):
         return time.strftime("%H:%M")
 
+    def brain_log_path(self):
+        """The markdown log that gets the short operator lines.
+
+        The default keeps the log inside the dispatch state directory, so even
+        an unconfigured deployment has a real brain log for the alerts.
+        """
+        configured = os.path.expanduser(self.cfg.get("brain_log") or "")
+        return configured or os.path.join(os.path.expanduser(self.D), "brain-log.md")
+
     def log(self, msg, brain=True):
         line = f"{time.strftime('%F %T')} {msg}"
         print(line, file=self.out, flush=True)
@@ -531,9 +562,12 @@ class Dispatcher:
             return
         with open(self.path(self.cfg["log_file"]), "a") as f:
             f.write(line + "\n")
-        if brain and self.cfg.get("brain_log"):
-            with open(self.cfg["brain_log"], "a") as f:
-                f.write(f"- {self.now_hm()} UTC+8 {self.cfg['brain_log_prefix']}: {msg}\n")
+        if brain:
+            try:
+                with open(self.brain_log_path(), "a") as f:
+                    f.write(f"- {self.now_hm()} UTC+8 {self.cfg['brain_log_prefix']}: {msg}\n")
+            except OSError as e:
+                print(f"brain log write failed: {e}", file=self.out, flush=True)
 
     def heartbeat(self):
         if self.dry_run:
@@ -638,6 +672,135 @@ class Dispatcher:
             return True
         be = lc.get("backend") or ""
         return bool(be and os.path.exists(self.path(f"PAUSE-BACKEND-{be}")))
+
+    # ------------------------------------------------------------ memory guard
+    def memory_module(self):
+        """The memory probe module (lib/resources/memory.py), loaded on first use."""
+        if self._memory is None:
+            self._memory = resource_module("memory")
+        return self._memory
+
+    def memory_guard_enabled(self):
+        """Whether the memory guard has any watermark at all."""
+        guard = self.cfg.get("memory_guard") or {}
+        if float(guard.get("minimum_available_mb") or 0) > 0:
+            return True
+        for host_cfg in (guard.get("hosts") or {}).values():
+            if isinstance(host_cfg, dict) and host_cfg.get("minimum_available_mb") is not None:
+                return True
+        return False
+
+    def memory_watermarks(self, host):
+        """The pause/resume memory watermarks of one host, in MiB."""
+        guard = self.cfg.get("memory_guard") or {}
+        pause = float(guard.get("minimum_available_mb") or 0)
+        resume = float(guard.get("resume_available_mb") or 0) or pause
+        host_cfg = (guard.get("hosts") or {}).get(host) or {}
+        if host_cfg.get("minimum_available_mb") is not None:
+            pause = float(host_cfg["minimum_available_mb"])
+        if host_cfg.get("resume_available_mb") is not None:
+            resume = float(host_cfg["resume_available_mb"]) or pause
+        return pause, resume
+
+    def clear_memory_low(self, state, host=None):
+        """Drop the persisted low-water marks of the guard.
+
+        A host that the guard paused must dispatch again as soon as its
+        watermark is gone, so the stale mark is cleared instead of blocking
+        the lane of that host forever.
+        """
+        guards = state.get("_memory_guard") or {}
+        changed = False
+        for name, entry in guards.items():
+            if host is not None and name != host:
+                continue
+            if isinstance(entry, dict) and entry.get("low"):
+                entry["low"] = False
+                changed = True
+        if changed:
+            self.save_state(state)
+        return changed
+
+    def host_available_mb(self, host):
+        """Return the available memory of one lane host, in MiB.
+
+        A local host is read in-process; a remote host is asked over SSH with a
+        standalone snippet, so the watermark belongs to the host that runs the
+        lane and not to the scheduler.
+        """
+        memory = self.memory_module()
+        if host in self.local_hosts:
+            return memory.memory_usage()["available_mb"]
+        snippet = memory.remote_snippet() + "\n"
+        rc, out, err = self.sh(["ssh"] + self.ssh_opts(host) + [host, "python3", "-"],
+                               timeout=int(self.cfg["ssh"].get("memory_timeout_s", 15)), inp=snippet)
+        if rc:
+            raise OSError(f"{host}: memory probe rc={rc} {((err or out) or '').strip()[-120:]}")
+        return memory.parse_remote_sample(out)["available_mb"]
+
+    def host_memory_low(self, state, host):
+        """Whether the memory guard pauses the new dispatch to this host.
+
+        A disabled guard (no watermark at all) never blocks a lane, even when
+        the state still carries a low-water mark of an earlier run.
+        """
+        if not host or not self.memory_guard_enabled():
+            return False
+        pause_mb, _ = self.memory_watermarks(host)
+        if pause_mb <= 0:
+            return False
+        try:
+            return self.memory_module().host_low(state, host)
+        except OSError:
+            return False
+
+    def update_memory_guard(self, lanes, state):
+        """Probe every lane host and pause only the hosts below the watermark.
+
+        The guard is per host: a low-memory host stops the new dispatch to its
+        own lanes while the other hosts keep dispatching, and it lifts itself
+        as soon as the host reports enough memory again.
+        """
+        guard = self.cfg.get("memory_guard") or {}
+        if not self.memory_guard_enabled():
+            # The guard is off: the low-water marks of an earlier run must not
+            # keep the lanes of those hosts paused.
+            if self.clear_memory_low(state):
+                self.log("memory guard: disabled; the low-memory pause was lifted")
+            return state.get("_memory_guard") or {}
+        memory = self.memory_module()
+        now = self.clock()
+        interval = guard.get("probe_interval_s")
+        interval = 60.0 if interval is None else float(interval)
+        changed = False
+        for host in sorted({lc.get("host") for lc in lanes.values() if lc.get("host")}):
+            last = self.memory_probe_at.get(host)
+            if last is not None and now - last < interval:
+                continue
+            pause_mb, resume_mb = self.memory_watermarks(host)
+            if pause_mb <= 0:
+                # This host has no watermark: lift a stale pause and skip the probe.
+                if self.clear_memory_low(state, host):
+                    self.log(f"memory guard: {host} has no watermark; the low-memory pause was lifted")
+                continue
+            self.memory_probe_at[host] = now
+            try:
+                available_mb = self.host_available_mb(host)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.log(f"memory guard probe failed on {host}: {error}", brain=False)
+                continue
+            low, moved = memory.update_guard(state, host, available_mb, pause_mb, resume_mb)
+            changed = changed or moved
+            if moved:
+                if low:
+                    self.log(f"memory guard: {host} has {available_mb:.1f} MiB available (< {pause_mb:.1f} MiB); "
+                             f"new dispatch to {host} paused")
+                else:
+                    self.log(f"memory guard: {host} recovered {available_mb:.1f} MiB available "
+                             f"(>= {resume_mb:.1f} MiB); new dispatch resumed")
+        if changed:
+            self.save_state(state)
+        return state.get("_memory_guard") or {}
 
     def burn_state(self):
         """Return the selected backend and factor, with legacy marker compatibility."""
@@ -2020,7 +2183,8 @@ class Dispatcher:
 
     def idle_lanes(self, lanes, res, state):
         return [L for L, lc in lanes.items() if "error" not in res[L] and self.host_ok(lc["host"]) and not state.get(L)
-                and res[L].get("lane") == "idle" and not self.paused_lane(L, lc) and not lc.get("drain")]
+                and res[L].get("lane") == "idle" and not self.paused_lane(L, lc) and not lc.get("drain")
+                and not self.host_memory_low(state, lc.get("host"))]
 
     def notify_review_fails(self, p, review, fails):
         """Say once per head sha why the review keeps failing, then park the PR for a human.
@@ -2216,7 +2380,8 @@ class Dispatcher:
         for L, lc in self.lane_order(lanes):
             r = res[L]
             if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
-                    or self.paused_lane(L, lc) or lc.get("drain")):
+                    or self.paused_lane(L, lc) or lc.get("drain")
+                    or self.host_memory_low(state, lc.get("host"))):
                 continue
             pick = None
             for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(lc["backend"], i)),
@@ -2320,6 +2485,11 @@ class Dispatcher:
                 pass
         res = self.probe(lanes, state)
         self.harvest(lanes, res, state)
+        # Harvest the running work first, then protect the low-memory hosts from new runs.
+        try:
+            self.update_memory_guard(lanes, state)
+        except Exception as e:
+            self.log(f"memory guard exc: {e!r}", brain=False)
         try:
             self.sweep_leaked_inprogress(state)
         except Exception as e:
