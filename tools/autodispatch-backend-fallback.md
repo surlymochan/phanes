@@ -22,14 +22,17 @@ The verify-card queue share (a reserved share of lanes for verify cards, a concu
 work cards) composes with the rules above in a fixed order:
 
 1. **class admission** — a verify card wins over a work card on a reserved lane (the lane is a
-   review lane and the verify share is not filled yet);
+   review lane and the verify share is not filled yet); a work card is not dispatched at all
+   when the work class is at its cap (`work_slots == 0`, Refs #1864);
 2. **pin class** — own pin, unpinned, cross-pin (the rules above, unchanged);
 3. **inside one class** — `prio`, then issue number (work before verify inside one pin class).
 
 Class admission only reorders *verify vs work*; the relative order of pin class, priority and
-issue number is untouched (the reordering is a stable sort). The share is computed from the
-idle lanes and the runs in flight, not from a global static number, and it never locks all
-dispatching when there are too few lanes. Configuration and rollout:
+issue number is untouched (the reordering is a stable sort). The work class cap is a limit and
+not a reordering: the work cards wait for a free lane while the class holds `total - reserve`
+lanes. The share is computed from the idle lanes and the runs in flight, not from a global
+static number, and it never locks all dispatching when there are too few lanes. Configuration
+and rollout:
 [`tools/lane-autodispatch/README.md`](lane-autodispatch/README.md) ("队列优先级类与保底份额").
 
 ## Opt-out
