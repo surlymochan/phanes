@@ -34,3 +34,33 @@ snapshot before applying it. The checker is independent of doctor wiring.
 fix, or union-merge, produces a new commit that needs another review. A successful
 review status on the previous SHA does not approve the new SHA. Keep the PR out
 of merge until the review and required checks apply to its current head.
+
+## The fix task book carries the method block (Refs #1838)
+
+A fix task book is the issue body a fix lane receives. Three places write into it —
+the review CHANGES round (fix task), the red-CI fix (`cifix`) and the conflict
+rebase — and all three append the same shared method block
+(`## 修复方法（Refs #1838）`, `lib/dispatch/engine.py`):
+
+- ① enumerate the same-defect occurrences of every previous BLOCKER first (grep
+  the whole repo, list the hits, fix them all — fixing only the one the review
+  named is not a fix);
+- ② write the regression test that reproduces the failure first and run it on the
+  current head to see it fail, then change the code. The failure is the one the
+  task book is about: the previous round's BLOCKER (review CHANGES → fix task),
+  the red CI check it lists (`cifix`) or the merge conflict itself (`rebase`); a
+  task book without a previous BLOCKER never asks for a BLOCKER that does not
+  exist;
+- ③ verify with real commands and real samples, not only with mocks;
+- ④ tick every previous BLOCKER off in the delivery notes
+  (`BLOCKER → 同类点清单 → 测试 → 改动`);
+- ⑤ continue on the PR's current head, never replace the change wholesale.
+
+The block is written once per task book: every injection point strips the previous
+copy before writing the new one, so stacked fixes (rebase → cifix → review
+CHANGES) never repeat it. The items that need the previous round's BLOCKERs (①
+and ④) are left out when the task book carries none — a CI fix or a rebase
+without a previous review round keeps ② ③ ⑤ only.
+
+The block constrains the *method* of the fix. The review model, the review
+strictness and the acceptance checks are unchanged (Refs #1838).

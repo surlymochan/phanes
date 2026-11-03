@@ -260,6 +260,58 @@ DEFAULTS = {
     },
 }
 
+# Refs #1838: the fix/rebase task book (the issue body a fix lane receives) carries ONE shared
+# method block, written by the three injection points (review CHANGES -> fix task, cifix, rebase).
+# The block constrains the method of the fix, not the review model or its strictness: the rsi
+# baseline showed that most BLOCKERs of a later round are the deepened variant of a defect the
+# first round already named, so the fix has to sweep the same-defect occurrences, prove the
+# failure first and check every previous BLOCKER off. The text is a constant, not a config knob.
+# ① and ④ need the previous round's BLOCKERs; a task book without them carries the other items.
+FIX_METHOD_TITLE = "修复方法（Refs #1838）"
+FIX_METHOD_ITEMS = (
+    ("①", "先 grep 同类写法",
+     "对每条上轮 BLOCKER，先在全仓 grep 同类写法（例如 `grep -rn \"<关键写法>\" .`），把命中点列成清单，"
+     "一并修完；只改报告点名的那一处不算修净。"),
+    ("②", "先写会失败的回归测试", None),   # the text depends on the failure the task book is about
+    ("③", "用真实命令与真实样本验证",
+     "用真实命令、真实样本验证，不只靠 mock；至少完整跑一遍验收命令。"),
+    ("④", "逐条自检勾选",
+     "在交付说明里对上轮每条 BLOCKER 逐条自检勾选，按 `BLOCKER → 同类点清单 → 失败测试 → 改动` 写清楚，"
+     "缺一条都不算完成。"),
+    ("⑤", "在 PR 当前 head 上续改",
+     "必须在 PR 当前 head 上续改，不得整体替换（不许整体重写文件，也不许整体 revert 再重来）。"),
+)
+FIX_METHOD_BLOCKER_ITEMS = ("①", "④")   # the items that need the previous round's BLOCKERs
+
+# ② names the failure the regression test has to reproduce. With the previous round's BLOCKERs
+# in the task book that is the BLOCKER itself; without them the task book has to name the failure
+# that is actually at hand: the red CI check (cifix) or the merge conflict (rebase). Refs #1838.
+FIX_METHOD_REPRODUCE = {
+    "fix": "先写一个能复现该 BLOCKER 的回归测试，在当前 head 上跑出失败（把失败输出贴进交付说明），再改代码；"
+           "改完同一个测试必须转绿。",
+    "cifix": "先复现本次 CI 失败：把上面列出的失败检查在当前 head 上真实跑一遍（或写一个能复现该失败的回归测试），"
+             "先跑出失败并把失败输出贴进交付说明，再改代码；改完同一处必须转绿。",
+    "rebase": "先在当前 head 上真实复现本次冲突：把 PR head rebase 到 main，落到冲突那一步，把冲突文件清单与冲突输出"
+              "贴进交付说明，再解决冲突；冲突牵涉到行为差异时，先补一个能复现该差异的回归测试并跑出失败。",
+}
+
+
+def fix_method_block(has_blockers, kind="fix"):
+    """The shared method block of a fix/rebase task book (Refs #1838).
+
+    `kind` names the failure the task book is about: "fix" (the previous round's BLOCKER),
+    "cifix" (the red CI check) or "rebase" (the merge conflict).
+    """
+    lines = ["本段是 fix/rebase 任务书的固定方法约束，逐条照做："]
+    if not has_blockers:
+        lines.append("（本任务书没有上轮 BLOCKER，与上轮 BLOCKER 相关的条目不出现。）")
+    lines.append("")
+    items = [(mark, title, FIX_METHOD_REPRODUCE[kind] if mark == "②" else text)
+             for mark, title, text in FIX_METHOD_ITEMS]
+    lines.append("\n".join(f"{mark} **{title}**：{text}" for mark, title, text in items
+                           if has_blockers or mark not in FIX_METHOD_BLOCKER_ITEMS))
+    return "\n".join(lines)
+
 
 def deep_merge(base, over):
     out = copy.deepcopy(base)
@@ -2037,6 +2089,23 @@ class Dispatcher:
     def section_strip(self, body, title):
         return re.sub(r"\n*## " + re.escape(title) + r".*?(?=\n## |\Z)", "", body or "", flags=re.S)
 
+    def previous_blockers(self, body):
+        """True when the issue body already carries a previous review round's BLOCKERs (Refs #1838)."""
+        title = self.cfg["templates"]["changes_section_title"]
+        return bool(re.search(r"(?m)^##[ \t]+" + re.escape(title), body or ""))
+
+    def with_fix_method(self, body, has_blockers, kind="fix"):
+        """Write the shared fix-method block into a fix task book, exactly once (Refs #1838).
+
+        The three injection points (review CHANGES -> fix task, cifix, rebase) all come through
+        here, so the task book carries the block once, no matter how many fixes stack on it.
+        `kind` says which failure the task book is about ("fix" / "cifix" / "rebase"), so ② can
+        name the failure the regression test has to reproduce.
+        """
+        body = self.section_strip(body, FIX_METHOD_TITLE).rstrip("\n")
+        head = f"{body}\n\n" if body else ""
+        return f"{head}## {FIX_METHOD_TITLE}\n\n{fix_method_block(has_blockers, kind)}\n"
+
     def with_rebase_line(self, body, pr, branch):
         if self.rebase_of(body):
             return body
@@ -2058,7 +2127,9 @@ class Dispatcher:
         if kind == "cifix":
             bad = ", ".join(sorted(set(self._ci_result(p)["red"])))[:400]
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
+        blockers = self.previous_blockers(ib)          # a previous review round may be in the body
         ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
+        ib = self.with_fix_method(ib, blockers, kind)  # Refs #1838: the shared method block, once
         L = self.L
         self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
                        "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
@@ -2452,6 +2523,7 @@ class Dispatcher:
                 ib += (f"\n\n## {T['changes_section_title']}\n\n" +
                        T["changes_section"].format(round=r["rounds"], who=who, pr=pr, sha10=sha[:10], branch=cj["headRefName"],
                                                    notes=txt.strip()[:8000]) + "\n")
+                ib = self.with_fix_method(ib, bool(txt.strip()), "fix")   # Refs #1838: the notes carry the BLOCKERs
                 self.gh(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
                 self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
         self.put_review(pr, r)

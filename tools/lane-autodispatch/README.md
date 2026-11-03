@@ -8,6 +8,12 @@ box is the deployed runtime the control plane syncs from it (sync steps:
 [`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)); a change here is
 only live on the box after that sync.
 
+The review gate and the fix/rebase task books (review CHANGES → fix task, CI red → `cifix`,
+conflict → rebase) are **not** in this mirror: they live in the dispatch engine,
+`openswarm/lib/dispatch/engine.py`, which owns the review verdicts and writes the task book into
+the issue body. The shared fix-method block of those task books (Refs #1838) is therefore changed
+there, not here; this mirror only dispatches the issue body it is given.
+
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
 (`git -C <repo> cat-file -e <base>^{commit}`). A missing base is fetched into the target repo and
 the check is repeated (Refs #1810); a base that is still missing is reported and backed off as
