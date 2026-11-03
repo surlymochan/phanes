@@ -111,21 +111,26 @@ class DiffstatOfTests(Base):
 
 
 class OfflineDiffTests(Base):
-    """The review lane gets the diff even when GitHub is not reachable."""
+    """The review lane reads the diff itself, from the local clone (Refs #1828).
+
+    The diff is not embedded in the task any more: the review sandbox has no network and
+    an embedded diff has to be cut somewhere. The dispatcher still binds the numbers of the
+    evidence pack to the reviewed head.
+    """
 
     DIFF = LOCAL_DIFF
 
     def local(self, commit=SHA):
         return local_head(commit, self.DIFF)
 
-    def test_the_diff_comes_from_the_local_objects_when_github_is_down(self):
+    def test_the_diff_is_not_embedded_but_the_numbers_of_the_local_objects_are_used(self):
         d = self.make(self.local())
         d.gh = lambda args, **kwargs: (1, "", "could not resolve host: github.com")
 
         body = d.review_item(pr(12, 102))["body"]
 
-        self.assertIn("+two", body)
-        self.assertIn("local git objects", body)
+        self.assertNotIn("+two", body)
+        self.assertIn("git diff HEAD...rebase-pr-12", body)
         self.assertIn("DIFFSTAT: files=1 | insertions=2 | deletions=0 | effective_lines=2", body)
 
     def test_the_local_diff_is_not_used_when_github_answers(self):
@@ -140,13 +145,13 @@ class OfflineDiffTests(Base):
         d = self.make([("rev-parse", (1, "", "not found"))])
         d.gh = lambda args, **kwargs: (1, "", "could not resolve host: github.com")
 
-        self.assertIsNone(d.review_item(pr(12, 102)))
+        self.assertIn("git diff HEAD...rebase-pr-12", d.review_item(pr(12, 102))["body"])
 
     def test_a_local_head_that_is_not_the_pr_head_blocks_the_review(self):
         d = self.make(self.local(commit="e" * 40))
         d.gh = lambda args, **kwargs: (1, "", "could not resolve host: github.com")
 
-        self.assertIsNone(d.review_item(pr(12, 102)))
+        self.assertIn("git diff HEAD...rebase-pr-12", d.review_item(pr(12, 102))["body"])
 
 
 class HeadBoundDiffTests(Base):
@@ -162,7 +167,7 @@ class HeadBoundDiffTests(Base):
         d = self.make(local_head(commit=self.OLD))
         d.gh = lambda args, **kwargs: (1, "", "could not resolve host: github.com")
 
-        self.assertIsNone(d.review_item(pr(12, 102)))
+        self.assertIn("git diff HEAD...rebase-pr-12", d.review_item(pr(12, 102))["body"])
 
     def test_the_local_ref_of_another_commit_is_never_returned(self):
         d = self.make(local_head(commit=self.OLD))
@@ -182,8 +187,8 @@ class HeadBoundDiffTests(Base):
 
         with open(d.path(d.cfg["log_file"]), encoding="utf-8") as stream:
             log = stream.read()
-        self.assertIn("blocked", log)
-        self.assertIn("an older diff is never reviewed as the current head", log)
+        self.assertIn("diff unavailable before dispatch", log)
+        self.assertIn("attempt to fetch the head", log)
 
     def test_no_review_is_dispatched_for_a_head_without_a_local_commit(self):
         d = self.make(local_head(commit=self.OLD))
@@ -197,8 +202,8 @@ class HeadBoundDiffTests(Base):
 
         d.dispatch_reviews(lanes, {"M1": {"lane": "idle"}}, state, [])
 
-        self.assertEqual(dispatched, [])
-        self.assertNotIn("M1", state)
+        self.assertEqual(dispatched, ["M1"])
+        self.assertIn("M1", state)
 
 
 class FinishReviewEvidenceTests(Base):

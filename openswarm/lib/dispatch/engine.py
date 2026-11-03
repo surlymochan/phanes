@@ -174,6 +174,10 @@ DEFAULTS = {
         "author_lane_re": r"fleet/([A-Za-z]+\d+)-issue", "diff_limit": 60000, "verdict_dir": ".lane-review",
         # The raw evidence pack of a review (Refs #1788): the file name suffix next to the verdict file.
         "evidence_suffix": "-evidence",
+        # The diff of a PR is not embedded in the review task any more (Refs #1828): the review
+        # lane reads it from the local clone, so nothing is truncated. Only a diff that is bigger
+        # than this many lines is read in chunks - and the chunks that were read are named.
+        "diff_chunk_lines": 4000,
         "cifix_needs_burn": True,
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
@@ -252,13 +256,15 @@ DEFAULTS = {
                             "`rebase-pr-{pr}`, rebase onto main, apply the notes below and commit; the dispatcher force-pushes "
                             "back to `{branch}` and re-reviews.\n\n{notes}"),
         "review_task": ("Task type: PR review (review only, do not change code).\n\nPR #{pr} `{branch}` (author lane {author}): {title}\n"
-                        "Head sha `{sha}`. The worktree is main; below are the PR diff and its issue's requirements.\n\n"
+                        "Head sha `{sha}`. The worktree is main; the PR head is in the local clone.\n\n"
                         "Check correctness, whether the acceptance is really met, out-of-scope changes (unrelated files, deleted "
                         "tests, hard-coded secrets/paths), obvious bugs or regressions. Do not run tests, do not leave the worktree, "
                         "do not modify existing files.\n\nOnly output: create `{file}` and commit it (Refs #{pr}), exactly:\n"
                         "```\nVERDICT: APPROVE   (or VERDICT: CHANGES)\nSUMMARY: one line\n## Findings\n- file:line findings\n"
                         "## Required changes\n- only for CHANGES\n```\nGive CHANGES only for errors, unmet acceptance or scope "
-                        "violations; style is not a reason.\n\n{issue}\n\n### PR diff\n\n````diff\n{diff}\n````\n\n"
+                        "violations; style is not a reason.\n\nIf the diff cannot be read, write `SUMMARY: 无法获取 diff` and stop: a "
+                        "review without the diff is evidence-insufficient (TOOL_FAIL) - it approves nothing, it rejects nothing and "
+                        "it must not carry findings about the code.\n\n{issue}\n\n{diff_read}\n\n"
                         "Acceptance: `grep -qE '^VERDICT: (APPROVE|CHANGES)' {file}`"),
     },
 }
@@ -444,6 +450,15 @@ else:
 
 class DryRun(Exception):
     pass
+
+
+class HeadMoved(Exception):
+    """The PR head moved while the head of a review was fetched (Refs #1828).
+
+    The review lane reads the diff from the seeded branch `rebase-pr-<n>`, so a head that
+    moved between the PR list and the fetch must not be reviewed: the review is dispatched
+    again on the next tick, with the head that is current then.
+    """
 
 
 class Dispatcher:
@@ -1139,6 +1154,19 @@ class Dispatcher:
             raise RuntimeError(f"ls-remote failed: {(err or out)[-120:]}")
         return out.split()[0]
 
+    def review_head_check(self, repo_path, rb, sha):
+        """The host-side guard of the seeded PR head (Refs #1828).
+
+        A fetch that failed leaves an older `rebase-pr-<n>` in the lane repository: the
+        reviewer would read the diff of that older head and approve the current one. The
+        ref is therefore removed unless it points at the reviewed commit.
+        """
+        if not rb or not sha:
+            return ""
+        ref = f"refs/heads/rebase-pr-{rb[0]}"
+        return (f"git -C {repo_path} rev-parse --verify --quiet {ref} | grep -qx {sha} || "
+                f"git -C {repo_path} update-ref -d {ref}; ")
+
     def dispatch(self, lane, lc, item, base):
         if self.dry_run:
             self.plan.append({"would": "assign", "lane": lane, "issue": item["n"], "review": bool(item.get("review"))})
@@ -1162,7 +1190,17 @@ class Dispatcher:
             raise RuntimeError(f"task-upload: {(err or '').strip()[-200:]}")
         ver = self.verify_of(item["body"])
         title = f"#{n} {item['title']}"[:120]
-        rb = None if item.get("review") else self.rebase_of(item["body"])
+        rb = self.rebase_of(item["body"])
+        head_sha = item.get("head_sha")
+        if item.get("review"):
+            # The review sandbox has no network: the PR head is seeded into the lane
+            # repository as `rebase-pr-<n>` (Refs #1828), so the reviewer reads the full
+            # diff from the local clone instead of fetching it. The head of the *reviewed*
+            # PR is seeded - never the head of another PR that the issue body mentions.
+            try:
+                rb = (int(n), item.get("head_branch") or "")
+            except (TypeError, ValueError):
+                rb = None
         if lc.get("seed_from_box") and h not in self.local_hosts:
             # Host cannot reach GitHub reliably: the dispatcher fetches base / PR head and pushes them over ssh.
             refs = []
@@ -1172,6 +1210,12 @@ class Dispatcher:
                 except subprocess.TimeoutExpired:
                     frc = 1
                 if not frc:
+                    if head_sha and not self.same_commit(
+                            self.git("rev-parse", "--verify", "--quiet", f"refs/ad/pr-{rb[0]}")[1].strip(), head_sha):
+                        # The PR head moved between the PR list and the fetch: the seeded head
+                        # would not be the reviewed head, so no review is dispatched for it.
+                        raise HeadMoved(f"PR #{rb[0]}: the head moved while it was fetched "
+                                        f"({head_sha[:10]} is not the fetched head); the review is dispatched on the next tick")
                     refs.append(f"+refs/ad/pr-{rb[0]}:refs/heads/rebase-pr-{rb[0]}")
             if self.git("cat-file", "-e", f"{base}^{{commit}}")[0]:
                 self.git("fetch", "-q", repo_url, self.cfg["base_branch"], timeout=60)
@@ -1186,7 +1230,8 @@ class Dispatcher:
                    f"+pull/{rb[0]}/head:refs/heads/rebase-pr-{rb[0]} && break; sleep $((_i*2)); done; ") if rb else ""
             fetch_main = (f"for _i in 1 2 3 4; do timeout 40 git -C {R} fetch -q {repo_url} {self.cfg['base_branch']} && break; "
                           f"sleep $((_i*2)); done && ")
-        cmd = (pre + fetch_main + f"git -C {R} cat-file -e {base}^{{commit}} && "
+        cmd = (pre + fetch_main + self.review_head_check(R, rb, head_sha) +
+               f"git -C {R} cat-file -e {base}^{{commit}} && "
                f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes "
                f"{self.cfg['review_budget_minutes'] if item.get('review') else self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
         key = None
@@ -2176,31 +2221,17 @@ class Dispatcher:
         _, diff, err = self.gh(["pr", "diff", str(pr)], timeout=60)
         if not (diff or "").strip():
             # GitHub is not always reachable (the fleet lost its DNS more than once): the
-            # diff of the PR head is then taken from the local git objects, so the review
-            # lane still sees the code it has to review.
-            diff, note = self.local_diff(pr, p.get("headRefName"), p.get("headRefOid"))
+            # diff of the PR head is then taken from the local git objects. The diff itself
+            # is not embedded in the task any more (the review lane reads it from the local
+            # clone), but the numbers of the evidence pack still belong to the reviewed head.
+            diff, _note = self.local_diff(pr, p.get("headRefName"), p.get("headRefOid"))
             if not diff and p.get("headRefOid"):
-                # The head of the PR is known but the local objects do not hold it: an older
-                # ref would hide the changes of the head that is reviewed, so no review is
-                # dispatched for this head at all.
-                self.log(f"review PR #{pr}: blocked — the local git objects do not hold the head "
-                         f"{p['headRefOid'][:10]}; an older diff is never reviewed as the current head")
-                return None
+                self.log(f"review PR #{pr}: diff unavailable before dispatch; "
+                         "the review host will attempt to fetch the head", brain=False)
             if diff:
                 self.log(f"review PR #{pr}: `gh pr diff` unavailable "
                          f"({(err or '').strip()[-80:]}); using the local git objects", brain=False)
-                diff = note + diff
-        lim = int(self.R.get("review_diff_max_kb", 120)) * 1024
-        raw_diff = diff.encode("utf-8")
-        stats = self.diffstat_of(diff)          # the raw numbers, computed before the excerpt
-        if len(raw_diff) > lim:
-            files = [line[11:] for line in diff.splitlines() if line.startswith("diff --git ")]
-            plus = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-            minus = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
-            stat = f"{len(files)} files changed, {plus} insertions(+), {minus} deletions(-)"
-            excerpt = raw_diff[:lim].decode("utf-8", errors="ignore")
-            diff = (f"Diffstat: {stat}\n" + "\n".join(files) + "\n\n" + excerpt +
-                    "\n... [diff excerpt truncated; inspect the remaining changes with `git diff` in the worktree]\n")
+        stats = self.diffstat_of(diff) if diff else {}  # unknown is not a zero-sized diff
         issue = ""
         if p.get("issue"):
             iv = self.gh(["issue", "view", str(p["issue"]), "--json", "title,body"])[1]
@@ -2210,11 +2241,42 @@ class Dispatcher:
             except Exception:
                 pass
         f = f"{self.R['verdict_dir']}/PR-{pr}.md"
+        diff_read = self.review_diff_read(pr, p)
+        # `diff` is passed as well: a task template of an older deployment still asks for
+        # `{diff}` and gets the same instructions instead of an empty section.
         body = self.cfg["templates"]["review_task"].format(pr=pr, branch=p["headRefName"], author=self.author_lane(p["headRefName"]) or "?",
-                                                           title=p["title"], sha=p["headRefOid"], file=f, issue=issue, diff=diff)
+                                                           title=p["title"], sha=p["headRefOid"], file=f, issue=issue,
+                                                           diff_read=diff_read, diff=diff_read)
         body += self.evidence_inputs(p, stats)
         body += self.evidence_instruction(pr, self.evidence_path(pr))
-        return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True}
+        return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True,
+                "head_sha": p.get("headRefOid"), "head_branch": p.get("headRefName")}
+
+    def review_diff_read(self, pr, p):
+        """How the review lane reads the diff of the PR head, offline (Refs #1828).
+
+        The diff is not part of the task: the review sandbox has no network, and a diff
+        that is embedded in the prompt has to be cut somewhere. The PR head is seeded
+        into the lane repository as `rebase-pr-<n>` (see `dispatch()`), so the reviewer
+        reads the whole diff from the local clone - no length limit, nothing truncated.
+        """
+        branch = f"rebase-pr-{pr}"
+        sha = p.get("headRefOid") or ""
+        chunk = int(self.R.get("diff_chunk_lines", 4000) or 4000)
+        return (
+            "### The diff of this PR (read it in the local clone, it is not in this task)\n\n"
+            "The PR head is already in the local clone as the branch `%s`:\n\n"
+            "```sh\n"
+            "git log --oneline -1 %s          # the PR head (it has to be %s)\n"
+            "git diff --stat HEAD...%s        # the files and the line counts\n"
+            "git diff HEAD...%s               # the full diff\n"
+            "git diff --numstat HEAD...%s     # the added/deleted lines per file\n"
+            "```\n\n"
+            "Read the whole diff - nothing is cut here. Only a diff of more than %d lines is read in "
+            "chunks; then name the line ranges you read in the review.\n\n"
+            "If `git log --oneline -1 %s` does not show %s, or the diff cannot be read at all, the diff is "
+            "not the head that is reviewed: write `SUMMARY: 无法获取 diff` and stop."
+            % (branch, branch, sha, branch, branch, branch, chunk, branch, sha))
 
     def evidence_path(self, pr):
         """The path of the raw evidence pack of one PR inside the lane branch."""
@@ -2269,13 +2331,15 @@ class Dispatcher:
         """The local git ref that holds the head of a PR (no network needed).
 
         The dispatcher keeps the PR head locally: `rebase-pr-<n>` (the fetch of the PR
-        head), the branch of the PR itself and the lane branch that carries it.  When
-        the head sha is known, **only** the ref that carries exactly that commit may be
-        used: an older ref would hide the changes of the head that is reviewed, so the
-        search stops there instead of falling back to an older commit.
+        head), `refs/ad/pr-<n>` (the head the dispatcher seeded itself), the branch of
+        the PR itself and the lane branch that carries it.  When the head sha is known,
+        **only** the ref that carries exactly that commit may be used: an older ref would
+        hide the changes of the head that is reviewed, so the search stops there instead
+        of falling back to an older commit.
         """
         lane = self.author_lane(head_ref) if head_ref else None
         candidates = [f"refs/heads/rebase-pr-{pr}",
+                      f"refs/ad/pr-{pr}",            # the head the dispatcher seeded itself (Refs #1828)
                       f"refs/heads/{head_ref}" if head_ref else None,
                       f"refs/fleet/{lane}" if lane else None,
                       f"refs/pull/{pr}/head"]
@@ -2411,7 +2475,7 @@ class Dispatcher:
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
             txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PR-{pr}.md")[1]
             ev_txt = self.git("show", f"refs/fleet/{lane}:{self.evidence_path(pr)}")[1]
-        v, _ = status.parse_verdict(txt)
+        v, summary = status.parse_verdict(txt)
         ev = self.evidence_trace(ev_txt)
         r["evidence"] = ev
         if ev["complete"]:
@@ -2421,6 +2485,28 @@ class Dispatcher:
             self.log(f"review PR #{pr} by {lane}: evidence pack INCOMPLETE "
                      f"(missing: {', '.join(ev['missing']) or '-'}; errors: {', '.join(ev['errors']) or '-'}) "
                      f"— recorded, the judgement is untouched")
+        if v and status and status.tool_fail(txt, summary):
+            # Refs #1828: the reviewer could not read the diff. Such a review is evidence
+            # insufficient: it approves nothing, it rejects nothing and it must not carry
+            # findings about the code. The verdict is not released, the run counts as a
+            # failed review, so the PR is reviewed again (and finally parked for a human).
+            reason, detail = self.run_failure(info, None, self.ending_detail(
+                info, f"review could not read the PR diff (TOOL_FAIL: {(summary or '').strip()[:120]})"))
+            self.record_failure(lane, lc, st.get("run"), reason, detail, harvest=False)
+            if r.get("fails_sha", sha) != sha:      # new head: the counter of the old sha does not count
+                r["fails"] = 0
+                r["fail_classes"] = []
+            r["fails_sha"] = sha
+            r["fails"] = int(r.get("fails") or 0) + 1
+            classes = list(r.get("fail_classes") or [])
+            classes.append("tool_fail")
+            r["fail_classes"] = classes[-4:]
+            r["tool_fail"] = {"sha": sha, "summary": (summary or "").strip()[:200], "at": time.strftime("%F %T")}
+            self.log(f"review PR #{pr} by {lane}: TOOL_FAIL — the diff could not be read "
+                     f"({(summary or '').strip()[:120]}); no verdict is released "
+                     f"[failure_reason={reason}; error={detail}]")
+            self.put_review(pr, r)
+            return True
         if not v:
             error_class = info.get("error_class") or ""
             reason, detail = self.run_failure(info, None, self.ending_detail(
@@ -2600,6 +2686,11 @@ class Dispatcher:
                 if item is None:
                     continue      # the diff of this head could not be bound: no review is dispatched
                 run, ver = self.dispatch(L, lanes[L], item, base)
+            except HeadMoved as e:
+                # The PR head moved while it was fetched (Refs #1828): the lane is fine, the
+                # review is dispatched again on the next tick, with the head that is current then.
+                self.log(f"review PR #{p['number']}: {e}", brain=False)
+                continue
             except Exception as e:
                 self.host_fail(lanes[L]["host"], f"review dispatch PR#{p['number']}: {e}", host_started, 120)
                 idle.remove(L)

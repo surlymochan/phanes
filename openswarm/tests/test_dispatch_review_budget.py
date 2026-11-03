@@ -40,14 +40,14 @@ class ReviewBudget(Base):
         d.dispatch_reviews(lanes, {"M1": {"lane": "idle"}, "M2": {"lane": "idle"}}, state, [])
         self.assertEqual(len(chosen), 1)
 
-    def test_large_diff_has_diffstat_truncated_excerpt_and_git_diff_hint(self):
+    def test_a_large_diff_is_not_embedded_but_read_locally(self):
         d = self.make()
-        d.R["review_diff_max_kb"] = 1
         content = "diff --git a/file.txt b/file.txt\n" + "+x\n" * 800
         d.gh = lambda args, **kwargs: (0, content, "")
         item = d.review_item(pr(12, 102))
-        self.assertIn("Diffstat:", item["body"])
-        self.assertIn("git diff", item["body"])
-        self.assertIn("diff excerpt truncated", item["body"])
-        # the body is the truncated excerpt plus the fixed evidence-pack instruction (Refs #1788)
+        # the diff is read from the local clone, so the task stays small and nothing is cut
+        self.assertNotIn("+x\n" * 10, item["body"])
+        self.assertNotIn("diff excerpt truncated", item["body"])
+        self.assertIn("git diff HEAD...rebase-pr-12", item["body"])
+        self.assertIn("git diff --stat HEAD...rebase-pr-12", item["body"])
         self.assertLess(len(item["body"]), len(content) + 3000)
