@@ -7,7 +7,7 @@ then by issue number. Optional `backend:pi|agy|codex` label pins an issue to tha
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
-import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -15,7 +15,9 @@ RULES = ("Rules: work only inside this repository worktree (the current director
          "files outside it — not the main repo, not $HOME, not /tmp; for scratch files use $TMPDIR (inside the worktree, cleaned "
          "automatically) and leave cleanup to the executor. Do not push, do not open PRs, do not touch credentials, no network "
          "installs. Keep the change small and factual; cite file paths and line numbers you checked. Commit your result with a "
-         "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue.")
+         "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue. "
+         "Your commit message must also carry a short body with a `Closes #{n}` line and a `验收：<command>` line, and the "
+         "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704).")
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
@@ -147,6 +149,84 @@ def host_good(h):
     if BACKOFF.pop(h, None): log(f"{h} ssh recovered", brain=False)
 
 def now(): return time.strftime("%H:%M")
+
+# --- lane PR 提交前校验（Refs #1704）---------------------------------------------
+# lane PR 缺 Closes #N 时合并后 issue 不会自动关闭，缺验收段时审查方无法核验；两者都能在
+# 提交前发现。校验对象是真正要提交的标题与正文：缺项逐条返回给 runner，严格模式下不建 PR。
+PR_VALIDATION_ENV = "AD_PR_VALIDATION"        # strict（默认，缺项即拦截）| warn（只记录不拦截）
+PR_VALIDATION_STRICT = "strict"
+PR_VALIDATION_WARN = "warn"
+PR_VALIDATION_CLASS = "pr_validation"         # 校验失败：可快速修复类，不计入 lane-failed
+PR_VALIDATION_FIX_CLASS = "quick_fix"
+CLOSING_RE = re.compile(r"\b(?:Closes|Fixes|Resolves)\s+#([1-9]\d*)\b", re.I)
+ACCEPTANCE_RE = re.compile(r"(?im)^[ \t]*(?:验收|Verify|Acceptance)[ \t]*[:：][ \t]*(\S.*)$")
+
+def validate_lane_pr(issue, title, body):
+    """Return the required lane PR fields that are missing (empty list = submittable).
+
+    Refs #1704: the body must close the task issue, must carry an acceptance section a
+    reviewer can verify, and the title must name the issue."""
+    missing = []
+    if not any(int(number) == int(issue) for number in CLOSING_RE.findall(body or "")):
+        missing.append(f"PR 正文缺少 Closes/Fixes/Resolves #{issue}")
+    if not ACCEPTANCE_RE.search(body or ""):
+        missing.append("PR 正文缺少验收段或 Verify 段")
+    if not re.search(rf"(?<!\d)#{int(issue)}(?!\d)", title or ""):
+        missing.append(f"PR 标题缺少 issue 号 #{issue}")
+    return missing
+
+def pr_validation_mode():
+    """Return the PR validation mode: `strict` (default) blocks a PR with missing fields."""
+    mode = (os.environ.get(PR_VALIDATION_ENV) or PR_VALIDATION_STRICT).strip().lower()
+    return mode if mode in (PR_VALIDATION_STRICT, PR_VALIDATION_WARN) else PR_VALIDATION_STRICT
+
+def closing_reference(issue, text):
+    """Return the closing reference the lane itself provided for `issue` ("" when it did not).
+
+    Only a closing keyword (`Closes`/`Fixes`/`Resolves`) that names the task issue counts.
+    The title is not searched: the title has to carry the issue number, but a number in the
+    title is not a closing instruction and the AD must not invent one for the lane
+    (Refs #1704)."""
+    for match in CLOSING_RE.finditer(text or ""):
+        if int(match.group(1)) == int(issue): return f"Closes #{issue}"
+    return ""
+
+def acceptance_evidence(verify_rc, report, summary, tests):
+    """Return the acceptance evidence of a lane run ("" when the run has none).
+
+    Only real evidence counts: the host verify rc, the lane's own acceptance statement, or
+    the test command the lane reported. A missing verify rc is not evidence, and a missing
+    test result stays empty instead of turning into the string `None`."""
+    if verify_rc is not None: return f"host verify rc `{verify_rc}`"
+    for text in (report or "", summary or ""):
+        found = ACCEPTANCE_RE.search(text)
+        if found: return found.group(1).strip()
+    reported = (tests or "").strip()
+    if reported and reported.lower() not in ("none", "null"): return f"lane reported tests: `{reported[:200]}`"
+    return ""
+
+def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests, verify_rc):
+    """Build the lane PR title and body from the lane's own artifacts.
+
+    Nothing is fabricated here: the title is the lane commit subject, and the closing
+    reference and the acceptance section come from the lane's own report (commit message /
+    executor summary / tests) or from the host verify run. What the lane did not provide
+    stays missing, so the submit path can block the PR (Refs #1704)."""
+    title = (subject or "").strip()[:200]
+    report = (message or "").strip()
+    parts = []
+    # the closing reference comes from the lane's own text only: the title carries the issue
+    # number by rule, and a number in the title is not a closing instruction (Refs #1704)
+    closing = closing_reference(issue, f"{report}\n{summary or ''}")
+    if closing: parts.append(closing)
+    evidence = acceptance_evidence(verify_rc, report, summary, tests)
+    if evidence: parts.append(f"验收：{evidence}")
+    verify_note = f", host verify rc `{verify_rc}`" if verify_rc is not None else ""
+    parts.append(f"Autodispatched to lane **{lane}** on **{cfg.get('host')}** ({info.get('backend')}/{info.get('model')}), "
+                 f"run `{st.get('run')}`, base `{str(st.get('base'))[:8]}`, lane status `{info.get('status')}`{verify_note}.")
+    if summary: parts.append(f"Executor summary: {summary}")
+    return title, "\n\n".join(parts)
+
 def log(msg, brain=True):
     line = f"{time.strftime('%F %T')} {msg}"
     print(line, flush=True)
@@ -228,9 +308,11 @@ except Exception as e: out["lane"]="unknown"
 if R:
   p=f"{O}/runs/{R}/result.json"
   if os.path.exists(p):
-    r=json.load(open(p)); res=r.get("result") or {}
+    with open(p) as stream: r=json.load(stream)
+    res=r.get("result") or {}
     out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
-      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
+      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
+      "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
     out["run"]="running"
@@ -600,15 +682,74 @@ def handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures):
         st["fetch_backoff_until"] = time.time() + wait
         save_state(state)
         log(f"{lane} #{n} harvest fetch failed (transient) {failures}/{HARVEST_FETCH_MAX_TRANSIENT_FAILURES}; backing off {wait}s before the next attempt", brain=False)
-        return False
+        return {"done": False, "status": "fetch-backoff", "error": None, "missing": []}
     st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
     label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) produced commit `{info.get('commit')}` but the harvest fetch failed "
                        f"({classification}, {failures} consecutive failure(s)): {err.strip()[-200:]}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
     mark_done(state, n)
     log(f"{lane} #{n} harvest fetch failed ({classification}) {failures} consecutive failure(s) → labelled lane-failed")
-    return True
+    return {"done": True, "status": "lane-failed", "error": None, "missing": []}
+
+RUN_RECORD_SNIPPET = r'''
+import base64,json,os,sys
+run, payload = sys.argv[1], sys.argv[2]
+d = os.path.expanduser("~/.claude/openswarm-executor-candidate/runs") + "/" + run
+os.makedirs(d, exist_ok=True)
+rec = json.loads(base64.b64decode(payload).decode("utf-8"))
+with open(d + "/pr-validation.json", "w") as f: json.dump(rec, f, ensure_ascii=False, indent=1)
+with open(d + "/pr-validation.log", "a") as f:
+    f.write(rec["at"] + " " + rec["error_class"] + " (" + rec["class"] + "): " + "; ".join(rec["missing"]) + "\n")
+print("ok")
+'''
+
+def record_pr_validation(cfg, run, record):
+    """Write the PR validation result into the run record and the run log (Refs #1704).
+
+    The AD keeps a per-run log under its state dir; the lane host gets the same record
+    next to its run directory, so a blocking diagnosis can quote the missing items. Both
+    writes are best effort: a failing host must not stop the dispatch loop."""
+    path = f"{D}/runs/{run}.log"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            f.write(f"{record['at']} {record['error_class']} ({record['class']}): {'; '.join(record['missing'])}\n")
+    except OSError as e:
+        log(f"run {run}: PR validation run log not written ({e!r})", brain=False)
+    try:
+        payload = base64.b64encode(json.dumps(record, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        rc, _, err = sh(ssh_argv(ssh_opts(cfg.get("host")), cfg.get("host"), "python3", "-", run, payload),
+                        timeout=60, inp=RUN_RECORD_SNIPPET)
+        if rc: log(f"run {run}: PR validation run record not written to the host ({err.strip()[-120:]})", brain=False)
+    except Exception as e:
+        log(f"run {run}: PR validation run record not written to the host ({e!r})", brain=False)
+
+def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
+    """Block a lane PR whose required fields are missing and hand the issue back for a quick fix.
+
+    The missing items are returned to the runner as an explicit error and listed one by
+    one on the issue; the run is recorded as a quick-fix class, so the lane-failed
+    statistics stay clean (Refs #1704)."""
+    n, run = st["issue"], st["run"]
+    record = {"run": run, "issue": n, "lane": lane, "class": PR_VALIDATION_FIX_CLASS,
+              "error_class": PR_VALIDATION_CLASS, "missing": list(missing), "title": title,
+              "at": time.strftime("%F %T")}
+    record_pr_validation(cfg, run, record)
+    state["_pr_validation"] = (state.get("_pr_validation", []) + [record])[-200:]
+    gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
+        + "".join(f"- {item}\n" for item in missing)
+        + f"\n按可快速修复类（`{PR_VALIDATION_CLASS}`）处理，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
+    mark_done(state, n)
+    return {"done": True, "status": "pr-validation-failed",
+            "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
+            "missing": list(missing)}
 
 def finish(lane, cfg, st, info, state):
+    """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
+
+    Returns a result for the runner: {"done": bool, "status": str, "error": str|None,
+    "missing": [...]}. `done` means the lane slot is free again; `error` carries the
+    explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
@@ -616,23 +757,31 @@ def finish(lane, cfg, st, info, state):
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
-        if rc: return log(f"{lane} #{n} run {run}: push failed: {err.strip()[-200:]}") or False
+        if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
-            log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n); return True
+            log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
+            return {"done": True, "status": "duplicate", "error": None, "missing": []}
         _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", f"refs/fleet/{lane}"])
-        body = (f"Closes #{n}\n\nAutodispatched to lane **{lane}** on **{cfg['host']}** ({info.get('backend')}/{info.get('model')}), run `{run}`, "
-                f"base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`.\n\nExecutor summary: {info.get('summary')}")
-        rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", (subj.strip() or f"#{n}")[:200], "--body", body])
+        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", f"refs/fleet/{lane}"])
+        title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
+        missing = validate_lane_pr(n, title, body)
+        mode = pr_validation_mode()
+        if missing and mode == PR_VALIDATION_STRICT:
+            return block_pr_validation(lane, cfg, st, info, state, title, body, missing)
+        if missing:
+            log(f"{lane} #{n} run {run} PR validation ({mode}): 缺 {'；'.join(missing)}", brain=False)
+        rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
+        return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
-    return True
+        return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 def tick(lanes, state, last_warn):
     if os.path.exists(f"{D}/PAUSE"): return last_warn
@@ -655,7 +804,9 @@ def tick(lanes, state, last_warn):
         if "error" in r: continue
         if st and isinstance(r.get("run"), dict):
             if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
-            if finish(L, lanes[L], st, r["run"], state): state.pop(L); save_state(state)
+            result = finish(L, lanes[L], st, r["run"], state)
+            if result.get("done"): state.pop(L); save_state(state)
+            if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
