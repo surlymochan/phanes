@@ -811,6 +811,231 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
             "missing": list(missing)}
 
+# --- fix/rebase 收割塌缩护栏（Refs #1833）-------------------------------------------
+# fix/rebase 轮若不在 PR 当前 head 上续改、只产出增量补丁，AD 把该提交推回 PR 分支就会把整个 PR
+# 替换成一个补丁（2026-11-03 实测：#1807 8 文件/1780 行 → 1 文件/11 行，#1804 6/1401→3/39，
+# #1715 8/868→2/23，#1755 8/746→1/19，#1653 6/200→2/19，#1824 9/835→1/17；这 6 个 PR 已由
+# builder 强推还原到 fix 前 head）。收割推送前加两道检查：
+#   ①新 head 必须以 fix 前 PR head 为祖先（git merge-base --is-ancestor），否则视作整体替换；
+#   ②新 head 相对 base 的变更文件数或总改动行数，任一项相对 fix 前 head 下降超过阈值即拒绝。
+# 阈值默认 50%（AD_HARVEST_COLLAPSE_RATIO 可配）；git 命令失败一律 fail closed：不放行、不推送。
+# 例外：卡正文显式声明“整体重写”的卡豁免本护栏。
+HARVEST_COLLAPSE_ENV = "AD_HARVEST_COLLAPSE_RATIO"
+HARVEST_COLLAPSE_RATIO = 0.5
+HARVEST_REWRITE_MARKERS = ("整体重写", "full-rewrite", "full rewrite", "rewrite-allowed")
+HARVEST_GUARD_CLASS = "harvest_collapse"   # 失败台账分类：收割塌缩护栏拦截
+REBASE_TARGET_RE = re.compile(r"(?mi)^[ \t]*(?:重基PR|Rebase-PR)[ \t]*[:：][ \t]*#([1-9]\d*)[ \t]+(\S+)")
+
+def harvest_collapse_ratio():
+    """收割塌缩阈值：相对 fix 前 head 的下降比例上限（默认 0.5，超过即拒绝推送）。"""
+    raw = (os.environ.get(HARVEST_COLLAPSE_ENV) or "").strip()
+    if not raw: return HARVEST_COLLAPSE_RATIO
+    try: value = float(raw)
+    except ValueError: return HARVEST_COLLAPSE_RATIO
+    return value if value >= 0 else HARVEST_COLLAPSE_RATIO
+
+def harvest_rewrite_exempt(body):
+    """卡正文显式声明“整体重写”时豁免塌缩护栏。"""
+    text = body or ""
+    return any(marker in text for marker in HARVEST_REWRITE_MARKERS)
+
+def git_diff_size(repo, base, rev):
+    """`rev` 相对 `base` 的 (变更文件数, 总改动行数)；git 失败时返回 None（fail closed）。"""
+    rc, out, _ = sh(["git", "-C", repo, "diff", "--numstat", base, rev], timeout=120)
+    if rc: return None
+    files = lines = 0
+    for row in out.splitlines():
+        parts = row.split("\t")
+        if len(parts) < 3: continue
+        files += 1
+        for cell in parts[:2]:
+            if cell.isdigit(): lines += int(cell)
+    return files, lines
+
+def git_is_ancestor(repo, old, new):
+    """`old` 是否为 `new` 的祖先；不是 → False；git 失败 → None（fail closed）。"""
+    rc, _, _ = sh(["git", "-C", repo, "merge-base", "--is-ancestor", old, new], timeout=60)
+    if rc == 0: return True
+    if rc == 1: return False
+    return None
+
+def git_has_commit(repo, rev):
+    """本地是否有这个 commit（护栏比较用的 base 必须能在本地解析）。"""
+    rc, _, _ = sh(["git", "-C", repo, "cat-file", "-e", f"{rev}^{{commit}}"], timeout=60)
+    return rc == 0
+
+def harvest_guard(repo, base, old_head, new_head, body=None, ratio=None):
+    """核对收割 head 能不能推回 PR 分支（Refs #1833）。
+
+    返回 (ok, reason, detail)：ok=False 表示不得推送，PR 分支保持 fix 前 head。
+    detail 带前后 sha 与前后体量，供 brain 日志与失败台账引用。"""
+    ratio = harvest_collapse_ratio() if ratio is None else float(ratio)
+    detail = {"base": base, "old_head": old_head, "new_head": new_head, "ratio": ratio,
+              "files_before": None, "files_after": None, "lines_before": None, "lines_after": None}
+    if harvest_rewrite_exempt(body):
+        detail["reason"] = "卡正文声明整体重写，豁免塌缩护栏"
+        return True, detail["reason"], detail
+    # 体量先算出来（日志要引用前后体量），算不出来也不放行：下面按 fail closed 处理。
+    before = git_diff_size(repo, base, old_head)
+    after = git_diff_size(repo, base, new_head)
+    if before is not None: detail["files_before"], detail["lines_before"] = before
+    if after is not None: detail["files_after"], detail["lines_after"] = after
+    ancestor = git_is_ancestor(repo, old_head, new_head)
+    detail["ancestor"] = ancestor
+    if ancestor is None:
+        detail["reason"] = "祖先判定失败（git merge-base --is-ancestor 报错，fail closed）"
+        return False, detail["reason"], detail
+    if not ancestor:
+        detail["reason"] = "新 head 不是 fix 前 head 的祖先（视作整体替换）"
+        return False, detail["reason"], detail
+    if before is None or after is None:
+        detail["reason"] = "体量统计失败（git diff --numstat 报错，fail closed）"
+        return False, detail["reason"], detail
+    limit = 1 - ratio
+    if after[0] < before[0] * limit:
+        detail["reason"] = f"变更文件数塌缩 {before[0]} → {after[0]}（阈值 {ratio:.0%}）"
+        return False, detail["reason"], detail
+    if after[1] < before[1] * limit:
+        detail["reason"] = f"总改动行数塌缩 {before[1]} → {after[1]}（阈值 {ratio:.0%}）"
+        return False, detail["reason"], detail
+    detail["reason"] = "祖先成立且体量正常"
+    return True, detail["reason"], detail
+
+def harvest_remote_head(branch):
+    """远端分支当前的 head sha；分支不存在返回空串；读取失败返回 None。"""
+    rc, out, _ = sh(["git", "-C", LOCAL, "ls-remote", "origin", f"refs/heads/{branch}"], timeout=60)
+    if rc: return None
+    parts = out.split()
+    return parts[0] if parts else ""
+
+def harvest_local_head(ref):
+    """本地 ref 的 head sha；ref 不存在返回空串。"""
+    rc, out, _ = sh(["git", "-C", LOCAL, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], timeout=60)
+    if rc: return ""
+    return out.strip()
+
+def harvest_guard_base(base):
+    """护栏比较用的 base：优先派发时的 base commit，其次本地 origin/main；都没有则空串。"""
+    for candidate in (base, "origin/main"):
+        if candidate and git_has_commit(LOCAL, candidate): return candidate
+    return ""
+
+def harvest_card_body(n):
+    """卡正文（豁免标记与目标 PR 的来源）；读取或解析失败返回 None。"""
+    rc, out, _ = gh(["issue", "view", str(n), "--json", "body"])
+    if rc: return None
+    try:
+        data = json.loads(out)
+        if not isinstance(data, dict) or "body" not in data: return None
+        body = data["body"]
+        return "" if body is None else body if isinstance(body, str) else None
+    except (TypeError, ValueError): return None
+
+def harvest_target_pr(body):
+    """卡正文声明的目标 PR（fix/rebase 轮）：`Rebase-PR: #N <branch>`。"""
+    m = REBASE_TARGET_RE.search(body or "")
+    return (int(m.group(1)), m.group(2)) if m else (None, None)
+
+def harvest_pr_head(pr):
+    """目标 PR 当前的 head sha；读不到时返回空串。"""
+    rc, out, _ = gh(["pr", "view", str(pr), "--json", "headRefOid"])
+    if rc: return ""
+    try: data = json.loads(out) or {}
+    except (TypeError, ValueError): return ""
+    return str(data.get("headRefOid") or "")
+
+def harvest_pr_number(branch):
+    """目标分支上打开着的 PR 号；没有或读不到时返回空串。"""
+    rc, out, _ = gh(["pr", "list", "--head", branch, "--state", "open", "--json", "number"])
+    if rc: return ""
+    try: prs = json.loads(out) or []
+    except (TypeError, ValueError): return ""
+    return str(prs[0].get("number")) if prs and isinstance(prs[0], dict) else ""
+
+def harvest_fetch_head(sha):
+    """把 fix 前 head 取回本地（祖先判定需要本地对象）；取不回时返回 False。"""
+    if git_has_commit(LOCAL, sha): return True
+    rc, _, _ = sh(["git", "-C", LOCAL, "fetch", "-q", "origin", sha], timeout=180)
+    return rc == 0 and git_has_commit(LOCAL, sha)
+
+def harvest_fix_head(branch, body):
+    """fix 前 head：卡声明了目标 PR 时取该 PR 的 head，否则取推送分支的远端 head。
+
+    返回 (sha, source, failed)：sha 为空串表示没有可比较的 head（新建 PR）；
+    failed 为 True 表示读不到 fix 前 head（fail closed）。"""
+    pr, _ = harvest_target_pr(body)
+    if pr:
+        sha = harvest_pr_head(pr)
+        if not sha: return "", f"PR #{pr}", True
+        if not harvest_fetch_head(sha): return sha, f"PR #{pr}", True
+        return sha, f"PR #{pr}", False
+    old = harvest_remote_head(branch)
+    if old is None: return "", f"branch {branch}", True
+    return old, f"branch {branch}", False
+
+def harvest_push_guard(lane, cfg, st, branch):
+    """收割推送前的塌缩护栏（Refs #1833）。
+
+    返回 (ok, detail)：没有可比较的 fix 前 head（新建 PR）时放行；有 fix 前 head 时，
+    新 head 必须包含它，且相对 base 的文件数/改动行数不得塌缩，否则拒绝推送。"""
+    body = harvest_card_body(st["issue"])
+    ratio = harvest_collapse_ratio()
+    if body is None:
+        return False, {"branch": branch, "ratio": ratio,
+                       "reason": "卡正文读取或解析失败（fail closed）"}
+    old, source, failed = harvest_fix_head(branch, body)
+    if failed:
+        return False, {"branch": branch, "ratio": ratio,
+                       "reason": f"读不到 fix 前 head（{source}，fail closed）"}
+    if not old:
+        return True, {"branch": branch, "ratio": ratio, "reason": "没有可比较的 fix 前 head（新建 PR）"}
+    new = harvest_local_head(f"refs/fleet/{lane}")
+    if not new:
+        return False, {"branch": branch, "old_head": old, "source": source, "ratio": ratio,
+                       "reason": "收割 head 读取失败（fail closed）"}
+    base = harvest_guard_base(st.get("base"))
+    if not base:
+        return False, {"branch": branch, "old_head": old, "new_head": new, "source": source,
+                       "ratio": ratio, "reason": "base commit 在本地不可用（fail closed）"}
+    ok, reason, detail = harvest_guard(LOCAL, base, old, new, body=body)
+    detail["branch"] = branch
+    detail["source"] = source
+    pr, _ = harvest_target_pr(body)
+    detail["pr"] = str(pr) if pr else harvest_pr_number(branch)
+    return ok, detail
+
+def block_harvest_collapse(lane, cfg, st, state, branch, detail):
+    """收割塌缩护栏拦截（Refs #1833）：不推送、不动 PR 分支，标 lane-failed 并留失败台账。
+
+    拒绝时不消耗任何 review 轮次：PR 的 head 与审查计数都保持原样。"""
+    n, run = st["issue"], st["run"]
+    pr = detail.get("pr") or harvest_pr_number(branch) or "?"
+    old_head = str(detail.get("old_head") or "")[:8] or "?"
+    new_head = str(detail.get("new_head") or "")[:8] or "?"
+    before = f"{detail.get('files_before')}/{detail.get('lines_before')}"
+    after = f"{detail.get('files_after')}/{detail.get('lines_after')}"
+    reason = detail.get("reason") or ""
+    ratio = detail.get("ratio")
+    label_lane_failed(n, f"Lane {lane} ({cfg.get('host')}, run `{run}`) 的收割结果未通过塌缩护栏，未推送"
+        f"（PR 分支保持 fix 前 head，未消耗 review 轮次）：\n\n"
+        f"- PR #{pr}（issue #{n}），分支 `{branch}`\n"
+        f"- fix 前 head `{old_head}` → fix 后 head `{new_head}`\n"
+        f"- 相对 base 的体量（文件数/改动行数）：{before} → {after}\n"
+        f"- 判定原因：{reason}\n\n"
+        f"护栏阈值 {ratio}（文件数或改动行数任一项下降超过阈值即拒绝）；"
+        f"Label `lane-failed`; re-add `lane-ready` to retry. 卡正文声明“整体重写”可豁免本护栏。")
+    state["_harvest_guard"] = (state.get("_harvest_guard", []) + [{
+        "at": time.strftime("%F %T"), "lane": lane, "issue": n, "pr": pr, "run": run,
+        "branch": branch, "class": HARVEST_GUARD_CLASS, "reason": reason, "ratio": ratio,
+        "old_head": detail.get("old_head"), "new_head": detail.get("new_head"),
+        "files_before": detail.get("files_before"), "files_after": detail.get("files_after"),
+        "lines_before": detail.get("lines_before"), "lines_after": detail.get("lines_after")}])[-200:]
+    mark_done(state, n)
+    log(f"{lane} #{n} harvest collapse guard blocked PR #{pr} ({branch}): {old_head} → {new_head} "
+        f"size {before} → {after} ({reason}); not pushed → lane-failed")
+    return {"done": True, "status": "harvest-guard-blocked",
+            "error": f"收割塌缩护栏拒绝推送：{reason}", "missing": []}
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -823,6 +1048,11 @@ def finish(lane, cfg, st, info, state):
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
+        # Refs #1833: 收割塌缩护栏。推送会覆盖已有 head（fix/rebase 轮把提交推回 PR 分支）时，
+        # 新 head 必须以 fix 前 head 为祖先，且相对 base 的文件数/改动行数不得塌缩；
+        # 不满足则不推送，PR 分支保持 fix 前 head，标 lane-failed。
+        ok, detail = harvest_push_guard(lane, cfg, st, b)
+        if not ok: return block_harvest_collapse(lane, cfg, st, state, b, detail)
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
