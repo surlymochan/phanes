@@ -66,6 +66,7 @@ def _load_review_module(name):
 
 status = _load_review_module("status")
 evidence = _load_review_module("evidence")
+land = _load_review_module("land")
 
 
 _DISPATCH_MODULES = {}
@@ -88,6 +89,14 @@ def dispatch_module(name):
 def failure_reasons():
     """The canonical run-ending reason module (lib/dispatch/failure_reason.py)."""
     return dispatch_module("failure_reason")
+
+
+# The author lane of a PR, when the configured pattern does not know the branch: any
+# lane-shaped branch (`fleet/<name>-issue...`), also an external lane named "dot" or
+# "chatgpt-agent" (Refs #1667).
+AUTHOR_BRANCH_RE = re.compile(r"fleet/([A-Za-z0-9][A-Za-z0-9_-]*)-issue")
+# The PR body of a lane PR names the lane that opened it ("Autodispatched to lane **CX2**").
+AUTHOR_BODY_RE = re.compile(r"Autodispatched to lane \*\*([A-Za-z0-9][A-Za-z0-9_-]*)\*\*")
 
 
 def _load_ci_checks():
@@ -387,7 +396,7 @@ if R:
       with open(f"{O}/runs/{R}/status.json") as stream: rs=json.load(stream)
     except Exception: rs={}
     out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
-      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"failure_reason":r.get("failure_reason"),"error":r.get("error"),"harvest_failure_reason":r.get("harvest_failure_reason"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
+      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"failure_reason":r.get("failure_reason"),"error":r.get("error"),"files":(json.dumps(res.get("files_changed") or [],ensure_ascii=False)[:400] if isinstance(res,dict) else ""),"harvest_failure_reason":r.get("harvest_failure_reason"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
       "started":r.get("started") if r.get("started") is not None else rs.get("started"),
       "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
       "seconds":r.get("seconds"),
@@ -1705,6 +1714,29 @@ class Dispatcher:
         m = re.match(self.R["author_lane_re"], branch or "")
         return m.group(1) if m else None
 
+    def author_of(self, pr):
+        """Return the author lane of a PR and where the name came from.
+
+        The head branch is the primary source, but the configured pattern only knows the
+        lane names of this fleet (``fleet/<letters><digits>-issue``): an external lane
+        (``fleet/dot-issue5-...``) or a hand-made branch loses the author, and with it the
+        "never review your own PR" rule - the dispatcher then logs "author None" and may
+        pick the author lane itself.  The PR body names the lane that opened it
+        ("Autodispatched to lane **CX2**"), so it is the fallback (Refs #1667).
+        """
+        pr = pr or {}
+        branch = pr.get("headRefName") or ""
+        m = re.match(self.R["author_lane_re"], branch)
+        if m:
+            return m.group(1), "branch"
+        m = AUTHOR_BRANCH_RE.match(branch)
+        if m:
+            return m.group(1), "branch-fallback"
+        m = AUTHOR_BODY_RE.search(pr.get("body") or "")
+        if m:
+            return m.group(1), "body"
+        return None, "unknown"
+
     def review_max(self):
         _, factor = self.burn_state()
         limits = {"review": int(self.R["max"]),
@@ -1883,7 +1915,7 @@ class Dispatcher:
             except Exception:
                 pass
         f = f"{self.R['verdict_dir']}/PR-{pr}.md"
-        body = self.cfg["templates"]["review_task"].format(pr=pr, branch=p["headRefName"], author=self.author_lane(p["headRefName"]) or "?",
+        body = self.cfg["templates"]["review_task"].format(pr=pr, branch=p["headRefName"], author=self.author_of(p)[0] or "?",
                                                            title=p["title"], sha=p["headRefOid"], file=f, issue=issue, diff=diff)
         body += self.evidence_inputs(p, stats)
         body += self.evidence_instruction(pr, self.evidence_path(pr))
@@ -1892,6 +1924,81 @@ class Dispatcher:
     def evidence_path(self, pr):
         """The path of the raw evidence pack of one PR inside the lane branch."""
         return "%s/PR-%s%s.md" % (self.R["verdict_dir"], pr, self.R.get("evidence_suffix") or "-evidence")
+
+    def verdict_landing(self, lane, pr, info):
+        """Report how the verdict file of one review run landed (Refs #1667).
+
+        The verdict is read from the lane's git ref.  The report says *how* it landed:
+        the class (landed, no_commit, file_missing, no_marker, unreadable, git_error),
+        the ref that was read, the git error and the verdict text.  A missing verdict must
+        not look like an empty file: the harvest needs to know which of the classes
+        happened before it counts a failure and hands the PR to the next lane.
+
+        A failed read is told apart from a missing file: when ``git show`` fails, the
+        tree of the commit is asked for the verdict path.  A tree that reads fine and does
+        not carry the path means the lane committed something else (``file_missing``); a
+        tree that cannot be read either means git itself is broken (``git_error``), which
+        says nothing about the lane and is not counted as a lane failure.
+        """
+        path = f"{self.R['verdict_dir']}/PR-{pr}.md"
+        branch = str(info.get("branch") or "")
+        commit = str(info.get("commit") or "")
+        report = {"path": path, "branch": branch or None, "commit": commit or None,
+                  "ref": None, "show_rc": None, "show_err": "", "text": "", "verdict": None,
+                  "path_missing": None, "ls_tree_rc": None, "ls_tree_err": ""}
+        if not (branch and branch != "None" and commit):
+            # The run committed nothing: there is no ref a verdict file could be read from.
+            report["land"] = land.LAND_NO_COMMIT
+            return report
+        rc, ref, _ = self.git("rev-parse", "--verify", f"refs/fleet/{lane}")
+        if rc:
+            report["land"] = land.LAND_UNREADABLE
+            report["show_err"] = f"refs/fleet/{lane} could not be read"
+            return report
+        report["ref"] = ref.strip() or None
+        if not report["ref"]:
+            report["land"] = land.LAND_UNREADABLE
+            report["show_err"] = f"refs/fleet/{lane} did not resolve to a commit"
+            return report
+        rc, out, err = self.git("show", f"{report['ref']}:{path}")
+        report["show_rc"] = rc
+        report["show_err"] = (err or "").strip()[-200:]
+        report["text"] = out or ""
+        verdict, _ = status.parse_verdict(report["text"])
+        report["verdict"] = verdict
+        if rc:
+            # The file could not be shown: ask the tree whether the path is really
+            # absent.  Only a tree that reads fine proves the lane committed something
+            # else; a tree that cannot be read is a git failure, not a lane failure.
+            trc, tout, terr = self.git("ls-tree", "--name-only", report["ref"], "--", path)
+            report["ls_tree_rc"] = trc
+            report["ls_tree_err"] = (terr or "").strip()[-200:]
+            report["path_missing"] = trc == 0 and not (tout or "").strip()
+        report["land"] = land.classify(True, True, rc, verdict, report["path_missing"])
+        return report
+
+    def evidence_record_path(self, pr):
+        """The path of the kept review evidence of one PR, relative to the state dir."""
+        return os.path.join("review-evidence", f"PR-{pr}.json")
+
+    def keep_review_evidence(self, pr, record):
+        """Keep the scene of one missed verdict before the PR goes to the next lane.
+
+        The last records of a PR live in ``<state_dir>/review-evidence/PR-<n>.json``: the
+        run status, its error and summary, the branch and commit it produced, the ref the
+        dispatcher read, the git error it got and - when the file was read but carries no
+        verdict - the text the lane wrote.  Without them a repeated "no verdict file" is a
+        number without a cause (Refs #1667).
+        """
+        if self.dry_run:
+            return
+        path = self.path(self.evidence_record_path(pr))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        records = load_json(path, [])
+        if not isinstance(records, list):
+            records = []
+        records.append(record)
+        write_json(path, records[-land.EVIDENCE_KEEP:])
 
     def diffstat_of(self, diff):
         """The raw diff statistics of a PR diff (files, added and deleted lines, effective lines)."""
@@ -2079,12 +2186,12 @@ class Dispatcher:
             self.quota_lane_guard(lane, lc, info)
         pr, sha = st["review_pr"], st["review_sha"]
         r = self.load_reviews().get(str(pr)) or {}
-        txt = ""
+        landing = self.verdict_landing(lane, pr, info)
+        txt = landing["text"]
+        v = landing["verdict"]
         ev_txt = ""
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
-            txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PR-{pr}.md")[1]
             ev_txt = self.git("show", f"refs/fleet/{lane}:{self.evidence_path(pr)}")[1]
-        v, _ = status.parse_verdict(txt)
         ev = self.evidence_trace(ev_txt)
         r["evidence"] = ev
         if ev["complete"]:
@@ -2099,6 +2206,12 @@ class Dispatcher:
             reason, detail = self.run_failure(info, None, self.ending_detail(
                 info, f"review produced no verdict file ({error_class or 'no error class'})"))
             self.record_failure(lane, lc, st.get("run"), reason, detail, harvest=False)
+            # Every branch below hands the PR to the next lane, so the scene of the
+            # missed verdict is kept in all of them - the run error alone does not say
+            # where the verdict file went (Refs #1667).
+            record = land.evidence(pr, lane, st.get("run"), info, landing)
+            r["land"] = landing["land"]
+            r["scene"] = record
             if error_class == "vm_paused":
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/vm_paused); "
                          f"VM pause (not counted), will retry [failure_reason={reason}; error={detail}]")
@@ -2114,6 +2227,14 @@ class Dispatcher:
                 r["budget_backends"] = backends
                 self.log(f"review PR #{pr} by {lane}: budget exceeded ({backend or 'unknown'}); not counted, will retry on another backend "
                          f"[failure_reason={reason}; error={detail}]")
+            elif landing["land"] in land.TRANSPORT_CLASSES:
+                # The verdict could not be read: the lane ref is gone or git is broken.
+                # This says nothing about the lane, so the scene is kept but the failure
+                # budget of the PR is not touched - a broken repository must not park a
+                # PR for a human (Refs #1667).
+                self.log(f"review PR #{pr} by {lane}: verdict unreadable ({landing['land']}: "
+                         f"{land.describe(landing['land'])}); not counted, will retry next tick "
+                         f"[failure_reason={reason}; error={detail}]")
             else:
                 if r.get("fails_sha", sha) != sha:      # new head: the counter of the old sha does not count
                     r["fails"] = 0
@@ -2121,10 +2242,14 @@ class Dispatcher:
                 r["fails_sha"] = sha
                 r["fails"] = int(r.get("fails") or 0) + 1
                 classes = list(r.get("fail_classes") or [])
-                classes.append(error_class or "unknown")
+                classes.append(land.failure_class(landing["land"], error_class))
                 r["fail_classes"] = classes[-4:]
-                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); fail #{r['fails']}, will retry "
+                record["fails"] = r["fails"]
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class or landing['land']}; "
+                         f"{landing['land']}: {land.describe(landing['land'])}); fail #{r['fails']}, will retry "
+                         f"(evidence: {self.evidence_record_path(pr)}) "
                          f"[failure_reason={reason}; error={detail}]")
+            self.keep_review_evidence(pr, record)
             self.put_review(pr, r)
             return True
         rc, cur, _ = self.gh(["pr", "view", str(pr), "--json", "headRefOid,state,headRefName,body"])
@@ -2223,8 +2348,9 @@ class Dispatcher:
         head = p["headRefOid"]
         if review.get("fails_notified_sha") != head:
             classes = ", ".join(review.get("fail_classes") or []) or "unknown"
+            landed_note = f"，verdict 落盘：{review['land']}" if review.get("land") else ""
             body = (f"PR #{p['number']} 在头部 `{head[:10]}` 上连续审查失败 {fails} 次，"
-                    f"失败类型：{classes}。请人工排查后再重试。\n\n"
+                    f"失败类型：{classes}{landed_note}。请人工排查后再重试。\n\n"
                     f"<!-- lane-review-fails pr={p['number']} sha={head} -->")
             if self.gh_write(["pr", "comment", str(p["number"]), "--body", body])[0] != 0:
                 return                      # comment failed: keep the one-shot notice for the next tick
@@ -2259,11 +2385,12 @@ class Dispatcher:
             timed_out = set(review.get("budget_backends") or [])
             alternatives = [lane for lane in idle if lanes[lane].get("backend") not in timed_out]
             eligible = alternatives or idle  # retry without exclusions if every idle backend timed out
-            L = self.pick_reviewer(eligible, lanes, self.author_lane(p["headRefName"]))
+            author, author_src = self.author_of(p)
+            L = self.pick_reviewer(eligible, lanes, author)
             previous_backend = review.get("quota_backend")
             quota_alternatives = [lane for lane in eligible if lanes[lane].get("backend") != previous_backend]
             if previous_backend and quota_alternatives:
-                L = self.pick_reviewer(quota_alternatives, lanes, self.author_lane(p["headRefName"]))
+                L = self.pick_reviewer(quota_alternatives, lanes, author)
             if not L:
                 continue
             host_started = self.clock()
@@ -2285,7 +2412,8 @@ class Dispatcher:
                         "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
             self.save_state(state)
             self.lru_picker().touch(L)
-            self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
+            self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, "
+                     f"author {author or 'unknown'} [{author_src}]) "
                      f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run}")
             self.heartbeat()
 
