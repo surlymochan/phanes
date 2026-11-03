@@ -1651,9 +1651,38 @@ class Dispatcher:
         tied = [lane for lane in available if history.get(lane) == history.get(oldest)]
         return min(tied, key=lambda lane: (self.R["pref"].get(lanes[lane]["backend"], 9), lane))
 
+    def local_pr_diff(self, p):
+        """The diff of the PR, taken from the local repo when GitHub is out of reach.
+
+        The branch of the PR is fetched into the local repo (``refs/fleet/<lane>``),
+        so the head of the PR is there and the diff is built from it: the base is
+        the fork point of the base branch, so the diff is the change of the PR
+        and nothing else.  An empty diff means "not available here", never a
+        wrong one: the reviewer gets no change to look at, but never a wrong one.
+        """
+        head = (p.get("headRefOid") or "").strip()
+        if not head or not self.cfg.get("local_repo"):
+            return ""
+        if self.git("cat-file", "-e", f"{head}^{{commit}}", timeout=30)[0]:
+            return ""  # the head of the PR is not in the local repo
+        branch = self.cfg.get("base_branch") or "main"
+        base = ""
+        for candidate in (branch, f"origin/{branch}"):
+            base = self.git("merge-base", head, candidate, timeout=30)[1].strip()
+            if base:
+                break
+        if not base:
+            return ""
+        diff = self.git("diff", f"{base}...{head}", timeout=60)[1]
+        return diff if diff.strip() else ""
+
     def review_item(self, p):
         pr = p["number"]
         diff = self.gh(["pr", "diff", str(pr)], timeout=60)[1]
+        if not diff.strip():
+            # GitHub did not answer: the diff is taken from the local repo, so the
+            # reviewer still gets the change of the PR to look at (Refs #1795).
+            diff = self.local_pr_diff(p)
         lim = int(self.R.get("review_diff_max_kb", 120)) * 1024
         raw_diff = diff.encode("utf-8")
         if len(raw_diff) > lim:

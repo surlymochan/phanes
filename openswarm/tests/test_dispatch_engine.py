@@ -428,6 +428,31 @@ class ReviewGate(Base):
             return 0, json.dumps(issues_by_n.get(n, {"state": "OPEN", "body": "orig"})), ""
         return [("pr list", (0, json.dumps(prs), "")), ("issue view", view)]
 
+    def test_the_review_task_carries_a_local_diff_when_github_is_out_of_reach(self):
+        # gh pr diff failed (no network): the diff is taken from the local repo,
+        # so the reviewer still gets the change of the PR to look at (Refs #1795).
+        p = pr(40, 400)
+        rules = [("pr diff", (1, "", "Could not resolve host: github.com")),
+                 ("cat-file", (0, "", "")),
+                 ("merge-base", (0, "c" * 40 + "\n", "")),
+                 ("diff", (0, "diff --git a/x b/x\n+the local diff\n", ""))]
+        d = self.make(rules)
+
+        item = d.review_item(p)
+
+        self.assertIn("the local diff", item["body"])
+
+    def test_a_head_that_is_not_in_the_local_repo_gives_no_diff(self):
+        # the local repo does not know the head: no diff is invented
+        p = pr(41, 401)
+        rules = [("pr diff", (1, "", "Could not resolve host: github.com")),
+                 ("cat-file", (1, "", "unknown revision"))]
+        d = self.make(rules)
+
+        item = d.review_item(p)
+
+        self.assertNotIn("diff --git", item["body"])
+
     def test_conflict_checked_before_reviewed_skip(self):
         # PR 10 was APPROVED at this head but went CONFLICTING after a sibling merge: it must get a rebase task.
         d = self.make(self.rules([pr(10, 100, mergeable="CONFLICTING")], reviews={"10": {"sha": SHA, "verdict": "APPROVE"}}))

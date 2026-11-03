@@ -76,6 +76,25 @@ class WorkspaceTest(unittest.TestCase):
                                         cwd=self.repo, text=True).split()
         self.assertEqual(files, ["pkg/real.txt"])
 
+    def test_build_artifacts_are_never_committed(self):
+        # a compiled shared object of a test run must not reach the commit (Refs #1795)
+        write(os.path.join(self.repo, ".gitignore"), "node_modules/\n*.so\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ignore", cwd=self.repo)
+        ws = xs.prepare_workspace(self.repo, "artifacts", True)
+        write(os.path.join(ws["root"], "pkg", "mod-00000000.so"), "not a real library")
+        write(os.path.join(ws["root"], "pkg", "real.txt"), "real change")
+        fin = xs.finalize_workspace(ws, "artifacts", "codex", self.rdir, keep=False)
+        files = subprocess.check_output(["git", "show", "--name-only", "--format=", fin["commit"]],
+                                        cwd=self.repo, text=True).split()
+        self.assertEqual(files, ["pkg/real.txt"])
+
+    def test_the_repository_ignores_compiled_objects(self):
+        # the rule that keeps the .so of a test run out of every commit
+        ignore = os.path.join(HERE, "..", "..", ".gitignore")
+        rules = [line.strip() for line in open(ignore, encoding="utf-8") if line.strip()]
+        self.assertIn("*.so", rules)
+
     def test_workspace_prepare_runs_in_worktree_and_replaces_dependency_link(self):
         home = os.path.join(self.tmp, "home")
         write(os.path.join(home, "policy.local.json"), json.dumps({"workspace": {

@@ -5,3 +5,7 @@ openswarm/bench/**/results/raw*/
 # The quota-reclaim drill sandbox is a local artifact: it holds throwaway lane
 # homes, repos and evidence, and must never dirty the working tree.
 .openswarm-tmp/
+
+# Compiled objects of a test run are local artifacts: they must never reach a
+# commit (the ones that slipped in before are removed with this rule).
+*.so

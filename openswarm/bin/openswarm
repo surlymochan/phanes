@@ -11675,6 +11675,7 @@ def cmd_fleet_render_lanes(args):
 FLEET_HEALTH_PAUSE_TTL = 1800
 FLEET_HEALTH_TIMEOUT = 30
 FLEET_HEALTH_STATE_FILE = "fleet-health.json"
+FLEET_LEASE_STATE_FILE = "lease-audit-state.json"
 FLEET_HEALTH_REASON = "auto:health"
 FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "unreachable": 2, "hard": 3}
 
@@ -11761,8 +11762,12 @@ def fleet_health_state_load(home=None):
     return hosts if isinstance(hosts, dict) else {}
 
 
-def fleet_health_state_save(hosts, home=None):
-    jsave(fleet_health_state_path(home), {"hosts": hosts, "updated_at": NOW()})
+def fleet_health_state_save(hosts, home=None, leases=None):
+    """Remember the SSH failure streaks and the lease numbers of the round."""
+    payload = {"hosts": hosts, "updated_at": NOW()}
+    if isinstance(leases, dict):
+        payload["leases"] = leases
+    jsave(fleet_health_state_path(home), payload)
 
 
 def fleet_health_apply(store, row, active, moment):
@@ -11802,6 +11807,46 @@ def fleet_health_status(rows):
         if FLEET_HEALTH_STATUS_RANK.get(row["status"], 0) > FLEET_HEALTH_STATUS_RANK[worst]:
             worst = row["status"]
     return worst
+
+
+def dispatch_lease_audit_module():
+    """The lease audit module (lib/dispatch/lease_audit.py), loaded by path."""
+    name = "openswarm_dispatch_lease_audit"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "lease_audit.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def fleet_health_leases(home=None, now=None):
+    """The lease numbers of the local lease stores (read-only).
+
+    The audit never writes a lease: it looks at the leases and at the runs and
+    says how many ghost leases there are and how long the cards waited for
+    their lease.  The stores are read by ``lib/dispatch/lease_audit.py``, the
+    same reader the periodic audit (``tools/lease-audit.py``) uses, so both
+    count the same leases.
+
+    The rolling window comes from the state the periodic audit leaves behind;
+    without that state the window is empty -- it is never filled with the
+    stock of the lease file.
+    """
+    audit = dispatch_lease_audit_module()
+    directory = home or DATA
+    moment = NOW() if now is None else now
+    leases = audit.read_leases(directory)
+    runs = audit.read_lane_state(os.path.join(directory, "state.json"))
+    runs.extend(audit.read_runs(os.path.join(directory, "runs")))
+    result = audit.audit(leases, runs, moment)
+    history = jload(os.path.join(directory, FLEET_LEASE_STATE_FILE), {}) or {}
+    return {"ok": not result["alerts"],
+            "metrics": result["metrics"],
+            "window_24h": audit.window_metrics(history, moment),
+            "alerts": result["alerts"]}
 
 
 def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
@@ -11850,12 +11895,14 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         remembered[name] = {"ssh_fail_streak": row["metrics"].get("ssh_fail_streak", 0),
                             "status": row["status"], "updated_at": moment}
         rows.append(row)
-    fleet_health_state_save(remembered, home)
+    leases = fleet_health_leases(home, moment)
+    fleet_health_state_save(remembered, home, leases)
     report = {"ok": all(row["status"] == "ok" for row in rows),
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits,
-              "hosts": rows}
+              "hosts": rows,
+              "leases": leases}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -11866,6 +11913,12 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
             print(f"  metrics: {metrics}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
+    lease_metrics = leases["metrics"]
+    print(f"leases: ghost={lease_metrics.get('ghost_leases', 0)} "
+          f"dual_claims={lease_metrics.get('dual_claims', 0)} "
+          f"dual_executions={lease_metrics.get('dual_executions', 0)} "
+          f"wait_avg={lease_metrics.get('wait_avg_s')}s "
+          f"wait_max={lease_metrics.get('wait_max_s')}s")
     print(f"{len(rows)} host(s) probed, status={report['status']}")
     return report
 
