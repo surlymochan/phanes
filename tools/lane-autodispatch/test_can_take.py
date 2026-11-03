@@ -167,13 +167,12 @@ class VerifyCardTest(unittest.TestCase):
         self.assertTrue(any("verify #2 rejected" in m and "目标 PR" in m for m in logs))
 
 
-class TickVerifyDispatchTest(unittest.TestCase):
-    """tick() level proof: a valid verify card reaches a review lane only, an invalid card reaches
-    no lane at all, and a work card of the same pin class is dispatched first."""
+class TickHarness:
+    """The faked side effects of one dispatch tick (GitHub, ssh, dispatch)."""
 
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
 
-    def run_tick(self, issues, lanes=None):
+    def run_tick(self, issues, lanes=None, state=None):
         """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
         dispatched, logs, edits = [], [], []
 
@@ -218,11 +217,16 @@ class TickVerifyDispatchTest(unittest.TestCase):
                 # tick() writes lanes-status.json without closing it: the warning is pre-existing
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", ResourceWarning)
-                    AUTODISPATCH.tick(dict(lanes or self.LANES), {}, 0)
+                    AUTODISPATCH.tick(dict(lanes or self.LANES), dict(state or {}), 0)
         finally:
             for name, value in saved.items():
                 setattr(AUTODISPATCH, name, value)
         return dispatched, logs
+
+
+class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
+    """tick() level proof: a valid verify card reaches a review lane only, an invalid card reaches
+    no lane at all, and a work card of the same pin class is dispatched first."""
 
     def test_share_keeps_both_classes_moving_during_floods(self):
         old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
@@ -291,6 +295,53 @@ class TickVerifyDispatchTest(unittest.TestCase):
         # the pin class still comes first (autodispatch-backend-fallback.md rule 1), the verify card
         # goes to the review lane and the cross-pin p0 work card to the remaining codex lane
         self.assertEqual(dispatched, [("CX2", 1), ("CX10", 2)])
+
+
+class TickWorkClassCapTest(TickHarness, unittest.TestCase):
+    """Refs #1864: the work class cap is a limit, not a preference.
+
+    The work class may hold at most `total - reserve` lanes. With `work_slots == 0` the work
+    cards wait: they are not dispatched on any lane, while the verify class still takes the
+    reserved lane."""
+
+    def busy_work_state(self):
+        """CX10 holds a work run: the work class is at its cap (2 lanes - 1 reserved = 1 lane)."""
+        return {"CX10": {"issue": 9, "run": "run-9", "host": "h10", "base": "b" * 40,
+                         "at": "2026-01-01 00:00:00", "verify": None, "class": "work"}}
+
+    def with_share(self, fn):
+        """Run one tick with the queue share policy enabled (the switch is off by default)."""
+        old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
+        AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
+        try:
+            return fn()
+        finally:
+            AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = old
+
+    def test_work_card_is_not_dispatched_when_the_work_class_is_at_its_cap(self):
+        dispatched, logs = self.with_share(
+            lambda: self.run_tick([issue(10, "普通工作卡", ("lane-ready",))], self.LANES, self.busy_work_state()))
+        self.assertEqual(dispatched, [])  # the work class holds its cap: the work card waits
+        self.assertTrue(any("work class at its cap" in line for line in logs))
+
+    def test_work_card_is_dispatched_while_the_work_class_has_a_slot(self):
+        dispatched, _ = self.with_share(
+            lambda: self.run_tick([issue(10, "普通工作卡", ("lane-ready",))], self.LANES, {}))
+        self.assertEqual(dispatched, [("CX2", 10)])  # work_slots > 0: the dispatch is unchanged
+
+    def test_the_cap_stops_the_second_work_card_of_the_same_tick(self):
+        # two work cards, two lanes: the work class may hold one lane (total - reserve), the
+        # second card waits for a free lane
+        dispatched, _ = self.with_share(
+            lambda: self.run_tick([issue(10, "普通工作卡", ("lane-ready",)),
+                                   issue(11, "普通工作卡", ("lane-ready",))], self.LANES, {}))
+        self.assertEqual(dispatched, [("CX2", 10)])
+
+    def test_the_verify_card_still_takes_the_reserved_lane_under_the_cap(self):
+        dispatched, _ = self.with_share(
+            lambda: self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+                                   self.LANES, self.busy_work_state()))
+        self.assertEqual(dispatched, [("CX2", 1)])  # the cap limits the work class only
 
 
 if __name__ == "__main__":

@@ -44,12 +44,20 @@ verify_slots = reserve - verify_busy     # 验证类还剩的保底车道
 work_slots   = total - reserve - work_busy # 工作类还剩的车道
 ```
 
-`reserve` 至少留一个车道给另一类（`total - 1`），所以**车道不足时不会锁死全部派发**：保底
-车道上没有对应类别的卡时，另一类照常派发。
+`reserve` 至少留一个车道给另一类（`total - 1`），所以**车道不足时不会锁死全部派发**：工作类
+的上限至少留一条车道，验证类的保底份额先满足；保底车道上没有验证类卡时，该车道照常派工作卡
+（工作类未达上限时）。
+
+### 工作类上限是硬上限（Refs #1864）
+
+`work_slots == 0`（工作类已占满 `total - reserve` 条车道）时**不派发工作卡**：工作卡等待车道
+释放，直到有车道空出来。上限是限流（cap），不是排序偏好——只把工作卡排到前面（`preferred=false`）
+时工作卡仍会被派发，上限没有落实。验证类不受影响：保底份额内的 review 车道照常派发验证卡。
 
 ### 优先级合成顺序（与既有排序规则的合成）
 
-1. **类别准入**：验证类在保底车道（`verify_slots > 0` 且是 review 车道）上先于工作类；
+1. **类别准入**：验证类在保底车道（`verify_slots > 0` 且是 review 车道）上先于工作类；工作类达
+   上限（`work_slots == 0`）时不派发工作卡；
 2. **pin 类别**：own pin → unpinned → cross-pin（[`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)）；
 3. **同类别内**：`prio`（p0 < p1 < p2 < 无）→ issue 号；同一 pin 类别与 prio 下工作类先于验证类（`rank()`）。
 
@@ -78,10 +86,11 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 
 生效与让行都写日志（`~/phanes-ctl/autodispatch/autodispatch.log`）：
 
-- `queue share: <lane> prefers verify|work (verify deficit=…, work slots=…); other class yields` —— 份额生效、另一类让行；
+- `queue share: <lane> prefers verify (verify deficit=…, work slots=…); other class yields` —— 份额生效、另一类让行；
+- `queue share: <lane> work class at its cap (work slots=0, verify deficit=…); N work card(s) wait` —— 工作类达上限，工作卡等待；
 - `queue share: dispatched <class> #<n> on <lane>` —— 本次派发的类别。
 
-离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含工作洪峰 / 验证洪峰两个场景）。
+离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含工作洪峰 / 验证洪峰 / 工作类上限三个场景）。
 
 ## PR 提交前校验（Refs #1704）
 

@@ -410,8 +410,10 @@ cards.
 
 The share is computed from the idle lanes and the runs in flight (lanes that are paused, in
 host backoff or in error are not counted); it is never a global static number, and it never
-locks all dispatching when there are too few lanes. Configuration (all read from the
-environment at AD start-up):
+locks all dispatching when there are too few lanes. The work class cap is a real limit: when
+`work_slots == 0` (the work class already holds `total - reserve` lanes) no work card is
+dispatched on any lane, the work cards wait for a free lane; the reserved share of the verify
+class is not affected. Configuration (all read from the environment at AD start-up):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -432,10 +434,11 @@ export AD_VERIFY_SHARE_ENABLED=1     # optional: AD_VERIFY_SHARE=0.2 AD_VERIFY_M
 ```
 
 The AD log (`~/phanes-ctl/autodispatch/autodispatch.log`) records every share decision
-(`queue share: <lane> prefers verify|work (...); other class yields`) and the class of every
-dispatched card (`queue share: dispatched <class> #<n> on <lane>`). The priority composition
-order (class admission → pin class → priority/number) and the offline proof are documented in
-[`tools/lane-autodispatch/README.md`](../tools/lane-autodispatch/README.md).
+(`queue share: <lane> prefers verify (...); other class yields`), every work class cap
+(`queue share: <lane> work class at its cap (work slots=0, ...); N work card(s) wait`) and the
+class of every dispatched card (`queue share: dispatched <class> #<n> on <lane>`). The priority
+composition order (class admission → pin class → priority/number) and the offline proof are
+documented in [`tools/lane-autodispatch/README.md`](../tools/lane-autodispatch/README.md).
 
 ```bash
 python3 tools/lane-autodispatch/test_can_take.py

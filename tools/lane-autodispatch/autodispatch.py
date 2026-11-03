@@ -989,12 +989,21 @@ def tick(lanes, state, last_warn):
             idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
                     and res[name].get("lane") == "idle" and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
-            # Admission precedes existing pin/priority/work/number ordering. Borrow unused
-            # capacity when the preferred class has no eligible card on this lane.
-            preferred = True if verify_slots and is_review_lane(L) else False if not work_slots else None
-            if preferred is not None and any(bool(i.get("verify")) == preferred for i in candidates):
+            # The work class may hold at most `total - reserve` lanes: with no work slot left it takes
+            # no further lane, the work cards in flight keep the lanes they hold (Refs #1864). The cap
+            # is a limit, not a preference: a waiting work card is not dispatched on any lane.
+            if not work_slots:
+                waiting = [i for i in candidates if not i.get("verify")]
+                if waiting:
+                    log(f"queue share: {L} work class at its cap (work slots=0, verify deficit={verify_slots}); "
+                        f"{len(waiting)} work card(s) wait", brain=False)
+                candidates = [i for i in candidates if i.get("verify")]
+            # Admission precedes existing pin/priority/work/number ordering. The verify class takes
+            # the reserved lane first; the work class never crosses its cap.
+            preferred = True if verify_slots and is_review_lane(L) else None
+            if preferred and any(bool(i.get("verify")) == preferred for i in candidates):
                 candidates.sort(key=lambda i: bool(i.get("verify")) != preferred)
-                log(f"queue share: {L} prefers {'verify' if preferred else 'work'} (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
+                log(f"queue share: {L} prefers verify (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
         for c in candidates:
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break

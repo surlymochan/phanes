@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from unittest import mock
 
 
@@ -601,6 +602,91 @@ class PauseLaneServeAssignTests(unittest.TestCase):
     def test_the_lane_serve_resolves_its_host_from_the_dispatch_configuration(self):
         self.assertEqual(cli.lane_host_identity(self.lane), "ib1")
         self.assertEqual(cli.lane_host_identity({"name": "L1", "host": "explicit"}), "explicit")
+
+
+class WorkClassCapTickTests(unittest.TestCase):
+    """Refs #1864: the work class cap of the queue share policy is a real limit.
+
+    The tick is the real one: only the GitHub/ssh/dispatch side effects are faked, so the
+    category admission of `tools/lane-autodispatch/autodispatch.py` is the shipped one. The work
+    class may hold at most `total - reserve` lanes; with no work slot left the work cards wait."""
+
+    LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
+    WORK_BODY = "普通工作卡"
+    VERIFY_BODY = "## Verify Intent\n目标 PR: #1785\n证据要求:\n- [ ] 测试结果\n- [ ] 复现步骤"
+
+    def issue(self, number, body, labels=("lane-ready",)):
+        return {"number": number, "title": f"card {number}", "body": body, "labels": list(labels)}
+
+    def tick(self, issues, state=None):
+        """One dispatch tick with the GitHub/ssh/dispatch side effects faked."""
+        dispatched = []
+
+        def fake_gh(args, timeout=60):
+            if args[:2] == ["issue", "list"]:
+                return 0, json.dumps(issues), ""
+            if args[:2] == ["issue", "view"]:
+                number = int(args[2])
+                labels = next((row["labels"] for row in issues if row["number"] == number), [])
+                return 0, json.dumps({"number": number, "state": "OPEN",
+                                      "labels": [{"name": name} for name in labels]}), ""
+            return 0, "", ""
+
+        def fake_dispatch(lane, cfg, item, base):
+            dispatched.append((lane, item["n"]))
+            return "run-1", None
+
+        patched = ("D", "gh", "sh", "log", "host_ok", "host_fail", "host_good", "remote", "deps_met",
+                   "dispatch", "replenish", "save_state", "status_snapshot")
+        saved = {name: getattr(autodispatch, name) for name in patched}
+        old_share = autodispatch.AD_VERIFY_SHARE_ENABLED
+        autodispatch.AD_VERIFY_SHARE_ENABLED = True
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                autodispatch.D = scratch
+                autodispatch.gh = fake_gh
+                autodispatch.sh = lambda *a, **k: (0, "0" * 40 + "\n", "")
+                autodispatch.log = lambda msg, brain=True: None
+                autodispatch.host_ok = lambda host: True
+                autodispatch.host_fail = lambda host, why: None
+                autodispatch.host_good = lambda host: None
+                autodispatch.remote = lambda lane, cfg, run="": {"lane": "idle"}
+                autodispatch.deps_met = lambda item: True
+                autodispatch.dispatch = fake_dispatch
+                autodispatch.replenish = lambda k, state: []
+                autodispatch.save_state = lambda state: None
+                autodispatch.status_snapshot = lambda *a, **k: {}
+                autodispatch.VERIFY_REJECT_LOGGED.clear()
+                # tick() writes lanes-status.json without closing it: the warning is pre-existing
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", ResourceWarning)
+                    autodispatch.tick(dict(self.LANES), dict(state or {}), 0)
+        finally:
+            autodispatch.AD_VERIFY_SHARE_ENABLED = old_share
+            for name, value in saved.items():
+                setattr(autodispatch, name, value)
+        return dispatched
+
+    def busy_work_state(self):
+        """CX10 holds a work run: the work class is at its cap (2 lanes - 1 reserved = 1 lane)."""
+        return {"CX10": {"issue": 9, "run": "run-9", "host": "h10", "base": "b" * 40,
+                         "at": "2026-01-01 00:00:00", "verify": None, "class": "work"}}
+
+    def test_a_work_card_is_not_dispatched_when_the_work_class_is_at_its_cap(self):
+        dispatched = self.tick([self.issue(10, self.WORK_BODY)], self.busy_work_state())
+
+        self.assertEqual(dispatched, [])
+
+    def test_a_work_card_is_dispatched_while_the_work_class_has_a_slot(self):
+        dispatched = self.tick([self.issue(10, self.WORK_BODY)])
+
+        self.assertEqual(dispatched, [("CX2", 10)])
+
+    def test_the_verify_card_still_takes_the_reserved_lane_under_the_cap(self):
+        dispatched = self.tick([self.issue(1, self.VERIFY_BODY, ("lane-ready", "verify-intent"))],
+                                self.busy_work_state())
+
+        self.assertEqual(dispatched, [("CX2", 1)])
 
 
 if __name__ == "__main__":
