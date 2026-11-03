@@ -649,7 +649,7 @@ in the box runtime (`~/phanes-ctl/bin/autodispatch.py`) and is not mirrored yet.
 
 ## 幽灵 in-progress 判定与重贴处置 (Refs #922)
 
-现场双模式运行中，常见 issue 带有 `in-progress` 标签但 `state.json` 无对应 lane 记录（如 runner 异常退出、lane state 被清理或调度中断）。`lane-autodispatch` 的 `DISPATCH_EXCLUDING_LABELS`（`tools/lane-autodispatch/autodispatch.py:20`）包含 `in-progress`，`dispatchable_issue`（`tools/lane-autodispatch/autodispatch.py:73-76`）因此跳过这类 issue：它既不会被再次调度，也没有 worker 在处理，沦为“幽灵 in-progress”（ghost in-progress）。
+现场双模式运行中，常见 issue 带有 `in-progress` 标签但 `state.json` 无对应 lane 记录（如 runner 异常退出、lane state 被清理或调度中断）。`lane-autodispatch` 的 `DISPATCH_EXCLUDING_LABELS`（`tools/lane-autodispatch/autodispatch.py:22`）包含 `in-progress`，`dispatchable_issue`（`tools/lane-autodispatch/autodispatch.py:73-76`）因此跳过这类 issue：它既不会被再次调度，也没有 worker 在处理，沦为“幽灵 in-progress”（ghost in-progress）。
 
 ### 判定原理 (offline detection)
 
@@ -758,7 +758,7 @@ python3 tools/check-ad-review-pause-uncounted.py
 
 再用临时目录 + 假 `gh`/`ssh` 打桩调用 `finish_review` 的无 verdict 分支：暂停命中时
 `reviews.json` 里该 PR 的 fails 不变、日志含暂停专有标记与 `not counted`；未命中时 fails+1。
-夹具用 AD 真实的 `at` 派发时间（`%F %T` 墙钟串，`tools/lane-autodispatch/autodispatch.py:598`）
+夹具用 AD 真实的 `at` 派发时间（`%F %T` 墙钟串，`tools/lane-autodispatch/autodispatch.py:837`）
 与生产格式的暂停记录（`{"from": "%Y-%m-%d %H:%M:%S", "to": …, "gap_s": N}`，样本见
 `openswarm/tests/test_dispatch_pause_window.py`）。
 

@@ -73,7 +73,7 @@ def check(condition, message):
 def wall(stamp):
     """The AD's wall clock format: `time.strftime("%F %T")`.
 
-    The dispatch time is stored that way (`tools/lane-autodispatch/autodispatch.py:598`,
+    The dispatch time is stored that way (`tools/lane-autodispatch/autodispatch.py:837`,
     `openswarm/lib/dispatch/engine.py:1814`) and the AD-parity dispatcher reads it back
     as the run start when the run info carries no timestamps
     (`openswarm/lib/dispatch/engine.py:1244`).
@@ -144,7 +144,7 @@ def pause_row(start, gap_s):
 def lane_state(host, dispatch, run="review-run-1"):
     """The AD lane record of a dispatched review run.
 
-    `at` is the AD's dispatch wall clock (`tools/lane-autodispatch/autodispatch.py:598`,
+    `at` is the AD's dispatch wall clock (`tools/lane-autodispatch/autodispatch.py:837`,
     `openswarm/lib/dispatch/engine.py:1814`); `review_pr`/`review_sha` identify the
     reviewed PR (`openswarm/lib/dispatch/engine.py:1814`,
     `openswarm/tests/test_dispatch_engine.py:497`). `started_at`/`dispatched_at` are

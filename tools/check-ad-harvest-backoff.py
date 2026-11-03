@@ -93,7 +93,12 @@ class FakeHarvest:
         return 0, "", ""
 
     def lane_failed_edits(self):
-        return [c for c in self.gh_calls if "edit" in c and "lane-failed" in c]
+        """Issue edits that add the `lane-failed` label (removing it does not count)."""
+        edits = []
+        for call in self.gh_calls:
+            if "edit" not in call or "--add-label" not in call: continue
+            if "lane-failed" in call[call.index("--add-label") + 1:]: edits.append(call)
+        return edits
 
     def comments(self):
         return [c for c in self.gh_calls if "comment" in c]
@@ -141,7 +146,7 @@ def check_transient_sequence(module, scratch_root):
 
         # the first N failures only log and back off, the issue stays untouched
         for cycle in range(1, threshold + 1):
-            assert module.finish(LANE, CFG, lane_state, INFO, state) is False, cycle
+            assert module.finish(LANE, CFG, lane_state, INFO, state)["done"] is False, cycle
             assert lane_state["fetch_failures"] == cycle, lane_state
             assert module.lane_in_fetch_backoff(lane_state) is True, lane_state
             assert not harvest.lane_failed_edits(), harvest.gh_calls
@@ -151,7 +156,7 @@ def check_transient_sequence(module, scratch_root):
             assert (pathlib.Path(raw) / "state.json").is_file(), "the lane state must stay in the scratch dir"
 
         # the failure past the threshold gives up on the issue
-        assert module.finish(LANE, CFG, lane_state, INFO, state) is True
+        assert module.finish(LANE, CFG, lane_state, INFO, state)["done"] is True
         assert lane_state.get("fetch_failures") is None, lane_state
         assert module.lane_in_fetch_backoff(lane_state) is False, lane_state
         assert harvest.lane_failed_edits(), harvest.gh_calls
@@ -169,7 +174,7 @@ def check_fatal_error(module, scratch_root):
         lane_state = state[LANE]
         harvest.fetch_error = FATAL_ERROR
 
-        assert module.finish(LANE, CFG, lane_state, INFO, state) is True
+        assert module.finish(LANE, CFG, lane_state, INFO, state)["done"] is True
         assert harvest.lane_failed_edits(), harvest.gh_calls
         assert harvest.comments(), harvest.gh_calls
         assert lane_state.get("fetch_failures") is None, lane_state
@@ -185,7 +190,7 @@ def check_success_resets(module, scratch_root):
         lane_state["fetch_backoff_until"] = time.time() + 600
         harvest.fetch_error = ""
 
-        assert module.finish(LANE, CFG, lane_state, INFO, state) is True
+        assert module.finish(LANE, CFG, lane_state, INFO, state)["done"] is True
         assert lane_state.get("fetch_failures") is None, lane_state
         assert module.lane_in_fetch_backoff(lane_state) is False, lane_state
         assert not harvest.lane_failed_edits(), harvest.gh_calls
