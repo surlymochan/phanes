@@ -14,10 +14,12 @@
         "lib/dispatch/burn.py",
         "lib/dispatch/fallback.py",
         "lib/dispatch/retry.py",
+        "lib/procboundary.py",
         "tests/test_autodispatch.py",
         "tests/test_dispatch_burn.py",
         "tests/test_dispatch_fallback.py",
-        "tests/test_dispatch_retry.py"
+        "tests/test_dispatch_retry.py",
+        "tests/test_procboundary.py"
       ]
     }
   }
