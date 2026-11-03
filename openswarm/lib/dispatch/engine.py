@@ -88,6 +88,8 @@ def dispatch_module(name):
 def failure_reasons():
     """The canonical run-ending reason module (lib/dispatch/failure_reason.py)."""
     return dispatch_module("failure_reason")
+def risk_feedback_module():
+    return dispatch_module("risk_feedback")
 
 
 def _load_ci_checks():
@@ -391,7 +393,8 @@ if R:
       "started":r.get("started") if r.get("started") is not None else rs.get("started"),
       "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
       "seconds":r.get("seconds"),
-      "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
+      "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None,
+      "risk_blocks":r.get("risk_blocks") or []}
   else:
     out["run"]="running"
     try:
@@ -454,6 +457,7 @@ class Dispatcher:
         self.rev_lock = threading.RLock()
         self.inode = {"t": 0.0, "low": False}
         self.last_leak_sweep = 0.0
+        self.last_risk_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
@@ -765,6 +769,28 @@ class Dispatcher:
         rx = (self.cfg.get("never_take_re") or {}).get(backend)
         return not (rx and re.search(rx, item["title"] + "\n" + item["body"], re.I))
 
+    def risk_reroute_possible(self, lanes, item, blocked):
+        """Can the card still be dispatched to a backend other than the one that blocked it?
+
+        A reroute only helps when another backend can take the card: a card pinned
+        to one backend (`strict-backend`) or a fleet with a single backend has
+        nowhere else to go.  Excluding the blocked backend there would strand the
+        card in `lane-ready` forever instead of failing it (#1597).
+        """
+        for lane, lc in lanes.items():
+            if lc.get("backend") == blocked:
+                continue
+            if self.can_take(lc.get("backend"), item):
+                return True
+        return False
+
+    def risk_blocked_here(self, lanes, item, backend, state):
+        """True when the card was risk-blocked on `backend` and can be rerouted elsewhere."""
+        blocked = (state.get("_risk_backend") or {}).get(str(item["n"]))
+        if not blocked or blocked != backend:
+            return False
+        return self.risk_reroute_possible(lanes, item, blocked)
+
     def rank(self, backend, item):
         if item["backend"] == backend:
             g = 0
@@ -873,6 +899,30 @@ class Dispatcher:
             self.gh_write(["issue", "edit", str(n), "--remove-label", self.L["in_progress"]])
             self.log(f"leak-sweep: #{n} had {self.L['in_progress']} but no lane holds it (idle {int(age)}s) → removed")
 
+    def sweep_closed_risk_state(self, state, q):
+        """Drop the risk-blocked bookkeeping of cards that were closed in the meantime.
+
+        A card a human closed must not keep its backend rotation, its retry
+        budget and its blocked commands: re-opening it starts a fresh attempt
+        instead of a card that is already out of retries (#1597).
+        """
+        if self.clock() - self.last_risk_sweep < 300:
+            return
+        self.last_risk_sweep = self.clock()
+        pending = set()
+        for name in ("_risk_backend", "_retry_attempts", "_risk_feedback"):
+            pending.update(str(k) for k in (state.get(name) or {}))
+        if not pending:
+            return
+        live = {str(i["n"]) for i in q}
+        for key in sorted(pending - live):
+            if not key.isdigit():
+                continue
+            st, _ = self.issue_labels(int(key))
+            if st == "CLOSED":
+                self.clear_risk_state(state, key)
+                self.log(f"risk-sweep: #{key} was closed → dropped its backend rotation / retry budget / notes")
+
     # ------------------------------------------------------------ LRU
     def lru_picker(self):
         if self._lru_picker is None:
@@ -882,7 +932,8 @@ class Dispatcher:
     # ------------------------------------------------------------ dispatch one task
     def task_text(self, item):
         n = item["n"]
-        return f"# #{n} {item['title']}\n\n{item['body']}\n\n{self.cfg['templates']['rules'].format(n=n)}\n"
+        feedback = risk_feedback_module().render(item.get("risk_notes"))
+        return f"# #{n} {item['title']}\n\n{item['body']}\n\n{self.cfg['templates']['rules'].format(n=n)}\n{feedback}"
 
     def main_sha(self):
         rc, out, err = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git",
@@ -981,6 +1032,19 @@ class Dispatcher:
     @staticmethod
     def mark_done(state, n):
         state["_done"] = (state.get("_done", []) + [n])[-200:]
+
+    @staticmethod
+    def clear_risk_state(state, n):
+        """Forget the risk-blocked bookkeeping of a card.
+
+        The backend rotation, the retry budget and the blocked commands only
+        belong to the retry sequence of one card; when that sequence ends (PR
+        opened, card failed, card closed) they must not leak into a later,
+        manually triggered attempt (#1597).
+        """
+        key = str(n)
+        for name in ("_risk_backend", "_retry_attempts", "_risk_feedback"):
+            (state.get(name) or {}).pop(key, None)
 
     def age_s(self, st):
         try:
@@ -1540,6 +1604,7 @@ class Dispatcher:
                     note = f" [failure_reason={reason}; error={detail}]" if reason else ""
                     self.log(f"{lane} #{n} push failed after PR already exists/issue closed "
                              f"({(err or '').strip()[-120:] or 'empty err'}); clearing lane{note}")
+                    self.clear_risk_state(state, n)
                     self.mark_done(state, n)
                     return True
                 ls = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git", f"refs/heads/{b}"], timeout=30)[1]
@@ -1578,6 +1643,7 @@ class Dispatcher:
             rc, out, err = self.gh(["pr", "create", "--base", self.cfg["base_branch"], "--head", b, "--title", title, "--body", body])
             url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
             self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
+            self.clear_risk_state(state, n)
             # the run kept its commit: a run that did not end cleanly still says why
             reason, detail = self.end_reason(lane, lc, run, info, "the lane commit was kept and a PR was opened")
             if rc:
@@ -1614,7 +1680,36 @@ class Dispatcher:
                          f"[failure_reason={reason}; error={detail}]")
                 return True
             requeue_classes = (self.cfg.get("quota") or {}).get("requeue_classes", ["rate_limit", "quota"])
-            if error_class in requeue_classes:
+            risk_label = None
+            if error_class == "risk_blocked":
+                # retry table: risk_blocked = {"max": 1, "then": "reroute"} (#1510).
+                # The first block requeues the card on another backend and carries the
+                # blocked operation into the next task; the second block is terminal.
+                key = str(n)
+                feedback = state.setdefault("_risk_feedback", {})
+                feedback[key] = risk_feedback_module().accumulate(feedback.get(key), info)
+                attempts = state.setdefault("_retry_attempts", {})
+                count = int(attempts.get(key) or 0)
+                action, counted = dispatch_module("retry").decide(error_class, count, status=info.get("status"))
+                if counted:
+                    attempts[key] = count + 1
+                if action == "requeue":
+                    state.setdefault("_risk_backend", {})[key] = info.get("backend") or lc.get("backend")
+                    self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
+                    self.gh(["issue", "comment", str(n), "--body",
+                             f"Lane {lane} was blocked by risk controls. Requeued once (another backend takes it "
+                             f"when one can) with the blocked operation listed in the next task."])
+                    risk_label = L["ready"]
+                else:
+                    self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
+                    self.gh(["issue", "comment", str(n), "--body",
+                             f"Lane {lane} was blocked by risk controls again after one reroute. Label `{L['failed']}`; re-add `{L['ready']}` to retry."])
+                    # A terminal failure ends this retry sequence. If the card is
+                    # manually requeued later it must start with a clean backend
+                    # rotation and retry budget.
+                    self.clear_risk_state(state, key)
+                    risk_label = L["failed"]
+            elif error_class in requeue_classes:
                 self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
                 self.gh(["issue", "comment", str(n), "--body",
                          f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
@@ -1626,8 +1721,10 @@ class Dispatcher:
                          f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
                          f"(error_class `{error_class}`).\n\nExecutor summary: {info.get('summary')}\n\n"
                          f"Label `{L['failed']}`; re-add `{L['ready']}` to retry."])
+                # the card failed for another reason: the risk-blocked sequence is over
+                self.clear_risk_state(state, n)
             self.mark_done(state, n)
-            label = L["ready"] if error_class in requeue_classes else L["failed"]
+            label = risk_label or (L["ready"] if error_class in requeue_classes else L["failed"])
             reason, detail = self.run_failure(info)
             # The run record keeps the reason even when the executor wrote none.
             self.record_failure(lane, lc, run, reason, detail, harvest=False)
@@ -1887,6 +1984,7 @@ class Dispatcher:
                                                            title=p["title"], sha=p["headRefOid"], file=f, issue=issue, diff=diff)
         body += self.evidence_inputs(p, stats)
         body += self.evidence_instruction(pr, self.evidence_path(pr))
+        body += risk_feedback_module().render((self.load_reviews().get(str(pr)) or {}).get("risk_feedback"))
         return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True}
 
     def evidence_path(self, pr):
@@ -2079,6 +2177,18 @@ class Dispatcher:
             self.quota_lane_guard(lane, lc, info)
         pr, sha = st["review_pr"], st["review_sha"]
         r = self.load_reviews().get(str(pr)) or {}
+        # A review can finish after the PR was merged, including when the lane
+        # produced no verdict. Clear feedback before the no-verdict retry path.
+        rc, cur, _ = self.gh(["pr", "view", str(pr), "--json", "state"])
+        try:
+            pr_state = json.loads(cur).get("state")
+        except Exception:
+            pr_state = None
+        if rc == 0 and pr_state == "MERGED":
+            r.pop("risk_feedback", None)
+            self.put_review(pr, r)
+            self.log(f"review PR #{pr} by {lane}: PR MERGED; verdict discarded")
+            return True
         txt = ""
         ev_txt = ""
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
@@ -2099,6 +2209,8 @@ class Dispatcher:
             reason, detail = self.run_failure(info, None, self.ending_detail(
                 info, f"review produced no verdict file ({error_class or 'no error class'})"))
             self.record_failure(lane, lc, st.get("run"), reason, detail, harvest=False)
+            if error_class == "risk_blocked":
+                r["risk_feedback"] = risk_feedback_module().accumulate(r.get("risk_feedback"), info)
             if error_class == "vm_paused":
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/vm_paused); "
                          f"VM pause (not counted), will retry [failure_reason={reason}; error={detail}]")
@@ -2135,6 +2247,9 @@ class Dispatcher:
             return False
         if cj.get("state") != "OPEN":
             self.log(f"review PR #{pr} by {lane}: PR {cj.get('state')}; verdict discarded")
+            if cj.get("state") == "MERGED":
+                r.pop("risk_feedback", None)
+                self.put_review(pr, r)
             return True
         if status.head_changed(sha, cj.get("headRefOid")):
             self.log(f"review PR #{pr} by {lane}: PR {cj.get('state')} / head moved ({sha[:8]}→{str(cj.get('headRefOid'))[:8]}); verdict discarded")
@@ -2187,6 +2302,7 @@ class Dispatcher:
         self.gh(["pr", "comment", str(pr), "--body", comment])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
                   "fails_sha": sha, "fail_classes": []})
+        r.pop("risk_feedback", None)
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -2414,7 +2530,8 @@ class Dispatcher:
                     or self.paused_lane(L, lc) or lc.get("drain")):
                 continue
             pick = None
-            for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(lc["backend"], i)),
+            for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(lc["backend"], i)
+                             and not self.risk_blocked_here(lanes, i, lc.get("backend"), state)),
                             key=lambda i: self.rank(lc["backend"], i)):
                 if self.hot_lock.blocked(self.hot_of(c["body"])):
                     continue
@@ -2429,6 +2546,7 @@ class Dispatcher:
                 self.note_stale_skip(c["n"], state)
             if not pick:
                 continue
+            pick["risk_notes"] = state.get("_risk_feedback", {}).get(str(pick["n"]), [])
             if base is None:
                 try:
                     base = self.main_sha()
@@ -2526,6 +2644,10 @@ class Dispatcher:
             return res
         for i in q:
             i["deps_ok"] = self.deps_met(i)
+        try:
+            self.sweep_closed_risk_state(state, q)
+        except Exception as e:
+            self.log(f"risk-sweep exc: {e!r}", brain=False)
         blocked = sum(not i["deps_ok"] for i in q)
         try:
             self.dispatch_reviews(lanes, res, state, q)
