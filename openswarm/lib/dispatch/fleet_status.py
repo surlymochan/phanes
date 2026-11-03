@@ -33,6 +33,10 @@ Sections
 ``needs_human``  how many pull requests wait for a human
 ``pauses``       the PAUSE switches that are currently on
 
+``merge_backlog`` is an optional section (Refs #1696): the open lane pull
+requests that wait for something, the stage each one waits in and how long it
+waits there.  It only shows up when a merge backlog source was collected.
+
 Usage::
 
     report = fleet_status.aggregate(sections, now=epoch)
@@ -62,6 +66,7 @@ __all__ = [
     "iso",
     "lane_data",
     "make_section",
+    "merge_backlog_line",
     "needs_human_data",
     "pause_data",
     "pool_data",
@@ -96,6 +101,7 @@ SECTION_LABELS = {
     "burn": "烧量",
     "needs_human": "待人工",
     "pauses": "开关",
+    "merge_backlog": "积压",
 }
 
 # The marker of a section that could not be collected.
@@ -686,6 +692,29 @@ def _pause_line(data: Dict[str, Any]) -> str:
     return "count=%d%s" % (data.get("count", 0), (" " + " ".join(names)) if names else "")
 
 
+def merge_backlog_line(data: Dict[str, Any]) -> str:
+    """The merge backlog line: the queue, one entry per waiting pull request.
+
+    The entries carry their stage and their dwell time, and the entries that
+    are over their threshold are counted: a queue that is not named in the
+    brain log is a queue nobody reads.
+    """
+    rows = data.get("rows") or []
+    parts = ["count=%d" % data.get("count", 0)]
+    for row in rows[:4]:
+        summary = row.get("summary")
+        if summary:
+            parts.append(str(summary))
+    if len(rows) > 4:
+        parts.append("+%d" % (len(rows) - 4))
+    overdue = data.get("overdue") or []
+    if overdue:
+        parts.append("超时=%d" % len(overdue))
+    if data.get("unknown"):
+        parts.append("unknown=%d" % data["unknown"])
+    return " ".join(parts)
+
+
 _LINE_BUILDERS = {
     "lanes": _lane_line,
     "pool": _pool_line,
@@ -694,6 +723,7 @@ _LINE_BUILDERS = {
     "burn": _burn_line,
     "needs_human": _needs_human_line,
     "pauses": _pause_line,
+    "merge_backlog": merge_backlog_line,
 }
 
 

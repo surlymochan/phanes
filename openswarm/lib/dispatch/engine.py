@@ -1570,7 +1570,8 @@ class Dispatcher:
                 # only the failure-limit label is ours to lift (a CHANGES-round escalation stays for a human)
                 if self.gh_write(["pr", "edit", str(p["number"]), "--remove-label", L["needs_human"]])[0] == 0:
                     labs.discard(L["needs_human"])
-                    self.merge_review(p["number"], {"needs_human_sha": None, "needs_human_reason": None})
+                    self.merge_review(p["number"], {"needs_human_sha": None, "needs_human_reason": None,
+                                                    "needs_human_at": None})
                     self.log(f"review: PR #{p['number']} head moved; removed {L['needs_human']} (failure limit starts over)", brain=False)
             if L["needs_human"] in labs or p["number"] in busy_pr:
                 continue
@@ -2003,6 +2004,9 @@ class Dispatcher:
                 self.gh(["pr", "edit", str(pr), "--add-label", L["needs_human"]])
                 r["needs_human_reason"] = "rounds"    # a human escalation: never lifted automatically
                 r["needs_human_sha"] = sha
+                # The moment the label went on: the merge backlog counts the
+                # waiting from here, not from the verdict before it (Refs #1696).
+                r["needs_human_at"] = time.strftime("%F %T")
                 self.log(f"review PR #{pr}: CHANGES round {r['rounds']} (issue {n}) → {L['needs_human']}")
             else:
                 iv = self.gh(["issue", "view", str(n), "--json", "body"])[1]
@@ -2040,6 +2044,9 @@ class Dispatcher:
         if self.gh_write(["pr", "edit", str(p["number"]), "--add-label", self.L["needs_human"]])[0] == 0:
             review["needs_human_sha"] = head
             fields = {"needs_human_sha": head}
+            # The moment the label went on: the merge backlog counts the
+            # waiting from here, not from the verdict before it (Refs #1696).
+            fields["needs_human_at"] = time.strftime("%F %T")
             if review.get("needs_human_reason") != "rounds":
                 fields["needs_human_reason"] = "fails"   # ours to lift once the head moves
             self.merge_review(p["number"], fields)

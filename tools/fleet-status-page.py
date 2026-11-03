@@ -16,6 +16,8 @@ Usage:
   fleet-status-page.py [--lanes-status FILE] [--gh-issues FILE] [--gh-prs FILE]
                        [--capacity FILE] [--capacity-db FILE] [--hosts FILE]
                        [--broker-log FILE] [--pauses DIR] [--markers DIR]
+                       [--gh-lane-prs FILE] [--gh-lane-issues FILE] [--reviews FILE]
+                       [--ci-policy FILE]
                        [--gh-live] [--now ISO] [--max-age SECONDS]
                        [--out FILE] [--no-write] [--print text|json] [--self-test]
 
@@ -32,6 +34,16 @@ seconds.
 
 ``--gh-live`` reads the pool and the needs-human count from GitHub with the
 ``gh`` CLI; without it the tool never touches the network.
+
+The merge backlog section (``--gh-lane-prs`` plus ``--gh-lane-issues``, or
+``--gh-live``) is optional: without those inputs the section does not show up
+at all, because a merge queue that was not read says nothing.  It lists the
+open pull requests whose card carries the ``lane-pr`` label, the stage each
+one waits in (等首审 / 等复审 / 审查 CHANGES 待修复 / CI 未绿 / 已批待合并 /
+等人工裁决) and how long it waits there.  The rows that are over their
+threshold (two hours for an approved pull request, a day for every other
+stage) are named in the brain log.  ``--reviews`` adds the verdict times of
+the dispatcher, ``--ci-policy`` the ignore rules of the merge gate.
 """
 
 from __future__ import annotations
@@ -51,10 +63,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 MODULE_PATH = ROOT / "openswarm" / "lib" / "dispatch" / "fleet_status.py"
+BACKLOG_PATH = ROOT / "openswarm" / "lib" / "dispatch" / "merge_backlog.py"
 
 spec = importlib.util.spec_from_file_location("openswarm_dispatch_fleet_status", MODULE_PATH)
 fleet_status = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet_status)
+
+backlog_spec = importlib.util.spec_from_file_location("openswarm_dispatch_merge_backlog",
+                                                       BACKLOG_PATH)
+merge_backlog = importlib.util.module_from_spec(backlog_spec)
+backlog_spec.loader.exec_module(merge_backlog)
 
 GH_TIMEOUT = 60
 DEFAULT_HOME = Path(os.environ.get("OPENSWARM_HOME", Path.home() / ".claude/openswarm"))
@@ -400,6 +418,95 @@ def section_pauses(args, now):
     return data, stamp if stamp is not None else now, "pause store + PAUSE markers"
 
 
+def merge_backlog_sources(args):
+    """True when a merge backlog reading was configured.
+
+    The section is optional: without a source there is nothing to say about
+    the merge queue, and a missing source is not an unverified reading.
+    """
+    return bool(getattr(args, "gh_lane_prs", None) or getattr(args, "gh_lane_issues", None)
+                or getattr(args, "gh_live", False))
+
+
+def read_reviews(path):
+    """Read the review ledger of the dispatcher (``reviews.json``).
+
+    The ledger is optional: without it the review verdicts are read from the
+    commit status of the pull request, which says *that* a verdict exists but
+    not when it was written.
+    """
+    if not path:
+        return None
+    ledger, _mtime = read_json(path)
+    if not isinstance(ledger, dict):
+        raise RuntimeError("the review ledger must hold a JSON object")
+    return ledger
+
+
+def read_ci_policy(path):
+    """Read the CI ignore/advisory policy of the merge gate.
+
+    The policy has the shape of the ``review`` part of the dispatch config
+    (``ignore_red_re``, ``advisory_checks``).  Without it nothing is ignored:
+    the backlog then shows every red check, which is the safe direction.
+    """
+    if not path:
+        return {}
+    policy, _mtime = read_json(path)
+    if not isinstance(policy, dict):
+        raise RuntimeError("the CI policy must hold a JSON object")
+    return policy
+
+
+def section_merge_backlog(args, now):
+    """The merge queue: the open lane pull requests that wait for something.
+
+    The reading has two halves: the open pull requests and the cards that
+    carry the ``lane-pr`` label.  A pull request is in the queue when its card
+    carries that label, so a pull request whose card never entered the lane
+    queue is not part of the backlog.  The review ledger of the dispatcher adds
+    the verdict times when it was collected.
+    """
+    if getattr(args, "gh_lane_prs", None):
+        prs, pr_stamp = read_json(args.gh_lane_prs)
+        pr_source = "gh pr list --state open"
+    elif getattr(args, "gh_live", False):
+        prs = run_gh(["pr", "list", "--state", "open", "--limit", "200", "--json",
+                      "number,title,url,labels,body,headRefName,headRefOid,isDraft,"
+                      "mergeable,reviewDecision,statusCheckRollup,createdAt,updatedAt"])
+        pr_stamp = now
+        pr_source = "gh pr list --state open"
+    else:
+        raise RuntimeError("no merge backlog source configured (--gh-lane-prs or --gh-live)")
+    if not isinstance(prs, list):
+        raise RuntimeError("the pull request source must hold a JSON array of pull requests")
+
+    if getattr(args, "gh_lane_issues", None):
+        cards, card_stamp = read_json(args.gh_lane_issues)
+        card_source = "gh issue list --label lane-pr"
+    elif getattr(args, "gh_live", False):
+        cards = run_gh(["issue", "list", "--label", "lane-pr", "--state", "open",
+                        "--limit", "500", "--json",
+                        "number,title,state,labels,body,updatedAt"])
+        card_stamp = now
+        card_source = "gh issue list --label lane-pr"
+    else:
+        raise RuntimeError("no merge backlog card source configured "
+                           "(--gh-lane-issues or --gh-live)")
+    if not isinstance(cards, list):
+        raise RuntimeError("the card source must hold a JSON array of issues")
+
+    ledger = read_reviews(getattr(args, "reviews", None))
+    policy = read_ci_policy(getattr(args, "ci_policy", None))
+    data = merge_backlog.section_data(prs, cards, ledger, now,
+                                       policy=policy, offset=getattr(args, "tz", None),
+                                       review_source=ledger is not None)
+    stamps = [stamp for stamp in (pr_stamp, card_stamp) if stamp is not None]
+    stamp = min(stamps) if stamps else now
+    source = pr_source + " + " + card_source
+    return data, stamp, source
+
+
 COLLECTORS = (
     ("lanes", "车道忙闲与在途卡", section_lanes, "lanes-status.json"),
     ("pool", "池深度（gh 口径 / AD _ready 双口径）", section_pool,
@@ -411,6 +518,14 @@ COLLECTORS = (
     ("pauses", "PAUSE 开关清单", section_pauses, "pause store + PAUSE markers"),
 )
 
+# The sections that only show up when their source was configured.  A missing
+# source is not a failed reading: there is nothing to say about the merge
+# queue when nobody collected it.
+OPTIONAL_COLLECTORS = (
+    ("merge_backlog", "合并积压（等哪一步 / 停了多久）", section_merge_backlog,
+     "gh pr list --state open + gh issue list --label lane-pr"),
+)
+
 
 def build_page(args, now):
     """Collect every section and assemble the page.
@@ -420,7 +535,10 @@ def build_page(args, now):
     kept as well, so the reader still sees the numbers next to the mark.
     """
     sections = []
-    for key, title, collector, default_source in COLLECTORS:
+    collectors = list(COLLECTORS)
+    if merge_backlog_sources(args):
+        collectors.extend(OPTIONAL_COLLECTORS)
+    for key, title, collector, default_source in collectors:
         try:
             data, stamp, source = collector(args, now)
         except SectionError as error:
@@ -449,13 +567,28 @@ def write_page(report, path):
     return target
 
 
+def merge_backlog_rows(report):
+    """The merge backlog rows of a page, empty when the section is missing."""
+    for section in report.get("sections") or []:
+        if section.get("key") == "merge_backlog":
+            return (section.get("data") or {}).get("rows") or []
+    return []
+
+
 def append_brain_log(report, path):
-    """Append the one-screen summary to a brain log file."""
+    """Append the one-screen summary to a brain log file.
+
+    The rows of the merge backlog that are over their threshold are named on
+    their own lines: a backlog that is not named in the brain log is a backlog
+    nobody reads.
+    """
     target = Path(path)
     if target.parent and not target.parent.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "a", encoding="utf-8") as stream:
         stream.write(report["text"] + "\n")
+        for line in merge_backlog.brain_log_lines(merge_backlog_rows(report)):
+            stream.write(line + "\n")
     return target
 
 
@@ -541,9 +674,42 @@ def self_test():
         assert undated["sections"][1]["verified"] is False, undated
         assert undated["sections"][1]["data"]["gh"]["ready"] == 1, undated
         assert "未核实" in undated["text"], undated["text"]
+
+        # The merge backlog: the open lane pull requests that wait for something.
+        # The card of a pull request has its own number: an issue and a pull
+        # request share one number space in a repository.
+        (root / "gh-lane-prs.json").write_text(json.dumps([
+            {"number": 1632, "state": "OPEN", "title": "thin card", "body": "Closes #1626",
+             "labels": [{"name": "needs-human"}], "createdAt": "2026-11-01T10:00:00Z",
+             "updatedAt": "2026-11-02T09:00:00Z", "statusCheckRollup": [
+                 {"context": "external-lane/contract", "state": "FAILURE"}]},
+            {"number": 1635, "state": "MERGED", "title": "merged", "body": "Closes #1630",
+             "mergedAt": "2026-11-01T12:00:00Z"}]), encoding="utf-8")
+        (root / "gh-lane-issues.json").write_text(json.dumps([
+            {"number": 1626, "state": "OPEN", "labels": [{"name": "lane-pr"}]}]),
+            encoding="utf-8")
+        (root / "reviews.json").write_text(json.dumps(
+            {"1632": {"sha": "a" * 40, "verdict": "CHANGES", "at": "2026-11-01 18:34:11",
+                       "needs_human_at": "2026-11-01 18:34:11"}}),
+            encoding="utf-8")
+        args.gh_lane_prs = str(root / "gh-lane-prs.json")
+        args.gh_lane_issues = str(root / "gh-lane-issues.json")
+        args.reviews = str(root / "reviews.json")
+        args.ci_policy = None
+        queued = build_page(args, 1793624700.0)
+        assert queued["summary"]["total"] == 8, queued["summary"]
+        backlog = queued["sections"][-1]
+        assert backlog["key"] == "merge_backlog", backlog
+        assert backlog["data"]["count"] == 1, backlog["data"]
+        assert backlog["data"]["overdue"] == [1632], backlog["data"]
+        assert "[积压]" in queued["text"], queued["text"]
+        log = root / "brain.log"
+        append_brain_log(queued, str(log))
+        written = log.read_text(encoding="utf-8")
+        assert "合并积压点名 #1632 等人工裁决（薄卡豁免） 停留26h30m（阈值 24h00m）" in written, written
     print("fleet status page self-test: 7 sections, dual pool reading, oldest reservation, "
-          "burn window, pause switches, a broken section and an undated snapshot "
-          "all passed")
+          "burn window, pause switches, a broken section, an undated snapshot and the "
+          "merge backlog all passed")
 
 
 def main(argv=None):
@@ -559,7 +725,15 @@ def main(argv=None):
     parser.add_argument("--broker-log", help="the MiniMax broker request log (JSONL)")
     parser.add_argument("--pauses", help="the pause store directory")
     parser.add_argument("--markers", help="the dispatcher directory with the PAUSE markers")
-    parser.add_argument("--gh-live", action="store_true", help="read the pool and needs-human from GitHub")
+    parser.add_argument("--gh-lane-prs", help="JSON file with the open pull requests "
+                                               "(the merge backlog reading)")
+    parser.add_argument("--gh-lane-issues", help="JSON file with the cards that carry "
+                                                  "the lane-pr label")
+    parser.add_argument("--reviews", help="the review ledger of the dispatcher (reviews.json)")
+    parser.add_argument("--ci-policy", help="JSON file with the CI ignore/advisory policy "
+                                            "of the merge gate")
+    parser.add_argument("--gh-live", action="store_true",
+                        help="read the pool, needs-human and the merge backlog from GitHub")
     parser.add_argument("--now", help="the time the page belongs to (ISO-8601), default: now")
     parser.add_argument("--tz", help="the timezone of the naive source stamps (+08:00), default: local")
     parser.add_argument("--max-age", type=float, default=fleet_status.DEFAULT_MAX_AGE_S,

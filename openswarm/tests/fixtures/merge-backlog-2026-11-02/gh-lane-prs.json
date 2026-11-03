@@ -1,0 +1,237 @@
+[
+  {
+    "number": 1632,
+    "title": "chatgpt-agent: 补齐 external lane 回放与自检",
+    "url": "https://github.com/surlymochan/phanes/pull/1632",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1626\n\nExternal lane **chatgpt-agent** (contract v1).\n\n补齐 external lane 回放与自检。",
+    "headRefName": "fleet/chatgpt-agent-issue1626-20261101-101400",
+    "headRefOid": "2c4543ecaac779fb29499807c89c8a704a846e25",
+    "labels": [
+      {
+        "name": "needs-human"
+      }
+    ],
+    "reviewDecision": "CHANGES_REQUESTED",
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [
+      {
+        "__typename": "StatusContext",
+        "context": "external-lane/contract",
+        "state": "FAILURE",
+        "targetUrl": "https://github.com/surlymochan/phanes/pull/1632/checks"
+      },
+      {
+        "__typename": "StatusContext",
+        "context": "lane-review",
+        "state": "FAILURE",
+        "targetUrl": "https://github.com/surlymochan/phanes/pull/1632/checks"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "Phanes components",
+        "workflowName": "Phanes components",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "startedAt": "2026-11-01T10:20:00Z",
+        "completedAt": "2026-11-01T10:26:00Z"
+      }
+    ],
+    "createdAt": "2026-11-01T10:14:00Z",
+    "updatedAt": "2026-11-02T09:00:00Z"
+  },
+  {
+    "number": 1633,
+    "title": "openswarm(pi): #1592 dispatch 引擎：paused_lane 同时读 PauseStore（TTL/scope）与旧 PAUSE-* 标记",
+    "url": "https://github.com/surlymochan/phanes/pull/1633",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1627\n\nAutodispatched to lane **M2** on **gores1** (pi/MiniMax-M3.1-Flash), run `20261102-145000`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: 派发引擎补齐 PAUSE 读取路径。",
+    "headRefName": "fleet/M2-issue1627-20261102-145000",
+    "headRefOid": "a3a196e576cb482a3dec163b779d1bbc3423ac33",
+    "labels": [
+      {
+        "name": "lane-reviewed"
+      }
+    ],
+    "reviewDecision": "APPROVED",
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [
+      {
+        "__typename": "StatusContext",
+        "context": "lane-review",
+        "state": "SUCCESS",
+        "targetUrl": "https://github.com/surlymochan/phanes/pull/1633/checks"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "Phanes components",
+        "workflowName": "Phanes components",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "startedAt": "2026-11-02T09:50:00Z",
+        "completedAt": "2026-11-02T09:56:00Z"
+      }
+    ],
+    "createdAt": "2026-11-02T06:51:00Z",
+    "updatedAt": "2026-11-02T10:04:12Z"
+  },
+  {
+    "number": 1634,
+    "title": "openswarm(agy): #907 AD git_ssh_command：ProxyCommand 空格必须 shlex 引用否则 harvest 失败",
+    "url": "https://github.com/surlymochan/phanes/pull/1634",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1628\n\nAutodispatched to lane **CX5** on **gocc** (agy/gemini-3.8-flash-medium), run `20261101-145300`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: harvest 失败的 ProxyCommand 引用修复。",
+    "headRefName": "fleet/CX5-issue1628-20261101-145300",
+    "headRefOid": "19bae1bccd13bf14c2a4e08e9d7a042dfad2e5ce",
+    "labels": [],
+    "reviewDecision": "",
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "Phanes components",
+        "workflowName": "Phanes components",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "startedAt": "2026-11-01T07:10:00Z",
+        "completedAt": "2026-11-01T07:16:00Z"
+      }
+    ],
+    "createdAt": "2026-11-01T07:00:00Z",
+    "updatedAt": "2026-11-01T07:16:00Z"
+  },
+  {
+    "number": 1635,
+    "title": "openswarm(agy): #244 双模式：一份运维检查清单 checklist.md",
+    "url": "https://github.com/surlymochan/phanes/pull/1635",
+    "state": "MERGED",
+    "isDraft": false,
+    "body": "Closes #1629\n\nAutodispatched to lane **A1** on **gocc** (agy/gemini-3.8-flash-medium), run `20261101-104600`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: 双模式运维检查清单。",
+    "headRefName": "fleet/A1-issue1629-20261101-104600",
+    "headRefOid": "67deb417b8b051a4bbd4588e577681187f9a8b5c",
+    "labels": [
+      {
+        "name": "lane-reviewed"
+      }
+    ],
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "Phanes components",
+        "workflowName": "Phanes components",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "startedAt": "2026-11-01T11:40:00Z",
+        "completedAt": "2026-11-01T11:46:00Z"
+      }
+    ],
+    "createdAt": "2026-11-01T04:00:00Z",
+    "updatedAt": "2026-11-01T12:00:00Z",
+    "mergedAt": "2026-11-01T12:00:00Z"
+  },
+  {
+    "number": 1636,
+    "title": "openswarm(agy): #774 Boss make_brief：期次锚点与 diagnosis periods 对齐",
+    "url": "https://github.com/surlymochan/phanes/pull/1636",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1630\n\nAutodispatched to lane **M4** on **gores1** (pi/MiniMax-M3.1-Flash), run `20261101-122300`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: 期次锚点与 diagnosis periods 对齐。",
+    "headRefName": "fleet/M4-issue1630-20261101-122300",
+    "headRefOid": "53d07a90a475cb961c9999810054de51d91782f3",
+    "labels": [],
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [],
+    "createdAt": "2026-11-01T04:30:00Z",
+    "updatedAt": "2026-11-01T12:00:00Z"
+  },
+  {
+    "number": 1637,
+    "title": "openswarm(agy): #1373 upstream(openbot)：把 phanes 专用的 org-health-local 移出 openbot/ 目录",
+    "url": "https://github.com/surlymochan/phanes/pull/1637",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1631\n\nAutodispatched to lane **M1** on **gores1** (pi/MiniMax-M3.1-Flash), run `20261102-153400`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: org-health-local 目录搬迁。",
+    "headRefName": "fleet/M1-issue1631-20261102-153400",
+    "headRefOid": "c47d3b1c325177b2dc57744af8b252a4fc1ca703",
+    "labels": [],
+    "mergeable": "UNKNOWN",
+    "createdAt": "2026-11-02T07:34:00Z",
+    "updatedAt": "2026-11-02T07:40:00Z"
+  },
+  {
+    "number": 1638,
+    "title": "openswarm(pi): #1392 upstream(openswarm)：通用 inode 守卫——host probe 报 inode、95% 停派/92% 恢复",
+    "url": "https://github.com/surlymochan/phanes/pull/1638",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1625\n\nAutodispatched to lane **CX1** on **gocc** (codex/gpt-6.1-terra), run `20261102-155800`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: 通用 inode 守卫。",
+    "headRefName": "fleet/CX1-issue1625-20261102-155800",
+    "headRefOid": "15e28d7e9dcbf35f129fe817a933894275a1daaf",
+    "labels": [
+      {
+        "name": "lane-reviewed"
+      }
+    ],
+    "reviewDecision": "APPROVED",
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [
+      {
+        "__typename": "StatusContext",
+        "context": "lane-review",
+        "state": "SUCCESS",
+        "targetUrl": "https://github.com/surlymochan/phanes/pull/1638/checks"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "Phanes components",
+        "workflowName": "Phanes components",
+        "status": "COMPLETED",
+        "conclusion": "FAILURE",
+        "startedAt": "2026-11-02T08:40:00Z",
+        "completedAt": "2026-11-02T08:47:00Z"
+      }
+    ],
+    "createdAt": "2026-11-02T07:58:00Z",
+    "updatedAt": "2026-11-02T08:47:00Z"
+  },
+  {
+    "number": 1639,
+    "title": "openswarm(pi): #1627 Review PR #1627: Add lane budget timeout report (Refs #1605)",
+    "url": "https://github.com/surlymochan/phanes/pull/1639",
+    "state": "OPEN",
+    "isDraft": false,
+    "body": "Closes #1624\n\nAutodispatched to lane **CX2** on **gocc** (codex/gpt-6.1-terra), run `20261102-041800`, base `4e43191a`, lane status `success`, host verify rc `0`.\n\nExecutor summary: 审查 #1627 的交付。",
+    "headRefName": "fleet/CX2-issue1624-20261102-041800",
+    "headRefOid": "14194fd421702060fe5a2b17fe3359043d16b339",
+    "labels": [
+      {
+        "name": "lane-reviewed"
+      }
+    ],
+    "reviewDecision": "APPROVED",
+    "mergeable": "MERGEABLE",
+    "statusCheckRollup": [
+      {
+        "__typename": "StatusContext",
+        "context": "lane-review",
+        "state": "SUCCESS",
+        "targetUrl": "https://github.com/surlymochan/phanes/pull/1639/checks"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "Phanes components",
+        "workflowName": "Phanes components",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "startedAt": "2026-11-02T12:55:00Z",
+        "completedAt": "2026-11-02T13:00:00Z"
+      }
+    ],
+    "createdAt": "2026-11-02T04:18:00Z",
+    "updatedAt": "2026-11-02T13:00:00Z"
+  }
+]

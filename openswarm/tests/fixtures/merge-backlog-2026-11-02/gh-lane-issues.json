@@ -1,0 +1,114 @@
+[
+  {
+    "number": 1626,
+    "state": "OPEN",
+    "title": "chatgpt-agent: 回放 external lane 契约",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:chatgpt-agent"
+      }
+    ],
+    "updatedAt": "2026-11-01T10:34:00Z"
+  },
+  {
+    "number": 1627,
+    "state": "OPEN",
+    "title": "dispatch 引擎：paused_lane 同时读 PauseStore（TTL/scope）与旧 PAUSE-* 标记",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:pi"
+      }
+    ],
+    "updatedAt": "2026-11-02T10:04:00Z"
+  },
+  {
+    "number": 1628,
+    "state": "OPEN",
+    "title": "AD git_ssh_command：ProxyCommand 空格必须 shlex 引用否则 harvest 失败",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:agy"
+      }
+    ],
+    "updatedAt": "2026-11-01T07:00:00Z"
+  },
+  {
+    "number": 1629,
+    "state": "CLOSED",
+    "title": "双模式：一份运维检查清单 checklist.md",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:agy"
+      }
+    ],
+    "updatedAt": "2026-11-01T12:00:00Z"
+  },
+  {
+    "number": 1630,
+    "state": "OPEN",
+    "title": "Boss make_brief：期次锚点与 diagnosis periods 对齐",
+    "labels": [
+      {
+        "name": "lane-ready"
+      },
+      {
+        "name": "backend:pi"
+      }
+    ],
+    "updatedAt": "2026-11-01T12:00:00Z"
+  },
+  {
+    "number": 1631,
+    "state": "OPEN",
+    "title": "upstream(openbot)：把 phanes 专用的 org-health-local 移出 openbot/ 目录",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:agy"
+      }
+    ],
+    "updatedAt": "2026-11-02T07:40:00Z"
+  },
+  {
+    "number": 1625,
+    "state": "OPEN",
+    "title": "upstream(openswarm)：通用 inode 守卫——host probe 报 inode、95% 停派/92% 恢复",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:codex"
+      }
+    ],
+    "updatedAt": "2026-11-02T08:47:00Z"
+  },
+  {
+    "number": 1624,
+    "state": "OPEN",
+    "title": "Review PR #1627: Add lane budget timeout report (Refs #1605)",
+    "labels": [
+      {
+        "name": "lane-pr"
+      },
+      {
+        "name": "backend:codex"
+      }
+    ],
+    "updatedAt": "2026-11-02T13:00:00Z"
+  }
+]
