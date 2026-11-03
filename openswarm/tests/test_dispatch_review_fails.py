@@ -29,7 +29,7 @@ def pr(n, issue_n, labels=(), head=SHA):
             "isDraft": False, "mergeable": "MERGEABLE",
             "statusCheckRollup": [{"name": "linux-0", "conclusion": "SUCCESS"},
                                   {"name": "OpenSwarm tests (macos-latest)", "conclusion": "FAILURE"}],
-            "labels": [{"name": l} for l in labels], "body": f"Closes #{issue_n}"}
+            "labels": [{"name": l} for l in labels], "body": f"Closes #{issue_n}", "createdAt": "2026-11-02T00:00:00Z"}
 
 
 class Base(unittest.TestCase):

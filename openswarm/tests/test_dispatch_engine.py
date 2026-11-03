@@ -49,7 +49,7 @@ def pr(n, issue_n, mergeable="MERGEABLE", checks=("SUCCESS",), head=SHA, branch=
     roll.append({"name": "OpenSwarm tests (macos-latest)", "conclusion": "FAILURE"})
     return {"number": n, "title": f"pr {n}", "headRefName": branch or f"fleet/M5-issue{issue_n}-r1", "headRefOid": head,
             "isDraft": False, "mergeable": mergeable, "statusCheckRollup": roll,
-            "labels": [{"name": l} for l in labels], "body": f"Closes #{issue_n}"}
+            "labels": [{"name": l} for l in labels], "body": f"Closes #{issue_n}", "createdAt": "2026-11-02T00:00:00Z"}
 
 
 class Base(unittest.TestCase):
