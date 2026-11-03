@@ -13642,14 +13642,20 @@ def card_lint_rules(policy):
 def card_lint_acceptance_commands(text):
     """Return the acceptance commands a card declares."""
     commands = []
+    active = False
     for raw in text.splitlines():
         line = raw.strip()
-        for prefix in CARD_LINT_ACCEPTANCE_PREFIXES:
-            if line.lower().startswith(prefix.lower()):
-                command = line[len(prefix):].strip()
-                if command:
-                    commands.append(command)
-                break
+        if re.match(r"^#{1,6}\s+", line):
+            active = bool(re.match(r"^#{1,6}\s*(?:验收|acceptance)(?:\b|\s|$)", line, re.I))
+            continue
+        prefix = next((p for p in CARD_LINT_ACCEPTANCE_PREFIXES if line.lower().startswith(p.lower())), None)
+        if prefix:
+            active = True
+            line = line[len(prefix):].strip()
+        elif not active:
+            continue
+        if line:
+            commands.append(re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", line))
     return commands
 
 
@@ -13660,11 +13666,18 @@ def card_lint_body_lines(text):
     and the rules are card scaffolding; what is left describes the change itself.
     """
     lines = []
+    scaffold = False
     for raw in text.splitlines():
         line = raw.strip()
+        if line.startswith("#"):
+            scaffold = bool(re.match(r"^#{1,6}\s*(?:失败模式清单|验收|acceptance)", line, re.I))
+            continue
+        if scaffold or "docs/defect-patterns.md" in line:
+            continue
         if not line or line.startswith("#") or line.lower().startswith("labels:"):
             continue
         if any(line.lower().startswith(prefix.lower()) for prefix in CARD_LINT_ACCEPTANCE_PREFIXES):
+            scaffold = True
             continue
         if set(line) <= set("-*_ "):
             continue
@@ -13728,6 +13741,14 @@ def card_lint_card(text, rules):
     body = card_lint_body_lines(text)
     commands = card_lint_acceptance_commands(text)
     reasons = []
+    measurable = re.compile(r"(?:\b(?:pytest|vitest|go test|cargo test|python3? -m unittest|(?:npm|pnpm|bun) (?:run )?test|assert)\b|返回码\s*(?:为|等于|是|=)\s*\S+|输出包含\s*\S+|应为\s*\S+|必须包含\s*\S+|等于\s*\S+|\b(?:matches|equals|exit code)\s+\S+)", re.I)
+    for item in commands:
+        if not measurable.search(item):
+            reasons.append({"code": "untestable_acceptance",
+                            "detail": f"acceptance item is not measurable: {item}"})
+    if not re.search(r"^#{1,6}\s*失败模式清单\s*$", text, re.M):
+        reasons.append({"code": "missing_failure_modes",
+                        "detail": "the card has no '失败模式清单' section"})
     if not card_lint_has_title(text):
         reasons.append({"code": "missing_title", "detail": "the card has no '# ' title line"})
     if not card_lint_has_labels(text):

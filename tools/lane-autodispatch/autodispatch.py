@@ -926,6 +926,13 @@ def tick(lanes, state, last_warn):
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
 
+def preflight_card(text):
+    result = subprocess.run([f"{LOCAL}/openswarm/bin/openswarm", "card-lint", "/dev/stdin"],
+                            input=text, text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f"card preflight rejected: {result.stdout.strip()} {result.stderr.strip()}")
+
+
 def file_issue(text, extra=()):
     lines = text.splitlines()
     title = lines[0].lstrip("# ").strip(); labels = [l.strip() for l in lines[1].split(":", 1)[1].split(",") if l.strip()]
@@ -946,7 +953,12 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 <任务正文：要改的文件路径、具体改动、边界；不得依赖其它未完成任务>
 
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
+
+## 失败模式清单
+对照 docs/defect-patterns.md 检查相关失败模式。
 ```
+
+每条验收须有明确判定方法；提交前逐卡运行 openswarm/bin/openswarm card-lint。
 
 要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 openswarm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
 
@@ -964,7 +976,10 @@ def replenish(k, state):
     bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
         if len(out) >= k: return out
-        try: out.append(file_issue(open(f"{bd}/{f}").read()))
+        try:
+            text = open(f"{bd}/{f}").read()
+            preflight_card(text)
+            out.append(file_issue(text))
         except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
         os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
     G = ["git", "-C", "/workspace/phanes-repo"]
@@ -975,10 +990,11 @@ def replenish(k, state):
         if len(out) >= k: break
         if path in imp: continue
         rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        imp.append(path); save_state(state)
         try:
             if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
+            preflight_card(text)
             out.append(file_issue(text))
+            imp.append(path); save_state(state)
         except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])

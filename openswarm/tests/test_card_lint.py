@@ -178,8 +178,35 @@ class CardLintPolicyTests(unittest.TestCase):
         self.assertEqual(rules["thin_keywords"], xs.CARD_LINT_DEFAULTS["thin_keywords"])
         self.assertEqual(rules["weak_acceptance_re"], xs.CARD_LINT_DEFAULTS["weak_acceptance_re"])
 
+
+class CardPreReviewTests(unittest.TestCase):
+    def test_unmeasurable_acceptance_is_rejected_with_the_item(self):
+        card = "# Sample\nlabels: bug\n验收：功能正常\n## 失败模式清单\n参考 docs/defect-patterns.md\n"
+        reasons, _ = xs.card_lint_card(card, xs.card_lint_rules({}))
+        match = next(reason for reason in reasons if reason["code"] == "untestable_acceptance")
+        self.assertIn("功能正常", match["detail"])
+
+    def test_multiline_and_quoted_vague_items_are_rejected(self):
+        card = "# T\nlabels: p1\ncache\n验收：`pytest`\n- `功能正常`\n## 失败模式清单\n参考 docs/defect-patterns.md\n"
+        reasons, estimate = xs.card_lint_card(card, xs.card_lint_rules({}))
+        self.assertTrue(any(r["code"] == "untestable_acceptance" and "功能正常" in r["detail"] for r in reasons))
+        self.assertIn("thin_keywords", {r["code"] for r in reasons})
+        self.assertEqual(estimate, 1)
+
+    def test_unbulleted_and_command_name_only_items_are_rejected(self):
+        card = "# T\nlabels: p1\n验收：`pytest`\n功能正常\n- 使用 python 修复\n## 失败模式清单\n参考 docs/defect-patterns.md\n"
+        reasons, _ = xs.card_lint_card(card, xs.card_lint_rules({}))
+        details = [r["detail"] for r in reasons if r["code"] == "untestable_acceptance"]
+        self.assertTrue(any("功能正常" in detail for detail in details))
+        self.assertTrue(any("使用 python 修复" in detail for detail in details))
+
+    def test_missing_failure_modes_is_rejected(self):
+        card = "# Sample\nlabels: bug\n验收：`python -m unittest`\n"
+        reasons, _ = xs.card_lint_card(card, xs.card_lint_rules({}))
+        self.assertIn("missing_failure_modes", {reason["code"] for reason in reasons})
+
     def test_a_policy_floor_lets_a_small_card_through(self):
-        card = "# Title\nlabels: p1\nImplement the bounded path.\n验收：`python3 -m unittest`\n"
+        card = "# Title\nlabels: p1\nImplement the bounded path.\n验收：`python3 -m unittest`\n## 失败模式清单\n参考 docs/defect-patterns.md\n"
         reasons, estimate = xs.card_lint_card(card, xs.card_lint_rules({"acceptance": {"min_effective_diff": 1}}))
         self.assertEqual(reasons, [])
         self.assertEqual(estimate, 1)
