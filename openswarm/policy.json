@@ -111,6 +111,7 @@
       "codex"
     ],
     "large_context_tokens": 220000,
+    "planner_skip_max_difficulty": 2,
     "min_samples": 8,
     "weighted": false
   },
@@ -262,7 +263,7 @@
     "print_timeout": null
   },
   "pi": {
-    "_doc": "Opt-in executor: Pi coding agent (pi -p --mode json). Not in routing.default_order. provider/default_model null means Pi's own default. OPENSWARM_PI_BIN may point at a wrapper that takes the same flags. Quota is unknown; usage is summed from message_end events.",
+    "_doc": "Opt-in executor: Pi coding agent (pi -p --mode json). Not in routing.default_order. provider/default_model null means Pi's own default. OPENSWARM_PI_BIN may point at a wrapper that takes the same flags. Quota is unknown unless the provider publishes a balance endpoint (provider deepseek reads the DeepSeek balance); usage is summed from message_end events.",
     "provider": "minimax-cn",
     "default_model": "MiniMax-M3.1-Flash",
     "require_isolation": true

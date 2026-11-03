@@ -150,7 +150,7 @@ class RoutingScenarios(unittest.TestCase):
         self.assertEqual(
             set(decision),
             {"ok", "backend", "model", "effort", "tier", "limit_id", "fallbacks",
-             "claude_review", "reasons", "skipped", "concurrency", "profile"},
+             "claude_review", "reasons", "skipped", "concurrency", "planner", "profile"},
         )
         self.assertEqual(decision["backend"], "codex")
         self.assertEqual(decision["claude_review"], "light")
@@ -183,6 +183,23 @@ class RoutingScenarios(unittest.TestCase):
                             scenario(), POLICY)
         self.assertEqual(decision["backend"], "deepseek")
         self.assertEqual(decision["model"], "deepseek-flash")
+
+    def test_29_small_tasks_skip_the_planner(self):
+        self.assertEqual(xs.route(prof(d=2), scenario(), POLICY)["planner"], "skipped")
+        self.assertEqual(xs.route(prof(d=1), scenario(), POLICY)["planner"], "skipped")
+        self.assertEqual(xs.route(prof(d=3), scenario(), POLICY)["planner"], "used")
+
+    def test_30_planner_skip_follows_the_policy_limit(self):
+        policy = copy.deepcopy(POLICY)
+        policy["routing"]["planner_skip_max_difficulty"] = 1
+        self.assertEqual(xs.route(prof(d=2), scenario(), policy)["planner"], "used")
+        self.assertEqual(xs.route(prof(d=1), scenario(), policy)["planner"], "skipped")
+
+    def test_31_unroutable_tasks_still_report_the_planner_decision(self):
+        st = scenario(codex_week=0.97, ocgo_usage=0.9, ds_balance=3)
+        decision = xs.route(prof(d=2), st, OPT_IN_POLICY)
+        self.assertFalse(decision["ok"])
+        self.assertEqual(decision["planner"], "skipped")
 
 
 if __name__ == "__main__":

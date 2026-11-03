@@ -41,6 +41,28 @@ class RoutingSummaryTests(unittest.TestCase):
         self.assertIn("second", summary)
         self.assertNotIn("third", summary)
 
+    def test_easy_task_skips_planner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, events, swarm = root / "repo", root / "events", root / "swarm"
+            for path in (repo, events, swarm):
+                path.mkdir()
+            (swarm / "SKILL.md").write_text("# Routing rules\nRoute tasks.\n")
+            routing = {"planner_decision": lambda profile, policy: "skipped",
+                       "load_policy": lambda: {}}
+            result = type("Result", (), {"stdout": "", "stderr": "", "returncode": 0})()
+            with patch.object(arms, "OPENSWARM_DIR", swarm), \
+                 patch.object(arms.E, "sh", return_value=result), \
+                 patch("runpy.run_path", return_value=routing), \
+                 patch.object(arms, "run_pi") as planner, \
+                 patch.object(arms.subprocess, "run", return_value=result):
+                calls = arms.arm_openswarm(
+                    {"instance_id": "x", "repo": "example", "problem_statement": "Fix issue", "difficulty": 2},
+                    repo, root / "venv", events, "tid")
+            planner.assert_not_called()
+            self.assertEqual([call["label"] for call in calls], ["executor"])
+            self.assertIn("Fix issue", (events / "executor-task.md").read_text())
+
     def test_arm_uses_summary_and_120_second_planner_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

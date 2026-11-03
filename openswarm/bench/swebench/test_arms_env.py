@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent / "harness"))
 # swebench package. These tests exercise only path_env, so provide its small config API.
 sys.modules.setdefault(
     "swe_env",
-    types.SimpleNamespace(ROOT=Path.cwd(), GIT=["git"], visible_command=lambda inst, venv: ""),
+    types.SimpleNamespace(ROOT=Path.cwd(), GIT=["git"], sh=lambda *args, **kwargs: None,
+                          visible_command=lambda inst, venv: ""),
 )
 import arms
 

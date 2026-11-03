@@ -266,15 +266,26 @@ def arm_openswarm(inst, repo, venv, events, tid):
     commit = E.sh(["git", "-C", str(OPENSWARM_DIR), "rev-parse", "HEAD"]).stdout.strip()
     (events / "tool-version.json").write_text(json.dumps({"name": "openswarm", "commit": commit, "backend": "pi"}))
     t0 = time.time()
+    decision = "used"
+    if inst.get("difficulty") is not None:
+        import runpy
+        routing = runpy.run_path(str(OPENSWARM_DIR / "bin" / "openswarm"))
+        decision = routing["planner_decision"]({"difficulty": inst["difficulty"]}, routing["load_policy"]())
+    if decision == "skipped":
+        task_file.write_text(base_prompt(inst, repo, venv))
+        calls = []
+    else:
+        calls = None
     full_skill = (OPENSWARM_DIR / "SKILL.md").read_text()
     skill_mode = "full" if os.environ.get("SWEBENCH_PLANNER_SKILL") == "full" else "summary"
     skill = full_skill if skill_mode == "full" else routing_summary(full_skill)
     plan = PLANNER.format(task_file=task_file, verify_file=verify_file, python=f"{venv}/bin/python", repo=repo,
                           skill=skill, task=base_prompt(inst, repo, venv))
-    calls = [run_pi(tid + "-plan", rundir, plan, events, 120,
-                    path_env(venv, cache_root=events / "cache"), label="planner")]
-    calls[0]["prompt_chars"] = len(plan)
-    calls[0]["skill_mode"] = skill_mode
+    if calls is None:
+        calls = [run_pi(tid + "-plan", rundir, plan, events, 120,
+                        path_env(venv, cache_root=events / "cache"), label="planner")]
+        calls[0]["prompt_chars"] = len(plan)
+        calls[0]["skill_mode"] = skill_mode
     if task_file.exists():
         shutil.copy(task_file, events / "executor-task.md")
     if verify_file.exists():

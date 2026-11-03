@@ -48,6 +48,7 @@ Rate-limit (429) retries inside Pi: baseline 0 in 0 runs
 Runs whose last model call ended in an error: baseline 0
 Harness errors excluded from n: 0
 Leak scan (tool calls touching upstream mirrors, dataset or other results): none
+Shared package cache reads: 0
 """
 
 
