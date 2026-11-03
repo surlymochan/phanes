@@ -153,6 +153,224 @@ def mint_paused(scopes=None):
     scopes = paused_scopes() if scopes is None else scopes
     return "mint" in scopes
 
+# --- lane instant-failure brake (Refs #1711) ---------------------------------------------------
+# 2026-11-02 night: CX9 failed four times in a row, each within 1-2 minutes, and kept taking
+# new cards.  Every attempt burned a card and added a lane-failed label, and a human only
+# noticed 30 minutes later.  A lane that keeps failing like that is a lane-level fault: the
+# dispatcher brakes it itself instead of waiting to be told.
+#
+# A failure only counts when the run really was instant: its duration is known and at most
+# AD_LANE_FAIL_MAX_SECONDS long.  A long run without a commit is a different kind of failure
+# (the work was attempted), and a run whose duration nobody measured is not counted at all --
+# an unreadable duration must never widen the brake (Refs #1711).
+LANE_FAIL_STREAK = env_number("AD_LANE_FAIL_STREAK", 3, int)          # N consecutive instant failures
+LANE_FAIL_MAX_SECONDS = env_number("AD_LANE_FAIL_MAX_SECONDS", 180.0, float)  # the short threshold
+LANE_FAIL_COUNT_UNKNOWN = os.environ.get("AD_LANE_FAIL_COUNT_UNKNOWN", "0").lower() in {"1", "true", "yes"}
+LANE_BRAKE_REASON = "auto:lane-fail-streak"   # the body prefix of the switch the brake writes
+
+def lane_failures(state):
+    """The per-lane instant-failure counters of the dispatcher state."""
+    rows = state.get("_lane_failures")
+    if not isinstance(rows, dict):
+        rows = {}
+        state["_lane_failures"] = rows
+    return rows
+
+def lane_brakes(state):
+    """The per-lane brake records of the dispatcher state (the brakes that are on)."""
+    rows = state.get("_lane_brakes")
+    if not isinstance(rows, dict):
+        rows = {}
+        state["_lane_brakes"] = rows
+    return rows
+
+def run_seconds(info):
+    """The wall-clock seconds of a finished run (None when nobody measured the duration).
+
+    The remote projection carries `seconds`; when it is missing the start/end stamps are
+    used.  A duration that cannot be read stays unknown: it is never guessed, because the
+    short-run threshold must not be applied to a number nobody measured (Refs #1711)."""
+    info = info if isinstance(info, dict) else {}
+    seconds = info.get("seconds")
+    if isinstance(seconds, bool): seconds = None
+    if isinstance(seconds, (int, float)) and seconds >= 0: return float(seconds)
+    started, finished = info.get("started"), info.get("finished")
+    if isinstance(started, bool) or isinstance(finished, bool): return None
+    if isinstance(started, (int, float)) and isinstance(finished, (int, float)) and finished >= started:
+        return float(finished - started)
+    return None
+
+def instant_failure(info, max_seconds=None, count_unknown=None):
+    """Whether a run that ended without a commit counts as an instant failure.
+
+    A run counts when its duration is known and at most `max_seconds` long.  A longer run
+    is not an instant failure, and a run whose duration is unknown does not count unless
+    the operator asked for it (AD_LANE_FAIL_COUNT_UNKNOWN=1)."""
+    max_seconds = LANE_FAIL_MAX_SECONDS if max_seconds is None else float(max_seconds)
+    count_unknown = LANE_FAIL_COUNT_UNKNOWN if count_unknown is None else bool(count_unknown)
+    seconds = run_seconds(info)
+    if seconds is None: return bool(count_unknown)
+    return seconds <= max_seconds
+
+def lane_failure_reason(info):
+    """The reason of a failed run, as the audit row and the brake record carry it."""
+    info = info if isinstance(info, dict) else {}
+    parts = [f"ended `{info.get('status')}`"]
+    if info.get("error_class"): parts.append(f"error_class `{info.get('error_class')}`")
+    summary = str(info.get("summary") or "").strip().replace("\n", " ")
+    if summary: parts.append(summary[:160])
+    return "; ".join(parts)
+
+def lane_brake_marker(lane):
+    """The path of the PAUSE-<lane> switch the brake writes (the operator's own file)."""
+    return os.path.join(D, f"PAUSE-{lane}")
+
+def lane_brake_audit_path():
+    """The audit file of the lane brakes: one JSON row per brake event."""
+    return os.path.join(D, "lane-brakes.jsonl")
+
+def lane_brakes_path():
+    """The brake file the health output reads (the brakes that are on right now)."""
+    return os.path.join(D, "lane-brakes.json")
+
+def write_lane_brake_audit(row):
+    """Append one audit row of a brake event (a failing write never stops the dispatch)."""
+    try:
+        with open(lane_brake_audit_path(), "a") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log(f"lane brake audit not written ({e!r})", brain=False)
+
+def publish_lane_brakes(state):
+    """Publish the brakes that are on, for the health output to read."""
+    payload = {"updated_at": time.strftime("%F %T"), "lanes": lane_brakes(state)}
+    try:
+        with open(lane_brakes_path(), "w") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=1)
+    except OSError as e:
+        log(f"lane brake file not written ({e!r})", brain=False)
+
+def brake_lane(lane, state, issue=None, run=None, reason=None, seconds=None, host=None, streak=None):
+    """Brake one lane: write the PAUSE-<lane> switch and the audit row.
+
+    The switch is the very file an operator writes by hand, so the dispatch loop skips the
+    lane from the next tick on and every pause listing shows it (Refs #1711)."""
+    streak = int(streak or (lane_failures(state).get(lane) or {}).get("streak") or 0)
+    marker = lane_brake_marker(lane)
+    body = (f"{LANE_BRAKE_REASON} lane={lane} streak={streak} issue={issue} "
+            f"seconds={seconds} reason={reason}\n")
+    try:
+        with open(marker, "w") as stream: stream.write(body)
+    except OSError as e:
+        log(f"{lane} brake switch not written ({e!r})", brain=False)
+    record = {"lane": lane, "streak": streak, "threshold": LANE_FAIL_STREAK, "last_issue": issue,
+              "last_run": run, "last_reason": reason, "last_seconds": seconds, "host": host,
+              "marker": os.path.basename(marker), "braked_at": time.strftime("%F %T")}
+    lane_brakes(state)[lane] = record
+    write_lane_brake_audit({"at": record["braked_at"], "event": "brake", **record})
+    log(f"{lane} braked after {streak} consecutive instant failures (threshold {LANE_FAIL_STREAK}, "
+        f"last card #{issue}, {reason}); wrote {record['marker']}", brain=True)
+    return record
+
+def note_lane_failure(lane, state, info, issue=None, run=None, host=None, reason=None):
+    """Count one failed run of a lane and brake the lane when the streak reaches the threshold.
+
+    Only a run with a commit clears the streak (see clear_lane_failures); a long run and a
+    run whose duration is unknown do not count and do not clear it (Refs #1711)."""
+    rows = lane_failures(state)
+    seconds = run_seconds(info)
+    counted = instant_failure(info)
+    row = rows.get(lane) if isinstance(rows.get(lane), dict) else {}
+    record = {"lane": lane, "issue": issue, "run": run, "host": host or row.get("host"),
+              "reason": reason or lane_failure_reason(info), "seconds": seconds,
+              "at": time.strftime("%F %T"), "counted": counted}
+    if not counted:
+        record["skipped"] = ("duration unknown" if seconds is None
+                             else f"duration {seconds:.0f}s over the {LANE_FAIL_MAX_SECONDS:.0f}s threshold")
+        return record
+    streak = int(row.get("streak", 0) or 0) + 1
+    row.update({"lane": lane, "streak": streak, "last_issue": issue, "last_run": run,
+                "last_reason": record["reason"], "last_seconds": seconds,
+                "host": record["host"], "at": record["at"]})
+    rows[lane] = row
+    record["streak"] = streak
+    if streak >= LANE_FAIL_STREAK:
+        brake_lane(lane, state, issue=issue, run=run, reason=record["reason"], seconds=seconds,
+                   host=record["host"], streak=streak)
+    return record
+
+def clear_lane_failures(lane, state):
+    """Clear the instant-failure streak of a lane (a run with a commit succeeded)."""
+    lane_failures(state).pop(lane, None)
+
+def lane_braked(lane, state):
+    """Whether the dispatcher braked this lane itself."""
+    return lane in lane_brakes(state)
+
+def release_lane_brake(lane, state, reason, remove_switch=True):
+    """Release a brake: the switch is removed, the streak is cleared, the audit row is written."""
+    record = lane_brakes(state).pop(lane, None) or {"lane": lane}
+    if remove_switch:
+        marker = lane_brake_marker(lane)
+        try:
+            with open(marker) as stream: body = stream.read()
+        except OSError: body = None
+        # only the switch the brake wrote is removed; a manual one is left alone
+        if body is not None and body.startswith(LANE_BRAKE_REASON):
+            try: os.unlink(marker)
+            except OSError as e: log(f"{lane} brake switch not removed ({e!r})", brain=False)
+    clear_lane_failures(lane, state)
+    row = {"at": time.strftime("%F %T"), "event": "release", "lane": lane, "reason": reason,
+           "streak": record.get("streak"), "last_issue": record.get("last_issue"),
+           "last_reason": record.get("last_reason")}
+    write_lane_brake_audit(row)
+    log(f"{lane} brake released ({reason}); the lane takes cards again", brain=True)
+    return row
+
+def health_snapshot():
+    """The probe summary the health loop writes (~/phanes-ctl/autodispatch/health.json)."""
+    try:
+        with open(os.path.join(D, "health.json")) as stream: payload = json.load(stream)
+    except (OSError, ValueError): return None
+    return payload if isinstance(payload, dict) else None
+
+def health_host_ok(host, snapshot):
+    """Whether the health probe reported the host as healthy."""
+    if not host or not isinstance(snapshot, dict): return False
+    ok = snapshot.get("hosts_ok")
+    if isinstance(ok, list): return host in ok
+    hosts = snapshot.get("hosts")
+    if isinstance(hosts, dict): return hosts.get(host) == "ok"
+    return False
+
+def snapshot_after_brake(snapshot, braked_at):
+    """Whether the health snapshot was taken after the brake (an older probe proves nothing)."""
+    if not isinstance(snapshot, dict): return False
+    stamp = snapshot.get("at")
+    if not stamp or not braked_at: return False
+    try:
+        probe = time.mktime(time.strptime(str(stamp), "%Y-%m-%d %H:%M:%S"))
+        brake = time.mktime(time.strptime(str(braked_at), "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return False
+    return probe > brake
+
+def release_lane_brakes(state, lanes):
+    """Release the brakes that are no longer justified.
+
+    A brake goes away when the operator removed the PAUSE-<lane> switch by hand, or when the
+    health probe of the lane's host reported the host healthy after the brake (the codex
+    server health probe of the control plane, Refs #1711)."""
+    for lane in list(lane_brakes(state)):
+        record = lane_brakes(state).get(lane) or {}
+        if not os.path.exists(lane_brake_marker(lane)):
+            release_lane_brake(lane, state, "the operator removed the PAUSE switch")
+            continue
+        cfg = lanes.get(lane) or {}
+        snapshot = health_snapshot()
+        if health_host_ok(cfg.get("host"), snapshot) and snapshot_after_brake(snapshot, record.get("braked_at")):
+            release_lane_brake(lane, state, f"the health probe reported host {cfg.get('host')} healthy")
+
 def worker_state_path():
     return os.path.join(ctl_state_dir(), "autodispatch.pid")
 
@@ -391,9 +609,15 @@ if R:
   if os.path.exists(p):
     with open(p) as stream: r=json.load(stream)
     res=r.get("result") or {}
+    try:
+      with open(f"{O}/runs/{R}/status.json") as stream: rs=json.load(stream)
+    except Exception: rs={}
     out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
+      "started":r.get("started") if r.get("started") is not None else rs.get("started"),
+      "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
+      "seconds":r.get("seconds"),
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
     out["run"]="running"
@@ -645,6 +869,8 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    # the lane brakes that are on: lane, streak and the card that failed last (Refs #1711)
+    status["_brakes"] = [dict(row) for row in lane_brakes(state).values()]
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -903,6 +1129,8 @@ def finish(lane, cfg, st, info, state):
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+        # the run produced a commit: the lane works, so the instant-failure streak is over
+        clear_lane_failures(lane, state)
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -945,9 +1173,14 @@ def finish(lane, cfg, st, info, state):
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
+        # the run failed: count it, and brake the lane when the instant failures pile up (Refs #1711)
+        note_lane_failure(lane, state, info, issue=n, run=run, host=cfg.get("host"))
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 def tick(lanes, state, last_warn):
+    # a brake whose switch the operator removed (or whose host probes healthy) goes away first,
+    # so a released lane may take a card in this very tick (Refs #1711)
+    release_lane_brakes(state, lanes)
     scopes = paused_scopes()  # the openswarm pause store and the legacy PAUSE markers (Refs #1366)
     if "all" in scopes: return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
@@ -981,13 +1214,15 @@ def tick(lanes, state, last_warn):
     base = None
     for L, cfg in lanes.items():
         r = res[L]
-        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
+        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" \
+                or lane_paused(L, cfg, scopes) or lane_braked(L, state): continue
         pick = None
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
         if AD_VERIFY_SHARE_ENABLED:
             idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
-                    and res[name].get("lane") == "idle" and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
+                    and res[name].get("lane") == "idle" and host_ok(c["host"]) and not lane_paused(name, c, scopes)
+                    and not lane_braked(name, state)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
             # Admission precedes existing pin/priority/work/number ordering. Borrow unused
             # capacity when the preferred class has no eligible card on this lane.
@@ -1034,6 +1269,7 @@ def tick(lanes, state, last_warn):
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     st = status_snapshot(lanes, state, res, ready, blocked)
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
+    publish_lane_brakes(state)  # the health output reads the brakes from this file (Refs #1711)
     return last_warn
 
 def file_issue(text, extra=()):

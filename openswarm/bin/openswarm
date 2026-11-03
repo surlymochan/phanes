@@ -12219,6 +12219,40 @@ def fleet_health_state_load(home=None):
 def fleet_health_state_save(hosts, home=None):
     jsave(fleet_health_state_path(home), {"hosts": hosts, "updated_at": NOW()})
 
+# Refs #1711: the autodispatcher brakes a lane that keeps failing in a row and writes the
+# brake records next to its own state.  The health report reads them, so a supervisor sees
+# the lane, the streak and the card that failed last without reading the dispatch log.
+LANE_BRAKES_FILE_ENV = "AD_LANE_BRAKES_FILE"
+LANE_BRAKES_FILE_DEFAULT = "~/phanes-ctl/autodispatch/lane-brakes.json"
+
+def fleet_lane_brakes_path(explicit=None):
+    """The brake file the autodispatcher writes (the fleet health report reads it)."""
+    if explicit:
+        return os.path.expanduser(str(explicit))
+    configured = os.environ.get(LANE_BRAKES_FILE_ENV)
+    if configured:
+        return os.path.expanduser(configured)
+    return os.path.expanduser(LANE_BRAKES_FILE_DEFAULT)
+
+def fleet_lane_brakes(path=None):
+    """The lane brakes that are on right now (an empty list when there is no file).
+
+    A brake row carries the lane, the consecutive instant-failure count, the card that
+    failed last and the reason, so the health output can be quoted as it is (Refs #1711)."""
+    try:
+        with open(fleet_lane_brakes_path(path), encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        return []
+    lanes = payload.get("lanes") if isinstance(payload, dict) else None
+    if isinstance(lanes, dict):
+        rows = list(lanes.values())
+    elif isinstance(lanes, list):
+        rows = lanes
+    else:
+        rows = []
+    return [row for row in rows if isinstance(row, dict) and row.get("lane")]
+
 
 def fleet_health_apply(store, row, active, moment):
     """Pause or resume one host from its health decision.
@@ -12362,11 +12396,12 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                                                   row["status"], moment)
         rows.append(row)
     fleet_health_state_save(remembered, home)
+    brakes = fleet_lane_brakes(getattr(args, "lane_brakes", None))
     report = {"ok": all(row["status"] == "ok" for row in rows),
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits, "recent_failure_reasons": recent_failures,
-              "hosts": rows}
+              "lane_brakes": brakes, "hosts": rows}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -12382,6 +12417,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         print("recent failure reasons (last 20):")
         for reason, count in sorted(recent_failures.items(), key=lambda item: (-item[1], item[0])):
             print(f"  {reason}: {count}")
+    if brakes:
+        print("lane brakes (instant-failure streaks, Refs #1711):")
+        for row in brakes:
+            print(f"  {row.get('lane')}  streak={row.get('streak')}  "
+                  f"last card #{row.get('last_issue')}  {row.get('last_reason')}")
     return report
 
 
@@ -16172,6 +16212,8 @@ def main():
                     help="compare the inventory with the lanes.json each host has and exit non-zero on drift")
     fp = fleet_sub.add_parser("health", help="probe the fleet hosts and pause the unhealthy ones")
     fp.add_argument("--hosts", help="comma-separated fleet host names (default: the hosts lanes.json names)")
+    fp.add_argument("--lane-brakes",
+                    help="the autodispatch lane-brake file (default: ~/phanes-ctl/autodispatch/lane-brakes.json)")
     fp.add_argument("--json", action="store_true", help="print the health report as JSON")
     fp.add_argument("--apply", action="store_true",
                     help="pause the unhealthy hosts and release the recovered ones")
