@@ -1,4 +1,4 @@
-import { resolveLocale, translateFor } from "@openbot/i18n";
+import { resolveLocale, translateFor } from "../../openbot/packages/i18n/src/index.ts";
 
 const locale = resolveLocale("system", new URLSearchParams(location.search).get("lang") || "zh-CN");
 const t = translateFor(locale);

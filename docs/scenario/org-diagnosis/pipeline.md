@@ -12,9 +12,9 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
 
 ## 1. 场景与角色
 
-诊断站点已经在仓库内落地：`openbot/examples/org-health-local/`（`serve.py` + `app.js` + `index.html`），
+诊断站点已经在仓库内落地：`examples/org-health-local/`（`serve.py` + `app.js` + `index.html`），
 用合成示例数据渲染「技术人力成本 / 折算人头 / 收入与成本率」等指标。真实组织数据按
-`openbot/examples/org-health-local/README.md:5` 的约定保存在仓库外，只经绝对路径传入。
+`examples/org-health-local/README.md:5` 的约定保存在仓库外，只经绝对路径传入。
 
 本流水线把「做一次组织诊断」拆成三个角色：
 
@@ -22,7 +22,7 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
 |---|---|---|---|---|
 | 1 | Boss | 把诊断目标变成口径与问题清单（任务书） | `docs/scenario/org-diagnosis/out/boss-brief.json`（仓库内） | 否 |
 | 2 | DA | 按任务书口径把真实数据归并成结构化诊断 | `${DIAGNOSIS}`（仓库外）+ `docs/scenario/org-diagnosis/out/da-method.md`（仓库内） | 是（仅仓库外那份） |
-| 3 | Builder | 让站点通过外部数据参数加载并正确渲染诊断快照 | `openbot/examples/org-health-local/` 改动（可选）+ `docs/scenario/org-diagnosis/out/builder-notes.md`（仓库内） | 是（仅外部 `${DIAGNOSIS}`） |
+| 3 | Builder | 让站点通过外部数据参数加载并正确渲染诊断快照 | `examples/org-health-local/` 改动（可选）+ `docs/scenario/org-diagnosis/out/builder-notes.md`（仓库内） | 是（仅外部 `${DIAGNOSIS}`） |
 
 ```
                  提交/分支交接（下一阶段 --base = 上一阶段 commit）
@@ -51,8 +51,8 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
 
 ### 3.1 Boss：口径与任务书
 
-- **输入**：`docs/scenario/org-diagnosis/pipeline.md`（本文）、`openbot/examples/org-health-local/README.md`、
-  合成示例 `openbot/examples/org-health-local/data/diagnosis.json`。
+- **输入**：`docs/scenario/org-diagnosis/pipeline.md`（本文）、`examples/org-health-local/README.md`、
+  合成示例 `examples/org-health-local/data/diagnosis.json`。
 - **任务提示**（写进 `WORKSPACE/tasks/boss.md`，也可直接用示例编排里的 `stages[0].prompt`）：
   产出 `docs/scenario/org-diagnosis/out/boss-brief.json`，包含 `目标` / `观察期间` / `口径` / `必答问题` /
   `数据需求` / `禁止事项`；只写口径、问题与字段映射，不得写入任何真实组织数据或真实数字。
@@ -77,7 +77,7 @@ openswarm run \
   同时在仓库内提交 `docs/scenario/org-diagnosis/out/da-method.md`，逐条说明结论字段的数据来源路径、
   计算口径与已知缺口，**不含真实数字**。
 - **产物**：`${DIAGNOSIS}`（仓库外，真实数据）+ `docs/scenario/org-diagnosis/out/da-method.md`（仓库内）。
-- **`--verify`**：`python3 openbot/examples/org-health-local/validate.py "<DIAGNOSIS>" &&
+- **`--verify`**：`python3 examples/org-health-local/validate.py "<DIAGNOSIS>" &&
   test -s docs/scenario/org-diagnosis/out/da-method.md`。`validate.py` 已在仓库内，接受一个或多个
   位置参数（不接受 `--data`），按 schema v4 校验快照；退出码 `0` 表示全部通过，`1` 表示校验失败，
   `2` 表示输入不可读或不是合法 JSON。
@@ -88,18 +88,18 @@ openswarm run \
   --backend codex --type impl --difficulty 4 --budget-minutes 30 \
   --title 组织诊断数据分析 \
   --task-file <workspace>/tasks/da.md \
-  --verify 'python3 openbot/examples/org-health-local/validate.py <workspace>/out/da/diagnosis.json && test -s docs/scenario/org-diagnosis/out/da-method.md'
+  --verify 'python3 examples/org-health-local/validate.py <workspace>/out/da/diagnosis.json && test -s docs/scenario/org-diagnosis/out/da-method.md'
 ```
 
 ### 3.3 Builder：站点接入
 
 - **输入**：诊断数据 `${DIAGNOSIS}`（仓库外）、口径说明 `docs/scenario/org-diagnosis/out/da-method.md`、
-  现有站点实现 `openbot/examples/org-health-local/`。
+  现有站点实现 `examples/org-health-local/`。
 - **任务提示**：让站点能加载并正确渲染真实诊断数据；保留 `serve.py --data /absolute/path/to/diagnosis.json`
-  这个外部数据入口；真实数据不得进入仓库；改动限于 `openbot/examples/org-health-local/`，
+  这个外部数据入口；真实数据不得进入仓库；改动限于 `examples/org-health-local/`，
   并在 `docs/scenario/org-diagnosis/out/builder-notes.md` 记录改动点与验证方式；不引入新的运行时依赖。
-- **产物**：`openbot/examples/org-health-local/` 的改动 + `docs/scenario/org-diagnosis/out/builder-notes.md`。
-- **`--verify`**：`python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_serve.py'`。
+- **产物**：`examples/org-health-local/` 的改动 + `docs/scenario/org-diagnosis/out/builder-notes.md`。
+- **`--verify`**：`python3 -m unittest discover -s examples/org-health-local -p 'test_serve.py'`。
   `test_serve.py` 已在仓库内，是不接受 `--data` 参数的 Python 标准库 unittest；测试会在临时目录注入
   数据并覆盖 `serve.py` 的 loopback、白名单路径、`--data`/`--root` 边界。退出码 `0` 表示全部测试通过，
   `1` 表示测试失败；参数错误等 unittest/解释器错误为非 `0`。
@@ -110,7 +110,7 @@ openswarm run \
   --backend codex --type impl --difficulty 3 --budget-minutes 25 \
   --title 组织诊断站点接入 \
   --task-file <workspace>/tasks/builder.md \
-  --verify "python3 -m unittest discover -s openbot/examples/org-health-local -p 'test_serve.py'"
+  --verify "python3 -m unittest discover -s examples/org-health-local -p 'test_serve.py'"
 ```
 
 ## 4. 阶段之间的交接
@@ -161,9 +161,9 @@ openswarm review <run-id> --by pi --json
 
 ## 6. 真实数据边界
 
-- 真实组织数据只经**仓库外的绝对路径**进入：`python3 openbot/examples/org-health-local/serve.py
-  --data /absolute/path/to/diagnosis.json`（`openbot/examples/org-health-local/serve.py:49-66`）。
-- 仓库内只保留合成示例 `openbot/examples/org-health-local/data/diagnosis.json`；
+- 真实组织数据只经**仓库外的绝对路径**进入：`python3 examples/org-health-local/serve.py
+  --data /absolute/path/to/diagnosis.json`（`examples/org-health-local/serve.py:49-66`）。
+- 仓库内只保留合成示例 `examples/org-health-local/data/diagnosis.json`；
   `openbot/scripts/org-health-demo-e2e.ts:13-16` 也是把合成数据复制到临时目录再经 `--data` 传入，
   作为「数据不落库」的既有做法。
 - DA 阶段的诊断 JSON 写在仓库外，不随分支提交；仓库内只提交不含真实数字的说明文件。
@@ -283,8 +283,8 @@ PY
 
 | 依赖 | 提供方 | 影响 |
 |---|---|---|
-| `openbot/examples/org-health-local/validate.py` | 仓库内 schema 校验器 | DA 阶段按位置参数传入仓库外的 `${DIAGNOSIS}`；退出码 `0`/`1`/`2` 分别表示通过/校验失败/输入不可读 |
-| `openbot/examples/org-health-local/test_serve.py` | 仓库内 unittest | Builder 阶段用 `python3 -m unittest discover ... -p 'test_serve.py'` 执行；退出码 `0` 表示通过，`1` 表示测试失败 |
+| `examples/org-health-local/validate.py` | 仓库内 schema 校验器 | DA 阶段按位置参数传入仓库外的 `${DIAGNOSIS}`；退出码 `0`/`1`/`2` 分别表示通过/校验失败/输入不可读 |
+| `examples/org-health-local/test_serve.py` | 仓库内 unittest | Builder 阶段用 `python3 -m unittest discover ... -p 'test_serve.py'` 执行；退出码 `0` 表示通过，`1` 表示测试失败 |
 | `bun run test:org-health-demo`（`openbot/package.json:194`） | 仓库已有 | 需要 bun 与 Chrome，且只覆盖合成示例数据 |
 | 真实组织数据文件 | 数据提供方 | 必须自行放在仓库外，流水线不提供真实数据 |
 
@@ -302,17 +302,17 @@ PY
 ## 10. 交接产物最小验收表
 
 本节由 #707 新增。上面第 3 节的三阶段编排用 OpenSwarm 交接产物；同一场景还有「仓库内一键跑通」这一个入口
-（`contract.md:33-39`）：`python3 openbot/examples/org-health-local/run_e2e.py --workdir <workdir> --review`
+（`contract.md:33-39`）：`python3 examples/org-health-local/run_e2e.py --workdir <workdir> --review`
 一次跑完 Boss → DA → Builder → 站点自检 → Reviewer，产物全部落在 `<workdir>` 下
-（`openbot/examples/org-health-local/run_e2e.py:13`、`:146-148`、`:161`、`:173-179`）。
+（`examples/org-health-local/run_e2e.py:13`、`:146-148`、`:161`、`:173-179`）。
 下表按交接顺序列出每个产物的生成者、输入，以及一条**可直接运行**的校验命令。
 
 | 产物 | 生成者 | 输入 | 可直接运行的校验命令 |
 | --- | --- | --- | --- |
-| `<workdir>/brief.json` | Boss：`boss/make_brief.py`（`run_e2e.py:35`、`:150`） | 无文件输入；口径、问题与字段映射内置在脚本里 | `python3 openbot/examples/org-health-local/boss/make_brief.py --check <workdir>/brief.json` |
-| `<workdir>/diagnosis.json` | DA：`da/build_diagnosis.py`（`run_e2e.py:36`、`:151`） | `<workdir>/brief.json` + 合成样本 `openbot/examples/org-health-local/da/sample-raw/` | `python3 openbot/examples/org-health-local/validate.py <workdir>/diagnosis.json` |
-| `<workdir>/dist/` | Builder：`builder/build_site.py`（`run_e2e.py:37`、`:160`） | `<workdir>/diagnosis.json`（+ `--bundle` 预构建包；不指定时依赖 Bun 打包） | `python3 openbot/examples/org-health-local/builder/check_site.py <workdir>/dist` |
-| `<workdir>/review.md` | Reviewer：`review/cross_check.py`（`run_e2e.py:39`、`:173-179`） | `<workdir>/brief.json` + `<workdir>/diagnosis.json`（+ `<workdir>/dist/`） | `python3 openbot/examples/org-health-local/review/cross_check.py --brief <workdir>/brief.json --data <workdir>/diagnosis.json --dist <workdir>/dist` |
+| `<workdir>/brief.json` | Boss：`boss/make_brief.py`（`run_e2e.py:35`、`:150`） | 无文件输入；口径、问题与字段映射内置在脚本里 | `python3 examples/org-health-local/boss/make_brief.py --check <workdir>/brief.json` |
+| `<workdir>/diagnosis.json` | DA：`da/build_diagnosis.py`（`run_e2e.py:36`、`:151`） | `<workdir>/brief.json` + 合成样本 `examples/org-health-local/da/sample-raw/` | `python3 examples/org-health-local/validate.py <workdir>/diagnosis.json` |
+| `<workdir>/dist/` | Builder：`builder/build_site.py`（`run_e2e.py:37`、`:160`） | `<workdir>/diagnosis.json`（+ `--bundle` 预构建包；不指定时依赖 Bun 打包） | `python3 examples/org-health-local/builder/check_site.py <workdir>/dist` |
+| `<workdir>/review.md` | Reviewer：`review/cross_check.py`（`run_e2e.py:39`、`:173-179`） | `<workdir>/brief.json` + `<workdir>/diagnosis.json`（+ `<workdir>/dist/`） | `python3 examples/org-health-local/review/cross_check.py --brief <workdir>/brief.json --data <workdir>/diagnosis.json --dist <workdir>/dist` |
 
 说明：
 

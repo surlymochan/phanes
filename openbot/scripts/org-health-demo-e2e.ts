@@ -7,13 +7,14 @@ import { join, resolve } from "node:path";
 import { chromium } from "playwright-core";
 
 const root = resolve(import.meta.dirname, "..");
+const scenario = resolve(root, "..", "examples", "org-health-local");
 const output = join(root, ".openbot-build", "org-health-demo-e2e");
 const temporary = await mkdtemp(join(tmpdir(), "openbot-health-demo-"));
 const data = join(temporary, "diagnosis.json");
-const source = await readFile(join(root, "examples/org-health-local/data/diagnosis.json"), "utf8");
+const source = await readFile(join(scenario, "data", "diagnosis.json"), "utf8");
 const snapshot = JSON.parse(source);
 await writeFile(data, source);
-const server = spawn("python3", [join(root, "examples/org-health-local/serve.py"), "--port", "0", "--data", data], {
+const server = spawn("python3", [join(scenario, "serve.py"), "--port", "0", "--data", data], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 const checks: string[] = [];

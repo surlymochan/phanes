@@ -17,15 +17,15 @@ Refs #6, Refs #156。
 在仓库根目录下运行：
 
 ```bash
-python3 openbot/examples/org-health-local/run_e2e.py \
+python3 examples/org-health-local/run_e2e.py \
   --workdir .openswarm-tmp/demo-run \
-  --bundle openbot/examples/org-health-local/demo/vendor/app.bundle.js
+  --bundle examples/org-health-local/demo/vendor/app.bundle.js
 ```
 
-或者进入示例目录 `openbot/examples/org-health-local` 运行：
+或者进入示例目录 `examples/org-health-local` 运行：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bundle.js
 ```
 
@@ -33,19 +33,19 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 
 ### 1.2 参数说明
 
-参数定义见 `openbot/examples/org-health-local/run_e2e.py:16-24`：
+参数定义见 `examples/org-health-local/run_e2e.py:16-24`：
 
 | 参数 | 必需/可选 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `--workdir` | **必需** | 无 | 本次运行的工作目录（若不存在会自动创建），用于存放流水线产生的所有工件（任务书、诊断快照、静态站点目录等）。推荐放在仓库外（如 `~/phanes-runs/demo`）或临时目录。 |
 | `--bundle` | 可选 | `None` | 预编译好的前端浏览器脚本路径（`demo/vendor/app.bundle.js`，由 #121/#130 引入）。**强烈推荐在无 Bun/Node 环境或 fleet lane 中指定此参数**；指定后 Builder 阶段将直接复制该 bundle，无需在本地安装 Bun 或调用 `bun build`。 |
-| `--raw` | 可选 | `openbot/examples/org-health-local/da/sample-raw` | 原始数据 CSV 所在目录，默认使用仓库内置的合成样本数据（包含 `cost.csv`、`heads.csv`、`revenue.csv`、`forecast.csv`、`fx.csv`）。若使用真实数据，需指向仓库外的绝对路径。 |
-| `--boss` | 可选 | `openbot/examples/org-health-local/boss/make_brief.py` | Boss 角色脚本路径，用于生成标准任务书 `brief.json`。 |
-| `--da` | 可选 | `openbot/examples/org-health-local/da/build_diagnosis.py` | DA 角色脚本路径，用于将原始 CSV 归并计算为 schema v4 诊断快照 `diagnosis.json`。 |
-| `--builder` | 可选 | `openbot/examples/org-health-local/builder/build_site.py` | Builder 角色脚本路径，用于根据诊断快照构建可本地浏览的静态站点目录 `dist`。 |
-| `--checker` | 可选 | `openbot/examples/org-health-local/builder/check_site.py` | 静态合规检查脚本路径，用于检查 `dist` 产物的完整性与安全性。 |
-| `--reviewer` | 可选 | `openbot/examples/org-health-local/review/cross_check.py` | 独立审查脚本路径，核对任务书、诊断快照与站点产物的三方一致性与隐私边界。 |
-| `--review` | 可选 | 关闭（不审查） | 站点自检通过后追加独立三方交叉审查，并把审查记录写入 `<workdir>/review.md`（`openbot/examples/org-health-local/run_e2e.py:24`、`:68-72`）。审查不通过时流水线返回非 0，但报告文件仍然保留。 |
+| `--raw` | 可选 | `examples/org-health-local/da/sample-raw` | 原始数据 CSV 所在目录，默认使用仓库内置的合成样本数据（包含 `cost.csv`、`heads.csv`、`revenue.csv`、`forecast.csv`、`fx.csv`）。若使用真实数据，需指向仓库外的绝对路径。 |
+| `--boss` | 可选 | `examples/org-health-local/boss/make_brief.py` | Boss 角色脚本路径，用于生成标准任务书 `brief.json`。 |
+| `--da` | 可选 | `examples/org-health-local/da/build_diagnosis.py` | DA 角色脚本路径，用于将原始 CSV 归并计算为 schema v4 诊断快照 `diagnosis.json`。 |
+| `--builder` | 可选 | `examples/org-health-local/builder/build_site.py` | Builder 角色脚本路径，用于根据诊断快照构建可本地浏览的静态站点目录 `dist`。 |
+| `--checker` | 可选 | `examples/org-health-local/builder/check_site.py` | 静态合规检查脚本路径，用于检查 `dist` 产物的完整性与安全性。 |
+| `--reviewer` | 可选 | `examples/org-health-local/review/cross_check.py` | 独立审查脚本路径，核对任务书、诊断快照与站点产物的三方一致性与隐私边界。 |
+| `--review` | 可选 | 关闭（不审查） | 站点自检通过后追加独立三方交叉审查，并把审查记录写入 `<workdir>/review.md`（`examples/org-health-local/run_e2e.py:24`、`:68-72`）。审查不通过时流水线返回非 0，但报告文件仍然保留。 |
 
 ---
 
@@ -122,8 +122,8 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 
 ### 步骤 5：Reviewer 独立三方交叉审查（仅 `--review` 时执行）
 - **命令**：`python3 review/cross_check.py --brief <workdir>/brief.json --data <workdir>/diagnosis.json --dist <workdir>/dist`
-  （由 `run_e2e.py --review` 调用，见 `openbot/examples/org-health-local/run_e2e.py:68-72`；审查脚本本身只读输入、不写文件，`--out <报告.md>` 可另存一份 Markdown 报告）
-- **产物路径**：`<workdir>/review.md`——由 `run_e2e.py` 捕获审查者的标准输出写入（`openbot/examples/org-health-local/run_e2e.py:11`、`:70`），内容是逐条 `PASS`/`FAIL` 行加一行汇总（例如「共 11 项检查：11 项通过，0 项失败」）。
+  （由 `run_e2e.py --review` 调用，见 `examples/org-health-local/run_e2e.py:68-72`；审查脚本本身只读输入、不写文件，`--out <报告.md>` 可另存一份 Markdown 报告）
+- **产物路径**：`<workdir>/review.md`——由 `run_e2e.py` 捕获审查者的标准输出写入（`examples/org-health-local/run_e2e.py:11`、`:70`），内容是逐条 `PASS`/`FAIL` 行加一行汇总（例如「共 11 项检查：11 项通过，0 项失败」）。
 - **失败行为**：审查不通过时审查者返回非 0，`run_e2e.py` 中断并返回 1，但 `<workdir>/review.md` **照常保留**（含 FAIL 行）便于核对失败原因；若在站点自检阶段就已中断，则本步骤不执行、也不生成该报告。
 - **审查内容**（见 `review/cross_check.py:10-39`）：
   - **期间一致**：核对任务书 `观察期间` 与诊断快照 `scope.观察月份`、`scope.数据截止` 严格一致，并核对快照 `metrics[*].数值` 的期次键（全口径成本率的键去掉「整体」前缀）与任务书期次锚点（Boss 格式的 `期次` 列表，或起止/参考期次）一致；缺哪些键、多哪些键都在这一行里说明。
@@ -142,19 +142,19 @@ python3 run_e2e.py --workdir /tmp/org-diagnosis-demo --bundle demo/vendor/app.bu
 ### 3.1 预览命令
 
 ```bash
-python3 openbot/examples/org-health-local/serve.py --root <workdir>/dist
+python3 examples/org-health-local/serve.py --root <workdir>/dist
 ```
 
-或在 `openbot/examples/org-health-local` 目录下执行：
+或在 `examples/org-health-local` 目录下执行：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 serve.py --root /path/to/workdir/dist
 ```
 
 ### 3.2 运行机制与参数选项
 
-参数定义见 `openbot/examples/org-health-local/serve.py:49-66`：
+参数定义见 `examples/org-health-local/serve.py:49-66`：
 
 - `--root <Path>`：指定站点静态根目录（通常指向流水线产出的 `<workdir>/dist`）。
   - **关键行为**：指定 `--root` 时，服务**直接从该目录提供文件，不再调用 Bun 打包**（`serve.py:110-115`）；数据文件默认读取 `<root>/data/diagnosis.json`。
@@ -192,7 +192,7 @@ python3 serve.py --root /path/to/workdir/dist
 `demo/site-summary.md`，快速核对指标卡片的数值、单位和口径说明：
 
 ```bash
-cd openbot/examples/org-health-local
+cd examples/org-health-local
 python3 demo/make_site_summary.py
 ```
 
@@ -212,8 +212,8 @@ python3 demo/make_site_summary.py
 ### ② 端口已被占用（`serve.py`）
 - **错误字符串**：`端口 {port} 已被占用，请先停止占用进程，或用 --port 指定其他端口`
 - **文件与行号**：
-  - 抛出位置：`openbot/examples/org-health-local/serve.py:187`
-  - 捕获输出：`openbot/examples/org-health-local/serve.py:213`（终端打印 `错误: 端口 8765 已被占用，请先停止占用进程，或用 --port 指定其他端口`，退出码非 0，不打印 traceback）
+  - 抛出位置：`examples/org-health-local/serve.py:187`
+  - 捕获输出：`examples/org-health-local/serve.py:213`（终端打印 `错误: 端口 8765 已被占用，请先停止占用进程，或用 --port 指定其他端口`，退出码非 0，不打印 traceback）
 - **原因**：默认端口 `8765` 已被之前启动的 `serve.py` 实例或其他本地服务占用。`serve.py` 的端口预检机制禁止静默更换端口。
 - **修复**：
   1. 使用命令查找并杀掉占用该端口的残留进程：
@@ -230,13 +230,13 @@ python3 demo/make_site_summary.py
 ### ③ 未指定 bundle 且环境无 Bun 导致构建失败（`build_site.py`）
 - **错误字符串**：`构建失败：{cause}`
 - **文件与行号**：
-  - 抛出位置：`openbot/examples/org-health-local/builder/build_site.py:74`（`subprocess.run(bun_command(...), check=True)`）
-  - 捕获输出：`openbot/examples/org-health-local/builder/build_site.py:174`（终端打印 `构建失败：[Errno 2] No such file or directory: 'bun'`）
+  - 抛出位置：`examples/org-health-local/builder/build_site.py:74`（`subprocess.run(bun_command(...), check=True)`）
+  - 捕获输出：`examples/org-health-local/builder/build_site.py:174`（终端打印 `构建失败：[Errno 2] No such file or directory: 'bun'`）
 - **原因**：运行环境未安装 Bun，且在执行 `run_e2e.py` 或 `build_site.py` 时未传入 `--bundle` 参数。Builder 默认尝试调用 `bun build app.js ...` 打包前端，因找不到可执行程序而失败。
 - **修复**：
   1. 向 `run_e2e.py` 显式传入预编译的 bundle 路径（免去现场构建）：
      ```bash
-     --bundle openbot/examples/org-health-local/demo/vendor/app.bundle.js
+     --bundle examples/org-health-local/demo/vendor/app.bundle.js
      ```
   2. 或在宿主机器上安装 Bun 并安装依赖：
      ```bash
@@ -246,23 +246,23 @@ python3 demo/make_site_summary.py
 ### ④ 原始数据目录不存在（`build_diagnosis.py`）
 - **错误字符串**：`原始数据目录不存在：{raw_dir}`
 - **文件与行号**：
-  - 抛出位置：`openbot/examples/org-health-local/da/build_diagnosis.py:316`（`raise RawDataError(...)`）
-  - 捕获输出：`openbot/examples/org-health-local/da/build_diagnosis.py:1014`（输出到 `sys.stderr`）
+  - 抛出位置：`examples/org-health-local/da/build_diagnosis.py:316`（`raise RawDataError(...)`）
+  - 捕获输出：`examples/org-health-local/da/build_diagnosis.py:1014`（输出到 `sys.stderr`）
 - **原因**：DA 执行计算时，`--raw` 参数指向的路径不存在，或在不同工作目录下使用了无效的相对路径。
 - **修复**：
   1. 运行合成数据演示时，使用有效路径或绝对路径指向合成样本：
      ```bash
-     --raw openbot/examples/org-health-local/da/sample-raw
+     --raw examples/org-health-local/da/sample-raw
      ```
   2. 运行真实数据时，确保外部目录已正确创建且路径拼写无误。
 
 ### ⑤ 原始 CSV 数据缺失必需列（`build_diagnosis.py`）
 - **错误字符串**：`原始数据 {path.name} 缺少必需列：{'、'.join(missing)}`
 - **文件与行号**：
-  - 抛出位置：`openbot/examples/org-health-local/da/build_diagnosis.py:274`（`raise RawDataError(...)`）
-  - 捕获输出：`openbot/examples/org-health-local/da/build_diagnosis.py:1014`（输出到 `sys.stderr`）
+  - 抛出位置：`examples/org-health-local/da/build_diagnosis.py:274`（`raise RawDataError(...)`）
+  - 捕获输出：`examples/org-health-local/da/build_diagnosis.py:1014`（输出到 `sys.stderr`）
 - **原因**：原始数据表头列名与 DA 规则不匹配。例如 `cost.csv` 缺少 `技术人力成本_万元` 或 `heads.csv` 缺少 `折算人头` 等字段。
-- **修复**：对照 `openbot/examples/org-health-local/da/build_diagnosis.py:31-48` 定义的表头规范，核对并修改原始 CSV 的首行表头：
+- **修复**：对照 `examples/org-health-local/da/build_diagnosis.py:31-48` 定义的表头规范，核对并修改原始 CSV 的首行表头：
   - `cost.csv` 必须包含：`期次`、`技术人力成本_万元`、`营收业务技术人力成本_万元`、`运维与设施成本_万元`。
   - `heads.csv` 必须包含：`期次`、`折算人头`、`营收业务折算人头`。
   - `revenue.csv` 必须包含：`期次`、`营收业务收入_万美元`。
@@ -272,8 +272,8 @@ python3 demo/make_site_summary.py
 ### ⑥ 构建报告结构不符合检查契约（`check_site.py`）
 - **错误字符串**：`失败：无法读取 build-report.json 中的 sha256（build-report.json 缺少 files 或 sha256 对象）`
 - **文件与行号**：
-  - 抛出位置：`openbot/examples/org-health-local/builder/check_site.py:56`（`raise ValueError("build-report.json 缺少 files 或 sha256 对象")`）
-  - 捕获输出：`openbot/examples/org-health-local/builder/check_site.py:136`（添加到 `failures` 列表并输出）
+  - 抛出位置：`examples/org-health-local/builder/check_site.py:56`（`raise ValueError("build-report.json 缺少 files 或 sha256 对象")`）
+  - 捕获输出：`examples/org-health-local/builder/check_site.py:136`（添加到 `failures` 列表并输出）
 - **原因**：`check_site.py` 的哈希核验函数 `report_hashes()` 期望读取 `build-report.json` 中以 `"files"` 或顶层 `"sha256"` 为键的对象映射（`dict`）。如果报告文件结构不匹配或缺少该对象，站点检查将判定失败。
 - **修复**：核查 `<workdir>/dist/build-report.json`，确保包含符合 `check_site.py:54-64` 规范的哈希映射对象，例如：
   ```json
@@ -291,8 +291,8 @@ python3 demo/make_site_summary.py
 ### ⑦ 独立审查未通过（`run_e2e.py --review`）
 - **错误字符串**：`步骤失败: 审查 (退出码 1)`
 - **文件与行号**：
-  - 打印位置：`openbot/examples/org-health-local/run_e2e.py:35`（`print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr)`）
-  - 中断退出：`openbot/examples/org-health-local/run_e2e.py:71-72`（审查返回非 0 时 `return 1`）
+  - 打印位置：`examples/org-health-local/run_e2e.py:35`（`print(f'步骤失败: {name} (退出码 {result.returncode})', file=sys.stderr)`）
+  - 中断退出：`examples/org-health-local/run_e2e.py:71-72`（审查返回非 0 时 `return 1`）
 - **原因**：三方交叉审查存在未通过项（期间一致、版本一致、必答问题覆盖、站点数据一致、隐私边界），或审查输入不可读、不是 JSON 对象（审查脚本退出码 2，见 `review/cross_check.py:461-481`）。
 - **排查**：
   1. 打开 `<workdir>/review.md`：其中的 `FAIL <检查项>：<原因>` 行即为未通过项，末行给出「共 N 项检查：X 项通过，Y 项失败」汇总。

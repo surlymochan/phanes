@@ -5,7 +5,7 @@
 - 页面骨架：`demo/site/index.html`（sha256 `7f3b210f5f6a`）
 - 页面数据：`demo/site/data/diagnosis.json`（sha256 `51028209dda5`，与 `demo/site/build-report.json` 记录的快照一致）
 - 页面按站点根相对路径读取 `./data/diagnosis.json`（app.js 的 fetch 目标）
-- 生成命令：`cd openbot/examples/org-health-local && python3 demo/make_site_summary.py`
+- 生成命令：`cd examples/org-health-local && python3 demo/make_site_summary.py`
 
 ## 1. 结论与诊断边界
 

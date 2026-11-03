@@ -15,6 +15,7 @@ jobs:
     outputs:
       openswarm: ${{ steps.detect.outputs.openswarm }}
       openbot: ${{ steps.detect.outputs.openbot }}
+      scenario: ${{ steps.detect.outputs.scenario }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,11 +28,13 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "openswarm=true" >> "$GITHUB_OUTPUT"
             echo "openbot=true" >> "$GITHUB_OUTPUT"
+            echo "scenario=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           openswarm=false
           openbot=false
+          scenario=false
           while IFS= read -r path; do
             case "$path" in
               openswarm/*|.github/*) openswarm=true ;;
@@ -39,9 +42,13 @@ jobs:
             case "$path" in
               openbot/*|.github/*) openbot=true ;;
             esac
+            case "$path" in
+              examples/org-health-local/*|.github/*) scenario=true ;;
+            esac
           done < <(git diff --name-only "$BASE_SHA...HEAD")
           echo "openswarm=$openswarm" >> "$GITHUB_OUTPUT"
           echo "openbot=$openbot" >> "$GITHUB_OUTPUT"
+          echo "scenario=$scenario" >> "$GITHUB_OUTPUT"
   example-json:
     name: Validate example JSON
     runs-on: ubuntu-24.04
@@ -54,7 +61,7 @@ jobs:
               echo "Invalid JSON: $file" >&2
               exit 1
             fi
-          done < <(find openswarm/examples openbot/examples -name '*.json' -not -path '*/node_modules/*' -print0)
+          done < <(find openswarm/examples examples -name '*.json' -not -path '*/node_modules/*' -print0)
   # Advisory only (Nick: CI gates on Linux tests, no heavy gates). An unmarked PR title is a bookkeeping
   # issue for upstream sync, not a broken build: report it as a warning, never fail the check or block merge.
   upstream-drift:
@@ -114,7 +121,7 @@ jobs:
   openbot:
     name: OpenBot type and language checks
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true' || needs.changes.outputs.scenario == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -126,12 +133,15 @@ jobs:
           bun-version: '1.3.11'
       - run: bun install --frozen-lockfile
       - run: bun run typecheck:node
-      - run: bun run i18n:check
+        if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
+      - run: bun run i18n:check --example-root ../examples/org-health-local
+      - run: bun scripts/i18n-check-e2e.ts --example-root ../examples/org-health-local
       - run: bun run build
+        if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
   openbot-scenario-tests:
     name: OpenBot scenario tests (Python ${{ matrix.python }})
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true' || needs.changes.outputs.scenario == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -146,11 +156,11 @@ jobs:
         run: python openbot/apps/auth-api/scripts/check_migration_numbers.py openbot/apps/auth-api/migrations
       - name: Run scenario unit tests
         run: |
-          find openbot/examples/org-health-local -type f -name 'test_*.py' -print0 |
+          find examples/org-health-local -type f -name 'test_*.py' -print0 |
             while IFS= read -r -d '' test_file; do
               test_dir="$(dirname "$test_file")"
               test_name="$(basename "$test_file" .py)"
               (cd "$test_dir" && python -m unittest "$test_name" -v)
             done
       - name: Validate scenario data
-        run: python openbot/examples/org-health-local/validate.py
+        run: python examples/org-health-local/validate.py

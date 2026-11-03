@@ -1,6 +1,6 @@
 # DA 诊断快照产出说明：2026 H1 组织健康度诊断（合成数据演示）
 
-> **合成数据演示，不含真实员工数据**：本说明与快照产物（`demo/diagnosis.json`）均基于人工构造的合成样本（`openbot/examples/org-health-local/da/sample-raw/*.csv`），遵循 Boss 任务书（`demo/brief.json`）口径，不代表任何真实组织，不作个人/薪酬/编制判断，仓库内不写入真实数据。
+> **合成数据演示，不含真实员工数据**：本说明与快照产物（`demo/diagnosis.json`）均基于人工构造的合成样本（`examples/org-health-local/da/sample-raw/*.csv`），遵循 Boss 任务书（`demo/brief.json`）口径，不代表任何真实组织，不作个人/薪酬/编制判断，仓库内不写入真实数据。
 
 ---
 
@@ -8,7 +8,7 @@
 
 1. **执行命令**：
    ```bash
-   cd openbot/examples/org-health-local
+   cd examples/org-health-local
    python3 da/build_diagnosis.py --brief demo/brief.json --raw da/sample-raw --out demo/diagnosis.json
    ```
 2. **校验结果**：
@@ -171,11 +171,11 @@
 
 - **验收命令复核**：
   ```bash
-  cd openbot/examples/org-health-local && python3 validate.py demo/diagnosis.json && test -s demo/da-notes.md
+  cd examples/org-health-local && python3 validate.py demo/diagnosis.json && test -s demo/da-notes.md
   ```
   执行状态：通过（退出码 0）。
 - **交付清单**：
-  - `openbot/examples/org-health-local/demo/diagnosis.json`（DA 产出诊断快照，通过 schema v4 校验）
-  - `openbot/examples/org-health-local/demo/da-notes.md`（本说明，逐条回答必答问题并引用字段路径数值）
+  - `examples/org-health-local/demo/diagnosis.json`（DA 产出诊断快照，通过 schema v4 校验）
+  - `examples/org-health-local/demo/da-notes.md`（本说明，逐条回答必答问题并引用字段路径数值）
 - **交接下一棒**：
   下一棒（Reviewer / Builder）可直接消费 `demo/diagnosis.json` 进行审核或前端展示构建。
