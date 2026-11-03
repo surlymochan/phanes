@@ -59,6 +59,11 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # GitHub charges one GraphQL point per `gh issue view`: cap the authoritative reads of one
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
+# Reserved seam for the P2-3 verify-card queue share policy; the quota/份额 behaviour is not implemented here.
+AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
+# Verify cards rejected for missing fields, per issue: the field set that was logged. An invalid card
+# must not repeat the same log line every tick, but a changed field set is logged again.
+VERIFY_REJECT_LOGGED = {}
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -254,19 +259,58 @@ def queue():
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
         be = next((l.split(":", 1)[1] for l in labels if l.startswith("backend:")), None)
-        items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "", "prio": pr, "backend": be, "strict": "strict-backend" in labels})
+        body = i["body"] or ""
+        verify = is_verify_issue(labels, body)
+        # a `verify-intent` label without the `## Verify Intent` heading is an invalid card: it stays
+        # undispatched. A heading without the label is an ordinary work card (only the label asks for
+        # the verify contract, so a normal card that happens to use the heading is not dropped).
+        if "verify-intent" in labels and not verify:
+            log_verify_rejected(i["number"], ["正文 Verify Intent 段"]); continue
+        if verify:
+            valid, missing = verify_requirements(body)
+            if not valid:
+                log_verify_rejected(i["number"], missing); continue
+        items.append({"n": i["number"], "title": i["title"], "body": body, "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
+VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
+def is_verify_issue(labels, body):
+    """A verification card carries both markers: the `verify-intent` label and the `## Verify Intent` heading."""
+    return "verify-intent" in labels and bool(VERIFY_HEADING_RE.search(body))
+def verify_requirements(body):
+    """Return (valid, missing) for the required verify-card body fields (Refs #1811).
+
+    `目标 PR` must carry a non-empty value on its own line (a missing value never borrows the value of
+    the next line) and `证据要求` must be followed by at least one checkbox item."""
+    target = re.search(r"(?mi)^[ \t]*目标 PR[^\S\r\n]*[:：][^\S\r\n]*(?=\S)[^\r\n]*$", body)
+    evidence = re.search(r"(?mi)^[ \t]*证据要求[^\S\r\n]*[:：][^\S\r\n]*$(?:\r?\n(?:[ \t]*\r?\n)*[ \t]*[-*][ \t]*\[[ xX]\][^\S\r\n]*\S[^\r\n]*)+", body)
+    missing = []
+    if not target: missing.append("目标 PR")
+    if not evidence: missing.append("证据要求清单")
+    return not missing, missing
+def log_verify_rejected(n, missing):
+    """Log a rejected verify card once per issue and field set (not once per tick)."""
+    fields = ", ".join(missing)
+    if VERIFY_REJECT_LOGGED.get(n) == fields: return
+    VERIFY_REJECT_LOGGED[n] = fields
+    log(f"verify #{n} rejected: missing required fields: {fields}", brain=False)
+
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
-def can_take(backend, item):
+def can_take(backend, item, lane=None, verify_gate=True):
     """Exact pin or unpinned always; cross-pin allowed unless `strict-backend`, except codex never takes Unix-socket work
-    (codex sandbox blocks AF_UNIX bind) — so idle agy/codex lanes drain the pi-heavy queue instead of sitting idle."""
+    (codex sandbox blocks AF_UNIX bind) — so idle agy/codex lanes drain the pi-heavy queue instead of sitting idle.
+    A verify card is only eligible for the review lanes CX2/CX4/CX5 (Refs #1811); `verify_gate=False` skips
+    that lane rule (the backend-pool starvation count treats a verify card as available work)."""
+    if verify_gate and item.get("verify") and not is_review_lane(lane): return False
     if item["backend"] in (None, backend): return True
     if item.get("strict"): return False
     if backend == "codex" and SOCKET_RE.search(item["title"] + "\n" + item["body"]): return False
     return True
-def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, number
-    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], item["n"])
+def is_review_lane(lane):
+    """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
+    return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
+def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
+    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
 
 def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
@@ -623,7 +667,7 @@ def tick(lanes, state, last_warn):
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
-        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
+        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
@@ -646,7 +690,7 @@ def tick(lanes, state, last_warn):
     blocked = sum(not i["deps_ok"] for i in q)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
-    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
+    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     if ready < LOW or starve > 0:
