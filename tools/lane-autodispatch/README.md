@@ -16,6 +16,7 @@ tick that fetched the object in the meantime) must never mask it.
 
 ```bash
 python3 tools/lane-autodispatch/test_can_take.py
+python3 tools/lane-autodispatch/test_harvest_filter.py
 python3 tools/check-ad-base-fetch-on-miss.py
 python3 -m unittest tools.tests.test_lane_pr_validation
 ```
@@ -91,3 +92,23 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 `lane-failed`，避免污染失败统计。告警模式（`AD_PR_VALIDATION=warn`）只记录缺项照常提 PR。
 校验结果写入 run 记录（lane 主机 `runs/<run>/pr-validation.json` 与 `pr-validation.log`）
 和 AD 侧 `~/phanes-ctl/autodispatch/runs/<run>.log`，供阻塞诊断引用。
+
+## 收割前的越界产物过滤（Refs #1835）
+
+收割 fix/rebase/impl 的结果、推送回 PR 分支之前，AD 对待推送分支的变更文件做机械过滤：
+匹配到隐藏二进制（以 `.` 开头的 `.so`，如 `openswarm/tests/.dde4*-00000000.so`）或
+`.lane-review/` 目录下的文件（评审产物）时，把这些路径从提交中剔除（保留其余改动、
+重新提交），剔除清单写 brain 日志一行。剔除后若有效改动为空（比较最终树与基线树，
+不是比较 head），按空结果处理、不推送；过滤本身失败（git 命令报错）时 fail closed、
+不推送并记因。规则是列表常量（`HARVEST_EXCLUDE_PATTERNS`），可配置。
+
+对应关系：本文件是仓内版 AD；派发引擎里的同一套过滤在
+`openswarm/lib/dispatch/harvest_filter.py`（fix/rebase 与新 PR 两条收割路径都接入，
+见 `openswarm/docs/harvest-artifact-filter.md`）。两份规则必须同步；部署版另行同步
+（sync steps 见 [`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)）。
+
+离线回放某个 PR 头会被剔掉哪些产物：
+
+```bash
+python3 tools/check-harvest-filter.py 1768 1677
+```

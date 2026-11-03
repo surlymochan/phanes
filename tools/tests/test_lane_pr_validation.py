@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,34 @@ def run_remote_status(home, payload, run=RUN, lane="codex"):
         if old_home is None: os.environ.pop("HOME", None)
         else: os.environ["HOME"] = old_home
     return json.loads(buffer.getvalue().strip().splitlines()[-1])
+
+
+def make_lane_repo(root):
+    """A real local clone with a base commit and a lane branch.
+
+    The harvest filters the fetched lane branch before it pushes it (Refs #1835), so
+    the submit path needs a repository the filter can read."""
+    repo = Path(root) / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+        if proc.returncode:
+            raise AssertionError("git %s failed: %s" % (args[0], proc.stderr.strip()))
+        return proc.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    git("add", "base.txt")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "code.py").write_text("print('lane')\n", encoding="utf-8")
+    git("add", "code.py")
+    git("commit", "-qm", "lane")
+    git("update-ref", "refs/fleet/codex", git("rev-parse", "HEAD"))
+    return repo, base
 
 
 class FakeLaneHost:
@@ -131,11 +160,14 @@ class LanePrSubmitTests(unittest.TestCase):
             self.addCleanup(setattr, MODULE, name, getattr(MODULE, name))
             setattr(MODULE, name, value)
         self.state = {}
+        self.repo, self.base = make_lane_repo(self.tmp.name)
+        self.addCleanup(setattr, MODULE, "LOCAL", MODULE.LOCAL)
+        MODULE.LOCAL = str(self.repo)
 
     def finish(self, info=None, **kwargs):
         fake = FakeLaneHost(**kwargs)
         MODULE.sh, MODULE.gh, MODULE.log = fake.sh, fake.gh, fake.log
-        st = {"issue": ISSUE, "run": RUN, "base": "0123456789abcdef0123", "host": CFG["host"]}
+        st = {"issue": ISSUE, "run": RUN, "base": self.base, "host": CFG["host"]}
         result = MODULE.finish("codex", CFG, st, info or fake.info(), self.state)
         return fake, result
 
@@ -256,6 +288,9 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
             self.addCleanup(setattr, MODULE, name, getattr(MODULE, name))
             setattr(MODULE, name, value)
         self.state = {}
+        self.repo, self.base = make_lane_repo(self.tmp.name)
+        self.addCleanup(setattr, MODULE, "LOCAL", MODULE.LOCAL)
+        MODULE.LOCAL = str(self.repo)
 
     def read_run_info(self, result):
         payload = dict(self.RESULT, result=result)
@@ -282,7 +317,7 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
         info = self.read_run_info({"summary": "Rewrote the parser."})
         fake = FakeLaneHost(subject="fix #1704 parser", message="Rewrote the parser.\n\nCloses #1704")
         MODULE.sh, MODULE.gh, MODULE.log = fake.sh, fake.gh, fake.log
-        st = {"issue": ISSUE, "run": RUN, "base": "0123456789abcdef0123", "host": CFG["host"]}
+        st = {"issue": ISSUE, "run": RUN, "base": self.base, "host": CFG["host"]}
         result = MODULE.finish("codex", CFG, st, info, self.state)
         self.assertEqual(fake.prs, [])
         self.assertEqual(result["status"], "pr-validation-failed")

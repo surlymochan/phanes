@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import subprocess
 import tempfile
 import time
 
@@ -77,6 +78,28 @@ class FakeHarvest:
         module.log = self._log
         module.sh = self._sh
         module.gh = self._gh
+        # the harvest filters the fetched lane branch before the push (Refs #1835):
+        # the filter needs a real repository with the lane branch in it
+        self.repo = self.scratch / "repo"
+        self.repo.mkdir()
+        module.LOCAL = str(self.repo)
+        self._git("init", "-q")
+        self._git("config", "user.name", "Test")
+        self._git("config", "user.email", "test@example.com")
+        (self.repo / "base.txt").write_text("base\n", encoding="utf-8")
+        self._git("add", "base.txt")
+        self._git("commit", "-qm", "base")
+        self.base = self._git("rev-parse", "HEAD")
+        (self.repo / "code.py").write_text("print('lane')\n", encoding="utf-8")
+        self._git("add", "code.py")
+        self._git("commit", "-qm", "lane")
+        self._git("update-ref", "refs/fleet/%s" % LANE, self._git("rev-parse", "HEAD"))
+
+    def _git(self, *args):
+        proc = subprocess.run(["git", "-C", str(self.repo), *args], capture_output=True, text=True)
+        if proc.returncode:
+            raise AssertionError("git %s failed: %s" % (args[0], proc.stderr.strip()))
+        return proc.stdout.strip()
 
     def _log(self, msg, brain=True):
         self.logs.append(msg)
@@ -104,8 +127,9 @@ class FakeHarvest:
         return [c for c in self.gh_calls if "comment" in c]
 
 
-def new_state():
-    return {LANE: {"issue": ISSUE, "run": "run-947", "host": CFG["host"], "base": "abcdef1234"}}
+def new_state(harvest=None):
+    return {LANE: {"issue": ISSUE, "run": "run-947", "host": CFG["host"],
+                   "base": harvest.base if harvest else "abcdef1234"}}
 
 
 def check_classification(module):
@@ -140,7 +164,7 @@ def check_transient_sequence(module, scratch_root):
     threshold = module.HARVEST_FETCH_MAX_TRANSIENT_FAILURES
     with tempfile.TemporaryDirectory(dir=scratch_root) as raw:
         harvest = FakeHarvest(module, raw)
-        state = new_state()
+        state = new_state(harvest)
         lane_state = state[LANE]
         harvest.fetch_error = TRANSIENT_ERRORS[0]
 
@@ -170,7 +194,7 @@ def check_fatal_error(module, scratch_root):
     """A fatal fetch error is labelled lane-failed without waiting for the threshold."""
     with tempfile.TemporaryDirectory(dir=scratch_root) as raw:
         harvest = FakeHarvest(module, raw)
-        state = new_state()
+        state = new_state(harvest)
         lane_state = state[LANE]
         harvest.fetch_error = FATAL_ERROR
 
@@ -184,7 +208,7 @@ def check_success_resets(module, scratch_root):
     """A successful harvest fetch clears the failure counter and never labels lane-failed."""
     with tempfile.TemporaryDirectory(dir=scratch_root) as raw:
         harvest = FakeHarvest(module, raw)
-        state = new_state()
+        state = new_state(harvest)
         lane_state = state[LANE]
         lane_state["fetch_failures"] = 2
         lane_state["fetch_backoff_until"] = time.time() + 600

@@ -161,6 +161,9 @@ DEFAULTS = {
     "assign_idempotency_key": True,       # pass `lane assign --idempotency-key` (needs a fleet release with #1388)
     "status_tick_cap_s": 55,
     "harvest_cap_s": 100,
+    # The artifacts that never enter a harvested branch (Refs #1835).  None = the default
+    # rule list of lib/dispatch/harvest_filter.py; a list of patterns replaces it.
+    "harvest_exclude": None,
     "review": {
         "enabled": True, "max": 8, "burn_max": 12, "rounds": 3, "max_fails": 4,
         "pref": {"pi": 0, "codex": 1, "copilot": 2, "agy": 3},
@@ -1495,6 +1498,18 @@ class Dispatcher:
         return classify_numstat(out, mn, tuple(tp.get("doc_ext") or ()), tuple(tp.get("code_ext") or ()),
                                 tuple(tp.get("code_dirs") or ()))
 
+    def filter_lane_branch(self, lane, st):
+        """Rebuild the fetched lane branch without the artifacts that never enter a PR.
+
+        Returns (head, removed, empty): the head of the rebuilt branch, the excluded
+        paths and whether nothing effective is left (the rebuilt tree is the tree of
+        the base).  A failing git command raises ``harvest_filter.FilterError``: the
+        caller then fails closed and pushes nothing (Refs #1835).
+        """
+        module = dispatch_module("harvest_filter")
+        return module.filter_branch(self.cfg["local_repo"], "refs/fleet/%s" % lane, st.get("base"),
+                                    self.cfg.get("harvest_exclude"))
+
     def fetch_lane_branch(self, lane, lc, info):
         if lc["host"] in self.local_hosts:
             src = os.path.expanduser(info.get("repo") or self.cfg["default_repo_path"])
@@ -1717,11 +1732,27 @@ class Dispatcher:
             if st.get("rebase_pr"):
                 pr, ob = st["rebase_pr"], st["rebase_branch"]
                 anc = self.git("merge-base", "--is-ancestor", st["base"], f"refs/fleet/{lane}")[0]
-                df = self.git("diff", "--stat", st["base"], f"refs/fleet/{lane}")[1]
-                if anc != 0 or not df.strip():
+                head, removed, empty = f"refs/fleet/{lane}", [], False
+                if anc == 0:
+                    # Refs #1835: the artifacts of the lane (the hidden build leftovers,
+                    # the review products) never enter the PR: the branch is rebuilt
+                    # without them before it is pushed.
+                    try:
+                        head, removed, empty = self.filter_lane_branch(lane, st)
+                    except Exception as error:
+                        # fail closed: an undecided filter never pushes anything
+                        reason, detail = self.harvest_reason(lane, lc, run, info, f"artifact filter failed: {error}")
+                        self.log(f"{lane} rebase #{n} PR#{pr}: artifact filter failed ({error}); nothing pushed "
+                                 f"[failure_reason={reason}; error={detail}]")
+                        return False
+                    if removed:
+                        self.log(f"{lane} rebase #{n} PR#{pr} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
+                df = self.git("diff", "--stat", st["base"], head)[1]
+                if anc != 0 or not df.strip() or empty:
                     # nothing usable to push: the PR is still conflicting, so do not report it as rebased
                     why = (f"not based on {self.cfg['base_branch']} {st['base'][:8]}" if anc != 0
-                           else f"empty diff vs {self.cfg['base_branch']}")
+                           else f"empty diff vs {self.cfg['base_branch']}" if not df.strip()
+                           else f"no effective change vs {self.cfg['base_branch']} after the artifact filter")
                     reason, detail = self.run_failure(info, None, self.ending_detail(
                         info, f"rebase produced nothing to push: {why}"))
                     self.record_failure(lane, lc, run, reason, detail)
@@ -1744,7 +1775,7 @@ class Dispatcher:
                         st["rebase_head"] = expect
                     lease = f"--force-with-lease=refs/heads/{ob}:{expect}"
                     try:
-                        rc, _, err = self.git("push", "-q", lease, "origin", f"refs/fleet/{lane}:refs/heads/{ob}", timeout=60)
+                        rc, _, err = self.git("push", "-q", lease, "origin", f"{head}:refs/heads/{ob}", timeout=60)
                     except subprocess.TimeoutExpired:
                         self.log(f"{lane} rebase push timeout; retry next tick", brain=False)
                         return False
@@ -1772,8 +1803,34 @@ class Dispatcher:
                 self.log(f"{lane} rebased #{n} → PR #{pr} ({ob}, run {run}, {info.get('status')}){note}")
                 self.mark_done(state, n)
                 return True
+            # Refs #1835: the artifacts of the lane (the hidden build leftovers, the
+            # review products) never enter the PR: the branch is rebuilt without them
+            # before it is pushed.
             try:
-                rc, _, err = self.git("push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}", timeout=60)
+                head, removed, empty = self.filter_lane_branch(lane, st)
+            except Exception as error:
+                # fail closed: an undecided filter never pushes anything
+                reason, detail = self.harvest_reason(lane, lc, run, info, f"artifact filter failed: {error}")
+                self.log(f"{lane} #{n} run {run} harvest filter failed ({error}); nothing pushed "
+                         f"[failure_reason={reason}; error={detail}]")
+                return False
+            if removed:
+                self.log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
+            if empty:
+                why = ("no effective change after the artifact filter" if removed
+                       else f"no effective change vs {self.cfg['base_branch']}")
+                reason, detail = self.run_failure(info, None, self.ending_detail(info, why))
+                self.record_failure(lane, lc, run, reason, detail)
+                self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
+                self.gh_write(["issue", "comment", str(n), "--body",
+                               f"Lane {lane} run `{run}` has no effective change ({why}; "
+                               f"{len(removed)} excluded path(s)). Labelled `{L['failed']}`; re-add `{L['ready']}` to retry."])
+                self.log(f"{lane} #{n} run {run}: {why}; not pushing → {L['failed']} "
+                         f"[failure_reason={reason}; error={detail}]")
+                self.mark_done(state, n)
+                return True
+            try:
+                rc, _, err = self.git("push", "-q", "origin", f"{head}:refs/heads/{b}", timeout=60)
             except subprocess.TimeoutExpired:
                 self.log(f"{lane} #{n} origin push timeout; retry next tick", brain=False)
                 return False
@@ -1802,7 +1859,7 @@ class Dispatcher:
                 self.log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR{note}")
                 self.mark_done(state, n)
                 return True
-            thin = self.pr_diff_too_thin(st["base"], f"refs/fleet/{lane}")
+            thin = self.pr_diff_too_thin(st["base"], head)
             if thin:
                 mn = (self.cfg.get("thin_pr") or {}).get("min_effective_diff")
                 reason, detail = self.run_failure(info, None, self.ending_detail(info, f"thin diff: {thin}"))
@@ -1815,11 +1872,11 @@ class Dispatcher:
                 self.log(f"{lane} #{n} thin PR blocked ({thin}) → {L['failed']} "
                          f"[failure_reason={reason}; error={detail}]")
                 return True
-            subj = self.git("log", "-1", "--format=%s", f"refs/fleet/{lane}")[1]
+            subj = self.git("log", "-1", "--format=%s", head)[1]
             body = (f"Closes #{n}\n\nAutodispatched to lane **{lane}** on **{lc['host']}** ({info.get('backend')}/{info.get('model')}), "
                     f"run `{run}`, base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`."
                     f"\n\nExecutor summary: {info.get('summary')}")
-            title = self.upstream_title(subj.strip() or f"#{n}", st["base"], f"refs/fleet/{lane}")[:200]
+            title = self.upstream_title(subj.strip() or f"#{n}", st["base"], head)[:200]
             rc, out, err = self.gh(["pr", "create", "--base", self.cfg["base_branch"], "--head", b, "--title", title, "--body", body])
             url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
             self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)

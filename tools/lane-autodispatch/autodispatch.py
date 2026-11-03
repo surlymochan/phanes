@@ -9,7 +9,7 @@ Pause: the openswarm pause store ($OPENSWARM_HOME/pauses, written by `openswarm 
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
-import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import base64, json, os, re, shlex, subprocess, sys, time, tempfile, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -835,6 +835,66 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
             "missing": list(missing)}
 
+# The artifacts that never enter a harvested branch (Refs #1835): the hidden build
+# leftovers (openswarm/tests/.dde4*-00000000.so) and the review products
+# (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
+# one more pattern.  The same rules live in the dispatch engine
+# (openswarm/lib/dispatch/harvest_filter.py); both copies must stay in sync.
+HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)\.[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+
+def filter_harvest(ref, base):
+    """Rebuild the harvested branch without the artifacts that never enter a PR.
+
+    Returns (head, removed, empty): the head of the rebuilt branch (the input ref
+    when nothing was excluded), the excluded paths and whether nothing effective is
+    left.  The emptiness compares the trees, not the heads: commits that cancel each
+    other out leave the tree of the base, whatever the head is.  A failing git
+    command raises: the caller then pushes nothing (fail closed)."""
+    def git(*args, env=None, inp=None):
+        p = subprocess.run(["git", "-C", LOCAL, *args], capture_output=True, env=env, input=inp)
+        if p.returncode:
+            raise RuntimeError(p.stderr.decode("utf-8", "replace").strip() or f"git {args[0]} failed")
+        return p.stdout
+
+    if not base:
+        raise RuntimeError("missing dispatch base")
+    git("merge-base", "--is-ancestor", base, ref)
+    commits = git("rev-list", "--reverse", "--topo-order", "--parents", f"{base}..{ref}").splitlines()
+    if any(len(line.split()) != 2 for line in commits):
+        raise RuntimeError("cannot filter merge commits")
+    paths = git("diff", "--no-renames", "--name-only", "-z", base, ref).split(b"\0")
+    # Inspect every commit as well, including artifacts subsequently deleted.
+    for line in commits:
+        commit = line.split()[0].decode()
+        paths += git("diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", commit).split(b"\0")
+    removed = sorted({os.fsdecode(p) for p in paths if p and
+                      any(rule.search(os.fsdecode(p)) for rule in HARVEST_EXCLUDE_PATTERNS)})
+    tree_of = lambda rev: git("rev-parse", f"{rev}^{{tree}}").strip().decode()
+    if not removed:
+        return ref, [], tree_of(ref) == tree_of(base)
+    parent = base
+    with tempfile.TemporaryDirectory(prefix=".harvest-", dir=LOCAL) as directory:
+        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(directory, "index"), "GIT_LITERAL_PATHSPECS": "1"}
+        for line in commits:
+            commit = line.split()[0].decode()
+            git("read-tree", commit, env=env)
+            git("update-index", "--force-remove", "--", *removed, env=env)
+            present = [path for path in removed if git("ls-tree", "-z", base, "--", path)]
+            if present:
+                git("restore", "--source", base, "--staged", "--", *present, env=env)
+            tree = git("write-tree", env=env).strip().decode()
+            if tree == tree_of(f"{parent}^{{tree}}"):
+                continue  # nothing is left of this commit
+            author = git("show", "-s", "--format=%an%x00%ae%x00%aI", commit).rstrip(b"\n").split(b"\0")
+            commit_env = {**env, "GIT_AUTHOR_NAME": os.fsdecode(author[0]),
+                          "GIT_AUTHOR_EMAIL": os.fsdecode(author[1]), "GIT_AUTHOR_DATE": os.fsdecode(author[2]),
+                          "GIT_COMMITTER_NAME": os.fsdecode(author[0]),
+                          "GIT_COMMITTER_EMAIL": os.fsdecode(author[1]),
+                          "GIT_COMMITTER_DATE": os.fsdecode(author[2])}
+            message = git("show", "-s", "--format=%B", commit)
+            parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
+    return parent, removed, tree_of(parent) == tree_of(base)
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -847,15 +907,28 @@ def finish(lane, cfg, st, info, state):
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
-        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
+        try:
+            head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            # fail closed: an undecided filter never pushes anything
+            log(f"{lane} #{n} run {run} harvest filter failed: {error}")
+            return {"done": False, "status": "filter-failed", "error": str(error), "missing": []}
+        if removed:
+            log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
+        if empty:
+            label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
+                               f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
+        rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
-        _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", f"refs/fleet/{lane}"])
-        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", f"refs/fleet/{lane}"])
+        _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", head])
+        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", head])
         title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
         missing = validate_lane_pr(n, title, body)
         mode = pr_validation_mode()
