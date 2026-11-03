@@ -1,0 +1,380 @@
+diff --git a/.lane-review/PR-1803.md b/.lane-review/PR-1803.md
+index 33e0c0c0f6..e8c5cb1d32 100644
+--- a/.lane-review/PR-1803.md
++++ b/.lane-review/PR-1803.md
+@@ -1,33 +1,60 @@
+-# PR #1803 本地审查入口（离线）
++# PR #1803 本地审查入口（离线，无需 GitHub 网络）
+ 
+-第 1 轮审查的阻塞项是「无法获取 diff」：`git fetch` 因 github.com DNS 解析失败，`gh pr diff 1803`
+-因未安装 `gh` 而不可用。本文件给出**不依赖网络**的核验入口：相关提交对象全部在本地对象库里，
++第 1、2 轮审查的阻塞项都是「无法获取 diff」：`git fetch` 因 github.com DNS 解析失败，`gh pr diff 1803`
++因未安装 `gh` 而不可用。本文件给出**完全离线**的核验入口：相关提交对象全部在本地对象库里，
+ 文件内容全部在车道工作树里。
+ 
+-## 1. 相关对象
++> 关键结论：**审查对象 `4b539ccebde3a12ab727b1684ef309fc94a51854` 已在本地对象库中**
++> （分支 `rebase-pr-1803` 指向它），不需要 `git fetch`，也不需要 `gh`。
++
++## 1. 复审对象（当前 PR 头）
+ 
+ | 角色 | 对象 | 说明 |
+ | --- | --- | --- |
+-| 上一轮已 push 的 PR 头 | `ef5e8f79c832efea3cc92a151e1c77ba45c274f`（分支 `rebase-pr-1803`） | 第 1 轮审查的对象 |
+-| 上一轮的基线 | `6452f82a8408da0f2f0db5775b573d65f51414bf` | 当时的 main 顶 |
+-| 本轮 rebase 目标（main） | `e1e838a0afcfc39468c4ac17a811fa5611fb42f1` | main 顶（#1799 合入后） |
++| **本轮复审对象（PR 当前头）** | `4b539ccebde3a12ab727b1684ef309fc94a51854`（分支 `rebase-pr-1803`） | 第 2 轮审查指定的头；已重基到 main |
++| 本轮 rebase 目标（main 顶） | `e1e838a0afcfc39468c4ac17a811fa5611fb42f1` | main 顶（#1799 合入后） |
++| 上一轮 push 的头 | `ef5e8f79c832efea3cc92a151e1c77ba45c274f` | 第 1 轮审查的对象（基线为 `6452f82a84`） |
++
++## 2. 拿到完整 diff（一条命令，不需要网络）
++
++对象都在本地，直接用 git 就能出 diff：
+ 
+ ```sh
+-# 上一轮 push 的头（审查对象）
+-git diff 6452f82a8408da0f2f0db5775b573d65f51414bf..ef5e8f79c832efea3cc92a151e1c77ba45c274f
+-git show --stat ef5e8f79c8
++cd /root/.claude/openswarm-executor-candidate/lanes/M8/wt
+ 
+-# 本轮重基后的落点（AD 提交后即为新的 PR 头）
++# PR 全量 diff（main → 当前 PR 头），带统计
++git diff --stat e1e838a0afcfc39468c4ac17a811fa5611fb42f1..rebase-pr-1803
+ git diff e1e838a0afcfc39468c4ac17a811fa5611fb42f1..rebase-pr-1803
++
++# 逐个文件看
++git show 4b539ccebd -- tools/review-divergence-log.py
++git show 4b539ccebd -- tools/tests/test_review_divergence_log.py
++git show 4b539ccebd -- docs/review-divergence-log.md
++
++# 确认对象确实在本地（不依赖远端）
++git cat-file -t 4b539ccebde3a12ab727b1684ef309fc94a51854   # -> commit
++git rev-parse rebase-pr-1803                                # -> 4b539ccebd...
++```
++
++若只想看单个文件的完整内容（不受 diff 上下文截断影响）：
++
++```sh
++cd /root/.claude/openswarm-executor-candidate/lanes/M8/wt
++for f in tools/review-divergence-log.py tools/tests/test_review_divergence_log.py \
++         docs/review-divergence-log.md docs/evidence/review-divergence/divergence-log.jsonl \
++         docs/evidence/review-divergence/stats.json; do
++  echo "===== $f"
++  git show "4b539ccebd:$f"
++done
+ ```
+ 
+-## 2. 本轮工作树
++## 3. 本轮工作树（AD 提交后即为新的 PR 头）
+ 
+-本轮从 `rebase-pr-1803` 出发重基到 main `e1e838a0af`，并按审查意见修正。修正后的文件在车道
+-工作树 `/root/.claude/openswarm-executor-candidate/lanes/M8/wt`（本次会话的 git 元数据挂载为只读，
+-无法在会话内产生提交，提交与 force-push 由 AD 侧完成）。
++本轮从 `rebase-pr-1803`（头 `4b539ccebd`）出发，基线是 main 顶 `e1e838a0af`。本次会话的 git 元数据
++挂载为**只读**（`/root/work/openbot-executor-base/.git` 是 `ro` 挂载），所以**无法在会话内产生提交**，
++提交与 force-push 由 AD 侧完成；工作树里已经是修正后的文件内容。
+ 
+-本次改动全部是**新增文件**，用下面的命令离线生成 unified diff：
++本次改动全部落在**新增文件**上，离线生成 unified diff：
+ 
+ ```sh
+ cd /root/.claude/openswarm-executor-candidate/lanes/M8/wt
+@@ -38,47 +65,50 @@ for f in tools/review-divergence-log.py tools/tests/test_review_divergence_log.p
+ done
+ ```
+ 
+-只看「本轮相对上一轮 push 头改了什么」：
++只看「本轮相对上一轮头 `4b539ccebd` 改了什么」：
+ 
+ ```sh
+ cd /root/.claude/openswarm-executor-candidate/lanes/M8/wt
+ for f in tools/review-divergence-log.py tools/tests/test_review_divergence_log.py \
+          docs/review-divergence-log.md docs/evidence/review-divergence/divergence-log.jsonl \
+-         docs/evidence/review-divergence/stats.json; do
++         docs/evidence/review-divergence/stats.json .lane-review/PR-1803.md; do
+   mkdir -p ".openswarm-tmp/old/$(dirname "$f")"
+-  git show "ef5e8f79c8:$f" > ".openswarm-tmp/old/$f"
++  git show "4b539ccebd:$f" > ".openswarm-tmp/old/$f"
+   diff -u ".openswarm-tmp/old/$f" "$f"
+ done
+ ```
+ 
+-## 3. 本轮相对上一轮头的改动
+-
+-1. **去掉两个二进制构建产物**：`openswarm/tests/.dde4df7fffbfd6bc-00000000.so` 与
+-   `openswarm/tests/.dde4df7fffffb7f7-00000000.so`（`ef5e8f79c8` 里的 `.so`）。它们是编译缓存，
+-   不是交付物；#1729 的质量门明确「二进制/构建产物入 diff 拒收」。本轮不包含它们。
+-2. **`build_stats()` 补两个口径**（`tools/review-divergence-log.py:429`）：
+-   - `incomplete`：有结局但没有成对判定的轮次（手写日志/日志截断会出现）单列，既不算样本也不进
+-     任何分母；此前这类轮次会让统计路径抛 `KeyError`。
+-   - `attribution`：`both` / `lane` / `tester` / `neither` / `undecided` 的计数分布，即「谁对」的
+-     直方表，是合并门切换时最直接要看的一张表。
+-3. **测试补两条**：`tools/tests/test_review_divergence_log.py`
+-   - `test_an_outcome_without_a_pair_of_verdicts_is_incomplete_and_never_a_sample`
+-   - `test_the_attribution_breakdown_counts_who_was_right`
+-4. **文档与证据同步**：`docs/review-divergence-log.md` §6/§7/§10 补 `incomplete`、`attribution`
+-   口径与新的统计输出；`docs/evidence/review-divergence/stats.json` 用工具重新生成。
+-
+-其余内容（数据格式、工具、端到端演示、失败模式防护）与上一轮一致，未做无关改动。
+-
+-## 4. 复核命令
++## 4. 本轮相对上一轮头（`4b539ccebd`）的改动
++
++上一轮的头已经是「重基到 main + 去掉二进制构建产物 + 补 `incomplete`/`attribution` 口径」后的版本。
++本轮在此基础上做三件事：
++
++1. **修掉一个文档/代码漂移**：模块 docstring 里的事件样例缺 `schema` 字段，而 `validate_event()`
++   把它当必填——照抄样例会被退出码 2 拒绝。样例补上 `schema` 并换成真实 head
++   （`tools/review-divergence-log.py:14-24`），并新增一条测试
++   `test_the_event_examples_of_the_module_docstring_pass_the_validator`，把「文档里的样例必须能被校验器
++   接受」变成回归项，防止再漂移。
++2. **两处报错信息指向错误的轮次/轮数**：
++   - `cmd_append()` 在同一 `(pr, head)` 已有判定时报的是 `same_head[0]["round"]`——多轮时可能报出
++     过期轮次。现在报**最高**轮次，并直接给出下一个可用轮次（`--round <max+1>`）。
++   - `cmd_backfill()` 在同一 `(pr, head)` 有多轮时用 `len(waiting)` 拼「has N rounds to backfill」，
++     当所有轮次都已回填时会打印成「has 0 rounds to backfill」。现在分两种情况分别报
++     「has N rounds to backfill」与「all of them are backfilled」。
++3. **文档同步**：修正 §3.1 里 `OPENSWARM_HOME` 的描述（未设时兜底到 `~/.claude/openswarm/`）、
++   §4 的校验表补充「多轮待回填需显式 `--round`」、§10 的覆盖清单；所有引用到的行号按本轮改后
++   的实际行号重新核对（`log_path()` 94、`read_events()` 216、`append_event()` 234、
++   `who_was_right()` 292、`build_stats()` 436、`main()` 581）。
++
++## 5. 复核命令
+ 
+ ```sh
+ cd /root/.claude/openswarm-executor-candidate/lanes/M8/wt
+-python3 -m unittest discover -s tools/tests -p 'test_review_divergence_log.py' -v   # 16 项
++python3 -m unittest discover -s tools/tests -p 'test_review_divergence_log.py' -v   # 20 项
+ python3 tools/review-divergence-log.py --self-test
+ python3 tools/review-divergence-log.py --log docs/evidence/review-divergence/divergence-log.jsonl stats
+ ```
+ 
+-## 5. 演示数据的来源核对（离线）
++## 6. 演示数据的来源核对（离线）
+ 
+ 演示用的两张真实 PR（#917、#1751）数据来自仓库内的 GitHub 快照
+ `docs/evidence/architecture-review/snapshot.json.gz`，可离线核对：
+@@ -86,14 +116,15 @@ python3 tools/review-divergence-log.py --log docs/evidence/review-divergence/div
+ ```sh
+ cd /root/.claude/openswarm-executor-candidate/lanes/M8/wt
+ python3 - <<'PY'
+-import gzip, json
++import gzip, json, re
+ data = json.loads(gzip.open("docs/evidence/architecture-review/snapshot.json.gz", "rt", encoding="utf-8").read())
+ for pr in data["pull_requests"]:
+     if pr["number"] in (917, 1751):
+-        print("PR", pr["number"], "merged_at", pr["merged_at"])
++        print("PR", pr["number"], "merged_at", pr.get("merged_at"))
+         for comment in pr["comments"]:
+             if "lane-review" in comment["body"]:
+-                print("  ", comment["created_at"], comment["url"])
++                print("  ", comment["created_at"], comment["url"],
++                      re.findall(r"head `([0-9a-f]{7,40})`", comment["body"]))
+ PY
+ ```
+ 
+diff --git a/docs/review-divergence-log.md b/docs/review-divergence-log.md
+index cf4c2fe54e..1f2a871206 100644
+--- a/docs/review-divergence-log.md
++++ b/docs/review-divergence-log.md
+@@ -56,23 +56,23 @@
+ 
+ ### 3.1 位置
+ 
+-日志路径按以下顺序解析（`tools/review-divergence-log.py:92` `log_path()`）：
++日志路径按以下顺序解析（`tools/review-divergence-log.py:94` `log_path()`）：
+ 
+ 1. 命令行 `--log PATH`；
+ 2. 环境变量 `REVIEW_DIVERGENCE_LOG`；
+-3. `$OPENSWARM_HOME/review-divergence.jsonl`（fleet 运行时目录，默认 `~/.claude/openswarm/`）；
+-4. `~/.claude/openswarm/review-divergence.jsonl`。
++3. `$OPENSWARM_HOME/review-divergence.jsonl`（`OPENSWARM_HOME` 由 fleet 运行时目录提供，典型值 `~/.claude/openswarm/`）；
++4. `~/.claude/openswarm/review-divergence.jsonl`（`OPENSWARM_HOME` 未设时的兜底）。
+ 
+ 仓库内随版本走的影子期证据副本放在 `docs/evidence/review-divergence/divergence-log.jsonl`（本卡的演示数据），决策时引用的快照也放同一目录。
+ 
+ ### 3.2 读写约定
+ 
+ - **只追加**：任何命令都不改写既有行；回填与修正都是新行。
+-- **一次写入一行**：`append_event()`（`tools/review-divergence-log.py:232`）用 `O_APPEND` 单次 `write()` 落盘，并行写不会互相穿插。
++- **一次写入一行**：`append_event()`（`tools/review-divergence-log.py:234`）用 `O_APPEND` 单次 `write()` 落盘，并行写不会互相穿插。
+ - **单写者**：一个文件同一时刻只有一个写入者（lane 或 tester 侧各写自己的事件），避免语义冲突。
+-- **坏行不跳过**：文件里出现非 JSON、schema 不认识、字段不合规的行时，命令以退出码 2 报错，不静默丢弃（`read_events()`，`tools/review-divergence-log.py:214`）。
++- **坏行不跳过**：文件里出现非 JSON、schema 不认识、字段不合规的行时，命令以退出码 2 报错，不静默丢弃（`read_events()`，`tools/review-divergence-log.py:216`）。
+ - **时间一律带时区**：naive 时间戳（如 `2026-11-02 17:33:59`）被拒绝。
+-- **退出码**：0 成功；2 输入非法或日志损坏（`main()`，`tools/review-divergence-log.py:574`）。
++- **退出码**：0 成功；2 输入非法或日志损坏（`main()`，`tools/review-divergence-log.py:581`）。
+ 
+ ## 4. 工具用法
+ 
+@@ -104,16 +104,16 @@ python3 tools/review-divergence-log.py --log "$LOG" list --json
+ | --- | --- |
+ | `--pr` | 正整数 |
+ | `--head` | 7–40 位十六进制 |
+-| `--round` | 正整数；同一 `(pr, head)` 已有判定时必须显式给出，否则报错（防止误开新一轮） |
++| `--round` | 正整数；同一 `(pr, head)` 已有判定时必须显式给出，否则报错并提示下一个可用轮次（防止误开新一轮） |
+ | `--lane` | `APPROVE` / `CHANGES`（别名 `approve`、`通过`、`不通过` 等） |
+ | `--tester` | `PASS` / `FAIL` / `INSUFFICIENT`（别名 `通过`、`不通过`、`证据不足`） |
+ | `--outcome` | `merged` / `closed` / `re_review`（别名 `合并`、`关闭`、`再审`） |
+ | 时间戳 | ISO-8601 且必须带时区 |
+-| 回填目标 | 必须存在对应的 `verdict` 轮次；重复回填需 `--force` |
++| 回填目标 | 必须存在对应的 `verdict` 轮次；重复回填需 `--force`；同一 `(pr, head)` 有多轮待回填时必须显式 `--round` |
+ 
+ ## 5. 判定与回填口径
+ 
+-三方映射到同一个「正面 / 负面」轴（`tools/review-divergence-log.py:63-67`）：
++三方映射到同一个「正面 / 负面」轴（`tools/review-divergence-log.py:65-69`）：
+ 
+ | 判定方 | 判定 | 含义 |
+ | --- | --- | --- |
+@@ -126,7 +126,7 @@ python3 tools/review-divergence-log.py --log "$LOG" list --json
+ | 结局 | `closed` | 负面（PR 关闭，未合入） |
+ | 结局 | `re_review` | 负面（head 变更后进入下一轮审查，本轮未合入） |
+ 
+-「谁对」按上表判定（`who_was_right()`，`tools/review-divergence-log.py:290`）：
++「谁对」按上表判定（`who_was_right()`，`tools/review-divergence-log.py:292`）：
+ 
+ | `correct` | 条件 |
+ | --- | --- |
+@@ -140,7 +140,7 @@ python3 tools/review-divergence-log.py --log "$LOG" list --json
+ 
+ ## 6. 统计口径
+ 
+-`build_stats()`（`tools/review-divergence-log.py:429`）的规则：
++`build_stats()`（`tools/review-divergence-log.py:436`）的规则：
+ 
+ - **只有已回填结局的轮次进入任何比率的分母**。未回填的轮次只出现在 `rounds.pending` 与 `pending` 列表里，**不冒充准确率样本**。
+ - **有结局但没有成对判定的轮次**（手写日志或日志被截断可能出现）单列在 `incomplete` 里，既不算样本也不进分母。
+@@ -236,4 +236,4 @@ python3 -m unittest discover -s tools/tests -p 'test_review_divergence_log.py' -
+ python3 tools/review-divergence-log.py --self-test
+ ```
+ 
+-覆盖：追加（多轮不覆盖、自动轮次、同一 head 需显式 `--round`）、回填（正确归因、未知轮次拒绝、重复回填需 `--force` 且后者生效）、未回填清单、统计（只算已回填轮次、弃权不进分母、一致率与分歧矩阵、归因规则表全覆盖、归因分布计数、篡改的 `correct` 被点名、有结局无判定的轮次单列且不进分母）、坏输入拒绝（PR 号、head、判定值、轮次、无时区时间戳，且拒绝时不写文件）、坏行报错不跳过、环境变量路径解析。
++覆盖：追加（多轮不覆盖、自动轮次、同一 head 需显式 `--round` 且报错提示下一个可用轮次）、回填（正确归因、未知轮次拒绝、多轮待回填需显式 `--round`、全部回填完毕后的提示、重复回填需 `--force` 且后者生效）、未回填清单、统计（只算已回填轮次、弃权不进分母、一致率与分歧矩阵、归因规则表全覆盖、归因分布计数、篡改的 `correct` 被点名、有结局无判定的轮次单列且不进分母）、坏输入拒绝（PR 号、head、判定值、轮次、无时区时间戳，且拒绝时不写文件）、坏行报错不跳过、环境变量路径解析、模块 docstring 里的事件样例可被校验器接受（文档与代码不漂移）。
+diff --git a/tools/review-divergence-log.py b/tools/review-divergence-log.py
+index e941141a34..d923519973 100755
+--- a/tools/review-divergence-log.py
++++ b/tools/review-divergence-log.py
+@@ -12,12 +12,14 @@ judged, when, and who turned out to be right.
+ Two event kinds share one JSON Lines file:
+ 
+ ``verdict``
+-    ``{"kind": "verdict", "pr": 1751, "head": "<sha>", "round": 1,
++    ``{"schema": "phanes.review-divergence/1", "kind": "verdict", "pr": 1751,
++    "head": "a141b7b371bb3e3d4a158d82bdf067fc4c926aff", "round": 1,
+     "lane_verdict": "CHANGES", "tester_verdict": "FAIL",
+     "recorded_at": "2026-11-02T17:33:59Z"}``
+ 
+ ``outcome``
+-    ``{"kind": "outcome", "pr": 1751, "head": "<sha>", "round": 1,
++    ``{"schema": "phanes.review-divergence/1", "kind": "outcome", "pr": 1751,
++    "head": "a141b7b371bb3e3d4a158d82bdf067fc4c926aff", "round": 1,
+     "outcome": "re_review", "outcome_at": "2026-11-02T18:19:28Z",
+     "correct": "both", "backfilled_at": "2026-11-02T18:25:00Z"}``
+ 
+@@ -325,16 +327,17 @@ def cmd_append(args):
+     same_head = [record for record in records.values() if record["pr"] == pr and record["head"] == head]
+     if args.round is None:
+         if same_head:
+-            raise ValueError("PR %d head %s already has round %d; pass --round for another round"
+-                             % (pr, head, same_head[0]["round"]))
++            highest = max(record["round"] for record in same_head)
++            raise ValueError("PR %d head %s already has round %d; pass --round %d to record "
++                             "another round of this head" % (pr, head, highest, highest + 1))
+         rounds = [record["round"] for record in records.values() if record["pr"] == pr]
+         number = max(rounds) + 1 if rounds else 1
+     else:
+         number = require_round(args.round)
+     key = (pr, head, number)
+     if key in records and not args.force:
+-        raise ValueError("PR %d head %s round %d is already recorded; use --force to replace it"
+-                         % (pr, head, number))
++        raise ValueError("PR %d head %s round %d is already recorded; use --force to append "
++                         "a corrected record" % (pr, head, number))
+     event = {"schema": SCHEMA, "kind": "verdict", "pr": pr, "head": head, "round": number,
+              "lane_verdict": lane, "tester_verdict": tester, "recorded_at": recorded_at}
+     if args.evidence:
+@@ -366,6 +369,10 @@ def cmd_backfill(args):
+             number = waiting[0]["round"]
+         elif len(candidates) == 1:
+             number = candidates[0]["round"]
++        elif not waiting:
++            raise ValueError("PR %d head %s has %d rounds and all of them are backfilled; "
++                             "pass --round --force to correct one"
++                             % (pr, head, len(candidates)))
+         else:
+             raise ValueError("PR %d head %s has %d rounds to backfill; pass --round"
+                              % (pr, head, len(waiting)))
+diff --git a/tools/tests/test_review_divergence_log.py b/tools/tests/test_review_divergence_log.py
+index 1e9579cb46..a2b351009a 100644
+--- a/tools/tests/test_review_divergence_log.py
++++ b/tools/tests/test_review_divergence_log.py
+@@ -1,8 +1,10 @@
+ """Offline tests of the review divergence log: append, backfill, statistics, bad input."""
+ 
++import importlib.util
+ import json
+ import os
+ from pathlib import Path
++import re
+ import subprocess
+ import sys
+ import tempfile
+@@ -14,6 +16,14 @@ HEAD_ONE = "a" * 40
+ HEAD_TWO = "b" * 40
+ 
+ 
++def load_tool():
++    """Import the tool as a module so its validator can be exercised directly."""
++    spec = importlib.util.spec_from_file_location("review_divergence_log", SCRIPT)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
+ class ReviewDivergenceLogTests(unittest.TestCase):
+     """The log records both verdicts per round, backfills the outcome and scores both sides."""
+ 
+@@ -67,6 +77,42 @@ class ReviewDivergenceLogTests(unittest.TestCase):
+         self.append("--round", "2", head=HEAD_ONE)
+         self.assertEqual([event["round"] for event in self.events()], [1, 2])
+ 
++    def test_append_of_a_known_head_names_the_next_round_and_not_a_stale_one(self):
++        self.append("--round", "1", head=HEAD_ONE)
++        self.append("--round", "2", head=HEAD_ONE)
++        result = self.append(head=HEAD_ONE, expect=2)
++        self.assertIn("already has round 2", result.stderr)
++        self.assertIn("--round 3", result.stderr)
++        self.append("--round", "3", head=HEAD_ONE)
++        self.assertEqual([event["round"] for event in self.events()], [1, 2, 3])
++
++    def test_backfill_of_several_rounds_of_one_head_needs_an_explicit_round(self):
++        self.append("--round", "1", head=HEAD_ONE)
++        self.append("--round", "2", head=HEAD_ONE)
++        result = self.backfill(head=HEAD_ONE, expect=2)
++        self.assertIn("--round", result.stderr)
++        self.backfill("--round", "2", head=HEAD_ONE)
++        outcomes = [event for event in self.events() if event["kind"] == "outcome"]
++        self.assertEqual([event["round"] for event in outcomes], [2])
++
++    def test_backfill_of_a_head_whose_rounds_are_all_backfilled_says_so(self):
++        self.append("--round", "1", head=HEAD_ONE)
++        self.append("--round", "2", head=HEAD_ONE)
++        self.backfill("--round", "1", head=HEAD_ONE)
++        self.backfill("--round", "2", head=HEAD_ONE)
++        result = self.backfill(head=HEAD_ONE, expect=2)
++        self.assertIn("all of them are backfilled", result.stderr)
++
++    def test_the_event_examples_of_the_module_docstring_pass_the_validator(self):
++        module = load_tool()
++        examples = re.findall(r"``(\{.*?\})``", module.__doc__, re.S)
++        self.assertEqual(len(examples), 2, "the docstring must document one example per event kind")
++        for example in examples:
++            event = module.validate_event(json.loads(example))
++            self.assertEqual(event["schema"], module.SCHEMA)
++            self.assertEqual(event["pr"], 1751)
++            self.assertEqual(event["head"], "a141b7b371bb3e3d4a158d82bdf067fc4c926aff")
++
+     def test_bad_input_is_rejected_and_leaves_the_log_untouched(self):
+         cases = [
+             ("append", "--pr", "0", "--head", HEAD_ONE, "--lane", "APPROVE", "--tester", "PASS"),
