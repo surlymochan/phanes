@@ -18,6 +18,7 @@ tick that fetched the object in the meantime) must never mask it.
 python3 tools/lane-autodispatch/test_can_take.py
 python3 tools/check-ad-base-fetch-on-miss.py
 python3 -m unittest tools.tests.test_lane_pr_validation
+python3 -m unittest openswarm.tests.test_harvest_collapse_guard
 ```
 
 ## PR 提交前校验（Refs #1704）
@@ -36,3 +37,15 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 `lane-failed`，避免污染失败统计。告警模式（`AD_PR_VALIDATION=warn`）只记录缺项照常提 PR。
 校验结果写入 run 记录（lane 主机 `runs/<run>/pr-validation.json` 与 `pr-validation.log`）
 和 AD 侧 `~/phanes-ctl/autodispatch/runs/<run>.log`，供阻塞诊断引用。
+
+## 收割塌缩护栏（Refs #1833）
+
+收割推送前核对“fix 后 head”：它必须以 fix 前 PR head 为祖先
+（`git merge-base --is-ancestor`），且相对 base 的变更文件数**或**总改动行数任一项相对
+fix 前 head 下降不超过阈值（默认 50%，`AD_HARVEST_COLLAPSE_RATIO`）。不满足即拒绝推送：
+PR 分支保持 fix 前 head、不建 PR、不消耗 review 轮次，issue 标 `lane-failed`，brain 日志写
+一行（PR 号、前后 sha、前后体量、判定原因），`state.json` 的 `_harvest_guard` 追加台账记录。
+git 命令失败一律 fail closed；卡正文声明“整体重写”可豁免。
+
+规则、fix 前 head 的来源与 2026-11-03 六个被还原 PR 的回放：
+[`../../docs/harvest-collapse-guard.md`](../../docs/harvest-collapse-guard.md)。
