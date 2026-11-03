@@ -1393,18 +1393,18 @@ class LanePickingAndBurn(Base):
 
     def test_successful_review_assignment_touches_same_picker_history(self):
         d = self.make()
-        lanes = {"P1": self.lanes()["P1"]}
+        lanes = {"C1": {**self.lanes()["C1"], "model": "gpt-6.1-terra"}}
         d.main_sha = lambda: SHA
         d.review_candidates = lambda *args: [pr(11, 101)]
         d.review_item = lambda item: {"n": "PR11", "title": "review", "body": ""}
         d.dispatch = lambda *args: ("review-run", "verify")
         state = {}
-        d.dispatch_reviews(lanes, {"P1": {"lane": "idle"}}, state, [])
-        self.assertEqual(state["P1"]["review_pr"], 11)
+        d.dispatch_reviews(lanes, {"C1": {"lane": "idle"}}, state, [])
+        self.assertEqual(state["C1"]["review_pr"], 11)
         with open(d.path("lane-lru.json")) as stream:
             history = json.load(stream)
         self.assertEqual(history["version"], 1)
-        self.assertEqual(history["lanes"]["P1"], history["counter"])
+        self.assertEqual(history["lanes"]["C1"], history["counter"])
 
 
 class Defaults(unittest.TestCase):
