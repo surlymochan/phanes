@@ -686,6 +686,20 @@ gh issue edit <issue-number> --remove-label in-progress --remove-label lane-fail
 
 `lane-failed` 的重贴沿用 #960 契约（`tools/check-lane-failed-requeue.py:36-43`）：`state.json` 里不得还有 lane 占用，issue 体内必须保留验收命令。任一条不满足时，工具只输出“去掉标签”的命令并提示先补齐条件，**不会**直接 `--add-label lane-ready`；带 `lane-pr` 的 issue 一律不判为幽灵、不重贴。
 
+### 手工重贴前先查开放 PR（Refs #1772）
+
+已经有开放 PR 的卡已经交付，不能再加回 `lane-ready`（否则同一张卡会被重复派发，严格池深也会虚增）。手工重贴前先用 `gh` 实读确认：
+
+```bash
+gh pr list --state open --json number,title,closingIssuesReferences   # 确认该卡没有开放 PR
+```
+
+已经有开放 PR 时，改为把交付标签修回终态（`lane-pr` 单独存在，`lane-ready` / `in-progress` 都摘掉）：
+
+```bash
+gh issue edit <issue-number> --remove-label lane-ready --remove-label in-progress --add-label lane-pr
+```
+
 ### 离线验证
 
 ```bash

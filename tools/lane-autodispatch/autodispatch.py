@@ -353,6 +353,10 @@ def save_state(s):
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
 
+def gh_api(args, payload=None, timeout=120):
+    """A raw `gh` call (no `-R`): the delivery guard names the repository itself."""
+    return sh(["gh"] + args, timeout=timeout, inp=payload)
+
 def label_names(issue):
     return {
         label if isinstance(label, str) else label["name"]
@@ -364,6 +368,161 @@ def dispatchable_issue(issue):
     labels = label_names(issue)
     return (issue.get("state", "OPEN") == "OPEN" and "lane-ready" in labels
             and not labels & DISPATCH_EXCLUDING_LABELS)
+
+# --- 交付守卫：开放 PR 与交付标签终态（Refs #1772）-------------------------------
+# 交付换标（lane-ready/in-progress → lane-pr）必须以 gh 实读核验终态；一切重派路径
+# （失败 run 重排、needs-human 重排、手工重排）与派发决策都要先查该 issue 是否已有
+# 开放 PR：已有开放 PR 的卡已经交付，不能再加回 lane-ready，也不能再派发一次。
+DELIVERY_LABELS = ("lane-ready", "in-progress", "lane-pr", "lane-failed")
+DELIVERED_LABEL = "lane-pr"
+DELIVERY_ATTEMPTS = 3  # 交付换标的重试次数
+# 开放 PR 的完整分页查询：没有 --limit 上限，PR 不在第一页也不会漏判。
+OPEN_PR_QUERY = (
+    "query($owner:String!,$name:String!,$after:String){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequests(states:OPEN,first:100,after:$after,orderBy:{field:UPDATED_AT,direction:DESC}){"
+    "nodes{number title body headRefName closingIssuesReferences(first:50){nodes{number}}}"
+    "pageInfo{hasNextPage endCursor}}}}}")
+# fleet 分支名 `fleet/<lane>-issue<n>-<run>` 里的 issue 号
+BRANCH_RE = re.compile(r"(?:^|[/\-])issue([1-9]\d*)(?=[-/_]|$)")
+OPEN_PR_CACHE = {"at": 0.0, "issues": {}, "loaded": False}
+OPEN_PR_TTL = 30  # seconds; the open PR map is refreshed at least once per tick
+
+def open_pull_requests(runner, repo):
+    """Every open pull request of the repository (complete pagination, no result cap).
+
+    The pages are walked with the GraphQL pageInfo/endCursor, so a PR that is not
+    on the first page is never missed. A merged PR is not an open PR. A failed
+    read raises: the caller must not requeue or dispatch on an unknown state."""
+    owner, _, name = repo.partition("/")
+    if not owner or not name: raise ValueError(f"the repository must be owner/name, got {repo!r}")
+    prs, cursor, seen = [], None, set()
+    while True:
+        payload = json.dumps({"query": OPEN_PR_QUERY,
+                              "variables": {"owner": owner, "name": name, "after": cursor}})
+        rc, out, err = runner(["api", "graphql", "--input", "-"], payload)
+        if rc: raise RuntimeError(f"the open PR lookup failed: {(err or out).strip()[-200:]}")
+        try: data = json.loads(out)
+        except ValueError: raise RuntimeError("the open PR lookup returned unparsable JSON")
+        if data.get("errors"): raise RuntimeError(f"the open PR lookup returned GraphQL errors: {json.dumps(data['errors'])[:200:]}")
+        connection = ((data.get("data") or {}).get("repository") or {}).get("pullRequests")
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            raise RuntimeError("the open PR lookup returned an unexpected shape")
+        prs.extend(node for node in connection["nodes"] if isinstance(node, dict))
+        info = connection.get("pageInfo") or {}
+        if not info.get("hasNextPage"): return prs
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen: raise RuntimeError("the open PR pagination did not advance")
+        seen.add(cursor)
+
+def linked_issue_numbers(pr):
+    """The issue numbers a pull request delivers.
+
+    Three independent links are honoured: the issues GitHub closes with the PR
+    (`closingIssuesReferences`), a closing keyword in the PR text and the fleet
+    branch name. A PR that only mentions an issue number in passing is not a
+    delivery."""
+    numbers = set()
+    for node in (pr.get("closingIssuesReferences") or {}).get("nodes") or []:
+        number = node.get("number") if isinstance(node, dict) else None
+        if isinstance(number, int): numbers.add(number)
+    for text in (pr.get("body") or "", pr.get("title") or ""):
+        for match in CLOSING_RE.finditer(text): numbers.add(int(match.group(1)))
+    match = BRANCH_RE.search(pr.get("headRefName") or "")
+    if match: numbers.add(int(match.group(1)))
+    return numbers
+
+def open_pr_issues(runner=None, repo=None):
+    """The issue numbers an open pull request already delivers -> the PR numbers."""
+    runner = runner or gh_api; repo = repo or REPO
+    delivered = {}
+    for pr in open_pull_requests(runner, repo):
+        for number in linked_issue_numbers(pr): delivered.setdefault(number, []).append(pr.get("number"))
+    return delivered
+
+def has_open_pr(n, runner=None, repo=None, delivered=None):
+    """Whether the issue already has an open pull request (raises when unreadable).
+
+    The number is the issue number of the request, not a number read back from a
+    payload: the payload of a label read does not always carry it. `delivered` is
+    an already read map (issue number -> PR numbers); it is read from GitHub when
+    it is None."""
+    if delivered is None: delivered = open_pr_issues(runner, repo)
+    return bool(delivered.get(int(n)))
+
+def pr_list(prs):
+    """The log wording of a PR number list (#1768, #1769)."""
+    return ", ".join(f"#{p}" for p in prs if p)
+
+def open_pr_map(force=False):
+    """The issue numbers an open pull request already delivers (a short lived cache).
+
+    The map only ever holds what `gh` really read; `force=True` reads it again."""
+    now = time.time()
+    if not force and OPEN_PR_CACHE["loaded"] and now - OPEN_PR_CACHE["at"] < OPEN_PR_TTL: return OPEN_PR_CACHE["issues"]
+    delivered = open_pr_issues()
+    OPEN_PR_CACHE["issues"] = delivered; OPEN_PR_CACHE["at"] = now; OPEN_PR_CACHE["loaded"] = True
+    return delivered
+
+def delivery_labels(labels):
+    """The delivery labels of an issue (priority, backend, ... are not part of it)."""
+    return {label for label in labels if label in DELIVERY_LABELS}
+
+def is_delivered(labels):
+    """The delivery terminal state: the delivery labels are exactly {lane-pr}."""
+    return set(labels) == {DELIVERED_LABEL}
+
+def read_labels(runner, repo, n):
+    """The labels of an issue, read back from GitHub: (labels, error).
+
+    The labels are None when the read failed; a cached state never replaces them."""
+    rc, out, err = runner(["issue", "view", str(n), "--repo", repo, "--json", "state,labels"])
+    if rc: return None, f"gh rc={rc}: {(err or out).strip()[-120:]}"
+    try: payload = json.loads(out)
+    except ValueError: return None, "unparsable `gh issue view` output"
+    if not isinstance(payload, dict): return None, "unexpected `gh issue view` output"
+    labels = payload.get("labels") or []
+    return {label["name"] if isinstance(label, dict) else label for label in labels
+            if isinstance(label, str) or (isinstance(label, dict) and "name" in label)}, ""
+
+def ensure_lane_pr(n, runner=None, repo=None, attempts=DELIVERY_ATTEMPTS, note=None):
+    """Bring the issue to the delivery terminal state and verify it with a fresh read.
+
+    The transition is retried up to `attempts` times and every attempt is verified
+    by reading the labels back from GitHub (never from a local cache). Returns
+    False when the terminal state could not be reached; the caller then warns."""
+    runner = runner or gh_api; repo = repo or REPO
+    for attempt in range(1, attempts + 1):
+        labels, error = read_labels(runner, repo, n)
+        if labels is not None and is_delivered(labels): return True
+        if labels is None:
+            labels = set()
+        args = ["issue", "edit", str(n), "--repo", repo]
+        for label in sorted(labels - {DELIVERED_LABEL}):
+            args += ["--remove-label", label]
+        args += ["--add-label", DELIVERED_LABEL]
+        rc, _, err = runner(args)
+        labels, error = read_labels(runner, repo, n)
+        if labels is not None and is_delivered(labels): return True
+        if note:
+            seen = sorted(delivery_labels(labels)) if labels is not None else "unreadable"
+            note(f"#{n} delivery label transition attempt {attempt}/{attempts} failed: "
+                 f"expected {{{DELIVERED_LABEL}}}, got {seen} ({error or (err or '').strip()[-80:] or 'labels not terminal'})")
+    return False
+
+def ensure_delivery_state(n):
+    """Bring the issue to the delivery terminal state; a failure is logged as a warning.
+
+    The failure is never dropped silently: it goes to the brain log (Refs #1772)."""
+    try:
+        ok = ensure_lane_pr(n, note=lambda message: log(message, brain=False))
+    except Exception as e:
+        log(f"WARNING #{n} delivery label transition failed ({e}); the lane-pr state is unverified", brain=True)
+        return False
+    if not ok:
+        log(f"WARNING #{n} delivery label transition failed after {DELIVERY_ATTEMPTS} attempts; "
+            f"the lane-pr state is unverified", brain=True)
+    return ok
 
 REMOTE_STATUS = r'''
 import json,os,sys
@@ -474,8 +633,27 @@ def reconcile(L, cfg, st, r, state):
     try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
     except Exception: return False
     if j["state"] == "OPEN" and "lane-pr" not in labels:
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
-        what = "requeued (lane-ready)"
+        # Refs #1772: a card that already has an open PR is delivered: it must not be
+        # put back into lane-ready. The lookup failed -> the card is not requeued.
+        try: delivered = open_pr_map(force=True)
+        except Exception as e:
+            log(f"{L} #{n} run {st['run']} orphaned but the open PR lookup failed ({e}); not requeued", brain=True)
+            return True
+        prs = delivered.get(n)
+        if prs:
+            ensure_delivery_state(n)
+            what = f"open PR {pr_list(prs)} delivers it; lane-pr kept, not requeued"
+        else:
+            gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+            # read the delivery state again: a PR may have been opened while the label was
+            # written, and the old decision must not overwrite the delivery result.
+            try: prs = open_pr_map(force=True).get(n)
+            except Exception: prs = None
+            if prs:
+                ensure_delivery_state(n)
+                what = f"open PR {pr_list(prs)} appeared; lane-pr restored, not requeued"
+            else:
+                what = "requeued (lane-ready)"
     else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
     log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
     return True
@@ -494,7 +672,7 @@ def read_issue(n):
     dispatchable) or "error" (the read failed). A failed read is NOT stale: the caller must
     keep the row, otherwise a transient `gh` error shrinks `_ready` to a false 0."""
     try:
-        rc, out, err = gh(["issue", "view", str(n), "--json", "state,labels"])
+        rc, out, err = gh(["issue", "view", str(n), "--json", "number,state,labels"])
     except Exception as e:
         return "error", f"gh raised {e!r}"
     if rc: return "error", f"gh rc={rc}: {(err or out).strip()[-100:]}"
@@ -551,6 +729,26 @@ def fresh_ready(n, state=None):
 
     True only when the authoritative labels say dispatchable; a stale or unreadable issue is False."""
     return label_state(n)[0] == "fresh"
+
+def drop_delivered(q):
+    """Drop the cards an open pull request already delivers (Refs #1772).
+
+    A card with an open PR is delivered: it must not be dispatched a second time and
+    it must not be counted as ready. Its delivery labels are repaired to the terminal
+    state `lane-pr`, otherwise the strict pool depth counts a delivered card. A failed
+    lookup keeps the queue as it is: the dispatch decision reads the state again."""
+    try: delivered = open_pr_map()
+    except Exception as e:
+        log(f"the open PR lookup failed ({e}); the queue is not filtered this tick", brain=False)
+        return q
+    kept = []
+    for item in q:
+        prs = delivered.get(item["n"])
+        if not prs:
+            kept.append(item); continue
+        log(f"skip #{item['n']}: open PR {pr_list(prs)} already delivers it; not dispatched", brain=False)
+        ensure_delivery_state(item["n"])
+    return kept
 
 def unverified_reason(status, detail):
     """Log wording for a row that could not be verified authoritatively (never "stale search index")."""
@@ -802,10 +1000,36 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
               "at": time.strftime("%F %T")}
     record_pr_validation(cfg, run, record)
     state["_pr_validation"] = (state.get("_pr_validation", []) + [record])[-200:]
-    gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-    gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
+    # Refs #1772: handing the card back is a requeue: a card that already has an open
+    # pull request is delivered, it must not go back into lane-ready.
+    try: delivered = open_pr_map(force=True)
+    except Exception as e:
+        delivered = None
+        log(f"{lane} #{n} the open PR lookup failed ({e}); the card is not requeued", brain=True)
+    prs = delivered.get(n) if delivered is not None else None
+    gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed"])
+    body_comment = (f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
         + "".join(f"- {item}\n" for item in missing)
-        + f"\n按可快速修复类（`{PR_VALIDATION_CLASS}`）处理，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
+        + f"\n按可快速修复类（`{PR_VALIDATION_CLASS}`）处理，不计入 lane-failed 统计；")
+    if prs:
+        ensure_delivery_state(n)
+        body_comment += f"开放 PR {pr_list(prs)} 已经交付该卡，保持 `lane-pr`，不加回 `lane-ready`。"
+    elif delivered is None:
+        body_comment += "开放 PR 状态无法核验，未重新排队。"
+    else:
+        gh(["issue", "edit", str(n), "--add-label", "lane-ready"])
+        try: prs = open_pr_map(force=True).get(n)
+        except Exception as e:
+            gh(["issue", "edit", str(n), "--remove-label", "lane-ready"])
+            log(f"WARNING #{n} post-requeue PR lookup failed ({e}); lane-ready removed", brain=True)
+            body_comment += "重排后无法核验开放 PR，已撤销重排。"
+        else:
+            if prs:
+                ensure_delivery_state(n)
+                body_comment += f"开放 PR {pr_list(prs)} 已交付该卡，保持 `lane-pr`。"
+            else:
+                body_comment += "已重新标记 `lane-ready`。"
+    gh(["issue", "comment", str(n), "--body", body_comment])
     mark_done(state, n)
     return {"done": True, "status": "pr-validation-failed",
             "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
@@ -825,8 +1049,7 @@ def finish(lane, cfg, st, info, state):
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
-        _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
-        if "lane-pr" in lj:
+        if "lane-pr" in issue_labels(n):
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
@@ -839,9 +1062,30 @@ def finish(lane, cfg, st, info, state):
             return block_pr_validation(lane, cfg, st, info, state, title, body, missing)
         if missing:
             log(f"{lane} #{n} run {run} PR validation ({mode}): 缺 {'；'.join(missing)}", brain=False)
+        # Refs #1772: the card may already be delivered by the pull request of another
+        # lane (the delivery labels of that PR are not trustworthy enough to decide it).
+        try: delivered = open_pr_map(force=True)
+        except Exception as e:
+            delivered = {}
+            log(f"{lane} #{n} the open PR lookup failed ({e}); the pull request is opened anyway", brain=False)
+        if delivered.get(n):
+            ensure_delivery_state(n)
+            gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); "
+                                                         f"open PR {pr_list(delivered[n])} already delivers it, no second PR opened."])
+            log(f"{lane} finished #{n} (run {run}) duplicate → open PR {pr_list(delivered[n])}, no PR"); mark_done(state, n)
+            return {"done": True, "status": "duplicate", "error": None, "missing": []}
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
-        url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        if rc:
+            # the pull request does not exist: the card must not be labelled lane-pr
+            # (Refs #1701), it is a failed delivery like any other (Refs #1772).
+            label_lane_failed(n, f"Lane {lane} (run `{run}`) could not open the pull request: {err.strip()[-200:]}\n\n"
+                f"Label `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            log(f"{lane} #{n} (run {run}) the pull request could not be opened → labelled lane-failed")
+            return {"done": True, "status": "pr-create-failed", "error": f"pr create failed: {err.strip()[-160:]}", "missing": []}
+        url = (out.strip().splitlines() or [""])[-1]
+        # the delivery transition is verified with a fresh read (Refs #1772)
+        ensure_delivery_state(n)
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
@@ -878,6 +1122,7 @@ def tick(lanes, state, last_warn):
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
+    q = drop_delivered(q)
     for i in q: i["deps_ok"] = deps_met(i)
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
@@ -896,12 +1141,31 @@ def tick(lanes, state, last_warn):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: continue
+        # Refs #1772: read the delivery state again right before the assignment: the card
+        # may have been delivered (pull request opened) since the queue was read.
+        try: delivered = open_pr_map(force=True)
+        except Exception as e:
+            log(f"skip #{pick['n']}: the open PR lookup failed ({e}); not dispatched this tick", brain=False)
+            continue
+        if pick["n"] in delivered:
+            q.remove(pick)
+            log(f"skip #{pick['n']}: open PR {pr_list(delivered[pick['n']])} already delivers it; not dispatched", brain=False)
+            ensure_delivery_state(pick["n"])
+            continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
             dispatch_failed(L, cfg, pick, e); continue
+        # the assignment is over: a pull request may have appeared in the meantime, the
+        # delivery terminal state must not be overwritten by this (older) decision.
+        try: delivered = open_pr_map(force=True)
+        except Exception as e: delivered = {}
+        if pick["n"] in delivered:
+            ensure_delivery_state(pick["n"])
+            log(f"WARNING #{pick['n']} was dispatched to {L} while open PR {pr_list(delivered[pick['n']])} appeared; "
+                f"the delivery labels were restored", brain=True)
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
