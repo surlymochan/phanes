@@ -637,6 +637,305 @@ class ReviewGate(Base):
         self.assertEqual(d.load_reviews()["25"]["verdict"], "APPROVE")
 
 
+class ReviewVerdictLanding(Base):
+    """A review run without a verdict file says why, and keeps the scene (Refs #1667)."""
+
+    ST = {"issue": "PR70", "run": "r70", "review_pr": 70, "review_sha": SHA}
+    VERDICT_PATH = ".lane-review/PR-70.md"
+
+    def finish(self, d, info):
+        st = dict(self.ST)
+        d.finish_review("CX2", {"host": "box", "backend": "codex"}, st, info, {})
+        return d.load_reviews().get("70") or {}
+
+    def records(self, d, pr=70):
+        with open(d.path(d.evidence_record_path(pr))) as stream:
+            return json.load(stream)
+
+    def test_a_run_without_a_commit_is_no_commit(self):
+        d = self.make()
+        review = self.finish(d, {"status": "failed", "error_class": "exec_error",
+                                  "branch": None, "commit": None})
+        self.assertEqual(review["land"], "no_commit")
+        self.assertEqual(review["fails"], 1)
+        self.assertEqual(self.runner.called("show "), [])
+
+    def test_a_commit_without_the_verdict_file_is_file_missing(self):
+        # The tree of the commit reads fine and does not carry the verdict path:
+        # the lane committed something else.
+        d = self.make([("rev-parse --verify", (0, SHA2, "")),
+                       (":" + self.VERDICT_PATH,
+                        (128, "", "fatal: path '%s' does not exist in '%s'" % (self.VERDICT_PATH, SHA2))),
+                       ("ls-tree --name-only", (0, "", ""))])
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r70", "commit": SHA2})
+        self.assertEqual(review["land"], "file_missing")
+        self.assertEqual(review["fail_classes"], ["file_missing"])
+
+    def test_a_verdict_file_without_a_verdict_line_is_no_marker(self):
+        d = self.make([("rev-parse --verify", (0, SHA2, "")),
+                       (":" + self.VERDICT_PATH, (0, "# Review\n\nlooks fine to me\n", ""))])
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r70", "commit": SHA2})
+        self.assertEqual(review["land"], "no_marker")
+        self.assertEqual(review["fail_classes"], ["no_marker"])
+
+    def test_an_unreadable_ref_is_not_a_lane_failure(self):
+        d = self.make([("rev-parse --verify", (128, "", "fatal: Needed a single revision"))])
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r70", "commit": SHA2})
+        self.assertEqual(review["land"], "unreadable")
+        self.assertEqual(review.get("fails", 0), 0)
+        self.assertEqual(review.get("fail_classes", []), [])
+        self.assertEqual(self.runner.called(":" + self.VERDICT_PATH), [])
+        # A repeated fetch/ref read outage retains each scene but leaves the PR
+        # eligible for another reviewer instead of exhausting max_fails.
+        self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r70", "commit": SHA2})
+        self.assertEqual(d.load_reviews()["70"].get("fails", 0), 0)
+        self.assertEqual(len(self.records(d)), 2)
+
+    def test_the_run_error_stays_the_failure_class(self):
+        d = self.make()
+        review = self.finish(d, {"status": "failed", "error_class": "exec_error"})
+        self.assertEqual(review["fail_classes"], ["exec_error"])
+        self.assertEqual(review["land"], "no_commit")
+
+    def test_the_scene_is_kept_before_the_pr_goes_to_the_next_lane(self):
+        d = self.make()
+        info = {"status": "failed", "error_class": "exec_error", "error": "the executor died",
+                "summary": "no verdict written", "branch": None, "commit": None,
+                "backend": "codex", "model": "gpt-6", "verify_rc": 1}
+        review = self.finish(d, info)
+        path = d.path(d.evidence_record_path(70))
+        self.assertTrue(os.path.exists(path))
+        with open(path) as stream:
+            records = json.load(stream)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["landing"], "no_commit")
+        self.assertEqual(records[0]["error"], "the executor died")
+        self.assertEqual(records[0]["summary"], "no verdict written")
+        self.assertEqual(records[0]["lane"], "CX2")
+        self.assertEqual(records[0]["run"], "r70")
+        self.assertEqual(review["scene"]["landing"], "no_commit")
+
+    def test_only_the_last_five_scenes_are_kept(self):
+        d = self.make()
+        for _ in range(7):
+            self.finish(d, {"status": "failed", "error_class": "exec_error"})
+        with open(d.path(d.evidence_record_path(70))) as stream:
+            records = json.load(stream)
+        self.assertEqual(len(records), 5)
+        self.assertEqual(d.load_reviews()["70"]["fails"], 7)
+
+    def test_a_landed_verdict_is_not_a_failure(self):
+        d = self.make([("rev-parse --verify", (0, SHA2, "")),
+                       (":" + self.VERDICT_PATH, (0, "VERDICT: APPROVE\nSUMMARY: ok\n", "")),
+                       ("pr view 70", (0, json.dumps({"headRefOid": SHA, "state": "OPEN",
+                                                      "headRefName": "fleet/M5-issue700-r",
+                                                      "body": "Closes #700"}), ""))])
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r70", "commit": SHA2})
+        self.assertEqual(review.get("land"), None)
+        self.assertEqual(review.get("fails", 0), 0)
+        self.assertEqual(review["verdict"], "APPROVE")
+        self.assertFalse(os.path.exists(d.path(d.evidence_record_path(70))))
+
+
+class ReviewVerdictReadFailure(Base):
+    """A git failure is not a lane failure: the verdict may be there (Refs #1667)."""
+
+    ST = {"issue": "PR72", "run": "r72", "review_pr": 72, "review_sha": SHA}
+    VERDICT_PATH = ".lane-review/PR-72.md"
+
+    def finish(self, d, info):
+        st = dict(self.ST)
+        d.finish_review("CX2", {"host": "box", "backend": "codex"}, st, info, {})
+        return d.load_reviews().get("72") or {}
+
+    def records(self, d, pr=72):
+        with open(d.path(d.evidence_record_path(pr))) as stream:
+            return json.load(stream)
+
+    def broken_git(self):
+        """The ref resolves, but git cannot read the object behind it."""
+        return [("rev-parse --verify", (0, SHA2, "")),
+                (":" + self.VERDICT_PATH, (128, "", "fatal: bad object %s" % SHA2)),
+                ("ls-tree --name-only", (128, "", "fatal: bad object %s" % SHA2))]
+
+    def test_a_broken_object_is_not_a_missing_file(self):
+        d = self.make(self.broken_git())
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r72", "commit": SHA2})
+        self.assertEqual(review["land"], "git_error")
+        self.assertNotEqual(review["land"], "file_missing")
+
+    def test_a_broken_object_does_not_count_as_a_lane_failure(self):
+        d = self.make(self.broken_git())
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r72", "commit": SHA2})
+        self.assertEqual(review.get("fails", 0), 0)
+        self.assertEqual(review.get("fail_classes", []), [])
+        self.assertEqual(review.get("fails_sha"), None)
+
+    def test_consecutive_read_failures_keep_the_pr_retryable(self):
+        d = self.make(self.broken_git())
+        for _ in range(4):        # more than the review failure limit
+            self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r72", "commit": SHA2})
+        review = d.load_reviews()["72"]
+        self.assertEqual(review.get("fails", 0), 0)          # the budget of the PR is untouched
+        self.assertEqual(len(self.records(d)), 4)            # every scene is kept
+        self.assertEqual(self.records(d)[-1]["landing"], "git_error")
+
+    def test_the_git_error_is_kept_as_evidence(self):
+        d = self.make(self.broken_git())
+        self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r72", "commit": SHA2})
+        record = self.records(d)[0]
+        self.assertEqual(record["landing"], "git_error")
+        self.assertEqual(record["show_rc"], 128)
+        self.assertIn("bad object", record["show_error"])
+        self.assertEqual(record["tree_rc"], 128)
+        self.assertIn("bad object", record["tree_error"])
+        self.assertIs(record["path_missing"], False)
+
+    def test_a_verdict_file_without_a_marker_keeps_the_text_of_the_lane(self):
+        d = self.make([("rev-parse --verify", (0, SHA2, "")),
+                       (":" + self.VERDICT_PATH,
+                        (0, "# Lane review\n\nI could not decide, sorry.\n", ""))])
+        review = self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r72", "commit": SHA2})
+        self.assertEqual(review["land"], "no_marker")
+        record = self.records(d)[0]
+        self.assertEqual(record["landing"], "no_marker")
+        self.assertIn("I could not decide", record["verdict_text"])
+        self.assertIsNone(record["verdict"])
+
+    def test_the_pr_is_reviewed_again_after_consecutive_read_failures(self):
+        # Four read failures are more than max_fails (4): counted as lane failures they
+        # would park the PR for a human instead of handing it to the next reviewer.
+        p = pr(72, 720)
+        d = self.make([("pr list", (0, json.dumps([p]), "")),
+                       ("pr diff", (0, "diff --git a/x b/x\n", "")),
+                       ("ls-remote", (0, SHA + "\trefs/heads/main", "")),
+                       ("lane assign", (0, '{"id": "run-1"}', "")),
+                       ("rev-parse --verify", (0, SHA2, "")),
+                       (":" + self.VERDICT_PATH, (128, "", "fatal: bad object %s" % SHA2)),
+                       ("ls-tree --name-only", (128, "", "fatal: bad object %s" % SHA2))])
+        for _ in range(4):
+            self.finish(d, {"status": "done", "error_class": "", "branch": "openswarm/r72", "commit": SHA2})
+        self.assertEqual(d.load_reviews()["72"].get("fails", 0), 0)
+        d.dispatch_reviews({"M1": {"host": "host1", "backend": "pi"}}, {"M1": {"lane": "idle"}}, {}, [])
+        self.assertTrue(self.runner.called("lane assign"))          # the PR is reviewed again
+        self.assertEqual(self.runner.called("--add-label needs-human"), [])
+
+
+class ReviewVerdictEvidence(Base):
+    """Every no-verdict branch keeps the scene before the PR goes to the next lane (Refs #1667)."""
+
+    def finish(self, d, info, pr=71):
+        st = {"issue": f"PR{pr}", "run": f"r{pr}", "review_pr": pr, "review_sha": SHA}
+        d.finish_review("CX2", {"host": "box", "backend": "codex"}, st, info, {})
+        return d.load_reviews().get(str(pr)) or {}
+
+    def records(self, d, pr=71):
+        with open(d.path(d.evidence_record_path(pr))) as stream:
+            return json.load(stream)
+
+    def test_a_vm_pause_keeps_the_scene_before_the_retry(self):
+        d = self.make()
+        review = self.finish(d, {"status": "failed", "error_class": "vm_paused",
+                                  "error": "the box was paused", "summary": "no verdict written",
+                                  "branch": None, "commit": None, "backend": "codex", "model": "gpt-6"})
+        records = self.records(d)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["landing"], "no_commit")
+        self.assertEqual(records[0]["error_class"], "vm_paused")
+        self.assertEqual(records[0]["error"], "the box was paused")
+        self.assertEqual(records[0]["lane"], "CX2")
+        self.assertEqual(records[0]["run"], "r71")
+        self.assertEqual(review["land"], "no_commit")
+        self.assertEqual(review["scene"]["error_class"], "vm_paused")
+        self.assertEqual(review.get("fails", 0), 0)      # a VM pause is not a lane failure
+
+    def test_a_quota_run_keeps_the_scene_before_the_retry(self):
+        for n, error_class in enumerate(("rate_limit", "quota", "model_unavailable")):
+            with self.subTest(error_class=error_class):
+                d = self.make()
+                review = self.finish(d, {"status": "failed", "error_class": error_class,
+                                          "error": "the backend said no", "backend": "pi"}, pr=71 + n)
+                records = self.records(d, pr=71 + n)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["error_class"], error_class)
+                self.assertEqual(records[0]["error"], "the backend said no")
+                self.assertEqual(records[0]["backend"], "pi")
+                self.assertEqual(review["land"], "no_commit")
+                self.assertEqual(review.get("fails", 0), 0)  # a quota miss is not a lane failure
+
+    def test_a_budget_exceeded_run_keeps_the_scene_before_the_retry(self):
+        d = self.make()
+        review = self.finish(d, {"status": "failed", "error_class": "budget_exceeded",
+                                  "error": "the budget ran out", "backend": "codex"})
+        records = self.records(d)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["error_class"], "budget_exceeded")
+        self.assertEqual(records[0]["error"], "the budget ran out")
+        self.assertEqual(records[0]["backend"], "codex")
+        self.assertEqual(review["budget_backends"], ["codex"])
+        self.assertEqual(review.get("fails", 0), 0)
+
+    def test_a_missed_verdict_with_a_commit_keeps_the_ref_it_read(self):
+        d = self.make([("rev-parse --verify", (0, SHA2, "")),
+                       (":.lane-review/PR-71.md",
+                        (128, "", "fatal: path '.lane-review/PR-71.md' does not exist")),
+                       ("ls-tree --name-only", (0, "", ""))])
+        review = self.finish(d, {"status": "done", "error_class": "rate_limit",
+                                  "branch": "openswarm/r71", "commit": SHA2, "backend": "pi"})
+        records = self.records(d)
+        self.assertEqual(records[0]["landing"], "file_missing")
+        self.assertEqual(records[0]["ref"], SHA2)
+        self.assertEqual(records[0]["show_rc"], 128)
+        self.assertEqual(review["land"], "file_missing")
+
+    def test_every_miss_keeps_its_own_scene_in_one_file(self):
+        d = self.make()
+        for error_class in ("vm_paused", "rate_limit", "quota", "model_unavailable", "budget_exceeded"):
+            self.finish(d, {"status": "failed", "error_class": error_class})
+        records = self.records(d)
+        self.assertEqual([r["error_class"] for r in records],
+                         ["vm_paused", "rate_limit", "quota", "model_unavailable", "budget_exceeded"])
+        self.assertEqual(d.load_reviews()["71"].get("fails", 0), 0)   # none of them is a lane failure
+
+
+class ReviewAuthor(Base):
+    """The author lane of a PR is found in the branch, or in the PR body (Refs #1667)."""
+
+    def test_the_configured_branch_pattern_wins(self):
+        d = self.make()
+        self.assertEqual(d.author_of(pr(1, 1, branch="fleet/CX2-issue1658-r1")), ("CX2", "branch"))
+
+    def test_an_external_lane_name_is_still_an_author(self):
+        d = self.make()
+        self.assertEqual(d.author_of(pr(1, 1, branch="fleet/dot-issue5-20261102-101010")),
+                         ("dot", "branch-fallback"))
+        self.assertEqual(d.author_of(pr(1, 1, branch="fleet/chatgpt-agent-issue12-r1")),
+                         ("chatgpt-agent", "branch-fallback"))
+
+    def test_the_pr_body_names_the_author_when_the_branch_does_not(self):
+        d = self.make()
+        p = pr(1, 1, branch="brain/20261102-note")
+        p["body"] = "Closes #1658\n\nAutodispatched to lane **CX5** on box (codex/gpt-6)"
+        self.assertEqual(d.author_of(p), ("CX5", "body"))
+
+    def test_an_unknown_author_is_reported_as_unknown(self):
+        d = self.make()
+        p = pr(1, 1, branch="brain/20261102-note")
+        p["body"] = "Closes #1658"
+        self.assertEqual(d.author_of(p), (None, "unknown"))
+
+    def test_the_author_lane_is_not_picked_as_its_own_reviewer(self):
+        d = self.make()
+        lanes = {"dot": {"backend": "pi"}, "M2": {"backend": "codex"}}
+        self.assertEqual(d.pick_reviewer(["dot", "M2"], lanes, "dot"), "M2")
+
+    def test_the_review_task_names_the_author(self):
+        d = self.make([("pr diff", (0, "diff --git a/x b/x\n", ""))])
+        p = pr(1, 1, branch="fleet/dot-issue5-20261102-101010")
+        item = d.review_item(p)
+        self.assertIn("(author lane dot)", item["body"])
+
+
 class RebaseHarvest(Base):
     ST = {"issue": 7, "run": "r1", "base": SHA, "rebase_pr": 70, "rebase_branch": "fleet/M5-issue7-r0"}
     INFO = {"branch": "lane/x", "commit": "c", "status": "done", "repo": "/w"}
