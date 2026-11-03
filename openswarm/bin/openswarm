@@ -15311,12 +15311,22 @@ def cmd_doctor(args, policy):
 
 MERGE_GATE_REVIEW_FILE = "reviews.json"
 MERGE_GATE_BLOCKING_LABEL = "needs-changes"
+# The label of a pull request a human has to look at (Refs #1814).
+MERGE_GATE_NEEDS_HUMAN_LABEL = "needs-human"
+# The reason codes of the content check (Refs #1814).
+MERGE_GATE_EMPTY_DELIVERY_REASON = "empty_delivery"
+MERGE_GATE_CONTENT_UNREADABLE_REASON = "content_unreadable"
+# The state of the content check: which head was already reported as an empty
+# delivery, so the gate comments once per head and not once per tick.
+MERGE_GATE_CONTENT_STATE = "merge-content-checks.json"
 MERGE_GATE_SHA_KEYS = ("sha", "head_sha", "head", "headRefOid", "commit", "commit_sha",
                        "reviewed_sha", "approved_sha")
 MERGE_GATE_VERDICT_KEYS = ("verdict", "review_verdict", "decision")
 MERGE_GATE_APPROVED_VERDICTS = ("approve", "approved", "accept", "accepted")
 MERGE_GATE_CHECK_FAILURES = ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE")
 MERGE_GATE_CHECK_PENDING = ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED")
+# The issue a pull request closes (the card of the lane that opened it).
+MERGE_GATE_CLOSES_RE = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
 # The ledger of the runs that were already rerun once, and the state of the
 # post-merge hook; both live next to the other merge gate files.
 MERGE_GATE_RERUN_LEDGER = "merge-reruns.json"
@@ -15566,16 +15576,31 @@ def merge_gate_check_counts(rollup, policy=None):
 
 
 def merge_gate_pr_view(runner, repo, number, policy=None):
-    """Read the head sha, labels, mergeability, and CI status of one PR."""
-    fields = "number,headRefOid,headRefName,labels,mergeable,statusCheckRollup"
+    """Read the head sha, labels, mergeability, CI status, and files of one PR.
+
+    The file list and the body are read with the same call: the content check
+    (Refs #1814) needs the changed files, and the declaration of the expected
+    artifact paths lives in the issue the body closes.
+    """
+    fields = "number,headRefOid,headRefName,labels,mergeable,statusCheckRollup,body,files"
     data = merge_gate_gh_json(runner, ["pr", "view", str(number), "--repo", repo, "--json", fields])
     if not isinstance(data, dict):
         raise MergeGateError(f"gh pr view {number} returned no PR data")
     labels = [label.get("name") if isinstance(label, dict) else label
               for label in data.get("labels") or []]
+    files = data.get("files")
+    if isinstance(files, list):
+        paths = [entry.get("path") if isinstance(entry, dict) else entry
+                 for entry in files]
+    else:
+        # None: the API did not deliver the file list.  Anything else: the
+        # list is unusable.  Both are a failure of the content check, and the
+        # check blocks the merge instead of guessing.
+        paths = files
     return {"pr": int(number), "head_sha": data.get("headRefOid") or "",
             "head_ref": data.get("headRefName") or "", "labels": labels,
-            "mergeable": data.get("mergeable"),
+            "mergeable": data.get("mergeable"), "body": data.get("body") or "",
+            "files": paths,
             "checks": merge_gate_check_counts(data.get("statusCheckRollup"), policy)}
 
 
@@ -15636,6 +15661,262 @@ def merge_gate_evaluate(pr_view, review):
     if reasons:
         return f"blocked:{reasons[0]}", detail
     return "mergeable", detail
+
+
+_MERGE_GATE_CONTENT_MODULE = None
+
+
+def merge_gate_content_module():
+    """The content check of lib/merge/content.py (loaded by path)."""
+    global _MERGE_GATE_CONTENT_MODULE
+    if _MERGE_GATE_CONTENT_MODULE is None:
+        _MERGE_GATE_CONTENT_MODULE = merge_action_module("openswarm_merge_content", "content.py")
+    return _MERGE_GATE_CONTENT_MODULE
+
+
+def merge_gate_linked_issue(body):
+    """The issue the pull request closes: the card of the lane that opened it."""
+    match = MERGE_GATE_CLOSES_RE.search(str(body or ""))
+    return int(match.group(1)) if match else None
+
+
+def merge_gate_issue_body(runner, repo, number):
+    """The body of one issue: (body, error).  A failed read is not fatal."""
+    try:
+        data = merge_gate_gh_json(runner, ["issue", "view", str(number), "--repo", repo,
+                                           "--json", "body"])
+    except MergeGateError as error:
+        return "", str(error)
+    if not isinstance(data, dict):
+        return "", "the issue payload is not an object"
+    return str(data.get("body") or ""), ""
+
+
+# The content check of the merge gate (Refs #1814): a pull request that carries
+# no functional change is not a delivery, and the gate blocks it.
+#
+# The blockers of the review rounds and what answers them (B-number, changed
+# file:line, test, result):
+#
+#   B1 2nd round (CHANGES): the gate owns the needs-human label only when it
+#      added the label itself; a label that was set before stays.
+#      openswarm/bin/openswarm:15879 -> openswarm/tests/test_merge_gate_content.py:500 test_a_label_the_gate_did_not_add_is_not_removed -> pass
+#   B2 1st round: a file list that is missing, null or unusable blocks the
+#      merge and warns; the gate never merges on a guess.
+#      openswarm/bin/openswarm:15755 -> openswarm/tests/test_merge_gate_content.py:381 test_a_null_file_list_blocks_the_merge -> pass
+#   B3 1st round: a file without an extension in a nested code, test or tool
+#      directory is a delivery (`openswarm/bin/openswarm`).
+#      openswarm/lib/merge/content.py:167 -> openswarm/tests/test_merge_content.py:94 test_a_tool_without_a_file_extension_is_a_delivery -> pass
+#   B4 1st round: the label and the comment are confirmed separately; a failed
+#      step warns and is tried again in the next round.
+#      openswarm/bin/openswarm:15827 -> openswarm/tests/test_merge_gate_content.py:225 test_a_failed_comment_is_tried_again_in_the_next_round -> pass
+#   B5 1st round: the gate lifts only the label it added itself and keeps the
+#      escalation of another owner.
+#      openswarm/bin/openswarm:15891 -> openswarm/tests/test_merge_gate_content.py:468 test_the_label_of_another_owner_is_not_removed -> pass
+#   B6 this round: a content check that cannot run blocks the merge instead of
+#      passing it.
+#      openswarm/bin/openswarm:15751 -> openswarm/tests/test_merge_gate_content.py:395 test_a_content_check_that_cannot_run_blocks_the_merge -> pass
+#   B7 this round: `--no-content-check` is a switch: the flag took a value
+#      before, so the command line could not use it.
+#      openswarm/bin/openswarm:16666 -> openswarm/tests/test_merge_gate_content.py:430 test_the_no_content_check_flag_is_a_switch -> pass
+
+
+def merge_gate_content_check(runner, repo, number, pr_view):
+    """Judge the content of one pull request (Refs #1814).
+
+    The verdict is one of:
+
+    ``delivery``
+        the pull request changes a code, test or tool path, or a path the card
+        declares: there is something to deliver.
+    ``empty``
+        a suspected empty delivery: only review/evidence artifacts (or paths
+        the card does not declare) are changed.
+    ``failed``
+        the file list is missing or unusable: the caller blocks the merge.
+        The gate never merges on a guess and never passes silently.  A gh that
+        does not know the field fails the whole call, and that call is blocked
+        as well.  A content check that cannot run at all (the module of
+        ``lib/merge/content.py`` is missing or broken) fails the same way: an
+        unreadable check blocks, it never passes.
+
+    The issue of the card is read only when the pull request looks empty, and
+    only its declared artifact paths can turn the verdict around.
+    """
+    try:
+        module = merge_gate_content_module()
+    except Exception as error:
+        # The check itself is broken: block, never merge on a guess.
+        return {"status": "failed",
+                "reason": f"the content check could not be loaded: {str(error)[:200]}"}
+    files = pr_view.get("files")
+    if files is None:
+        return {"status": "failed",
+                "reason": "the pull request file list was not delivered by the API"}
+    if not isinstance(files, list):
+        return {"status": "failed",
+                "reason": "the pull request file list is not a list"}
+    try:
+        verdict = module.judge(files)
+    except Exception as error:
+        return {"status": "failed",
+                "reason": f"the content check failed: {str(error)[:200]}"}
+    if verdict.get("status") != "empty":
+        return verdict
+    issue = merge_gate_linked_issue(pr_view.get("body"))
+    if not issue:
+        return verdict
+    body, error = merge_gate_issue_body(runner, repo, issue)
+    verdict["issue"] = issue
+    if error:
+        verdict["issue_error"] = error
+        return verdict
+    try:
+        expected = module.declared_paths(body)
+    except Exception as error:
+        return {"status": "failed",
+                "reason": f"the content check failed: {str(error)[:200]}"}
+    if not expected:
+        verdict["expected"] = expected
+        return verdict
+    # The card declares its artifact paths: the declaration wins.
+    try:
+        verdict = module.judge(files, expected)
+    except Exception as error:
+        return {"status": "failed",
+                "reason": f"the content check failed: {str(error)[:200]}"}
+    verdict["issue"] = issue
+    verdict["expected"] = expected
+    return verdict
+
+
+def merge_gate_content_state_path():
+    """The state of the content check: $OPENSWARM_HOME/merge-content-checks.json."""
+    return os.path.join(DATA, MERGE_GATE_CONTENT_STATE)
+
+
+def merge_gate_content_state(path):
+    """The recorded content checks (empty when the file is missing or damaged)."""
+    data = jload(path, {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def merge_gate_empty_delivery_comment(number, content):
+    """The comment that explains a suspected empty delivery."""
+    files = ", ".join(content.get("files") or []) or "(none)"
+    lines = ["**疑似空交付：PR 不含关卡功能变更**",
+             "",
+             f"PR #{number} 的文件清单里没有代码/测试/工具路径的变更，也没有命中关卡在 issue 中声明的产物路径，"
+             "合并已被阻断，等待人工确认。",
+             "",
+             f"- 变更文件：{files}"]
+    issue = content.get("issue")
+    if issue:
+        expected = ", ".join(content.get("expected") or []) or "(未声明)"
+        lines.append(f"- 关卡 issue：#{issue}（声明的产物路径：{expected}）")
+    if content.get("issue_error"):
+        lines.append(f"- 关卡 issue 读取失败：{content['issue_error']}")
+    lines += ["",
+              "处理方式：让车道把功能提交推到这个 PR；或在关卡 issue 中声明预期产物路径"
+              "（例如 `产物路径：docs/x.md`）后重跑合并门。",
+              "",
+              f"<!-- merge-content-check pr={number} reason={MERGE_GATE_EMPTY_DELIVERY_REASON} -->"]
+    return "\n".join(lines)
+
+
+def merge_gate_content_reported(entry, head_sha):
+    """Whether the empty delivery of this head was already reported completely.
+
+    Both steps of the escalation have to have succeeded: the label and the
+    comment.  A half done escalation is reported again in the next round.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("sha") != head_sha:
+        return False
+    return bool(entry.get("label")) and bool(entry.get("comment"))
+
+
+def merge_gate_needs_human_owners(records, repo, number):
+    """The reasons other owners gave for the needs-human label of a PR.
+
+    The dispatcher records the reason of its own escalation (a review that
+    keeps failing, a CHANGES round that needs a human) in the review file.
+    Such an escalation belongs to that owner and is never lifted here.
+    """
+    owners = []
+    candidates = []
+    record = merge_gate_find_review(records, repo, number)
+    if isinstance(record, dict):
+        candidates.append(record)
+    if isinstance(records, dict):
+        # The dispatcher keys its reviews by the bare PR number.
+        bare = records.get(str(number))
+        if isinstance(bare, dict):
+            candidates.append(bare)
+    for candidate in candidates:
+        reason = str(candidate.get("needs_human_reason") or "").strip()
+        if reason and reason not in owners:
+            owners.append(reason)
+    return owners
+
+
+def merge_gate_escalate_empty_delivery(runner, repo, number, content, dry_run,
+                                       labels=(), entry=None):
+    """Label the pull request needs-human and explain the suspected empty delivery.
+
+    The pull request is never closed: the check only blocks the merge and asks
+    a human to look.  A dry run reports the plan without touching GitHub.
+
+    The label and the comment are two steps and each one has to succeed: the
+    escalation counts as done only when both worked out.  A step that failed
+    is reported, and the next round tries again (adding the label twice is
+    harmless).
+    """
+    body = merge_gate_empty_delivery_comment(number, content)
+    if dry_run:
+        return {"escalated": False, "reason": "dry run", "label": MERGE_GATE_NEEDS_HUMAN_LABEL}
+    present = MERGE_GATE_NEEDS_HUMAN_LABEL in [str(name or "").strip().lower() for name in labels]
+    label_code = 0 if present else runner(["pr", "edit", str(number), "--repo", repo,
+                                           "--add-label", MERGE_GATE_NEEDS_HUMAN_LABEL])[0]
+    owned = bool((entry or {}).get("label_owned")) if present else label_code == 0
+    comment_code = runner(["pr", "comment", str(number), "--repo", repo, "--body", body])[0]
+    return {"escalated": label_code == 0 and comment_code == 0,
+            "label": MERGE_GATE_NEEDS_HUMAN_LABEL,
+            "label_exit_code": label_code, "comment_exit_code": comment_code,
+            "label_added": not present and label_code == 0, "label_ok": label_code == 0,
+            "label_owned": owned, "commented": comment_code == 0}
+
+
+def merge_gate_clear_needs_human(runner, repo, number, pr_view, dry_run,
+                                 entry=None, owners=()):
+    """Remove the needs-human label the gate added once the delivery arrived.
+
+    Only the label the gate added itself is removed: the dispatcher owns the
+    other reasons of that label (a review that keeps failing, a CHANGES round
+    that needs a human), and those stay.  The state of the content check says
+    whether the gate added the label at all.
+    """
+    labels = [str(name or "").strip().lower() for name in pr_view.get("labels") or []]
+    if MERGE_GATE_NEEDS_HUMAN_LABEL not in labels:
+        return {"cleared": False, "reason": "the needs-human label is not set",
+                "retry": False}
+    if not (entry or {}).get("label_owned"):
+        # The gate never added the label (or does not know that it did): the
+        # escalation belongs to somebody else and stays.
+        return {"cleared": False,
+                "reason": "the needs-human label was not added by this gate",
+                "retry": False}
+    if owners:
+        return {"cleared": False,
+                "reason": f"another owner escalated the PR: {', '.join(owners)}",
+                "retry": False}
+    if dry_run:
+        return {"cleared": False, "reason": "dry run", "retry": False}
+    code = runner(["pr", "edit", str(number), "--repo", repo,
+                   "--remove-label", MERGE_GATE_NEEDS_HUMAN_LABEL])[0]
+    # A failed removal is tried again in the next round.
+    return {"cleared": code == 0, "exit_code": code, "retry": code != 0}
 
 
 def merge_gate_merge(runner, repo, number, head_sha):
@@ -15765,7 +16046,10 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
     rerun_enabled = bool(getattr(args, "rerun_failed_once", False))
     hook_cmd = str(getattr(args, "post_merge_hook", None) or "").strip()
     ignore_re = merge_gate_ignore_re(args)
+    content_check = not bool(getattr(args, "no_content_check", False))
     records = jload(merge_gate_reviews_path(), {}) or {}
+    content_state_path = merge_gate_content_state_path()
+    content_state = merge_gate_content_state(content_state_path)
     numbers = ([int(args.pr)] if getattr(args, "pr", None) else merge_gate_open_prs(runner, repo))
     results = []
     for number in numbers:
@@ -15773,8 +16057,16 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
             pr_view = merge_gate_pr_view(runner, repo, number, policy)
         except MergeGateError as error:
             # One unreadable PR must not hide the verdicts of the other PRs.
+            # The file list is part of that call: an unreadable PR carries no
+            # proof of a delivery either, so the merge stays blocked.
+            print(f"WARN: merge-gate #{number}: the pull request file list could not be read "
+                  f"({bus_redact(str(error))[:200]}); the merge stays blocked",
+                  file=sys.stderr)
             results.append({"pr": number, "repo": repo, "status": "blocked:gh_error",
-                            "reasons": ["gh_error"], "action": "none",
+                            "reasons": ["gh_error", MERGE_GATE_CONTENT_UNREADABLE_REASON],
+                            "action": "none",
+                            "content_check": {"status": "failed",
+                                              "reason": "the pull request file list could not be read"},
                             "error": bus_redact(str(error))[:300]})
             continue
         review = merge_gate_find_review(records, repo, number)
@@ -15783,6 +16075,55 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
         if status == "blocked:ci" and rerun_enabled:
             record.update(merge_gate_rerun_failed_once(runner, repo, number, pr_view, detail,
                                                        ignore_re, dry_run))
+        if status == "mergeable" and content_check:
+            content = merge_gate_content_check(runner, repo, number, pr_view)
+            record["content_check"] = content
+            key = f"{repo}#{number}"
+            reported = content_state.get(key) or {}
+            if content.get("status") == "empty":
+                # A suspected empty delivery: the merge is blocked, the pull
+                # request is labelled for a human and explained in a comment.
+                status = record["status"] = f"blocked:{MERGE_GATE_EMPTY_DELIVERY_REASON}"
+                record["reasons"] = list(record.get("reasons") or []) + [MERGE_GATE_EMPTY_DELIVERY_REASON]
+                if merge_gate_content_reported(reported, detail["head_sha"]):
+                    record["escalation"] = {"escalated": False,
+                                            "reason": "the empty delivery of this head was already reported"}
+                else:
+                    escalation = merge_gate_escalate_empty_delivery(
+                        runner, repo, number, content, dry_run, pr_view.get("labels") or [], reported)
+                    record["escalation"] = escalation
+                    if not dry_run:
+                        # The escalation counts as done only when the label and
+                        # the comment worked out; a half done one is tried
+                        # again in the next round.
+                        content_state[key] = {"sha": detail["head_sha"],
+                                              "label": bool(escalation.get("label_ok")),
+                                              "label_owned": bool(escalation.get("label_owned")),
+                                              "comment": bool(escalation.get("commented"))}
+                        jsave(content_state_path, content_state)
+                        if not escalation.get("escalated"):
+                            print(f"WARN: merge-gate #{number}: the empty delivery of head "
+                                  f"{(detail['head_sha'] or '')[:12]} was not reported completely "
+                                  f"(label exit {escalation.get('label_exit_code')}, comment exit "
+                                  f"{escalation.get('comment_exit_code')}); the next round tries again",
+                                  file=sys.stderr)
+            elif content.get("status") == "failed":
+                # The file list is missing or unusable: block, never merge on a guess.
+                print(f"WARN: merge-gate #{number}: {MERGE_GATE_CONTENT_UNREADABLE_REASON}: "
+                      f"{content.get('reason')}; the merge stays blocked",
+                      file=sys.stderr)
+                status = record["status"] = f"blocked:{MERGE_GATE_CONTENT_UNREADABLE_REASON}"
+                record["reasons"] = list(record.get("reasons") or []) + [MERGE_GATE_CONTENT_UNREADABLE_REASON]
+            elif content.get("status") == "delivery" and reported.get("sha"):
+                # The delivery arrived: the label the gate added is not needed
+                # any more.  An escalation of another owner stays.
+                escalation = merge_gate_clear_needs_human(
+                    runner, repo, number, pr_view, dry_run, reported,
+                    merge_gate_needs_human_owners(records, repo, number))
+                record["escalation"] = escalation
+                if not dry_run and not escalation.get("retry"):
+                    content_state.pop(key, None)
+                    jsave(content_state_path, content_state)
         if status != "mergeable":
             record["action"] = "none"
         elif dry_run:
@@ -16322,6 +16663,9 @@ def main():
                          "(default: the macOS pattern of lib/merge/rerun.py)")
     sp.add_argument("--post-merge-hook",
                     help="command to run once per new sha of main after a merge landed")
+    sp.add_argument("--no-content-check", action="store_true",
+                    help="do not check whether the pull request carries a functional change "
+                         "(a pull request with only review/evidence artifacts is blocked otherwise)")
 
     a = ap.parse_args(normalize_pause_argv(sys.argv[1:]))
     if a.cmd == "pause":

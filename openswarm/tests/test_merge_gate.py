@@ -27,11 +27,18 @@ def check(name, conclusion="SUCCESS", status="COMPLETED"):
     return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion}
 
 
-def pr_payload(number, head=HEAD_SHA, labels=(), checks=()):
-    """The `gh pr view --json` payload of one pull request."""
+def pr_payload(number, head=HEAD_SHA, labels=(), checks=(),
+               files=("openswarm/lib/merge/content.py",)):
+    """The `gh pr view --json` payload of one pull request.
+
+    The file list is part of the payload since the content check (Refs #1814)
+    reads it: the default is a changed code path, so the pull request of these
+    tests is a delivery.
+    """
     return {"number": number, "headRefOid": head,
             "labels": [{"name": name} for name in labels],
             "mergeable": "MERGEABLE",
+            "files": [{"path": path} for path in files],
             "statusCheckRollup": list(checks)}
 
 
