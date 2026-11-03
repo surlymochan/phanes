@@ -5,9 +5,12 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -22,6 +25,9 @@ DISK = ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
         "/dev/root 1000 700 300 70% /\n")
 MEMORY = ("              total used free shared buff/cache available\n"
           "Mem: 8000 3000 2000 100 3000 5000\nSwap: 0 0 0\n")
+# The dispatcher snapshot of the 2026-11-02 22:13 stall (Refs #1697).
+STALLED_AT = "2026-11-02 22:13:20"
+STALLED_NOW = "2026-11-02 22:18:20"
 
 
 def inode_output(percent):
@@ -40,6 +46,12 @@ class FleetHealthCliTests(unittest.TestCase):
         self.home.mkdir()
         self.now = 1700000000.0
         self.store = xs.dispatch_pause_module().PauseStore(self.home)
+        # the dispatcher's pid file lives in the control-plane state dir, never in the real one
+        self.ctl_state = self.root / "ctl-state"
+        self.ctl_state.mkdir()
+        patcher = mock.patch.dict(os.environ, {"OPENSWARM_CTL_STATE_DIR": str(self.ctl_state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     # ---------------------------------------------------------------- fixtures
 
@@ -89,6 +101,30 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def pauses(self):
         return {row["scope"]: row for row in self.store.active(self.now)}
+
+    # ---------------------------------------------------------------- the dispatcher snapshot
+
+    def snapshot_dir(self):
+        """The directory the dispatcher publishes its snapshot in."""
+        return self.home / "phanes-ctl" / "autodispatch"
+
+    def snapshot(self, stamp, **extra):
+        """Write the lanes-status snapshot the dispatcher publishes."""
+        directory = self.snapshot_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        body = {"_at": stamp, "_busy": 1, "_ready": 4, "_blocked": 0}
+        body.update(extra)
+        (directory / "lanes-status.json").write_text(json.dumps(body), encoding="utf-8")
+        return directory / "lanes-status.json"
+
+    def heartbeat(self, stamp):
+        """Write the heartbeat the dispatcher refreshes on every tick."""
+        directory = self.snapshot_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "heartbeat").write_text(stamp + "\n", encoding="utf-8")
+
+    def stamp(self, text):
+        return time.mktime(time.strptime(text, "%Y-%m-%d %H:%M:%S"))
 
     # ---------------------------------------------------------------- tests
 
@@ -164,7 +200,8 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["alerts", "applied", "hosts", "lanes_snapshot", "ok",
+                                          "status", "thresholds", "writer"])
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
         self.assertEqual(report["thresholds"]["inode_pause_pct"], 95)
@@ -173,6 +210,140 @@ class FleetHealthCliTests(unittest.TestCase):
                                        "reason", "status", "triggers"])
         self.assertEqual(row["host"], "worker-a")
         self.assertFalse(row["paused"])
+
+    # ---------------------------------------------------------------- the snapshot freshness (Refs #1697)
+
+    def test_the_snapshot_path_is_the_one_the_dispatcher_writes(self):
+        default = os.path.join(os.path.expanduser("~"), "phanes-ctl", "autodispatch", "lanes-status.json")
+        self.assertEqual(xs.fleet_lanes_snapshot_path(), default)
+        self.assertEqual(xs.fleet_lanes_snapshot_path(self.home),
+                         str(self.snapshot_dir() / "lanes-status.json"))
+        with mock.patch.dict(os.environ, {"OPENSWARM_AD_STATE_DIR": str(self.snapshot_dir())}):
+            self.assertEqual(xs.fleet_lanes_snapshot_path(), str(self.snapshot_dir() / "lanes-status.json"))
+        with mock.patch.dict(os.environ, {"OPENSWARM_LANES_STATUS_FILE": str(self.snapshot_dir() / "other.json")}):
+            self.assertEqual(xs.fleet_lanes_snapshot_path(), str(self.snapshot_dir() / "other.json"))
+
+    def test_stalled_2213_snapshot_is_reported_stale(self):
+        """The 2026-11-02 22:13 stall replayed: the snapshot must be marked expired."""
+        self.snapshot(STALLED_AT)
+        self.now = self.stamp(STALLED_NOW)
+        report = self.health()
+        snapshot = report["lanes_snapshot"]
+        self.assertEqual(snapshot["status"], "stale")
+        self.assertEqual(snapshot["at"], STALLED_AT)
+        self.assertEqual(snapshot["age_seconds"], 300)
+        self.assertEqual(snapshot["stale_after_seconds"], 180)
+        self.assertEqual(snapshot["ready"], 4)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "stale")
+        self.assertEqual([alert["kind"] for alert in report["alerts"]], ["lanes-snapshot-stale"])
+        self.assertIn(STALLED_AT, report["alerts"][0]["message"])
+
+    def test_a_fresh_snapshot_keeps_the_health_ok(self):
+        self.snapshot(STALLED_AT)
+        self.now = self.stamp("2026-11-02 22:14:20")
+        report = self.health()
+        self.assertEqual(report["lanes_snapshot"]["status"], "fresh")
+        self.assertEqual(report["lanes_snapshot"]["age_seconds"], 60)
+        self.assertEqual(report["alerts"], [])
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["status"], "ok")
+
+    def test_a_missing_snapshot_is_reported_without_failing_the_health(self):
+        report = self.health()
+        self.assertEqual(report["lanes_snapshot"]["status"], "missing")
+        self.assertEqual(report["alerts"], [])
+        self.assertTrue(report["ok"])
+
+    def test_an_unreadable_snapshot_is_an_alarm(self):
+        directory = self.snapshot_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "lanes-status.json").write_text("{not json", encoding="utf-8")
+        report = self.health()
+        self.assertEqual(report["lanes_snapshot"]["status"], "unreadable")
+        self.assertEqual([alert["kind"] for alert in report["alerts"]], ["lanes-snapshot-unreadable"])
+        self.assertFalse(report["ok"])
+
+    def test_the_default_output_warns_about_the_stale_snapshot(self):
+        self.snapshot(STALLED_AT)
+        self.now = self.stamp(STALLED_NOW)
+        args = argparse.Namespace(hosts="worker-a", json=False, apply=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            report = xs.cmd_fleet_health(args, runner=self.runner(),
+                                         hosts={"worker-a": {"name": "worker-a", "kind": "local"}},
+                                         now=self.now, home=self.home)
+        printed = output.getvalue()
+        self.assertIn("lanes-status  stale", printed)
+        self.assertIn(STALLED_AT, printed)
+        self.assertIn("WARNING", printed)
+        self.assertFalse(report["ok"])
+
+    # ---------------------------------------------------------------- the writer liveness (Refs #1697)
+
+    def test_a_fresh_heartbeat_means_the_writer_is_alive(self):
+        self.snapshot("2026-11-02 22:17:20")
+        self.heartbeat("2026-11-02 22:17:20")
+        self.now = self.stamp(STALLED_NOW)
+        report = self.health()
+        self.assertEqual(report["lanes_snapshot"]["status"], "fresh")
+        self.assertEqual(report["writer"]["status"], "alive")
+        self.assertEqual(report["writer"]["heartbeat_age_seconds"], 60)
+        self.assertEqual(report["alerts"], [])
+
+    def test_a_silent_heartbeat_means_the_writer_is_stalled(self):
+        self.snapshot(STALLED_AT)
+        self.heartbeat(STALLED_AT)
+        self.now = self.stamp("2026-11-02 22:33:20")  # 20 minutes of silence
+        report = self.health()
+        self.assertEqual(report["writer"]["status"], "stalled")
+        self.assertEqual([alert["kind"] for alert in report["alerts"]],
+                         ["lanes-snapshot-stale", "autodispatch-writer-stalled"])
+        self.assertFalse(report["ok"])
+
+    def test_a_dead_writer_process_is_reported(self):
+        self.snapshot(STALLED_AT)
+        state = self.ctl_state / "autodispatch.pid"
+        state.write_text(json.dumps({"pid": 999999, "started_at": 1}), encoding="utf-8")
+        self.now = self.stamp(STALLED_NOW)
+        report = self.health()
+        self.assertEqual(report["writer"]["status"], "dead")
+        self.assertFalse(report["writer"]["pid_alive"])
+        self.assertIn("autodispatch-writer-dead", [alert["kind"] for alert in report["alerts"]])
+
+    def test_a_dead_writer_process_is_reported_even_with_a_fresh_heartbeat(self):
+        """The pid file survives the process it names: a fresh heartbeat is not proof of life."""
+        self.snapshot("2026-11-02 22:17:20")
+        self.heartbeat("2026-11-02 22:17:20")  # refreshed a minute ago
+        state = self.ctl_state / "autodispatch.pid"
+        state.write_text(json.dumps({"pid": 999999, "started_at": 1}), encoding="utf-8")
+        self.now = self.stamp(STALLED_NOW)
+        report = self.health()
+        self.assertEqual(report["lanes_snapshot"]["status"], "fresh")
+        self.assertEqual(report["writer"]["heartbeat_age_seconds"], 60)
+        self.assertFalse(report["writer"]["pid_alive"])
+        self.assertEqual(report["writer"]["status"], "dead")
+        self.assertEqual([alert["kind"] for alert in report["alerts"]], ["autodispatch-writer-dead"])
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "stale")
+
+    def test_a_live_writer_process_is_reported_as_alive(self):
+        self.snapshot(STALLED_AT)
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.terminate)
+        state = self.ctl_state / "autodispatch.pid"
+        state.write_text(json.dumps({"pid": process.pid, "started_at": time.time()}), encoding="utf-8")
+        self.now = self.stamp(STALLED_NOW)
+        report = self.health()
+        self.assertTrue(report["writer"]["pid_alive"])
+        self.assertEqual(report["writer"]["status"], "alive")
+
+    def test_the_writer_check_is_reported_even_without_a_snapshot(self):
+        report = self.health()
+        self.assertEqual(report["writer"]["status"], "unknown")
+        self.assertIn("checked_at", report["writer"])
+        self.assertIn("heartbeat_path", report["writer"])
 
     def test_policy_thresholds_override_the_defaults(self):
         policy = {"resources": {"health": {"inode_pause_pct": 50, "inode_resume_pct": 40}}}
