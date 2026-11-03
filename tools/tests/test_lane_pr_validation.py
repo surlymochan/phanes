@@ -25,6 +25,10 @@ ISSUE = 1704
 RUN = "20261103-013813-216a11"
 CFG = {"host": "host1", "backend": "codex", "model": "gpt", "repo": "~/work/phanes-fleet"}
 MESSAGE_WITH_ALL = "Rewrote the parser.\n\nCloses #1704\n\n验收：python3 -m unittest tools/tests (passed)"
+# The delivery note of the fake lane carries the mapping table of the delivery-note
+# pre-check (Refs #1849); the mapping table itself is asserted in
+# openswarm/tests/test_lane_delivery_map.py.
+DELIVERY_MAP = "\n| 验收 | 改动文件 | 测试 |\n| --- | --- | --- |\n| `python3 -m unittest tools/tests` | `tools/lane-autodispatch/autodispatch.py` | `python3 -m unittest tools/tests` |\n"
 
 
 def run_remote_status(home, payload, run=RUN, lane="codex"):
@@ -73,7 +77,7 @@ class FakeLaneHost:
     def sh(self, cmd, timeout=120, inp=None):
         argv = cmd if isinstance(cmd, list) else [cmd]
         if isinstance(cmd, list) and "--format=%s" in cmd: return 0, self.subject, ""
-        if isinstance(cmd, list) and "--format=%B" in cmd: return 0, self.message, ""
+        if isinstance(cmd, list) and "--format=%B" in cmd: return 0, self.message + DELIVERY_MAP, ""
         if inp and "pr-validation.json" in inp:  # the run record write on the lane host
             self.run_records.append(json.loads(base64.b64decode(argv[-1]).decode("utf-8")))
             return 0, "ok", ""

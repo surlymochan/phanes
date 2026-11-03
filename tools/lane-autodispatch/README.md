@@ -18,7 +18,34 @@ tick that fetched the object in the meantime) must never mask it.
 python3 tools/lane-autodispatch/test_can_take.py
 python3 tools/check-ad-base-fetch-on-miss.py
 python3 -m unittest tools.tests.test_lane_pr_validation
+python3 -m unittest openswarm.tests.test_lane_delivery_map
 ```
+
+## 交付说明映射表预检（Refs #1849，rubric A7/F3）
+
+首轮与 fix 轮的**交付说明**须含一张「验收条目→改动文件→测试」映射表：缺行时评审必报流程性
+BLOCKER，白烧一轮。AD 在**推送前**检查这张表，缺表或缺行就把卡**退回作者**：不推送、不建 PR，
+卡上写明缺什么并重新标记 `lane-ready`（作者再跑一次）。不进评审，也就不计评审轮次。
+
+判定的两份载体（任一命中即可）：
+
+- head 提交的正文（PR 带着它，评审在 PR 上读得到）；
+- 分支里的交付说明文件 `.lane-review/PR-<n>.md`。
+
+映射表的写法：表头要能看出「验收」列与「测试」列，每行三列都要写满（验收条目、改动文件、测试）：
+
+```markdown
+| 验收 | 改动文件 | 测试 |
+| --- | --- | --- |
+| `python3 -m unittest tools.tests` | `tools/lane-autodispatch/autodispatch.py` | `python3 -m unittest tools.tests` |
+```
+
+卡的每条验收句子都要有一行对应（`验收：`/`Verify：` 行，或验收段里的每条 bullet）。验收句子是
+一条命令时，测试列写上同一条命令也算对应。
+
+这项预检与 #1704 的 PR 必备字段校验（`Closes #N`、验收段、标题带号）共用同一个开关：
+`AD_PR_VALIDATION=strict`（默认）缺项即退回，`warn` 只记录不退回（灰度用）。映射表的退回按
+可快速修复类（`delivery_map`）处理，不计入 lane-failed 统计，也不计评审轮次。
 
 ## 队列优先级类与保底份额（Refs #1794）
 
