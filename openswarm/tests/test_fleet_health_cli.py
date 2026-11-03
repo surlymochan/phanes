@@ -1,6 +1,7 @@
 """`openswarm fleet health`: probe the fleet hosts and pause the unhealthy ones."""
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -17,6 +18,11 @@ sys.path.insert(0, str(HERE))
 import _load  # noqa: E402
 
 xs = _load.load()
+
+_engine_spec = importlib.util.spec_from_file_location(
+    "dispatch_engine_under_test", ROOT / "lib" / "dispatch" / "engine.py")
+E = importlib.util.module_from_spec(_engine_spec)
+_engine_spec.loader.exec_module(E)
 
 DISK = ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
         "/dev/root 1000 700 300 70% /\n")
@@ -92,6 +98,17 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def pauses(self):
         return {row["scope"]: row for row in self.store.active(self.now)}
+
+    def dispatcher(self):
+        """A dispatcher that reads the health state this probe writes."""
+        cfg_path = self.root / "cfg.json"
+        cfg_path.write_text(json.dumps({
+            "repo": "acme/project", "local_repo": str(self.root),
+            "state_dir": str(self.root / "state"),
+            "fleet_health_file": str(self.home / "fleet-health.json"),
+        }), encoding="utf-8")
+        return E.Dispatcher(E.load_config(str(cfg_path)),
+                            runner=lambda *args, **kwargs: (0, "", ""), out=io.StringIO())
 
     # ---------------------------------------------------------------- tests
 
@@ -248,6 +265,19 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(row["host"], "worker-b")
         self.assertEqual(row["status"], "unreachable")
         self.assertEqual(row["error"], "unknown fleet host")
+
+    def test_the_state_the_probe_writes_blocks_the_dispatch(self):
+        """The dispatch gate reads the file the probe writes (Refs #1674)."""
+        for _ in range(3):                     # three failing probes reach the pause threshold
+            self.health(runner=self.runner(failing=("worker-a",)), apply=True)
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["hosts"]["worker-a"]["ssh_fail_streak"], 3)
+        self.assertTrue(self.dispatcher().ssh_health_blocked("worker-a"))
+        # a reachable host resets the streak and the gate lets it pass again
+        self.health(runner=self.runner(), apply=True)
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["hosts"]["worker-a"]["ssh_fail_streak"], 0)
+        self.assertFalse(self.dispatcher().ssh_health_blocked("worker-a"))
 
 
 if __name__ == "__main__":

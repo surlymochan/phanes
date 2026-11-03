@@ -51,6 +51,61 @@ def thresholds_from_policy(policy):
     return limits
 
 
+def ssh_fail_blocked(streak, thresholds=None):
+    """Whether a consecutive SSH failure count reached the pause threshold.
+
+    The threshold is the one the health probe pauses a host with
+    (``resources.health.ssh_fail_pause_streak``, default 3): at or above it the
+    host counts as unreachable.
+    """
+    limits = dict(DEFAULT_THRESHOLDS)
+    if thresholds:
+        limits.update(thresholds)
+    try:
+        count = int(streak or 0)
+    except (TypeError, ValueError):
+        count = 0
+    try:
+        threshold = float(limits["ssh_fail_pause_streak"])
+    except (TypeError, ValueError):
+        threshold = float(DEFAULT_THRESHOLDS["ssh_fail_pause_streak"])
+    return count >= threshold
+
+
+def ssh_fail_record(streak, status, updated_at):
+    """The per-host state the health probe remembers between two probes.
+
+    The dispatch gate reads the same field, so the persisted shape of a host
+    record lives here only: ``ssh_fail_streak`` sits on the record itself.
+    """
+    try:
+        count = int(streak or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return {"ssh_fail_streak": count, "status": status, "updated_at": updated_at}
+
+
+def ssh_fail_streaks(state):
+    """The consecutive SSH failure count every host has in a fleet-health state.
+
+    ``state`` is the parsed ``fleet-health.json`` the health probe writes:
+    ``{"hosts": {host: {"ssh_fail_streak": n, "status": ..., "updated_at": ...}}}``.
+    A damaged state is never evidence of a failure: a host without a usable
+    count has no streak at all.
+    """
+    hosts = state.get("hosts") if isinstance(state, dict) else None
+    if not isinstance(hosts, dict):
+        return {}
+    streaks = {}
+    for host, record in hosts.items():
+        if not isinstance(record, dict):
+            continue
+        count = _number(record, "ssh_fail_streak")
+        if count is not None:
+            streaks[str(host)] = int(count)
+    return streaks
+
+
 def pressure_levels(probe, limits):
     """Classify every valid measurement of a probe against the pause/resume watermarks.
 

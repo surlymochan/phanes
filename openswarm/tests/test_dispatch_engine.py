@@ -248,6 +248,117 @@ class HostHealth(Base):
         self.assertFalse(d.host_ok("h1"))
 
 
+
+class HealthProbeGate(Base):
+    """The dispatch gate of the health probe's SSH failure streaks (Refs #1674).
+
+    `openswarm fleet health` probes every fleet host and remembers how often its
+    SSH to a host failed in a row; the streak lives in the openswarm home's
+    fleet-health.json, next to the policy.local.json that names the threshold.
+    A host whose streak reached the threshold is unreachable and gets no
+    dispatch, whatever the dispatcher's own backoff says.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "openswarm-home")
+        os.makedirs(self.home, exist_ok=True)
+
+    # ---------------------------------------------------------------- fixtures
+
+    def write_health(self, hosts, updated_at=1700000000.0):
+        """Write the fleet-health.json the health probe leaves behind (its real format)."""
+        path = os.path.join(self.home, "fleet-health.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump({"hosts": hosts, "updated_at": updated_at}, stream)
+        return path
+
+    def write_policy(self, threshold):
+        """Write the policy.local.json of the openswarm home (the probe reads it too)."""
+        path = os.path.join(self.home, "policy.local.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump({"resources": {"health": {"ssh_fail_pause_streak": threshold}}}, stream)
+        return path
+
+    def dispatcher(self):
+        d = self.make()
+        d.clock = lambda: 1000
+        d.main_sha = lambda: SHA
+        d.label_state = lambda n: "fresh"
+        d.dispatch = lambda lane, lc, item, base: (f"run-{item['n']}", "verify")
+        d.gh_write_retry = lambda args, **kwargs: (0, "", "")
+        return d
+
+    def assign(self, d, host="box"):
+        """Run one dispatch round for a lane on `host` and return the written state."""
+        lanes = {"P0": {"host": host, "backend": "pi"}}
+        state = {}
+        item = {"n": 1, "title": "task", "body": "", "backend": None,
+                "strict": False, "prio": 1}
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            d.assign_issues(lanes, {"P0": {"lane": "idle"}}, state, [item])
+        return state
+
+    def log_text(self, d):
+        try:
+            with open(d.path(d.cfg["log_file"]), encoding="utf-8") as stream:
+                return stream.read()
+        except OSError:
+            return ""
+
+    # ---------------------------------------------------------------- tests
+
+    def test_the_health_probe_state_blocks_the_dispatch(self):
+        # the probe writes the streak on the host record itself (fleet-health.json)
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 3, "status": "unreachable",
+                                   "updated_at": 1700000000.0}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d), {})          # the unreachable host gets no dispatch
+        self.assertIn("SSH failure streak 3", self.log_text(d))
+
+    def test_the_block_survives_an_expired_dispatcher_backoff(self):
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 3, "status": "unreachable"}})
+        d = self.dispatcher()
+        d.backoff["box"] = {"n": 1, "until": 999}      # the dispatcher's own backoff expired
+        self.assertTrue(d.host_ok("box"))
+        self.assertEqual(self.assign(d), {})
+
+    def test_a_recovered_host_is_dispatched_again(self):
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 3, "status": "unreachable"}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d), {})
+        self.write_health({"box": {"ssh_fail_streak": 0, "status": "ok", "updated_at": 1700000000.0}})
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+    def test_a_streak_below_the_threshold_does_not_block(self):
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 2, "status": "unreachable"}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+    def test_the_openswarm_home_decides_the_threshold(self):
+        # the probe pauses a host after two failures when its home says so
+        self.write_policy(2)
+        self.write_health({"box": {"ssh_fail_streak": 2, "status": "unreachable"}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d), {})
+        self.assertIn("streak 2", self.log_text(d))
+
+    def test_a_damaged_hosts_entry_does_not_interrupt_the_dispatch(self):
+        self.write_policy(3)
+        self.write_health(["bad", "state"])
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+    def test_a_missing_health_state_does_not_block(self):
+        self.write_policy(3)
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+
 class QuotaGuards(Base):
     """The quota guards classify with the pure module lib/dispatch/quota.py (Refs #1499)."""
 
