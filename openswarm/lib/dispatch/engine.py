@@ -390,6 +390,10 @@ out={"lane":None,"run":None}
 try:
   with open(f"{O}/lanes/{L}/state.json") as stream: ls=json.load(stream)
   out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
+  sp=ls.get("server_probe")
+  if isinstance(sp,dict):
+    out["server_probe"]={"alive":sp.get("alive"),"last_success_at":sp.get("last_success_at"),
+      "restarts":sp.get("restarts") or 0,"failures":sp.get("failures") or 0,"last_error":sp.get("last_error")}
 except Exception as e: out["lane"]="unknown"
 if R:
   p=f"{O}/runs/{R}/result.json"
@@ -2890,6 +2894,10 @@ class Dispatcher:
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)
+            probe = res.get(L, {}).get("server_probe")
+            if isinstance(probe, dict):
+                # The lane server health probe of the lane host (Refs #1709).
+                entry["server_probe"] = probe
             st[L] = entry
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
                                                 "model_drift": drift},

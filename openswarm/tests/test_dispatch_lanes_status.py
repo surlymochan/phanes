@@ -30,11 +30,13 @@ class LaneStatus(unittest.TestCase):
         self.d = E.Dispatcher(self.cfg, out=open(os.devnull, "w"))
         self.addCleanup(self.d.out.close)
 
-    def status(self, configured_model):
+    def status(self, configured_model, probe=None):
         lanes = {"GH1": {"backend": "claude", "host": "gorelay", "model": configured_model},
                  "GH2": {"backend": "claude", "host": "gores1", "model": "claude-haiku-5.5"}}
         result = {name: {"lane": "idle", "run": {"model": "claude-haiku-5.5", "timestamp": "2026-11-02T07:30:00Z"}}
                   for name in lanes}
+        if probe is not None:
+            result["GH1"]["server_probe"] = probe
         self.d.probe = lambda _lanes, _state: result
         self.d.harvest = lambda *_args: None
         self.d.sweep_leaked_inprogress = lambda *_args: None
@@ -64,6 +66,14 @@ class LaneStatus(unittest.TestCase):
         summary = self.status("claude-haiku-5.5")["_summary"]
         self.assertEqual(summary["by_backend"], {"claude": 2})
         self.assertEqual((summary["busy"], summary["idle"]), (0, 2))
+
+    def test_the_lane_server_probe_of_the_lane_host_is_reported(self):
+        probe = {"alive": False, "last_success_at": 1_700_000_000.0, "restarts": 2, "failures": 3,
+                 "last_error": "no answer within 20s"}
+        data = self.status("claude-haiku-5.5", probe=probe)
+
+        self.assertEqual(data["GH1"]["server_probe"], probe)
+        self.assertNotIn("server_probe", data["GH2"])
 
     def test_legacy_string_entries_are_normalized(self):
         view = E.lanes_status_view({"GH1": "idle", "GH2": "busy #42", "_busy": 1})
