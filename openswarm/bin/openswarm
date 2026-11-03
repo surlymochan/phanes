@@ -12154,6 +12154,19 @@ def dispatch_pause_module():
     return module
 
 
+def dispatch_needs_human_module():
+    """The needs-human backlog module (lib/dispatch/needs_human.py), loaded by path."""
+    name = "openswarm_dispatch_needs_human"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "needs_human.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
 def fleet_health_lane_hosts(home=None):
     """The host names the lanes.json names, in the order they appear.
 
@@ -12306,7 +12319,27 @@ def fleet_health_failure_reasons(home=None, limit=20):
     return counts
 
 
-def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
+def fleet_health_needs_human(dispatch_dir=None):
+    """The needs-human backlog the dispatcher wrote into its lanes-status snapshot.
+
+    The dispatcher refreshes that snapshot on every tick; the health check reads it
+    instead of asking GitHub again, so the health check stays a cheap probe.  A missing
+    or unreadable snapshot is an empty backlog, never a failed health check.
+    """
+    directory = dispatch_dir or envvar("DISPATCH_STATE_DIR",
+                                       os.path.join(HOME, ".claude", "openswarm-dispatch"))
+    status = jload(os.path.join(directory, "lanes-status.json"), {}) or {}
+    backlog = status.get("_needs_human") if isinstance(status, dict) else None
+    backlog = backlog if isinstance(backlog, dict) else {}
+    entries = backlog.get("entries")
+    entries = entries if isinstance(entries, list) else []
+    return {"count": int(backlog.get("count") or len(entries)),
+            "entries": entries,
+            "at": status.get("_at") if isinstance(status, dict) else None}
+
+
+def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None,
+                     dispatch_dir=None):
     """Probe every fleet host and report its health; --apply pauses the sick ones.
 
     The hosts are the ones ``lanes.json`` names (or ``--hosts``); each one is
@@ -12356,11 +12389,12 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                                                   row["status"], moment)
         rows.append(row)
     fleet_health_state_save(remembered, home)
+    needs_human = fleet_health_needs_human(dispatch_dir or getattr(args, "dispatch_dir", None))
     report = {"ok": all(row["status"] == "ok" for row in rows),
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits, "recent_failure_reasons": recent_failures,
-              "hosts": rows}
+              "hosts": rows, "needs_human": needs_human}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -12371,6 +12405,8 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
             print(f"  metrics: {metrics}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
+    # The backlog that waits for a human: the same summary the brain log gets.
+    print(dispatch_needs_human_module().render(needs_human["entries"]))
     print(f"{len(rows)} host(s) probed, status={report['status']}")
     if recent_failures:
         print("recent failure reasons (last 20):")
@@ -16023,6 +16059,8 @@ def main():
     fp.add_argument("--json", action="store_true", help="print the health report as JSON")
     fp.add_argument("--apply", action="store_true",
                     help="pause the unhealthy hosts and release the recovered ones")
+    fp.add_argument("--dispatch-dir",
+                     help="the dispatcher state dir the needs-human backlog is read from")
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")

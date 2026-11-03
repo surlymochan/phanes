@@ -139,6 +139,7 @@ DEFAULTS = {
     "tick_s": 60,
     "budget_minutes": "45",
     "review_budget_minutes": "20",
+    "needs_human_refresh_s": 300,         # how often the needs-human backlog is re-read from GitHub
     "base_branch": "main",
     "pr_branch_template": "fleet/{lane}-issue{n}-{run}",
     "labels": {
@@ -259,6 +260,10 @@ def deep_merge(base, over):
         else:
             out[k] = copy.deepcopy(v)
     return out
+
+
+# The needs-human report state: the snapshot of the backlog and what was already reported.
+NEEDS_HUMAN_STATE = "needs-human-report.json"
 
 
 def load_config(path):
@@ -456,6 +461,7 @@ class Dispatcher:
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
+        self.needs_human = {"count": 0, "entries": []}   # the human backlog, refreshed by the tick
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
         self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
@@ -485,6 +491,10 @@ class Dispatcher:
         return self.runner(cmd, timeout=timeout, inp=inp, env=env)
 
     def gh(self, args, timeout=60):
+        args = list(args)
+        if args and args[0] == "api":
+            # `gh api` has no -R: the repository is part of the endpoint it reads.
+            return self.sh(["gh"] + args, timeout=timeout)
         return self.sh(["gh"] + args + ["-R", self.cfg["repo"]], timeout=timeout)
 
     def gh_write(self, args, timeout=60):
@@ -2148,7 +2158,7 @@ class Dispatcher:
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
             txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PR-{pr}.md")[1]
             ev_txt = self.git("show", f"refs/fleet/{lane}:{self.evidence_path(pr)}")[1]
-        v, _ = status.parse_verdict(txt)
+        v, vsummary = status.parse_verdict(txt)
         ev = self.evidence_trace(ev_txt)
         r["evidence"] = ev
         if ev["complete"]:
@@ -2249,7 +2259,7 @@ class Dispatcher:
         comment += self.evidence_comment(ev_txt, ev)
         comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"
         self.gh(["pr", "comment", str(pr), "--body", comment])
-        r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
+        r.update({"sha": sha, "verdict": v, "summary": vsummary or "", "text": txt.strip()[:2000], "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
                   "fails_sha": sha, "fail_classes": []})
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
@@ -2352,6 +2362,54 @@ class Dispatcher:
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
                      f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run}")
             self.heartbeat()
+
+    # ------------------------------------------------------- needs-human backlog
+    def needs_human_entries(self, now=None, refresh=True):
+        """The human backlog: every open issue and PR that carries the needs-human label.
+
+        The backlog is re-read from GitHub at most every ``needs_human_refresh_s`` seconds
+        (the tick runs every minute, the backlog changes far slower); between two reads the
+        last one is reused.  The report state in the state dir holds that snapshot.
+        """
+        module = dispatch_module("needs_human")
+        moment = self.clock() if now is None else now
+        state = module.load_state(self.path(NEEDS_HUMAN_STATE))
+        collected = float(state.get("collected_at") or 0)
+        interval = int(self.cfg.get("needs_human_refresh_s") or 300)
+        if not refresh and collected and moment - collected < interval:
+            return list(state.get("entries") or []), state
+        items = module.collect(self.gh, self.cfg["repo"], label=self.L["needs_human"],
+                               reviews=self.load_reviews(), now=moment)
+        entries = module.summarize(items, now=moment)
+        state["collected_at"] = moment
+        state["entries"] = entries
+        return entries, state
+
+    def needs_human_report(self, now=None, refresh=True, record=True):
+        """Report the needs-human backlog: into the status output and (when due) the brain log.
+
+        An entry is written to the brain log when it is new, and again once it waited
+        another day; the report state remembers what was written, so a backlog that does
+        not move does not fill the log.  The report only reads: it changes no label, no
+        round counter and no dispatch decision.  ``record=False`` reports without
+        touching the report state: a manual report neither writes the brain log nor
+        marks the entries as reported.
+        """
+        module = dispatch_module("needs_human")
+        moment = self.clock() if now is None else now
+        entries, state = self.needs_human_entries(now=moment, refresh=refresh)
+        due_entries, items_state = module.due(entries, state, now=moment)
+        self.needs_human = {"count": len(entries), "entries": entries}
+        if not record:
+            return {"at": time.strftime("%F %T"), "needs_human": self.needs_human,
+                    "due": len(due_entries)}
+        state["items"] = items_state
+        if not self.dry_run:
+            module.save_state(self.path(NEEDS_HUMAN_STATE), state)
+        if due_entries:
+            self.log(module.render_line(due_entries), brain=True)
+            self.log(module.render(due_entries), brain=False)
+        return {"at": time.strftime("%F %T"), "needs_human": self.needs_human, "due": len(due_entries)}
 
     # ------------------------------------------------------------ tick
     def probe(self, lanes, state):
@@ -2603,6 +2661,11 @@ class Dispatcher:
             self.dispatch_reviews(lanes, res, state, q)
         except Exception as e:
             self.log(f"review dispatch exc: {e!r}", brain=False)
+        try:
+            # The backlog a human has to look at (Refs #1695): only reported, never acted on.
+            self.needs_human_report(refresh=False)
+        except Exception as e:
+            self.log(f"needs-human report exc: {e!r}", brain=False)
         self.assign_issues(lanes, res, state, q)
         ready = len(q) - blocked
         rp = self.cfg.get("replenish") or {}
@@ -2645,6 +2708,7 @@ class Dispatcher:
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
                                                 "model_drift": drift},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
+                   "_needs_human": self.needs_human,
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
@@ -2697,12 +2761,15 @@ def add_parser(sub):
     sp = sub.add_parser("dispatch", help="push-mode GitHub label dispatcher for resident lanes (reviews, rebase/CI-fix queue)")
     dsub = sp.add_subparsers(dest="dispatch_cmd", required=True)
     for name, hlp in (("serve", "run the resident dispatch loop"), ("tick", "run one tick"),
-                      ("check-config", "print the merged config")):
+                      ("check-config", "print the merged config"),
+                      ("health", "report the needs-human backlog that waits for a human")):
         p = dsub.add_parser(name, help=hlp)
         p.add_argument("--config", required=True)
         if name == "tick":
             p.add_argument("--dry-run", action="store_true", help="decide only: no labels, assigns, pushes or state writes")
             p.add_argument("--json", action="store_true")
+        if name == "health":
+            p.add_argument("--json", action="store_true", help="print the report as JSON")
     sp.set_defaults(func=cmd_dispatch)
 
 
@@ -2713,6 +2780,16 @@ def cmd_dispatch(args):
         return 0
     if args.dispatch_cmd == "serve":
         Dispatcher(cfg).serve()
+        return 0
+    if args.dispatch_cmd == "health":
+        d = Dispatcher(cfg)
+        # A manual report reads the backlog and prints it; it neither writes the brain
+        # log nor marks the entries as reported (the tick does that).
+        report = d.needs_human_report(refresh=True, record=False)
+        if getattr(args, "json", False):
+            print(json.dumps(report, indent=1, ensure_ascii=False))
+        else:
+            print(dispatch_module("needs_human").render(report["needs_human"]["entries"]))
         return 0
     d = Dispatcher(cfg, dry_run=args.dry_run, out=sys.stderr if args.json else sys.stdout)
     d.tick(load_json(cfg["lanes_file"], {}), load_json(d.path("state.json"), {}))
