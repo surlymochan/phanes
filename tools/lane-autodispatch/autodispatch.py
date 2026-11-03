@@ -49,6 +49,8 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # GitHub charges one GraphQL point per `gh issue view`: cap the authoritative reads of one
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
+# Reserved seam for P2-3 verify-card share policy; quota/份额 behavior is not implemented here.
+AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -244,19 +246,43 @@ def queue():
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
         be = next((l.split(":", 1)[1] for l in labels if l.startswith("backend:")), None)
-        items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "", "prio": pr, "backend": be, "strict": "strict-backend" in labels})
-    return sorted(items, key=lambda x: (x["prio"], x["n"]))
+        body = i["body"] or ""
+        verify = is_verify_issue(labels, body)
+        marked_verify = "verify-intent" in labels or bool(re.search(r"(?mi)^##\s*Verify\s*Intent\s*$", body))
+        valid_fields, missing = verify_requirements(body)
+        if marked_verify and (not verify or not valid_fields):
+            missing = (missing + ([] if re.search(r"(?mi)^##\s*Verify\s*Intent\s*$", body) else ["正文 Verify Intent 段"]) + ([] if "verify-intent" in labels else ["verify-intent 标签"]))
+            log(f"verify #{i['number']} rejected: missing required fields: {', '.join(missing)}", brain=False)
+            continue
+        items.append({"n": i["number"], "title": i["title"], "body": body, "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
+    # Work cards precede verification cards at equal priority; within each class use issue number.
+    return sorted(items, key=lambda x: (x["prio"], x["verify"], x["n"]))
+
+def verify_requirements(body):
+    """Return (valid, missing) for the required verify-card body fields."""
+    target = re.search(r"(?mi)^目标 PR\s*[:：]\s*(\S+)", body)
+    evidence = re.search(r"(?mi)^证据要求\s*[:：]\s*$((?:\s*[-*] \[[ xX]\].+\n?)+)", body)
+    missing = []
+    if not target: missing.append("目标 PR")
+    if not evidence: missing.append("证据要求清单")
+    return not missing, missing
+
+def is_verify_issue(labels, body):
+    return "verify-intent" in labels and bool(re.search(r"(?mi)^##\s*Verify\s*Intent\s*$", body))
 
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
-def can_take(backend, item):
+def can_take(backend, item, lane=None):
     """Exact pin or unpinned always; cross-pin allowed unless `strict-backend`, except codex never takes Unix-socket work
     (codex sandbox blocks AF_UNIX bind) — so idle agy/codex lanes drain the pi-heavy queue instead of sitting idle."""
+    if item.get("verify") and not is_review_lane(lane): return False
     if item["backend"] in (None, backend): return True
     if item.get("strict"): return False
     if backend == "codex" and SOCKET_RE.search(item["title"] + "\n" + item["body"]): return False
     return True
-def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, number
-    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], item["n"])
+def is_review_lane(lane):
+    return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
+def rank(backend, item):  # pin, priority, work before verify, then issue number
+    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
 
 def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
@@ -579,7 +605,7 @@ def tick(lanes, state, last_warn):
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
-        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
+        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":

@@ -76,5 +76,21 @@ class BackendFallbackTest(unittest.TestCase):
         self.assertFalse(AUTODISPATCH.should_retry_harvest_fetch("fatal: repository not found", 1))
         self.assertEqual(AUTODISPATCH.HARVEST_FETCH_MAX_ATTEMPTS, 3)
 
+    def test_verify_requires_dual_marker_and_required_fields(self):
+        body = "## Verify Intent\n目标 PR: #1785\n证据要求:\n- [ ] 测试结果"
+        valid, missing = AUTODISPATCH.verify_requirements(body)
+        self.assertTrue(valid)
+        self.assertEqual(missing, [])
+        self.assertTrue(AUTODISPATCH.is_verify_issue({"verify-intent"}, body))
+        self.assertFalse(AUTODISPATCH.is_verify_issue(set(), body))
+        self.assertFalse(AUTODISPATCH.verify_requirements("## Verify Intent")[0])
+
+    def test_verify_cards_only_fit_review_lanes_and_work_ranks_first(self):
+        card = {"backend": None, "prio": 1, "n": 10, "verify": True}
+        work = {"backend": None, "prio": 1, "n": 99}
+        self.assertFalse(AUTODISPATCH.can_take("codex", card, "CX10"))
+        self.assertTrue(AUTODISPATCH.can_take("codex", card, "CX2"))
+        self.assertLess(AUTODISPATCH.rank("codex", work), AUTODISPATCH.rank("codex", card))
+
 if __name__ == "__main__":
     unittest.main()
