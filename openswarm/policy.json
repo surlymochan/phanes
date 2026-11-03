@@ -314,6 +314,17 @@
     "stall_after_s": 900,
     "provider_request_log": null
   },
+  "session_compaction": {
+    "_doc": "Session context compaction for long runs (Refs #1716). The executor follows the size of the conversation it drives and compacts the running session once it passes max_context_tokens: the early part is replaced by a summary that keeps the decisions, the changed files and the open todos. keep_recent_tokens and keep_recent_messages are the retention window (the most recent messages are kept verbatim), summary_model names the model that writes the summary of the live session (the session model writes it when it is empty or not reachable), min_growth_share is the share of the threshold the session has to grow again before a second compaction runs, and max_fact_items and max_summary_lines bound the summary: the facts that do not fit are counted in the run log, they are never dropped silently. A failed compaction keeps the context the session had and the run continues.",
+    "enabled": true,
+    "max_context_tokens": 120000,
+    "keep_recent_tokens": 24000,
+    "keep_recent_messages": 12,
+    "summary_model": null,
+    "min_growth_share": 0.1,
+    "max_fact_items": 120,
+    "max_summary_lines": 600
+  },
   "review": {
     "_doc": "Cross-family peer review uses read-only reviewer modes; automatic reviews run asynchronously within the concurrency, time, and diff-size caps.",
     "prefer": ["codex", "agy", "pi", "cursor"],
