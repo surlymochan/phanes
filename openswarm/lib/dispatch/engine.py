@@ -145,7 +145,10 @@ DEFAULTS = {
     "verify_line_re": r"\s*(?:验收|Verify|verify|Acceptance)\s*[:：]",
     "depends_line_re": r"^\s*(?:依赖|Depends on)\s*[:：](.*)$",
     "rebase_line_re": r"^\s*(?:重基PR|Rebase-PR)\s*[:：]\s*#(\d+)\s+(\S+)",
-    "hot_files": {"line_re": r"^\s*(?:热文件|Hot-files)\s*[:：](.*)$", "union": [], "limits": {}, "default_limit": 1},
+    # hot_files.default_limit has no default here: the shipped policy (openswarm/policy.json)
+    # provides the default cap, and a value in the dispatch config overrides it.
+    "hot_files": {"line_re": r"^\s*(?:热文件|Hot-files)\s*[:：](.*)$", "union": [], "limits": {}},
+    "dispatch": {},
     "leak_grace_s": 900,
     "resume_grace_s": 120,
     "stale_strip_after": 5,
@@ -249,6 +252,46 @@ def deep_merge(base, over):
         else:
             out[k] = copy.deepcopy(v)
     return out
+
+
+def _normalize_policy_section(section):
+    """Return one policy section with its hot-file paths in canonical form.
+
+    The per-file caps are normalized before the policy files are merged: one file spelled in
+    two ways (``src/a.py`` and ``./src/a.py``) must follow the precedence of the sources, not
+    the spelling that happens to come last in the merged map.
+    """
+    section = dict(section or {})
+    shared = section.get("hot_shared")
+    if isinstance(shared, dict):
+        section["hot_shared"] = dispatch_module("hotfiles").merge_caps(shared)
+    return section
+
+
+def load_dispatch_policy(cfg):
+    """Return the ``dispatch`` policy of the shipped and the local policy files.
+
+    Precedence, lowest to highest: the repository policy (openswarm/policy.json) ships the
+    defaults and a local policy file refines them.  The dispatch config overrides both; it is
+    resolved by the caller, so that a shipped default never masks an explicit setting.
+
+    ``policy_repo_file`` replaces the shipped repository policy, ``policy_file`` the local one.
+    The hot-file paths of every file are normalized before the files are merged, so that the
+    later file wins for one file spelled in two ways.
+    """
+    policy = {}
+    paths = (cfg.get("policy_repo_file") or os.path.join(
+                 os.path.dirname(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__)))), "policy.json"),
+             cfg.get("policy_file") or os.path.expanduser("~/.claude/openswarm/policy.local.json"))
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                section = (json.load(stream) or {}).get("dispatch") or {}
+            policy = deep_merge(policy, _normalize_policy_section(section))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    return policy
 
 
 def load_config(path):
@@ -425,13 +468,32 @@ class Dispatcher:
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
-        self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
         hot_cfg = cfg["hot_files"]
-        hot_caps = dict(hot_cfg.get("limits") or {})
-        hot_caps.update(cfg.get("hot_shared") or {})
-        self.hot_lock = hotfiles.HotLock(
-            caps=hot_caps,
-            default_cap=hot_cfg.get("default_limit", 1))
+        # Hot-file policy precedence, lowest to highest: the shipped policy (repository policy
+        # file, refined by the local one) provides the defaults, the legacy hot_files/hot_shared
+        # keys of the dispatch config keep their own values, and the config's dispatch section
+        # wins over all of them.  A shipped default never masks an explicit setting.
+        policy = load_dispatch_policy(cfg)
+        explicit = cfg.get("dispatch") or {}
+        # Exemptions are additive: a file declared exempt by any source stays exempt.
+        union = list(hot_cfg.get("union") or []) + list(policy.get("hot_union") or []) + \
+            list(explicit.get("hot_union") or [])
+        self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(union)))
+        # The paths are normalized while the sources are merged: one file spelled in two ways
+        # (``src/a.py`` and ``./src/a.py``) must follow the declared precedence, not the
+        # spelling that happens to come last in the dictionary.
+        hot_caps = hotfiles.merge_caps(
+            policy.get("hot_shared"),
+            hot_cfg.get("limits"),
+            cfg.get("hot_shared"),
+            explicit.get("hot_shared"),
+        )
+        default_cap = explicit.get("hot_default")
+        if default_cap is None:
+            default_cap = hot_cfg.get("default_limit")
+        if default_cap is None:
+            default_cap = policy.get("hot_default", 1)
+        self.hot_lock = hotfiles.HotLock(caps=hot_caps, default_cap=default_cap)
         self.local_hosts = set(cfg.get("local_hosts") or [])
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
@@ -718,7 +780,9 @@ class Dispatcher:
             labels = {l["name"] for l in i["labels"]}
             if self.L["in_progress"] in labels or labels & skip:
                 continue
-            items.append({"n": i["number"], "title": i["title"], "body": i["body"] or "",
+            body = i["body"] or ""
+            items.append({"n": i["number"], "title": i["title"], "body": body,
+                          "hot_files": sorted(self.hot_of(body)),
                           "prio": min([pr[l] for l in labels if l in pr] or [len(pr)]),
                           "backend": next((l[len(bp):] for l in labels if l.startswith(bp)), None),
                           "strict": self.L["strict_backend"] in labels})
@@ -756,6 +820,11 @@ class Dispatcher:
         return (int(m.group(1)), m.group(2)) if m else None
 
     def hot_of(self, body):
+        if isinstance(body, dict):
+            if "hot_files" in body:
+                body = "热文件：" + " ".join(body["hot_files"] or [])
+            else:
+                body = body.get("body", "")
         return {f for f in self.hotfiles.parse_hot_files(body)
                 if f not in self.hot_union and not self.hotfiles.is_doc_file(f)}
 
@@ -1864,7 +1933,8 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
-                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
+                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"],
+                        "hot": []}   # a review lane holds no hot files, but the key must exist
             self.save_state(state)
             self.lru_picker().touch(L)
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
@@ -1985,11 +2055,19 @@ class Dispatcher:
     def assign_issues(self, lanes, res, state, q):
         base = None
         self.hot_lock.counts.clear()
+        # Old state files have no declaration to reconstruct safely. Drain them before
+        # dispatching more work, so upgrading cannot temporarily bypass the file caps.
+        legacy_hot_state = False
         for L in lanes:
-            for f in (state.get(L) or {}).get("hot") or []:
+            lane_state = state.get(L) or {}
+            if lane_state and "hot" not in lane_state:
+                legacy_hot_state = True
+            for f in lane_state.get("hot") or []:
                 for normalized in self.hotfiles.parse_hot_files("热文件：" + str(f)):
                     if normalized not in self.hot_union and not self.hotfiles.is_doc_file(normalized):
                         self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
+        if legacy_hot_state:
+            return
         for L, lc in self.lane_order(lanes):
             r = res[L]
             if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
@@ -1998,7 +2076,7 @@ class Dispatcher:
             pick = None
             for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(lc["backend"], i)),
                             key=lambda i: self.rank(lc["backend"], i)):
-                if self.hot_lock.blocked(self.hot_of(c["body"])):
+                if self.hot_lock.blocked(self.hot_of(c)):
                     continue
                 ls = self.label_state(c["n"])
                 if ls == "fresh":
@@ -2033,15 +2111,17 @@ class Dispatcher:
                 self.host_fail(lc["host"], f"dispatch #{pick['n']}: {e}", host_started, 120)
                 continue
             q.remove(pick)
-            hot = self.hot_of(pick["body"])
+            hot = self.hot_of(pick)
             self.hot_lock.acquire(hot)
             if self.dry_run:
                 continue
             state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
             self.lru_picker().touch(L)
             rb = self.rebase_of(pick["body"])
-            if hot:
-                state[L]["hot"] = sorted(hot)
+            # Always record the hot files, even when none counts (no hot files, or all of them
+            # exempt): a missing key marks the entry as pre-upgrade state, and that pauses the
+            # whole dispatch until the lane drains.
+            state[L]["hot"] = sorted(hot)
             if rb:
                 state[L]["rebase_pr"], state[L]["rebase_branch"] = rb
                 # PR head the lane starts from: harvest force-pushes with this lease so a fix pushed meanwhile survives

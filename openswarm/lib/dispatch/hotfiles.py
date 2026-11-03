@@ -69,6 +69,23 @@ def parse_hot_files(body):
     return files
 
 
+def merge_caps(*sources):
+    """Merge per-file cap maps, normalizing the paths before the maps are merged.
+
+    One file can be spelled in several ways (``src/a.py`` and ``./src/a.py``).  Merging the raw
+    maps would keep every spelling, and the normalization in :class:`HotLock` would then let
+    the spelling that happens to come last win instead of the source with the higher
+    precedence.  Normalizing first collapses the equivalent paths, so the later source decides.
+    """
+    merged = {}
+    for source in sources:
+        for path, cap in (source or {}).items():
+            key = _normalize(path)
+            if key:
+                merged[key] = cap
+    return merged
+
+
 class HotLock:
     """Bound how many cards may work on the same hot file at the same time.
 
