@@ -80,7 +80,7 @@ class FleetHealthCliTests(unittest.TestCase):
             os.environ["OPENSWARM_LANES_FILE"] = previous
 
     def health(self, runner=None, hosts=("worker-a",), apply=False, json_out=True,
-               policy=None, lanes=("worker-a",)):
+               policy=None, lanes=("worker-a",), dispatch_dir=None):
         """Run `fleet health` against the fake runner and return its report."""
         if lanes:
             self.lanes(lanes)
@@ -92,9 +92,21 @@ class FleetHealthCliTests(unittest.TestCase):
                                          runner=runner or self.runner(),
                                          hosts={name: {"name": name, "kind": "local"}
                                                 for name in (lanes or ())},
-                                         now=self.now, home=self.home)
-        self.assertEqual(json.loads(output.getvalue()) if json_out else {}, report if json_out else {})
+                                         now=self.now, home=self.home,
+                                         dispatch_dir=dispatch_dir)
+        self.output = output.getvalue()
+        self.assertEqual(json.loads(self.output) if json_out else {}, report if json_out else {})
         return report
+
+    def dispatch_dir(self, entries=None):
+        """A dispatcher state dir with the lane status snapshot the dispatcher writes."""
+        directory = self.root / "dispatch-state"
+        directory.mkdir(exist_ok=True)
+        backlog = {"count": len(entries or []), "entries": entries or []}
+        (directory / "lanes-status.json").write_text(
+            json.dumps({"schema": 2, "_needs_human": backlog, "_at": "2026-11-02 22:00:00"}),
+            encoding="utf-8")
+        return str(directory)
 
     def pauses(self):
         return {row["scope"]: row for row in self.store.active(self.now)}
@@ -184,7 +196,7 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "recent_failure_reasons", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["applied", "hosts", "needs_human", "ok", "recent_failure_reasons", "status", "thresholds"])
         self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
@@ -243,6 +255,32 @@ class FleetHealthCliTests(unittest.TestCase):
             json.dumps({"status": "done", "branch": "lane/x", "commit": "c"}), encoding="utf-8")
         report = self.health(runner=self.runner())
         self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
+    def test_the_needs_human_backlog_is_part_of_the_health_report(self):
+        entry = {"kind": "pr", "number": 1653, "title": "审查轮次耗尽", "rounds": 4,
+                 "verdict": "CHANGES", "summary": "缺少回归用例说明", "waiting_hours": 26.0,
+                 "action": "等维护者信息", "reason": "verdict 命中「缺少」"}
+        report = self.health(dispatch_dir=self.dispatch_dir([entry]))
+        self.assertEqual(report["needs_human"]["count"], 1)
+        self.assertEqual(report["needs_human"]["entries"][0]["number"], 1653)
+        self.assertIn("1653", json.dumps(report, ensure_ascii=False))
+
+    def test_an_empty_backlog_is_an_empty_summary(self):
+        report = self.health(dispatch_dir=self.dispatch_dir())
+        self.assertEqual(report["needs_human"], {"count": 0, "entries": [], "at": "2026-11-02 22:00:00"})
+
+    def test_a_missing_snapshot_is_an_empty_backlog_and_not_a_failure(self):
+        report = self.health(dispatch_dir=str(self.root / "nowhere"))
+        self.assertEqual(report["needs_human"]["count"], 0)
+        self.assertTrue(report["ok"])
+
+    def test_the_text_output_carries_the_needs_human_summary(self):
+        entry = {"kind": "pr", "number": 1653, "title": "审查轮次耗尽", "rounds": 4,
+                 "verdict": "CHANGES", "summary": "缺少回归用例说明", "waiting_hours": 26.0,
+                 "action": "等维护者信息", "reason": "verdict 命中「缺少」"}
+        self.health(json_out=False, dispatch_dir=self.dispatch_dir([entry]))
+        self.assertIn("needs-human", self.output)
+        self.assertIn("#1653", self.output)
+        self.assertIn("缺少回归用例说明", self.output)
 
     def test_policy_thresholds_override_the_defaults(self):
         policy = {"resources": {"health": {"inode_pause_pct": 50, "inode_resume_pct": 40}}}
