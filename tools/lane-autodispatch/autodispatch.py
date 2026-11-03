@@ -63,11 +63,25 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # GitHub charges one GraphQL point per `gh issue view`: cap the authoritative reads of one
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
-# Reserved seam for the P2-3 verify-card queue share policy; the quota/份额 behaviour is not implemented here.
-AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
 # Verify cards rejected for missing fields, per issue: the field set that was logged. An invalid card
 # must not repeat the same log line every tick, but a changed field set is logged again.
 VERIFY_REJECT_LOGGED = {}
+
+# --- verify-card queue share (Refs #1794) ------------------------------------------------
+# The verification reservation is enabled explicitly for gradual rollout: with the switch off the
+# dispatch order is exactly the one from before this policy.
+def env_number(name, default, cast=float):
+    """Read a numeric environment variable; a malformed value falls back to the default.
+
+    A typo in the configuration must not kill the AD loop at import time."""
+    try:
+        return cast(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower() in {"1", "true", "yes"}
+VERIFY_SHARE = env_number("AD_VERIFY_SHARE", 0.2)
+VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -460,6 +474,16 @@ def is_review_lane(lane):
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
 def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
     return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
+
+def queue_class_limits(lanes, state, idle):
+    """Reserve review-capable capacity using available lanes and active runs only."""
+    active = [L for L in lanes if L in idle or state.get(L)]
+    total = len(active)
+    review = sum(is_review_lane(L) for L in active)
+    reserve = min(review, max(0, total - 1), max(0, VERIFY_MIN, round(total * max(0.0, VERIFY_SHARE))))
+    verify_busy = sum(1 for L in active if (state.get(L) or {}).get("class") == "verify")
+    work_busy = sum(1 for L in active if state.get(L) and (state[L].get("class") != "verify"))
+    return max(0, reserve - verify_busy), max(0, total - reserve - work_busy)
 
 def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
@@ -886,7 +910,19 @@ def tick(lanes, state, last_warn):
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
         pick = None
-        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)), key=lambda i: rank(cfg["backend"], i)):
+        candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
+        candidates.sort(key=lambda i: rank(cfg["backend"], i))
+        if AD_VERIFY_SHARE_ENABLED:
+            idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
+                    and res[name].get("lane") == "idle" and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
+            verify_slots, work_slots = queue_class_limits(lanes, state, idle)
+            # Admission precedes existing pin/priority/work/number ordering. Borrow unused
+            # capacity when the preferred class has no eligible card on this lane.
+            preferred = True if verify_slots and is_review_lane(L) else False if not work_slots else None
+            if preferred is not None and any(bool(i.get("verify")) == preferred for i in candidates):
+                candidates.sort(key=lambda i: bool(i.get("verify")) != preferred)
+                log(f"queue share: {L} prefers {'verify' if preferred else 'work'} (verify deficit={verify_slots}, work slots={work_slots}); other class yields", brain=False)
+        for c in candidates:
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
@@ -902,7 +938,8 @@ def tick(lanes, state, last_warn):
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
             dispatch_failed(L, cfg, pick, e); continue
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)

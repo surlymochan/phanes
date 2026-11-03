@@ -400,6 +400,47 @@ lane state):
 python3 tools/check-ad-harvest-backoff.py
 ```
 
+### AD queue share for verify cards (Refs #1794)
+
+The dispatch queue is split into two classes: **verify cards** (`verify-intent` label +
+`## Verify Intent` section, see #1811) and **work cards**. When the share policy is on, verify
+cards get a reserved share of lanes and the work class is capped at `total - reserve`, so a
+verify flood cannot starve the work lanes and a work flood cannot starve the verification
+cards.
+
+The share is computed from the idle lanes and the runs in flight (lanes that are paused, in
+host backoff or in error are not counted); it is never a global static number, and it never
+locks all dispatching when there are too few lanes. Configuration (all read from the
+environment at AD start-up):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AD_VERIFY_SHARE_ENABLED` | `0` (off) | master switch; with `0` the dispatch order is exactly the one before this policy |
+| `AD_VERIFY_SHARE` | `0.2` | reserved share ratio: `reserve = max(AD_VERIFY_MIN, round(total * ratio))` |
+| `AD_VERIFY_MIN` | `1` | lower bound of the reserved lanes |
+
+A malformed numeric value falls back to the default (`env_number()`), so a typo in the
+configuration cannot kill the AD loop at start-up.
+
+**Rollout**: the policy is off by default, so the box keeps the old behaviour until an
+operator enables it explicitly:
+
+```bash
+cp /workspace/phanes-repo/tools/lane-autodispatch/autodispatch.py ~/phanes-ctl/bin/autodispatch.py
+export AD_VERIFY_SHARE_ENABLED=1     # optional: AD_VERIFY_SHARE=0.2 AD_VERIFY_MIN=1
+~/phanes-ctl/bin/start-control-plane # restart the AD loop with the new environment
+```
+
+The AD log (`~/phanes-ctl/autodispatch/autodispatch.log`) records every share decision
+(`queue share: <lane> prefers verify|work (...); other class yields`) and the class of every
+dispatched card (`queue share: dispatched <class> #<n> on <lane>`). The priority composition
+order (class admission → pin class → priority/number) and the offline proof are documented in
+[`tools/lane-autodispatch/README.md`](../tools/lane-autodispatch/README.md).
+
+```bash
+python3 tools/lane-autodispatch/test_can_take.py
+```
+
 ### AD ready queue target refill (Refs #1242)
 
 When `lane-autodispatch` ready queue drops below `LOW` (`AD_LOW`, default 10), the refill

@@ -16,6 +16,22 @@ When picking the next `lane-ready` issue for a lane whose executor family is `ba
 
 Ranking key (lower is better): `(0=own pin, 1=unpinned, 2=cross-pin, prio, number)`.
 
+## Composition with the queue share policy (Refs #1794)
+
+The verify-card queue share (a reserved share of lanes for verify cards, a concurrency cap for
+work cards) composes with the rules above in a fixed order:
+
+1. **class admission** — a verify card wins over a work card on a reserved lane (the lane is a
+   review lane and the verify share is not filled yet);
+2. **pin class** — own pin, unpinned, cross-pin (the rules above, unchanged);
+3. **inside one class** — `prio`, then issue number (work before verify inside one pin class).
+
+Class admission only reorders *verify vs work*; the relative order of pin class, priority and
+issue number is untouched (the reordering is a stable sort). The share is computed from the
+idle lanes and the runs in flight, not from a global static number, and it never locks all
+dispatching when there are too few lanes. Configuration and rollout:
+[`tools/lane-autodispatch/README.md`](lane-autodispatch/README.md) ("队列优先级类与保底份额").
+
 ## Opt-out
 
 Add label `strict-backend` on an issue to forbid cross-pin. Exact pin and unpinned still apply.
