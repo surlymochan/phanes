@@ -12232,7 +12232,8 @@ def fleet_health_apply(store, row, active, moment):
         return "none"
     if row["decision"] == "pause":
         store.pause(scope, ttl_s=FLEET_HEALTH_PAUSE_TTL,
-                    reason=FLEET_HEALTH_REASON + " " + row["reason"], now=moment)
+                    reason=FLEET_HEALTH_REASON + " " + row["reason"], now=moment,
+                    source="auto:fleet-health")
         return "paused"
     if row["decision"] == "resume":
         if record is None:
@@ -15784,11 +15785,41 @@ def main():
     pause_set.add_argument("scope")
     pause_set.add_argument("--ttl")
     pause_set.add_argument("--reason", default="")
+    pause_set.add_argument("--source", default=None,
+                           help="who set the switch (creator); a switch without a creator is "
+                                "reported for a review")
+    pause_set.add_argument("--basis", default=None,
+                           help="on what authority the switch is set (issue, command, probe); "
+                                "defaults to the reason")
     pause_clear = pause_sub.add_parser("clear")
     pause_clear.add_argument("scope")
     pause_list = pause_sub.add_parser("list")
     pause_list.add_argument("--json", action="store_true")
     pause_list.add_argument("--legacy-dir")
+    pause_list.add_argument("--max-age", default=None,
+                            help="how long an open-ended switch stays trustworthy (e.g. 12h)")
+    pause_marker = pause_sub.add_parser("marker",
+                                         help="write a legacy PAUSE* marker with its provenance")
+    pause_marker_sub = pause_marker.add_subparsers(dest="marker_cmd", required=True)
+    marker_set = pause_marker_sub.add_parser("set")
+    marker_set.add_argument("scope")
+    marker_set.add_argument("--source", default=None,
+                            help="who set the switch (creator); a switch without a creator is "
+                                 "reported for a review")
+    marker_set.add_argument("--basis", default=None,
+                            help="on what authority the switch is set (issue, command, probe)")
+    marker_set.add_argument("--reason", default="")
+    marker_set.add_argument("--ttl", default=None)
+    marker_set.add_argument("--until", default=None, help="deadline (epoch seconds or ISO-8601)")
+    marker_set.add_argument("--dir", default=None,
+                            help="the dispatch state dir that holds the PAUSE* markers")
+    marker_clear = pause_marker_sub.add_parser("clear")
+    marker_clear.add_argument("scope")
+    marker_clear.add_argument("--dir", default=None)
+    marker_list = pause_marker_sub.add_parser("list")
+    marker_list.add_argument("--json", action="store_true")
+    marker_list.add_argument("--dir", default=None)
+    marker_list.add_argument("--max-age", default=None)
     consult_module().add_parser(sub)
 
     dispatch_load_error = None
@@ -16181,15 +16212,82 @@ def main():
                                                   pause_module.parse_ttl)
         home = os.environ.get("OPENSWARM_HOME", DATA)
         store = PauseStore(home)
+        marker_dir = os.path.expanduser(
+            getattr(a, "dir", None) or os.environ.get("OPENSWARM_STATE_DIR")
+            or "~/.claude/openswarm-dispatch")
+        max_age_s = (parse_ttl(a.max_age) if getattr(a, "max_age", None) is not None
+                     else pause_module.DEFAULT_MAX_AGE_S)
         try:
             if a.pause_cmd == "set":
                 ttl = parse_ttl(a.ttl) if a.ttl is not None else None
-                record = store.pause(a.scope, ttl_s=ttl, reason=a.reason, now=time.time())
+                now = time.time()
+                record = store.pause(a.scope, ttl_s=ttl, reason=a.reason, now=now,
+                                     source=a.source, basis=a.basis)
+                problems = pause_module.switch_problems(record, now, max_age_s)
+                record["problems"] = problems
+                record["needs_review"] = bool(problems)
+                if problems:
+                    print("openswarm: pause switch needs review: {} ({})".format(
+                        record["scope"], ",".join(problems)), file=sys.stderr)
                 print(json.dumps(record, ensure_ascii=False))
             elif a.pause_cmd == "clear":
                 if not store.resume(a.scope):
                     print("openswarm: pause not found: {}".format(a.scope), file=sys.stderr)
                     sys.exit(1)
+            elif a.pause_cmd == "marker":
+                if a.marker_cmd == "set":
+                    name = pause_module.marker_name(a.scope)
+                    now = time.time()
+                    until = pause_module.parse_deadline(a.until) if a.until else None
+                    if until is None and a.ttl is not None:
+                        until = now + parse_ttl(a.ttl)
+                    text = pause_module.format_marker(
+                        body=a.reason or "manual hold", source=a.source, basis=a.basis,
+                        created_at=now, until=until)
+                    os.makedirs(marker_dir, exist_ok=True)
+                    path = os.path.join(marker_dir, name)
+                    with open(path, "w", encoding="utf-8") as stream:
+                        stream.write(text)
+                    switch = pause_module.marker_switch(path, name=name) or {}
+                    problems = pause_module.switch_problems(switch, now, max_age_s)
+                    row = dict(switch)
+                    row.update({"problems": problems, "needs_review": bool(problems)})
+                    if problems:
+                        print("openswarm: pause switch needs review: {} ({})".format(
+                            name, ",".join(problems)), file=sys.stderr)
+                    print(json.dumps(row, ensure_ascii=False))
+                elif a.marker_cmd == "clear":
+                    name = pause_module.marker_name(a.scope)
+                    path = os.path.join(marker_dir, name)
+                    try:
+                        os.unlink(path)
+                    except FileNotFoundError:
+                        print("openswarm: pause marker not found: {}".format(name), file=sys.stderr)
+                        sys.exit(1)
+                    print(json.dumps({"marker": name, "cleared": True}, ensure_ascii=False))
+                else:
+                    now = time.time()
+                    try:
+                        names = sorted(n for n in os.listdir(marker_dir) if n.startswith("PAUSE"))
+                    except OSError:
+                        names = []
+                    rows = []
+                    for name in names:
+                        switch = pause_module.marker_switch(os.path.join(marker_dir, name),
+                                                             name=name)
+                        if switch is None:
+                            continue
+                        row = pause_module.review_switch(switch, now, max_age_s)
+                        row["marker"] = name
+                        rows.append(row)
+                    if a.json:
+                        print(json.dumps(rows, ensure_ascii=False, indent=2))
+                    else:
+                        for row in rows:
+                            review = ("  NEEDS REVIEW: " + ",".join(row["problems"])) if row["needs_review"] else ""
+                            print("{}  scope={}  created_at={}  source={}  basis={}{}".format(
+                                row["marker"], row["scope"], row["created_at"], row["source"] or "-",
+                                row["basis"] or "-", review))
             else:
                 now = time.time()
                 records = store.active(now)
@@ -16199,14 +16297,19 @@ def main():
                     row.setdefault("legacy", False)
                     row["remaining_ttl_s"] = (None if row["expires_at"] is None else
                                                max(0, row["expires_at"] - now))
+                    problems = pause_module.switch_problems(row, now, max_age_s)
+                    row["problems"] = problems
+                    row["needs_review"] = bool(problems)
                 if a.json:
                     print(json.dumps(records, ensure_ascii=False, indent=2))
                 else:
                     for row in records:
                         remaining = "forever" if row["remaining_ttl_s"] is None else "{:.0f}s".format(row["remaining_ttl_s"])
                         label = " legacy" if row["legacy"] else ""
-                        print("{}  ttl={}  reason={}  created_at={}{}".format(
-                            row["scope"], remaining, row["reason"], row["created_at"], label))
+                        review = ("  NEEDS REVIEW: " + ",".join(row["problems"])) if row["needs_review"] else ""
+                        print("{}  ttl={}  reason={}  created_at={}  source={}  basis={}{}{}".format(
+                            row["scope"], remaining, row["reason"], row["created_at"],
+                            row.get("source") or "-", row.get("basis") or "-", label, review))
         except ValueError as error:
             print("openswarm: {}".format(error), file=sys.stderr)
             sys.exit(2)

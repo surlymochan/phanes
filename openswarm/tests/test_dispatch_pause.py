@@ -26,9 +26,10 @@ class PauseStoreTests(unittest.TestCase):
         self.assertFalse(self.store.resume("lane:M1"))
 
     def test_scope_matching(self):
-        self.store.pause("lane:M2", now=10)
-        self.store.pause("host:worker-a", now=10)
-        self.store.pause("backend:codex", now=10)
+        # a switch is only honoured when it names its creator and its basis
+        self.store.pause("lane:M2", now=10, source="operator:main", basis="issue #1669")
+        self.store.pause("host:worker-a", now=10, source="operator:main", basis="issue #1669")
+        self.store.pause("backend:codex", now=10, source="operator:main", basis="issue #1669")
 
         self.assertTrue(self.store.is_paused(lane="M2", now=10))
         self.assertTrue(self.store.is_paused(host="worker-a", now=10))
@@ -36,10 +37,10 @@ class PauseStoreTests(unittest.TestCase):
         self.assertFalse(self.store.is_paused(lane="M1", host="worker-b", backend="pi", now=10))
 
     def test_mint_does_not_pause_dispatch_but_all_does(self):
-        self.store.pause("mint", now=5)
+        self.store.pause("mint", now=5, source="operator:main", basis="issue #1669")
         self.assertFalse(self.store.is_paused(lane="M1", now=5))
         self.store.resume("mint")
-        self.store.pause("all", now=6)
+        self.store.pause("all", now=6, source="operator:main", basis="issue #1669")
         self.assertTrue(self.store.is_paused(lane="M1", now=6))
 
     def test_legacy_markers_map_to_sorted_pause_records(self):

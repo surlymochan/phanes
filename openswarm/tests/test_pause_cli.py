@@ -56,6 +56,79 @@ class PauseCliTests(unittest.TestCase):
     def test_invalid_scope_exits_two(self):
         self.assertEqual(self.run_cli("set", "bogus").returncode, 2)
 
+    def test_set_records_the_creator_and_the_basis(self):
+        result = self.run_cli("set", "lane:CX5", "--ttl", "30m", "--reason", "drain",
+                              "--source", "operator:main", "--basis", "issue #1669")
+        self.assertEqual(result.returncode, 0)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["source"], "operator:main")
+        self.assertEqual(record["basis"], "issue #1669")
+        rows = json.loads(self.run_cli("list", "--json").stdout)
+        self.assertEqual(rows[0]["source"], "operator:main")
+        self.assertFalse(rows[0]["needs_review"])
+
+    def test_switch_without_provenance_is_reported_for_review(self):
+        # a record restored from an older snapshot: no creator, no basis
+        pause_file = self.home / "pauses" / "mint.json"
+        pause_file.parent.mkdir(parents=True, exist_ok=True)
+        pause_file.write_text(json.dumps({"scope": "mint", "created_at": time.time() - 10,
+                                          "expires_at": None, "reason": "was missing on gocc ctl"}))
+        rows = json.loads(self.run_cli("list", "--json").stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["needs_review"])
+        self.assertIn("no-source", rows[0]["problems"])
+        self.assertIn("no-basis", rows[0]["problems"])
+
+    def test_set_without_provenance_asks_for_a_review(self):
+        # no creator and no authority: no value is invented for them
+        result = self.run_cli("set", "lane:CX5")
+        self.assertEqual(result.returncode, 0)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["source"], "")
+        self.assertEqual(record["basis"], "")
+        self.assertTrue(record["needs_review"])
+        self.assertIn("no-source", record["problems"])
+        self.assertIn("no-basis", record["problems"])
+        self.assertIn("needs review", result.stderr)
+
+    def test_set_with_a_reason_but_no_creator_asks_for_a_review(self):
+        result = self.run_cli("set", "lane:CX5", "--reason", "drain")
+        self.assertEqual(result.returncode, 0)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["basis"], "drain")
+        self.assertIn("no-source", record["problems"])
+
+    def test_marker_set_records_the_creator_and_the_basis(self):
+        state = pathlib.Path(self.tmp.name) / "state"
+        result = self.run_cli("marker", "set", "lane:CX5", "--source", "operator:main",
+                              "--basis", "issue #1669", "--dir", str(state))
+        self.assertEqual(result.returncode, 0)
+        body = (state / "PAUSE-CX5").read_text()
+        self.assertIn("source=operator:main", body)
+        self.assertIn("basis=issue #1669", body)
+        self.assertIn("created_at=", body)
+        rows = json.loads(self.run_cli("marker", "list", "--json", "--dir", str(state)).stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "operator:main")
+        self.assertFalse(rows[0]["needs_review"])
+
+    def test_marker_without_provenance_is_reported_for_review(self):
+        state = pathlib.Path(self.tmp.name) / "state"
+        result = self.run_cli("marker", "set", "lane:CX5", "--dir", str(state))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("needs review", result.stderr)
+        rows = json.loads(self.run_cli("marker", "list", "--json", "--dir", str(state)).stdout)
+        self.assertTrue(rows[0]["needs_review"])
+        self.assertIn("no-source", rows[0]["problems"])
+        self.assertIn("no-basis", rows[0]["problems"])
+
+    def test_marker_clear_removes_the_marker(self):
+        state = pathlib.Path(self.tmp.name) / "state"
+        self.run_cli("marker", "set", "lane:CX5", "--source", "operator:main",
+                     "--basis", "issue #1669", "--dir", str(state))
+        self.assertEqual(self.run_cli("marker", "clear", "lane:CX5", "--dir", str(state)).returncode, 0)
+        self.assertFalse((state / "PAUSE-CX5").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

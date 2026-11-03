@@ -178,6 +178,9 @@ DEFAULTS = {
     "burn": {"file": "", "backend": ""},
     "local_hosts": [],
     "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
+    # An open-ended pause switch (no TTL) is trusted for this long; a switch
+    # with a deadline is governed by that deadline (Refs #1669).
+    "pause_max_age_s": 86400,
     "min_gap_s": 120,
     "local_env": {},
     "local_inode": {"pause_pct": 95, "resume_pct": 92, "path": "~"},
@@ -456,6 +459,9 @@ class Dispatcher:
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
+        self.pause_review = {}      # pause switches that need a review (Refs #1669)
+        self.pause_warned = {}      # last warning per switch
+        self.pause_warn_gap_s = 300
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
         self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
@@ -654,19 +660,94 @@ class Dispatcher:
             self.log(f"local inode {pct:.1f}% -> local lanes {'PAUSED' if self.inode['low'] else 'resumed'}")
         return self.inode["low"]
 
+    # ------------------------------------------------------------ pause switches
+    def pause_max_age_s(self):
+        """How long an open-ended pause switch stays trustworthy (Refs #1669).
+
+        A switch that carries a deadline is governed by that deadline; an
+        open-ended one must be re-affirmed within this window.
+        """
+        try:
+            value = float(self.cfg.get("pause_max_age_s"))
+        except (TypeError, ValueError):
+            value = float(dispatch_module("pause").DEFAULT_MAX_AGE_S)
+        return max(0.0, value)
+
+    def pause_switch(self, name):
+        """The pause switch a marker file stands for, with its provenance."""
+        return dispatch_module("pause").marker_switch(self.path(name), name=name)
+
+    def warn_pause_switch(self, row):
+        """Report a pause switch that needs a review (throttled per switch)."""
+        key = row.get("marker") or row.get("scope")
+        self.pause_review[key] = row
+        now = self.clock()
+        if now - self.pause_warned.get(key, 0.0) < self.pause_warn_gap_s:
+            return
+        self.pause_warned[key] = now
+        self.log("pause switch needs review: {} problems={} source={} basis={} created_at={}".format(
+            row.get("scope") or key, ",".join(row.get("problems") or []), row.get("source") or "-",
+            row.get("basis") or "-", row.get("created_at")), brain=False)
+
+    def pause_switch_honored(self, name):
+        """Whether a marker file may pause the dispatch.
+
+        A marker without provenance (no creator, no basis) or one that is
+        older than the freshness window cannot be told apart from a snapshot
+        restored from an older run (Refs #1669): it is refused, reported for a
+        review and the dispatch keeps running.
+        """
+        module = dispatch_module("pause")
+        switch = self.pause_switch(name)
+        if switch is None:
+            return False
+        now = self.clock()
+        problems = module.switch_problems(switch, now, self.pause_max_age_s())
+        if not problems:
+            return True
+        self.warn_pause_switch(module.review_switch(switch, now, self.pause_max_age_s()))
+        return False
+
+    def review_pauses(self):
+        """Warn about every pause switch that cannot be trusted (Refs #1669).
+
+        Each marker file of the state dir and each pause record is checked for
+        its provenance (creator, time, basis) and its freshness; the switches
+        that fail the check are reported for a review instead of freezing the
+        dispatch.
+        """
+        module = dispatch_module("pause")
+        now = self.clock()
+        max_age_s = self.pause_max_age_s()
+        try:
+            names = sorted(p for p in os.listdir(self.D) if p.startswith("PAUSE"))
+        except OSError:
+            names = []
+        for name in names:
+            switch = module.marker_switch(self.path(name), name=name)
+            if switch is None:
+                continue
+            problems = module.switch_problems(switch, now, max_age_s)
+            if problems:
+                self.warn_pause_switch(module.review_switch(switch, now, max_age_s))
+        for row in module.PauseStore(self.D).review(now, max_age_s=max_age_s):
+            if row.get("problems"):
+                self.warn_pause_switch(row)
+
     def paused_lane(self, lane, lc):
-        if os.path.exists(self.path(f"PAUSE-{lane}")):
+        if self.pause_switch_honored(f"PAUSE-{lane}"):
             return True
         if dispatch_module("pause").PauseStore(self.D).is_paused(lane=lane, host=lc.get("host"),
-                                                                  backend=lc.get("backend"), now=self.clock()):
+                                                                  backend=lc.get("backend"), now=self.clock(),
+                                                                  max_age_s=self.pause_max_age_s()):
             return True
         host = lc.get("host") or ""
-        if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
+        if host and self.pause_switch_honored(f"PAUSE-HOST-{host}"):
             return True
         if host in self.local_hosts and self.local_inode_low():
             return True
         be = lc.get("backend") or ""
-        return bool(be and os.path.exists(self.path(f"PAUSE-BACKEND-{be}")))
+        return bool(be and self.pause_switch_honored(f"PAUSE-BACKEND-{be}"))
 
     def burn_state(self):
         """Return the selected backend and factor, with legacy marker compatibility."""
@@ -1077,22 +1158,39 @@ class Dispatcher:
                 "from_text": from_text}
 
     def quota_pause(self, name, lane, hit):
-        """Write the automatic pause file; a manual (non-auto) pause is never overwritten."""
+        """Write the automatic pause file; a manual (non-auto) pause is never overwritten.
+
+        A manual pause that carries no sound provenance is not a hold anybody
+        confirmed -- it may be a snapshot restored from an older run.  Such a
+        switch must not block the automatic quota protection (Refs #1669).
+        """
+        module = dispatch_module("pause")
         p = self.path(name)
         if os.path.exists(p):
-            try:
-                with open(p) as f:
-                    if not f.read().startswith("auto:"):
-                        return False
-            except Exception:
+            switch = module.marker_switch(p, name=name)
+            if switch is None:
                 return False
+            problems = module.switch_problems(switch, self.clock(), self.pause_max_age_s())
+            if not problems:
+                try:
+                    with open(p) as f:
+                        if not f.read().startswith("auto:"):
+                            return False
+                except Exception:
+                    return False
+            else:
+                self.log("{} carries no sound provenance ({}); the quota guard takes over".format(
+                    name, ",".join(problems)), brain=False)
         cd = int(hit.get("cooldown_s") or 0)
         body = f"auto:quota:{lane}:{hit['kind']}"
         if hit.get("until_iso"):
             body += f" until={hit['until_iso']}"
         elif cd and hit.get("scope") == "lane":
             body += f" until={int(self.clock()) + cd}"
-        self.touch_file(name, body + "\n")
+        text = module.format_marker(body=body, source="auto:quota",
+                                     created_at=self.clock(),
+                                     basis=f"quota signal from {lane}: {hit['kind']}")
+        self.touch_file(name, text)
         self.log(f"{name} (quota signal from {lane}: {hit['kind']})")
         return True
 
@@ -1401,7 +1499,8 @@ class Dispatcher:
         if model_unavailable:
             model = info.get("model") or "unknown"
             dispatch_module("pause").PauseStore(self.D).pause(
-                "lane:" + lane, ttl_s=3600, reason="auto:model_unavailable " + str(model), now=self.clock())
+                "lane:" + lane, ttl_s=3600, reason="auto:model_unavailable " + str(model), now=self.clock(),
+                source="auto:model_unavailable")
         has_commit = info.get("branch") and info["branch"] != "None" and info.get("commit")
         if st.get("review_pr"):
             if has_commit:
@@ -2477,8 +2576,15 @@ class Dispatcher:
         rp = self.cfg.get("replenish") or {}
         if not rp.get("cmd"):
             return
-        if any(os.path.exists(self.path(f)) for f in rp.get("skip_files") or []):
-            return
+        for name in rp.get("skip_files") or []:
+            if name.startswith("PAUSE"):
+                # A mint pause is a switch like any other: an unattributed or
+                # stale one must not stop the card minting (Refs #1669).
+                if self.pause_switch_honored(name):
+                    return
+                continue
+            if os.path.exists(self.path(name)):
+                return
         if self.dry_run:
             self.plan.append({"would": "replenish", "need": need})
             return
@@ -2491,14 +2597,17 @@ class Dispatcher:
 
     def tick(self, lanes, state):
         self._quota_probe_cache = None
+        self.pause_review = {}
         self.reap_quota_pauses()
-        if os.path.exists(self.path("PAUSE")):
+        self.review_pauses()
+        if self.pause_switch_honored("PAUSE"):
             return
         self.label_cache, self.label_reads = {}, 0
         os.makedirs(os.path.expanduser(self.cfg["ssh"]["control_dir"]), exist_ok=True)
         self.heartbeat()
         try:
-            paused = sorted(p for p in os.listdir(self.D) if p.startswith("PAUSE"))
+            paused = sorted(p for p in os.listdir(self.D) if p.startswith("PAUSE")
+                            and self.pause_switch_honored(p))
             if paused and self.clock() - self.last_warn > 300:
                 self.log(f"pauses active: {', '.join(paused)}", brain=False)
                 self.last_warn = self.clock()
@@ -2572,9 +2681,9 @@ class Dispatcher:
             entry = {"state": lane_state, "issue": active.get("issue") if active else None,
                      "pr": active.get("review_pr") if active else None, "backend": backend, "host": lc.get("host"),
                      "model_cfg": model_cfg, "model_last": last.get("model"), "model_last_at": last.get("at"),
-                     "paused_reason": (f"lane:{L}" if os.path.exists(self.path(f"PAUSE-{L}")) else
-                                      f"host:{lc.get('host')}" if os.path.exists(self.path(f"PAUSE-HOST-{lc.get('host')}")) else
-                                      f"backend:{backend}" if backend and os.path.exists(self.path(f"PAUSE-BACKEND-{backend}")) else None)}
+                     "paused_reason": (f"lane:{L}" if self.pause_switch_honored(f"PAUSE-{L}") else
+                                      f"host:{lc.get('host')}" if lc.get("host") and self.pause_switch_honored(f"PAUSE-HOST-{lc.get('host')}") else
+                                      f"backend:{backend}" if backend and self.pause_switch_honored(f"PAUSE-BACKEND-{backend}") else None)}
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)
@@ -2582,6 +2691,7 @@ class Dispatcher:
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
                                                 "model_drift": drift},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
+                   "_pause_review": list(self.pause_review.values()),
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
