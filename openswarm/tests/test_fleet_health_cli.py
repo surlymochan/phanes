@@ -49,6 +49,19 @@ class FleetHealthCliTests(unittest.TestCase):
             json.dumps({"status": "failed", "failure_reason": "spawn-failed"}), encoding="utf-8")
         self.now = 1700000000.0
         self.store = xs.dispatch_pause_module().PauseStore(self.home)
+        # The control plane of the box holds the health snapshot and the brain
+        # log of the queued diagnosis: the tests keep them inside the sandbox.
+        self.ctl = self.root / "ctl"
+        (self.ctl / "state").mkdir(parents=True)
+        previous = os.environ.get("OPENSWARM_CTL_STATE_DIR")
+        os.environ["OPENSWARM_CTL_STATE_DIR"] = str(self.ctl / "state")
+        self.addCleanup(self.restore_ctl_state, previous)
+
+    def restore_ctl_state(self, previous):
+        if previous is None:
+            os.environ.pop("OPENSWARM_CTL_STATE_DIR", None)
+        else:
+            os.environ["OPENSWARM_CTL_STATE_DIR"] = previous
 
     # ---------------------------------------------------------------- fixtures
 
@@ -184,7 +197,8 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "recent_failure_reasons", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "queued",
+                                          "recent_failure_reasons", "status", "thresholds"])
         self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
@@ -278,6 +292,58 @@ class FleetHealthCliTests(unittest.TestCase):
         state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
         self.assertEqual(state["hosts"]["worker-a"]["ssh_fail_streak"], 0)
         self.assertFalse(self.dispatcher().ssh_health_blocked("worker-a"))
+    # ------------------------------------------------------- queued diagnosis
+
+    def queued_run(self, run_id, started):
+        """A run of the box that waits in the queued state."""
+        directory = self.home / "runs" / run_id
+        directory.mkdir(parents=True)
+        (directory / "status.json").write_text(json.dumps(
+            {"id": run_id, "state": "queued", "lane": "M17", "backend": "pi",
+             "provider": "minimax-cn", "started": started}), encoding="utf-8")
+        return run_id
+
+    def test_the_report_carries_the_queued_diagnosis(self):
+        run_id = self.queued_run("20261102-213000-m17aa", self.now - 1800)
+        report = self.health()
+        section = report["queued"]
+        self.assertEqual(section["queued"], 1)
+        self.assertEqual(section["runs"][0]["run_id"], run_id)
+        self.assertEqual(section["runs"][0]["reason"], "unknown")
+        self.assertIn("需人工排查", section["runs"][0]["detail"])
+
+    def test_a_fresh_queue_is_not_reported(self):
+        self.queued_run("20261102-223000-fresh", self.now - 120)
+        report = self.health()
+        self.assertEqual(report["queued"]["queued"], 0)
+        self.assertEqual(report["queued"]["runs"], [])
+
+    def test_the_health_check_writes_the_section_into_the_control_plane_files(self):
+        """The patrol writes into the health.json and the brain log of the box."""
+        run_id = self.queued_run("20261102-213000-m17aa", self.now - 1800)
+        report = self.health()
+        health_json = self.ctl / "autodispatch" / "health.json"
+        brain = self.ctl / "brain" / "log.md"
+        self.assertTrue(health_json.exists())
+        self.assertTrue(brain.exists())
+        payload = json.loads(health_json.read_text())
+        self.assertEqual(payload["queued"]["runs"][0]["run_id"], run_id)
+        self.assertIn(run_id, brain.read_text())
+        self.assertEqual(report["queued"]["runs"][0]["run_id"], run_id)
+
+    def test_the_queued_diagnosis_command_writes_the_control_plane_files(self):
+        """`openswarm fleet queued-diagnosis` is the command of the patrol."""
+        run_id = self.queued_run("20261102-213000-m17aa", self.now - 1800)
+        args = argparse.Namespace(hosts=None, json=True, health_json=None, brain_log=None)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            section = xs.cmd_fleet_queued_diagnosis(
+                args, policy={}, hosts={"worker-a": {"name": "worker-a", "kind": "local"}},
+                now=self.now, home=self.home)
+        payload = json.loads((self.ctl / "autodispatch" / "health.json").read_text())
+        self.assertEqual(section["runs"][0]["run_id"], run_id)
+        self.assertEqual(payload["queued"]["runs"][0]["run_id"], run_id)
+        self.assertIn(run_id, (self.ctl / "brain" / "log.md").read_text())
 
 
 if __name__ == "__main__":

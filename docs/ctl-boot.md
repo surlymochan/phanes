@@ -499,6 +499,37 @@ The SSH cooldown set/hold contract is checked offline with
 `python3 tools/check-health-pause.py`; it uses fake probe output and never
 starts the resident health loop or connects over SSH.
 
+### Queued run 阻塞原因诊断 (Refs #1687)
+
+一条 run 长时间停在 `run_state=queued` 且零请求时，卡在哪一层只有逐层翻主机才能看出来：
+容量协调器的幽灵预留、主机并发上限是旧值、单机本地 policy 上限、全舰队 provider 预算打满。
+控制面把这层名字直接写进 health.json 与 brain log，排查不用再逐台 ssh。
+
+- **谁产出**：`lane-autodispatch` 巡查循环（box 上的常驻巡查）每 `AD_QUEUED_DIAGNOSIS_TICKS`
+  个 tick（默认 5，约 5 分钟）调一次 `openswarm fleet queued-diagnosis`；`openswarm fleet health`
+  也带同一段。诊断在后台线程里跑，不拖慢派发 tick。
+- **写到哪**：默认写控制面的 `~/phanes-ctl/autodispatch/health.json`（`queued` 段）与
+  `~/phanes-ctl/brain/log.md`（逐条一行）；`--health-json` / `--brain-log` 或
+  `OPENSWARM_HEALTH_JSON` / `OPENSWARM_BRAIN_LOG` 可改路径。没有卡住的 run 时不写 brain 行。
+  注意：box 上的 `health-check.py` 每次巡检会整体重写 `health.json`，`queued` 段会被下一次巡检
+  冲掉；brain log 里的逐条行才是持久记录。
+- **只看超过 10 分钟的**：排队不足 10 分钟是正常排队，不产出任何行。
+- **判定枚举**（固定）：`blocked-by-ghost-reservation`（协调器还占着已结束 run 的预留，且释放它
+  就能让出准入容量；行内点名残留 run）、`blocked-by-host-cap`（主机预留达到 topology 上限）、
+  `blocked-by-fleet-cap`（全舰队 total/backend/provider 预算打满）、`blocked-by-local-policy`
+  （目标主机本地 policy 并发已满）、`unknown`（没命中任何一层，或存活证据不足）。
+  unknown 占比过半时输出里会写「需人工排查」，不臆测原因。
+- **幽灵要有证据**：远端快照 `fleet _snapshot` 除了活跃 run，还带上已结束 run 的
+  `executor_alive` 证据；只有「run 已结束且 executor 已停」才算幽灵预留。executor 还活着
+  的 run 不算幽灵，证据不足的残留只报 unknown（活 run 的预留零误判）。
+- **已拿到预留的 run 不归因准入层**：协调器已经放行的 run 不会被算成容量/上限阻塞。
+
+离线验证：
+
+```bash
+python3 -m unittest openswarm.tests.test_queued_diagnosis openswarm.tests.test_queued_patrol
+```
+
 ### Host cooldown vs `hosts_ok` (Refs #948)
 
 `health-loop` writes the probe summary to `~/phanes-ctl/autodispatch/health.json`.
@@ -780,3 +811,14 @@ setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
 ```
 
 Do not invent systemd units here; a documented start script is enough.
+
+### #1687 审查修复与验证映射
+
+- B1 周期巡查：`tools/lane-autodispatch/autodispatch.py` 的 health-loop 定期调用
+  queued-diagnosis，默认写控制面 health.json 和 brain log；
+  `openswarm/tests/test_queued_patrol.py` 验证调用链与默认路径。
+- B2 准入归因：`openswarm/lib/dispatch/queued.py` 仅在释放幽灵后解除容量限制时归因，
+  已持有预留的 run 跳过协调器准入判定；`test_queued_diagnosis.py` 覆盖未满容量、
+  已持有预留和真实幽灵阻塞。
+- B3 存活证据：终态且 executor 已停止才认定幽灵；缺失记录或 executor 状态未知时
+  保持证据不足。`test_queued_diagnosis.py` 覆盖已知主机缺失记录、活 executor 和未知状态。
