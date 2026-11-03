@@ -14888,6 +14888,22 @@ def merge_gate_review_verdict(record):
     return None
 
 
+def merge_gate_tester_enabled():
+    """Tester is authoritative only when the explicit opt-in marker exists."""
+    return os.path.isfile(os.path.join(DATA, "MERGE-GATE-TESTER"))
+
+
+def merge_gate_tester_verdict(record):
+    """Read the tester's final verdict without falling back to the lane verdict."""
+    if not isinstance(record, dict):
+        return None
+    for key in ("tester_verdict", "tester_review_verdict"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def merge_gate_verdict_approved(verdict):
     """Whether a review verdict approves the merge."""
     return str(verdict or "").strip().lower() in MERGE_GATE_APPROVED_VERDICTS
@@ -14994,7 +15010,7 @@ def merge_gate_open_prs(runner, repo):
     return numbers
 
 
-def merge_gate_evaluate(pr_view, review):
+def merge_gate_evaluate(pr_view, review, tester_enabled=False):
     """Judge one PR: (status, details).
 
     The reasons are collected in the order the status names them: a missing
@@ -15002,13 +15018,18 @@ def merge_gate_evaluate(pr_view, review):
     and the freshness of the reviewed sha.
     """
     head_sha = pr_view.get("head_sha") or ""
-    reviewed_sha = merge_gate_reviewed_sha(review)
-    verdict = merge_gate_review_verdict(review)
+    reviewed_sha = (merge_gate_reviewed_sha({"sha": review.get("tester_sha")})
+                    if tester_enabled and isinstance(review, dict)
+                    else merge_gate_reviewed_sha(review))
+    verdict = (merge_gate_tester_verdict(review) if tester_enabled
+               else merge_gate_review_verdict(review))
+    source = "tester" if tester_enabled else "lane"
     blocking_labels = [name for name in pr_view.get("labels") or []
                        if merge_gate_label_is_blocking(name)]
     checks = pr_view.get("checks") or {}
     detail = {"head_sha": head_sha, "reviewed_sha": reviewed_sha,
-              "labels": pr_view.get("labels") or [], "checks": checks}
+              "labels": pr_view.get("labels") or [], "checks": checks,
+              "judgment_source": source}
     if verdict is not None:
         detail["review_verdict"] = verdict
     reasons = []
@@ -15025,6 +15046,8 @@ def merge_gate_evaluate(pr_view, review):
         reasons.append("conflict")
     if not checks.get("total"):
         reasons.append("no_checks")
+    if tester_enabled and verdict is None:
+        reasons.append("no_tester_verdict")
     if not reviewed_sha:
         reasons.append("no_review")
     else:
@@ -15178,7 +15201,7 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
                             "error": bus_redact(str(error))[:300]})
             continue
         review = merge_gate_find_review(records, repo, number)
-        status, detail = merge_gate_evaluate(pr_view, review)
+        status, detail = merge_gate_evaluate(pr_view, review, merge_gate_tester_enabled())
         record = {"pr": number, "repo": repo, "status": status, **detail}
         if status == "blocked:ci" and rerun_enabled:
             record.update(merge_gate_rerun_failed_once(runner, repo, number, pr_view, detail,

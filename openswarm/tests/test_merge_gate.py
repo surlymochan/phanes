@@ -190,6 +190,39 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "mergeable")
         self.assertEqual(len(gh.merge_calls()), 1)
 
+    def test_tester_switch_off_keeps_lane_verdict_authoritative(self):
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve",
+                                             "tester_sha": HEAD_SHA, "tester_verdict": "changes"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 0)
+        self.assertEqual(results[0]["judgment_source"], "lane")
+
+    def test_tester_switch_uses_tester_verdict_to_allow_and_block(self):
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({
+            f"{REPO}#7": {"sha": OTHER_SHA, "verdict": "changes", "tester_sha": HEAD_SHA,
+                         "tester_verdict": "approve"},
+            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "approve", "tester_sha": HEAD_SHA,
+                         "tester_verdict": "changes"},
+        })
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")]),
+                     8: pr_payload(8, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual([item["judgment_source"] for item in results], ["tester", "tester"])
+        self.assertEqual(results[0]["status"], "mergeable")
+        self.assertEqual(results[1]["status"], "blocked:verdict")
+
+    def test_tester_switch_without_tester_verdict_blocks(self):
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
     def test_the_review_of_another_repository_does_not_release_the_pr(self):
         """A record of another repository never releases this PR."""
         self.write_reviews({"7": {"sha": HEAD_SHA, "repo": "other/project"}})
