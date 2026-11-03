@@ -172,6 +172,28 @@ DEFAULTS = {
         # The raw evidence pack of a review (Refs #1788): the file name suffix next to the verdict file.
         "evidence_suffix": "-evidence",
         "cifix_needs_burn": True,
+        # The pre-review layer (#1731): a pi PR passes a hygiene pre-review (the codex luna lane)
+        # before the formal review.  The pre-review is no review round: it writes no reviews.json
+        # round, posts no commit status and labels nothing.
+        "pre": {
+            "enabled": True,
+            "marker": "review_pre",     # the lanes.json key that marks a lane as a pre-review lane
+            "backend": "codex",          # a pre-review lane runs this backend (the codex luna lane)
+            "model_re": "luna",          # ... and its model matches this pattern (empty: any model)
+            "author_backend": "pi",      # only this backend gets a pre-review (codex output skips it)
+            "max_concurrency": 0,        # 0: as many pre-reviews as the marked lane pool allows
+            "timeout_s": 900,            # a PR waits this long for a pre-review verdict, then it degrades
+            "fix_timeout_s": 3600,       # ... and this long for the fix round after a CHANGES verdict
+            "rounds": 3,                 # how many pre-review fix rounds a PR gets before it degrades
+            "budget_minutes": "10",
+        },
+        # The formal review runs on a review lane (terra).  A lane marked as a pre-review lane
+        # (`review_pre` in lanes.json) never takes a formal review.
+        "formal": {
+            "backend": "",        # empty: any backend
+            "model_re": "terra",  # the formal review lane's model matches this pattern (empty: any model)
+            "required": False,    # True: a fleet without such a lane waits instead of falling back
+        },
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
     # A legacy file marker remains supported when no timed parameters are supplied.
@@ -257,6 +279,23 @@ DEFAULTS = {
                         "## Required changes\n- only for CHANGES\n```\nGive CHANGES only for errors, unmet acceptance or scope "
                         "violations; style is not a reason.\n\n{issue}\n\n### PR diff\n\n````diff\n{diff}\n````\n\n"
                         "Acceptance: `grep -qE '^VERDICT: (APPROVE|CHANGES)' {file}`"),
+        "pre_review_task": ("Task type: PR pre-review (hygiene check only, review only, do not change code).\n\n"
+                        "PR #{pr} `{branch}` (author lane {author}): {title}\n"
+                        "Head sha `{sha}`. The worktree is main; below are the PR diff and its issue's requirements.\n\n"
+                        "Check the hygiene of the change only: bugs on the main path, binary or generated-file hygiene, "
+                        "whether every acceptance item of the issue is mapped to the change, and obvious out-of-scope "
+                        "changes (unrelated files, deleted tests, hard-coded secrets/paths). Do not judge style, do not run "
+                        "tests, do not leave the worktree, do not modify existing files.\n\n"
+                        "Only output: create `{file}` and commit it (Refs #{pr}), exactly:\n"
+                        "```\nVERDICT: APPROVE   (or VERDICT: CHANGES)\nSUMMARY: one line\n## Findings\n- file:line findings\n"
+                        "## Required changes\n- only for CHANGES\n```\n"
+                        "Give CHANGES only for a main-path bug, binary hygiene, a missing acceptance mapping or an obvious "
+                        "scope violation.\n\n{issue}\n\n### PR diff\n\n````diff\n{diff}\n````\n\n"
+                        "Acceptance: `grep -qE '^VERDICT: (APPROVE|CHANGES)' {file}`"),
+        "pre_changes_section_title": "Lane pre-review requested changes",
+        "pre_changes_section": ("Pre-review round {round} ({who}) on PR #{pr} head `{sha10}` found hygiene problems. "
+                            "Start from branch `rebase-pr-{pr}`, rebase onto main, fix the findings below and commit; the "
+                            "dispatcher force-pushes back to `{branch}` and re-reviews.\n\n{notes}"),
     },
 }
 
@@ -459,9 +498,14 @@ class Dispatcher:
         self.out = out or sys.stdout
         self.L = cfg["labels"]
         self.R = cfg["review"]
+        self.P = self.R.get("pre") or {}
+        self.F = self.R.get("formal") or {}
         self.backoff = {}
         self.state_lock = threading.Lock()
         self.rev_lock = threading.RLock()
+        self.pre_lock = threading.RLock()
+        self._formal_fallback_logged = False
+        self._formal_wait_logged = set()
         self.inode = {"t": 0.0, "low": False}
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
@@ -1138,7 +1182,8 @@ class Dispatcher:
 
     def dispatch(self, lane, lc, item, base):
         if self.dry_run:
-            self.plan.append({"would": "assign", "lane": lane, "issue": item["n"], "review": bool(item.get("review"))})
+            self.plan.append({"would": "assign", "lane": lane, "issue": item["n"], "review": bool(item.get("review")),
+                              "pre_review": bool(item.get("pre_review"))})
             return "dry-run", self.verify_of(item["body"])
         n = item["n"]
         task = self.task_text(item)
@@ -1159,7 +1204,7 @@ class Dispatcher:
             raise RuntimeError(f"task-upload: {(err or '').strip()[-200:]}")
         ver = self.verify_of(item["body"])
         title = f"#{n} {item['title']}"[:120]
-        rb = None if item.get("review") else self.rebase_of(item["body"])
+        rb = None if (item.get("review") or item.get("pre_review")) else self.rebase_of(item["body"])
         if lc.get("seed_from_box") and h not in self.local_hosts:
             # Host cannot reach GitHub reliably: the dispatcher fetches base / PR head and pushes them over ssh.
             refs = []
@@ -1183,9 +1228,14 @@ class Dispatcher:
                    f"+pull/{rb[0]}/head:refs/heads/rebase-pr-{rb[0]} && break; sleep $((_i*2)); done; ") if rb else ""
             fetch_main = (f"for _i in 1 2 3 4; do timeout 40 git -C {R} fetch -q {repo_url} {self.cfg['base_branch']} && break; "
                           f"sleep $((_i*2)); done && ")
+        budget = self.cfg["budget_minutes"]
+        if item.get("review"):
+            budget = self.cfg["review_budget_minutes"]
+        if item.get("pre_review"):
+            budget = self.P.get("budget_minutes") or self.cfg["review_budget_minutes"]
         cmd = (pre + fetch_main + f"git -C {R} cat-file -e {base}^{{commit}} && "
                f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes "
-               f"{self.cfg['review_budget_minutes'] if item.get('review') else self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
+               f"{budget} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
         key = None
         if self.cfg.get("assign_idempotency_key"):
             # one key per dispatch attempt: a retry after a dropped transport returns the run that already landed
@@ -1249,6 +1299,10 @@ class Dispatcher:
             return False
         if r.get("runner_alive") or (r.get("runner_alive") is None and self.age_s(st) < 600) or self.age_s(st) < 180:
             return False
+        if st.get("pre_review_pr"):
+            self.log(f"{L} pre-review PR#{st['pre_review_pr']} run {st['run']} orphaned; dropped (will re-review)")
+            self.pre_requeue(st["pre_review_pr"], "the pre-review run was orphaned")
+            return True
         if st.get("review_pr"):
             self.log(f"{L} review PR#{st['review_pr']} run {st['run']} orphaned; dropped (will re-review)")
             return True
@@ -1648,6 +1702,17 @@ class Dispatcher:
             dispatch_module("pause").PauseStore(self.D).pause(
                 "lane:" + lane, ttl_s=3600, reason="auto:model_unavailable " + str(model), now=self.clock())
         has_commit = info.get("branch") and info["branch"] != "None" and info.get("commit")
+        if st.get("pre_review_pr"):
+            if has_commit:
+                try:
+                    frc, _, ferr = self.sh(self.fetch_lane_branch(lane, lc, info), timeout=40)
+                except subprocess.TimeoutExpired:
+                    frc, ferr = 124, "timeout"
+                if frc:
+                    self.log(f"{lane} pre-review PR#{st['pre_review_pr']} fetch failed "
+                             f"({(ferr or '').strip()[-90:]}); retry next tick", brain=False)
+                    return False
+            return self.finish_pre_review(lane, lc, st, info, state)
         if st.get("review_pr"):
             if has_commit:
                 try:
@@ -2089,25 +2154,92 @@ class Dispatcher:
         tied = [lane for lane in available if history.get(lane) == history.get(oldest)]
         return min(tied, key=lambda lane: (self.R["pref"].get(lanes[lane]["backend"], 9), lane))
 
-    def review_item(self, p):
+    def rev_parse(self, rev):
+        """The commit a revision points at, empty when the local objects do not have it."""
+        rc, out, _ = self.git("rev-parse", "--verify", "--quiet", rev, timeout=30)
+        return out.strip() if rc == 0 else ""
+
+    def local_base_sha(self):
+        """The base branch commit of the local objects (no network)."""
+        branch = self.cfg["base_branch"]
+        for rev in (f"refs/remotes/origin/{branch}", branch):
+            sha = self.rev_parse(f"{rev}^{{commit}}")
+            if sha:
+                return sha
+        return ""
+
+    def pr_head_sha(self, p):
+        """The PR head in the local objects, but only the commit the PR points at.
+
+        A local ref (the fetched PR ref or the rebase branch) can still hold an older head: the
+        diff of that old head must never reach a reviewer, because the verdict would be recorded
+        on the new head.  So a local ref is only used when it is the head the PR reports; otherwise
+        the reported head sha itself is used (when the objects hold it)."""
         pr = p["number"]
-        _, diff, err = self.gh(["pr", "diff", str(pr)], timeout=60)
-        if not (diff or "").strip():
-            # GitHub is not always reachable (the fleet lost its DNS more than once): the
-            # diff of the PR head is then taken from the local git objects, so the review
-            # lane still sees the code it has to review.
-            diff, note = self.local_diff(pr, p.get("headRefName"), p.get("headRefOid"))
-            if not diff and p.get("headRefOid"):
-                # The head of the PR is known but the local objects do not hold it: an older
-                # ref would hide the changes of the head that is reviewed, so no review is
-                # dispatched for this head at all.
-                self.log(f"review PR #{pr}: blocked — the local git objects do not hold the head "
-                         f"{p['headRefOid'][:10]}; an older diff is never reviewed as the current head")
-                return None
+        want = str(p.get("headRefOid") or "")
+        for rev in (f"refs/ad/pr-{pr}", f"refs/heads/rebase-pr-{pr}"):
+            sha = self.rev_parse(f"{rev}^{{commit}}")
+            if not sha:
+                continue
+            if want and sha != want:
+                self.log(f"review: PR #{pr}: the local {rev} is stale ({sha[:10]}≠{want[:10]}); "
+                         f"the diff of the old head is not used", brain=False)
+                continue
+            return sha, rev
+        if want and self.git("cat-file", "-e", f"{want}^{{commit}}", timeout=30)[0] == 0:
+            return want, want[:10]
+        return "", ""
+
+    def local_pr_diff(self, p):
+        """The PR diff rebuilt from the local objects: the head against the merge base of main."""
+        sha, ref = self.pr_head_sha(p)
+        base = self.local_base_sha()
+        if not sha or not base:
+            return "", ref
+        rc, out, _ = self.git("diff", "--no-color", f"{base}...{sha}", timeout=60)
+        if rc or not out.strip():
+            return "", ref
+        return out, ref
+
+    def pr_diff(self, p):
+        """The diff of a PR for a review (or pre-review) task.
+
+        GitHub is the normal source, but when it does not answer (a DNS outage leaves `gh` empty)
+        the task would carry no diff at all and the reviewer would have nothing to review.  The
+        dispatcher holds the PR head in its own objects, so the diff is rebuilt from them."""
+        diff = self.gh(["pr", "diff", str(p["number"])], timeout=60)[1]
+        if diff and diff.strip():
+            return diff
+        diff, ref = self.local_pr_diff(p)
+        if not diff and p.get("headRefOid"):
+            diff, note = self.local_diff(p["number"], p.get("headRefName"), p["headRefOid"])
             if diff:
-                self.log(f"review PR #{pr}: `gh pr diff` unavailable "
-                         f"({(err or '').strip()[-80:]}); using the local git objects", brain=False)
-                diff = note + diff
+                diff = note + "\n" + diff
+        if diff:
+            self.log(f"review: PR #{p['number']}: GitHub gave no diff; rebuilt it from the local "
+                     f"objects ({ref})", brain=False)
+        else:
+            self.log(f"review: PR #{p['number']}: no diff at all (GitHub unreachable and no local "
+                     f"PR head for the current head)", brain=False)
+        return diff
+
+    def review_item(self, p):
+        return self.review_task(p, "review_task", f"{self.R['verdict_dir']}/PR-{p['number']}.md", review=True)
+
+    def pre_review_item(self, p):
+        """The hygiene pre-review task: the same diff, a narrower checklist, its own verdict file."""
+        return self.review_task(p, "pre_review_task", f"{self.R['verdict_dir']}/PRE-PR-{p['number']}.md",
+                                pre_review=True)
+
+    def review_task(self, p, template, file, review=False, pre_review=False):
+        pr = p["number"]
+        diff = self.pr_diff(p)
+        if not diff.strip():
+            # no diff for the current head: the task would ask the reviewer to judge nothing, and
+            # the diff of an older head must not be reviewed in its place
+            self.log(f"review: PR #{pr}: no diff for head {str(p.get('headRefOid') or '')[:10]}; "
+                     f"blocked: the review is not dispatched; an older diff is never reviewed as the current head", brain=False)
+            return None
         lim = int(self.R.get("review_diff_max_kb", 120)) * 1024
         raw_diff = diff.encode("utf-8")
         stats = self.diffstat_of(diff)          # the raw numbers, computed before the excerpt
@@ -2126,13 +2258,22 @@ class Dispatcher:
                 j = json.loads(iv)
                 issue = f"### Issue #{p['issue']}: {j['title']}\n\n{(j['body'] or '')[:6000]}"
             except Exception:
-                pass
-        f = f"{self.R['verdict_dir']}/PR-{pr}.md"
-        body = self.cfg["templates"]["review_task"].format(pr=pr, branch=p["headRefName"], author=self.author_lane(p["headRefName"]) or "?",
-                                                           title=p["title"], sha=p["headRefOid"], file=f, issue=issue, diff=diff)
-        body += self.evidence_inputs(p, stats)
-        body += self.evidence_instruction(pr, self.evidence_path(pr))
-        return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True}
+                issue = ""
+            if not issue:
+                self.log(f"review: PR #{p['number']}: the issue text is missing (GitHub unreachable); "
+                         f"the reviewer gets no requirements", brain=False)
+        body = self.cfg["templates"][template].format(pr=pr, branch=p["headRefName"], author=self.author_lane(p["headRefName"]) or "?",
+                                                       title=p["title"], sha=p["headRefOid"], file=file, issue=issue, diff=diff)
+        if review:
+            body += self.evidence_inputs(p, stats)
+            body += self.evidence_instruction(pr, self.evidence_path(pr))
+        kind = "Pre-review" if pre_review else "Review"
+        item = {"n": pr, "title": f"{kind} PR #{pr}: {p['title']}"[:110], "body": body}
+        if review:
+            item["review"] = True
+        if pre_review:
+            item["pre_review"] = True
+        return item
 
     def evidence_path(self, pr):
         """The path of the raw evidence pack of one PR inside the lane branch."""
@@ -2432,6 +2573,7 @@ class Dispatcher:
         self.gh(["pr", "comment", str(pr), "--body", comment])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
                   "fails_sha": sha, "fail_classes": []})
+        self.pre_supersede(pr, lane)      # the formal review decides: a pre-review never overrides it
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -2456,6 +2598,381 @@ class Dispatcher:
                 self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
         self.put_review(pr, r)
         self.log(f"reviewed PR #{pr} by {who}: {v}")
+        return True
+
+    # ------------------------------------------------------------ pre-review (hygiene layer)
+    def load_pre_reviews(self):
+        """The pre-review records, one entry per PR, kept apart from reviews.json.
+
+        The pre-review is no review round: it never writes a reviews.json round, so the formal
+        review counter (and the human escalation it drives) stays untouched."""
+        return load_json(self.path("pre-reviews.json"), {})
+
+    def put_pre_review(self, pr, rec):
+        """Read-modify-write ONE pre-review entry under the lock."""
+        if self.dry_run:
+            return
+        with self.pre_lock:
+            d = self.load_pre_reviews()
+            d[str(pr)] = rec
+            write_json(self.path("pre-reviews.json"), d)
+
+    def pre_marker(self):
+        return self.P.get("marker") or "review_pre"
+
+    def pre_marked(self, lc):
+        """True when a lanes.json entry carries the pre-review marker.
+
+        Such a lane runs the hygiene pre-review only: it never takes a formal review."""
+        return bool((lc or {}).get(self.pre_marker()))
+
+    def formal_lane(self, lc):
+        """True when a lane states the model the formal review needs (the review lane, terra)."""
+        lc = lc or {}
+        backend = self.F.get("backend") or ""
+        if backend and lc.get("backend") != backend:
+            return False
+        model_re = self.F.get("model_re") or ""
+        model = str(lc.get("model") or "")
+        if model_re and not re.search(model_re, model, re.I):
+            return False
+        return True
+
+    def formal_pool(self, lanes):
+        """The lanes of the whole fleet that may take a formal review (idle or not).
+
+        A lane marked as a pre-review lane never takes a formal review, and a lane only takes
+        one when it states the model the formal review needs (the review lane, terra)."""
+        return [lane for lane in lanes if not self.pre_marked(lanes.get(lane))
+                and self.formal_lane(lanes.get(lane))]
+
+    def formal_lanes(self, lanes, idle):
+        """The idle lanes that may take a formal review.
+
+        When the fleet declares a formal review lane (terra), only those lanes take the formal
+        review: if all of them are busy the review waits for them instead of falling back to a
+        lane that is not a review lane (a busy terra lane must never push the formal review onto
+        a pi or a pre-review lane).
+
+        A fleet that declares no formal review lane at all (an old lanes.json without a review
+        lane) keeps the old behaviour: the formal review runs on an idle lane that is not a
+        pre-review lane, so the review pipeline does not stall for ever.  `review.formal.required`
+        turns that fallback off: then such a fleet waits for a formal review lane as well."""
+        declared = self.formal_pool(lanes)
+        if declared:
+            return [lane for lane in idle if lane in declared]
+        if self.F.get("required"):
+            return []
+        return [lane for lane in idle if not self.pre_marked(lanes.get(lane))]
+
+    def pre_lane(self, lc):
+        """True when a lanes.json entry is marked as a pre-review lane.
+
+        The marker (`review_pre`) in lanes.json picks the lane; the backend and the model filter
+        keep the hygiene check on the codex luna lane.  A lane without a model is accepted: the
+        marker is explicit."""
+        lc = lc or {}
+        if not lc.get(self.pre_marker()):
+            return False
+        backend = self.P.get("backend") or ""
+        if backend and lc.get("backend") != backend:
+            return False
+        model_re = self.P.get("model_re") or ""
+        model = str(lc.get("model") or "")
+        if model_re and model and not re.search(model_re, model, re.I):
+            return False
+        return True
+
+    def pre_limit(self, marked):
+        """How many pre-reviews may run at once: the marked lane pool bounds it, the config caps it."""
+        cap = int(self.P.get("max_concurrency") or 0)
+        return len(marked) if cap <= 0 else max(0, min(cap, len(marked)))
+
+    def needs_pre_review(self, lanes, p):
+        """Only the pi output goes through the pre-review; codex output skips it."""
+        author = self.author_lane(p["headRefName"])
+        backend = (lanes.get(author) or {}).get("backend")
+        return backend == (self.P.get("author_backend") or "pi")
+
+    def pre_record(self, p):
+        """The pre-review record of PR p for its current head (a new head starts the stage over)."""
+        rec = dict(self.load_pre_reviews().get(str(p["number"])) or {})
+        if rec.get("sha") != p["headRefOid"]:
+            rec = {"sha": p["headRefOid"], "fails": 0, "round": int(rec.get("round") or 0)}
+        return rec
+
+    def pre_expired(self, rec, since_key, timeout_key):
+        """True when the pre-review stage waited longer than its timeout."""
+        timeout = float(self.P.get(timeout_key) or 0)
+        start = rec.get(since_key)
+        if not start or timeout <= 0:
+            return False
+        return self.clock() - float(start) > timeout
+
+    def pick_pre_reviewer(self, free, lanes, author):
+        """The pre-review lane: an idle lane marked in lanes.json, never the author lane."""
+        cands = [L for L in free if L != author]
+        if not cands:
+            return None
+        return self.lru_picker().pick(cands)
+
+    def dispatch_pre_reviews(self, lanes, state, idle, candidates):
+        """The pre-review layer: a pi PR passes the hygiene pre-review before the formal review.
+
+        Returns the candidates that may enter the formal review in this tick.  The pre-review is
+        not a review round and it never blocks the formal review for ever: when no pre-review lane
+        is free the PR waits for its timeout and then degrades into the formal review."""
+        if not self.P.get("enabled", True):
+            return candidates
+        marked = [L for L in lanes if self.pre_lane(lanes.get(L))]
+        if not marked:
+            return candidates
+        limit = self.pre_limit(marked)
+        running = sum(1 for s in state.values() if isinstance(s, dict) and s.get("pre_review_pr"))
+        free = [L for L in idle if L in marked]
+        out = []
+        for p in candidates:
+            if not self.needs_pre_review(lanes, p):
+                out.append(p)                      # codex output skips the pre-review
+                continue
+            rec = self.pre_record(p)
+            status = rec.get("status")
+            if status in ("approved", "degraded", "superseded"):
+                out.append(p)                      # the pre-review is done: the formal review may run
+                continue
+            if status == "changes":
+                if self.pre_expired(rec, "changes_since", "fix_timeout_s"):
+                    self.pre_degrade(p["number"], p["headRefOid"], rec, "the fix round did not come back in time")
+                    out.append(p)
+                continue                             # the production lane fixes the findings first
+            if status == "changes_pending":
+                # the findings are known but the fix task did not reach the issue: queue it again
+                if self.pre_expired(rec, "changes_since", "fix_timeout_s"):
+                    self.pre_degrade(p["number"], p["headRefOid"], rec, "the fix task did not reach the issue in time")
+                    out.append(p)
+                    continue
+                if self.pre_queue_fix(p["number"], rec):
+                    rec["status"] = "changes"
+                    self.put_pre_review(p["number"], rec)
+                    self.log(f"pre-review PR #{p['number']}: fix task queued on #{rec.get('issue')} (retried)")
+                continue
+            if self.pre_expired(rec, "wait_since", "timeout_s"):
+                self.pre_degrade(p["number"], p["headRefOid"], rec, "no pre-review verdict in time")
+                out.append(p)
+                continue
+            if status == "dispatched":
+                continue                             # a pre-review run is in flight
+            lane = self.pick_pre_reviewer(free, lanes, self.author_lane(p["headRefName"]))
+            if lane is None or running >= limit:
+                self.pre_wait(p["number"], rec)
+                continue
+            if self.start_pre_review(lane, lanes, p, rec, state):
+                running += 1
+                free.remove(lane)
+                if lane in idle:
+                    idle.remove(lane)
+        return out
+
+    def pre_requeue(self, pr, reason):
+        """Put the PR back into the pre-review queue: the run died, so the stage starts over.
+
+        The pre-review record only says that the PR waits again; no review round is counted."""
+        rec = self.load_pre_reviews().get(str(pr)) or {}
+        if rec.get("status") != "dispatched":
+            return
+        rec["status"] = "waiting"
+        rec["wait_since"] = self.clock()
+        rec["reset_reason"] = reason
+        self.put_pre_review(pr, rec)
+        self.log(f"pre-review PR #{pr}: {reason} → queued again", brain=False)
+
+    def pre_wait(self, pr, rec):
+        """Record that the PR waits for a free pre-review lane (the timeout runs from here)."""
+        if rec.get("status") == "waiting" and rec.get("wait_since"):
+            return
+        rec["status"] = "waiting"
+        rec.setdefault("wait_since", self.clock())
+        self.put_pre_review(pr, rec)
+        self.log(f"pre-review PR #{pr}: no free pre-review lane; waiting "
+                 f"(timeout {int(self.P.get('timeout_s') or 0)}s)", brain=False)
+
+    def pre_retry(self, pr, rec, reason):
+        """The pre-review run ended without a verdict and it was not the lane's fault.
+
+        The record goes back to `waiting`, so the next tick dispatches the pre-review again
+        instead of leaving the PR without a pre-review until the timeout degrades it.  The bounded
+        timeout keeps running (wait_since is kept), so a PR that never gets a verdict still
+        degrades into the formal review."""
+        rec["status"] = "waiting"
+        rec.setdefault("wait_since", self.clock())
+        self.put_pre_review(pr, rec)
+        self.log(f"pre-review PR #{pr}: {reason} → queued again for a new pre-review run", brain=False)
+
+    def pre_queue_fix(self, pr, rec):
+        """Put the pre-review findings into the issue so the production lane can fix them.
+
+        The issue body is read before it is written: a failed read never overwrites the original
+        requirements with an empty body.  A failed write leaves the fix task pending, so it is
+        queued again on the next tick instead of being lost."""
+        n = rec.get("issue")
+        if not n:
+            return False
+        rc, iv, err = self.gh(["issue", "view", str(n), "--json", "body"])
+        try:
+            ij = json.loads(iv) if iv else None
+        except Exception:
+            ij = None
+        if rc or not isinstance(ij, dict) or ij.get("body") is None:
+            self.log(f"pre-review PR #{pr}: the issue text of #{n} could not be read "
+                     f"({(err or '').strip()[-90:]}); the original body is kept, the fix task waits",
+                     brain=False)
+            return False
+        T = self.cfg["templates"]
+        ib = self.with_rebase_line(self.section_strip(ij.get("body") or "", T["pre_changes_section_title"]),
+                                   pr, rec.get("branch") or "")
+        ib += (f"\n\n## {T['pre_changes_section_title']}\n\n" +
+               T["pre_changes_section"].format(round=int(rec.get("round") or 1), who=rec.get("who") or "?",
+                                               pr=pr, sha10=str(rec.get("sha") or "")[:10],
+                                               branch=rec.get("branch") or "", notes=rec.get("notes") or "") + "\n")
+        wrc, _, werr = self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", self.L["ready"],
+                                      "--remove-label", self.L["pr"], "--remove-label", self.L["failed"]])
+        if wrc:
+            self.log(f"pre-review PR #{pr}: the fix task for #{n} could not be written "
+                     f"({(werr or '').strip()[-90:]}); it is queued again", brain=False)
+            return False
+        return True
+
+    def start_pre_review(self, lane, lanes, p, rec, state):
+        """Hand the PR to a pre-review lane and remember the run (no review round is written)."""
+        host_started = self.clock()
+        item = self.pre_review_item(p)
+        if not item:
+            return False               # no diff for the current head: the pre-review waits
+        try:
+            base = self.main_sha()
+            run, ver = self.dispatch(lane, lanes[lane], item, base)
+        except Exception as e:
+            self.host_fail(lanes[lane]["host"], f"pre-review dispatch PR#{p['number']}: {e}", host_started, 120)
+            return False
+        rec.update({"status": "dispatched", "lane": lane, "run": run, "sha": p["headRefOid"],
+                    "at": time.strftime("%F %T")})
+        rec.setdefault("wait_since", self.clock())
+        self.put_pre_review(p["number"], rec)
+        if self.dry_run:
+            return True
+        state[lane] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[lane]["host"], "base": base,
+                       "at": time.strftime("%F %T"), "verify": ver,
+                       "pre_review_pr": p["number"], "pre_review_sha": p["headRefOid"]}
+        self.save_state(state)
+        self.lru_picker().touch(lane)
+        self.log(f"pre-review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, "
+                 f"author {self.author_lane(p['headRefName'])}) → {lane} "
+                 f"({lanes[lane]['host']}/{lanes[lane]['backend']}) run {run}")
+        self.heartbeat()
+        return True
+
+    def pre_degrade(self, pr, sha, rec, reason):
+        """Give up on the pre-review and let the formal review run (the trace stays on the PR)."""
+        rec["status"] = "degraded"
+        rec["degraded_at"] = time.strftime("%F %T")
+        rec["degraded_reason"] = reason
+        self.put_pre_review(pr, rec)
+        self.log(f"pre-review PR #{pr}: {reason} → degraded to the formal review "
+                 f"(the pre-review counts no review round)", brain=False)
+        self.gh_write(["pr", "comment", str(pr), "--body",
+                       f"PR #{pr} 预审未完成（{reason}），已降级直接进入正式审（terra）；预审不计正式审轮次。\n\n"
+                       f"<!-- lane-pre-review-degraded pr={pr} sha={str(sha)[:10]} -->"])
+
+    def pre_supersede(self, pr, lane):
+        """The formal review wins: its verdict is the one of record, the pre-review record retires."""
+        rec = self.load_pre_reviews().get(str(pr))
+        if not rec or rec.get("status") in ("superseded", "degraded"):
+            return
+        rec["status"] = "superseded"
+        rec["superseded_at"] = time.strftime("%F %T")
+        rec["superseded_by"] = lane
+        self.put_pre_review(pr, rec)
+        self.log(f"pre-review PR #{pr}: superseded by the formal review of {lane} → the formal verdict decides",
+                 brain=False)
+
+    def finish_pre_review(self, lane, lc, st, info, state):
+        """Harvest a finished pre-review run: a verdict, a fix round for the production lane or a retry.
+
+        The pre-review writes no reviews.json round and posts no commit status: the formal review
+        stays the only verdict of record."""
+        info = self.pause_info(lane, lc, st, info)
+        if info.get("error_class") != "vm_paused":
+            self.quota_lane_guard(lane, lc, info)
+        pr, sha = st["pre_review_pr"], st["pre_review_sha"]
+        rec = self.load_pre_reviews().get(str(pr)) or {}
+        txt = ""
+        if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+            txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PRE-PR-{pr}.md")[1]
+        v, _ = status.parse_verdict(txt)
+        if not v:
+            error_class = info.get("error_class") or ""
+            if error_class == "vm_paused":
+                # not the lane's fault: the PR waits for a new pre-review run (the timeout runs on)
+                self.pre_retry(pr, rec, "the VM was paused (not counted)")
+                return True
+            if error_class in {"rate_limit", "quota", "model_unavailable"}:
+                self.pre_retry(pr, rec, f"{error_class} (not counted)")
+                return True
+            fails = int(rec.get("fails") or 0) + 1
+            rec["fails"] = fails
+            rec["status"] = "waiting"
+            self.put_pre_review(pr, rec)
+            if fails >= int(self.R["max_fails"]):
+                self.pre_degrade(pr, sha, rec, f"the pre-review failed {fails}x")
+            else:
+                self.log(f"pre-review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); "
+                         f"fail #{fails}, will retry")
+            return True
+        who = f"{lane} ({info.get('backend') or lc.get('backend') or '?'}/{info.get('model') or '?'})"
+        if rec.get("status") in ("degraded", "superseded"):
+            self.log(f"pre-review PR #{pr} by {lane}: {v} arrived after the formal review took over → "
+                     f"the formal verdict decides", brain=False)
+            return True
+        rc, cur, _ = self.gh(["pr", "view", str(pr), "--json", "headRefOid,state,headRefName,body"])
+        try:
+            cj = json.loads(cur)
+        except Exception:
+            self.log(f"pre-review PR #{pr}: pr view failed; retry next tick", brain=False)
+            return False
+        if cj.get("state") != "OPEN":
+            self.log(f"pre-review PR #{pr} by {lane}: PR {cj.get('state')}; verdict discarded")
+            return True
+        if status.head_changed(sha, cj.get("headRefOid")):
+            self.log(f"pre-review PR #{pr} by {lane}: head moved "
+                     f"({sha[:8]}→{str(cj.get('headRefOid'))[:8]}); verdict discarded")
+            return True
+        if v == "APPROVE":
+            rec.update({"status": "approved", "verdict": v, "lane": lane, "sha": sha,
+                        "at": time.strftime("%F %T"), "fails": 0})
+            self.put_pre_review(pr, rec)
+            self.log(f"pre-review PR #{pr} by {who}: APPROVE → the formal review may start")
+            return True
+        m2 = self.closes_re.search(cj.get("body") or "")
+        n = int(m2.group(1)) if m2 else None
+        if not n:
+            self.pre_degrade(pr, sha, rec, "the PR carries no issue link")
+            return True
+        round_no = int(rec.get("round") or 0) + 1
+        rec.update({"status": "changes_pending", "verdict": v, "lane": lane, "sha": sha, "round": round_no,
+                    "issue": n, "branch": cj["headRefName"], "who": who, "notes": txt.strip()[:8000],
+                    "changes_since": self.clock(), "at": time.strftime("%F %T"), "fails": 0})
+        self.put_pre_review(pr, rec)
+        if not self.pre_queue_fix(pr, rec):
+            # the fix task did not reach the issue: it stays pending and is queued again next tick
+            self.log(f"pre-review PR #{pr} by {who}: CHANGES → the fix task for #{n} is pending "
+                     f"(it is queued again; no review round counted)", brain=False)
+            return True
+        rec["status"] = "changes"
+        self.put_pre_review(pr, rec)
+        self.log(f"pre-review PR #{pr} by {who}: CHANGES → fix task queued on #{n} "
+                 f"(pre-round {round_no}; no review round counted)")
+        if round_no > int(self.P.get("rounds") or self.R["rounds"]):
+            self.pre_degrade(pr, sha, rec, f"the pre-review asked for changes {round_no}x")
         return True
 
     def idle_lanes(self, lanes, res, state):
@@ -2489,21 +3006,39 @@ class Dispatcher:
             return
         inflight = sum(1 for s in state.values() if isinstance(s, dict) and s.get("review_pr"))
         idle = self.idle_lanes(lanes, res, state)
-        if inflight >= self.review_max() or not idle:
+        pre_idle = [L for L in idle if self.pre_lane(lanes.get(L))]
+        if inflight >= self.review_max() and not pre_idle:
             return
         revs = self.load_reviews()
-        for p in self.review_candidates(lanes, state, q):
-            if inflight >= self.review_max() or not idle:
-                break
+        candidates = self.review_candidates(lanes, state, q)
+        # The pre-review layer: a pi PR passes the hygiene pre-review before the formal review.
+        candidates = self.dispatch_pre_reviews(lanes, state, idle, candidates)
+        # The formal review runs on a review lane (terra): a pre-review lane never takes it.
+        declared = self.formal_pool(lanes)
+        pool = self.formal_lanes(lanes, idle)
+        if not declared and not self.F.get("required") and not self._formal_fallback_logged:
+            # a fleet without a review lane: the formal review keeps the old behaviour, but the
+            # gap is left in the dispatch log (the review does not state the formal model)
+            self._formal_fallback_logged = True
+            self.log(f"review: no lane of the fleet states the formal review model "
+                     f"({self.F.get('model_re') or 'any'}); the formal review falls back to the "
+                     "lanes that are not pre-review lanes", brain=False)
+        for p in candidates:
             review = revs.get(str(p["number"])) or {}
             fails_sha = review.get("fails_sha", p["headRefOid"])   # legacy rows count on the current head
             fails = int(review.get("fails") or 0) if fails_sha == p["headRefOid"] else 0
             if fails >= int(self.R["max_fails"]):
                 self.notify_review_fails(p, review, fails)
                 continue
+            if inflight >= self.review_max() or not pool:
+                if not pool and declared and p["number"] not in self._formal_wait_logged:
+                    self._formal_wait_logged.add(p["number"])
+                    self.log(f"review PR #{p['number']}: waiting for a formal review lane "
+                             f"({self.F.get('model_re') or 'any'}); none of them is idle", brain=False)
+                continue
             timed_out = set(review.get("budget_backends") or [])
-            alternatives = [lane for lane in idle if lanes[lane].get("backend") not in timed_out]
-            eligible = alternatives or idle  # retry without exclusions if every idle backend timed out
+            alternatives = [lane for lane in pool if lanes[lane].get("backend") not in timed_out]
+            eligible = alternatives or pool  # retry without exclusions if every idle backend timed out
             L = self.pick_reviewer(eligible, lanes, self.author_lane(p["headRefName"]))
             previous_backend = review.get("quota_backend")
             quota_alternatives = [lane for lane in eligible if lanes[lane].get("backend") != previous_backend]
@@ -2511,18 +3046,20 @@ class Dispatcher:
                 L = self.pick_reviewer(quota_alternatives, lanes, self.author_lane(p["headRefName"]))
             if not L:
                 continue
+            item = self.review_item(p)
+            if not item:
+                continue                       # no diff for the current head: nothing to review yet
             host_started = self.clock()
             try:
                 base = self.main_sha()
-                item = self.review_item(p)
-                if item is None:
-                    continue      # the diff of this head could not be bound: no review is dispatched
                 run, ver = self.dispatch(L, lanes[L], item, base)
             except Exception as e:
                 self.host_fail(lanes[L]["host"], f"review dispatch PR#{p['number']}: {e}", host_started, 120)
                 idle.remove(L)
+                pool.remove(L)
                 continue
             idle.remove(L)
+            pool.remove(L)
             inflight += 1
             # The reviewing lane takes over the card: the project's Lane field follows it (Refs #1761).
             if p.get("issue"):
@@ -2827,7 +3364,9 @@ class Dispatcher:
             model_cfg = lc.get("model") or (policy.get(backend) or {}).get("default_model")
             last = model_history.get(L) or {}
             entry = {"state": lane_state, "issue": active.get("issue") if active else None,
-                     "pr": active.get("review_pr") if active else None, "backend": backend, "host": lc.get("host"),
+                     "pr": active.get("review_pr") if active else None,
+                     "pre_review_pr": active.get("pre_review_pr") if active else None,
+                     "backend": backend, "host": lc.get("host"),
                      "model_cfg": model_cfg, "model_last": last.get("model"), "model_last_at": last.get("at"),
                      "paused_reason": self.paused_reason(L, lc)}
             if model_cfg and last.get("model") and model_cfg != last["model"]:
