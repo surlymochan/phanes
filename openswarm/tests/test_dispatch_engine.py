@@ -56,6 +56,7 @@ class Base(unittest.TestCase):
         raw = {"repo": "acme/project", "local_repo": self.tmp, "state_dir": os.path.join(self.tmp, "state"),
                "ssh": {"control_dir": os.path.join(self.tmp, "cm")}, "local_hosts": ["box"],
                "hot_files": {"limits": {"bin/big": 2}, "union": ["docs/log.md"]},
+               "policy_file": os.path.join(self.tmp, "policy.local.json"),
                "burn": {"file": "BURN-X", "backend": "pi"}}
         p = os.path.join(self.tmp, "cfg.json")
         with open(p, "w") as f:
@@ -116,6 +117,11 @@ class HotDispatch(Base):
         return {"n": n, "title": f"task {n}", "body": f"热文件：{hot}",
                 "backend": None, "strict": False, "prio": 1}
 
+    @staticmethod
+    def plain_item(n):
+        return {"n": n, "title": f"task {n}", "body": "no hot file here",
+                "backend": None, "strict": False, "prio": 1}
+
     def test_limit_one_blocks_second_dispatch(self):
         d = self.make()
         lanes, state = self.lane_names(2), {}
@@ -128,6 +134,130 @@ class HotDispatch(Base):
         lanes, state = self.lane_names(4), {}
         self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 5)])
         self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2, 3])
+
+    def test_dispatch_policy_controls_caps_and_normalizes_paths(self):
+        self.cfg["dispatch"] = {"hot_shared": {"./src/shared.py": 2}}
+        d = self.make()
+        self.assertEqual(d.hot_lock.cap_for("src/shared.py"), 2)
+        self.assertEqual(d.hot_lock.cap_for("./src/shared.py"), 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(1), self.hot_item(2), self.hot_item(3)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_equivalent_paths_follow_the_declared_precedence(self):
+        # the same file spelled two ways in two sources: the higher-precedence source decides,
+        # whichever spelling it uses
+        with open(self.cfg["policy_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"src/shared.py": 3}}}, f)
+        self.cfg["hot_files"]["limits"] = {"./src/shared.py": 1}
+        d = self.make()
+        self.assertEqual(d.hot_lock.cap_for("src/shared.py"), 1)
+        self.assertEqual(d.hot_lock.cap_for("./src/shared.py"), 1)
+        self.cfg["dispatch"] = {"hot_shared": {"src/shared.py": 2}}
+        d = self.make()
+        self.assertEqual(d.hot_lock.cap_for("src/shared.py"), 2)
+        self.assertEqual(d.hot_lock.cap_for("./src/shared.py"), 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 4)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_repository_policy_and_local_policy_follow_the_source_precedence(self):
+        # the repository policy spells one file in two ways and the local policy uses the
+        # first spelling: the local source decides, whatever spelling it uses
+        self.cfg["policy_repo_file"] = os.path.join(self.tmp, "policy.repo.json")
+        with open(self.cfg["policy_repo_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"src/shared.py": 3, "./src/shared.py": 1}}}, f)
+        with open(self.cfg["policy_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"src/shared.py": 2}}}, f)
+        d = self.make()
+        self.assertEqual(d.hot_lock.cap_for("src/shared.py"), 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 4)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_local_policy_wins_with_the_other_spelling(self):
+        # the same two sources, the spellings swapped: the local source still decides
+        self.cfg["policy_repo_file"] = os.path.join(self.tmp, "policy.repo.json")
+        with open(self.cfg["policy_repo_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"./src/shared.py": 3, "src/shared.py": 1}}}, f)
+        with open(self.cfg["policy_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"./src/shared.py": 2}}}, f)
+        d = self.make()
+        self.assertEqual(d.hot_lock.cap_for("src/shared.py"), 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 4)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_local_policy_spells_the_file_differently_than_the_repository_policy(self):
+        # one file, two spellings, one per source: the sources refine each other, not the
+        # spelling that happens to come last
+        self.cfg["policy_repo_file"] = os.path.join(self.tmp, "policy.repo.json")
+        with open(self.cfg["policy_repo_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"src/shared.py": 3}}}, f)
+        with open(self.cfg["policy_file"], "w") as f:
+            json.dump({"dispatch": {"hot_shared": {"./src/shared.py": 2}}}, f)
+        d = self.make()
+        self.assertEqual(d.hot_lock.cap_for("src/shared.py"), 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 4)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_dispatch_policy_default_cap_overrides_the_shipped_default(self):
+        # openswarm/policy.json ships hot_default 1; the dispatch config must win over it
+        self.cfg["dispatch"] = {"hot_default": 2}
+        d = self.make()
+        self.assertEqual(d.hot_lock.default_cap, 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 4)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_legacy_default_limit_overrides_the_shipped_default(self):
+        self.cfg["hot_files"]["default_limit"] = 2
+        d = self.make()
+        self.assertEqual(d.hot_lock.default_cap, 2)
+        lanes, state = self.lane_names(3), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(n) for n in range(1, 4)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+
+    def test_dispatch_policy_union_exempts_a_non_doc_file(self):
+        # a union member is never locked, so both tasks on the same file may run
+        self.cfg["dispatch"] = {"hot_union": ["src/shared.py"]}
+        d = self.make()
+        lanes, state = self.lane_names(2), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(1), self.hot_item(2)])
+        self.assertEqual(sorted(st["issue"] for st in state.values()), [1, 2])
+        self.assertEqual(d.hot_lock.inflight(), {})
+
+    def test_local_policy_file_refines_the_shipped_default_and_the_config_wins(self):
+        with open(self.cfg["policy_file"], "w") as f:
+            json.dump({"dispatch": {"hot_default": 3}}, f)
+        self.assertEqual(self.make().hot_lock.default_cap, 3)
+        self.cfg["dispatch"] = {"hot_default": 2}
+        self.assertEqual(self.make().hot_lock.default_cap, 2)
+
+    def test_legacy_inflight_state_pauses_new_dispatch_until_migrated(self):
+        d = self.make()
+        lanes, state = self.lane_names(2), {"P0": {"issue": 10, "run": "old-run"}}
+        self.dispatch_items(d, state, lanes, [self.hot_item(1)])
+        self.assertNotIn("P1", state)
+
+    def test_task_without_hot_files_keeps_dispatch_running(self):
+        d = self.make()
+        lanes, state = self.lane_names(2), {}
+        self.dispatch_items(d, state, lanes, [self.plain_item(1)])
+        # the running task holds no hot file: the next tick must still dispatch the idle lane
+        self.dispatch_items(d, state, lanes, [self.plain_item(2)])
+        self.assertEqual(state.get("P1", {}).get("issue"), 2)
+        self.assertEqual(state["P0"].get("hot"), [])
+
+    def test_exempt_hot_task_keeps_dispatch_running(self):
+        d = self.make()
+        lanes, state = self.lane_names(2), {}
+        self.dispatch_items(d, state, lanes, [self.hot_item(1, "docs/guide.md docs/log.md")])
+        # docs and union members are exempt: the next tick must still dispatch the idle lane
+        self.dispatch_items(d, state, lanes, [self.plain_item(2)])
+        self.assertEqual(state.get("P1", {}).get("issue"), 2)
+        self.assertEqual(state["P0"].get("hot"), [])
 
     def test_docs_do_not_consume_hot_lock(self):
         d = self.make()
