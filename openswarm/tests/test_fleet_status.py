@@ -201,6 +201,26 @@ class CapacityReadingTests(unittest.TestCase):
         self.assertEqual(data["oldest"]["run_id"], "a")
         self.assertEqual(data["by_host"], {"gocc": 1, "gores1": 1})
         self.assertEqual(data["limits"]["total"], {"used": 2, "limit": 8})
+        self.assertTrue(data["oldest_age_reliable"])
+        self.assertEqual(data["clock_unreliable_hosts"], [])
+
+    def test_the_age_of_a_host_with_a_skewed_clock_is_not_trusted(self):
+        """The age is a cross-host reading: a skewed host stamps it wrong (Refs #1703)."""
+        reservations = [{"host": "gocc", "run_id": "a", "backend": "codex", "created": 1000.0},
+                        {"host": "gores1", "run_id": "b", "backend": "pi", "created": 1900.0}]
+        clocks = {"gocc": {"offset_s": 300.0, "unreliable": True},
+                  "gores1": {"offset_s": 0.0, "unreliable": False}}
+        data = fleet_status.capacity_data(reservations, 2000.0, None, clocks)
+        self.assertFalse(data["oldest_age_reliable"])
+        self.assertEqual(data["clock_unreliable_hosts"], ["gocc"])
+        self.assertTrue(data["reservations"][0]["clock_unreliable"])
+        self.assertFalse(data["reservations"][1]["clock_unreliable"])
+
+    def test_the_page_says_that_the_clock_is_not_trusted(self):
+        reservations = [{"host": "gocc", "run_id": "a", "backend": "codex", "created": 1000.0}]
+        clocks = {"gocc": {"offset_s": 300.0, "unreliable": True}}
+        data = fleet_status.capacity_data(reservations, 2000.0, None, clocks)
+        self.assertIn("clock_unreliable=gocc", fleet_status._capacity_line(data))
 
 
 class HostReadingTests(unittest.TestCase):
@@ -215,6 +235,14 @@ class HostReadingTests(unittest.TestCase):
         self.assertEqual(data["down"], 1)
         self.assertEqual(data["worst"], "unreachable")
         self.assertEqual(data["hosts"][1]["age_s"], 120.0)
+
+    def test_a_host_with_a_skewed_clock_is_visible(self):
+        state = {"hosts": {"gocc": {"status": "soft", "updated_at": "2026-11-02 21:03:00",
+                                    "clock_offset_s": 300.0, "clock_unreliable": True}}}
+        data = fleet_status.hosts_data(state, NOW, 28800)
+        self.assertTrue(data["hosts"][0]["clock_unreliable"])
+        self.assertEqual(data["hosts"][0]["clock_offset_s"], 300.0)
+        self.assertIn("clock_skew=gocc:+300s", fleet_status._hosts_line(data))
 
 
 class BurnReadingTests(unittest.TestCase):

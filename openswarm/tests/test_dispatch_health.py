@@ -80,14 +80,48 @@ class ProbeTests(unittest.TestCase):
             "df -P /": "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 1000 700 300 70% /\n",
             "df -Pi /": "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/root 1000 950 50 95% /\n",
             "free -m": "              total used free shared buff/cache available\nMem: 8000 3000 2000 100 3000 5000\nSwap: 0 0 0\n",
+            "date +%s.%N": "1700000000.0",
         }
         def runner(host, command):
             calls.append((host, command))
             return outputs[command]
         result = health.run_probe("node-a", runner)
         self.assertEqual(result, {"host": "node-a", "disk_pct": 70.0, "inode_pct": 95.0,
-                                  "mem_avail_mb": 5000, "ssh_fail_streak": 0})
+                                  "mem_avail_mb": 5000, "ssh_fail_streak": 0,
+                                  "host_epoch": 1700000000.0})
         self.assertEqual([command for _, command in calls], list(outputs))
+
+    def test_the_control_plane_clock_is_sampled_next_to_the_remote_reading(self):
+        """The control-plane time is read right before and right after the remote one."""
+        stamps = iter([1000.0, 1002.0])
+        outputs = {"df -P /": "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 1000 700 300 70% /\n",
+                   "df -Pi /": "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/root 1000 950 50 95% /\n",
+                   "free -m": "              total used free shared buff/cache available\nMem: 8000 3000 2000 100 3000 5000\n",
+                   "date +%s.%N": "1700.0"}
+        def runner(host, command):
+            return outputs[command]
+        result = health.run_probe("node-a", runner, clock=lambda: next(stamps))
+        # the middle of the two control-plane readings is the time of the remote one
+        self.assertEqual(result["control_epoch"], 1001.0)
+        self.assertEqual(result["clock_probe_s"], 2.0)
+        self.assertEqual(result["host_epoch"], 1700.0)
+
+    def test_a_date_without_fractional_seconds_is_understood(self):
+        """macOS `date` has no %N: it prints the literal N, which is not a failure."""
+        outputs = {"df -P /": "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 1000 700 300 70% /\n",
+                   "df -Pi /": "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/root 1000 950 50 95% /\n",
+                   "free -m": "              total used free shared buff/cache available\nMem: 8000 3000 2000 100 3000 5000\n",
+                   "date +%s.%N": "1700000000.N"}
+        result = health.run_probe("node-a", lambda host, command: outputs[command])
+        self.assertEqual(result["host_epoch"], 1700000000.0)
+
+    def test_a_broken_date_reading_is_a_value_error(self):
+        outputs = {"df -P /": "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 1000 700 300 70% /\n",
+                   "df -Pi /": "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/root 1000 950 50 95% /\n",
+                   "free -m": "              total used free shared buff/cache available\nMem: 8000 3000 2000 100 3000 5000\n",
+                   "date +%s.%N": "not a date"}
+        with self.assertRaises(ValueError):
+            health.run_probe("node-a", lambda host, command: outputs[command])
 
     def test_parses_mac_inode_column_and_selects_root_mount(self):
         disk = "Filesystem 512-blocks Used Available Capacity Mounted on\n/dev/root 1000 700 300 70% /\n/dev/data 100 99 1 99% /data\n"
@@ -151,6 +185,109 @@ class SshFailStreakTests(unittest.TestCase):
     def test_a_damaged_threshold_falls_back_to_the_default(self):
         self.assertTrue(health.ssh_fail_blocked(3, {"ssh_fail_pause_streak": "x"}))
         self.assertFalse(health.ssh_fail_blocked(2, {"ssh_fail_pause_streak": "x"}))
+
+
+class ClockTests(unittest.TestCase):
+    """The clock of a host against the clock of the control plane (Refs #1703)."""
+
+    def test_the_offset_is_signed(self):
+        self.assertEqual(health.clock_skew(1700.0, 1000.0), 700.0)      # the host is fast
+        self.assertEqual(health.clock_skew(300.0, 1000.0), -700.0)      # the host is slow
+
+    def test_an_unmeasured_offset_is_not_an_offset_of_zero(self):
+        self.assertIsNone(health.clock_skew(None, 1000.0))
+        self.assertIsNone(health.clock_skew(1000.0, None))
+
+    def test_a_clock_within_the_threshold_can_be_trusted(self):
+        row = health.clock_status(59.9)
+        self.assertFalse(row["unreliable"])
+        self.assertIsNone(row["warning"])
+        self.assertIsNone(row["direction"])
+        self.assertEqual(row["offset_s"], 59.9)
+
+    def test_a_clock_beyond_the_threshold_is_not_trusted(self):
+        row = health.clock_status(60.1)
+        self.assertTrue(row["unreliable"])
+        self.assertEqual(row["direction"], "fast")
+        self.assertIn("fast by 60.1s", row["warning"])
+        self.assertIn("timedatectl set-ntp true", row["warning"])
+
+    def test_a_slow_clock_says_so(self):
+        row = health.clock_status(-300.0)
+        self.assertTrue(row["unreliable"])
+        self.assertEqual(row["direction"], "slow")
+        self.assertIn("slow by 300.0s", row["warning"])
+
+    def test_an_unavailable_clock_is_never_trusted(self):
+        row = health.clock_status(None)
+        self.assertTrue(row["unreliable"])
+        self.assertIsNone(row["offset_s"])
+        self.assertEqual(row["warning"], "clock unavailable")
+
+    def test_the_threshold_is_the_boundary(self):
+        self.assertFalse(health.clock_status(60)["unreliable"])
+        self.assertTrue(health.clock_status(60.5)["unreliable"])
+
+    def test_the_first_skew_is_reported(self):
+        alert = health.clock_alert(None, health.clock_status(300.0))
+        self.assertEqual(alert["kind"], "first")
+        self.assertEqual(alert["direction"], "fast")
+        self.assertEqual(alert["offset_s"], 300.0)
+
+    def test_a_steady_skew_is_not_reported_again(self):
+        previous = {"offset_s": 300.0, "unreliable": True}
+        self.assertIsNone(health.clock_alert(previous, health.clock_status(300.0)))
+        self.assertIsNone(health.clock_alert(previous, health.clock_status(301.0)))
+
+    def test_a_shrinking_skew_is_not_reported_again(self):
+        previous = {"offset_s": 300.0, "unreliable": True}
+        self.assertIsNone(health.clock_alert(previous, health.clock_status(120.0)))
+
+    def test_a_growing_skew_is_reported(self):
+        previous = {"offset_s": 300.0, "unreliable": True}
+        alert = health.clock_alert(previous, health.clock_status(600.0))
+        self.assertEqual(alert["kind"], "expanded")
+        self.assertEqual(alert["offset_s"], 600.0)
+
+    def test_a_clock_in_range_is_never_reported(self):
+        self.assertIsNone(health.clock_alert(None, health.clock_status(0.0)))
+
+    def test_a_skew_after_a_recovery_is_a_first_one_again(self):
+        recovered = {"offset_s": 0.0, "unreliable": False}
+        alert = health.clock_alert(recovered, health.clock_status(300.0))
+        self.assertEqual(alert["kind"], "first")
+
+    def test_the_remembered_clock_is_read_from_the_health_state(self):
+        state = {"hosts": {"box": {"ssh_fail_streak": 0, "status": "soft", "updated_at": 1.0,
+                                   "clock_offset_s": 300.0, "clock_unreliable": True},
+                           "pi": {"ssh_fail_streak": 0, "status": "ok", "updated_at": 1.0,
+                                  "clock_offset_s": 1.5, "clock_unreliable": False}}}
+        self.assertEqual(health.clock_states(state),
+                         {"box": {"offset_s": 300.0, "unreliable": True},
+                          "pi": {"offset_s": 1.5, "unreliable": False}})
+        self.assertEqual(health.clock_unreliable_hosts(state), {"box"})
+
+    def test_a_damaged_state_is_never_evidence_of_a_skew(self):
+        for state in ({}, {"hosts": None}, {"hosts": {"box": "broken"}}, {"hosts": {"box": {}}}, None, []):
+            with self.subTest(state=state):
+                self.assertEqual(health.clock_states(state), {})
+                self.assertEqual(health.clock_unreliable_hosts(state), set())
+
+    def test_the_record_keeps_the_measured_clock(self):
+        record = health.ssh_fail_record(0, "soft", 1.0, clock=health.clock_status(300.0))
+        self.assertEqual(record["clock_offset_s"], 300.0)
+        self.assertTrue(record["clock_unreliable"])
+
+    def test_an_unmeasured_clock_keeps_the_last_known_state(self):
+        """An unreachable host has no clock reading: nothing is remembered about it."""
+        self.assertEqual(health.clock_record(health.clock_status(None)), {})
+        record = health.ssh_fail_record(1, "unreachable", 1.0, clock=health.clock_status(None))
+        self.assertNotIn("clock_offset_s", record)
+        self.assertNotIn("clock_unreliable", record)
+
+    def test_the_record_without_a_clock_is_unchanged(self):
+        self.assertEqual(health.ssh_fail_record(3, "unreachable", 1700000000.0),
+                         {"ssh_fail_streak": 3, "status": "unreachable", "updated_at": 1700000000.0})
 
 
 if __name__ == "__main__":

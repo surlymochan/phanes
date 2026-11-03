@@ -56,6 +56,11 @@ spec = importlib.util.spec_from_file_location("openswarm_dispatch_fleet_status",
 fleet_status = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet_status)
 
+HEALTH_PATH = ROOT / "openswarm" / "lib" / "dispatch" / "health.py"
+_health_spec = importlib.util.spec_from_file_location("openswarm_dispatch_health", HEALTH_PATH)
+health = importlib.util.module_from_spec(_health_spec)
+_health_spec.loader.exec_module(health)
+
 GH_TIMEOUT = 60
 DEFAULT_HOME = Path(os.environ.get("OPENSWARM_HOME", Path.home() / ".claude/openswarm"))
 
@@ -345,8 +350,24 @@ def section_capacity(args, now):
         raise RuntimeError("no capacity source configured (--capacity, --capacity-db or --capacity-dir)")
     if not isinstance(reservations, list):
         raise RuntimeError("the capacity source must hold a JSON array of reservations")
-    data = fleet_status.capacity_data(reservations, now, limits)
+    data = fleet_status.capacity_data(reservations, now, limits, clock_states(args.hosts))
     return data, stamp, source
+
+
+def clock_states(path):
+    """The clock of every host, read from the fleet-health state (Refs #1703).
+
+    A reservation is stamped by the host that holds it and its age is compared
+    with the clock of the control plane: the age of a host with a skewed clock
+    is not a fact, and the page has to say so.
+    """
+    if not path:
+        return {}
+    try:
+        state, _stamp = read_json(path)
+    except (OSError, ValueError):
+        return {}
+    return health.clock_states(state)
 
 
 def section_hosts(args, now):
@@ -513,6 +534,7 @@ def self_test():
         assert pool["ad"]["collected_at"] == "2026-11-02T13:04:12+00:00", pool
         capacity = report["sections"][2]["data"]
         assert capacity["total"] == 1 and capacity["oldest_age_s"] == 600.0, capacity
+        assert capacity["oldest_age_reliable"] is True, capacity
         hosts = report["sections"][3]["data"]
         assert hosts["alive"] == 1 and hosts["down"] == 1, hosts
         burn = report["sections"][4]["data"]
@@ -528,6 +550,19 @@ def self_test():
         assert broken["sections"][3]["verified"] is False, broken
         assert "未核实" in broken["text"], broken["text"]
         assert broken["sections"][0]["verified"] is True, broken
+
+        # A host whose clock is off: the age of its reservation is not a fact
+        # (Refs #1703).
+        (root / "fleet-health.json").write_text(json.dumps({"hosts": {
+            "gocc": {"status": "soft", "ssh_fail_streak": 0,
+                     "clock_offset_s": 300.0, "clock_unreliable": True},
+            "gores1": {"status": "unreachable", "ssh_fail_streak": 3}}}), encoding="utf-8")
+        args.hosts = str(root / "fleet-health.json")
+        skewed = build_page(args, 1793624700.0)
+        skewed_capacity = skewed["sections"][2]["data"]
+        assert skewed_capacity["oldest_age_reliable"] is False, skewed_capacity
+        assert skewed_capacity["clock_unreliable_hosts"] == ["gocc"], skewed_capacity
+        assert "clock_unreliable=gocc" in skewed["text"], skewed["text"]
 
         # A snapshot without a clock cannot be dated: the lane section and the
         # dispatcher reading of the pool section are marked 未核实.

@@ -409,13 +409,21 @@ def pool_data(issues: Any, ad_ready: Any = None, target: Any = None) -> Dict[str
     }
 
 
-def capacity_data(reservations: Any, now: Any, limits: Any = None) -> Dict[str, Any]:
+def capacity_data(reservations: Any, now: Any, limits: Any = None,
+                 clocks: Any = None) -> Dict[str, Any]:
     """The fleet capacity reservations and the age of the oldest one.
 
     A reservation that is never released is the failure this page has to make
     visible: the oldest one says how long the fleet has been held.
+
+    The age is a cross-host reading: the reservation was stamped by a host and
+    it is compared with the clock of the control plane.  ``clocks`` (the clock
+    state the health probe measured, ``{host: {"offset_s":..., "unreliable":...}}``)
+    says which hosts may be believed; the age of a reservation of a host with a
+    skewed clock is reported as unreliable instead of being read as a fact.
     """
     moment = epoch(now)
+    states = clocks if isinstance(clocks, dict) else {}
     rows: List[Dict[str, Any]] = []
     skipped = 0
     for record in reservations if isinstance(reservations, (list, tuple)) else []:
@@ -426,9 +434,12 @@ def capacity_data(reservations: Any, now: Any, limits: Any = None) -> Dict[str, 
         if created is None:
             skipped += 1
             continue
-        rows.append({"host": record.get("host"), "run_id": record.get("run_id"),
+        host = record.get("host")
+        clock = states.get(host) if isinstance(host, str) else None
+        unreliable = bool(clock.get("unreliable")) if isinstance(clock, dict) else False
+        rows.append({"host": host, "run_id": record.get("run_id"),
                      "backend": record.get("backend"), "provider": record.get("provider"),
-                     "created": created})
+                     "created": created, "clock_unreliable": unreliable})
     by_host: Dict[str, int] = {}
     by_backend: Dict[str, int] = {}
     for row in rows:
@@ -441,6 +452,9 @@ def capacity_data(reservations: Any, now: Any, limits: Any = None) -> Dict[str, 
     oldest_age = None
     if oldest is not None and moment is not None:
         oldest_age = max(0.0, moment - oldest["created"])
+    unreliable_hosts = sorted({str(row["host"]) for row in rows
+                               if row["clock_unreliable"] and row.get("host")})
+    oldest_reliable = True if oldest is None else not oldest["clock_unreliable"]
 
     used: Dict[str, int] = {"total": len(rows)}
     for host, count in by_host.items():
@@ -455,7 +469,9 @@ def capacity_data(reservations: Any, now: Any, limits: Any = None) -> Dict[str, 
     return {
         "total": len(rows),
         "oldest_age_s": oldest_age,
+        "oldest_age_reliable": oldest_reliable,
         "oldest": oldest,
+        "clock_unreliable_hosts": unreliable_hosts,
         "by_host": by_host,
         "by_backend": by_backend,
         "skipped": skipped,
@@ -489,6 +505,8 @@ def hosts_data(state: Any, now: Any = None, offset: Optional[float] = None) -> D
         stamp = epoch(record.get("updated_at"), offset)
         rows.append({"host": str(name), "status": status,
                      "ssh_fail_streak": record.get("ssh_fail_streak"),
+                     "clock_offset_s": record.get("clock_offset_s"),
+                     "clock_unreliable": bool(record.get("clock_unreliable")),
                      "updated_at": iso(stamp),
                      "age_s": None if stamp is None or moment is None else max(0.0, moment - stamp)})
     return {
@@ -646,6 +664,10 @@ def _capacity_line(data: Dict[str, Any]) -> str:
     if data.get("by_host"):
         parts.append("by_host=" + ",".join("%s:%d" % (name, count)
                                            for name, count in sorted(data["by_host"].items())))
+    if data.get("clock_unreliable_hosts"):
+        # The age is a cross-host reading: a host with a skewed clock stamps
+        # its reservation with a time the control plane cannot trust.
+        parts.append("clock_unreliable=" + ",".join(data["clock_unreliable_hosts"]))
     return " ".join(parts)
 
 
@@ -655,6 +677,10 @@ def _hosts_line(data: Dict[str, Any]) -> str:
     down = [row["host"] for row in data.get("hosts", []) if row.get("status") not in ("ok", "soft")]
     if down:
         parts.append("down=" + ",".join(down))
+    skewed = ["%s:%+.0fs" % (row["host"], row["clock_offset_s"]) for row in data.get("hosts", [])
+              if row.get("clock_unreliable") and row.get("clock_offset_s") is not None]
+    if skewed:
+        parts.append("clock_skew=" + ",".join(skewed))
     return " ".join(parts)
 
 

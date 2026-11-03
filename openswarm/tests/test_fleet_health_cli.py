@@ -54,12 +54,23 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def runner(self, inode=10, failing=()):
         """A fake probe runner: fixed outputs per command, transport failures per host."""
-        outputs = {"df -P /": DISK, "df -Pi /": inode_output(inode), "free -m": MEMORY}
+        outputs = {"df -P /": DISK, "df -Pi /": inode_output(inode), "free -m": MEMORY,
+                   "date +%s.%N": str(self.now)}
 
         def run(host, command):
             if host in failing:
                 raise OSError("ssh: connect to host %s port 22: Connection refused" % host)
             return outputs[command]
+        return run
+
+    def clock_runner(self, offset_s, inode=10):
+        """A probe runner whose host clock is `offset_s` seconds off the control plane."""
+        runner = self.runner(inode=inode)
+
+        def run(host, command):
+            if command == "date +%s.%N":
+                return str(self.now + offset_s)
+            return runner(host, command)
         return run
 
     def lanes(self, hosts=("worker-a",)):
@@ -79,8 +90,14 @@ class FleetHealthCliTests(unittest.TestCase):
         else:
             os.environ["OPENSWARM_LANES_FILE"] = previous
 
+    def restore_dispatch_config(self, previous):
+        if previous is None:
+            os.environ.pop("OPENSWARM_DISPATCH_CONFIG", None)
+        else:
+            os.environ["OPENSWARM_DISPATCH_CONFIG"] = previous
+
     def health(self, runner=None, hosts=("worker-a",), apply=False, json_out=True,
-               policy=None, lanes=("worker-a",)):
+               policy=None, lanes=("worker-a",), brain_log=None, text=False):
         """Run `fleet health` against the fake runner and return its report."""
         if lanes:
             self.lanes(lanes)
@@ -92,8 +109,11 @@ class FleetHealthCliTests(unittest.TestCase):
                                          runner=runner or self.runner(),
                                          hosts={name: {"name": name, "kind": "local"}
                                                 for name in (lanes or ())},
-                                         now=self.now, home=self.home)
-        self.assertEqual(json.loads(output.getvalue()) if json_out else {}, report if json_out else {})
+                                         now=self.now, home=self.home, brain_log=brain_log)
+        if json_out:
+            self.assertEqual(json.loads(output.getvalue()), report)
+        if text:
+            self.text = output.getvalue()
         return report
 
     def pauses(self):
@@ -190,10 +210,99 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(report["status"], "hard")
         self.assertEqual(report["thresholds"]["inode_pause_pct"], 95)
         row = report["hosts"][0]
-        self.assertEqual(sorted(row), ["action", "decision", "error", "host", "metrics", "paused",
+        self.assertEqual(sorted(row), ["action", "clock", "decision", "error", "host", "metrics", "paused",
                                        "reason", "status", "triggers"])
         self.assertEqual(row["host"], "worker-a")
         self.assertFalse(row["paused"])
+        self.assertFalse(row["clock"]["unreliable"])
+
+    def test_fast_clock_is_reported_and_time_is_unreliable(self):
+        runner = self.runner()
+        def fast(host, command):
+            return str(self.now + 300) if command == "date +%s.%N" else runner(host, command)
+        row = self.health(runner=fast)["hosts"][0]
+        self.assertEqual(row["clock"]["offset_s"], 300.0)
+        self.assertTrue(row["clock"]["unreliable"])
+        self.assertIn("fast by 300.0s", row["clock"]["warning"])
+
+    def test_a_host_five_minutes_fast_is_alarmed_and_its_time_is_not_trusted(self):
+        """The 5-minute simulation of the issue: the host is fast, the fleet is not ok."""
+        row = self.health(runner=self.clock_runner(300.0))["hosts"][0]
+        self.assertEqual(row["status"], "soft")
+        self.assertEqual(row["clock"]["offset_s"], 300.0)
+        self.assertEqual(row["clock"]["direction"], "fast")
+        self.assertTrue(row["clock"]["unreliable"])
+        report = self.health(runner=self.clock_runner(300.0))
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "soft")
+
+    def test_the_text_output_names_the_direction_the_seconds_and_the_repair(self):
+        self.health(runner=self.clock_runner(-300.0), json_out=False, text=True)
+        self.assertIn("clock: clock slow by 300.0s", self.text)
+        self.assertIn("timedatectl set-ntp true", self.text)
+
+    def test_the_measured_clock_is_remembered_per_host(self):
+        self.health(runner=self.clock_runner(300.0))
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["hosts"]["worker-a"]["clock_offset_s"], 300.0)
+        self.assertTrue(state["hosts"]["worker-a"]["clock_unreliable"])
+
+    def test_a_clock_in_range_is_remembered_as_trusted(self):
+        self.health(runner=self.clock_runner(5.0))
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["hosts"]["worker-a"]["clock_offset_s"], 5.0)
+        self.assertFalse(state["hosts"]["worker-a"]["clock_unreliable"])
+
+    def test_the_first_skew_is_written_into_the_brain_log(self):
+        brain = self.root / "brain.md"
+        self.health(runner=self.clock_runner(300.0), brain_log=str(brain))
+        lines = brain.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("worker-a", lines[0])
+        self.assertIn("clock fast by 300.0s", lines[0])
+        self.assertIn("timedatectl set-ntp true", lines[0])
+
+    def test_a_steady_skew_is_not_written_again(self):
+        brain = self.root / "brain.md"
+        for _ in range(3):
+            self.health(runner=self.clock_runner(300.0), brain_log=str(brain))
+        self.assertEqual(len(brain.read_text(encoding="utf-8").strip().splitlines()), 1)
+
+    def test_a_growing_skew_is_written_again(self):
+        brain = self.root / "brain.md"
+        self.health(runner=self.clock_runner(300.0), brain_log=str(brain))
+        self.health(runner=self.clock_runner(900.0), brain_log=str(brain))
+        lines = brain.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("clock fast by 900.0s", lines[1])
+
+    def test_a_skew_after_a_recovery_is_written_again(self):
+        brain = self.root / "brain.md"
+        self.health(runner=self.clock_runner(300.0), brain_log=str(brain))
+        self.health(runner=self.clock_runner(0.0), brain_log=str(brain))
+        self.health(runner=self.clock_runner(300.0), brain_log=str(brain))
+        lines = brain.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("clock fast by 300.0s", lines[1])
+
+    def test_an_unreachable_host_does_not_report_a_clock_alert(self):
+        brain = self.root / "brain.md"
+        self.health(runner=self.runner(failing=("worker-a",)), brain_log=str(brain))
+        self.assertFalse(brain.exists())
+        # the last known clock of the host is kept, not replaced by a guess
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        self.assertNotIn("clock_offset_s", state["hosts"]["worker-a"])
+
+    def test_the_brain_log_of_the_dispatch_configuration_is_used(self):
+        """The health probe writes into the brain log the dispatcher writes into."""
+        brain = self.root / "brain.md"
+        config = self.root / "dispatch.json"
+        config.write_text(json.dumps({"repo": "acme/project", "brain_log": str(brain)}), encoding="utf-8")
+        previous = os.environ.get("OPENSWARM_DISPATCH_CONFIG")
+        os.environ["OPENSWARM_DISPATCH_CONFIG"] = str(config)
+        self.addCleanup(self.restore_dispatch_config, previous)
+        self.health(runner=self.clock_runner(300.0))
+        self.assertIn("clock fast by 300.0s", brain.read_text(encoding="utf-8"))
 
     def test_the_harvest_failure_is_counted(self):
         (self.home / "runs" / "harvest-1").mkdir(parents=True)
