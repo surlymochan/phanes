@@ -1503,3 +1503,29 @@ class ThinDiff(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TickAdvisoryIntegration(Base):
+    def test_tick_harvest_advisory_and_push(self):
+        risky = 'diff --git a/engine.py b/engine.py\n+dispatch_lane()\n'
+        tick_test = 'diff --git a/tests/test_engine.py b/tests/test_engine.py\n+    d.tick(lanes, state)\n'
+        for diff, expected in ((risky, True), (risky + tick_test, False),
+                               ('diff --git a/a.py b/a.py\n+value = 1\n', False)):
+            with self.subTest(diff=diff):
+                d = self.make([('diff --no-color', (0, diff, '')),
+                               ('issue view', (0, json.dumps({'state': 'OPEN', 'labels': []}), '')),
+                               ('issue list', (0, '[]', '')),
+                               ('pr list', (0, '[]', '')),
+                               ('pr create', (0, 'https://github.com/acme/project/pull/9\n', ''))])
+                lanes = {'M5': {'host': 'box', 'backend': 'codex'}}
+                state = {'M5': {'issue': 7, 'run': 'r1', 'base': SHA}}
+                result = {'M5': {'lane': 'idle', 'run': {'status': 'done', 'branch': 'lane/x',
+                                                             'commit': 'c', 'repo': '/w'}}}
+                with mock.patch.object(d, 'probe', return_value=result), mock.patch.object(d, 'log') as log:
+                    d.tick(lanes, state)
+                events = [json.loads(c.args[0]) for c in log.call_args_list
+                          if c.args and '"event": "tick_test_advisory"' in str(c.args[0])]
+                self.assertEqual(bool(events), expected)
+                if events:
+                    self.assertEqual(events[0]['rules_version'], E.TICK_ADVISORY_RULES_VERSION)
+                self.assertTrue(self.runner.called('push'), self.runner.calls)
