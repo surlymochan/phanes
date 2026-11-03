@@ -603,5 +603,230 @@ class PauseLaneServeAssignTests(unittest.TestCase):
         self.assertEqual(cli.lane_host_identity({"name": "L1", "host": "explicit"}), "explicit")
 
 
+class BudgetFailureTests(unittest.TestCase):
+    """Refs #1668: a run that died on a spent budget window is held, not lane-failed."""
+
+    ST = {"issue": 1392, "run": "r1", "base": "abc123"}
+
+    def setUp(self):
+        self.calls = []
+        self.probe = {"exhausted": True}
+        patchers = (mock.patch.object(autodispatch, "gh", side_effect=self._gh),
+                    mock.patch.object(autodispatch, "log"),
+                    mock.patch.object(autodispatch, "save_state"),
+                    mock.patch.object(autodispatch, "budget_window_probe", side_effect=self._probe))
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _gh(self, args, timeout=60):
+        self.calls.append(list(args))
+        if "view" in args:
+            return 0, json.dumps({"state": "OPEN", "labels": []}), ""
+        return 0, "", ""
+
+    def _probe(self):
+        return dict(self.probe)
+
+    def calls_containing(self, needle):
+        return [" ".join(call) for call in self.calls if needle in " ".join(call)]
+
+    def test_budget_classes_are_budget_failures(self):
+        for error_class in ("budget_exceeded", "budget_exceeded_daily", "BUDGET-EXCEEDED"):
+            with self.subTest(error_class=error_class):
+                self.assertTrue(autodispatch.is_budget_failure(error_class))
+
+    def test_other_classes_are_not_budget_failures(self):
+        for error_class in ("exec_error", "stalled", "rate_limit", "", None):
+            with self.subTest(error_class=error_class):
+                self.assertFalse(autodispatch.is_budget_failure(error_class))
+
+    def test_the_reset_time_wins_over_the_fallback_delay(self):
+        self.assertEqual(autodispatch.budget_requeue_at(1000, 5000), 5000)
+        self.assertEqual(autodispatch.budget_requeue_at(1000, None),
+                         1000 + autodispatch.BUDGET_REQUEUE_DELAY)
+        self.assertEqual(autodispatch.budget_requeue_at(1000, "1970-01-01T01:00:00Z"), 3600)
+
+    def test_the_run_text_may_name_the_window_reset(self):
+        self.assertEqual(autodispatch.budget_reset_seconds("resets in 2h13m"), 2 * 3600 + 13 * 60)
+        self.assertEqual(autodispatch.budget_reset_seconds("Retry-After: 120"), 120)
+        self.assertIsNone(autodispatch.budget_reset_seconds("Token Plan 用量上限"))
+
+    def test_a_budget_failure_is_held_instead_of_lane_failed(self):
+        state = {}
+        st = dict(self.ST)
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded", "summary": "Token Plan 用量上限"}
+
+        self.assertTrue(autodispatch.finish("M17", {"host": "box"}, st, info, state))
+
+        self.assertEqual(self.calls_containing("lane-failed"), [])
+        held = state["_budget_requeue"]["1392"]
+        self.assertEqual(held["tries"], 1)
+        self.assertIsNone(held["reset_at"])
+        self.assertGreater(held["requeue_at"], autodispatch.time.time())
+
+    def test_a_real_failure_stays_lane_failed(self):
+        state = {}
+        st = dict(self.ST)
+        info = {"status": "failed", "error_class": "exec_error", "summary": "boom"}
+
+        self.assertTrue(autodispatch.finish("M17", {"host": "box"}, st, info, state))
+
+        self.assertTrue(any("--add-label lane-failed" in call for call in self.calls_containing("issue edit")))
+        self.assertNotIn("_budget_requeue", state)
+
+    def test_the_held_card_returns_to_the_queue_when_the_window_recovered(self):
+        self.probe = {"exhausted": False}
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M17", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "requeue_at": autodispatch.time.time() - 1}}}
+
+        autodispatch.requeue_budget_cards(state)
+
+        edits = self.calls_containing("issue edit")
+        self.assertTrue(any("--add-label lane-ready" in call and "--remove-label in-progress" in call
+                            for call in edits), edits)
+        self.assertNotIn("1392", state["_budget_requeue"])
+
+    def test_a_closed_window_keeps_the_card_held(self):
+        self.probe = {"exhausted": True}
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M17", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "requeue_at": autodispatch.time.time() - 1}}}
+
+        autodispatch.requeue_budget_cards(state)
+
+        self.assertEqual(self.calls_containing("issue edit"), [])
+        self.assertIn("1392", state["_budget_requeue"])
+        self.assertGreater(state["_budget_requeue"]["1392"]["requeue_at"], autodispatch.time.time())
+
+    def test_an_unknown_window_keeps_the_card_held(self):
+        self.probe = {}
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M17", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "requeue_at": autodispatch.time.time() - 1}}}
+
+        autodispatch.requeue_budget_cards(state)
+
+        self.assertEqual(self.calls_containing("issue edit"), [])
+        self.assertIn("1392", state["_budget_requeue"])
+
+    def test_a_card_that_keeps_hitting_a_closed_window_fails_for_real(self):
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M17", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded",
+                                             "tries": autodispatch.BUDGET_REQUEUE_MAX,
+                                             "requeue_at": autodispatch.time.time() - 1}}}
+
+        autodispatch.requeue_budget_cards(state)
+
+        edits = self.calls_containing("issue edit")
+        self.assertTrue(any("--add-label lane-failed" in call for call in edits), edits)
+        self.assertNotIn("1392", state["_budget_requeue"])
+
+    def test_a_card_held_on_an_unknown_window_expires_into_lane_failed(self):
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M17", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "since": autodispatch.time.time() - 7 * 3600,
+                                             "requeue_at": autodispatch.time.time() - 1}}}
+
+        autodispatch.requeue_budget_cards(state)
+
+        edits = self.calls_containing("issue edit")
+        self.assertTrue(any("--add-label lane-failed" in call for call in edits), edits)
+        self.assertNotIn("1392", state["_budget_requeue"])
+
+    def test_the_budget_failure_count_survives_a_requeue(self):
+        """B2: a card that fails again after a requeue counts as the second failure."""
+        self.probe = {"exhausted": False}
+        state = {}
+        st = dict(self.ST)
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded", "summary": "Token Plan"}
+
+        self.assertTrue(autodispatch.finish("M17", {"host": "box"}, st, info, state))
+        self.assertEqual(state["_budget_requeue"]["1392"]["tries"], 1)
+
+        # the window recovers: the card goes back into the queue, the count stays
+        state["_budget_requeue"]["1392"]["requeue_at"] = autodispatch.time.time() - 1
+        autodispatch.requeue_budget_cards(state)
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertEqual(state["_budget_tries"]["1392"], 1)
+
+        # the card runs again and dies on the same closed window: the second failure counts
+        self.assertTrue(autodispatch.finish("M17", {"host": "box"}, st, info, state))
+        self.assertEqual(state["_budget_requeue"]["1392"]["tries"], 2)
+
+        # the window recovers again, but the card already failed twice: it fails for real
+        state["_budget_requeue"]["1392"]["requeue_at"] = autodispatch.time.time() - 1
+        autodispatch.requeue_budget_cards(state)
+        edits = self.calls_containing("issue edit")
+        self.assertTrue(any("--add-label lane-failed" in call for call in edits), edits)
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertNotIn("1392", state.get("_budget_tries", {}))
+
+
+class BudgetFailureTickTests(unittest.TestCase):
+    """Refs #1668: the AD tick holds a budget-failed card and requeues it when the window is back."""
+
+    ST = {"issue": 1392, "run": "r1", "host": "box", "base": "abc123", "at": "2026-11-02 16:53", "verify": ""}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-ad-budget-tick-")
+        self.addCleanup(self.tmp.cleanup)
+        self.calls = []
+        self.probe = {"exhausted": True}
+        run = {"status": "budget_exceeded", "error_class": "budget_exceeded", "summary": "Token Plan 用量上限"}
+        patchers = (mock.patch.object(autodispatch, "D", self.tmp.name),
+                    mock.patch.object(autodispatch, "gh", side_effect=self._gh),
+                    mock.patch.object(autodispatch, "log"),
+                    mock.patch.object(autodispatch, "save_state"),
+                    mock.patch.object(autodispatch, "paused_scopes", return_value=set()),
+                    mock.patch.object(autodispatch, "host_ok", return_value=True),
+                    mock.patch.object(autodispatch, "remote", return_value={"lane": "idle", "run": run}),
+                    mock.patch.object(autodispatch, "queue", return_value=[]),
+                    mock.patch.object(autodispatch, "status_snapshot", return_value={}),
+                    mock.patch.object(autodispatch, "replenish", return_value=[]),
+                    mock.patch.object(autodispatch, "mint_paused", return_value=True),
+                    mock.patch.object(autodispatch, "budget_window_probe", side_effect=self._probe))
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _gh(self, args, timeout=60):
+        self.calls.append(list(args))
+        if "view" in args:
+            return 0, json.dumps({"state": "OPEN", "labels": []}), ""
+        return 0, "", ""
+
+    def _probe(self):
+        return dict(self.probe)
+
+    def calls_containing(self, needle):
+        return [" ".join(call) for call in self.calls if needle in " ".join(call)]
+
+    def tick(self, state):
+        autodispatch.tick({"M17": {"host": "box", "backend": "pi"}}, state, 0)
+
+    def test_the_tick_holds_the_card_frees_the_lane_and_requeues_it_when_the_window_is_back(self):
+        state = {"M17": dict(self.ST)}
+
+        self.tick(state)
+
+        # the lane slot is free again and the card waits for the window
+        self.assertNotIn("M17", state)
+        self.assertIn("1392", state["_budget_requeue"])
+        self.assertEqual(state["_budget_requeue"]["1392"]["tries"], 1)
+        self.assertEqual([c for c in self.calls_containing("issue edit") if "lane-ready" in c], [])
+
+        # the window recovers: the next tick puts the card back into the queue
+        self.probe = {"exhausted": False}
+        state["_budget_requeue"]["1392"]["requeue_at"] = autodispatch.time.time() - 1
+        self.tick(state)
+
+        edits = self.calls_containing("issue edit")
+        self.assertTrue(any("--add-label lane-ready" in call for call in edits), edits)
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertEqual(state["_budget_tries"]["1392"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

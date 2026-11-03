@@ -10,6 +10,7 @@ legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one l
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
 import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -55,6 +56,20 @@ BASE_REPO_URL = f"https://github.com/{REPO}.git"  # the upstream the base commit
 DISPATCH_BASE_FETCH_ATTEMPTS = 3  # bounded attempts (check -> fetch -> check) when the base is missing
 DISPATCH_BASE_FETCH_DELAY = 5     # seconds between two attempts
 BASE_MISSING_RE = re.compile(r"Not a valid object name", re.I)
+# Refs #1668: a run that died because a backend budget window was spent (the MiniMax 5h Token
+# Plan window, for example) is not a card failure: the card never got a fair try.  Such a card
+# is held (it keeps `in-progress`) until the window recovers and then returns to the queue.
+BUDGET_CLASSES = {"budget_exceeded", "budget_exceeded_daily", "budget_exceeded_weekly",
+                  "budget_exceeded_monthly", "budget_exhausted"}
+BUDGET_REQUEUE_DELAY = int(os.environ.get("AD_BUDGET_REQUEUE_DELAY", "1800"))  # seconds, no reset time known
+BUDGET_REQUEUE_MAX = int(os.environ.get("AD_BUDGET_REQUEUE_MAX", "2"))  # holds per card before it fails for real
+BUDGET_REQUEUE_MAX_HOLD = int(os.environ.get("AD_BUDGET_REQUEUE_MAX_HOLD", str(6 * 3600)))  # seconds, unknown window state
+# The provider error may say when the window recovers ("resets in 2h13m", "Retry-After: 120").
+BUDGET_RESETS_IN_RE = re.compile(r"\bresets in\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?\b", re.I)
+BUDGET_RESETS_IN_PLAIN_RE = re.compile(r"\bresets in\s+(\d+)\b", re.I)
+BUDGET_RETRY_AFTER_RE = re.compile(r"\bretry[-_ ]?after\"?\s*[:=]\s*\"?(\d+)", re.I)
+# The window state: open (the card may be requeued), exhausted (still closed) or unknown.
+BUDGET_WINDOW_OPEN, BUDGET_WINDOW_EXHAUSTED, BUDGET_WINDOW_UNKNOWN = "open", "exhausted", "unknown"
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -392,7 +407,7 @@ if R:
     with open(p) as stream: r=json.load(stream)
     res=r.get("result") or {}
     out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
-      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
+      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"resets_at":r.get("resets_at"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
   else:
@@ -737,6 +752,194 @@ def lane_in_fetch_backoff(st, now=None):
 
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
+    if str(n) not in state.get("_budget_requeue", {}):
+        state.get("_budget_tries", {}).pop(str(n), None)
+
+def is_budget_failure(error_class):
+    """True when the run died because a backend budget window was spent (Refs #1668).
+
+    `budget_exceeded` and its daily/weekly/monthly variants name a spent window, not a
+    broken card: the run never got to the end of the card."""
+    return str(error_class or "").strip().lower().replace("-", "_") in BUDGET_CLASSES
+
+def parse_epoch(value):
+    """Epoch seconds from an epoch number or an ISO-8601 timestamp (None when unreadable)."""
+    if isinstance(value, bool) or value is None: return None
+    if isinstance(value, (int, float)): return float(value)
+    text = str(value).strip()
+    if not text: return None
+    try: return float(text)
+    except ValueError: pass
+    try: stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError: return None
+    if stamp.tzinfo is None: stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.timestamp()
+
+def budget_requeue_at(now, resets_at=None, delay=BUDGET_REQUEUE_DELAY, max_hold=BUDGET_REQUEUE_MAX_HOLD):
+    """Epoch second at which a budget-failed card may return to the queue (Refs #1668).
+
+    The window reset time wins when the run knows it (`resets_at`); without it the card
+    waits `delay` seconds.  The wait is capped by `max_hold` so a stale reset time cannot
+    park a card forever."""
+    reset = parse_epoch(resets_at)
+    now = float(now)
+    target = max(now, reset) if reset is not None else now + max(0, delay)
+    return min(target, now + max(0, max_hold))
+
+def budget_reset_seconds(text):
+    """The seconds until the window recovers according to the run text (None when unknown).
+
+    The provider error often says when the window recovers ("resets in 2h13m",
+    "Retry-After: 120"); that is a trustworthy recovery time."""
+    if not isinstance(text, str) or not text: return None
+    m = BUDGET_RESETS_IN_RE.search(text)
+    if m and any(m.groups()):
+        h, mi, s = (int(x or 0) for x in m.groups())
+        return h * 3600 + mi * 60 + s
+    m = BUDGET_RESETS_IN_PLAIN_RE.search(text)
+    if m: return int(m.group(1))
+    m = BUDGET_RETRY_AFTER_RE.search(text)
+    if m: return int(m.group(1))
+    return None
+
+def issue_state_labels(n):
+    """The state and the labels of an issue as read back (None, set() when unreadable)."""
+    rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
+    if rc: return None, set()
+    try: issue = json.loads(out)
+    except Exception: return None, set()
+    return issue.get("state"), label_names(issue)
+
+def budget_window_probe():
+    """The window probe answer ({exhausted: bool, resets_at?: ...}); {} when there is none.
+
+    `AD_BUDGET_PROBE_CMD` is a shell command that answers JSON.  Only an explicit
+    `{"exhausted": false}` confirms that the window is open again."""
+    cmd = os.environ.get("AD_BUDGET_PROBE_CMD")
+    if not cmd: return {}
+    try:
+        rc, out, _ = sh(cmd, timeout=20)
+        if rc: return {}
+        data = json.loads(out)
+        return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError, AttributeError, subprocess.TimeoutExpired, OSError):
+        return {}
+
+def budget_window_state(probe, reset_passed=False):
+    """The window state the harvester may act on: open, exhausted or unknown (Refs #1668).
+
+    The probe knows the window that is closed right now, so its answer wins.  Without a
+    probe answer a recovery time that has passed means the window is back; anything else
+    is unknown and the card stays held."""
+    if isinstance(probe, dict):
+        exhausted = probe.get("exhausted")
+        if exhausted is True: return BUDGET_WINDOW_EXHAUSTED
+        if exhausted is False: return BUDGET_WINDOW_OPEN
+    return BUDGET_WINDOW_OPEN if reset_passed else BUDGET_WINDOW_UNKNOWN
+
+def budget_window_reset(info):
+    """The epoch second at which the backend window recovers (None when unknown).
+
+    The run result knows the reset time of the provider error it hit, the run text may
+    say when the window recovers ("resets in 2h13m") and the probe knows it for the
+    window that is currently closed.  The real executor writes no top level `resets_at`,
+    so the text and the probe are what a 5h window failure can rely on."""
+    reset = parse_epoch((info or {}).get("resets_at"))
+    if reset is not None: return reset
+    seconds = budget_reset_seconds(" ".join(str((info or {}).get(k) or "") for k in ("error", "summary")))
+    if seconds: return time.time() + seconds
+    reset = parse_epoch(budget_window_probe().get("resets_at"))
+    if reset is not None: return reset
+    return None
+
+def hold_budget_card(lane, cfg, st, info, state):
+    """Hold a budget-failed card until the backend window recovers (Refs #1668).
+
+    The card keeps its `in-progress` label, so no lane picks it up while the window is
+    closed; the next tick returns it to `lane-ready` once the window is back."""
+    n, run = st["issue"], st["run"]
+    now = time.time()
+    reset = budget_window_reset(info)
+    at = budget_requeue_at(now, reset)
+    pending = state.setdefault("_budget_requeue", {})
+    row = dict(pending.get(str(n)) or {})
+    counts = state.setdefault("_budget_tries", {})
+    row.update({"issue": n, "lane": lane, "run": run, "backend": info.get("backend"),
+                "error_class": info.get("error_class"), "tries": int(counts.get(str(n), row.get("tries") or 0)) + 1,
+                "requeue_at": at, "reset_at": reset, "since": row.get("since") or now})
+    pending[str(n)] = row
+    counts[str(n)] = row["tries"]
+    save_state(state)
+    when = time.strftime("%F %T", time.localtime(at))
+    gh(["issue", "comment", str(n), "--body",
+        f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit because a backend "
+        f"budget window was spent (`{info.get('error_class')}`), not a card failure. Held until the window "
+        f"recovers (at `{when}`); the card returns to `lane-ready` by itself then.\n\n"
+        f"Executor summary: {info.get('summary')}"])
+    log(f"{lane} #{n} run {run} budget failure ({info.get('error_class')}) → held until the window recovers "
+        f"(hold {row['tries']}/{BUDGET_REQUEUE_MAX})")
+    return True
+
+def budget_hold_expired(row, now):
+    """True when a held card waited longer than the hold bound without a known recovery time."""
+    since = parse_epoch((row or {}).get("since"))
+    if since is None: return False
+    return now - since >= BUDGET_REQUEUE_MAX_HOLD
+
+def requeue_budget_cards(state):
+    """Return the held budget cards to the queue once the window recovered (Refs #1668).
+
+    The window state decides: a probe that still reports an exhausted window (or no
+    answer at all) keeps the card held, so a card is never put back into the queue while
+    its window is still closed."""
+    pending = state.get("_budget_requeue") or {}
+    if not pending: return
+    now = time.time()
+    probe = budget_window_probe()  # one window probe per tick
+    for key, row in list(pending.items()):
+        if float(row.get("requeue_at") or 0) > now: continue
+        n = row.get("issue") or key
+        issue_state, labels = issue_state_labels(n)
+        if issue_state is None: continue  # unreadable: try again next tick
+        if issue_state != "OPEN" or "lane-pr" in labels:
+            pending.pop(key, None)
+            state.get("_budget_tries", {}).pop(key, None)
+            continue  # closed or already a PR: the hold is void
+        tries = int(row.get("tries") or 0)
+        if tries >= BUDGET_REQUEUE_MAX:
+            pending.pop(key, None)
+            (state.get("_budget_tries") or {}).pop(key, None)
+            label_lane_failed(n, f"Lane {row.get('lane')} ({row.get('backend') or 'unknown'}) hit a closed budget "
+                               f"window `{row.get('error_class')}` {tries} time(s) for this card; the window never "
+                               f"recovered in time.\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            log(f"{row.get('lane')} #{n} budget hold exhausted ({tries} holds) → labelled lane-failed")
+            continue
+        reset = parse_epoch(row.get("reset_at"))
+        reset_passed = reset is not None and now >= reset
+        wstate = budget_window_state(probe, reset_passed=reset_passed)
+        if wstate != BUDGET_WINDOW_OPEN:
+            # the window is still closed or its state cannot be confirmed: wait another round
+            if reset is None and budget_hold_expired(row, now):
+                pending.pop(key, None)  # the window state stayed unknown for too long
+                (state.get("_budget_tries") or {}).pop(key, None)
+                label_lane_failed(n, f"Lane {row.get('lane')} ({row.get('backend') or 'unknown'}) stayed on a closed "
+                                   f"budget window `{row.get('error_class')}`; the window never recovered within the "
+                                   f"hold bound.\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+                log(f"{row.get('lane')} #{n} budget hold expired (window {wstate}) → labelled lane-failed")
+                continue
+            delay = BUDGET_REQUEUE_DELAY
+            row["requeue_at"] = budget_requeue_at(now, reset if reset is not None and reset > now else None, delay=delay)
+            pending[key] = row
+            log(f"{row.get('lane')} #{n} budget hold: window {wstate}; retry in {delay}s", brain=False)
+            continue
+        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+        if rc: continue  # the relabel failed: keep the hold and retry next tick
+        gh(["issue", "comment", str(n), "--body",
+            f"The backend budget window recovered; the card is requeued as `lane-ready` "
+            f"(lane {row.get('lane')}, run `{row.get('run')}`)."])
+        pending.pop(key, None)
+        log(f"{row.get('lane')} #{n} budget window recovered → requeued lane-ready (hold {tries})")
+    save_state(state)
 
 def label_lane_failed(n, body):
     """Label the issue lane-failed and explain why in a comment."""
@@ -869,6 +1072,11 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        if is_budget_failure(info.get("error_class")):
+            # A spent budget window is not a card failure: the card never ran to the end, so it is
+            # held until the window recovers instead of being labelled lane-failed (Refs #1668).
+            hold_budget_card(lane, cfg, st, info, state)
+            mark_done(state, n); return {"done": True, "status": "budget-held", "error": None, "missing": []}
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
@@ -900,6 +1108,7 @@ def tick(lanes, state, last_warn):
             if result.get("done"): state.pop(L); save_state(state)
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
+    requeue_budget_cards(state)  # budget-failed cards return to the queue once the window recovered (Refs #1668)
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
     for i in q: i["deps_ok"] = deps_met(i)

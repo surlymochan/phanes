@@ -200,6 +200,11 @@ DEFAULTS = {
         "fresh_s": 900,                   # quota signals older than this (seconds) are ignored as stale
         "lane_pause": {},                 # backend -> regex: matching run errors pause that lane
         "requeue_classes": ["rate_limit", "quota"],
+        # A run that died because a budget window was spent is not a card failure (Refs #1668): the card is
+        # held until the window recovers and then returns to the queue on its own.
+        "budget_requeue_delay_s": 1800,   # fallback wait when the window reset time is unknown
+        "budget_requeue_max": 2,          # holds per card before it is failed for real
+        "budget_max_hold_s": 21600,       # how long a card stays held while the window state stays unknown
         # Per-backend quota table in lib/dispatch/quota.py's own shape: quota_error_re is
         # matched against the run's error/summary/status text, cooldown_s is the fallback
         # cooldown (a "resets in ..." / "Retry-After" in the text wins), scope says what is
@@ -1101,6 +1106,8 @@ class Dispatcher:
         self.last_leak_sweep = self.clock()
         held = {st.get("issue") for L, st in state.items() if not L.startswith("_") and isinstance(st, dict)}
         held.update(int(n) if str(n).isdigit() else n for n in (state.get("_label_debt") or {}))
+        held.update(row.get("issue") for row in (state.get("_budget_requeue") or {}).values()
+                    if isinstance(row, dict) and row.get("issue") is not None)
         rc, out, _ = self.gh(["issue", "list", "--state", "open", "--label", self.L["in_progress"], "--limit", "100",
                               "--json", "number,updatedAt"])
         if rc:
@@ -1226,6 +1233,8 @@ class Dispatcher:
     @staticmethod
     def mark_done(state, n):
         state["_done"] = (state.get("_done", []) + [n])[-200:]
+        if str(n) not in state.get("_budget_requeue", {}):
+            state.get("_budget_tries", {}).pop(str(n), None)
 
     def age_s(self, st):
         try:
@@ -1859,6 +1868,13 @@ class Dispatcher:
                          f"[failure_reason={reason}; error={detail}]")
                 return True
             requeue_classes = (self.cfg.get("quota") or {}).get("requeue_classes", ["rate_limit", "quota"])
+            if dispatch_module("failure_class").is_budget(error_class):
+                # A spent budget window is not a card failure: the card never ran to the end, so it is
+                # held until the window recovers instead of being labelled lane-failed (Refs #1668).
+                self.hold_budget_card(lane, lc, st, info, state, error_class)
+                self.mark_done(state, n)
+                self.quota_backend_guard(lane, lc, info)
+                return True
             if error_class in requeue_classes:
                 self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
                 self.gh(["issue", "comment", str(n), "--body",
@@ -1880,6 +1896,162 @@ class Dispatcher:
                      f"failure_reason={reason}; error={detail}) → labelled {label}")
             self.quota_backend_guard(lane, lc, info)
         return True
+
+    # ---------------------------------------------------- budget failure hold
+    def budget_requeue_delay(self):
+        """Seconds a budget-failed card waits when the window reset time is unknown."""
+        fc = dispatch_module("failure_class")
+        try:
+            return int((self.cfg.get("quota") or {}).get("budget_requeue_delay_s",
+                                                         fc.DEFAULT_BUDGET_REQUEUE_DELAY_S))
+        except (TypeError, ValueError):
+            return fc.DEFAULT_BUDGET_REQUEUE_DELAY_S
+
+    def budget_requeue_max(self):
+        """How often a card may be held on a budget window before it fails for real."""
+        try:
+            return max(1, int((self.cfg.get("quota") or {}).get("budget_requeue_max", 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    def budget_max_hold_s(self):
+        """How long a card stays held while the window state stays unknown."""
+        fc = dispatch_module("failure_class")
+        try:
+            return int((self.cfg.get("quota") or {}).get("budget_max_hold_s", fc.MAX_BUDGET_HOLD_S))
+        except (TypeError, ValueError):
+            return fc.MAX_BUDGET_HOLD_S
+
+    def budget_window_reset(self, info):
+        """The epoch second at which the backend quota window recovers (None when unknown).
+
+        The run result knows the reset time of the provider error it hit, the
+        run text may say when the window recovers ("resets in 2h13m") and the
+        configured quota probe knows it for the window that is currently closed.
+        The real executor writes no top level `resets_at`, so the text and the
+        probe are what a 5h window failure can rely on.
+        """
+        fc = dispatch_module("failure_class")
+        reset = self.quota_until((info or {}).get("resets_at"))
+        if reset is not None:
+            return reset
+        probe = self.quota_probe()
+        reset = self.quota_until(probe.get("resets_at"))
+        if reset is not None:
+            return reset
+        seconds = fc.reset_seconds_from_text(self.quota_text(info))
+        if seconds:
+            return self.clock() + seconds
+        return None
+
+    def hold_budget_card(self, lane, lc, st, info, state, error_class):
+        """Hold a card whose run died on a spent budget window (Refs #1668).
+
+        The card keeps its `in-progress` label, so no lane picks it up while the
+        window is closed, and waits in the state for the window to recover; the
+        tick then returns it to `lane-ready` on its own.  A budget failure is
+        not a card failure: the card never ran to the end.
+        """
+        fc = dispatch_module("failure_class")
+        n, run = st["issue"], st["run"]
+        now = self.clock()
+        reset = self.budget_window_reset(info)
+        at = fc.requeue_at(now, reset, delay_s=self.budget_requeue_delay(),
+                           max_hold_s=self.budget_max_hold_s())
+        with self.state_lock:
+            pending = state.setdefault("_budget_requeue", {})
+            row = dict(pending.get(str(n)) or {})
+            counts = state.setdefault("_budget_tries", {})
+            row.update({"issue": n, "lane": lane, "run": run,
+                        "backend": (info or {}).get("backend") or (lc or {}).get("backend"),
+                        "error_class": error_class, "tries": int(counts.get(str(n), row.get("tries") or 0)) + 1,
+                        "requeue_at": at, "reset_at": reset, "since": row.get("since") or now})
+            pending[str(n)] = row
+            counts[str(n)] = row["tries"]
+        when = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.gh_write(["issue", "comment", str(n), "--body",
+                       f"Lane {lane} ({lc['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
+                       f"because a backend budget window was spent (`{error_class}`), not a card failure. "
+                       f"Held until the window recovers (at `{when}`); the card returns to `{self.L['ready']}` "
+                       f"by itself then.\n\nExecutor summary: {info.get('summary')}"])
+        self.log(f"{lane} #{n} run {run} budget failure ({error_class}) → held until {when} "
+                 f"(hold {row['tries']}/{self.budget_requeue_max()})")
+        return True
+
+    def budget_hold_expired(self, row, now):
+        """True when a held card waited longer than the hold bound without a known recovery time."""
+        since = dispatch_module("failure_class").epoch((row or {}).get("since"))
+        if since is None:
+            return False
+        return now - since >= self.budget_max_hold_s()
+
+    def requeue_budget_cards(self, state):
+        """Return the held cards to the queue once the budget window recovered (Refs #1668).
+
+        The window state decides: a probe that still reports an exhausted window
+        (or no answer at all) keeps the card held, so a card is never put back
+        into the queue while its window is still closed.
+        """
+        pending = state.get("_budget_requeue") or {}
+        if not pending:
+            return
+        fc = dispatch_module("failure_class")
+        now = self.clock()
+        for key, row in list(pending.items()):
+            at = fc.epoch(row.get("requeue_at"))
+            if at is None or at > now:
+                continue
+            n = row.get("issue") or key
+            issue_state, labels = self.issue_labels(n)
+            if issue_state is None:
+                continue                      # unreadable: try again next tick
+            if issue_state != "OPEN" or self.L["pr"] in labels:
+                pending.pop(key, None)        # closed or already merged: the hold is void
+                state.get("_budget_tries", {}).pop(key, None)
+                continue
+            tries = int(row.get("tries") or 0)
+            if tries >= self.budget_requeue_max():
+                # the card keeps hitting a closed window: fall back to the normal failure flow
+                pending.pop(key, None)
+                (state.get("_budget_tries") or {}).pop(key, None)
+                self.relabel(n, self.L["failed"], [self.L["in_progress"], self.L["ready"]], state)
+                self.gh_write(["issue", "comment", str(n), "--body",
+                               f"Lane {row.get('lane')} ({row.get('backend') or 'unknown'}) hit a closed budget "
+                               f"window `{row.get('error_class')}` {tries} time(s) for this card; the window never "
+                               f"recovered in time.\n\nLabel `{self.L['failed']}`; re-add `{self.L['ready']}` to retry."])
+                self.log(f"#{n} budget hold exhausted ({tries} holds) → {self.L['failed']}")
+                continue
+            reset = fc.epoch(row.get("reset_at"))
+            reset_passed = reset is not None and now >= reset
+            wstate = fc.window_state(self.quota_probe(), reset_passed=reset_passed)
+            if wstate != fc.WINDOW_OPEN:
+                # the window is still closed or its state cannot be confirmed: wait another
+                # round instead of burning the card
+                if reset is None and self.budget_hold_expired(row, now):
+                    pending.pop(key, None)    # the window state stayed unknown for too long
+                    (state.get("_budget_tries") or {}).pop(key, None)
+                    self.relabel(n, self.L["failed"], [self.L["in_progress"], self.L["ready"]], state)
+                    self.gh_write(["issue", "comment", str(n), "--body",
+                                   f"Lane {row.get('lane')} ({row.get('backend') or 'unknown'}) stayed on a closed "
+                                   f"budget window `{row.get('error_class')}`; the window never recovered within "
+                                   f"the hold bound.\n\nLabel `{self.L['failed']}`; re-add `{self.L['ready']}` to retry."])
+                    self.log(f"#{n} budget hold expired (window {wstate}) → {self.L['failed']}")
+                    continue
+                delay = self.budget_requeue_delay()
+                row["requeue_at"] = fc.requeue_at(now, reset if reset and reset > now else None,
+                                                  delay_s=delay, max_hold_s=self.budget_max_hold_s())
+                pending[key] = row
+                self.log(f"#{n} budget hold: window {wstate}; retry in {delay}s", brain=False)
+                continue
+            rc = self.relabel(n, self.L["ready"], [self.L["in_progress"], self.L["failed"]], state)[0]
+            if rc:
+                pending[key] = row           # the relabel failed: keep the hold and retry next tick
+                continue
+            pending.pop(key, None)
+            self.gh_write(["issue", "comment", str(n), "--body",
+                           f"The backend budget window recovered; the card is requeued as `{self.L['ready']}` "
+                           f"(lane {row.get('lane')}, run `{row.get('run')}`)."])
+            self.log(f"#{n} budget window recovered → {self.L['ready']} (hold {tries})")
 
     def watchdog_requeue(self):
         f = self.cfg.get("watchdog_requeue_file")
@@ -2785,6 +2957,10 @@ class Dispatcher:
             self.sweep_leaked_inprogress(state)
         except Exception as e:
             self.log(f"leak-sweep exc: {e!r}", brain=False)
+        try:
+            self.requeue_budget_cards(state)
+        except Exception as e:
+            self.log(f"budget requeue exc: {e!r}", brain=False)
         try:
             q = self.queue()
         except Exception as e:
