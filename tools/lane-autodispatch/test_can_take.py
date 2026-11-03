@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fake-queue proof for backend starvation fallback (Refs #232) and for the verify-card contract (Refs #1811)."""
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -172,7 +173,7 @@ class TickVerifyDispatchTest(unittest.TestCase):
 
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
 
-    def run_tick(self, issues):
+    def run_tick(self, issues, lanes=None):
         """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
         dispatched, logs, edits = [], [], []
 
@@ -217,11 +218,57 @@ class TickVerifyDispatchTest(unittest.TestCase):
                 # tick() writes lanes-status.json without closing it: the warning is pre-existing
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", ResourceWarning)
-                    AUTODISPATCH.tick(dict(self.LANES), {}, 0)
+                    AUTODISPATCH.tick(dict(lanes or self.LANES), {}, 0)
         finally:
             for name, value in saved.items():
                 setattr(AUTODISPATCH, name, value)
         return dispatched, logs
+
+    def test_share_keeps_both_classes_moving_during_floods(self):
+        old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
+        AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
+        try:
+            verify = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 6)]
+            work = [issue(n, "普通工作卡", ("lane-ready",)) for n in range(10, 15)]
+            for rows in (work + verify[:1], verify + work[:1]):
+                dispatched, logs = self.run_tick(rows)
+                self.assertEqual(dispatched, [("CX2", 1), ("CX10", 10)])
+                self.assertTrue(any("other class yields" in line for line in logs))
+        finally:
+            AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = old
+
+    def test_share_keeps_the_work_floor_during_a_verify_flood(self):
+        # Three lanes: two review lanes (CX2/CX4) and one work lane (CX10). The verify reservation
+        # is one lane, so a verify flood may not swallow every review lane: the work class keeps
+        # its floor (total - reserve = 2 lanes) and only the reserved lane takes a verify card.
+        lanes = {"CX2": {"host": "h2", "backend": "codex"}, "CX4": {"host": "h4", "backend": "codex"},
+                 "CX10": {"host": "h10", "backend": "codex"}}
+        verify = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 6)]
+        work = [issue(n, "普通工作卡", ("lane-ready",)) for n in range(10, 13)]
+        old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
+        AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
+        try:
+            dispatched, _ = self.run_tick(verify + work, lanes)
+        finally:
+            AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = old
+        self.assertEqual([lane for lane, _ in dispatched], ["CX2", "CX4", "CX10"])
+        self.assertEqual([n for lane, n in dispatched if lane == "CX2"], [1])  # the reserved lane
+        self.assertEqual(sorted(n for lane, n in dispatched if lane != "CX2"), [10, 11])  # work floor
+
+    def test_share_configuration_falls_back_to_the_default_on_a_bad_value(self):
+        # A typo in the configuration must not kill the AD loop: the value falls back to the default.
+        self.assertEqual(AUTODISPATCH.env_number("AD_VERIFY_SHARE", 0.2), 0.2)
+        os.environ["AD_TEST_BAD_NUMBER"] = "abc"
+        try:
+            self.assertEqual(AUTODISPATCH.env_number("AD_TEST_BAD_NUMBER", 0.2), 0.2)
+            self.assertEqual(AUTODISPATCH.env_number("AD_TEST_BAD_NUMBER", 1, int), 1)
+        finally:
+            del os.environ["AD_TEST_BAD_NUMBER"]
+
+    def test_share_uses_available_capacity_and_allows_single_lane(self):
+        lanes = {"CX2": {}, "CX4": {}, "CX10": {}}
+        self.assertEqual(AUTODISPATCH.queue_class_limits(lanes, {}, ["CX2"]), (0, 1))
+        self.assertEqual(AUTODISPATCH.queue_class_limits(lanes, {"CX10": {"class": "work"}}, ["CX2"]), (1, 0))
 
     def test_verify_card_is_dispatched_to_a_review_lane_only(self):
         dispatched, _ = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))])
