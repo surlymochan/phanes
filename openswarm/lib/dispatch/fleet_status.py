@@ -301,9 +301,14 @@ def lane_data(status: Any) -> Dict[str, Any]:
     ``in_flight`` lists the cards the busy lanes hold.  A lane whose state is
     neither busy nor idle (an ssh error, for example) counts as unknown and
     keeps its raw text: a broken lane is not an idle lane.
+
+    ``stale`` counts the busy lanes the dispatcher marked as stale (Refs
+    #1786): their last trustworthy activity is older than the limit, so the
+    busy entry says less about the fleet than it appears to.
     """
     lanes: List[Dict[str, Any]] = []
     busy = idle = unknown = 0
+    stale: List[str] = []
     in_flight: List[int] = []
     for name, state, record in _lane_records(status):
         text = state.strip()
@@ -317,6 +322,8 @@ def lane_data(status: Any) -> Dict[str, Any]:
             busy += 1
             if isinstance(issue, int):
                 in_flight.append(issue)
+            if isinstance(record, dict) and record.get("stale"):
+                stale.append(str(name))
         elif lowered in ("idle", "", "-"):
             kind = "idle"
             idle += 1
@@ -324,13 +331,16 @@ def lane_data(status: Any) -> Dict[str, Any]:
             kind = "unknown"
             unknown += 1
         lanes.append({"lane": name, "kind": kind, "state": text, "issue": issue,
-                      "host": record.get("host"), "backend": record.get("backend")})
+                      "host": record.get("host"), "backend": record.get("backend"),
+                      "stale": bool(isinstance(record, dict) and record.get("stale"))})
     reported = status if isinstance(status, dict) else {}
     return {
         "total": len(lanes),
         "busy": busy,
         "idle": idle,
         "unknown": unknown,
+        "stale": len(stale),
+        "stale_lanes": stale,
         "in_flight": sorted(in_flight),
         "lanes": lanes,
         "reported_busy": reported.get("_busy"),
@@ -609,6 +619,8 @@ def _lane_line(data: Dict[str, Any]) -> str:
     parts = ["busy=%d" % data.get("busy", 0), "idle=%d" % data.get("idle", 0)]
     if data.get("unknown"):
         parts.append("unknown=%d" % data["unknown"])
+    if data.get("stale"):
+        parts.append("stale=%d" % data["stale"])
     cards = data.get("in_flight") or []
     parts.append("in_flight=%d%s" % (len(cards),
                                       " (" + ",".join("#%d" % card for card in cards) + ")"
