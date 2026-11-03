@@ -128,6 +128,11 @@ def compatible_lru_picker(path):
 
 # ---------------------------------------------------------------- config
 
+#: The MiniMax burn watchdog refreshes at most every this many seconds: it
+#: reads the provider request log of the broker, and the freshness window of
+#: the reading (900 s) is longer than that.
+MINIMAX_BURN_REFRESH_S = 300
+
 DEFAULTS = {
     "repo": "",
     "local_repo": "",
@@ -194,6 +199,16 @@ DEFAULTS = {
     "default_fleet_bin": "~/.local/bin/openswarm-fleet",
     "default_repo_path": "~/work/repo",
     "watchdog_requeue_file": "",
+    # The MiniMax burn reading the lane status shows (Refs #1671).  The burn
+    # watchdog (tools/mm-burn-rate.py) measures the real MiniMax token burn
+    # and writes the snapshot; burn_cmd overrides the default watchdog
+    # command, status_file is the snapshot path and max_age_s drops a reading
+    # that is no longer fresh.
+    "minimax": {
+        "burn_cmd": "",
+        "status_file": "",
+        "max_age_s": 900,
+    },
     "quota": {
         "backend_pause": True,
         "probe_cmd": "",                  # shell command returning JSON {exhausted: bool, resets_at?: ISO-8601}
@@ -469,6 +484,7 @@ class Dispatcher:
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
         self._quota_probe_cache = None
+        self._minimax_burn_at = 0.0
 
     # ------------------------------------------------------------ io helpers
     def path(self, name):
@@ -1140,6 +1156,74 @@ class Dispatcher:
             return parsed.timestamp()
         except (ValueError, TypeError, OverflowError):
             return None
+
+    def minimax_burn_path(self):
+        """The path of the MiniMax burn snapshot the lane status shows."""
+        cfg = self.cfg.get("minimax") or {}
+        path = cfg.get("status_file") or os.path.join(self.D, "minimax-burn.json")
+        return os.path.expanduser(path)
+
+    def minimax_max_age_s(self):
+        """The freshness window of a MiniMax token reading (seconds)."""
+        value = (self.cfg.get("minimax") or {}).get("max_age_s")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 900.0
+
+    def minimax_burn_tool(self):
+        """The burn watchdog of the repository: ``tools/mm-burn-rate.py``."""
+        override = os.environ.get("MM_BURN_TOOL")
+        if override:
+            return os.path.expanduser(override)
+        # This file lives in openswarm/lib/dispatch/: the repository root is
+        # three directories above it.
+        here = os.path.abspath(__file__)
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(here))))
+        return os.path.join(root, "tools", "mm-burn-rate.py")
+
+    def minimax_burn_command(self):
+        """The command that refreshes the MiniMax burn snapshot (Refs #1671).
+
+        The configured ``burn_cmd`` wins.  The default runs the burn watchdog
+        of the repository (``tools/mm-burn-rate.py``): it measures the real
+        MiniMax token burn from the provider request log of the broker and
+        writes the snapshot the lane status shows.  Without it the fleet
+        status would carry no token reading at all.
+        """
+        cmd = (self.cfg.get("minimax") or {}).get("burn_cmd")
+        if cmd:
+            return list(cmd) if isinstance(cmd, (list, tuple)) else shlex.split(cmd)
+        tool = self.minimax_burn_tool()
+        if not tool or not os.path.exists(tool):
+            return None
+        return [sys.executable, tool,
+                "--history", self.path("minimax-burn-history.jsonl"),
+                "--status-file", self.minimax_burn_path()]
+
+    def refresh_minimax_burn(self):
+        """Refresh the MiniMax burn snapshot the lane status shows (Refs #1671).
+
+        The watchdog exits 1 while it alerts (a collapsed token burn); that
+        alert is logged here.  A failing watchdog must never stop the tick.
+        The watchdog reads the provider request log, so it runs at most every
+        ``MINIMAX_BURN_REFRESH_S`` seconds: the freshness window of the
+        reading is longer than that.
+        """
+        cmd = self.minimax_burn_command()
+        if not cmd or self.dry_run:
+            return
+        now = self.clock()
+        if now - self._minimax_burn_at < MINIMAX_BURN_REFRESH_S:
+            return
+        self._minimax_burn_at = now
+        try:
+            rc, out, err = self.runner(cmd, timeout=60)
+        except Exception as e:
+            self.log(f"minimax burn watchdog exc: {e!r}", brain=False)
+            return
+        if rc:
+            self.log(f"minimax burn watchdog rc={rc}: {(err or out).strip()[-160:]}", brain=False)
 
     def reap_quota_pauses(self):
         try:
@@ -2583,6 +2667,13 @@ class Dispatcher:
                                                 "model_drift": drift},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
+        # The MiniMax burn reading of the watchdog snapshot: the hourly token
+        # burn an operator compares with the MiniMax console.  A snapshot
+        # whose token sample is no longer fresh is dropped, so a stopped
+        # collection never shows an old burn as the current one.
+        self.refresh_minimax_burn()
+        st.update(dispatch_module("minimax_usage").read_snapshot(
+            self.minimax_burn_path(), self.clock(), self.minimax_max_age_s()))
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
         return res

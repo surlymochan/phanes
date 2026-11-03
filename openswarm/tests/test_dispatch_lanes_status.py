@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPEC = importlib.util.spec_from_file_location(
@@ -27,8 +28,14 @@ class LaneStatus(unittest.TestCase):
                        "policy_file": self.policy_path,
                        "ssh": {"control_dir": os.path.join(self.tmp.name, "cm")}}, stream)
         self.cfg = E.load_config(self.cfg_path)
-        self.d = E.Dispatcher(self.cfg, out=open(os.devnull, "w"))
+        self.calls = []
+        self.d = E.Dispatcher(self.cfg, runner=self._runner, out=open(os.devnull, "w"))
         self.addCleanup(self.d.out.close)
+
+    def _runner(self, cmd, timeout=120, inp=None, env=None):
+        """The commands of the dispatcher are recorded, never executed."""
+        self.calls.append(cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd))
+        return 0, "", ""
 
     def status(self, configured_model):
         lanes = {"GH1": {"backend": "claude", "host": "gorelay", "model": configured_model},
@@ -75,6 +82,35 @@ class LaneStatus(unittest.TestCase):
         view = E.lanes_status_view(raw)
         self.assertNotIn("schema", view)
         self.assertEqual(view["GH1"], {"state": "idle", "backend": "claude"})
+
+    def _burn_snapshot(self, age_s, tokens=166):
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).isoformat()
+        with open(os.path.join(self.state_dir, "minimax-burn.json"), "w", encoding="utf-8") as stream:
+            json.dump({"status": "ok", "hourly_tokens": tokens, "token_alert": True,
+                       "token_observed_at": stamp, "token_sample_at": stamp}, stream)
+        return stamp
+
+    def test_lane_status_shows_the_minimax_hourly_token_burn(self):
+        # The burn watchdog measures the real MiniMax token burn (Refs #1671).
+        stamp = self._burn_snapshot(30)
+        data = self.status("claude-haiku-4.5")
+        self.assertEqual(data["_minimax_hourly_tokens"], 166)
+        self.assertTrue(data["_minimax_token_alert"])
+        self.assertEqual(data["_minimax_usage_at"], stamp)
+
+    def test_lane_status_drops_an_expired_minimax_reading(self):
+        # A stopped watchdog must not show the last known burn as current.
+        self._burn_snapshot(7200)
+        data = self.status("claude-haiku-4.5")
+        self.assertNotIn("_minimax_hourly_tokens", data)
+
+    def test_lane_status_refreshes_the_burn_snapshot_with_the_default_watchdog(self):
+        # Without a configured burn_cmd the fleet status would carry no token
+        # reading at all (Refs #1671).
+        self.status("claude-haiku-4.5")
+        burn = [call for call in self.calls if "mm-burn-rate.py" in call]
+        self.assertTrue(burn)
+        self.assertIn(os.path.join(self.state_dir, "minimax-burn.json"), burn[0])
 
 
 if __name__ == "__main__":

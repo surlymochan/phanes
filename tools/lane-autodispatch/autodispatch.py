@@ -8,6 +8,7 @@ State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/aut
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
 import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -66,6 +67,10 @@ AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower()
 # Verify cards rejected for missing fields, per issue: the field set that was logged. An invalid card
 # must not repeat the same log line every tick, but a changed field set is logged again.
 VERIFY_REJECT_LOGGED = {}
+# The MiniMax burn reading the status surface shows (Refs #1671).  A token
+# sample older than this is not shown: a stopped collection must not pass the
+# last known burn off as the current one.
+MM_BURN_MAX_AGE_S = int(os.environ.get("MM_BURN_MAX_AGE_S", "900"))
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -545,6 +550,125 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
+def minimax_burn_path():
+    """The path of the MiniMax burn snapshot the status surface shows."""
+    return os.environ.get("MM_BURN_STATUS") or os.path.join(D, "minimax-burn.json")
+
+def minimax_burn_status(now=None, max_age_s=MM_BURN_MAX_AGE_S):
+    """The MiniMax burn reading of the watchdog snapshot (Refs #1671).
+
+    The snapshot is only shown while the reading is fresh: the watchdog writes
+    ``token_observed_at`` (the moment the reading was taken) and the hourly
+    token count.  A snapshot whose reading is older than the freshness window
+    is dropped, so a stopped watchdog cannot pass the last known burn off as
+    the current one.  ``token_sample_at`` (the newest MiniMax provider
+    request of the hour) is the moment the reading is based on; a genuine
+    zero burn has no request at all and is still a reading of this hour.
+    A snapshot without a reading is a collection failure (the collector is
+    gone, the log lost rows or the collector cannot be verified): no token
+    count is shown, but the state is, so a broken collection is never read as
+    a fleet that burned nothing.  The state of the collector behind the
+    reading (``collector_state``) is shown with it.  The consumption of the
+    current Token Plan interval (``interval_tokens``) is shown with the hour:
+    it is the figure of the interval the MiniMax console shows, and it is
+    only set when the rows of that interval are complete.
+    The same contract lives in ``openswarm/lib/dispatch/minimax_usage.py``
+    for the dispatch engine.
+    """
+    try:
+        with open(minimax_burn_path(), encoding="utf-8") as stream:
+            burn = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return {}  # Missing or malformed optional telemetry must not break dispatch.
+    if not isinstance(burn, dict): return {}
+    tokens = burn.get("hourly_tokens")
+    stamp = burn.get("token_observed_at") or burn.get("written_at")
+    if not isinstance(stamp, str): return {}
+    try: observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError: return {}
+    if observed.tzinfo is None: observed = observed.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - observed).total_seconds()
+    if age < -60 or age > max_age_s: return {}
+    fields = {}
+    if not isinstance(tokens, bool) and isinstance(tokens, (int, float)):
+        fields.update({"_minimax_hourly_tokens": int(tokens),
+                       "_minimax_token_alert": bool(burn.get("token_alert")),
+                       "_minimax_usage_at": burn.get("token_sample_at") or stamp,
+                       "_minimax_token_age_s": int(age),
+                       "_minimax_token_state": str(burn.get("token_state") or "unknown")})
+    elif burn.get("token_state"):
+        # A collection failure is no reading, but it is not a zero burn
+        # either: the state says which one it is.
+        fields["_minimax_token_state"] = str(burn.get("token_state"))
+        fields["_minimax_token_age_s"] = int(age)
+    interval = burn.get("interval_tokens")
+    if not isinstance(interval, bool) and isinstance(interval, (int, float)):
+        # The consumption of the current Token Plan interval: the operator
+        # compares it with the interval figure of the MiniMax console.
+        fields["_minimax_interval_tokens"] = int(interval)
+        requests = burn.get("interval_requests")
+        if not isinstance(requests, bool) and isinstance(requests, (int, float)):
+            fields["_minimax_interval_requests"] = int(requests)
+        reset = burn.get("interval_reset_at")
+        if isinstance(reset, str): fields["_minimax_interval_reset_at"] = reset
+    collector = burn.get("collector_state")
+    if isinstance(collector, str):
+        # "alive" is a verified reading, the other states are collection
+        # failures.
+        fields["_minimax_collector_state"] = collector
+    last = burn.get("token_last_request_at")
+    if isinstance(last, str): fields["_minimax_token_last_request_at"] = last
+    return fields
+
+def minimax_burn_tool():
+    """The burn watchdog of the repository: ``tools/mm-burn-rate.py``.
+
+    The dispatcher lives in ``tools/lane-autodispatch/`` and the watchdog one
+    directory above it (``tools/``); both are looked up, so the watchdog is
+    found without any configuration (Refs #1671).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = (os.path.join(os.path.dirname(here), "mm-burn-rate.py"),
+                  os.path.join(here, "mm-burn-rate.py"))
+    for candidate in candidates:
+        if os.path.exists(candidate): return candidate
+    return candidates[0]
+
+def minimax_burn_command():
+    """The command that refreshes the MiniMax burn snapshot (Refs #1671).
+
+    ``MM_BURN_CMD`` overrides it.  The default runs the burn watchdog of the
+    repository (``tools/mm-burn-rate.py``): it reads the MiniMax provider
+    request log (the log of the running broker, found without configuration)
+    and writes the snapshot the lane status shows.  Without the watchdog on
+    the box there is no reading, and the status stays as it was.
+    """
+    override = os.environ.get("MM_BURN_CMD")
+    if override: return shlex.split(override)
+    tool = os.environ.get("MM_BURN_TOOL") or minimax_burn_tool()
+    if not os.path.exists(tool): return []
+    cmd = [sys.executable, tool, "--history", os.path.join(D, "minimax-burn-history.jsonl"),
+           "--status-file", minimax_burn_path()]
+    broker = os.environ.get("MM_BROKER_LOG") or os.environ.get("PI_BROKER_LOG")
+    if broker: cmd += ["--broker-log", broker]
+    health = os.path.join(D, "health.json")
+    if os.path.exists(health): cmd += ["--append", health]
+    return cmd
+
+def refresh_minimax_burn():
+    """Refresh the MiniMax burn snapshot the lane status shows (Refs #1671).
+
+    The watchdog exits 1 while it alerts (a collapsed token burn); that alert
+    is logged so the dispatcher log carries it too.  A failing watchdog must
+    never stop the dispatcher.
+    """
+    cmd = minimax_burn_command()
+    if not cmd: return
+    try: rc, out, err = sh(cmd, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"minimax burn watchdog failed: {e!r}", brain=False); return
+    if rc: log(f"minimax burn watchdog rc={rc}: {(err or out).strip()[-160:]}", brain=False)
+
 def status_snapshot(lanes, state, res, ready, blocked):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
@@ -555,6 +679,9 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
     status["_at"] = time.strftime("%F %T")
+    # The burn watchdog measures the MiniMax token burn; the lane status shows
+    # its reading so an operator can compare it with the MiniMax console.
+    status.update(minimax_burn_status())
     return status
 
 def deps_met(item):
@@ -850,6 +977,7 @@ def tick(lanes, state, last_warn):
         if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
         elif time.time() - last_warn > 600:
             log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
+    refresh_minimax_burn()
     st = status_snapshot(lanes, state, res, ready, blocked)
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
