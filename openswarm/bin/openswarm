@@ -8507,12 +8507,16 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
 
 
 class LaneChild:
+    #: How many stderr lines of the resident executor are kept for the failure report.
+    STDERR_LINES = 200
+
     def __init__(self, lane, cwd, policy, on_started=None):
         self.lane, self.cwd = lane, cwd
         _tmpdir, self.env = configure_executor_environment(cwd)
         self.events = queue.Queue()
         self.backlog = []
         self.write_lock = threading.Lock()
+        self.stderr_lines = []
         backend = lane["backend"]
         if backend == "codex":
             binary = envvar("CODEX_APP_SERVER_BIN") or lane.get("binary") or find_codex(policy)[0]
@@ -8567,8 +8571,15 @@ class LaneChild:
             os.makedirs(child_env["HERMES_HOME"], exist_ok=True)
             if lane.get("model"):
                 child_env["HERMES_MODEL"] = lane["model"]
+        # How the lane was started (the wrapper, its build, the broker socket): a failed spawn
+        # used to leave no trace of it, because the wrapper's reason only went to stderr and
+        # stderr was dropped (Refs #1747).
+        self.spawn = lane_pi_spawn_evidence(binary, child_env) if backend == "pi" else {}
+        # The executor's stderr carries its own failure reason (pi-isolated's spawn guards,
+        # the provider's error lines).  It used to go to /dev/null, which left a failed run
+        # without any agent-side error string; the drain thread keeps the tail instead.
         self.proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True,
+                                     stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True,
                                      env=child_env)
         try:
             self.pgid = os.getpgid(self.proc.pid)
@@ -8578,6 +8589,8 @@ class LaneChild:
             on_started(self)
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
+        self.stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+        self.stderr_reader.start()
         if backend == "codex":
             try:
                 self.send({"jsonrpc": "2.0", "id": "init", "method": "initialize",
@@ -8612,6 +8625,19 @@ class LaneChild:
                     continue
         finally:
             self.events.put(None)
+
+    def _read_stderr(self):
+        """Keep the executor's stderr tail; without it a failed run has no error string."""
+        try:
+            for line in self.proc.stderr:
+                self.stderr_lines.append(line)
+                if len(self.stderr_lines) > self.STDERR_LINES:
+                    del self.stderr_lines[:len(self.stderr_lines) - self.STDERR_LINES]
+        except Exception:
+            pass
+
+    def stderr_text(self):
+        return "".join(self.stderr_lines)
 
     def alive(self):
         return self.proc.poll() is None
@@ -8672,11 +8698,74 @@ class LaneChild:
             self.proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
-        for stream in (self.proc.stdin, self.proc.stdout):
+        for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 stream.close()
             except Exception:
                 pass
+
+
+def lane_child_stderr(child, limit=600):
+    """The resident executor's stderr tail.
+
+    A lane child writes its failure reason to stderr (pi-isolated's spawn guards, the
+    provider's error lines).  It is the only agent-side error string a failed run has.
+    """
+    reader = getattr(child, "stderr_text", None)
+    text = reader() if callable(reader) else ""
+    text = (text or "").strip()
+    return text[-limit:] if text else ""
+
+
+def lane_failure_detail(child, detail):
+    """A failure detail that keeps the executor's own error string next to the classification."""
+    tail = lane_child_stderr(child)
+    if not tail or tail in (detail or ""):
+        return detail
+    return f"{detail}; executor stderr: {tail}" if detail else f"executor stderr: {tail}"
+
+
+def lane_file_sha256(path):
+    """The sha256 of a file, or None when it cannot be read."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def lane_pi_spawn_evidence(binary, env):
+    """The spawn path of a pi lane: the wrapper, its build and the broker socket it will use.
+
+    The wrapper reports a refused spawn on stderr only, so a failed run had no record of how pi
+    was started.  These facts are recorded with every pi run, which is what makes the next
+    failure readable (Refs #1747).
+    """
+    evidence = {"wrapper": binary, "wrapper_sha256": lane_file_sha256(binary), "env": {}}
+    for name in ("OPENSWARM_PI_RUNTIME", "OPENSWARM_PI_BROKER_SOCKET", "OPENSWARM_PI_SANDBOX_TMP",
+                 "OPENSWARM_PI_DEPS_ROOT", "OPENSWARM_PI_ISOLATED_MODEL"):
+        value = env.get(name)
+        if value:
+            evidence["env"][name] = value
+    socket_path = env.get("OPENSWARM_PI_BROKER_SOCKET") or ""
+    broker = {"path": socket_path or None, "exists": False, "is_socket": False}
+    if socket_path:
+        try:
+            broker["exists"] = True
+            broker["is_socket"] = stat.S_ISSOCK(os.stat(socket_path).st_mode)
+        except OSError:
+            pass
+    evidence["broker"] = broker
+    return evidence
+
+
+def lane_child_spawn(child):
+    """The spawn path of the lane's executor, when the backend records one."""
+    spawn = getattr(child, "spawn", None)
+    return spawn if isinstance(spawn, dict) and spawn else None
 
 
 class AgyChild:
@@ -9321,6 +9410,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
+               spawn=lane_child_spawn(child),
                **executor_status_fields(child.pid, getattr(child, "pgid", None)))
     lane_record_event(event_file, {"type": "lane_start", "lane": lane["name"]})
     if continuation:
@@ -9390,13 +9480,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         text = detail or ""
         if lane_headless(lane):
             text = child.stderr_text()[-600:] or text
+        else:
+            text = lane_failure_detail(child, text)
         return classify_lane_failure(text, lane.get("model"), spec.get("risk_blocks"))
 
     def turn_failed(error_class, rc, detail):
         """Classify a turn that ended without a report; a stalled turn keeps its own class."""
         if stall_hit:
             return None, usage, "stalled", 124, event_file, stall_detail
-        return None, usage, error_class, rc, event_file, detail
+        return None, usage, error_class, rc, event_file, lane_failure_detail(child, detail)
 
     if budget_hit:
         lane_abort_child(lane, child, turn)
@@ -9495,8 +9587,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                         error_class, detail = lane_failure("resident executor process exited")
                         return turn_failed(error_class, 1, detail)
                 else:
-                    return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
-                                       "resident executor process exited")
+                    detail = lane_failure_detail(child, "resident executor process exited")
+                    lane_record_event(event_file, {"type": "error", "error": detail})
+                    return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, detail)
             continue
         if msg is None:
             lane_note_executor_exit(rdir, desc_recorded_at)
@@ -9512,8 +9605,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     # classification; retain the observed process status too.
                     detail += f" (executor exit code {exit_code})"
                 return turn_failed(error_class, 1, detail)
-            return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
-                               "resident executor stdout closed")
+            detail = lane_failure_detail(child, "resident executor stdout closed")
+            lane_record_event(event_file, {"type": "error", "error": detail})
+            return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, detail)
         block = None if turn.get("risk_resume") else enforced_risk(msg, risk_policy, ws["path"])
         if block and lane_risk_deniable(lane, block, spec):
             # Refuse only this command: interrupt the turn, then continue the same session with the reason.
@@ -10044,7 +10138,8 @@ def lane_do_run(lane, spec, child, server, current):
                     attempts.append({"backend": attempt_lane["backend"], "model": model,
                                      "effort": attempt_lane.get("effort"), "rc": rc, "seconds": 0,
                                      "error_class": error_class, "meta": {"usage": usage},
-                                     "events": evp, "error_tail": error_tail})
+                                     "events": evp, "error_tail": error_tail,
+                                     "spawn": lane_child_spawn(child)})
                     break
                 started = NOW()
                 spec.pop("_turn_completed", None)
@@ -10090,7 +10185,8 @@ def lane_do_run(lane, spec, child, server, current):
                 attempts.append({"backend": attempt_lane["backend"], "model": model,
                                  "effort": attempt_lane.get("effort"), "rc": rc,
                                  "seconds": round(NOW() - started, 3), "error_class": error_class,
-                                 "meta": {"usage": usage}, "events": evp, "error_tail": error_tail})
+                                 "meta": {"usage": usage}, "events": evp, "error_tail": error_tail,
+                                 "spawn": lane_child_spawn(child)})
                 if allow_fallback and error_class == "exec_error" and MODEL_UNAVAILABLE_RE.search(error_tail or ""):
                     error_class = attempts[-1]["error_class"] = "model_unavailable"
                 # A transient Google 403 can occur before any work starts. Retry once
@@ -10146,10 +10242,12 @@ def lane_do_run(lane, spec, child, server, current):
         return out
     except Exception as e:
         error_class = e.error_class if isinstance(e, CodexVersionBlockedError) else "exec_error"
+        # The executor's stderr is the agent-side error string; keep it in the run record.
+        error_text = lane_failure_detail(child, short(e, 400))
         evp = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
         if not os.path.exists(evp):
             open(evp, "w").close()
-        lane_record_event(evp, {"type": "error", "error": short(e, 400)})
+        lane_record_event(evp, {"type": "error", "error": error_text})
         if ws is None:
             # Preserve a visible failed run even if lane worktree preparation was rejected.
             failure_reason = lane_failure_reason(error_class, short(e, 500), 1)
@@ -10159,10 +10257,10 @@ def lane_do_run(lane, spec, child, server, current):
                       "error_class": error_class, "failure_reason": failure_reason,
                       "failure_error": failure_error, "error": short(e, 500),
                       "attempts": [{"backend": lane["backend"], "model": lane["model"], "rc": 1,
-                                    "error_class": error_class, "error_tail": short(e, 500)}], "run_dir": rdir}
+                                    "error_class": error_class, "error_tail": error_text}], "run_dir": rdir}
             jsave(os.path.join(rdir, "result.json"), status)
             set_status(rdir, state="finished", status="failed", finished=NOW(), error_class=error_class,
-                       last_error=short(e, 500))
+                       last_error=short(error_text, 500))
             append_ledger({"id": rid, "ts": NOW(), "title": spec.get("title"), "status": "failed",
                            "lane": lane["name"], "backend": lane["backend"], "model": lane["model"],
                            "error_class": error_class, "failure_reason": failure_reason, "card_type": spec.get("card_type"),
@@ -10170,7 +10268,12 @@ def lane_do_run(lane, spec, child, server, current):
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
             return status
-        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp, child_pid=child.pid)
+        attempt = {"backend": lane["backend"], "model": lane["model"], "effort": lane.get("effort"),
+                   "rc": 1, "seconds": round(NOW() - spec["started"], 3), "error_class": error_class,
+                   "meta": {"usage": {}}, "events": evp, "error_tail": error_text,
+                   "spawn": lane_child_spawn(child)}
+        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp, attempts=[attempt],
+                                 child_pid=child.pid)
 
 
 def agy_quota_available(lane, child):
@@ -10263,16 +10366,24 @@ def cmd_lane_serve(lane, policy):
             lane_recover_expired_fleet_slots(lane, recovery_policy)
             next_fleet_recovery = NOW() + fleet_recovery_poll_seconds(recovery_policy)
         if child and not child.alive():
+            # The executor's stderr is the only agent-side error string; keep it in the event,
+            # in the lane state and in the failed run's attempt record.
+            exit_detail = lane_failure_detail(child, "resident executor process exited")
             if current.get("run_id"):
                 spec = current
                 lane_record_event(os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"),
-                                  {"type": "error", "error": "resident executor process exited"})
+                                  {"type": "error", "error": exit_detail})
                 spec.pop("stop_requested", None)
-                lane_write_state(name, state="crashed", last_error="resident executor process exited", child_pid=None)
+                lane_write_state(name, state="crashed", last_error=exit_detail, child_pid=None)
+                attempt = {"backend": lane["backend"], "model": lane["model"], "effort": lane.get("effort"),
+                           "rc": 1, "seconds": round(NOW() - spec["started"], 3),
+                           "error_class": "exec_error", "meta": {"usage": {}},
+                           "events": os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"),
+                           "error_tail": exit_detail, "spawn": lane_child_spawn(child)}
                 lane_finalize_run(lane, spec, lane_prepare_workspace(lane, spec["run_id"], spec.get("base")),
                                   None, {}, "exec_error", 1,
                                   os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"),
-                                  child_pid=child.pid)
+                                  attempts=[attempt], child_pid=child.pid)
                 current.clear()
             try:
                 child.close()
@@ -10280,7 +10391,7 @@ def cmd_lane_serve(lane, policy):
                 pass
             child = None
             lane_write_state(name, state="crashed", child_pid=None, current_run=None,
-                             last_error="resident executor process exited")
+                             last_error=exit_detail)
             next_start = NOW() + backoff
             backoff = min(backoff * 2, 60)
         if child is None and NOW() >= next_start:
