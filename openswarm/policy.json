@@ -300,6 +300,9 @@
     "agy": 2,
     "total": 10
   },
+  "quota_window": {
+    "_doc": "Per-backend quota window burn policy: burn_before_reset_h is the number of hours before the backend's quota window resets in which the leftover quota may be burned, factor is the multiplier applied to that backend's concurrency cap. The window itself is not configured here: it comes from the probe state (the quota_window section of state.json), which reads the window end each backend's provider reports. A backend without an entry here never burns; the dispatch policy (the dispatch config's quota_window section) carries the same knobs for the review budget."
+  },
   "rate_limit": {
     "backoff_seconds": [30, 60, 120, 240],
     "max_retries": 4

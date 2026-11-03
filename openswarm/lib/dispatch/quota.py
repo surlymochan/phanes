@@ -375,6 +375,45 @@ def minimax_reset_at(payload: Any) -> Optional[int]:
     return int(epoch) if epoch is not None else None
 
 
+def minimax_windows(payload: Any) -> Dict[str, Any]:
+    """
+    Return the MiniMax Token Plan windows of a coding-plan remains payload.
+
+    The remains API reports the current interval (5 hours) and the current
+    week.  Both windows end at a known instant, also while they still have
+    quota left: that instant is the reset time the burn policy needs (it is
+    not the "the window is spent" case :func:`minimax_reset_at` reports).
+
+    Args:
+        payload: The coding-plan remains response, a JSON string or a dict.
+
+    Returns:
+        A dict with ``interval_end`` / ``weekly_end`` (epoch seconds) and the
+        remaining percentages, empty when the payload cannot be read.
+    """
+    data = _parse_minimax_payload(payload)
+    if data is None:
+        return {}
+    entry = _minimax_model_entry(data)
+    if entry is None:
+        return {}
+
+    out: Dict[str, Any] = {}
+    interval_end = _minimax_end_time(data, entry, "end_time")
+    weekly_end = _minimax_end_time(data, entry, "weekly_end_time")
+    if interval_end is not None:
+        out["interval_end"] = interval_end
+    if weekly_end is not None:
+        out["weekly_end"] = weekly_end
+    interval_pct = _num(entry.get("current_interval_remaining_percent"))
+    weekly_pct = _num(entry.get("current_weekly_remaining_percent"))
+    if interval_pct is not None:
+        out["interval_pct"] = interval_pct
+    if weekly_pct is not None:
+        out["weekly_pct"] = weekly_pct
+    return out
+
+
 def reset_from_minimax_remains(payload: Any, now: Any = None) -> Optional[int]:
     """
     Return the seconds until the exhausted MiniMax window resets.
