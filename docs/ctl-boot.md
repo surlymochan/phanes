@@ -352,13 +352,34 @@ changes:
 python3 tools/check-orphan-runner-window.py
 ```
 
-### Host SSH transient backoff (Refs #967)
+### Host SSH transient backoff (Refs #967, #1689)
 
-`lane-autodispatch` keeps transient SSH failures at host scope.  Consecutive
-failures use exponential backoff of `30s → 60s → 120s → 240s → 480s`, capped
-at `600s`; any successful host probe calls `host_good` and clears that host's
-failure count and cooldown.  The offline contract uses a synthetic
-failure/success sequence and does not touch the real backoff state:
+`lane-autodispatch` keeps transient SSH failures at host scope.  The backoff is
+**tiered** by the consecutive failure streak (Refs #1689):
+
+| tier | streak | wait before the next probe | dispatch |
+|---|---|---|---|
+| soft | `< 3` | `30s → 60s` (cap `120s`) | open when the wait expired |
+| hard | `>= 3` | `240s → 480s` (cap `600s`) | closed until a probe succeeds |
+
+- The streak counts **consecutive** failures only: any successful host probe
+  calls `host_good` and clears that host's failure count and cooldown, so a host
+  is never judged by its historical peak.
+- The host is judged by its **SSH results**, not by its lanes: one lane of a
+  host that answered is enough to clear the streak, so a lane that died while
+  another lane of the same host answered never extends the backoff.
+- A host in the hard tier is **not dropped**: it keeps a low-frequency probe
+  (once per backoff window, the ticks in between are skipped).  The first
+  successful probe clears the streak, and the dispatch to that host resumes in
+  the same tick -- the dispatch window of a host that came back is not lost.
+- The tier, the streak and the next probe time are published in
+  `~/phanes-ctl/autodispatch/lanes-status.json` under `_host_backoff`.
+
+The same policy lives in `openswarm/lib/dispatch/ssh_backoff.py` and is used by
+the dispatch engine (`openswarm/lib/dispatch/engine.py`); the box-side shim
+mirrors it and `openswarm/tests/test_autodispatch.py` asserts that both agree.
+The offline contract uses a synthetic failure/success sequence and does not
+touch the real backoff state:
 
 ```bash
 python3 tools/check-ad-host-backoff.py

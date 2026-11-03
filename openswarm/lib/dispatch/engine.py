@@ -19,6 +19,12 @@ State, pause markers and logs live in `state_dir`:
   state.json, reviews.json, lane-lru.json, lanes-status.json, heartbeat, <log_file>
   PAUSE (whole loop), PAUSE-<lane>, PAUSE-HOST-<host>, PAUSE-BACKEND-<backend>, NO-LANE-REVIEW,
   and an optional burn marker (config burn.file) that gives burn.backend lanes first pick.
+
+A host whose SSH fails is backed off in tiers (lib/dispatch/ssh_backoff.py): a short retry
+interval while the failure streak is small (soft tier) and a long one from the limit on
+(hard tier), where the host keeps a low-frequency probe (once per backoff window).  One
+successful probe clears the streak, so the dispatch to that host resumes at once.  The tier,
+the streak and the next probe time are published in lanes-status.json under `_host_backoff`.
 """
 import os
 import sys
@@ -178,6 +184,11 @@ DEFAULTS = {
     "burn": {"file": "", "backend": ""},
     "local_hosts": [],
     "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
+    # SSH backoff tiers (Refs #1689): soft_limit consecutive failures keep the
+    # short retries (soft_base_s * 2 ** (streak - 1), capped by soft_max_s), from
+    # the limit on the host waits long (hard_base_s * 2 ** (streak - soft_limit),
+    # capped by hard_max_s) and is probed once per window.
+    "ssh_backoff": {},
     "min_gap_s": 120,
     "local_env": {},
     "local_inode": {"pause_pct": 95, "resume_pct": 92, "path": "~"},
@@ -600,8 +611,26 @@ class Dispatcher:
         parts = ["timeout", "--signal=TERM", "-k", "2", str(int(limit)), "ssh"] + self.ssh_opts(host)
         return " ".join(shlex.quote(x) for x in parts)
 
+    def ssh_backoff_limits(self):
+        """The SSH backoff limits: the policy defaults with the config overrides."""
+        return dispatch_module("ssh_backoff").limits(self.cfg.get("ssh_backoff") or {})
+
     def host_ok(self, h):
-        return self.clock() >= self.backoff.get(h, {}).get("until", 0)
+        """Whether the host may be probed now.
+
+        The soft tier retries after a short interval; the hard tier keeps a
+        low-frequency probe (once per backoff window), so a host that comes
+        back is noticed even while it is backing off (Refs #1689).
+        """
+        return dispatch_module("ssh_backoff").probe_due(self.backoff.get(h), self.clock())
+
+    def host_dispatchable(self, h):
+        """Whether the host may receive a dispatch now.
+
+        The soft tier opens when its short backoff expired; the hard tier stays
+        closed until a successful probe cleared the failure streak.
+        """
+        return dispatch_module("ssh_backoff").dispatchable(self.backoff.get(h), self.clock())
 
     def host_fail(self, h, why, started_at=None, timeout_s=None):
         now = self.clock()
@@ -619,15 +648,21 @@ class Dispatcher:
         if resumed_at is not None and 0 <= now - resumed_at < grace:
             self.log(f"{h} ssh transient error ignored during VM resume grace ({str(why)[-80:]})", brain=False)
             return
-        b = self.backoff.setdefault(h, {"n": 0, "until": 0})
-        b["n"] += 1
-        wait = min(600, 30 * 2 ** (b["n"] - 1))
-        b["until"] = now + wait
-        self.log(f"{h} ssh transient error #{b['n']} ({str(why)[-80:]}); backing off {wait}s", brain=(b["n"] == 4))
+        policy = dispatch_module("ssh_backoff")
+        b = policy.record_failure(self.backoff.get(h), now, self.ssh_backoff_limits())
+        self.backoff[h] = b
+        self.log(f"{h} ssh transient error #{b['n']} ({str(why)[-80:]}); "
+                 f"{b['tier']} backoff {b['wait']}s", brain=(b["tier"] == policy.HARD))
 
     def host_good(self, h):
-        if self.backoff.pop(h, None):
-            self.log(f"{h} ssh recovered", brain=False)
+        """The host answered again: the failure streak is cleared.
+
+        One success is enough -- the host is never judged by its historical peak,
+        so the next failure starts the ladder from the beginning (Refs #1689).
+        """
+        b = self.backoff.pop(h, None)
+        if b:
+            self.log(f"{h} ssh recovered (streak {b.get('n', 0)} cleared)", brain=False)
 
     def local_inode_low(self):
         """In-process inode guard for local-host lanes (works with 0 inodes left)."""
@@ -2214,7 +2249,7 @@ class Dispatcher:
         return True
 
     def idle_lanes(self, lanes, res, state):
-        return [L for L, lc in lanes.items() if "error" not in res[L] and self.host_ok(lc["host"]) and not state.get(L)
+        return [L for L, lc in lanes.items() if "error" not in res[L] and self.host_dispatchable(lc["host"]) and not state.get(L)
                 and res[L].get("lane") == "idle" and not self.paused_lane(L, lc) and not lc.get("drain")]
 
     def notify_review_fails(self, p, review, fails):
@@ -2331,11 +2366,17 @@ class Dispatcher:
             if h in seen:
                 continue
             seen.add(h)
-            errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-            if errs:
-                self.host_fail(h, errs[0]["error"], probe_started, int(self.cfg["status_tick_cap_s"]))
-            else:
+            # The host is judged by its ssh results, not by its lanes: one lane that
+            # answered is enough to clear the streak, so a lane that failed while
+            # another lane of the same host answered must not extend the backoff
+            # (Refs #1689).
+            results = {x: res[x] for x in live if lanes[x]["host"] == h}
+            if dispatch_module("ssh_backoff").host_reachable(results):
                 self.host_good(h)
+            else:
+                errs = [r["error"] for r in results.values() if r.get("error")]
+                self.host_fail(h, errs[0] if errs else "ssh status failed", probe_started,
+                               int(self.cfg["status_tick_cap_s"]))
         return res
 
     def harvest(self, lanes, res, state):
@@ -2410,7 +2451,7 @@ class Dispatcher:
                         self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
         for L, lc in self.lane_order(lanes):
             r = res[L]
-            if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
+            if ("error" in r or not self.host_dispatchable(lc["host"]) or state.get(L) or r.get("lane") != "idle"
                     or self.paused_lane(L, lc) or lc.get("drain")):
                 continue
             pick = None
@@ -2582,6 +2623,7 @@ class Dispatcher:
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
                                                 "model_drift": drift},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
+                   "_host_backoff": dispatch_module("ssh_backoff").snapshot(self.backoff, self.clock()),
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
