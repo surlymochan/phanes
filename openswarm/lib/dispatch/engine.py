@@ -238,7 +238,16 @@ DEFAULTS = {
         "rebase_line": "Rebase-PR: #{pr} {branch}",
         "rebase_section_title": "Auto rebase (conflict)",
         "rebase_section": ("PR #{pr} head `{sha10}` conflicts with main. Start from branch `rebase-pr-{pr}` (the PR head), "
-                           "rebase onto main, resolve conflicts keeping main's merged changes and this PR's intent, run the "
+                           "before resolving conflicts, save a worktree snapshot inside the repository. Classify each conflict "
+                           "by running `python3 openswarm/lib/dispatch/rebase_conflicts.py . --snapshot`; classify paths and "
+                           "stages: docs-only/add-add and whitespace-only conflicts are auto-resolvable; same-region "
+                           "code edits and binary conflicts require human intervention. Record the classification, files, and "
+                           "conflict-marker line counts in the run log. Try `git rebase -Xignore-space-change` for whitespace "
+                           "conflicts; for documentation conflicts use a union merge and continue the rebase. If an automatic "
+                           "attempt fails, stop and report exact files. The classifier supports `--resolve-docs` for union merges; "
+                           "after staging, continue the rebase and log the retry result. For manual conflicts, fail immediately with files, marker "
+                           "line counts, snapshot path, and whether the PR author should redo their change or main should land "
+                           "first. Do not discard the conflict state. Then run the "
                            "acceptance and commit; the dispatcher force-pushes back to `{branch}` and re-reviews."),
         "cifix_section_title": "Auto fix CI (red)",
         "cifix_section": ("PR #{pr} head `{sha10}` failed CI: {checks}. Start from branch `rebase-pr-{pr}`, rebase onto main, "
