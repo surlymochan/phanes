@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+# The Pi executor unpacks its native TUI library (libopentui.so) into the working
+# directory when a test runs it; the artifact belongs to no commit.
+*.so
 # local overrides / runtime data never belong in the repo
 /policy.local.json
 /state.json

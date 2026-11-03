@@ -613,6 +613,14 @@ checkout there can pin the lane at `memory.high`. Set `OPENSWARM_PI_SANDBOX_TMP=
 lane unit's `Environment=`) to bind a disk directory instead: the wrapper uses `<dir>/openswarm-pi-tmp` (mode 700),
 empties it when an RPC session starts, and never removes anything else under `<dir>`.
 
+A resident lane keeps its sandbox between runs, so a background process a run started (a `while` loop a test leaves
+behind, for example) would keep burning CPU long after the run ended.  Every run therefore sweeps its lane sandbox
+when the run is finalized: the processes that provably belong to the sandbox (its own session or mount namespace)
+are terminated, except the resident executor and its broker bridge.  Only the lane's own child identifies the
+sandbox, so a process that cannot be attributed to it is never touched.  The sweep is bounded (a deadline and caps on
+the processes it looks at and kills) and a sweep that cannot finish is reported in the run's event file
+(`sandbox_sweep`) instead of blocking the run.
+
 For automated queue dispatch, label issues with `lane-ready` and an optional backend pin (`backend:pi|agy|codex`) to prioritize matching lane workers.
 
 ## Fleet and batch dispatch
