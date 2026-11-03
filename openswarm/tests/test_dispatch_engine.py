@@ -194,10 +194,22 @@ class Pauses(Base):
         d = self.make()
         lc = {"host": "h1", "backend": "codex"}
         self.assertFalse(d.paused_lane("CX1", lc))
+        pause = E.dispatch_module("pause")
         for name in ("PAUSE-CX1", "PAUSE-HOST-h1", "PAUSE-BACKEND-codex"):
-            open(d.path(name), "w").close()
+            with open(d.path(name), "w") as stream:
+                stream.write(pause.format_marker(body="operator hold", source="operator:main",
+                                                 basis="issue #1669", created_at=d.clock()))
             self.assertTrue(d.paused_lane("CX1", lc), name)
             os.unlink(d.path(name))
+
+    def test_unattributed_marker_is_not_honored(self):
+        # A marker without a basis cannot be told apart from a snapshot
+        # restored from an older run: it is refused and reported (Refs #1669).
+        d = self.make()
+        lc = {"host": "h1", "backend": "codex"}
+        open(d.path("PAUSE-CX1"), "w").close()
+        self.assertFalse(d.paused_lane("CX1", lc))
+        self.assertIn("no-basis", d.pause_review["PAUSE-CX1"]["problems"])
 
     def test_inode_hysteresis(self):
         d = self.make()
@@ -269,6 +281,13 @@ class QuotaGuards(Base):
         with open(path) as f:
             return f.read()
 
+    def manual_hold(self, path):
+        """A manual hold somebody confirmed: it records its provenance."""
+        with open(path, "w") as stream:
+            stream.write(E.dispatch_module("pause").format_marker(
+                body="operator hold", source="operator:main", basis="issue #1669",
+                created_at=1000.0))
+
     def test_copilot_402_pauses_the_lane(self):
         d = self.dispatcher()
         d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"},
@@ -276,7 +295,10 @@ class QuotaGuards(Base):
                             "timestamp": 1000, "summary": "HTTP 402 Payment Required: monthly quota exceeded"})
         p = d.path("PAUSE-M5")
         self.assertTrue(os.path.exists(p))
-        self.assertEqual(self.read(p), "auto:quota:M5:402 until=4600\n")
+        body = self.read(p)
+        self.assertEqual(body.splitlines()[0], "auto:quota:M5:402 until=4600")
+        self.assertIn("source=auto:quota", body)
+        self.assertIn("created_at=1000.0", body)
         self.assertFalse(os.path.exists(d.path("PAUSE-BACKEND-copilot")))
 
     def test_agy_resource_exhausted_pauses_the_backend_until(self):
@@ -312,16 +334,25 @@ class QuotaGuards(Base):
 
     def test_manual_pause_is_never_overwritten(self):
         d = self.dispatcher()
-        with open(d.path("PAUSE-M5"), "w") as f:
-            f.write("operator hold\n")
+        self.manual_hold(d.path("PAUSE-M5"))
         d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"},
                            {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "402 quota exceeded"})
-        self.assertEqual(self.read(d.path("PAUSE-M5")), "operator hold\n")
-        with open(d.path("PAUSE-BACKEND-agy"), "w") as f:
-            f.write("operator hold\n")
+        self.assertIn("operator:main", self.read(d.path("PAUSE-M5")))
+        self.manual_hold(d.path("PAUSE-BACKEND-agy"))
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
                               {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "RESOURCE_EXHAUSTED"})
-        self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")), "operator hold\n")
+        self.assertIn("operator:main", self.read(d.path("PAUSE-BACKEND-agy")))
+
+    def test_unsound_pause_does_not_block_the_quota_guard(self):
+        # a switch nobody confirmed (a snapshot restored from an older run)
+        # must not stop the automatic quota protection (Refs #1669)
+        d = self.dispatcher()
+        with open(d.path("PAUSE-BACKEND-agy"), "w") as f:
+            f.write("was missing on gocc ctl\n")
+        d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
+                              {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "RESOURCE_EXHAUSTED"})
+        body = self.read(d.path("PAUSE-BACKEND-agy"))
+        self.assertTrue(body.startswith("auto:quota:M5:RESOURCE_EXHAUSTED"), body)
 
     def test_auto_pause_is_refreshed_with_the_new_cooldown(self):
         d = self.dispatcher()
@@ -329,8 +360,8 @@ class QuotaGuards(Base):
             f.write("auto:quota:M1:429 until=500\n")
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
                               {"status": "error", "error_class": "exec_error", "timestamp": 1000, "summary": "RESOURCE_EXHAUSTED"})
-        self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")),
-                         "auto:quota:M5:RESOURCE_EXHAUSTED\n")
+        self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")).splitlines()[0],
+                         "auto:quota:M5:RESOURCE_EXHAUSTED")
 
     def test_auto_pause_refreshes_with_text_cooldown(self):
         d = self.dispatcher()
@@ -339,8 +370,8 @@ class QuotaGuards(Base):
         d.quota_backend_guard("M5", {"host": "box", "backend": "agy"},
                               {"status": "error", "error_class": "exec_error", "timestamp": 1000,
                                "summary": "RESOURCE_EXHAUSTED: resets in 1800s"})
-        self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")),
-                         "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z\n")
+        self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")).splitlines()[0],
+                         "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z")
 
     def test_backend_pause_until_is_reaped_only_after_expiry(self):
         d = self.dispatcher()
@@ -372,7 +403,8 @@ class QuotaGuards(Base):
                                "summary": "RESOURCE_EXHAUSTED"})
         p = d.path("PAUSE-BACKEND-agy")
         self.assertTrue(os.path.exists(p))
-        self.assertEqual(self.read(p), "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z\n")
+        self.assertEqual(self.read(p).splitlines()[0],
+                         "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z")
 
     def test_probe_runs_once_per_tick_across_multiple_pauses(self):
         d = self.make([("probe", (0, '{"exhausted":false}', ""))])
