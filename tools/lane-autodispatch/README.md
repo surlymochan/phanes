@@ -17,8 +17,32 @@ tick that fetched the object in the meantime) must never mask it.
 ```bash
 python3 tools/lane-autodispatch/test_can_take.py
 python3 tools/check-ad-base-fetch-on-miss.py
+python3 tools/check-ad-idle-redispatch.py
 python3 -m unittest tools.tests.test_lane_pr_validation
 ```
+
+## 车道空闲间隙：即时重派发 + 空闲时长指标（Refs #1688）
+
+车道跑完一张卡到拿到下一张卡之间的空窗是纯调度延迟（池子不空、容量不卡时）。AD 在收割完
+一条 run 后**当轮立即**给同一条车道再派一次卡，不等下一个 tick；派发失败（无卡/无容量）就
+静默等下一 tick，不重试、不占位。重派发与普通派发走同一条 `dispatch()` 路径，因此车道暂停
+（`PAUSE-<lane>` 与 pause store）和主机 backoff 检查一视同仁：运行中被暂停的车道，run 结束后
+不会被派新卡；主机把车道报成 busy 时不算主机故障，不会退避主机。
+
+空闲窗口从 **run 自己的结束时间**（远端 `runs/<run>/status.json` 的 `finished`，回退到
+`result.json` 的 mtime）起算，而不是收割时刻：收割慢、或 run 在派发器停机期间结束时，空窗都
+不会算短。每个窗口单独记账（停机时长、无卡时长、无容量时长、暂停时长、收割占用时长），
+窗口关闭即清零，所以一个窗口的停机不会解释下一个窗口的空闲。
+
+`lanes-status.json` 新增字段：
+
+- `_idle_s`：每条车道最近一次空闲时长（秒，run 结束 → 派发）；
+- `_idle_reason`：这次空闲的原因（`no card` / `no capacity` / `dispatcher not running` /
+  `lane paused` / `dispatcher not dispatching`；没有空窗时是 `no gap`）；
+- `_idle_open_s`：当前还空着的车道已经空了多少秒，`_idle_worst_s`：其中最长的一个。
+
+空闲超过 5 分钟（`AD_IDLE_LOG_S`，默认 300 秒）的派发会在 brain log 留一行原因，例如
+`autodispatch: GH2 idle 613s before dispatch (reason: no card)`。
 
 ## PR 提交前校验（Refs #1704）
 
