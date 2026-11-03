@@ -1781,6 +1781,9 @@ class Dispatcher:
                         return False
                     if rc and st.get("rebase_head") and ("stale info" in (err or "") or "rejected" in (err or "")):
                         # someone pushed a newer head (manual fix) while the lane ran: keep it, don't clobber
+                        # The rebase of that head is not done: the key keeps the head it started from, so the
+                        # next tick rebases the current head again (Refs #1842).
+                        self.merge_review(pr, {"rebase_sha": st["rebase_head"], "rebase_base_sha": st["base"]})
                         self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
                         reason, detail = self.end_reason(lane, lc, run, info,
                                                          "the PR head moved during the run; kept the newer head")
@@ -1792,6 +1795,11 @@ class Dispatcher:
                     if rc:
                         self.log(f"{lane} rebase #{n} PR#{pr} push failed: {(err or '').strip()[-160:]}")
                         return False
+                    # The head that went to the PR branch is the head of the push source (the artifact
+                    # filter may have rebuilt it): the rebase of that head is done (Refs #1842).
+                    rc_head, pushed_head, _ = self.git("rev-parse", head)
+                    if not rc_head and pushed_head.strip():
+                        self.merge_review(pr, {"rebase_sha": pushed_head.strip(), "rebase_base_sha": st["base"]})
                     self.gh_write(["pr", "comment", str(pr), "--body",
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
@@ -2044,6 +2052,7 @@ class Dispatcher:
                                           if not k.startswith("_") and isinstance(s, dict) and s.get("issue") is not None}
         L, fix = self.L, self.R["fix_ref_prefix"]
         out_l = []
+        main_sha = None          # the sha of main this tick: one read for every conflicting PR
         for p in sorted(json.loads(out), key=lambda p: p["number"]):
             if p["isDraft"] or not re.match(self.R["head_ref_re"], p["headRefName"]):
                 continue
@@ -2069,11 +2078,21 @@ class Dispatcher:
             p["issue"] = int(m.group(1)) if m else None
             if p["issue"] in pending:
                 continue
-            if (p["mergeable"] == "CONFLICTING" and p["issue"] and p["headRefName"].startswith(fix)
-                    and r.get("rebase_sha") != p["headRefOid"]):
-                tasks = sources.rebase_source([p], inflight, issue_for_pr=lambda pr: pr.get("issue"))
-                if tasks:
-                    self.queue_fix(p, revs, "rebase")
+            if p["mergeable"] == "CONFLICTING" and p["issue"] and p["headRefName"].startswith(fix):
+                # The rebase of a head is done when this head was rebased onto the main of this tick.
+                # A head that moved (or a main that moved) is rebased again, on the current head
+                # (Refs #1842): the key is the pair (head, main), not the head alone.
+                if main_sha is None:
+                    try:
+                        main_sha = self.main_sha()
+                    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+                        main_sha = ""
+                if not main_sha:
+                    continue
+                if (r.get("rebase_sha"), r.get("rebase_base_sha")) != (p["headRefOid"], main_sha):
+                    tasks = sources.rebase_source([p], inflight, issue_for_pr=lambda pr: pr.get("issue"))
+                    if tasks:
+                        self.queue_fix(p, revs, "rebase", main_sha)
                 continue
             if r.get("sha") == p["headRefOid"]:
                 continue
@@ -2099,8 +2118,12 @@ class Dispatcher:
             return body
         return self.cfg["templates"]["rebase_line"].format(pr=pr, branch=branch) + "\n\n" + body
 
-    def queue_fix(self, p, revs, kind):
-        """Requeue the PR's issue as a rebase (conflict) or CI-fix task on the PR head, once per head sha."""
+    def queue_fix(self, p, revs, kind, base_sha=None):
+        """Requeue the PR's issue as a rebase (conflict) or CI-fix task on the PR head.
+
+        A rebase task is queued once per (head, main) pair: the head it rebases and the
+        main it rebases onto (Refs #1842).  A CI-fix task is queued once per head sha.
+        """
         pr, n = p["number"], p["issue"]
         rc, iv, _ = self.gh(["issue", "view", str(n), "--json", "body,state"])
         try:
@@ -2121,6 +2144,8 @@ class Dispatcher:
                        "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
         r = revs.get(str(pr)) or {}
         r["rebase_sha" if kind == "rebase" else "cifix_sha"] = p["headRefOid"]
+        if kind == "rebase":
+            r["rebase_base_sha"] = base_sha
         revs[str(pr)] = r
         self.put_review(pr, r)
         if kind == "rebase":

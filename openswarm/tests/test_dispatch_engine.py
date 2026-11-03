@@ -589,7 +589,22 @@ class ReviewGate(Base):
         def view(text):
             n = int(text.split("issue view ")[1].split()[0])
             return 0, json.dumps(issues_by_n.get(n, {"state": "OPEN", "body": "orig"})), ""
-        return [("pr list", (0, json.dumps(prs), "")), ("issue view", view)]
+        return [("pr list", (0, json.dumps(prs), "")), ("issue view", view),
+                ("ls-remote", (0, SHA2 + "\trefs/heads/main\n", ""))]
+
+    def test_rebase_retry_uses_run_head_and_main(self):
+        for number in (1655, 1749):
+            with self.subTest(pr=number):
+                p = pr(number, number + 1, mergeable="CONFLICTING", head=SHA2)
+                d = self.make(self.rules([p], reviews={str(number): {"rebase_sha": SHA, "rebase_base_sha": SHA2}}))
+                d.review_candidates({}, {}, [])
+                self.assertEqual(len(self.runner.called(f"issue edit {number + 1}")), 1)
+                self.runner.calls.clear()
+                d.review_candidates({}, {}, [])
+                self.assertFalse(self.runner.called(f"issue edit {number + 1}"))
+                d.main_sha = lambda: SHA
+                d.review_candidates({}, {}, [])
+                self.assertEqual(len(self.runner.called(f"issue edit {number + 1}")), 1)
 
     def test_conflict_checked_before_reviewed_skip(self):
         # PR 10 was APPROVED at this head but went CONFLICTING after a sibling merge: it must get a rebase task.
@@ -842,8 +857,12 @@ class RebaseHarvest(Base):
     def test_moved_head_keeps_newer_head(self):
         rules = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
                  (" push -q", (1, "", "! [rejected] (stale info)"))]
-        _, done, _ = self.harvest(rules, dict(self.ST, rebase_head=SHA2))
+        d, done, _ = self.harvest(rules, dict(self.ST, rebase_head=SHA2))
         self.assertTrue(done)
+        # the head the lane started from and the main it rebased onto are kept: the rebase of
+        # that head is not done, so the next tick rebases the current head again (Refs #1842)
+        self.assertEqual(d.load_reviews()["70"]["rebase_sha"], SHA2)
+        self.assertEqual(d.load_reviews()["70"]["rebase_base_sha"], self.base)
         self.assertIn("--add-label lane-pr", " ".join(self.runner.called("issue edit 7")))
 
 
@@ -969,6 +988,148 @@ class HarvestArtifactFilter(Base):
         self.assertEqual(d.runner.called(" pr create"), [])
         self.assertIn("--add-label lane-failed", " ".join(d.runner.called("issue edit 7")))
         self.assertIn(7, state["_done"])
+
+
+class RebaseTickIntegration(Base):
+    """The rebase of a PR whose head moved is dispatched again (Refs #1842).
+
+    The lane review asked for the tick level: the card of a discarded rebase has to
+    enter the lane-ready queue again, wait for a free lane (lane limit) and be
+    dispatched with the budget of a normal task.  A rebase that was pushed
+    successfully must not be dispatched a second time.
+
+    Delivery of the review rounds:
+      * round 1, B1 (the function level was not enough): the tick replays the
+        discarded rebase of #1655/#1367 and #1749/#1719 - the harvest drops the
+        result of a run whose PR head moved, the card goes back to the lane-ready
+        queue, waits while every lane is busy and is dispatched by the first free
+        lane (with the budget of a normal task).
+        Change: the harvest records the head the run started from and the main it
+        rebased onto, so the key of a rebase is the pair (head, main) and not the
+        head alone; a pushed head is recorded as the head it became.
+        Test: test_moved_head_requeues_and_dispatches_with_lane_limit_and_budget.
+      * round 2, B1 (the lane limit was not asserted): the same test now keeps the
+        card in the lane-ready queue while every lane is busy and asserts that
+        nothing is dispatched, then frees a lane and asserts the dispatch.
+        Test: test_moved_head_requeues_and_dispatches_with_lane_limit_and_budget
+        (phases 2 and 3).
+      * round 2, B2 (the delivery mapping was missing): the mapping above and the
+        rebase notes are in .lane-review/PR-1858.md and in this docstring.
+    """
+
+    INFO = {"branch": "lane/x", "commit": "c", "status": "done", "repo": "/w"}
+    LANES = {"M5": {"host": "remote", "backend": "pi"}, "M6": {"host": "remote", "backend": "pi"}}
+
+    def lane_repo(self, name):
+        """A real local clone with the lane branch: the harvest filters it before the push."""
+        repo = os.path.join(self.tmp, name)
+        os.makedirs(repo, exist_ok=True)
+        self.tmp = repo                      # init_repo/lane_commit work in the clone
+        self.cfg["local_repo"] = repo
+        self.cfg["state_dir"] = os.path.join(repo, "state")
+        base = self.init_repo()
+        return base, self.lane_commit({"code.py": "print('lane')\n"})
+
+    def dispatcher(self, number, card, head, main, push, rev_parse=(1, "", "")):
+        """A dispatcher whose GitHub answers with one conflicting PR and its lane-ready card."""
+        branch = f"fleet/M5-issue{card}-r1"
+        current = pr(number, card, mergeable="CONFLICTING", head=head, branch=branch)
+        ready = []
+        self.main_box = {"sha": main}
+
+        def ls_remote(text):
+            if "refs/heads/main" in text:
+                return 0, f"{self.main_box['sha']}\trefs/heads/main\n", ""
+            return 0, f"{head}\trefs/heads/{branch}\n", ""
+
+        rules = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
+                 (" push -q", push), ("rev-parse", rev_parse),
+                 ("pr list", (0, json.dumps([current]), "")),
+                 ("issue list --state open --label lane-ready", lambda _: (0, json.dumps(ready), "")),
+                 ("issue list", (0, "[]", "")),
+                 ("issue view", lambda _: (0, json.dumps({"state": "OPEN", "body": "orig",
+                                                          "labels": [{"name": "lane-ready"}]}), "")),
+                 ("ls-remote", ls_remote),
+                 ("lane assign", (0, '{"id":"retry"}', ""))]
+        d = self.make(rules)
+        original_write = d.gh_write
+
+        def write(args, **kwargs):
+            # the card is in the lane-ready queue as soon as the AD labels it
+            added = args[args.index("--add-label") + 1] if "--add-label" in args else ""
+            if args[:3] == ["issue", "edit", str(card)] and added == "lane-ready":
+                ready[:] = [issue(card, ["lane-ready"], args[args.index("--body") + 1])]
+            return original_write(args, **kwargs)
+
+        d.gh_write = write
+        d.replenish = lambda *args: None
+        return d, ready, branch
+
+    def test_moved_head_requeues_and_dispatches_with_lane_limit_and_budget(self):
+        # the AD logs of #1655/#1367 and #1749/#1719: the rebase run is discarded because
+        # the PR head moved during the run, the PR stays CONFLICTING and must be rebased again
+        for number, card in ((1655, 1367), (1749, 1719)):
+            with self.subTest(pr=number):
+                base, _ = self.lane_repo(str(number))
+                head = SHA2                        # the head the PR moved to during the run
+                d, ready, branch = self.dispatcher(number, card, head, "c" * 40,
+                                                   (1, "", "! [rejected] (stale info)"))
+                state = {"M5": {"issue": card, "run": "r1", "base": base, "at": "2026-11-03 18:00:00",
+                                 "rebase_pr": number, "rebase_branch": branch, "rebase_head": SHA}}
+                # 1. the run ends with a moved head: the result is dropped (no force-push) and the
+                #    card goes back to the lane-ready queue, on the current head
+                d.probe = lambda *_: {"M5": {"lane": "busy", "run": dict(self.INFO)}, "M6": {"lane": "idle"}}
+                d.tick(self.LANES, state)
+                self.assertEqual(d.load_reviews()[str(number)]["rebase_sha"], head)
+                self.assertTrue(ready)
+                self.assertFalse(self.runner.called("lane assign"))
+                push = self.runner.called(" push -q")
+                self.assertEqual(len(push), 1)
+                self.assertIn(f"--force-with-lease=refs/heads/{branch}:{SHA}", push[0])
+                self.assertEqual(push[0].split().count("--force"), 0)
+                # 2. every lane is busy: the queued card waits for a free lane (lane limit)
+                state["M6"] = {"issue": 999, "run": "r2", "base": base, "at": "2026-11-03 18:05:00"}
+                d.probe = lambda *_: {"M5": {"lane": "busy"}, "M6": {"lane": "busy"}}
+                d.tick(self.LANES, state)
+                self.assertTrue(ready)
+                self.assertFalse(self.runner.called("lane assign"))
+                # 3. a lane frees up: the card is dispatched on the current head, with the budget
+                d.probe = lambda *_: {"M5": {"lane": "idle"}, "M6": {"lane": "busy"}}
+                d.tick(self.LANES, state)
+                assigns = self.runner.called("lane assign")
+                self.assertEqual(len(assigns), 1)
+                self.assertIn(f"--budget-minutes {self.cfg['budget_minutes']}", assigns[0])
+                self.assertEqual(state["M5"]["rebase_pr"], number)
+                self.assertEqual(state["M5"]["rebase_head"], head)
+
+    def test_successful_push_head_is_not_requeued_on_tick(self):
+        number, card = 1655, 1367
+        base, lane = self.lane_repo("pushed")
+        # the head of the PR after the successful push is the head the lane pushed
+        d, ready, branch = self.dispatcher(number, card, lane, base, (0, "", ""),
+                                            rev_parse=(0, lane + "\n", ""))
+        state = {"M5": {"issue": card, "run": "r1", "base": base, "at": "2026-11-03 18:00:00",
+                         "rebase_pr": number, "rebase_branch": branch, "rebase_head": SHA}}
+        d.probe = lambda *_: {"M5": {"lane": "busy", "run": dict(self.INFO)}, "M6": {"lane": "idle"}}
+        d.tick(self.LANES, state)
+        # the pushed head is recorded: the rebase of that head is done
+        reviews = d.load_reviews()[str(number)]
+        self.assertEqual(reviews["rebase_sha"], lane)
+        self.assertEqual(reviews["rebase_base_sha"], base)
+        self.assertFalse(ready)
+        # the next tick does not rebase the same head again, not even while the PR is CONFLICTING
+        d.probe = lambda *_: {"M5": {"lane": "idle"}, "M6": {"lane": "idle"}}
+        d.tick(self.LANES, state)
+        self.assertFalse(ready)
+        self.assertFalse(any("--add-label lane-ready" in c for c in self.runner.called(f"issue edit {card}")))
+        self.assertFalse(self.runner.called("lane assign"))
+        # main moves on: the rebase of that head onto the new main is due again (the key is the pair)
+        self.main_box["sha"] = "d" * 40
+        d.tick(self.LANES, state)
+        self.assertTrue(ready)
+        d.tick(self.LANES, state)
+        self.assertEqual(len(self.runner.called("lane assign")), 1)
+        self.assertEqual(state["M5"]["rebase_pr"], number)
 
 
 class QuotaHarvest(Base):
