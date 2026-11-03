@@ -882,7 +882,10 @@ class Dispatcher:
     # ------------------------------------------------------------ dispatch one task
     def task_text(self, item):
         n = item["n"]
-        return f"# #{n} {item['title']}\n\n{item['body']}\n\n{self.cfg['templates']['rules'].format(n=n)}\n"
+        wip = item.get("wip_ref")
+        resume = (f"## 续做\n上一轮预算耗尽，已把已完成部分推到 WIP 分支 `{wip}`。先 `git merge --no-edit {wip}`"
+                  f"再继续，已完成部分不要重写。\n\n") if wip else ""
+        return f"# #{n} {item['title']}\n\n{item['body']}\n\n{resume}{self.cfg['templates']['rules'].format(n=n)}\n"
 
     def main_sha(self):
         rc, out, err = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git",
@@ -925,6 +928,11 @@ class Dispatcher:
                     frc = 1
                 if not frc:
                     refs.append(f"+refs/ad/pr-{rb[0]}:refs/heads/rebase-pr-{rb[0]}")
+            if item.get("wip_ref"):
+                wip = item["wip_ref"]
+                if self.git("fetch", "-q", "-f", repo_url, f"+refs/heads/{wip}:refs/ad/wip-{lane}", timeout=40)[0]:
+                    raise RuntimeError("WIP fetch failed")
+                refs.append(f"+refs/ad/wip-{lane}:refs/heads/{wip}")
             if self.git("cat-file", "-e", f"{base}^{{commit}}")[0]:
                 self.git("fetch", "-q", repo_url, self.cfg["base_branch"], timeout=60)
             sshc = self.git_ssh_command(h, limit=100)
@@ -938,6 +946,9 @@ class Dispatcher:
                    f"+pull/{rb[0]}/head:refs/heads/rebase-pr-{rb[0]} && break; sleep $((_i*2)); done; ") if rb else ""
             fetch_main = (f"for _i in 1 2 3 4; do timeout 40 git -C {R} fetch -q {repo_url} {self.cfg['base_branch']} && break; "
                           f"sleep $((_i*2)); done && ")
+        if item.get("wip_ref") and not (lc.get("seed_from_box") and h not in self.local_hosts):
+            ref = shlex.quote(item["wip_ref"])
+            pre += f"git -C {R} fetch -q -f {repo_url} +refs/heads/{ref}:refs/heads/{ref} && "
         cmd = (pre + fetch_main + f"git -C {R} cat-file -e {base}^{{commit}} && "
                f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes "
                f"{self.cfg['review_budget_minutes'] if item.get('review') else self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
@@ -989,6 +1000,8 @@ class Dispatcher:
             return 1e9
 
     def relabel(self, n, add, remove, state=None):
+        if state is not None and add == self.L["failed"]:
+            state.get("_wip", {}).pop(str(n), None)
         args = ["issue", "edit", str(n)]
         for l in remove:
             args += ["--remove-label", l]
@@ -1258,6 +1271,7 @@ class Dispatcher:
         return ["git", "-c", f"core.sshCommand={sshc}", "-C", self.cfg["local_repo"], "fetch", "-q",
                 f"{lc['host']}:{info['repo']}", f"+{info['branch']}:refs/fleet/{lane}"]
 
+    WIP_MAX = 2     # budget_exceeded salvages per card before it is labelled lane-failed
     TRANSIENT = r"Permission denied|Connection closed|timed out|banner|124|Usage:|hung up|reset by peer"
     GIVEUP = r"Connection closed|Permission denied|timed out|banner|124|hung up|reset by peer|Could not resolve|No route"
 
@@ -1434,6 +1448,10 @@ class Dispatcher:
         self.quota_lane_guard(lane, lc, info)
         self.heartbeat()
         L = self.L
+        if has_commit and info.get("status") == "budget_exceeded" and info.get("verify_rc") != 0:
+            salvaged = self.salvage_budget(lane, lc, st, info, state)
+            if salvaged is not None:
+                return salvaged
         if has_commit:
             b = self.cfg["pr_branch_template"].format(lane=lane, n=n, run=run)
             fetch = self.fetch_lane_branch(lane, lc, info)
@@ -1586,6 +1604,7 @@ class Dispatcher:
                 reason, detail = reason or broken, detail or broken_detail
             note = f" [failure_reason={reason}; error={detail}]" if reason else ""
             self.log(f"{lane} finished #{n} (run {run}, {info.get('status')}){note} → {url}")
+            state.get("_wip", {}).pop(str(n), None)
             self.mark_done(state, n)
             self.quota_backend_guard(lane, lc, info)
         elif run in self.watchdog_requeue():
@@ -1634,6 +1653,68 @@ class Dispatcher:
             self.log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{error_class}; "
                      f"failure_reason={reason}; error={detail}) → labelled {label}")
             self.quota_backend_guard(lane, lc, info)
+        return True
+
+    def salvage_budget(self, lane, lc, st, info, state):
+        """budget_exceeded with a commit: push its diff to a WIP branch (no PR) and requeue the card (#1599).
+
+        Returns None when the lane branch has no diff against base, so the caller keeps the regular path."""
+        n, run, L = st["issue"], st["run"], self.L
+        status, labs = self.issue_labels(n)
+        if L["pr"] in labs or status == "CLOSED":
+            state.get("_wip", {}).pop(str(n), None)
+            self.mark_done(state, n)
+            return True
+
+        def failed(err):
+            st["fetch_fails"] = int(st.get("fetch_fails") or 0) + 1
+            if st["fetch_fails"] < 3:
+                return False
+            reason, detail = self.run_failure(info, "fetch-failed", self.ending_detail(info, f"WIP harvest failed: {err}"))
+            self.record_failure(lane, lc, run, reason, detail)
+            self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
+            self.gh_write(["issue", "comment", str(n), "--body", f"Lane {lane} WIP harvest failed three times: {(err or '')[-160:]}. Labelled `{L['failed']}`."])
+            self.mark_done(state, n)
+            return True
+
+        try:
+            frc, _, ferr = self.sh(self.fetch_lane_branch(lane, lc, info), timeout=40)
+        except subprocess.TimeoutExpired:
+            frc, ferr = 124, "timeout"
+        if frc:
+            self.log(f"{lane} #{n} budget WIP fetch failed ({(ferr or '').strip()[-90:]}); retry next tick", brain=False)
+            return failed(ferr)
+        rc, stat, _ = self.git("diff", "--stat", st["base"], f"refs/fleet/{lane}", timeout=30)
+        if rc or not stat.strip():
+            return None
+        wip = f"fleet/{lane}-issue{n}-wip-{run}"
+        try:
+            prc, _, perr = self.git("push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{wip}", timeout=60)
+        except subprocess.TimeoutExpired:
+            prc, perr = 124, "timeout"
+        if prc:
+            self.log(f"{lane} #{n} budget WIP push failed ({(perr or '').strip()[-120:]}); retry next tick", brain=False)
+            return failed(perr)
+        count = int(((state.get("_wip") or {}).get(str(n)) or {}).get("count") or 0) + 1
+        state.setdefault("_wip", {})[str(n)] = {"wip_ref": wip, "count": count}
+        last = stat.strip().splitlines()[-1]
+        report = (f"Lane {lane} ({lc['host']}, run `{run}`) hit the budget (`budget_exceeded`) after "
+                  f"{int(self.age_s(st) // 60)} min with a diff (`{last}`). WIP branch `{wip}` pushed; no PR opened.\n\n"
+                  f"```\n{stat.strip()[-1200:]}\n```")
+        if count > self.WIP_MAX:
+            self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
+            self.gh(["issue", "comment", str(n), "--body", report +
+                     f"\n\nWIP continued {self.WIP_MAX} times and ran out of budget again. Labelled `{L['failed']}`; "
+                     f"re-add `{L['ready']}` to retry."])
+            label = L["failed"]
+        else:
+            self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
+            self.gh(["issue", "comment", str(n), "--body", report +
+                     f"\n\nRequeued as `{L['ready']}` (WIP {count}/{self.WIP_MAX}); the next run merges `{wip}` and continues."])
+            label = L["ready"]
+        self.quota_backend_guard(lane, lc, info)
+        self.mark_done(state, n)
+        self.log(f"{lane} #{n} run {run}: budget with diff → WIP {wip} ({count}/{self.WIP_MAX}) → {label}")
         return True
 
     def watchdog_requeue(self):
@@ -2442,6 +2523,7 @@ class Dispatcher:
                 q.remove(pick)
                 continue
             host_started = self.clock()
+            pick["wip_ref"] = ((state.get("_wip") or {}).get(str(pick["n"])) or {}).get("wip_ref")
             try:
                 run, ver = self.dispatch(L, lc, pick, base)
             except Exception as e:
