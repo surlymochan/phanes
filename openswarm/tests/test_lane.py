@@ -26,6 +26,44 @@ sys.modules["openswarm"] = xs
 
 
 class LanePureFunctionTests(unittest.TestCase):
+    def test_failure_reason_enumeration_and_unknown_fallback(self):
+        cases = {"spawn_failed": "spawn-failed", "fetch_failed": "fetch-failed", "timeout": "timeout",
+                 "oom_killed": "oom-killed", "exec_error": "exec-error", "budget_exceeded": "budget-exceeded",
+                 "rate_limit": "rate-limit"}
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(xs.lane_failure_reason(source, "raw detail"), expected)
+                self.assertIn(xs.lane_failure_reason(source, "raw detail"), xs.RUN_FAILURE_REASONS)
+        # a cause outside the enumeration falls back to unknown and keeps the raw error
+        self.assertEqual(xs.lane_failure_reason(None, "git clone failed: denied"), "unknown")
+        self.assertEqual(xs.lane_failure_error("git clone failed: denied"), "git clone failed: denied")
+        self.assertEqual(xs.lane_failure_reason("new-class", ""), "unknown")
+        self.assertEqual(xs.lane_failure_error(""), "原因缺失")
+        self.assertEqual(xs.lane_failure_error("", 3), "exit code 3")
+
+    def test_session_spawn_failure_is_written_to_the_finished_run(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(xs, "RUNS", temp), \
+                mock.patch.object(xs, "LEDGER", os.path.join(temp, "ledger.jsonl")), \
+                mock.patch.object(xs, "DATA", temp), \
+                mock.patch.object(xs, "codex_min_version_block", return_value=None), \
+                mock.patch.object(xs, "lane_prepare_workspace", side_effect=RuntimeError("session derivation failed: denied")):
+            run_id = "spawn-failure"
+            os.makedirs(os.path.join(temp, run_id))
+            spec = {"run_id": run_id, "task": "test task", "started": time.time()}
+            result = xs.lane_do_run({"name": "L1", "backend": "codex", "model": "fake"},
+                                    spec, None, None, None)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure_reason"], "spawn-failed")
+            self.assertIn("session derivation failed", result["error"])
+            self.assertIn("session derivation failed", result["failure_error"])
+            with open(os.path.join(temp, run_id, "result.json"), encoding="utf-8") as stream:
+                stored = json.load(stream)
+            self.assertEqual(stored["failure_reason"], "spawn-failed")
+            self.assertIn("session derivation failed", stored["failure_error"])
+            with open(os.path.join(temp, "ledger.jsonl"), encoding="utf-8") as stream:
+                ledger = [json.loads(line) for line in stream.read().splitlines() if line.strip()]
+            self.assertEqual(ledger[-1]["failure_reason"], "spawn-failed")
+
     def lane_status_row(self, state):
         lane = {"name": "L1", "backend": "codex", "model": "fake-model"}
         with mock.patch.object(xs, "lane_config", return_value=[lane]), \

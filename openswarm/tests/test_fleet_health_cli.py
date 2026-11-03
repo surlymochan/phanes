@@ -38,6 +38,9 @@ class FleetHealthCliTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = self.root / "home"
         self.home.mkdir()
+        (self.home / "runs" / "failed-1").mkdir(parents=True)
+        (self.home / "runs" / "failed-1" / "result.json").write_text(
+            json.dumps({"status": "failed", "failure_reason": "spawn-failed"}), encoding="utf-8")
         self.now = 1700000000.0
         self.store = xs.dispatch_pause_module().PauseStore(self.home)
 
@@ -164,7 +167,8 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "recent_failure_reasons", "status", "thresholds"])
+        self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
         self.assertEqual(report["thresholds"]["inode_pause_pct"], 95)
@@ -173,6 +177,55 @@ class FleetHealthCliTests(unittest.TestCase):
                                        "reason", "status", "triggers"])
         self.assertEqual(row["host"], "worker-a")
         self.assertFalse(row["paused"])
+
+    def test_the_harvest_failure_is_counted(self):
+        (self.home / "runs" / "harvest-1").mkdir(parents=True)
+        (self.home / "runs" / "harvest-1" / "result.json").write_text(
+            json.dumps({"status": "done", "harvest_failure_reason": "fetch-failed",
+                        "harvest_failure_error": "Permission denied"}), encoding="utf-8")
+        report = self.health(runner=self.runner())
+        self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1, "fetch-failed": 1})
+
+    def test_a_failed_run_without_a_reason_is_counted_as_unknown(self):
+        (self.home / "runs" / "failed-2").mkdir(parents=True)
+        (self.home / "runs" / "failed-2" / "result.json").write_text(
+            json.dumps({"status": "failed", "error_class": "brand_new_class",
+                        "error": "something odd happened"}), encoding="utf-8")
+        report = self.health(runner=self.runner())
+        self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1, "unknown": 1})
+        for reason in report["recent_failure_reasons"]:
+            self.assertNotEqual(reason, "")
+            self.assertIsNotNone(reason)
+
+    def test_a_run_is_counted_once(self):
+        # the run itself failed and the harvest broke the ending: one run, one count
+        (self.home / "runs" / "failed-3").mkdir(parents=True)
+        (self.home / "runs" / "failed-3" / "result.json").write_text(
+            json.dumps({"status": "failed", "failure_reason": "exec-error",
+                        "failure_error": "child exited with code 1",
+                        "harvest_failure_reason": "exec-error",
+                        "harvest_failure_error": "pr create failed: HTTP 502"}), encoding="utf-8")
+        report = self.health(runner=self.runner())
+        self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1, "exec-error": 1})
+
+    def test_the_harvest_failure_of_a_failed_run_is_counted_too(self):
+        # the run failed and the harvest fetch gave up: both causes stay visible
+        (self.home / "runs" / "failed-4").mkdir(parents=True)
+        (self.home / "runs" / "failed-4" / "result.json").write_text(
+            json.dumps({"status": "failed", "failure_reason": "exec-error",
+                        "failure_error": "child exited with code 1",
+                        "harvest_failure_reason": "fetch-failed",
+                        "harvest_failure_error": "Permission denied"}), encoding="utf-8")
+        report = self.health(runner=self.runner())
+        self.assertEqual(report["recent_failure_reasons"],
+                         {"spawn-failed": 1, "exec-error": 1, "fetch-failed": 1})
+
+    def test_a_clean_run_with_a_commit_is_not_counted(self):
+        (self.home / "runs" / "done-1").mkdir(parents=True)
+        (self.home / "runs" / "done-1" / "result.json").write_text(
+            json.dumps({"status": "done", "branch": "lane/x", "commit": "c"}), encoding="utf-8")
+        report = self.health(runner=self.runner())
+        self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
 
     def test_policy_thresholds_override_the_defaults(self):
         policy = {"resources": {"health": {"inode_pause_pct": 50, "inode_resume_pct": 40}}}

@@ -1,8 +1,11 @@
 """openswarm dispatch engine (lib/dispatch/engine.py): queue/rank/fallback, hot-file limits, pauses, review gate, dry-run."""
 import importlib.util
+import base64
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -54,6 +57,7 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="dispatch-test-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         raw = {"repo": "acme/project", "local_repo": self.tmp, "state_dir": os.path.join(self.tmp, "state"),
+               "remote_home": self.tmp,
                "ssh": {"control_dir": os.path.join(self.tmp, "cm")}, "local_hosts": ["box"],
                "hot_files": {"limits": {"bin/big": 2}, "union": ["docs/log.md"]},
                "burn": {"file": "BURN-X", "backend": "pi"}}
@@ -714,6 +718,304 @@ class QuotaHarvest(Base):
         edit = d.runner.called("issue edit 1537")[0]
         self.assertIn("--add-label lane-ready", edit)
         self.assertIn("--remove-label lane-failed", edit)
+
+
+class FailureReasonHarvest(Base):
+    """#1710: every harvest ending path records a canonical reason and the raw error."""
+
+    ST = {"issue": 7, "run": "r1", "base": SHA}
+
+    def setUp(self):
+        super().setUp()
+        self.brain = os.path.join(self.tmp, "brain.md")
+        self.cfg["brain_log"] = self.brain
+        self.run_dir = os.path.join(self.tmp, "runs", "r1")
+        os.makedirs(self.run_dir, exist_ok=True)
+
+    def write_run(self, record):
+        with open(os.path.join(self.run_dir, "result.json"), "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+
+    def read_run(self):
+        with open(os.path.join(self.run_dir, "result.json"), encoding="utf-8") as stream:
+            return json.load(stream)
+
+    def brain_text(self):
+        with open(self.brain, encoding="utf-8") as stream:
+            return stream.read()
+
+    def harvest(self, info, rules=None, st=None):
+        d = self.make(rules or [])
+        state = {"M5": dict(st or self.ST)}
+        done = d.finish("M5", {"host": "box", "backend": "codex"}, state["M5"], info, state)
+        return d, done, state
+
+    def test_ended_without_commit_records_the_reason_and_the_raw_error(self):
+        info = {"status": "failed", "error_class": "exec_error",
+                "error": "session derivation failed: denied"}
+        d, done, state = self.harvest(info)
+        self.assertTrue(done)
+        line = self.brain_text()
+        self.assertIn("failure_reason=spawn-failed", line)
+        self.assertIn("error=session derivation failed: denied", line)
+        record = self.read_run()
+        self.assertEqual(record["failure_reason"], "spawn-failed")
+        self.assertEqual(record["failure_error"], "session derivation failed: denied")
+
+    def test_an_empty_reason_never_stays_empty(self):
+        info = {"status": "failed", "error_class": "", "error": "", "failure_reason": ""}
+        d, done, state = self.harvest(info)
+        self.assertTrue(done)
+        record = self.read_run()
+        self.assertEqual(record["failure_reason"], "unknown")
+        self.assertEqual(record["failure_error"], "原因缺失")
+        self.assertIn("failure_reason=unknown", self.brain_text())
+
+    def test_the_harvest_fetch_failure_is_persisted_in_the_run_record(self):
+        self.write_run({"id": "r1", "status": "done", "branch": "lane/x", "commit": "c"})
+        info = {"status": "done", "branch": "lane/x", "commit": "c", "repo": "/w"}
+        d = self.make([(" fetch ", (1, "", "Permission denied (publickey)"))])
+        st = dict(self.ST)
+        state = {"M5": st}
+        # the first fetch failure is transient: the run is not over yet
+        self.assertFalse(d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state))
+        # the harvest gave up: the card failed and the reason says why
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state))
+        record = self.read_run()
+        self.assertEqual(record["failure_reason"], "fetch-failed")
+        self.assertIn("Permission denied", record["failure_error"])
+        self.assertEqual(record["harvest_failure_reason"], "fetch-failed")
+        self.assertIn("failure_reason=fetch-failed", self.brain_text())
+
+    def test_the_watchdog_abort_ends_as_a_timeout(self):
+        watchdog = os.path.join(self.tmp, "watchdog.json")
+        with open(watchdog, "w", encoding="utf-8") as stream:
+            json.dump({"r1": "no provider event for 900s"}, stream)
+        self.cfg["watchdog_requeue_file"] = watchdog
+        info = {"status": "failed", "error_class": "exec_error", "error": "child exited"}
+        d, done, state = self.harvest(info)
+        self.assertTrue(done)
+        self.assertIn("failure_reason=timeout", self.brain_text())
+        self.assertIn("watchdog abort", self.brain_text())
+        self.assertEqual(self.read_run()["failure_reason"], "timeout")
+
+    def test_the_model_unavailable_end_keeps_a_reason(self):
+        info = {"status": "failed", "error_class": "model_unavailable", "model": "gpt-x",
+                "error": "model unavailable"}
+        d, done, state = self.harvest(info)
+        self.assertTrue(done)
+        self.assertIn("failure_reason=unknown", self.brain_text())
+        self.assertIn("model gpt-x unavailable", self.brain_text())
+        record = self.read_run()
+        self.assertEqual(record["failure_reason"], "unknown")
+        self.assertIn("model gpt-x unavailable", record["failure_error"])
+
+    def test_the_rate_limit_end_is_counted_as_rate_limit(self):
+        info = {"status": "failed", "error_class": "rate_limit", "summary": "upstream HTTP 429 rate limit"}
+        d, done, state = self.harvest(info)
+        self.assertTrue(done)
+        self.assertIn("failure_reason=rate-limit", self.brain_text())
+        self.assertEqual(self.read_run()["failure_reason"], "rate-limit")
+
+    def test_the_remote_record_snippet_writes_the_reason(self):
+        home = os.path.join(self.tmp, "remote-home")
+        os.makedirs(os.path.join(home, "runs", "r9"))
+        payload = base64.b64encode(json.dumps({"reason": "fetch-failed", "error": "boom",
+                                                "harvest": True}).encode()).decode()
+        proc = subprocess.run([sys.executable, "-", home, "r9", payload], input=E.RECORD_FAILURE_SRC,
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(home, "runs", "r9", "result.json"), encoding="utf-8") as stream:
+            record = json.load(stream)
+        self.assertEqual(record["failure_reason"], "fetch-failed")
+        self.assertEqual(record["failure_error"], "boom")
+        self.assertEqual(record["harvest_failure_reason"], "fetch-failed")
+
+    def test_the_remote_record_snippet_replaces_the_record_atomically(self):
+        home = os.path.join(self.tmp, "remote-home")
+        os.makedirs(os.path.join(home, "runs", "r9"))
+        with open(os.path.join(home, "runs", "r9", "result.json"), "w", encoding="utf-8") as stream:
+            json.dump({"id": "r9", "status": "failed"}, stream)
+        payload = base64.b64encode(json.dumps({"reason": "exec-error", "error": "boom",
+                                                "harvest": False}).encode()).decode()
+        proc = subprocess.run([sys.executable, "-", home, "r9", payload], input=E.RECORD_FAILURE_SRC,
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # the record is replaced, never truncated in place, and no temp file is left behind
+        self.assertFalse(os.path.exists(os.path.join(home, "runs", "r9", "result.json.tmp")))
+        with open(os.path.join(home, "runs", "r9", "result.json"), encoding="utf-8") as stream:
+            record = json.load(stream)
+        self.assertEqual(record["failure_reason"], "exec-error")
+
+
+class FailureReasonWithCommit(Base):
+    """#1710: the harvest endings of a run that kept its commit also carry a reason."""
+
+    ST = {"issue": 7, "run": "r1", "base": SHA}
+    ISSUE_OPEN = (0, json.dumps({"state": "OPEN", "labels": []}), "")
+    ISSUE_WITH_PR = (0, json.dumps({"state": "OPEN", "labels": [{"name": "lane-pr"}]}), "")
+    NUMSTAT = (0, "40\t0\tsrc/a.py\n", "")
+    PR_URL = (0, "https://github.com/acme/project/pull/9\n", "")
+
+    def setUp(self):
+        super().setUp()
+        self.brain = os.path.join(self.tmp, "brain.md")
+        self.cfg["brain_log"] = self.brain
+        self.run_dir = os.path.join(self.tmp, "runs", "r1")
+        os.makedirs(self.run_dir, exist_ok=True)
+
+    def write_run(self, record):
+        with open(os.path.join(self.run_dir, "result.json"), "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+
+    def read_run(self):
+        with open(os.path.join(self.run_dir, "result.json"), encoding="utf-8") as stream:
+            return json.load(stream)
+
+    def brain_text(self):
+        with open(self.brain, encoding="utf-8") as stream:
+            return stream.read()
+
+    def harvest(self, info, rules=None, st=None):
+        d = self.make([("issue view", self.ISSUE_OPEN), ("diff --numstat", self.NUMSTAT)]
+                      + list(rules or []))
+        st = dict(st or self.ST)
+        state = {"M5": st}
+        done = d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state)
+        return d, done, state
+
+    def commit_info(self, **over):
+        info = {"status": "failed", "error_class": "exec_error", "branch": "lane/x",
+                "commit": "c", "repo": "/w", "error": "child exited with code 1"}
+        info.update(over)
+        return info
+
+    def test_the_pr_opening_ending_records_the_reason_and_the_raw_error(self):
+        self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
+        d, done, state = self.harvest(self.commit_info(), [("pr create", self.PR_URL)])
+        self.assertTrue(done)
+        line = self.brain_text()
+        self.assertIn("failure_reason=exec-error", line)
+        self.assertIn("child exited with code 1", line)
+        record = self.read_run()
+        self.assertEqual(record["failure_reason"], "exec-error")
+        self.assertIn("child exited with code 1", record["failure_error"])
+
+    def test_the_session_derivation_failure_keeps_its_raw_error_in_the_ending_line(self):
+        self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
+        info = self.commit_info(error="session derivation failed: denied")
+        d, done, state = self.harvest(info, [("pr create", self.PR_URL)])
+        self.assertTrue(done)
+        line = self.brain_text()
+        self.assertIn("failure_reason=spawn-failed", line)
+        self.assertIn("session derivation failed: denied", line)
+        record = self.read_run()
+        self.assertEqual(record["failure_reason"], "spawn-failed")
+        self.assertIn("session derivation failed: denied", record["failure_error"])
+
+    def test_the_duplicate_ending_with_a_commit_records_the_reason(self):
+        self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
+        d = self.make([("issue view", self.ISSUE_WITH_PR), ("diff --numstat", self.NUMSTAT)])
+        st = dict(self.ST)
+        state = {"M5": st}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st,
+                                 self.commit_info(), state))
+        line = self.brain_text()
+        self.assertIn("failure_reason=exec-error", line)
+        self.assertIn("child exited with code 1", line)
+        self.assertEqual(self.read_run()["failure_reason"], "exec-error")
+
+    def test_the_rebase_ending_with_a_commit_records_the_reason(self):
+        self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
+        st = dict(self.ST, rebase_pr=70, rebase_branch="fleet/M5-issue7-r0", rebase_head=SHA2)
+        d = self.make([("issue view", self.ISSUE_OPEN), ("diff --numstat", self.NUMSTAT),
+                       ("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
+                       (" push -q", (1, "", "! [rejected] (stale info)"))])
+        state = {"M5": st}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st,
+                                 self.commit_info(), state))
+        line = self.brain_text()
+        self.assertIn("failure_reason=exec-error", line)
+        self.assertIn("child exited with code 1", line)
+        self.assertEqual(self.read_run()["failure_reason"], "exec-error")
+
+    def rebase_without_anything_to_push(self, status):
+        """Harvest a run that kept its commit when the rebase produced nothing to push."""
+        self.write_run({"id": "r1", "status": status, "branch": "lane/x", "commit": "c"})
+        st = dict(self.ST, rebase_pr=70, rebase_branch="fleet/M5-issue7-r0", rebase_head=SHA2)
+        # the lane branch is not based on the base commit: there is nothing to push
+        d = self.make([("issue view", self.ISSUE_OPEN), ("diff --numstat", self.NUMSTAT),
+                       ("merge-base", (1, "", "")), ("diff --stat", (0, "", ""))])
+        state = {"M5": st}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st,
+                                 self.commit_info(status=status,
+                                                  error="" if status == "done" else "child exited with code 1"),
+                                 state))
+        return self.brain_text(), self.read_run()
+
+    def test_the_rebase_without_anything_to_push_keeps_the_run_error_and_the_rebase_cause(self):
+        """#1710: the rebase ending must not hide the raw error of the failed run."""
+        for status in ("failed", "partial"):
+            with self.subTest(status=status):
+                line, record = self.rebase_without_anything_to_push(status)
+                self.assertIn("failure_reason=exec-error", line)
+                # the raw error of the run and the reason of the rebase are both kept
+                self.assertIn("child exited with code 1", line)
+                self.assertIn("rebase produced nothing to push", line)
+                self.assertEqual(record["failure_reason"], "exec-error")
+                self.assertIn("child exited with code 1", record["failure_error"])
+                self.assertIn("rebase produced nothing to push", record["failure_error"])
+
+    def test_the_rebase_without_anything_to_push_of_a_clean_run_keeps_the_rebase_cause(self):
+        line, record = self.rebase_without_anything_to_push("done")
+        self.assertIn("rebase produced nothing to push", line)
+        self.assertIsNotNone(record.get("failure_reason"))
+        self.assertNotEqual(record["failure_reason"], "")
+
+    def test_the_ending_detail_keeps_the_raw_error_and_the_cause(self):
+        d = self.make()
+        raw = "child exited with code 1 " * 40
+        cause = "rebase produced nothing to push: not based on main " * 10
+        detail = d.ending_detail({"error": raw}, cause)
+        # both parts stay inside the tail of the record
+        self.assertLessEqual(len(detail), 300)
+        self.assertIn("child exited with code 1", detail)
+        self.assertIn("rebase produced nothing to push", detail)
+        # a single part keeps the whole text
+        self.assertEqual(d.ending_detail({"error": raw}, ""), raw.strip())
+        self.assertEqual(d.ending_detail({}, ""), "")
+
+    def test_a_clean_run_with_a_commit_records_no_failure_reason(self):
+        self.write_run({"id": "r1", "status": "done", "branch": "lane/x", "commit": "c"})
+        d, done, state = self.harvest(self.commit_info(status="done", error=""),
+                                      [("pr create", self.PR_URL)])
+        self.assertTrue(done)
+        self.assertNotIn("failure_reason", self.brain_text())
+        record = self.read_run()
+        self.assertNotIn("failure_reason", record)
+        self.assertNotIn("harvest_failure_reason", record)
+
+    def test_a_broken_ending_of_a_clean_run_is_recorded_as_a_harvest_reason(self):
+        self.write_run({"id": "r1", "status": "done", "branch": "lane/x", "commit": "c"})
+        d, done, state = self.harvest(self.commit_info(status="done", error=""),
+                                      [("pr create", (1, "", "HTTP 502 bad gateway"))])
+        self.assertTrue(done)
+        line = self.brain_text()
+        self.assertIn("failure_reason=exec-error", line)
+        self.assertIn("pr create failed", line)
+        record = self.read_run()
+        self.assertEqual(record["harvest_failure_reason"], "exec-error")
+        self.assertIn("pr create failed", record["harvest_failure_error"])
+
+    def test_the_run_record_is_replaced_atomically(self):
+        self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
+        # a temp file of an interrupted write must not survive and must not corrupt the record
+        with open(os.path.join(self.run_dir, "result.json.tmp"), "w", encoding="utf-8") as stream:
+            stream.write('{"id": "r1", "status": "fai')
+        d, done, state = self.harvest(self.commit_info(), [("pr create", self.PR_URL)])
+        self.assertTrue(done)
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "result.json.tmp")))
+        self.assertEqual(self.read_run()["failure_reason"], "exec-error")
 
 
 class FreshReads(Base):
