@@ -47,22 +47,24 @@ import threading
 import time
 
 
-def _load_review_status():
+def _load_review_module(name):
+    """Load a module of lib/review by path (the directory is a namespace package)."""
     candidates = [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "review", "status.py"),
-        os.path.join(os.getcwd(), "openswarm", "lib", "review", "status.py"),
-        os.path.join(os.getcwd(), "lib", "review", "status.py"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "review", name + ".py"),
+        os.path.join(os.getcwd(), "openswarm", "lib", "review", name + ".py"),
+        os.path.join(os.getcwd(), "lib", "review", name + ".py"),
     ]
     for p in candidates:
         if os.path.exists(p):
-            spec = importlib.util.spec_from_file_location("openswarm_review_status", p)
+            spec = importlib.util.spec_from_file_location("openswarm_review_" + name, p)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             return mod
     return None
 
 
-status = _load_review_status()
+status = _load_review_module("status")
+evidence = _load_review_module("evidence")
 
 
 _DISPATCH_MODULES = {}
@@ -161,6 +163,8 @@ DEFAULTS = {
         "ignored_checks_red_file": "MACOS-UPSTREAM-RED", "ignored_checks_red_title_re": "upstream",
         "head_ref_re": r"(fleet|brain)/", "fix_ref_prefix": "fleet/",
         "author_lane_re": r"fleet/([A-Za-z]+\d+)-issue", "diff_limit": 60000, "verdict_dir": ".lane-review",
+        # The raw evidence pack of a review (Refs #1788): the file name suffix next to the verdict file.
+        "evidence_suffix": "-evidence",
         "cifix_needs_burn": True,
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
@@ -1653,9 +1657,26 @@ class Dispatcher:
 
     def review_item(self, p):
         pr = p["number"]
-        diff = self.gh(["pr", "diff", str(pr)], timeout=60)[1]
+        _, diff, err = self.gh(["pr", "diff", str(pr)], timeout=60)
+        if not (diff or "").strip():
+            # GitHub is not always reachable (the fleet lost its DNS more than once): the
+            # diff of the PR head is then taken from the local git objects, so the review
+            # lane still sees the code it has to review.
+            diff, note = self.local_diff(pr, p.get("headRefName"), p.get("headRefOid"))
+            if not diff and p.get("headRefOid"):
+                # The head of the PR is known but the local objects do not hold it: an older
+                # ref would hide the changes of the head that is reviewed, so no review is
+                # dispatched for this head at all.
+                self.log(f"review PR #{pr}: blocked — the local git objects do not hold the head "
+                         f"{p['headRefOid'][:10]}; an older diff is never reviewed as the current head")
+                return None
+            if diff:
+                self.log(f"review PR #{pr}: `gh pr diff` unavailable "
+                         f"({(err or '').strip()[-80:]}); using the local git objects", brain=False)
+                diff = note + diff
         lim = int(self.R.get("review_diff_max_kb", 120)) * 1024
         raw_diff = diff.encode("utf-8")
+        stats = self.diffstat_of(diff)          # the raw numbers, computed before the excerpt
         if len(raw_diff) > lim:
             files = [line[11:] for line in diff.splitlines() if line.startswith("diff --git ")]
             plus = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
@@ -1675,7 +1696,193 @@ class Dispatcher:
         f = f"{self.R['verdict_dir']}/PR-{pr}.md"
         body = self.cfg["templates"]["review_task"].format(pr=pr, branch=p["headRefName"], author=self.author_lane(p["headRefName"]) or "?",
                                                            title=p["title"], sha=p["headRefOid"], file=f, issue=issue, diff=diff)
+        body += self.evidence_inputs(p, stats)
+        body += self.evidence_instruction(pr, self.evidence_path(pr))
         return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True}
+
+    def evidence_path(self, pr):
+        """The path of the raw evidence pack of one PR inside the lane branch."""
+        return "%s/PR-%s%s.md" % (self.R["verdict_dir"], pr, self.R.get("evidence_suffix") or "-evidence")
+
+    def diffstat_of(self, diff):
+        """The raw diff statistics of a PR diff (files, added and deleted lines, effective lines)."""
+        if evidence is None:
+            return {}
+        return evidence.compute_diffstat(self.numstat_of(diff))
+
+    def numstat_of(self, diff):
+        """The `git diff --numstat` text of a unified diff.
+
+        The name of a deleted file stands in its `---` line (`+++ /dev/null`), and the
+        header lines are only read before the first hunk: a removed line may start with
+        `---` or `+++` itself.
+        """
+        files = {}
+        path = None
+        old_path = None
+        header = True
+        for line in str(diff or "").splitlines():
+            if line.startswith("diff --git "):
+                path = old_path = None
+                header = True
+                continue
+            if line.startswith("@@"):
+                header = False
+                continue
+            if header and line.startswith("--- "):
+                target = line[4:].strip()
+                old_path = target[2:] if target.startswith("a/") else target
+                continue
+            if header and line.startswith("+++ "):
+                target = line[4:].strip()
+                if target == "/dev/null":
+                    path = old_path            # a deleted file: its name is in the `---` line
+                else:
+                    path = target[2:] if target.startswith("b/") else target
+                files.setdefault(path, [0, 0])
+                continue
+            if path is None:
+                continue
+            if line.startswith("+"):
+                files[path][0] += 1
+            elif line.startswith("-"):
+                files[path][1] += 1
+        return "".join("%d\t%d\t%s\n" % (added, deleted, name) for name, (added, deleted) in files.items())
+
+    def local_head_ref(self, pr, head_ref=None, sha=None):
+        """The local git ref that holds the head of a PR (no network needed).
+
+        The dispatcher keeps the PR head locally: `rebase-pr-<n>` (the fetch of the PR
+        head), the branch of the PR itself and the lane branch that carries it.  When
+        the head sha is known, **only** the ref that carries exactly that commit may be
+        used: an older ref would hide the changes of the head that is reviewed, so the
+        search stops there instead of falling back to an older commit.
+        """
+        lane = self.author_lane(head_ref) if head_ref else None
+        candidates = [f"refs/heads/rebase-pr-{pr}",
+                      f"refs/heads/{head_ref}" if head_ref else None,
+                      f"refs/fleet/{lane}" if lane else None,
+                      f"refs/pull/{pr}/head"]
+        found = []
+        for ref in candidates:
+            if not ref:
+                continue
+            rc, out, _ = self.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+            if rc == 0 and (out or "").strip():
+                found.append((ref, out.strip()))
+        if sha:
+            for ref, commit in found:
+                if self.same_commit(commit, sha):
+                    return ref
+            return None          # no local commit of that head: an older ref must not stand in for it
+        return found[0][0] if found else None
+
+    def same_commit(self, commit, sha):
+        """Return True when a local commit is the commit the dispatcher knows."""
+        c = str(commit or "").strip().lower()
+        s = str(sha or "").strip().lower()
+        if not c or not s:
+            return False
+        if c == s:
+            return True
+        if len(s) >= 40:
+            return False        # a full sha only matches itself
+        return len(s) >= 7 and c.startswith(s)
+
+    def local_base_ref(self, head):
+        """The base of the local diff: the merge base with the base branch, or `refs/ad/base`."""
+        base_branch = self.cfg.get("base_branch") or "main"
+        rc, out, _ = self.git("merge-base", base_branch, head)
+        if rc == 0 and (out or "").strip():
+            return out.strip()
+        if self.git("cat-file", "-e", "refs/ad/base^{commit}")[0] == 0:
+            return "refs/ad/base"
+        return None
+
+    def local_diff(self, pr, head_ref=None, sha=None):
+        """The diff of a PR from the local git objects, and the note that says where it came from.
+
+        The review lane must be able to read the diff even when GitHub is not reachable:
+        the PR head and the base are in the local clone, so the diff is computed from
+        them.  The note tells the lane which refs the diff was taken from.
+
+        When the head sha is known, the diff is only taken from the local commit that
+        is exactly that sha; without it the diff stays empty — an older commit must
+        never be reviewed as the head of the PR.
+        """
+        head = self.local_head_ref(pr, head_ref, sha)
+        if not head:
+            return "", ""
+        base = self.local_base_ref(head)
+        if not base:
+            return "", ""
+        diff = self.git("diff", "--no-color", f"{base}..{head}")[1]
+        if not (diff or "").strip():
+            return "", ""
+        commit = self.git("rev-parse", "--verify", "--quiet", f"{head}^{{commit}}")[1].strip()
+        note = (f"NOTE: GitHub was not reachable, so this diff was taken from the local git objects: "
+                f"`git diff {base}..{head}` (base {base[:10]}, head {commit[:10] if commit else head[:10]}).")
+        return diff, note
+
+    def ci_evidence_lines(self, p):
+        """The raw CI conclusions of a PR head: one `name | conclusion | url` line per check."""
+        lines = []
+        for check in self._checks(p):
+            name = check.get("name") or check.get("context") or "?"
+            conclusion = check.get("conclusion") or check.get("state") or check.get("status") or "unknown"
+            url = check.get("detailsUrl") or check.get("targetUrl") or ""
+            lines.append("%s | %s | %s" % (name, conclusion, url))
+        return lines
+
+    def evidence_inputs(self, p, stats):
+        """The raw evidence the dispatcher already holds: the CI conclusions and the diff numbers."""
+        out = "\n### Raw evidence of this PR head (from the dispatcher, copy it into the pack)\n\n"
+        ci_lines = self.ci_evidence_lines(p)
+        out += "CI conclusions (one per check):\n"
+        out += "".join("CI: %s\n" % line for line in ci_lines) if ci_lines else "CI: <none reported>\n"
+        out += "\nDiff statistics:\n"
+        if stats:
+            out += ("DIFFSTAT: files=%s | insertions=%s | deletions=%s | effective_lines=%s\n"
+                    % (stats.get("files"), stats.get("insertions"), stats.get("deletions"),
+                       stats.get("effective_lines")))
+            out += "RULE: %s\n" % (evidence.EFFECTIVE_RULE if evidence else "")
+        return out
+
+    def evidence_instruction(self, pr, path):
+        """The text that tells the review lane to deliver the raw evidence pack (Refs #1788)."""
+        spec = evidence.render_spec(pr, path) if evidence else ""
+        return ("\n### The deliverable: the raw evidence pack (原始证据包)\n\n"
+                "The judgement of this review belongs to the tester: you deliver the raw evidence, not a verdict.\n"
+                "Create `%s` and commit it together with `%s` (Refs #%s).\n\n```\n%s\n```\n"
+                % (path, self.R["verdict_dir"] + "/PR-%s.md" % pr, pr, spec))
+
+    def evidence_trace(self, text):
+        """The trace of one raw evidence pack: what it carries and what is missing (Refs #1788)."""
+        if evidence is None:
+            return {"complete": False, "sections": [], "missing": ["pack"],
+                    "errors": ["evidence-module-missing"], "ci": 0, "tests": 0, "checks": 0,
+                    "effective_lines": None, "at": time.strftime("%F %T")}
+        parsed = evidence.parse_evidence(text)
+        return {"complete": parsed["complete"], "sections": parsed["sections"],
+                "missing": parsed["missing"], "errors": parsed["errors"],
+                "ci": len(parsed["ci"]), "tests": len(parsed["test_logs"]),
+                "checks": len(parsed["checks"]),
+                "effective_lines": parsed["diffstat"].get("effective_lines"),
+                "at": time.strftime("%F %T")}
+
+    def evidence_comment(self, ev_txt, ev):
+        """The evidence pack of a review: the raw pack, or the note that it is incomplete."""
+        text = str(ev_txt or "").strip()
+        if not text:
+            return ("\n\n### Raw evidence pack (原始证据包)\n\n"
+                    "⚠️ no evidence pack in the lane branch (missing: %s)"
+                    % (", ".join(ev["missing"]) or "-"))
+        if not ev["complete"]:
+            return ("\n\n### Raw evidence pack (原始证据包)\n\n"
+                    "⚠️ evidence pack incomplete — missing: %s; errors: %s (recorded in the review "
+                    "state; the judgement above is untouched)"
+                    % (", ".join(ev["missing"]) or "-", ", ".join(ev["errors"]) or "-"))
+        return "\n\n### Raw evidence pack (原始证据包)\n\n%s" % text[:24000]
 
     def finish_review(self, lane, lc, st, info, state):
         info = self.pause_info(lane, lc, st, info)
@@ -1684,9 +1891,20 @@ class Dispatcher:
         pr, sha = st["review_pr"], st["review_sha"]
         r = self.load_reviews().get(str(pr)) or {}
         txt = ""
+        ev_txt = ""
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
             txt = self.git("show", f"refs/fleet/{lane}:{self.R['verdict_dir']}/PR-{pr}.md")[1]
+            ev_txt = self.git("show", f"refs/fleet/{lane}:{self.evidence_path(pr)}")[1]
         v, _ = status.parse_verdict(txt)
+        ev = self.evidence_trace(ev_txt)
+        r["evidence"] = ev
+        if ev["complete"]:
+            self.log(f"review PR #{pr} by {lane}: evidence pack complete "
+                     f"({ev['ci']} CI items, {ev['tests']} test logs, {ev['checks']} acceptance checks)")
+        else:
+            self.log(f"review PR #{pr} by {lane}: evidence pack INCOMPLETE "
+                     f"(missing: {', '.join(ev['missing']) or '-'}; errors: {', '.join(ev['errors']) or '-'}) "
+                     f"— recorded, the judgement is untouched")
         if not v:
             error_class = info.get("error_class") or ""
             if error_class == "vm_paused":
@@ -1767,9 +1985,11 @@ class Dispatcher:
         if "skipped" in post_res:
             self.log(f"review PR #{pr}: commit status skipped ({post_res['skipped']})", brain=False)
 
-        self.gh(["pr", "comment", str(pr), "--body",
-                 f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, run `{st['run']}`, "
-                 f"head `{sha[:10]}`\n\n{txt.strip()[:60000]}\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"])
+        comment = (f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, "
+                   f"run `{st['run']}`, head `{sha[:10]}`\n\n{txt.strip()[:36000]}")
+        comment += self.evidence_comment(ev_txt, ev)
+        comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"
+        self.gh(["pr", "comment", str(pr), "--body", comment])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
                   "fails_sha": sha, "fail_classes": []})
         if v == "APPROVE":
@@ -1854,7 +2074,10 @@ class Dispatcher:
             host_started = self.clock()
             try:
                 base = self.main_sha()
-                run, ver = self.dispatch(L, lanes[L], self.review_item(p), base)
+                item = self.review_item(p)
+                if item is None:
+                    continue      # the diff of this head could not be bound: no review is dispatched
+                run, ver = self.dispatch(L, lanes[L], item, base)
             except Exception as e:
                 self.host_fail(lanes[L]["host"], f"review dispatch PR#{p['number']}: {e}", host_started, 120)
                 idle.remove(L)

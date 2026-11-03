@@ -49,4 +49,5 @@ class ReviewBudget(Base):
         self.assertIn("Diffstat:", item["body"])
         self.assertIn("git diff", item["body"])
         self.assertIn("diff excerpt truncated", item["body"])
-        self.assertLess(len(item["body"]), len(content) + 1000)
+        # the body is the truncated excerpt plus the fixed evidence-pack instruction (Refs #1788)
+        self.assertLess(len(item["body"]), len(content) + 3000)
