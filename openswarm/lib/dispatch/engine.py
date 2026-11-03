@@ -132,6 +132,7 @@ DEFAULTS = {
     "repo": "",
     "local_repo": "",
     "state_dir": "~/.claude/openswarm-dispatch",
+    "pause_home": "",                     # default $OPENSWARM_HOME (scoped PauseStore home)
     "lanes_file": "",                     # default <state_dir>/lanes.json
     "log_file": "dispatch.log",
     "brain_log": "",                      # optional markdown log that gets short lines
@@ -268,6 +269,8 @@ def load_config(path):
     if not cfg["repo"]:
         raise SystemExit("dispatch config: `repo` is required")
     cfg["state_dir"] = os.path.expanduser(cfg["state_dir"])
+    cfg["pause_home"] = os.path.expanduser(
+        cfg.get("pause_home") or os.environ.get("OPENSWARM_HOME") or "~/.claude/openswarm")
     cfg["pauses_file"] = (os.path.expanduser(cfg["pauses_file"]) if cfg.get("pauses_file")
                           else os.path.join(cfg["state_dir"], "box-pauses.jsonl"))
     gap = cfg.get("min_gap_s")
@@ -439,6 +442,9 @@ class Dispatcher:
     def __init__(self, cfg, runner=None, dry_run=False, clock=time.time, out=None, sleep=time.sleep):
         self.cfg = cfg
         self.D = cfg["state_dir"]
+        self.pause_home = os.path.expanduser(
+            cfg.get("pause_home") or os.environ.get("OPENSWARM_HOME") or "~/.claude/openswarm")
+        self._expired_pause_logs = set()
         if not dry_run:                       # shadow mode creates nothing
             os.makedirs(self.D, exist_ok=True)
         self.runner = runner or run_cmd
@@ -654,19 +660,82 @@ class Dispatcher:
             self.log(f"local inode {pct:.1f}% -> local lanes {'PAUSED' if self.inode['low'] else 'resumed'}")
         return self.inode["low"]
 
-    def paused_lane(self, lane, lc):
-        if os.path.exists(self.path(f"PAUSE-{lane}")):
-            return True
-        if dispatch_module("pause").PauseStore(self.D).is_paused(lane=lane, host=lc.get("host"),
-                                                                  backend=lc.get("backend"), now=self.clock()):
-            return True
+    def pause_homes(self):
+        """PauseStore homes the engine consults: its own state dir and the configured pause home."""
+        homes = [self.D]
+        home = self.pause_home
+        if home and os.path.abspath(home) != os.path.abspath(self.D):
+            homes.append(home)
+        return homes
+
+    def _pause_records(self, now):
+        """Active PauseStore records (scoped, TTL aware) of every consulted home."""
+        records = []
+        store = dispatch_module("pause").PauseStore
+        for home in self.pause_homes():
+            records.extend(store(home).active(now))
+        return records
+
+    def _legacy_pause(self, name, scope, now):
+        """Read one legacy PAUSE marker; an expired ``until=`` deadline means "not paused"."""
+        path = self.path(name)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as stream:
+                content = stream.read()
+        except OSError:
+            return {"scope": scope, "remaining_s": None, "reason": "legacy marker " + name}
+        body = content.strip()
+        # health/ib-refresh write "auto:cooldown:until=<deadline>" and "mm_remains:until=<deadline>";
+        # the engine writes "auto:quota:<lane>:<kind> until=<deadline>" (Refs #1538).
+        match = re.search(r"(?:^|[\s:])until=(\S+)", content)
+        expiry = self.quota_until(match.group(1)) if match else None
+        if expiry is not None:
+            if now >= expiry:
+                if path not in self._expired_pause_logs:
+                    self.log(f"expired pause marker {name} ({body})", brain=False)
+                    self._expired_pause_logs.add(path)
+                return None
+            return {"scope": scope, "remaining_s": max(0, int(expiry - now)),
+                    "reason": body or "legacy marker " + name}
+        return {"scope": scope, "remaining_s": None, "reason": body or "legacy marker " + name}
+
+    def pause_reason(self, lane, lc):
+        """Why the lane is paused: scope, remaining seconds and reason (None when dispatchable)."""
+        now = self.clock()
+        if os.path.exists(self.path("PAUSE")):
+            return {"scope": "all", "remaining_s": None, "reason": "global PAUSE marker"}
         host = lc.get("host") or ""
-        if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
-            return True
+        backend = lc.get("backend") or ""
+        scopes = {}
+        for record in self._pause_records(now):
+            scope = record.get("scope") or ""
+            expiry = record.get("expires_at")
+            remaining = None if expiry is None else max(0, int(expiry - now))
+            current = scopes.get(scope)
+            if current is None or (remaining or 0) > (current["remaining_s"] or 0):
+                scopes[scope] = {"scope": scope, "remaining_s": remaining,
+                                 "reason": record.get("reason") or "PauseStore"}
+        for scope in ("all", "lane:" + str(lane), "host:" + host, "backend:" + backend):
+            if scope in scopes:
+                return scopes[scope]
+        markers = [("PAUSE-" + str(lane), "lane:" + str(lane))]
+        if host:
+            markers.append(("PAUSE-HOST-" + host, "host:" + host))
+        if backend:
+            markers.append(("PAUSE-BACKEND-" + backend, "backend:" + backend))
+        for name, marker_scope in markers:
+            reason = self._legacy_pause(name, marker_scope, now)
+            if reason:
+                return reason
         if host in self.local_hosts and self.local_inode_low():
-            return True
-        be = lc.get("backend") or ""
-        return bool(be and os.path.exists(self.path(f"PAUSE-BACKEND-{be}")))
+            return {"scope": "host:" + host, "remaining_s": None, "reason": "local inode pressure"}
+        return None
+
+    def paused_lane(self, lane, lc):
+        """Whether the lane is paused: global marker, PauseStore scope or legacy marker."""
+        return self.pause_reason(lane, lc) is not None
 
     def burn_state(self):
         """Return the selected backend and factor, with legacy marker compatibility."""
@@ -1159,11 +1228,7 @@ class Dispatcher:
                 match = re.search(r"\buntil=([^\s]+)", body)
                 expiry = self.quota_until(match.group(1)) if match else None
                 if expiry is not None and expiry <= self.clock():
-                    if self.dry_run:
-                        self.plan.append({"would": "unlink", "file": name})
-                    else:
-                        os.unlink(path)
-                    self.log(f"{name} quota pause expired; cleared")
+                    # Expired markers remain as evidence; pause_reason logs and ignores them.
                     continue
                 if has_probe_cmd:
                     result = self.quota_probe()
@@ -2569,12 +2634,13 @@ class Dispatcher:
                 by_backend[backend] = by_backend.get(backend, 0) + 1
             model_cfg = lc.get("model") or (policy.get(backend) or {}).get("default_model")
             last = model_history.get(L) or {}
+            pause = self.pause_reason(L, lc)
             entry = {"state": lane_state, "issue": active.get("issue") if active else None,
                      "pr": active.get("review_pr") if active else None, "backend": backend, "host": lc.get("host"),
                      "model_cfg": model_cfg, "model_last": last.get("model"), "model_last_at": last.get("at"),
-                     "paused_reason": (f"lane:{L}" if os.path.exists(self.path(f"PAUSE-{L}")) else
-                                      f"host:{lc.get('host')}" if os.path.exists(self.path(f"PAUSE-HOST-{lc.get('host')}")) else
-                                      f"backend:{backend}" if backend and os.path.exists(self.path(f"PAUSE-BACKEND-{backend}")) else None)}
+                     "paused_reason": pause["scope"] if pause else None,
+                     "pause_remaining_s": pause["remaining_s"] if pause else None,
+                     "pause_detail": pause["reason"] if pause else None}
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)

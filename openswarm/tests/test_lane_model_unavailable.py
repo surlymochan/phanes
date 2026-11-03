@@ -43,7 +43,8 @@ class ModelUnavailableFinish(unittest.TestCase):
             spec.loader.exec_module(engine)
             cfg_path = pathlib.Path(home) / "config.json"
             cfg_path.write_text(json.dumps({"repo": "acme/project", "local_repo": home,
-                                           "state_dir": home, "ssh": {"control_dir": str(pathlib.Path(home) / "cm")},
+                                           "state_dir": home, "pause_home": home,
+                                           "ssh": {"control_dir": str(pathlib.Path(home) / "cm")},
                                            "local_hosts": [], "hot_files": {"limits": {}, "union": []}}))
             cfg = engine.load_config(str(cfg_path))
             d = engine.Dispatcher(cfg, runner=lambda *a, **k: (0, "", ""), clock=lambda: 1000)
@@ -71,7 +72,8 @@ class ModelUnavailableFinish(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="lane-model-review-", dir=HERE) as home:
             cfg_path = pathlib.Path(home) / "config.json"
             cfg_path.write_text(json.dumps({"repo": "acme/project", "local_repo": home,
-                                           "state_dir": home, "ssh": {"control_dir": str(pathlib.Path(home) / "cm")},
+                                           "state_dir": home, "pause_home": home,
+                                           "ssh": {"control_dir": str(pathlib.Path(home) / "cm")},
                                            "local_hosts": [], "hot_files": {"limits": {}, "union": []}}))
             d = engine.Dispatcher(engine.load_config(str(cfg_path)), runner=lambda *a, **k: (0, "", ""))
             d.put_review = mock.Mock()
