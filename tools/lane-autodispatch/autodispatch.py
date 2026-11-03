@@ -41,6 +41,30 @@ HARVEST_FETCH_BACKOFF_CAP = 600
 HARVEST_FETCH_TRANSIENT_RE = re.compile(r"Permission denied|Connection closed|broken pipe|timed out|banner|"
                                         r"unexpected disconnect|bad pack header|early eof|index-pack failed|"
                                         r"RPC failed|Connection reset|hung up unexpectedly", re.I)
+FETCH_FAILURES = {}  # host -> recent timestamped failure classifications (health snapshot)
+FETCH_HEALTH_WINDOW = 24 * 60 * 60
+FETCH_TLS_RE = re.compile(r"gnutls|tls|ssl|handshake", re.I)
+
+def record_dispatch_fetch_failure(host, error, now=None):
+    """Keep recent fetch failures by host, with network errors classified for diagnosis."""
+    now = time.time() if now is None else now
+    category = "tls" if FETCH_TLS_RE.search(error or "") else ("network" if HARVEST_FETCH_TRANSIENT_RE.search(error or "") else "git")
+    rows = [row for row in FETCH_FAILURES.get(host, []) if now - row["at"] <= FETCH_HEALTH_WINDOW]
+    rows.append({"at": now, "type": category})
+    FETCH_FAILURES[host] = rows
+    return category
+
+def dispatch_fetch_health(now=None):
+    """Recent fetch failure counts and leading error type, suitable for health output."""
+    now = time.time() if now is None else now
+    result = {}
+    for host, failures in FETCH_FAILURES.items():
+        recent = [item for item in failures if now - item["at"] <= FETCH_HEALTH_WINDOW]
+        if recent:
+            counts = {}
+            for item in recent: counts[item["type"]] = counts.get(item["type"], 0) + 1
+            result[host] = {"failures_24h": len(recent), "primary_error": max(counts, key=counts.get)}
+    return result
 # Refs #1810: the base commit is read from upstream (ls-remote) and must exist in the target repo
 # before the lane is assigned. The target repo can lag behind upstream (its object store misses the
 # new base), which surfaced as `fatal: Not a valid object name <base>^{commit}` plus a 30s host
@@ -428,6 +452,7 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    status["_dispatch_fetch_health"] = dispatch_fetch_health()
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -456,6 +481,23 @@ def dispatch_failed(lane, cfg, item, error):
     gh(["issue", "edit", str(item["n"]), "--remove-label", "in-progress"])
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
+def dispatch_fetch(host, command, *, timeout=180, attempts=3, fallback=None, delay=5):
+    """Retry a dispatch fetch, optionally invoking a seed transfer after its failure threshold."""
+    last = ""
+    for attempt in range(1, attempts + 1):
+        rc, out, err = sh(command, timeout=timeout)
+        if not rc: return True, out, ""
+        last = err or out
+        category = record_dispatch_fetch_failure(host, last)
+        if attempt < attempts:
+            time.sleep(delay * attempt)
+    if fallback:
+        log(f"{host} fetch failed {attempts} times ({category}); using seed push fallback", brain=False)
+        rc, out, err = sh(fallback, timeout=timeout)
+        if not rc: return True, out, ""
+        last = err or out
+    return False, "", last
+
 def dispatch(lane, cfg, item, base):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
@@ -478,8 +520,8 @@ def dispatch(lane, cfg, item, base):
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
         # own short-lived ref locks).
-        frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
-        if frc:
+        fetch_ok, _, ferr = dispatch_fetch(h, ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)))
+        if not fetch_ok:
             # A failing fetch aborts the dispatch right away: the base could not be validated, and
             # a later successful check (e.g. a concurrent tick that fetched the object in the
             # meantime) must never mask the fetch failure. The caller backs the host off as usual.
