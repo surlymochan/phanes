@@ -106,7 +106,7 @@ class LaneTimingTests(unittest.TestCase):
                      "diffstat": "", "excluded_files": [], "patch": None, "worktree": temp, "merge_hint": None}), \
                  mock.patch.object(xs, "append_ledger"), mock.patch.object(xs, "cleanup_executor_tmp"):
                 result = xs.lane_finalize_run({"name": "L", "backend": "pi", "model": "m"}, spec, ws,
-                                              None, {}, "budget_exceeded", 124, "events",
+                                              None, {}, "budget_exceeded", 124, str(run_dir / "events.jsonl"),
                                               attempts=[{"seconds": 20, "error_tail": "deadline"}])
             self.assertTrue(result["error"].endswith("slowest=tools 9.0s"))
             self.assertIn("slowest=tools 9.0s", json.loads((run_dir / "status.json").read_text())["error"])

@@ -4108,6 +4108,384 @@ def kill_tree(pid, grace=3):
                 return
 
 
+# ---------------------------------------------------------------- lane sandbox sweep
+#
+# A lane sandbox (bubblewrap) stays alive between runs, so a background process a run
+# started would keep burning CPU long after the run ended (issue #1771).  At the end of a
+# run the sandbox is swept: every process that provably belongs to the sandbox, except
+# the resident executor and its broker bridge, is terminated.
+#
+# The sweep is bounded on purpose: a run teardown must not wait for a process scan that
+# runs long, so the scan reads the process table once, the whole sweep has a deadline and
+# the number of processes it may look at (and kill) is capped.  A sweep that cannot
+# finish is reported in the event log and the run continues.
+
+SANDBOX_SWEEP_GRACE = 2.0            # seconds a leftover process gets after SIGTERM
+SANDBOX_SWEEP_ROUNDS = 3             # sweeps, so a process that forks during the sweep is caught
+SANDBOX_SWEEP_DEADLINE = 15.0        # seconds the whole sweep may take before it gives up
+SANDBOX_SWEEP_MAX_PROCESSES = 5000   # processes the scan may look at
+SANDBOX_SWEEP_MAX_TARGETS = 200      # processes a single sweep may terminate
+SANDBOX_RESIDENT_MARKERS = ("node_modules/.bin/pi",)   # the resident Pi executor
+SANDBOX_BRIDGE_MARKERS = ("socat", "/run/broker.sock")  # the Pi provider bridge
+
+
+def process_argv(pid):
+    """The argument vector of a pid, or an empty list when it cannot be read."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as stream:
+            raw = stream.read()
+    except (OSError, TypeError, ValueError):
+        return []
+    return [chunk.decode("utf-8", "replace") for chunk in raw.split(b"\0") if chunk]
+
+
+def process_cmdline(pid):
+    """The command line of a pid as a single string, or None when it cannot be read."""
+    parts = process_argv(pid)
+    return " ".join(parts) if parts else None
+
+
+def process_state(pid):
+    """The state letter of a pid (``Z`` for a zombie), or None when it cannot be read."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+            fields = stream.read().rsplit(")", 1)[1].split()
+    except (OSError, IndexError, TypeError, ValueError):
+        return None
+    return fields[0] if fields else None
+
+
+def process_table(limit=SANDBOX_SWEEP_MAX_PROCESSES):
+    """A snapshot of the host process table: pid -> (parent pid, state, session id).
+
+    The sweep reads the table once instead of asking ``pgrep`` for every process it looks
+    at: a run teardown may not wait for a process scan that runs long.  The snapshot is
+    capped, and a table above the cap is reported as truncated so the sweep can give up
+    instead of scanning an unbounded number of processes.
+    """
+    table, truncated = {}, False
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return table, truncated
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) < 4:
+            continue
+        try:
+            table[pid] = (int(fields[1]), fields[0], int(fields[3]))
+        except ValueError:
+            continue
+        if len(table) > limit:
+            truncated = True
+            break
+    return table, truncated
+
+
+def process_child_index(table):
+    """The children of every pid of a process table snapshot."""
+    index = {}
+    for child, row in table.items():
+        index.setdefault(row[0], []).append(child)
+    return index
+
+
+def process_descendants(pid, index):
+    """Every descendant of a pid in a process table snapshot."""
+    out, todo, seen = [], [int(pid)], set()
+    while todo:
+        for child in index.get(todo.pop(), ()):
+            if child in seen:
+                continue
+            seen.add(child)
+            out.append(child)
+            todo.append(child)
+    return out
+
+
+def process_ancestors(pid, table):
+    """The pid of a process and of its ancestors, up to pid 1."""
+    chain, seen, current = [], set(), int(pid)
+    while current and current not in seen:
+        seen.add(current)
+        chain.append(current)
+        row = table.get(current)
+        current = row[0] if row else 0
+    return chain
+
+
+def process_namespace(pid, kind="mnt"):
+    """The namespace inode of a pid (e.g. ``mnt``), or None when it cannot be read."""
+    try:
+        return os.readlink(f"/proc/{int(pid)}/ns/{kind}")
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def sandbox_process_alive(pid):
+    """Whether a sandbox process still runs (a zombie that already exited counts as gone)."""
+    return pid_alive(pid) and process_state(pid) != "Z"
+
+
+def is_bwrap_argv(argv):
+    """Whether an argument vector starts bubblewrap (directly, or through a shell)."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == "bwrap":
+        return True
+    return (len(argv) > 1 and os.path.basename(argv[0]) in ("sh", "bash", "dash", "zsh")
+            and os.path.basename(argv[1]) == "bwrap")
+
+
+def sandbox_roots(lane_pid, index):
+    """The outermost bubblewrap processes below a lane's resident child.
+
+    Only the outermost one hosts the lane sandbox: a sandbox may run a nested bubblewrap.
+    The result is sorted, so a caller that refuses to guess between several sandboxes
+    always sees them in the same order.
+    """
+    roots = [pid for pid in process_descendants(lane_pid, index) if is_bwrap_argv(process_argv(pid))]
+    if len(roots) < 2:
+        return sorted(roots)
+    # A sandbox may run a nested bubblewrap; only the outermost one hosts the lane sandbox.
+    nested = set()
+    for root in roots:
+        nested |= set(process_descendants(root, index))
+    return sorted([pid for pid in roots if pid not in nested] or roots)
+
+
+def sandbox_identity(init_pid, table):
+    """The identity a process has to share to be provably part of the sandbox.
+
+    Bubblewrap gives the sandbox its own session (``--new-session``) and its own mount
+    namespace, so a leftover whose parent died inside the sandbox is still provably part
+    of it: it keeps the session of the sandbox and lives in its mount namespace.  Both are
+    compared with the supervisor's own, so a sandbox that shares them with the host never
+    matches anything.
+    """
+    identity = {}
+    row = table.get(int(init_pid)) if init_pid else None
+    host_session = os.getsid(0)
+    if row and row[2] and row[2] != host_session:
+        identity["session"] = row[2]
+    namespace = process_namespace(init_pid) if init_pid else None
+    if namespace and namespace != process_namespace(os.getpid()):
+        identity["mnt"] = namespace
+    return identity
+
+
+def sandbox_members(root_pid, init_pid, table, index):
+    """The processes that provably run inside the sandbox of a bubblewrap root.
+
+    A process belongs to the sandbox when it descends from the sandbox root, or when it
+    shares the session or the mount namespace of the sandbox: a leftover whose parent died
+    is reparented away from the tree, but it keeps the session of the sandbox.  A process
+    the supervisor adopted from another lane shares neither, so it is left alone.
+    """
+    members = set(process_descendants(root_pid, index))
+    identity = sandbox_identity(init_pid, table)
+    if identity:
+        for pid, row in table.items():
+            if pid in members:
+                continue
+            if identity.get("session") and row[2] == identity["session"]:
+                members.add(pid)
+            elif identity.get("mnt") and process_namespace(pid) == identity["mnt"]:
+                members.add(pid)
+    return members
+
+
+def sandbox_resident_marker(command):
+    """Whether a command line belongs to the resident executor of a lane sandbox."""
+    return any(marker in command for marker in SANDBOX_RESIDENT_MARKERS)
+
+
+def sandbox_resident_processes(root_pid, tree, members, table):
+    """The sandbox processes that must survive a sweep.
+
+    The resident executor (the Pi process a lane keeps between runs), the sandbox
+    infrastructure it lives in and its broker bridge stay alive; every other process
+    inside the sandbox is a leftover of the run that just ended.
+    """
+    protected = {root_pid}
+    children = [pid for pid in tree if table.get(pid, (0,))[0] == root_pid]
+    protected.update(children)
+    for pid in members:
+        command = process_cmdline(pid) or ""
+        if all(marker in command for marker in SANDBOX_BRIDGE_MARKERS):
+            protected.add(pid)
+        elif sandbox_resident_marker(command):
+            protected.add(pid)
+    # The resident executor owns the broker bridge, so everything between the bridge and
+    # the sandbox root belongs to the lane and has to survive the sweep.
+    for pid in list(protected):
+        parent = table.get(pid, (0,))[0]
+        while parent and parent != root_pid and parent in tree:
+            protected.add(parent)
+            parent = table.get(parent, (0,))[0]
+    return protected
+
+
+def sandbox_sweep_plan(lane_pid, table=None):
+    """The processes a sweep would terminate in the sandbox of a lane's resident child.
+
+    Returns the sandbox root, the processes that survive the sweep (the resident executor,
+    its broker bridge and the sandbox infrastructure) and the leftovers that would go.
+    A lane without a bubblewrap sandbox has no plan: the sweep is skipped.
+    """
+    plan = {"root": None, "skipped": None, "members": [], "protected": [], "targets": []}
+    if not lane_pid:
+        plan["skipped"] = "no lane child"
+        return plan
+    if not sandbox_process_alive(lane_pid):
+        # Without the lane child there is no proof that a sandbox belongs to this lane,
+        # so nothing is swept.
+        plan["skipped"] = "no lane child"
+        return plan
+    if table is None:
+        table, _ = process_table()
+    index = process_child_index(table)
+    roots = sandbox_roots(lane_pid, index)
+    if not roots:
+        plan["skipped"] = "no sandbox"
+        return plan
+    if len(roots) > 1:
+        # Two sandboxes below one lane child: the sweep cannot tell which one is the lane's
+        # sandbox, so it sweeps neither of them.
+        plan["skipped"] = f"ambiguous sandbox ({len(roots)} bubblewrap roots)"
+        return plan
+    root = roots[0]
+    plan["root"] = root
+    tree = set(process_descendants(root, index))
+    init = next((pid for pid in sorted(tree) if table.get(pid, (0,))[0] == root), None)
+    members = sandbox_members(root, init, table, index)
+    protected = sandbox_resident_processes(root, tree, members, table)
+    if not [pid for pid in members if sandbox_resident_marker(process_cmdline(pid) or "")]:
+        # The resident executor of the lane could not be recognized, so the sweep cannot
+        # tell the lane's own processes from the leftovers of the run: it sweeps nothing.
+        plan["skipped"] = "no resident executor in the sandbox"
+        return plan
+    # Never signal this process, its ancestors, the resident child or pid 1.
+    guard = set(process_ancestors(os.getpid(), table)) | {os.getpid(), 1, int(lane_pid)}
+    plan["members"] = sorted(members)
+    plan["protected"] = sorted(protected)
+    plan["targets"] = sorted(pid for pid in members if pid not in protected and pid not in guard)
+    return plan
+
+
+def sweep_sandbox_processes(targets, protected, grace=SANDBOX_SWEEP_GRACE, budget=None):
+    """Terminate the leftover sandbox processes and report the ones that survived."""
+    # A process that is already gone (or a zombie the sandbox has not reaped yet) is not
+    # a leftover any more, so it is not counted as killed a second time.
+    targets = [pid for pid in targets if pid not in protected and sandbox_process_alive(pid)]
+    if not targets:
+        return [], []
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + max(0.0, grace)
+    if budget is not None:
+        deadline = min(deadline, time.monotonic() + max(0.0, budget))
+    while time.monotonic() < deadline:
+        if not [pid for pid in targets if sandbox_process_alive(pid)]:
+            break
+        time.sleep(0.05)
+    survivors = [pid for pid in targets if sandbox_process_alive(pid)]
+    for pid in survivors:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if survivors:
+        time.sleep(0.1)
+    survivors = [pid for pid in survivors if sandbox_process_alive(pid)]
+    return [pid for pid in targets if pid not in survivors], survivors
+
+
+def lane_sweep_sandbox(lane_pid, event_file=None, grace=SANDBOX_SWEEP_GRACE,
+                       deadline=SANDBOX_SWEEP_DEADLINE):
+    """Sweep the processes a run left behind in the lane sandbox.
+
+    The lane sandbox is reused by the next run, so a background loop the run started
+    would keep burning CPU after the run ended.  Everything inside the sandbox except
+    the resident executor and its broker bridge is terminated here.  A lane without a
+    bubblewrap sandbox is skipped, and a failing or slow sweep is reported in the event
+    log instead of blocking the run teardown.
+    """
+    summary = {"sandbox_pid": None, "scanned": 0, "killed": 0, "killed_pids": [],
+               "protected_pids": [], "processes": [], "skipped": None, "error": None}
+    started = time.monotonic()
+    seen_processes = {}
+    try:
+        table, truncated = process_table()
+        if truncated:
+            summary["error"] = (f"more than {SANDBOX_SWEEP_MAX_PROCESSES} processes on the host; "
+                                "the sandbox was not swept")
+        else:
+            for _ in range(SANDBOX_SWEEP_ROUNDS):
+                if time.monotonic() - started > deadline:
+                    summary["error"] = f"the sandbox sweep exceeded its {deadline}s budget"
+                    break
+                plan = sandbox_sweep_plan(lane_pid, table)
+                summary["sandbox_pid"] = plan["root"]
+                summary["skipped"] = plan["skipped"]
+                if not plan["root"]:
+                    break
+                summary["scanned"] = max(summary["scanned"], len(plan["members"]))
+                summary["protected_pids"] = plan["protected"]
+                targets = plan["targets"]
+                if not targets:
+                    break
+                if len(targets) > SANDBOX_SWEEP_MAX_TARGETS:
+                    summary["error"] = (f"{len(targets)} leftover processes are above the "
+                                        f"{SANDBOX_SWEEP_MAX_TARGETS} limit; the sandbox was not swept")
+                    break
+                summary["processes"] = [{"pid": pid, "cmd": (process_cmdline(pid) or "")[:200]}
+                                        for pid in targets]
+                for row in summary["processes"]:
+                    # A process that died in an earlier round has no command line any more,
+                    # so the first one that was read is kept.
+                    if row["cmd"] or row["pid"] not in seen_processes:
+                        seen_processes[row["pid"]] = row["cmd"]
+                killed, survivors = sweep_sandbox_processes(
+                    targets, set(plan["protected"]), grace, deadline - (time.monotonic() - started))
+                summary["killed_pids"].extend(killed)
+                if survivors:
+                    summary["error"] = f"{len(survivors)} sandbox process(es) survived the sweep"
+                    break
+                table, truncated = process_table()
+                if truncated:
+                    summary["error"] = (f"more than {SANDBOX_SWEEP_MAX_PROCESSES} processes on the "
+                                        "host; the sandbox was not swept")
+                    break
+            summary["killed"] = len(summary["killed_pids"])
+            summary["processes"] = [{"pid": pid, "cmd": seen_processes[pid]}
+                                    for pid in sorted(seen_processes)]
+    except Exception as error:  # noqa: BLE001 - a sweep failure must never block the teardown
+        summary["error"] = short(error, 300)
+    event = {"type": "sandbox_sweep", "killed": summary["killed"], "scanned": summary["scanned"],
+             "sandbox_pid": summary["sandbox_pid"], "processes": summary["processes"]}
+    if summary["skipped"]:
+        event["skipped"] = summary["skipped"]
+    if summary["error"]:
+        event["error"] = summary["error"]
+    if event_file:
+        try:
+            lane_record_event(event_file, event)
+        except OSError:
+            pass
+    return summary
+
+
 def process_group_alive(pgid):
     """Whether a dedicated executor process group still has a member."""
     try:
@@ -9419,7 +9797,7 @@ def lane_failure_error(error_detail=None, rc=None):
     return dispatch_failure_reason_module().tail(error_detail, rc)
 
 
-def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None):
+def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None, child_pid=None):
     rid, rdir = spec["run_id"], os.path.join(RUNS, spec["run_id"])
     title = spec.get("title") or spec["task"].strip().splitlines()[0][:72]
     stopped = bool(spec.get("stop_requested"))
@@ -9432,6 +9810,11 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                      "seconds": round(NOW() - spec["started"], 3), "error_class": error_class,
                      "meta": {"usage": usage}, "events": event_file, "error_tail": None}]
     set_status(rdir, state="finalizing")
+    # The sandbox is reused by the next run, so a background process the run started has to
+    # go before the run is finalized (issue #1771).  Only the lane's own child identifies
+    # the sandbox: without it nothing is swept, because the host runner (which supervises
+    # every lane) would point at a foreign sandbox.  A sweep failure never blocks the run.
+    sweep = lane_sweep_sandbox(child_pid, event_file=event_file)
     changed = bool(git(["status", "--porcelain"], ws["root"])[1].strip())
     if ws.get("mode") == "worktree":
         head_rc, head, _ = git(["rev-parse", "--verify", "HEAD^{commit}"], ws["root"])
@@ -9542,6 +9925,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
            **({"resolved_model": model} if lane["backend"] in ("cursor", "copilot") else {}),
            **({"last_activity_at": spec.get("stalled_last_activity_at")} if error_class == "stalled" else {}),
            "risk_blocks": spec.get("risk_blocks", []), "review_changes_discarded": bool(read_only and changed),
+           "sandbox_sweep": sweep,
            "usage": usage, "seconds": round(sum(attempt["seconds"] for attempt in attempts), 3), "result": final, "workspace":
            {k: v for k, v in ws.items() if k in ("mode", "path", "repo", "base", "note", "lane")},
            **fin, "attempts": attempts, "run_dir": rdir, **quota}
@@ -9606,7 +9990,7 @@ def lane_do_run(lane, spec, child, server, current):
                            "rc": prepared["rc"], "seconds": prepared["seconds"], "error_class": "prepare_failed",
                            "meta": {"usage": {}}, "events": evp, "error_tail": None}
                 return lane_finalize_run(lane, spec, ws, None, {}, "prepare_failed", prepared["rc"], evp,
-                                         attempts=[attempt])
+                                         attempts=[attempt], child_pid=child.pid)
         if spec.get("verify"):
             rewritten = rewrite_verify_paths(spec["verify"], ws["repo"], ws["root"])
             if rewritten != spec["verify"]:
@@ -9752,7 +10136,7 @@ def lane_do_run(lane, spec, child, server, current):
             if number == len(models) or spec.get("abort_requested"):
                 break
         out = lane_finalize_run(attempt_lane, spec, ws, final, usage, error_class, rc, evp,
-                                attempts=attempts)
+                                attempts=attempts, child_pid=child.pid)
         return out
     except Exception as e:
         error_class = e.error_class if isinstance(e, CodexVersionBlockedError) else "exec_error"
@@ -9780,7 +10164,7 @@ def lane_do_run(lane, spec, child, server, current):
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
             return status
-        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp)
+        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp, child_pid=child.pid)
 
 
 def agy_quota_available(lane, child):
@@ -9881,7 +10265,8 @@ def cmd_lane_serve(lane, policy):
                 lane_write_state(name, state="crashed", last_error="resident executor process exited", child_pid=None)
                 lane_finalize_run(lane, spec, lane_prepare_workspace(lane, spec["run_id"], spec.get("base")),
                                   None, {}, "exec_error", 1,
-                                  os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"))
+                                  os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"),
+                                  child_pid=child.pid)
                 current.clear()
             try:
                 child.close()
