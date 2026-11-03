@@ -20,6 +20,30 @@ Ranking key (lower is better): `(0=own pin, 1=unpinned, 2=cross-pin, prio, numbe
 
 Add label `strict-backend` on an issue to forbid cross-pin. Exact pin and unpinned still apply.
 
+## Policy (Refs #1361)
+
+The openswarm policy can narrow the cross-pin rule: `dispatch.fallback` maps a pinned backend to
+the backends its cards may fall back to (in the order they are tried) and `dispatch.fallback_wait_s`
+is how long the pinned backend gets an idle lane first (`dispatch.fallback_strict` switches the
+fallback off). A paused backend (`PAUSE-BACKEND-<backend>`) is skipped.
+
+Sources, the same ones the openswarm CLI uses (`load_policy` in `openswarm/bin/openswarm`):
+
+1. the base policy of the install of the openswarm CLI (`<install>/policy.json`) — the install the
+   CLI derives from its own path (`SKILL_DIR`, the parent of its `bin` directory). The dispatcher
+   finds the same install: `$OPENSWARM_SKILL_DIR` names it explicitly, otherwise the `openswarm`
+   CLI on the `PATH` is used, otherwise the install of the box (`~/.claude/skills/openswarm`);
+2. the local override of the data directory (`$OPENSWARM_HOME/policy.local.json`), merged on top
+   of the base policy.
+
+Only **one** base policy is read: the CLI knows the policy of its own install only, so a second
+install (the openswarm tree of this repository, for instance) must not be merged in — the CLI and
+the dispatcher would dispatch differently.
+
+A `policy.json` in the data directory is **not** a policy source: a stale copy there must not
+drop the published fallback rules. `AD_FALLBACK_POLICY` overrides everything with a complete
+policy file.
+
 ## Sync steps (box ↔ repo)
 
 ```bash

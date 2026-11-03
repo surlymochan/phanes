@@ -141,6 +141,12 @@ DEFAULTS = {
     "priorities": {"p0": 0, "p1": 1, "p2": 2},
     "fallback": {"pi": ["codex", "copilot", "agy"], "codex": ["pi", "copilot", "agy"],
                  "copilot": ["codex", "pi", "agy"], "agy": ["pi", "codex", "copilot"]},
+    # Cross-backend fallback of a pinned card (Refs #1361).  The policy section
+    # `dispatch.fallback` maps a pinned backend to the backends its cards may fall back
+    # to, in order, and `dispatch.fallback_wait_s` is the grace period the pinned
+    # backend gets an idle lane.  Empty means: a card stays on its pinned backend
+    # unless the policy says otherwise.
+    "fallback_chain": {},
     "never_take_re": {"codex": r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字"},
     "verify_line_re": r"\s*(?:验收|Verify|verify|Acceptance)\s*[:：]",
     "depends_line_re": r"^\s*(?:依赖|Depends on)\s*[:：](.*)$",
@@ -341,6 +347,9 @@ def run_cmd(cmd, timeout=120, inp=None, env=None):
     return (proc.returncode if proc.returncode is not None else 124), out or "", err or ""
 
 
+#: State key holding the arrival time of every queued card (Refs #1361).
+QUEUE_SINCE_KEY = "_queue_since"
+
 _QUOTA_MOD = None
 
 
@@ -436,6 +445,7 @@ class Dispatcher:
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
         self._quota_probe_cache = None
+        self._paused_backends = None
 
     # ------------------------------------------------------------ io helpers
     def path(self, name):
@@ -724,13 +734,150 @@ class Dispatcher:
                           "strict": self.L["strict_backend"] in labels})
         return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
+    def mark_queue_arrivals(self, items, state):
+        """How long every queued card waited, in seconds (Refs #1361).
+
+        The arrival time of a card lives in the dispatcher state: it is the time the
+        card was seen in the queue the first time.  A comment, a label change or any
+        other update of the issue does not reset the wait, only leaving the queue
+        does.  The age of the issue itself (``updatedAt``) is not used: every update
+        would reset it and a busy card would never fall back.
+
+        The cards are keyed by their number as a string: JSON object keys are
+        strings, so an integer key would be lost on every state round trip and the
+        wait of a queued card would start over again.
+
+        Returns whether a card entered the queue for the first time; the caller
+        persists the state then, a restart must not restart the wait.
+        """
+        since = state.setdefault(QUEUE_SINCE_KEY, {})
+        now = self.clock()
+        fresh = False
+        for item in items:
+            key = str(item["n"])
+            arrived = since.get(key)
+            if isinstance(arrived, bool) or not isinstance(arrived, (int, float)):
+                since[key] = now
+                arrived = now
+                fresh = True
+            item["waited_s"] = max(0.0, now - float(arrived))
+        return fresh
+
+    def prune_queue_arrivals(self, state, items):
+        """Forget the arrival times of the cards that left the queue (Refs #1361).
+
+        A card that is not in the queue any more has left it: it was dispatched, it was
+        claimed by another lane or it was taken out of ``lane-ready``.  Its arrival time
+        is forgotten, so a card that comes back to the queue waits for the grace period
+        of the fallback again instead of using the arrival time of its last stay in the
+        queue (which would let it fall back to another backend right away).
+
+        Returns whether an arrival time was forgotten; the caller persists the state
+        then, the cleanup must survive the next tick and a restart.
+        """
+        since = state.get(QUEUE_SINCE_KEY) or {}
+        live = {str(item["n"]) for item in items}
+        changed = False
+        for key in list(since):
+            if str(key) in live:
+                continue
+            since.pop(key, None)
+            changed = True
+        return changed
+
+    def note_queue_departure(self, n, state):
+        """A card left the queue: it was dispatched or it is already claimed (Refs #1361).
+
+        The arrival time of the card is forgotten right away, so a card that comes back
+        to the queue later waits for the grace period of the fallback again.
+
+        Returns whether an arrival time was forgotten.
+        """
+        since = state.get(QUEUE_SINCE_KEY) or {}
+        return since.pop(str(n), None) is not None
+
     def can_take(self, backend, item):
         if item["backend"] in (None, backend):
             return True
         if item.get("strict"):
             return False
         rx = (self.cfg.get("never_take_re") or {}).get(backend)
-        return not (rx and re.search(rx, item["title"] + "\n" + item["body"], re.I))
+        if rx and re.search(rx, item["title"] + "\n" + item["body"], re.I):
+            return False
+        return self.fallback_allows(backend, item)
+
+    def fallback_allows(self, backend, item):
+        """Whether a lane of ``backend`` may run a card pinned to another backend.
+
+        The policy section ``dispatch.fallback`` maps a pinned backend to the backends
+        its cards may fall back to, in order (Refs #1361).  A card falls back only
+        after the pinned backend waited ``dispatch.fallback_wait_s`` seconds, and a
+        paused backend is skipped.  Without a mapping the plain cross-backend
+        behaviour stays in place.
+        """
+        fallback = dispatch_module("fallback")
+        cfg = self.cfg.get("fallback_chain") or {}
+        if not fallback.configured(cfg):
+            return True
+        chain = fallback.fallback_backends(item["backend"], item.get("waited_s", 0), cfg, self.paused_backends())
+        return backend in chain
+
+    def fallback_chain(self, item):
+        """The backends a card may run on, in the order of the policy (Refs #1361).
+
+        The pinned backend comes first, the fallbacks of ``dispatch.fallback`` follow in
+        the configured order once the pinned backend waited its grace period; a paused
+        backend is skipped.  An empty chain means the plain cross-backend rule decides.
+        """
+        fallback = dispatch_module("fallback")
+        cfg = self.cfg.get("fallback_chain") or {}
+        pinned = item.get("backend")
+        if not pinned or not fallback.configured(cfg):
+            return []
+        return fallback.fallback_backends(pinned, item.get("waited_s", 0), cfg, self.paused_backends())
+
+    def chain_allows_lane(self, backend, item, pending):
+        """Whether the lane of ``backend`` may take the card (Refs #1361).
+
+        The card goes to the first backend of its fallback chain that still has a lane
+        to serve *and* that may run the card: the order of ``dispatch.fallback``
+        decides which backend runs the card, not the order the lanes happen to be
+        served in.  A backend that cannot take the card (a codex lane and Unix socket
+        work) is skipped, the next backend of the chain gets the card.
+        """
+        chain = self.fallback_chain(item)
+        if not chain:
+            return True
+        for candidate in chain:
+            if pending.get(candidate, 0) <= 0:
+                continue
+            if not self.can_take(candidate, item):
+                continue
+            return candidate == backend
+        return False
+
+    def paused_backends(self, refresh=False):
+        """The backends that are paused right now (backend pauses of the pause store)."""
+        if not refresh and self._paused_backends is not None:
+            return self._paused_backends
+        paused = set()
+        try:
+            for record in dispatch_module("pause").PauseStore(self.D).active(self.clock()):
+                scope = str(record.get("scope") or "")
+                if scope.startswith("backend:"):
+                    paused.add(scope.split(":", 1)[1].strip())
+        except Exception:
+            pass
+        try:
+            for name in os.listdir(self.D):
+                if name.startswith("PAUSE-BACKEND-"):
+                    backend = name[len("PAUSE-BACKEND-"):].strip()
+                    if backend:
+                        paused.add(backend)
+        except OSError:
+            pass
+        self._paused_backends = paused
+        return paused
 
     def rank(self, backend, item):
         if item["backend"] == backend:
@@ -799,6 +946,9 @@ class Dispatcher:
 
     def note_stale_skip(self, n, state):
         key = str(n)
+        # the card is not dispatchable any more: it left the queue, its arrival time is
+        # forgotten so that it waits for the grace period again when it comes back (Refs #1361)
+        self.note_queue_departure(n, state)
         skips = state.setdefault("_stale_skips", {})
         skips[key] = int(skips.get(key) or 0) + 1
         count = skips[key]
@@ -1982,6 +2132,23 @@ class Dispatcher:
                 remaining.remove(lane)
         return ordered
 
+    def lane_ready(self, lane, lc, res, state):
+        """Whether the lane may take a card now (idle, healthy host, not paused)."""
+        r = res.get(lane) or {}
+        return not ("error" in r or not self.host_ok(lc["host"]) or state.get(lane) or r.get("lane") != "idle"
+                    or self.paused_lane(lane, lc) or lc.get("drain"))
+
+    def free_lanes(self, lanes, res, state):
+        """The number of lanes per backend that may take a card now."""
+        free = {}
+        for L, lc in lanes.items():
+            if not self.lane_ready(L, lc, res, state):
+                continue
+            backend = lc.get("backend")
+            if backend:
+                free[backend] = free.get(backend, 0) + 1
+        return free
+
     def assign_issues(self, lanes, res, state, q):
         base = None
         self.hot_lock.counts.clear()
@@ -1990,14 +2157,15 @@ class Dispatcher:
                 for normalized in self.hotfiles.parse_hot_files("热文件：" + str(f)):
                     if normalized not in self.hot_union and not self.hotfiles.is_doc_file(normalized):
                         self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
+        pending = self.free_lanes(lanes, res, state)
         for L, lc in self.lane_order(lanes):
-            r = res[L]
-            if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
-                    or self.paused_lane(L, lc) or lc.get("drain")):
+            if not self.lane_ready(L, lc, res, state):
                 continue
+            backend = lc.get("backend")
             pick = None
-            for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(lc["backend"], i)),
-                            key=lambda i: self.rank(lc["backend"], i)):
+            for c in sorted((i for i in q if i.get("deps_ok", True) and self.can_take(backend, i)
+                             and self.chain_allows_lane(backend, i, pending)),
+                            key=lambda i: self.rank(backend, i)):
                 if self.hot_lock.blocked(self.hot_of(c["body"])):
                     continue
                 ls = self.label_state(c["n"])
@@ -2009,6 +2177,8 @@ class Dispatcher:
                     continue
                 self.log(f"skip #{c['n']}: stale search index (already claimed/done)", brain=False)
                 self.note_stale_skip(c["n"], state)
+            if backend:
+                pending[backend] = pending.get(backend, 0) - 1
             if not pick:
                 continue
             if base is None:
@@ -2033,6 +2203,9 @@ class Dispatcher:
                 self.host_fail(lc["host"], f"dispatch #{pick['n']}: {e}", host_started, 120)
                 continue
             q.remove(pick)
+            # the card is on a lane now: it left the queue, its arrival time is forgotten so
+            # that it waits for the grace period again when it comes back (Refs #1361)
+            self.note_queue_departure(pick["n"], state)
             hot = self.hot_of(pick["body"])
             self.hot_lock.acquire(hot)
             if self.dry_run:
@@ -2073,6 +2246,7 @@ class Dispatcher:
 
     def tick(self, lanes, state):
         self._quota_probe_cache = None
+        self.paused_backends(refresh=True)
         self.reap_quota_pauses()
         if os.path.exists(self.path("PAUSE")):
             return
@@ -2106,6 +2280,14 @@ class Dispatcher:
         except Exception as e:
             self.log(f"queue error: {e}", brain=False)
             return res
+        if self.mark_queue_arrivals(q, state) and not self.dry_run:
+            # the arrival times are the wait clock of the fallback: persist them right
+            # away, a restart must not restart the wait of a card that is queued
+            self.save_state(state)
+        if self.prune_queue_arrivals(state, q) and not self.dry_run:
+            # the cards that left the queue are cleaned up right away and the cleanup is
+            # persisted: a card that comes back waits for the grace period again
+            self.save_state(state)
         for i in q:
             i["deps_ok"] = self.deps_met(i)
         blocked = sum(not i["deps_ok"] for i in q)
@@ -2225,8 +2407,11 @@ def add_parser(sub):
     sp.set_defaults(func=cmd_dispatch)
 
 
-def cmd_dispatch(args):
+def cmd_dispatch(args, fallback=None):
     cfg = load_config(args.config)
+    if fallback:
+        # The policy section `dispatch.fallback` wins over the dispatch config (Refs #1361).
+        cfg["fallback_chain"] = fallback
     if args.dispatch_cmd == "check-config":
         print(json.dumps(cfg, indent=2, ensure_ascii=False))
         return 0

@@ -7,7 +7,7 @@ then by issue number. Optional `backend:pi|agy|codex` label pins an issue to tha
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
-import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import json, os, re, shlex, shutil, subprocess, sys, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -258,13 +258,247 @@ def queue():
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
-def can_take(backend, item):
+# Cross-backend fallback (Refs #1361): the openswarm policy says which backends a pinned card may
+# fall back to and how long the pinned backend gets an idle lane first.  Without a policy the plain
+# cross-pin rule of #232 stays in place.
+FALLBACK_POLICY_ENV = "AD_FALLBACK_POLICY"
+FALLBACK_WAIT_KEY = "fallback_wait_s"
+FALLBACK_STRICT_KEY = "fallback_strict"
+# State key holding the arrival time of every queued card (Refs #1361).
+QUEUE_SINCE_KEY = "_queue_since"
+# The openswarm install the base policy is read from (`SKILL_DIR` in `openswarm/bin/openswarm`).
+SKILL_DIR_ENV = "OPENSWARM_SKILL_DIR"
+# The install of the openswarm CLI on the box (see `openswarm/SKILL.md`).
+DEFAULT_SKILL_DIR = f"{HOME}/.claude/skills/openswarm"
+
+def openswarm_home():
+    """The openswarm data directory (the same one the openswarm CLI uses).
+
+    The CLI reads its data directory from `OPENSWARM_HOME` (the legacy name is `XSWARM_HOME`),
+    see `DATA` in `openswarm/bin/openswarm`: the dispatcher has to use the same directory, the
+    local override of the policy lives in it.
+    """
+    return os.path.expanduser(os.environ.get("OPENSWARM_HOME")
+                              or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/openswarm")
+
+def load_policy_file(path):
+    """Read one policy file; an unreadable or broken file yields an empty policy."""
+    try:
+        with open(path) as stream:
+            policy = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    return policy if isinstance(policy, dict) else {}
+
+def deep_merge(base, override):
+    """Merge two policies the way the openswarm `load_policy` does (Refs #1361)."""
+    out = dict(base)
+    for key, value in (override or {}).items():
+        out[key] = deep_merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+def openswarm_install_dir():
+    """The openswarm install the base policy is read from (Refs #1361).
+
+    The openswarm CLI derives its policy directory from its own path (`SKILL_DIR` in
+    `openswarm/bin/openswarm`: the parent of the `bin` directory the script lives in) and reads
+    the policy of that install as the base policy.  The dispatcher has to know the *same*
+    install, otherwise the two dispatchers would read different rules.  The install is looked up
+    in this order:
+
+    1. `$OPENSWARM_SKILL_DIR` — an explicitly configured install,
+    2. the `openswarm` CLI on the PATH — the install the user actually calls (used when its
+       directory holds a `policy.json`, so a foreign `openswarm` binary cannot shadow it),
+    3. the install of the box (`~/.claude/skills/openswarm`, see `openswarm/SKILL.md`).
+
+    Only one install is used: a second one (the openswarm tree of this repository, for instance)
+    is not merged in, the CLI does not know it either.  Two dispatchers that read different base
+    policies would dispatch differently, and the fallback mapping must not depend on where the
+    dispatcher runs from.
+    """
+    env = os.environ.get(SKILL_DIR_ENV)
+    if env: return os.path.abspath(os.path.expanduser(env))
+    cli = shutil.which("openswarm")
+    if cli:
+        install = os.path.dirname(os.path.dirname(os.path.realpath(cli)))
+        if os.path.exists(os.path.join(install, "policy.json")): return install
+    return os.path.abspath(os.path.expanduser(DEFAULT_SKILL_DIR))
+
+def policy_base_paths():
+    """The base policy file of the openswarm install (Refs #1361).
+
+    Exactly one base policy is read: the policy of the install of the openswarm CLI, the same
+    file the CLI reads itself.  The data directory is not a base policy source: the CLI merges
+    the local override of the data directory (`$OPENSWARM_HOME/policy.local.json`) on top of the
+    policy of its install, and a stale `policy.json` of the data directory must not shadow the
+    published rules.
+    """
+    return [os.path.join(openswarm_install_dir(), "policy.json")]
+
+def local_policy():
+    """The local policy override of the data directory (the file the openswarm CLI reads).
+
+    The CLI reads `$OPENSWARM_HOME/policy.local.json` and merges it on top of the policy of its
+    install (`load_policy` in `openswarm/bin/openswarm`); the dispatcher does the same.
+    """
+    local = load_policy_file(os.path.join(openswarm_home(), "policy.local.json"))
+    # Older policy.local.json files used `concurrency` for quota-based recommendations.
+    if isinstance(local.get("concurrency"), list):
+        local = dict(local)
+        local.setdefault("recommended_concurrency", local["concurrency"])
+        local["concurrency"] = {}
+    return local
+
+def fallback_policy():
+    """Read the cross-backend fallback policy (Refs #1361).
+
+    The openswarm policy carries the mapping under `dispatch.fallback` (pinned backend -> the
+    backends its cards may fall back to, in the order they are tried) and the grace period under
+    `dispatch.fallback_wait_s`.  The sources are the ones of the openswarm `load_policy`: the
+    policy of the install of the openswarm CLI as the base policy and the local override of the
+    data directory (`$OPENSWARM_HOME/policy.local.json`) on top of it.  A local file only has to
+    carry the keys it changes, a local file without a `dispatch` section keeps the rules of the
+    base policy.  `$AD_FALLBACK_POLICY` overrides everything with a complete policy file.
+
+    A missing or unreadable policy means no mapping at all: the plain cross-pin rule applies —
+    the same as the openswarm CLI, which knows no fallback either then."""
+    env = os.environ.get(FALLBACK_POLICY_ENV)
+    if env:
+        policy = load_policy_file(env)
+        if policy: return policy
+    base = {}
+    for path in policy_base_paths():
+        base = deep_merge(base, load_policy_file(path))
+    return deep_merge(base, local_policy())
+
+def fallback_section(policy):
+    """The dispatch section of the policy: the fallback mapping and its threshold."""
+    if not isinstance(policy, dict): return {}
+    section = policy.get("dispatch")
+    if not isinstance(section, dict): section = policy if "fallback" in policy else {}
+    return section
+
+def fallback_chain(pinned, waited_s, policy, paused_backends=()):
+    """The backends a card pinned to `pinned` may run on, in order.
+
+    The pinned backend comes first; the fallbacks of `dispatch.fallback` follow in policy order
+    once the pinned backend waited `dispatch.fallback_wait_s` seconds.  A paused backend is
+    skipped and `dispatch.fallback_strict` switches the fallback off.  A pinned backend without
+    a mapping stays on its own backend."""
+    section = fallback_section(policy)
+    mapping = section.get("fallback")
+    if not isinstance(mapping, dict) or not isinstance(mapping.get(pinned), (list, tuple)): return [pinned]
+    if section.get(FALLBACK_STRICT_KEY): return [pinned]
+    wait = section.get(FALLBACK_WAIT_KEY, 0)
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)): wait = 0
+    try: waited = float(waited_s)
+    except (TypeError, ValueError): waited = 0
+    if waited < wait: return [pinned]
+    paused = set(paused_backends or ())
+    result = [pinned]; seen = {pinned}
+    for backend in mapping[pinned]:
+        if not isinstance(backend, str) or not backend or backend in paused or backend in seen: continue
+        result.append(backend); seen.add(backend)
+    return result
+
+def backend_pauses():
+    """The backends that are paused right now (PAUSE-BACKEND-<backend> markers)."""
+    paused = set()
+    try: names = os.listdir(D)
+    except OSError: return paused
+    for name in names:
+        if name.startswith("PAUSE-BACKEND-"):
+            backend = name[len("PAUSE-BACKEND-"):].strip()
+            if backend: paused.add(backend)
+    return paused
+
+def queue_arrivals(items, state, now=None):
+    """How long every queued card waited, in seconds (Refs #1361).
+
+    The arrival time of a card lives in the dispatcher state: it is the time the card was seen in
+    the queue the first time.  A comment, a label change or any other update of the issue does not
+    reset the wait, only leaving the queue does.  The age of the issue itself is not used: every
+    update would reset it and a busy card would never fall back.  The cards are keyed by their
+    number as a string, JSON object keys are strings.
+
+    Returns whether a card entered the queue for the first time; the caller persists the state
+    then, a restart must not restart the wait."""
+    since = state.setdefault(QUEUE_SINCE_KEY, {})
+    now = time.time() if now is None else now
+    fresh = False
+    for item in items:
+        key = str(item["n"])
+        arrived = since.get(key)
+        if isinstance(arrived, bool) or not isinstance(arrived, (int, float)):
+            since[key] = now
+            arrived = now
+            fresh = True
+        item["waited_s"] = max(0.0, now - float(arrived))
+    return fresh
+
+def prune_queue_arrivals(state, items, now=None):
+    """Forget the arrival times of the cards that left the queue (Refs #1361).
+
+    A card that is not in the queue any more has left it: it was dispatched, it was claimed by
+    another lane or it was taken out of `lane-ready`.  Its arrival time is forgotten, so a card
+    that comes back to the queue waits for the grace period of the fallback again instead of
+    using the arrival time of its last stay in the queue (which would let it fall back to
+    another backend right away).
+
+    Returns whether an arrival time was forgotten; the caller persists the state then, the
+    cleanup must survive the next tick and a restart."""
+    since = state.get(QUEUE_SINCE_KEY) or {}
+    live = {str(item["n"]) for item in items}
+    changed = False
+    for key in list(since):
+        if str(key) in live: continue
+        since.pop(key, None); changed = True
+    return changed
+
+def note_queue_departure(n, state):
+    """A card left the queue: it was dispatched or it is already claimed (Refs #1361).
+
+    The arrival time of the card is forgotten right away, so a card that comes back to the
+    queue later waits for the grace period of the fallback again.
+
+    Returns whether an arrival time was forgotten."""
+    since = state.get(QUEUE_SINCE_KEY) or {}
+    return since.pop(str(n), None) is not None
+
+def can_take(backend, item, policy=None, waited_s=0, paused_backends=()):
     """Exact pin or unpinned always; cross-pin allowed unless `strict-backend`, except codex never takes Unix-socket work
-    (codex sandbox blocks AF_UNIX bind) — so idle agy/codex lanes drain the pi-heavy queue instead of sitting idle."""
+    (codex sandbox blocks AF_UNIX bind) — so idle agy/codex lanes drain the pi-heavy queue instead of sitting idle.
+    With a fallback policy (Refs #1361) a cross-pin card only runs on a backend of the pinned backend's fallback
+    chain, and only after the pinned backend waited its grace period.  A paused backend takes no card at all."""
+    if paused_backends and backend in paused_backends: return False
     if item["backend"] in (None, backend): return True
     if item.get("strict"): return False
     if backend == "codex" and SOCKET_RE.search(item["title"] + "\n" + item["body"]): return False
-    return True
+    if not isinstance(fallback_section(policy).get("fallback"), dict): return True  # no policy: plain cross-pin
+    return backend in fallback_chain(item["backend"], waited_s, policy, paused_backends)
+
+def fallback_target(item, policy, free, paused_backends=()):
+    """The backend that may take the card now, in the order of the policy (Refs #1361).
+
+    Returns (backend, restricted).  `restricted` is False when no fallback mapping applies (an
+    unpinned card or a policy without a mapping): then every backend may take the card as before.
+    With a mapping the card belongs to the first backend of the chain that has a free lane and
+    that may run the card, so the order of `dispatch.fallback` decides which backend runs the
+    card and not the order the lanes happen to be served in."""
+    pinned = item.get("backend")
+    if not pinned: return None, False
+    if not isinstance(fallback_section(policy).get("fallback"), dict): return None, False
+    waited = item.get("waited_s", 0)
+    for backend in fallback_chain(pinned, waited, policy, paused_backends):
+        if free.get(backend, 0) <= 0: continue
+        if not can_take(backend, item, policy, waited, paused_backends): continue
+        return backend, True
+    return None, True
+
+def chain_allows_lane(backend, item, policy, free, paused_backends=()):
+    """Whether the lane of `backend` may take the card (Refs #1361)."""
+    target, restricted = fallback_target(item, policy, free, paused_backends)
+    return target == backend if restricted else True
 def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, number
     return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], item["n"])
 
@@ -615,23 +849,38 @@ def tick(lanes, state, last_warn):
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
+    if queue_arrivals(q, state): save_state(state)  # the arrival times are the wait clock (Refs #1361)
+    if prune_queue_arrivals(state, q): save_state(state)  # the cards that left the queue are forgotten (Refs #1361)
     for i in q: i["deps_ok"] = deps_met(i)
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
+    policy = fallback_policy(); paused = backend_pauses()  # cross-backend fallback rules (Refs #1361)
     base = None
+    free = {}  # backend -> idle lanes that may take a card now (Refs #1361)
     for L, cfg in lanes.items():
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
+        backend = cfg["backend"]
+        if backend in paused: continue  # a paused backend takes no card at all
+        free[backend] = free.get(backend, 0) + 1
+    for L, cfg in lanes.items():
+        r = res[L]
+        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
+        backend = cfg["backend"]
+        if backend in paused: continue  # a paused backend takes no card at all
         pick = None
-        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
+        for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(backend, i, policy, i.get("waited_s", 0), paused)
+                         and chain_allows_lane(backend, i, policy, free, paused)), key=lambda i: rank(backend, i)):
             status, detail = label_state(c["n"])
             if status == "fresh": pick = c; break
             if status == "stale":
                 q.remove(c); skip_stale(c["n"], detail)  # try the next one this tick
+                note_queue_departure(c["n"], state)  # the card left the queue (Refs #1361)
                 continue
             # the authoritative read failed: keep the row (it may still be dispatchable),
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
+        free[backend] = max(0, free.get(backend, 0) - 1)  # the lane takes at most one card
         if not pick: continue
         if base is None:
             _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
@@ -639,13 +888,18 @@ def tick(lanes, state, last_warn):
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
             dispatch_failed(L, cfg, pick, e); continue
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+        q.remove(pick)
+        # the card is on a lane now: it left the queue, its arrival time is forgotten so that it
+        # waits for the grace period again when it comes back (Refs #1361)
+        note_queue_departure(pick["n"], state)
+        state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
     blocked = sum(not i["deps_ok"] for i in q)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
+    # the count keeps the plain cross-pin view (no policy): a restrictive fallback mapping must not file extra backlog
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
