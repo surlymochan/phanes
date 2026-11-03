@@ -89,6 +89,14 @@ def failure_reasons():
     """The canonical run-ending reason module (lib/dispatch/failure_reason.py)."""
     return dispatch_module("failure_reason")
 
+class _LazyFixCards:
+    """Load fix-round rules only when dispatch needs them."""
+    def __getattr__(self, name):
+        return getattr(dispatch_module("fix_cards"), name)
+
+
+fix_cards = _LazyFixCards()
+
 
 def _load_ci_checks():
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ci", "checks.py")
@@ -172,6 +180,9 @@ DEFAULTS = {
         # The raw evidence pack of a review (Refs #1788): the file name suffix next to the verdict file.
         "evidence_suffix": "-evidence",
         "cifix_needs_burn": True,
+        # Fix-round cards: a new round waits for the old one, and stale cards leave the pool (Refs #1713).
+        "fix_card_sweep_s": 300,              # how often the stale fix cards are swept (0 disables the sweep)
+        "fix_card_sweep_max": 20,             # pull request states read per sweep
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
     # A legacy file marker remains supported when no timed parameters are supplied.
@@ -464,6 +475,7 @@ class Dispatcher:
         self.rev_lock = threading.RLock()
         self.inode = {"t": 0.0, "low": False}
         self.last_leak_sweep = 0.0
+        self.last_fix_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
@@ -1052,6 +1064,33 @@ class Dispatcher:
         j = json.loads(out)
         return j["state"], {l["name"] for l in j["labels"]}
 
+    def issue_view(self, n, attempts=2):
+        """The body, the labels and the state of an issue; an empty dict when the read fails.
+
+        The labels decide whether a fix round may be queued (Refs #1713), so a failed read
+        must not be read as "no card in flight": the caller treats the empty dict as unknown.
+        """
+        for _ in range(max(1, attempts)):
+            rc, out, _ = self.gh(["issue", "view", str(n), "--json", "body,labels,state"])
+            if rc or not out:
+                continue
+            try:
+                data = json.loads(out)
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                return data
+        return {}
+
+    def issue_held(self, state, n):
+        """Whether a lane holds the issue, even when the `in-progress` label write failed."""
+        for key, st in (state or {}).items():
+            if key.startswith("_") or not isinstance(st, dict):
+                continue
+            if st.get("issue") == n:
+                return True
+        return False
+
     def label_state(self, n):
         """The search index behind `issue list --label` lags label edits; re-read the issue directly.
         Returns "fresh" (dispatchable), "stale" (labels say no) or "unknown" (read failed or the per-tick read budget
@@ -1117,6 +1156,95 @@ class Dispatcher:
                 continue
             self.gh_write(["issue", "edit", str(n), "--remove-label", self.L["in_progress"]])
             self.log(f"leak-sweep: #{n} had {self.L['in_progress']} but no lane holds it (idle {int(age)}s) → removed")
+
+    def remember_fix_card(self, state, n, pr, round_no):
+        """Remember the fix card of an issue, so the sweep finds its pull request (Refs #1713)."""
+        with self.state_lock:
+            cards = state.setdefault("_fix_cards", {})
+            cards[str(n)] = {"pr": pr, "round": round_no, "at": time.strftime("%F %T"), "state": "queued"}
+        self.save_state(state)
+
+    def settle_fix_card(self, state, n, label):
+        """Track the life cycle of a fix card: it is in flight until it is finished or failed."""
+        with self.state_lock:
+            record = (state.get("_fix_cards") or {}).get(str(n))
+            if not record:
+                return
+            if label in (self.L["pr"], self.L["failed"]):
+                record["state"] = "done" if label == self.L["pr"] else "failed"
+                record["settled"] = time.strftime("%F %T")
+            elif label == self.L["ready"]:
+                record["state"] = "queued"
+        self.save_state(state)
+
+    def sweep_stale_fix_cards(self, state):
+        """Drop the fix cards whose pull request was merged or whose issue was closed (Refs #1713).
+
+        The pool counts the `lane-ready` cards, so a card nobody is going to work on
+        anymore inflates the watermark without adding supply.  Every removal is written
+        to the brain log, so the supervisor can review the decisions of a night.
+        """
+        every = int(self.R.get("fix_card_sweep_s", 300))
+        if every <= 0 or self.clock() - self.last_fix_sweep < every:
+            return
+        self.last_fix_sweep = self.clock()
+        titles = fix_cards.section_titles(self.cfg["templates"])
+        recorded = state.get("_fix_cards") or {}
+        cards = []
+        for issue_state in ("open", "closed"):
+            rc, out, err = self.gh(["issue", "list", "--state", issue_state, "--label", self.L["ready"],
+                                    "--limit", "10000", "--json", "number,state,labels,body"], timeout=90)
+            if rc:
+                self.log(f"fix-card sweep: issue list ({issue_state}) failed: {(err or '')[-120:]}", brain=False)
+                continue
+            try:
+                rows = json.loads(out)
+            except ValueError:
+                continue
+            for row in rows or ():
+                if isinstance(row, dict):
+                    row.setdefault("state", issue_state.upper())
+                    cards.append(row)
+        if not cards:
+            return
+        limit = int(self.R.get("fix_card_sweep_max", 20))
+        pr_states = {}
+        cursor = int(state.get("_fix_sweep_cursor", 0)) % len(cards)
+        cards = cards[cursor:] + cards[:cursor]
+        processed = 0
+        for card in cards:
+            body = card.get("body") or ""
+            if not fix_cards.is_fix_card(body, titles):
+                processed += 1
+                continue                      # a plain card, not a fix round
+            n = card.get("number")
+            pr = (recorded.get(str(n)) or {}).get("pr") or fix_cards.source_pr(body, titles)
+            if pr is None:
+                processed += 1
+                continue
+            if pr not in pr_states:
+                if len(pr_states) >= limit:
+                    break                     # the rest is swept by the next round
+                rc, out, _ = self.gh(["pr", "view", str(pr), "--json", "state"], timeout=60)
+                state_name = ""
+                if not rc and out:
+                    try:
+                        state_name = (json.loads(out) or {}).get("state") or ""
+                    except ValueError:
+                        state_name = ""
+                pr_states[pr] = state_name
+            processed += 1
+            reason = fix_cards.stale_reason(card.get("state"), pr_states.get(pr))
+            if not reason:
+                continue
+            rc, _, _ = self.gh_write(["issue", "edit", str(n), "--remove-label", self.L["ready"]])
+            if rc:
+                continue
+            if str(n) in recorded:
+                recorded.pop(str(n), None)
+            self.log(fix_cards.audit_line("cleanup", n, f"PR #{pr} {reason.replace('-', ' ')} → "
+                                                  f"{self.L['ready']} removed"))
+        state["_fix_sweep_cursor"] = (cursor + processed) % len(cards)
 
     # ------------------------------------------------------------ LRU
     def lru_picker(self):
@@ -1239,8 +1367,11 @@ class Dispatcher:
             args += ["--remove-label", l]
         args += ["--add-label", add]
         result = self.gh_write_retry(args)
-        if result[0] and state is not None:
-            self.record_label_debt(state, n, add, remove)
+        if result[0]:
+            if state is not None:
+                self.record_label_debt(state, n, add, remove)
+        elif state is not None:
+            self.settle_fix_card(state, n, add)
         return result
 
     def reconcile(self, L, lc, st, r, state):
@@ -2016,7 +2147,7 @@ class Dispatcher:
                     and r.get("rebase_sha") != p["headRefOid"]):
                 tasks = sources.rebase_source([p], inflight, issue_for_pr=lambda pr: pr.get("issue"))
                 if tasks:
-                    self.queue_fix(p, revs, "rebase")
+                    self.queue_fix(p, revs, "rebase", state)
                 continue
             if r.get("sha") == p["headRefOid"]:
                 continue
@@ -2027,7 +2158,7 @@ class Dispatcher:
                                               eligible=lambda pr: self.ci_red(pr),
                                               issue_for_pr=lambda pr: pr.get("issue"))
                 if tasks:
-                    self.queue_fix(p, revs, "cifix")
+                    self.queue_fix(p, revs, "cifix", state)
                 continue
             if p["mergeable"] != "MERGEABLE" or not self.green(p):
                 continue
@@ -2042,15 +2173,23 @@ class Dispatcher:
             return body
         return self.cfg["templates"]["rebase_line"].format(pr=pr, branch=branch) + "\n\n" + body
 
-    def queue_fix(self, p, revs, kind):
+    def queue_fix(self, p, revs, kind, state=None):
         """Requeue the PR's issue as a rebase (conflict) or CI-fix task on the PR head, once per head sha."""
         pr, n = p["number"], p["issue"]
-        rc, iv, _ = self.gh(["issue", "view", str(n), "--json", "body,state"])
+        rc, iv, _ = self.gh(["issue", "view", str(n), "--json", "body,state,labels"])
+        if rc:
+            return
         try:
             j = json.loads(iv)
         except Exception:
             return
         if j["state"] != "OPEN":
+            return
+        L = self.L
+        plan = fix_cards.plan_fix_card(j.get("labels") or [], ready=L["ready"],
+                                       in_progress=L["in_progress"], held=self.issue_held(state or {}, n))
+        if not plan["queue"]:
+            self.log(fix_cards.audit_line("dedup", n, f"PR #{pr} {kind}: {plan['reason']}"))
             return
         T = self.cfg["templates"]
         title = T[f"{kind}_section_title"]
@@ -2060,8 +2199,10 @@ class Dispatcher:
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
         ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
         L = self.L
-        self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
-                       "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
+        rc, _, _ = self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
+                                  "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
+        if rc:
+            return
         r = revs.get(str(pr)) or {}
         r["rebase_sha" if kind == "rebase" else "cifix_sha"] = p["headRefOid"]
         revs[str(pr)] = r
@@ -2445,15 +2586,30 @@ class Dispatcher:
                 r["needs_human_sha"] = sha
                 self.log(f"review PR #{pr}: CHANGES round {r['rounds']} (issue {n}) → {L['needs_human']}")
             else:
-                iv = self.gh(["issue", "view", str(n), "--json", "body"])[1]
-                ib = (json.loads(iv)["body"] or "") if iv else ""
                 T = self.cfg["templates"]
-                ib = self.with_rebase_line(self.section_strip(ib, T["changes_section_title"]), pr, cj["headRefName"])
-                ib += (f"\n\n## {T['changes_section_title']}\n\n" +
-                       T["changes_section"].format(round=r["rounds"], who=who, pr=pr, sha10=sha[:10], branch=cj["headRefName"],
-                                                   notes=txt.strip()[:8000]) + "\n")
-                self.gh(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
-                self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
+                ij = self.issue_view(n)
+                ib = ij.get("body") or ""
+                # One fix card per issue: a new round is only queued when the previous round is
+                # finished or failed, never while it is still in flight (Refs #1713).
+                if not ij:
+                    # Unknown labels cannot rule out an in-flight card. Preserve the
+                    # existing issue body and retry after the issue becomes readable.
+                    plan = {"queue": False, "reason": "issue read failed"}
+                else:
+                    plan = fix_cards.plan_fix_card(ij.get("labels") or [], ib, fix_cards.section_titles(T),
+                                                   ready=L["ready"], in_progress=L["in_progress"],
+                                                   held=self.issue_held(state, n))
+                if not plan["queue"]:
+                    self.log(fix_cards.audit_line("dedup", n, f"PR #{pr} round {r['rounds']} not queued: "
+                                                      f"{plan['reason']} card already in flight"))
+                else:
+                    ib = self.with_rebase_line(self.section_strip(ib, T["changes_section_title"]), pr, cj["headRefName"])
+                    ib += (f"\n\n## {T['changes_section_title']}\n\n" +
+                           T["changes_section"].format(round=r["rounds"], who=who, pr=pr, sha10=sha[:10], branch=cj["headRefName"],
+                                                       notes=txt.strip()[:8000]) + "\n")
+                    self.gh(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
+                    self.remember_fix_card(state, n, pr, r["rounds"])
+                    self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
         self.put_review(pr, r)
         self.log(f"reviewed PR #{pr} by {who}: {v}")
         return True
@@ -2785,6 +2941,10 @@ class Dispatcher:
             self.sweep_leaked_inprogress(state)
         except Exception as e:
             self.log(f"leak-sweep exc: {e!r}", brain=False)
+        try:
+            self.sweep_stale_fix_cards(state)
+        except Exception as e:
+            self.log(f"fix-card sweep exc: {e!r}", brain=False)
         try:
             q = self.queue()
         except Exception as e:
