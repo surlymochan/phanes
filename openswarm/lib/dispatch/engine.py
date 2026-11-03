@@ -180,6 +180,7 @@ DEFAULTS = {
     # A legacy file marker remains supported when no timed parameters are supplied.
     "burn": {"file": "", "backend": ""},
     "local_hosts": [],
+    "capacity_topology": "",              # the fleet capacity topology to reconcile against
     "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
     "min_gap_s": 120,
     "local_env": {},
@@ -292,6 +293,8 @@ def load_config(path):
     cfg["lanes_file"] = os.path.expanduser(cfg["lanes_file"])
     if cfg["brain_log"]:
         cfg["brain_log"] = os.path.expanduser(cfg["brain_log"])
+    if cfg.get("capacity_topology"):
+        cfg["capacity_topology"] = os.path.expanduser(cfg["capacity_topology"])
     return cfg
 
 
@@ -716,6 +719,58 @@ class Dispatcher:
             return
         with open(self.path("heartbeat"), "w") as f:
             f.write(time.strftime("%F %T") + "\n")
+
+    # ------------------------------------------------- fleet capacity reconciliation
+    def capacity_report(self, lanes):
+        """The fleet-wide capacity reconciliation (Refs #1693).
+
+        The reconciliation covers the whole fleet, not only the lanes this
+        dispatcher runs: the fleet health probe reads the lane configuration of
+        every host and writes the result into the health state file (the file
+        the SSH failure gate reads), so the watchdog and the supervision patrol
+        read one fleet-wide result instead of a partial count.  Without that
+        snapshot the fleet cannot be verified, and the report says so instead
+        of counting the local lanes and calling the fleet sufficient.
+        """
+        module = dispatch_module("capacity_reconcile")
+        topology = self.cfg.get("capacity_topology") or module.topology_path()
+        snapshot = self.fleet_health_state().get("capacity")
+        report = snapshot.get("report") if isinstance(snapshot, dict) else None
+        if isinstance(report, dict) and report.get("status"):
+            fleet = dict(report)
+            fleet["source"] = "fleet-health"
+            fleet["at"] = snapshot.get("at")
+            return fleet
+        # No fleet snapshot: the dispatch lanes are a partial view of the fleet,
+        # so nothing is claimed about the fleet limits.
+        unverified = module.unverified(
+            "no fleet capacity snapshot: run `openswarm fleet health` "
+            "(the dispatcher lanes are a partial view of the fleet)",
+            topology, None)
+        unverified["source"] = "dispatcher-lanes"
+        unverified["dispatcher_lanes"] = len(lanes or {})
+        return unverified
+
+    def capacity_alert(self, capacity, state):
+        """Write a capacity alert to the brain log when the alert set changed.
+
+        The alert signature is remembered in the dispatch state, so a health loop
+        that ticks every minute reports a new limit once, not once per minute.
+        A brain log that cannot be written keeps the alert pending: the next tick
+        writes it again.
+        """
+        signature = capacity.get("signature", "")
+        if signature == state.get("_capacity_alert", ""):
+            return False
+        message = capacity.get("message") or ""
+        if not message or not self.cfg.get("brain_log"):
+            return False
+        try:
+            self.log("fleet capacity: " + message, brain=True)
+        except OSError:
+            return False
+        state["_capacity_alert"] = signature
+        return True
 
     def touch_file(self, name, text):
         if self.dry_run:
@@ -2868,6 +2923,10 @@ class Dispatcher:
             run = result.get("run")
             if isinstance(run, dict) and run.get("model"):
                 model_history[L] = {"model": run["model"], "at": run.get("timestamp")}
+        # The fleet capacity limits against the configured lanes (Refs #1693): the
+        # watchdog and the supervision patrol read the result from lanes-status.
+        capacity = self.capacity_report(lanes)
+        self.capacity_alert(capacity, state)
         if not self.dry_run:
             self.save_state(state)
         policy = self.policy()
@@ -2894,6 +2953,7 @@ class Dispatcher:
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
                                                 "model_drift": drift},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
+                   "_capacity": capacity,
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)

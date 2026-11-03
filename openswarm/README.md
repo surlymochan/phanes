@@ -706,6 +706,18 @@ or a duplicate lane name is an error. `--check` reads the `lanes.json` each host
 over the host transport) and reports the extra, missing, and changed lanes; it exits non-zero when a host
 drifted. The command only renders and compares: it never writes to a host.
 
+`openswarm fleet health` probes every fleet host and reports its health; the report carries a
+`capacity` section as well: the fleet capacity limits (`topology.json` of the capacity
+coordinator) reconciled with the lanes that are configured (the control plane `lanes.json` plus
+the lane file of every host the fleet knows, also the hosts the topology does not list yet).
+A limit that is behind its lane count is reported with the limit, the current lane count, the
+deficit and a suggested value (the lane count plus one lane), and it is written to the brain
+log once per change. The limits are never changed here: raising one stays a human decision.
+A topology or a host lane file that cannot be read is reported as `未核实` (unverified) instead
+of a partial lane count. The dispatcher copies the same fleet-wide result into
+`lanes-status.json` (`_capacity`), so the watchdog and the supervision patrol read one result
+instead of counting lanes by hand.
+
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
 ```bash
