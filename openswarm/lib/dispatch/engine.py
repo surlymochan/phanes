@@ -98,6 +98,21 @@ def _load_ci_checks():
     return module
 
 
+_RESOURCES_MODULE = None
+
+
+def resources_module():
+    """The resource cleanup module (lib/resources/cleanup.py), loaded by path."""
+    global _RESOURCES_MODULE
+    if _RESOURCES_MODULE is None:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "cleanup.py")
+        spec = importlib.util.spec_from_file_location("openswarm_resources_cleanup", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RESOURCES_MODULE = module
+    return _RESOURCES_MODULE
+
+
 def compatible_lru_picker(path):
     module = dispatch_module("lane_pick")
 
@@ -180,7 +195,13 @@ DEFAULTS = {
     "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
     "min_gap_s": 120,
     "local_env": {},
-    "local_inode": {"pause_pct": 95, "resume_pct": 92, "path": "~"},
+    "resources": {"inode": {"pause_pct": 95, "resume_pct": 92, "cleanup_pct": 90,
+                             "path": "~", "probe_interval_s": 30,
+                             # The cleanup hook runs once per pressure episode at cleanup_pct.
+                             # "command" replaces the built-in cleanup; "roots" are the
+                             # allowlisted container directories of the built-in cleanup.
+                             "cleanup_hook": {"enabled": False, "command": [], "roots": {}, "rules": {}}}},
+    "ledger_file": "",                    # default <state_dir>/dispatch-ledger.jsonl
     "ssh": {
         "base_opts": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=12", "-o", "ConnectionAttempts=1",
                       "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
@@ -452,7 +473,10 @@ class Dispatcher:
         self.backoff = {}
         self.state_lock = threading.Lock()
         self.rev_lock = threading.RLock()
-        self.inode = {"t": 0.0, "low": False}
+        self.inode = {}
+        self.busy_paths = set()
+        self.lanes = {}          # the lane configuration of the running tick
+        self.lane_state = {}     # the lane state of the running tick (busy lanes)
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
@@ -564,6 +588,34 @@ class Dispatcher:
             with open(self.cfg["brain_log"], "a") as f:
                 f.write(f"- {self.now_hm()} UTC+8 {self.cfg['brain_log_prefix']}: {msg}\n")
 
+    def safe_log(self, msg, brain=True):
+        """A log line that must never break the caller: a full disk has no room for it."""
+        try:
+            self.log(msg, brain=brain)
+        except Exception:
+            pass
+
+    def ledger_path(self):
+        return self.cfg.get("ledger_file") or self.path("dispatch-ledger.jsonl")
+
+    def ledger_event(self, event, **fields):
+        """Append one event to the dispatch ledger; a write failure never breaks the caller.
+
+        In dry-run the event is recorded in the plan instead of written to disk:
+        a shadow tick never touches the filesystem.
+        """
+        record = {"ts": time.time(), "event": event}
+        record.update(fields)
+        if self.dry_run:
+            self.plan.append({"would": "ledger", **record})
+            return record
+        try:
+            with open(self.ledger_path(), "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        return record
+
     def heartbeat(self):
         if self.dry_run:
             return
@@ -629,30 +681,159 @@ class Dispatcher:
         if self.backoff.pop(h, None):
             self.log(f"{h} ssh recovered", brain=False)
 
-    def local_inode_low(self):
-        """In-process inode guard for local-host lanes (works with 0 inodes left)."""
-        li = self.cfg.get("local_inode") or {}
-        if not li:
-            return False
+    def host_inode_low(self, host):
+        """In-process per-host inode guard; no marker file is needed to pause/resume."""
+        li = (self.cfg.get("resources") or {}).get("inode") or {}
         now = self.clock()
-        if now - self.inode["t"] < 30:
-            return self.inode["low"]
-        self.inode["t"] = now
+        state = self.inode_state(host)
+        last = state["t"]
+        if last is not None and now - last < float(li.get("probe_interval_s", 30)):
+            return state["low"]
+        state["t"] = now
         try:
-            st = os.statvfs(os.path.expanduser(li.get("path") or "~"))
-            pct = 100 * (1 - st.f_favail / max(st.f_files, 1)) if st.f_files else 0
-        except Exception:
-            return self.inode["low"]
-        return self.inode_decide(pct)
+            if host in self.local_hosts:
+                st = os.statvfs(os.path.expanduser(li.get("path") or "~"))
+                pct = 100 * (1 - st.f_favail / max(st.f_files, 1)) if st.f_files else None
+            else:
+                rc, out, _ = self.sh(["ssh"] + self.ssh_opts(host) + [host, "df", "-Pi", li.get("path") or "~"], timeout=20)
+                if rc:
+                    return state["low"]
+                # ``df -Pi <path>`` prints the filesystem that holds <path> only, and that
+                # filesystem is not necessarily mounted on "/": read its single data row.
+                pct = dispatch_module("health")._df_percent(out, "IUse%", mountpoint=None)
+        except Exception as error:
+            # A failed probe must never fail the tick, and the report must survive
+            # the very condition it reports (a host without free inodes).
+            self.safe_log(f"resource inode {host}: probe failed ({str(error)[:80]})", brain=False)
+            return state["low"]
+        if pct is None:
+            return state["low"]
+        paused = self.inode_decide(pct, host)
+        self.maybe_cleanup(host, pct, li)
+        return paused
 
-    def inode_decide(self, pct):
-        li = self.cfg.get("local_inode") or {}
+    def inode_state(self, host):
+        """The in-memory guard state of one host: probe time, pause flag, cleanup flag."""
+        return self.inode.setdefault(host, {"t": None, "low": False, "cleanup": False})
+
+    def inode_decide(self, pct, host="local"):
+        """Apply the configured per-host pause/resume watermarks."""
+        li = (self.cfg.get("resources") or {}).get("inode") or {}
+        state = self.inode_state(host)
         hi, lo = float(li.get("pause_pct", 95)), float(li.get("resume_pct", 92))
-        was = self.inode["low"]
-        self.inode["low"] = pct >= hi or (was and pct >= lo)
-        if self.inode["low"] != was:
-            self.log(f"local inode {pct:.1f}% -> local lanes {'PAUSED' if self.inode['low'] else 'resumed'}")
-        return self.inode["low"]
+        was = state["low"]
+        # A paused host resumes at or below the resume watermark: 92% used recovers it.
+        state["low"] = pct >= hi or (was and pct > lo)
+        if state["low"] != was:
+            self.safe_log(f"resource inode {host} {pct:.1f}% -> lanes {'PAUSED' if state['low'] else 'resumed'}")
+            self.ledger_event("host_inode_pause" if state["low"] else "host_inode_resume",
+                               host=host, inode_used_pct=round(float(pct), 2),
+                               pause_pct=hi, resume_pct=lo)
+        return state["low"]
+
+    def maybe_cleanup(self, host, pct, li=None):
+        """Run the cleanup hook once per pressure episode when the cleanup watermark is reached.
+
+        A failed hook is not remembered as done: it is retried after ``retry_s``
+        seconds, so one broken hook never silences the cleanup for the whole episode.
+        """
+        li = li if li is not None else ((self.cfg.get("resources") or {}).get("inode") or {})
+        level = float(li.get("cleanup_pct", 90))
+        state = self.inode_state(host)
+        if pct < level:
+            state["cleanup"] = False
+            state["cleanup_retry_at"] = 0
+            return []
+        if state["cleanup"]:
+            return []
+        now = self.clock()
+        if state.get("cleanup_retry_at", 0) > now:
+            return []                      # a failed hook waits for its retry window
+        hook = self.cleanup_hook()
+        if not hook.get("enabled"):
+            return []
+        state["cleanup_failed"] = False
+        removed = self.run_cleanup_hook(host, pct)
+        if state.get("cleanup_failed"):
+            state["cleanup_retry_at"] = now + float(hook.get("retry_s", 300))
+            return removed
+        state["cleanup"] = True
+        state["cleanup_retry_at"] = 0
+        return removed
+
+    def cleanup_hook(self):
+        """The configured cleanup hook: an external command or the built-in cleanup."""
+        return ((self.cfg.get("resources") or {}).get("inode") or {}).get("cleanup_hook") or {}
+
+    def run_cleanup_hook(self, host, pct):
+        """Trigger the cleanup hook of one host under inode pressure.
+
+        The hook never breaks the tick: a failed start, a timeout or a non-zero
+        exit code is recorded and the host keeps its dispatch decision.
+        """
+        hook = self.cleanup_hook()
+        if not hook.get("enabled"):
+            return []
+        state = self.inode_state(host)
+        state["cleanup_failed"] = False
+        command = hook.get("command") or []
+        if command:
+            try:
+                rc, out, err = self.write(list(command), timeout=float(hook.get("timeout_s", 300)),
+                                           what="resource cleanup hook")
+            except subprocess.TimeoutExpired:
+                rc, out, err = 124, "", "timeout"
+            except Exception as error:
+                rc, out, err = 125, "", repr(error)
+            state["cleanup_failed"] = bool(rc)
+            self.safe_log(f"resource cleanup {host}: hook rc={rc}", brain=False)
+            self.ledger_event("host_inode_cleanup", host=host, inode_used_pct=round(float(pct), 2),
+                               hook="command", rc=rc, failed=bool(rc))
+            return []
+        removed = self.builtin_cleanup(host, hook)
+        if removed:
+            self.safe_log(f"resource cleanup {host}: {'would remove' if self.dry_run else 'removed'} "
+                          f"{len(removed)} path(s)", brain=False)
+        self.ledger_event("host_inode_cleanup", host=host, inode_used_pct=round(float(pct), 2),
+                           hook="builtin", dry_run=self.dry_run,
+                           removed=[] if self.dry_run else removed,
+                           planned=removed if self.dry_run else [])
+        return removed
+
+    def builtin_cleanup(self, host, hook):
+        """The built-in cleanup: completed run dirs, closed worktrees, package caches.
+
+        Only allowlisted roots are touched and a busy lane's worktree is never removed.
+        The built-in cleanup only reaches this host's own filesystem; a remote host
+        needs the command hook.  In dry-run the plan is recorded, nothing is removed.
+        """
+        roots = hook.get("roots") or {}
+        if not roots:
+            return []
+        if host not in self.local_hosts:
+            self.safe_log(f"resource cleanup {host}: built-in cleanup is local only", brain=False)
+            return []
+        cleanup = resources_module()
+        # The busy paths are collected again here: the state of the lanes may have
+        # changed since the tick started, and a busy worktree is never removable.
+        busy = sorted(self.busy_paths | self.collect_busy_paths(self.lanes, self.lane_state))
+        repo = self.cfg.get("local_repo") or ""
+        try:
+            candidates = cleanup.scan_hook(roots, lanes=set(self.lanes or {}), repo=repo,
+                                           base=self.cfg.get("base_branch") or "main")
+            rules = {"allow_roots": cleanup.allow_roots(roots)}
+            # The allowlist comes from the scanned roots; only thresholds may be overridden.
+            rules.update({key: value for key, value in (hook.get("rules") or {}).items()
+                          if key != "allow_roots"})
+            plan = cleanup.plan_cleanup(candidates, busy, self.clock(), rules)
+            if self.dry_run:
+                self.plan.append({"would": "cleanup", "paths": [item["path"] for item in plan]})
+                return [item["path"] for item in plan]
+            return cleanup.execute_cleanup(plan, rules["allow_roots"], busy, repo=repo or None)
+        except Exception as error:
+            self.safe_log(f"resource cleanup {host}: hook failed ({str(error)[:80]})", brain=False)
+            self.inode_state(host)["cleanup_failed"] = True
+            return []
 
     def paused_lane(self, lane, lc):
         if os.path.exists(self.path(f"PAUSE-{lane}")):
@@ -663,7 +844,7 @@ class Dispatcher:
         host = lc.get("host") or ""
         if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
             return True
-        if host in self.local_hosts and self.local_inode_low():
+        if host and self.host_inode_low(host):
             return True
         be = lc.get("backend") or ""
         return bool(be and os.path.exists(self.path(f"PAUSE-BACKEND-{be}")))
@@ -2489,8 +2670,66 @@ class Dispatcher:
         except Exception as e:
             self.log(f"replenish hook exc: {e!r}", brain=False)
 
+    def lane_home(self):
+        """The home directory that holds the lanes of this fleet (OPENSWARM_HOME)."""
+        return os.path.expanduser(self.cfg.get("remote_home") or "")
+
+    def lane_worktree(self, lane):
+        """The worktree of a lane: <home>/lanes/<lane>/wt (bin/openswarm DATA/lanes/<name>/wt)."""
+        home = self.lane_home()
+        return os.path.join(home, "lanes", str(lane), "wt") if home else ""
+
+    def lane_running(self, lane):
+        """True when the lane's own state file records a run in flight.
+
+        The lane writes ``current_run`` into ``<home>/lanes/<lane>/state.json``
+        (bin/openswarm lane_write_state).  It is the live signal the cleanup
+        re-checks before it removes anything.
+        """
+        home = self.lane_home()
+        if not home:
+            return False
+        path = os.path.join(home, "lanes", str(lane), "state.json")
+        try:
+            with open(path, encoding="utf-8") as stream:
+                data = json.load(stream)
+        except (OSError, ValueError):
+            return False
+        current = (data or {}).get("current_run")
+        return isinstance(current, str) and bool(current)
+
+    def collect_busy_paths(self, lanes, state):
+        """The worktrees and run directories of the lanes that are busy right now.
+
+        A busy lane's worktree is never a cleanup candidate.  The lane worktree is
+        the real path of the lane's checkout (``<home>/lanes/<lane>/wt``); the
+        shared repository checkout is protected as well.  A lane that the
+        dispatcher believes to be idle but whose own state file records a run in
+        flight is busy as well.
+        """
+        paths = set()
+        home = self.lane_home()
+        for name, lc in (lanes or {}).items():
+            if (lc.get("host") or "") not in self.local_hosts:
+                continue            # the hook only touches this host's own filesystem
+            active = (state or {}).get(name)
+            worktree = self.lane_worktree(name)
+            if worktree and (active or self.lane_running(name)):
+                paths.add(worktree)
+            if not active:
+                continue
+            repo = os.path.expanduser(lc.get("repo") or self.cfg.get("default_repo_path") or "")
+            if repo:
+                paths.add(repo)
+            run = active.get("run")
+            if run and home:
+                paths.add(os.path.join(home, "runs", str(run)))
+        return paths
+
     def tick(self, lanes, state):
         self._quota_probe_cache = None
+        self.lanes, self.lane_state = lanes, state
+        self.busy_paths = self.collect_busy_paths(lanes, state)
         self.reap_quota_pauses()
         if os.path.exists(self.path("PAUSE")):
             return

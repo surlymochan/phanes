@@ -27,3 +27,12 @@ hysteresis so a paused workload does not immediately resume at the pause point:
 
 Run `python3 openswarm/lib/resources/policy.py [policy.json] [--json]` to merge
 and validate a policy. Invalid configuration exits with status 2.
+
+## Dispatcher guard
+
+The dispatch engine keeps the same watermarks in its own dispatch config
+(`resources.inode.pause_pct`, `resources.inode.resume_pct`,
+`resources.inode.cleanup_pct`, with the defaults above). A host at or above
+the pause watermark stops dispatching to its lanes without writing a marker
+file, and it resumes at or below the resume watermark. The cleanup hook and the
+dispatch ledger are described in [RESOURCES.md](RESOURCES.md).

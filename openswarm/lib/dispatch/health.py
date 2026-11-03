@@ -117,6 +117,12 @@ def _percent(value):
 
 
 def _df_percent(output, usage_column, mountpoint="/"):
+    """The usage percentage of one ``df`` data row.
+
+    ``mountpoint`` picks the data row by its mounted-on column. ``None`` takes
+    the last data row instead: ``df -Pi <path>`` prints only the filesystem that
+    holds ``<path>``, and that filesystem is not necessarily mounted on ``/``.
+    """
     lines = [line.split() for line in output.splitlines() if line.strip()]
     if len(lines) < 2:
         raise ValueError("df output has no data row")
@@ -128,9 +134,14 @@ def _df_percent(output, usage_column, mountpoint="/"):
         raise ValueError("df output missing " + usage_column)
     # ``Mounted on`` is printed as two header words but one data column.
     mount_index = header.index("Mounted") if "Mounted" in header else len(header) - 1
-    rows = [row for row in lines[1:] if len(row) > mount_index and row[mount_index] == mountpoint]
-    if not rows:
-        raise ValueError("df output missing mountpoint " + mountpoint)
+    if mountpoint is None:
+        rows = [row for row in lines[1:] if len(row) > index]
+        if not rows:
+            raise ValueError("df output has no data row")
+    else:
+        rows = [row for row in lines[1:] if len(row) > mount_index and row[mount_index] == mountpoint]
+        if not rows:
+            raise ValueError("df output missing mountpoint " + mountpoint)
     row = rows[-1]
     if len(row) <= index:
         raise ValueError("truncated df data row")

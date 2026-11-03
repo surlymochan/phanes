@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -19,6 +20,13 @@ _spec.loader.exec_module(E)
 
 SHA = "a" * 40
 SHA2 = "b" * 40
+
+# ``df -Pi <path>`` prints the filesystem that holds <path> only; its mount point
+# is not necessarily "/" (the box keeps /home on its own filesystem).
+DF_INODE_FULL = ("Filesystem     1024-blocks       Used    Available Capacity iused      ifree %iused  Mounted on\n"
+                 "/dev/vdb1        41153856  12345678  26640000      32%   2031615         0  100%  /home\n")
+DF_INODE_OK = ("Filesystem     1024-blocks       Used    Available Capacity iused      ifree %iused  Mounted on\n"
+               "/dev/vdb2        41153856  12345678  26640000      32%    250000    1800000    12%  /data\n")
 
 
 class FakeRunner:
@@ -71,6 +79,11 @@ class Base(unittest.TestCase):
         d = E.Dispatcher(self.cfg, runner=self.runner, dry_run=dry_run, out=open(os.devnull, "w"))
         self.addCleanup(d.out.close)
         return d
+
+    @staticmethod
+    def statvfs_used(free, total=1000):
+        """A statvfs result with ``free`` inodes left out of ``total``."""
+        return type("Stat", (), {"f_files": total, "f_favail": free})()
 
 
 class QueueAndRank(Base):
@@ -201,10 +214,262 @@ class Pauses(Base):
 
     def test_inode_hysteresis(self):
         d = self.make()
-        self.assertFalse(d.inode_decide(94.0))
-        self.assertTrue(d.inode_decide(95.0))
-        self.assertTrue(d.inode_decide(93.0))   # stays paused until below resume
-        self.assertFalse(d.inode_decide(91.9))
+        self.assertTrue(d.inode_decide(96.0, "box"))
+        self.assertTrue(d.inode_decide(93.0, "box"))   # stays paused until below resume
+        self.assertFalse(d.inode_decide(91.0, "box"))
+        self.assertFalse(d.inode_decide(94.0, "other"))  # host state is independent
+
+    def test_inode_resume_happens_at_the_resume_watermark(self):
+        """92% used resumes the host: the resume watermark is inclusive."""
+        d = self.make()
+        self.assertTrue(d.inode_decide(96.0, "box"))
+        self.assertTrue(d.inode_decide(93.0, "box"))
+        self.assertFalse(d.inode_decide(92.0, "box"))
+        self.assertTrue(d.inode_decide(96.0, "box"))
+        self.assertFalse(d.inode_decide(92.0, "box"))
+
+    def test_inode_statvfs_guard_pauses_host_lanes_without_marker(self):
+        d = self.make()
+        d.clock = lambda: 100
+        sample = type("Stat", (), {"f_files": 1000, "f_favail": 40})()
+        with mock.patch.object(E.os, "statvfs", return_value=sample):
+            self.assertTrue(d.paused_lane("CX1", {"host": "box", "backend": "codex"}))
+        self.assertFalse(os.path.exists(d.path("PAUSE-HOST-box")))
+
+    def test_inode_statvfs_guard_pauses_holds_and_resumes(self):
+        """96% pauses the host's lanes, 93% keeps them paused, 91% resumes them (Refs #1392)."""
+        d = self.make()
+        now = [1000]
+        d.clock = lambda: now[0]
+        lc = {"host": "box", "backend": "codex"}
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(40)):   # 96% used
+            self.assertTrue(d.paused_lane("CX1", lc))
+        now[0] += 60
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(70)):   # 93% used
+            self.assertTrue(d.paused_lane("CX1", lc))
+        now[0] += 60
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(90)):   # 91% used
+            self.assertFalse(d.paused_lane("CX1", lc))
+        self.assertFalse(os.path.exists(d.path("PAUSE-HOST-box")))  # in memory, no marker file
+
+    def test_remote_host_inode_probe_reads_non_root_mountpoint(self):
+        """A remote host whose filesystem is not mounted on "/" still guards its lanes."""
+        d = self.make([("df -Pi", (0, DF_INODE_FULL, ""))])
+        now = [1000]
+        d.clock = lambda: now[0]
+        self.assertTrue(d.paused_lane("CX1", {"host": "mac", "backend": "codex"}))
+        self.assertTrue(d.inode["mac"]["low"])
+        self.assertTrue(d.runner.called("df -Pi"))
+
+    def test_remote_host_inode_probe_keeps_healthy_host_running(self):
+        d = self.make([("df -Pi", (0, DF_INODE_OK, ""))])
+        now = [1000]
+        d.clock = lambda: now[0]
+        self.assertFalse(d.paused_lane("CX1", {"host": "mac", "backend": "codex"}))
+        self.assertFalse(d.inode["mac"]["low"])
+
+    def test_remote_host_inode_probe_failure_keeps_the_last_state(self):
+        d = self.make([("df -Pi", (0, DF_INODE_FULL, ""))])
+        now = [1000]
+        d.clock = lambda: now[0]
+        lc = {"host": "mac", "backend": "codex"}
+        self.assertTrue(d.paused_lane("CX1", lc))
+        now[0] += 60
+        d.runner.rules = [("df -Pi", (1, "", "ssh failed"))]
+        self.assertTrue(d.paused_lane("CX1", lc))   # the probe failed: keep the pause
+
+    def test_remote_host_inode_probe_reports_an_unparsable_output(self):
+        d = self.make([("df -Pi", (0, "unexpected output\n", ""))])
+        now = [1000]
+        d.clock = lambda: now[0]
+        self.assertFalse(d.paused_lane("CX1", {"host": "mac", "backend": "codex"}))
+        with open(d.path(d.cfg["log_file"]), encoding="utf-8") as stream:
+            self.assertIn("probe failed", stream.read())
+
+    def test_inode_pause_survives_a_failing_log_write(self):
+        """A host without free inodes cannot write the log; the guard must still decide."""
+        d = self.make()
+        d.clock = lambda: 100
+        with mock.patch.object(d, "log", side_effect=OSError(28, "No space left on device")):
+            self.assertTrue(d.inode_decide(96.0, "box"))
+            with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(40)):
+                self.assertTrue(d.paused_lane("CX1", {"host": "box", "backend": "codex"}))
+            self.assertFalse(d.inode_decide(91.0, "box"))   # the resume decision survives too
+        self.assertFalse(d.inode["box"]["low"])
+
+    def test_inode_pause_and_resume_are_written_to_the_ledger(self):
+        d = self.make()
+        d.clock = lambda: 100
+        self.assertTrue(d.inode_decide(96.0, "box"))
+        self.assertFalse(d.inode_decide(91.0, "box"))
+        with open(d.ledger_path(), encoding="utf-8") as stream:
+            events = [json.loads(line) for line in stream if line.strip()]
+        self.assertEqual([event["event"] for event in events],
+                         ["host_inode_pause", "host_inode_resume"])
+        self.assertEqual(events[0]["host"], "box")
+        self.assertEqual(events[0]["inode_used_pct"], 96.0)
+        self.assertEqual(events[1]["inode_used_pct"], 91.0)
+
+    def test_cleanup_hook_runs_once_per_pressure_episode(self):
+        d = self.make()
+        now = [1000]
+        d.clock = lambda: now[0]
+        d.cfg["resources"]["inode"]["cleanup_hook"] = {"enabled": True, "command": ["inode-cleanup"]}
+        lc = {"host": "box", "backend": "codex"}
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(95)):   # 90.5% used
+            self.assertFalse(d.paused_lane("CX1", lc))
+        self.assertEqual(len(d.runner.called("inode-cleanup")), 1)
+        now[0] += 60
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(95)):
+            d.paused_lane("CX1", lc)
+        self.assertEqual(len(d.runner.called("inode-cleanup")), 1)   # already cleaned up
+
+    def test_builtin_cleanup_never_removes_a_busy_lane_worktree(self):
+        d = self.make()
+        d.clock = lambda: time.time()
+        lanes_root = os.path.join(self.tmp, "lanes")
+        os.makedirs(lanes_root)
+        worktree = os.path.join(lanes_root, "CX1")
+        os.makedirs(worktree)
+        open(os.path.join(worktree, ".openswarm-closed"), "w").close()
+        os.utime(worktree, (1000, 1000))
+        d.cfg["resources"]["inode"]["cleanup_hook"] = {
+            "enabled": True, "roots": {"closed_worktree": [lanes_root]}}
+        d.busy_paths = {worktree}
+        self.assertEqual(d.run_cleanup_hook("box", 91.0), [])
+        self.assertTrue(os.path.isdir(worktree))       # a busy lane keeps its worktree
+        d.busy_paths = set()
+        self.assertEqual(d.run_cleanup_hook("box", 91.0), [worktree])
+        self.assertFalse(os.path.exists(worktree))     # an idle closed worktree is removed
+
+
+class CleanupHookBehaviour(Base):
+    """The cleanup hook of the inode guard (Refs #1392, lane review round 3)."""
+
+    def lane_home(self):
+        # The fixture sets ``remote_home`` to the test directory: DATA/lanes/<lane>/wt.
+        return os.path.join(self.tmp, "lanes")
+
+    def worktree(self, lane="CX1", closed=True):
+        path = os.path.join(self.lane_home(), lane, "wt")
+        os.makedirs(path, exist_ok=True)
+        if closed:
+            open(os.path.join(path, ".openswarm-closed"), "w").close()
+        os.utime(path, (1000, 1000))
+        return path
+
+    def hook(self, d, roots, rules=None):
+        d.cfg["resources"]["inode"]["cleanup_hook"] = {
+            "enabled": True, "roots": roots, "rules": rules or {}}
+
+    def test_the_tick_collects_the_busy_lane_worktree_and_never_removes_it(self):
+        """The busy worktree is the real lane path; the tick keeps it (Refs #1392)."""
+        d = self.make()
+        d.clock = lambda: time.time()
+        worktree = self.worktree()
+        self.hook(d, {"closed_worktree": [self.lane_home()]})
+        lanes = {"CX1": {"host": "box", "backend": "codex"}}
+        state = {"CX1": {"issue": 7, "run": "run-1", "host": "box"}}
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(95)):   # 90.5% used
+            d.tick(lanes, state)
+        self.assertIn(worktree, d.busy_paths)     # the tick collected the lane worktree
+        self.assertTrue(os.path.isdir(worktree))  # a busy lane keeps its worktree
+
+    def test_an_idle_closed_lane_worktree_is_removed(self):
+        d = self.make()
+        d.clock = lambda: time.time()
+        worktree = self.worktree()
+        self.hook(d, {"closed_worktree": [self.lane_home()]})
+        self.assertEqual(d.run_cleanup_hook("box", 91.0), [worktree])
+        self.assertFalse(os.path.exists(worktree))
+
+    def test_a_lane_that_started_a_run_keeps_its_worktree(self):
+        """The lane's own state file is re-checked before anything is removed."""
+        d = self.make()
+        d.clock = lambda: time.time()
+        worktree = self.worktree()
+        state_file = os.path.join(self.lane_home(), "CX1", "state.json")
+        with open(state_file, "w") as stream:
+            json.dump({"state": "busy", "current_run": "run-9"}, stream)
+        d.lanes = {"CX1": {"host": "box", "backend": "codex"}}
+        self.hook(d, {"closed_worktree": [self.lane_home()]})
+        self.assertIn(worktree, d.collect_busy_paths(d.lanes, {}))
+        self.assertEqual(d.run_cleanup_hook("box", 91.0), [])
+        self.assertTrue(os.path.isdir(worktree))
+
+    def test_the_dry_run_records_the_cleanup_and_removes_nothing(self):
+        """A shadow tick never deletes a directory and never writes the ledger."""
+        d = self.make(dry_run=True)
+        d.clock = lambda: time.time()
+        worktree = self.worktree()
+        self.hook(d, {"closed_worktree": [self.lane_home()]})
+        planned = d.run_cleanup_hook("box", 91.0)
+        self.assertEqual(planned, [worktree])
+        self.assertTrue(os.path.isdir(worktree))        # nothing was removed
+        self.assertFalse(os.path.exists(d.ledger_path()))  # the ledger was not written
+        cleanups = [item for item in d.plan if item.get("would") == "cleanup"]
+        self.assertEqual(cleanups[0]["paths"], [worktree])
+        events = [item for item in d.plan if item.get("would") == "ledger"]
+        self.assertEqual([event["event"] for event in events], ["host_inode_cleanup"])
+
+    def test_a_failing_cleanup_hook_does_not_break_the_tick_and_is_retried(self):
+        """A hook that cannot start never breaks the dispatch decision (Refs #1392)."""
+        d = self.make()
+        now = [1000]
+        d.clock = lambda: now[0]
+        d.cfg["resources"]["inode"]["cleanup_hook"] = {"enabled": True, "command": ["inode-cleanup"],
+                                                        "timeout_s": 5, "retry_s": 120}
+        calls = []
+
+        def boom(text):
+            calls.append(text)
+            raise subprocess.TimeoutExpired(cmd="inode-cleanup", timeout=5)
+
+        d.runner.rules = [("inode-cleanup", boom)]
+        lc = {"host": "box", "backend": "codex"}
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(95)):
+            self.assertFalse(d.paused_lane("CX1", lc))   # the decision survives the failure
+        self.assertEqual(len(calls), 1)
+        now[0] += 60
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(95)):
+            d.paused_lane("CX1", lc)
+        self.assertEqual(len(calls), 1)                  # the retry window is not over yet
+        now[0] += 120
+        with mock.patch.object(E.os, "statvfs", return_value=self.statvfs_used(95)):
+            d.paused_lane("CX1", lc)
+        self.assertEqual(len(calls), 2)                  # the failed hook is retried
+
+    def test_a_merged_worktree_of_the_normal_lifecycle_is_cleaned(self):
+        """A worktree whose branch is merged is closed and gets cleaned (Refs #1392)."""
+        repo = os.path.join(self.tmp, "repo")
+        os.makedirs(repo)
+        self.git(repo, "init", "-q", "-b", "main")
+        self.git(repo, "config", "user.name", "Test")
+        self.git(repo, "config", "user.email", "test@example.invalid")
+        with open(os.path.join(repo, "README.md"), "w") as stream:
+            stream.write("base\n")
+        self.git(repo, "add", "README.md")
+        self.git(repo, "commit", "-qm", "base")
+        worktree = self.worktree("CX1", closed=False)
+        self.git(repo, "worktree", "add", "-q", "-b", "lane/CX1", worktree)
+        with open(os.path.join(worktree, "task.txt"), "w") as stream:
+            stream.write("work\n")
+        self.git(worktree, "add", "task.txt")
+        self.git(worktree, "commit", "-qm", "work")
+        d = self.make()
+        d.clock = lambda: time.time()
+        d.cfg["local_repo"] = repo
+        self.hook(d, {"closed_worktree": [self.lane_home()]}, rules={"closed_worktree": 0})
+        d.lanes = {"CX1": {"host": "box", "backend": "codex"}}
+        self.assertEqual(d.run_cleanup_hook("box", 91.0), [])   # the branch is not merged yet
+        self.assertTrue(os.path.isdir(worktree))
+        self.git(repo, "merge", "--no-ff", "-qm", "merge", "lane/CX1")
+        self.assertEqual(d.run_cleanup_hook("box", 91.0), [worktree])
+        self.assertFalse(os.path.exists(worktree))
+
+    @staticmethod
+    def git(cwd, *args):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
 class HostHealth(Base):
