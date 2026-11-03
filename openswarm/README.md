@@ -160,6 +160,11 @@ openswarm resume                     # recover live runs, busy lanes and recent 
 openswarm resume --since-hours 12 --json
 openswarm report --since-minutes 60  # one-screen digest for scheduled check-ins
 openswarm stop <id>                  # kill the executor; partial work is still committed to its branch
+
+# Pause a scope (all|lane:X|host:H|backend:B|mint); the record lives in $OPENSWARM_HOME/pauses
+openswarm pause lane:C1 --ttl 2h --reason "host migration"
+openswarm pauses                      # the active pauses with their remaining TTL
+openswarm resume lane:C1             # the scope takes new work again
 ```
 
 Pi messages appear once at `message_end`; Cursor chunks are merged until a prompt turn ends or a tool call starts.
@@ -238,6 +243,20 @@ the `验收：` line and the section headings do not count. A pull request's eff
 | `openswarm fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `openswarm fleet render-lanes --inventory fleet-inventory.json --check` |
 | `openswarm doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk) without installing anything. | `openswarm doctor --lane C1 --json` |
 | `openswarm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `openswarm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
+
+### Pause
+
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `openswarm pause <scope>` | Pause a dispatch scope: `all`, `lane:X`, `host:H`, `backend:B` or `mint`. The record lives in `$OPENSWARM_HOME/pauses` and carries an optional TTL and a reason. | `openswarm pause lane:C1 --ttl 2h --reason "host migration"` |
+| `openswarm pauses` | List the active pauses with their remaining TTL and their reason. | `openswarm pauses --json` |
+| `openswarm resume <scope>` | Remove one pause: the scope takes new work again. | `openswarm resume lane:C1` |
+
+The lane supervisors and the dispatcher read the pause store: a paused lane, host or backend takes no
+new work, and `all` pauses every lane. `mint` stops the minting of new cards instead of the work
+itself. The legacy `PAUSE`, `PAUSE-<LANE>`, `PAUSE-HOST-<HOST>`, `PAUSE-BACKEND-<BACKEND>` and
+`PAUSE-MINT` marker files are still read, so both places can be used side by side while the fleet
+migrates to the store.
 
 ### Learn
 
@@ -856,7 +875,7 @@ dropped once this ships: a pinned worktree name goes stale as soon as a lane reb
 
 | Environment variable | Purpose |
 | --- | --- |
-| `OPENSWARM_HOME` | Runtime data dir (default `~/.claude/openswarm`) |
+| `OPENSWARM_HOME` | Runtime data dir (default `~/.claude/openswarm`); the pause records live in `$OPENSWARM_HOME/pauses` |
 | `OPENSWARM_CODEX_PLAN`, `OPENSWARM_CLAUDE_PLAN` | Declare your plans explicitly (recommended) |
 | `DEEPSEEK_API_KEY` | DeepSeek key, used only for the balance and model-list API |
 | `OPENSWARM_OPENCODE_BIN`, `OPENSWARM_OPENCODE_DB` | Non-standard OpenCode install locations |

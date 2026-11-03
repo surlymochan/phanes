@@ -1,11 +1,15 @@
+import contextlib
+import importlib.machinery
 import importlib.util
 import json
 import os
 import pathlib
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -14,6 +18,18 @@ AUTODISPATCH = pathlib.Path(__file__).parents[2] / "tools" / "lane-autodispatch"
 spec = importlib.util.spec_from_file_location("autodispatch", AUTODISPATCH)
 autodispatch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(autodispatch)
+
+CLI = pathlib.Path(__file__).parents[1] / "bin" / "openswarm"
+
+ENGINE = pathlib.Path(__file__).parents[1] / "lib" / "dispatch" / "engine.py"
+engine_spec = importlib.util.spec_from_file_location("openswarm_dispatch_engine_under_test", ENGINE)
+engine = importlib.util.module_from_spec(engine_spec)
+engine_spec.loader.exec_module(engine)
+
+cli_loader = importlib.machinery.SourceFileLoader("openswarm_cli_under_test", str(CLI))
+cli_spec = importlib.util.spec_from_loader("openswarm_cli_under_test", cli_loader)
+cli = importlib.util.module_from_spec(cli_spec)
+cli_loader.exec_module(cli)
 
 
 class GitSSHCommandTests(unittest.TestCase):
@@ -155,6 +171,436 @@ class HarvestFetchBackoffTests(unittest.TestCase):
         self.assertTrue(autodispatch.lane_in_fetch_backoff(state))
         self.assertFalse(autodispatch.lane_in_fetch_backoff({"fetch_backoff_until": 1}))
         self.assertFalse(autodispatch.lane_in_fetch_backoff({}))
+
+
+class PauseScopeTests(unittest.TestCase):
+    """Refs #1366: the AD reads the openswarm pause store and the legacy PAUSE markers."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-ad-pause-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.store = self.home / "pauses"
+        self.store.mkdir(parents=True)
+        self.markers = self.root / "autodispatch"
+        self.markers.mkdir()
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        marker_dir = mock.patch.object(autodispatch, "D", str(self.markers))
+        marker_dir.start()
+        self.addCleanup(marker_dir.stop)
+
+    def write_pause(self, scope, expires_at=None, reason=""):
+        record = {"scope": scope, "created_at": time.time(), "expires_at": expires_at, "reason": reason}
+        (self.store / (scope.replace(":", "_") + ".json")).write_text(json.dumps(record))
+
+    def test_expired_pause_is_no_pause(self):
+        self.write_pause("lane:CX5", expires_at=time.time() - 1)
+
+        self.assertEqual(autodispatch.paused_scopes(), set())
+
+        self.write_pause("lane:CX5", expires_at=time.time() + 600)
+
+        self.assertEqual(autodispatch.paused_scopes(), {"lane:CX5"})
+
+    def test_scope_matching_covers_lane_host_and_backend(self):
+        self.write_pause("lane:CX5")
+        self.write_pause("host:ib1")
+        self.write_pause("backend:pi")
+        scopes = autodispatch.paused_scopes()
+
+        self.assertTrue(autodispatch.lane_paused("CX5", {"host": "ib2", "backend": "codex"}, scopes))
+        self.assertTrue(autodispatch.lane_paused("M1", {"host": "ib1", "backend": "codex"}, scopes))
+        self.assertTrue(autodispatch.lane_paused("M1", {"host": "ib2", "backend": "pi"}, scopes))
+        self.assertFalse(autodispatch.lane_paused("M1", {"host": "ib2", "backend": "codex"}, scopes))
+
+    def test_the_all_scope_pauses_every_lane_and_the_loop(self):
+        self.write_pause("all")
+        scopes = autodispatch.paused_scopes()
+
+        self.assertTrue(autodispatch.lane_paused("M1", {"host": "ib2", "backend": "codex"}, scopes))
+        self.assertEqual(autodispatch.tick({}, {}, 0), 0)
+
+    def test_legacy_markers_are_read_next_to_the_store(self):
+        for name in ("PAUSE", "PAUSE-MINT", "PAUSE-M1", "PAUSE-HOST-ib1", "PAUSE-BACKEND-pi"):
+            (self.markers / name).touch()
+        scopes = autodispatch.paused_scopes()
+
+        self.assertEqual(scopes, {"all", "mint", "lane:M1", "host:ib1", "backend:pi"})
+        self.assertTrue(autodispatch.lane_paused("M1", {}, scopes))
+        self.assertTrue(autodispatch.mint_paused(scopes))
+        self.assertFalse(autodispatch.mint_paused(set()))
+
+    def test_pause_records_list_the_scope_the_reason_and_the_source(self):
+        self.write_pause("lane:CX5", expires_at=time.time() + 600, reason="drain")
+        (self.markers / "PAUSE-MINT").touch()
+
+        rows = autodispatch.pause_records()
+
+        self.assertEqual([row["scope"] for row in rows], ["lane:CX5", "mint"])
+        self.assertEqual(rows[0]["reason"], "drain")
+        self.assertEqual(rows[0]["source"], "store")
+        self.assertEqual(rows[1]["source"], "marker")
+        self.assertEqual(rows[1]["reason"], "legacy marker: PAUSE-MINT")
+
+
+class PauseCliListTests(unittest.TestCase):
+    """Refs #1366: `openswarm pause <scope>` and `openswarm pauses` list the pause records."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-pause-cli-")
+        self.addCleanup(self.tmp.cleanup)
+        self.home = pathlib.Path(self.tmp.name) / "home"
+        self.env = dict(os.environ, OPENSWARM_HOME=str(self.home))
+
+    def run_cli(self, *args):
+        return subprocess.run([str(CLI), *args], env=self.env, text=True, capture_output=True)
+
+    def test_pause_and_pauses_list_the_active_scopes(self):
+        self.assertEqual(self.run_cli("pause", "lane:CX5", "--ttl", "30m", "--reason", "drain").returncode, 0)
+
+        rows = json.loads(self.run_cli("pauses", "--json").stdout)
+
+        self.assertEqual([row["scope"] for row in rows], ["lane:CX5"])
+        self.assertEqual(rows[0]["reason"], "drain")
+        self.assertGreater(rows[0]["remaining_ttl_s"], 0)
+        self.assertIn("lane:CX5", self.run_cli("pauses").stdout)
+
+    def test_pause_without_a_ttl_never_expires(self):
+        self.assertEqual(self.run_cli("pause", "all", "--reason", "maintenance").returncode, 0)
+
+        rows = json.loads(self.run_cli("pauses", "--json").stdout)
+
+        self.assertEqual(rows[0]["expires_at"], None)
+        self.assertEqual(rows[0]["remaining_ttl_s"], None)
+
+    def test_resume_removes_the_scope(self):
+        self.assertEqual(self.run_cli("pause", "lane:CX5").returncode, 0)
+        self.assertEqual(self.run_cli("resume", "lane:CX5").returncode, 0)
+        self.assertEqual(json.loads(self.run_cli("pauses", "--json").stdout), [])
+        self.assertEqual(self.run_cli("resume", "lane:CX5").returncode, 1)
+
+    def test_an_invalid_scope_exits_two(self):
+        self.assertEqual(self.run_cli("pause", "bogus").returncode, 2)
+        self.assertEqual(self.run_cli("resume", "bogus").returncode, 2)
+
+
+class PauseTickRunner:
+    """Answers the GitHub and git commands of one dispatch tick and records every call."""
+
+    def __init__(self, issues=()):
+        self.issues = list(issues)
+        self.calls = []
+
+    def __call__(self, cmd, timeout=120, inp=None, env=None):
+        text = cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
+        self.calls.append(text)
+        if "issue list" in text and "lane-ready" in text:
+            return 0, json.dumps(self.issues), ""
+        if "issue list" in text:
+            return 0, "[]", ""
+        if "issue view" in text:
+            return 0, json.dumps({"state": "OPEN", "labels": [{"name": "lane-ready"}]}), ""
+        if "ls-remote" in text:
+            return 0, "b" * 40 + "\n", ""
+        if "lane assign" in text:
+            return 0, '{"id": "run-1"}', ""
+        return 0, "", ""
+
+    def called(self, needle):
+        return [call for call in self.calls if needle in call]
+
+
+class PauseDispatchTickTests(unittest.TestCase):
+    """Refs #1366: the dispatch tick honours the pause store of the openswarm home.
+
+    The tick is the real one: only the ssh probe of the lanes is stubbed, so the
+    pause decision, the assignment and the replenish hook are the shipped ones.
+    """
+
+    LANE = {"L1": {"host": "h1", "backend": "pi"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-pause-tick-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        (self.root / "repo").mkdir()
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def write_pause(self, scope, expires_at=None, reason=""):
+        store = self.home / "pauses"
+        store.mkdir(parents=True, exist_ok=True)
+        record = {"scope": scope, "created_at": time.time(), "expires_at": expires_at, "reason": reason}
+        (store / (scope.replace(":", "_") + ".json")).write_text(json.dumps(record))
+
+    def clear_pauses(self):
+        store = self.home / "pauses"
+        for path in store.glob("*.json") if store.exists() else []:
+            path.unlink()
+
+    def dispatcher(self, runner):
+        cfg = {"repo": "acme/project", "local_repo": str(self.root / "repo"),
+               "state_dir": str(self.root / "state"), "remote_home": str(self.root),
+               "ssh": {"control_dir": str(self.root / "cm")}, "local_hosts": [],
+               "hot_files": {"limits": {}, "union": []},
+               "replenish": {"cmd": ["mint"], "low": 2, "target": 3}}
+        path = self.root / "cfg.json"
+        path.write_text(json.dumps(cfg))
+        d = engine.Dispatcher(engine.load_config(str(path)), runner=runner)
+        d.probe = lambda lanes, state: {name: {"lane": "idle"} for name in lanes}
+        return d
+
+    def tick(self, runner):
+        d = self.dispatcher(runner)
+        state = {}
+        d.tick(dict(self.LANE), state)
+        return state
+
+    def runner(self):
+        return PauseTickRunner([{"number": 7, "title": "card 7", "body": "", "labels": [{"name": "lane-ready"}]}])
+
+    def test_without_a_pause_the_tick_assigns_the_issue(self):
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertEqual(state["L1"]["issue"], 7)
+        self.assertTrue(runner.called("lane assign"))
+
+    def test_a_lane_pause_stops_the_assignment_and_a_resume_lets_it_through(self):
+        self.write_pause("lane:L1")
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertNotIn("L1", state)
+        self.assertFalse(runner.called("lane assign"))
+
+        self.clear_pauses()
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertEqual(state["L1"]["issue"], 7)
+
+    def test_an_expired_lane_pause_does_not_stop_the_assignment(self):
+        self.write_pause("lane:L1", expires_at=time.time() - 1)
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertEqual(state["L1"]["issue"], 7)
+
+    def test_a_host_pause_stops_the_assignment(self):
+        self.write_pause("host:h1")
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertNotIn("L1", state)
+        self.assertFalse(runner.called("lane assign"))
+
+    def test_a_backend_pause_stops_the_assignment(self):
+        self.write_pause("backend:pi")
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertNotIn("L1", state)
+        self.assertFalse(runner.called("lane assign"))
+
+    def test_the_all_pause_stops_the_whole_tick(self):
+        self.write_pause("all")
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertNotIn("L1", state)
+        self.assertFalse(runner.called("lane assign"))
+        self.assertFalse(runner.called("mint"))
+
+    def test_the_mint_pause_stops_the_minting_but_not_the_assignment(self):
+        self.write_pause("mint")
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertEqual(state["L1"]["issue"], 7)
+        self.assertFalse(runner.called("mint"))
+
+        self.clear_pauses()
+        runner = self.runner()
+
+        self.tick(runner)
+
+        self.assertTrue(runner.called("mint"))
+
+    def test_an_expired_mint_pause_lets_the_minting_through(self):
+        self.write_pause("mint", expires_at=time.time() - 1)
+        runner = self.runner()
+
+        self.tick(runner)
+
+        self.assertTrue(runner.called("mint"))
+
+    def test_the_default_home_is_read_when_openswarm_home_is_unset(self):
+        """The CLI writes into ``~/.claude/openswarm``; the dispatcher must read that home."""
+        home = self.root / "fake-home"
+        home.mkdir()
+        environment = mock.patch.dict(os.environ, {"HOME": str(home), "OPENSWARM_HOME": "",
+                                                   "XSWARM_HOME": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+        result = subprocess.run([str(CLI), "pause", "lane:L1"], env=dict(os.environ), text=True,
+                                capture_output=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((home / ".claude" / "openswarm" / "pauses" / "lane_L1.json").exists())
+        runner = self.runner()
+
+        state = self.tick(runner)
+
+        self.assertNotIn("L1", state)
+        self.assertFalse(runner.called("lane assign"))
+
+
+class LaneControlSocket:
+    """A stand-in for the listening control socket of the lane serve.
+
+    ``select()`` sees the pending request through ``fileno()`` and ``accept()``
+    hands the connection over, exactly like the AF_UNIX server of the lane serve.
+    """
+
+    def __init__(self, connection):
+        self.connection = connection
+
+    def fileno(self):
+        return self.connection.fileno()
+
+    def accept(self):
+        return self.connection, None
+
+
+class PauseLaneServeAssignTests(unittest.TestCase):
+    """Refs #1366: the lane serve refuses an assign while its scope is paused."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-lane-pause-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        (self.root / "repo").mkdir()
+        state = self.root / "data" / "lanes" / "L1"
+        state.mkdir(parents=True)
+        (state / "state.json").write_text(json.dumps({"state": "idle"}))
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        # The dispatch configuration names the host of every lane it drives.
+        dispatch = self.root / "dispatch-lanes.json"
+        dispatch.write_text(json.dumps({"lanes": {"L1": {"host": "ib1", "backend": "codex"}}}))
+        lanes_file = mock.patch.dict(os.environ, {"OPENSWARM_DISPATCH_LANES_FILE": str(dispatch)})
+        lanes_file.start()
+        self.addCleanup(lanes_file.stop)
+        # The lane configuration itself names no host: the lane serve has to resolve it.
+        self.lane = {"name": "L1", "backend": "codex", "model": "fake-model", "repo": str(self.root / "repo")}
+
+    def write_pause(self, scope, expires_at=None, reason=""):
+        store = self.home / "pauses"
+        store.mkdir(parents=True, exist_ok=True)
+        record = {"scope": scope, "created_at": time.time(), "expires_at": expires_at, "reason": reason}
+        (store / (scope.replace(":", "_") + ".json")).write_text(json.dumps(record))
+
+    def clear_pauses(self):
+        store = self.home / "pauses"
+        for path in store.glob("*.json") if store.exists() else []:
+            path.unlink()
+
+    def assign(self, request=None):
+        """Send one assign request over the lane control socket and return the answer."""
+        client, connection = socket.socketpair()
+        payload = request or {"op": "assign", "run_id": "r1", "task": "do it"}
+        client.sendall((json.dumps(payload) + "\n").encode())
+        try:
+            with contextlib.ExitStack() as stack:
+                for name, value in (("DATA", str(self.root / "data")), ("RUNS", str(self.root / "runs"))):
+                    stack.enter_context(mock.patch.object(cli, name, value))
+                for name in ("validate_card_type", "admit_budget", "execution_provider", "lane_write_state",
+                             "set_status", "lane_idempotency_record", "concurrency_keys"):
+                    stack.enter_context(mock.patch.object(cli, name, lambda *args, **kwargs: None))
+                stack.enter_context(mock.patch.object(cli, "load_policy",
+                                                     return_value={"run": {"timeout_seconds": 2700}}))
+                stack.enter_context(mock.patch.object(cli, "lane_drain_check", return_value=None))
+                cli.lane_control_messages(LaneControlSocket(connection), self.lane, {}, None, {}, [])
+            client.settimeout(10)
+            answer = json.loads(client.recv(65536).decode().splitlines()[0])
+        finally:
+            client.close()
+            connection.close()
+        return answer
+
+    def test_without_a_pause_the_lane_takes_the_work(self):
+        answer = self.assign()
+
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["id"], "r1")
+
+    def test_a_lane_pause_refuses_the_assign_and_a_resume_lets_it_through(self):
+        self.write_pause("lane:L1")
+
+        answer = self.assign()
+
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["paused"])
+        self.assertIn("is paused", answer["error"])
+
+        self.clear_pauses()
+
+        answer = self.assign()
+
+        self.assertTrue(answer["ok"], answer)
+
+    def test_a_host_pause_refuses_the_assign_although_the_lane_names_no_host(self):
+        self.write_pause("host:ib1")
+
+        answer = self.assign()
+
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["paused"])
+
+    def test_a_backend_pause_refuses_the_assign(self):
+        self.write_pause("backend:codex")
+
+        answer = self.assign()
+
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["paused"])
+
+    def test_the_all_pause_refuses_the_assign(self):
+        self.write_pause("all")
+
+        answer = self.assign()
+
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["paused"])
+
+    def test_an_expired_pause_does_not_refuse_the_assign(self):
+        self.write_pause("lane:L1", expires_at=time.time() - 1)
+
+        answer = self.assign()
+
+        self.assertTrue(answer["ok"], answer)
+
+    def test_the_lane_serve_resolves_its_host_from_the_dispatch_configuration(self):
+        self.assertEqual(cli.lane_host_identity(self.lane), "ib1")
+        self.assertEqual(cli.lane_host_identity({"name": "L1", "host": "explicit"}), "explicit")
 
 
 if __name__ == "__main__":

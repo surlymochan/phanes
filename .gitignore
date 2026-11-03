@@ -15,3 +15,6 @@ openswarm/tests/.*.so
 # Local caches of the test runs: never part of a change.
 __pycache__/
 *.pyc
+
+# Local temporary test fixtures.
+/.t/

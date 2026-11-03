@@ -53,6 +53,14 @@ class PauseCliTests(unittest.TestCase):
         self.assertEqual({row["scope"] for row in rows}, {"lane:CX5", "backend:pi"})
         self.assertTrue(all(row["legacy"] for row in rows))
 
+    def test_legacy_host_marker_maps_to_the_host_scope(self):
+        legacy = pathlib.Path(self.tmp.name) / "legacy"
+        legacy.mkdir()
+        (legacy / "PAUSE-HOST-ib1").touch()
+        result = self.run_cli("list", "--json", "--legacy-dir", str(legacy))
+        rows = json.loads(result.stdout)
+        self.assertEqual([row["scope"] for row in rows], ["host:ib1"])
+
     def test_invalid_scope_exits_two(self):
         self.assertEqual(self.run_cli("set", "bogus").returncode, 2)
 

@@ -335,6 +335,17 @@ and exits `1` when it rejects the card or the diff.
 | `fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `$XS fleet render-lanes --inventory fleet-inventory.json --check` |
 | `doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk); installs nothing. | `$XS doctor --lane C1 --json` |
 
+### Pause
+
+| Command | Purpose | Example |
+|---|---|---|
+| `pause <scope>` | Pause a dispatch scope (`all`, `lane:X`, `host:H`, `backend:B`, `mint`) in `$OPENSWARM_HOME/pauses`, with an optional TTL and a reason. | `$XS pause lane:C1 --ttl 2h --reason "host migration"` |
+| `pauses` | List the active pauses with their remaining TTL and their reason. | `$XS pauses --json` |
+| `resume <scope>` | Remove one pause: the scope takes new work again. | `$XS resume lane:C1` |
+
+A paused lane, host or backend takes no new work and `all` pauses every lane; `mint` stops the
+minting of new cards. The legacy `PAUSE*` marker files are still read.
+
 ### Learn
 
 | Command | Purpose | Example |

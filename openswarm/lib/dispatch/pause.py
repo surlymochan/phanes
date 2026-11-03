@@ -3,6 +3,10 @@
 Pause records live as JSON files in ``<home>/pauses``.  The module has no
 knowledge of the dispatch loop; callers pass the clock explicitly and decide
 when a matching pause should affect scheduling.
+
+``$OPENSWARM_HOME`` is the canonical home of the pause store (see
+``default_home()``); the dispatcher keeps its own copy under its state
+directory, so both are read.
 """
 from __future__ import annotations
 
@@ -149,6 +153,20 @@ class PauseStore:
         )
 
 
+def marker_scope(name: str) -> Optional[str]:
+    """The pause scope of a legacy marker file name, or None when it is none."""
+    if name == "PAUSE":
+        return "all"
+    if name == "PAUSE-MINT":
+        return "mint"
+    for prefix, kind in (("PAUSE-HOST-", "host"), ("PAUSE-BACKEND-", "backend")):
+        if name.startswith(prefix) and len(name) > len(prefix):
+            return "{}:{}".format(kind, name[len(prefix):])
+    if name.startswith("PAUSE-") and len(name) > len("PAUSE-"):
+        return "lane:" + name[len("PAUSE-"):]
+    return None
+
+
 def legacy_markers(directory: Any) -> List[Dict[str, Any]]:
     """Map old PAUSE marker files into pause records, sorted by scope.
 
@@ -164,16 +182,63 @@ def legacy_markers(directory: Any) -> List[Dict[str, Any]]:
     for path in names:
         if not path.is_file():
             continue
-        if path.name == "PAUSE":
-            scope = "all"
-        elif path.name == "PAUSE-MINT":
-            scope = "mint"
-        elif path.name.startswith("PAUSE-BACKEND-") and len(path.name) > len("PAUSE-BACKEND-"):
-            scope = "backend:" + path.name[len("PAUSE-BACKEND-"):]
-        elif path.name.startswith("PAUSE-") and len(path.name) > len("PAUSE-"):
-            scope = "lane:" + path.name[len("PAUSE-"):]
-        else:
+        scope = marker_scope(path.name)
+        if scope is None:
             continue
         records.append({"scope": scope, "created_at": 0.0, "expires_at": None,
                         "reason": "legacy marker: " + path.name})
     return sorted(records, key=lambda row: row["scope"])
+
+
+def default_home() -> str:
+    """The canonical openswarm home: ``$OPENSWARM_HOME``, ``$XSWARM_HOME`` or ``~/.claude/openswarm``.
+
+    The CLI writes the pause records into this home, so every reader (the
+    dispatcher, the lane serve, the autodispatcher) must resolve it the same
+    way: an unset ``$OPENSWARM_HOME`` still has a home, and the default
+    install must see the pauses the CLI wrote (Refs #1366).
+    """
+    return (os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+            or os.path.join(os.path.expanduser("~"), ".claude", "openswarm"))
+
+
+def pause_homes(*extra: Any) -> List[str]:
+    """The pause store homes: the given ones plus the canonical home.
+
+    The canonical home of the pause records is ``default_home()``; a caller
+    that keeps its own store (the dispatcher keeps one under its state
+    directory) passes it as ``extra``.  The result is deduplicated and absolute.
+    """
+    homes: List[str] = []
+    for home in list(extra) + [default_home()]:
+        if not home:
+            continue
+        path = os.path.abspath(os.path.expanduser(str(home)))
+        if path not in homes:
+            homes.append(path)
+    return homes
+
+
+def active_scopes(homes: Any, now: Any) -> set:
+    """The scopes that are paused right now, across every home."""
+    moment = _time(now, "now")
+    scopes = set()
+    for home in homes or []:
+        for record in PauseStore(home).active(moment):
+            scopes.add(record["scope"])
+    return scopes
+
+
+def scope_paused(homes: Any, scope: str, now: Any) -> bool:
+    """Whether one exact scope (``all``, ``mint``, ``lane:X`` ...) is paused."""
+    return _scope(scope) in active_scopes(homes, now)
+
+
+def paused_in(homes: Any, lane: Any = None, host: Any = None, backend: Any = None, now: Any = None) -> bool:
+    """Whether any of the pause stores holds a pause that covers the target."""
+    if now is None:
+        raise ValueError("now is required")
+    for home in homes:
+        if PauseStore(home).is_paused(lane=lane, host=host, backend=backend, now=now):
+            return True
+    return False

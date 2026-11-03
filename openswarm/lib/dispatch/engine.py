@@ -718,11 +718,48 @@ class Dispatcher:
             self.log(f"local inode {pct:.1f}% -> local lanes {'PAUSED' if self.inode['low'] else 'resumed'}")
         return self.inode["low"]
 
+    def pause_homes(self):
+        """The pause stores this dispatcher reads: its own state dir and the canonical home."""
+        module = dispatch_module("pause")
+        return module.pause_homes(self.D)
+
+    def pause_scopes(self):
+        """The pause scopes that are active right now (the store of every home)."""
+        module = dispatch_module("pause")
+        return module.active_scopes(self.pause_homes(), now=self.clock())
+
+    def pause_scope_active(self, scope):
+        """Whether one exact scope (``all``, ``mint``, ``lane:X`` ...) is paused now."""
+        module = dispatch_module("pause")
+        return module.scope_paused(self.pause_homes(), scope, now=self.clock())
+
+    def paused_reason(self, lane, lc):
+        """The scope that pauses this lane (the store first, then the legacy markers)."""
+        backend = lc.get("backend")
+        host = lc.get("host") or ""
+        scopes = self.pause_scopes()
+        for scope in (f"lane:{lane}", f"host:{host}" if host else None,
+                      f"backend:{backend}" if backend else None):
+            if scope and scope in scopes:
+                return scope
+        if "all" in scopes:
+            return "all"
+        if os.path.exists(self.path(f"PAUSE-{lane}")):
+            return f"lane:{lane}"
+        if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
+            return f"host:{host}"
+        if backend and os.path.exists(self.path(f"PAUSE-BACKEND-{backend}")):
+            return f"backend:{backend}"
+        return None
+
     def paused_lane(self, lane, lc):
         if os.path.exists(self.path(f"PAUSE-{lane}")):
             return True
-        if dispatch_module("pause").PauseStore(self.D).is_paused(lane=lane, host=lc.get("host"),
-                                                                  backend=lc.get("backend"), now=self.clock()):
+        # The canonical pause records live in the openswarm home; the dispatcher keeps its own
+        # copy under its state directory, so both are read (Refs #1366).
+        module = dispatch_module("pause")
+        if module.paused_in(self.pause_homes(), lane=lane, host=lc.get("host"),
+                            backend=lc.get("backend"), now=self.clock()):
             return True
         host = lc.get("host") or ""
         if host and os.path.exists(self.path(f"PAUSE-HOST-{host}")):
@@ -2551,6 +2588,10 @@ class Dispatcher:
             return
         if any(os.path.exists(self.path(f)) for f in rp.get("skip_files") or []):
             return
+        # The mint scope of the pause store stops the minting of new work, exactly like the
+        # legacy PAUSE-MINT marker (Refs #1366).
+        if self.pause_scope_active("mint"):
+            return
         if self.dry_run:
             self.plan.append({"would": "replenish", "need": need})
             return
@@ -2564,13 +2605,16 @@ class Dispatcher:
     def tick(self, lanes, state):
         self._quota_probe_cache = None
         self.reap_quota_pauses()
-        if os.path.exists(self.path("PAUSE")):
+        # The `all` scope of the pause store stops the whole loop, exactly like the legacy
+        # PAUSE marker (Refs #1366).
+        if os.path.exists(self.path("PAUSE")) or self.pause_scope_active("all"):
             return
         self.label_cache, self.label_reads = {}, 0
         os.makedirs(os.path.expanduser(self.cfg["ssh"]["control_dir"]), exist_ok=True)
         self.heartbeat()
         try:
             paused = sorted(p for p in os.listdir(self.D) if p.startswith("PAUSE"))
+            paused += sorted(self.pause_scopes())
             if paused and self.clock() - self.last_warn > 300:
                 self.log(f"pauses active: {', '.join(paused)}", brain=False)
                 self.last_warn = self.clock()
@@ -2635,9 +2679,7 @@ class Dispatcher:
             entry = {"state": lane_state, "issue": active.get("issue") if active else None,
                      "pr": active.get("review_pr") if active else None, "backend": backend, "host": lc.get("host"),
                      "model_cfg": model_cfg, "model_last": last.get("model"), "model_last_at": last.get("at"),
-                     "paused_reason": (f"lane:{L}" if os.path.exists(self.path(f"PAUSE-{L}")) else
-                                      f"host:{lc.get('host')}" if os.path.exists(self.path(f"PAUSE-HOST-{lc.get('host')}")) else
-                                      f"backend:{backend}" if backend and os.path.exists(self.path(f"PAUSE-BACKEND-{backend}")) else None)}
+                     "paused_reason": self.paused_reason(L, lc)}
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)
