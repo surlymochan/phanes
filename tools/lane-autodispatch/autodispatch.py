@@ -19,7 +19,7 @@ RULES = ("Rules: work only inside this repository worktree (the current director
          "installs. Keep the change small and factual; cite file paths and line numbers you checked. Commit your result with a "
          "clear message referencing the issue (\"Refs #{n}\"). Write in the same language as the issue. "
          "Your commit message must also carry a short body with a `Closes #{n}` line and a `验收：<command>` line, and the "
-         "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704).")
+         "commit subject (the PR title) must contain `#{n}`, so the lane PR passes the pre-submit check (Refs #1704). It must also carry a 「验收条目→改动文件→测试」mapping table (one row per acceptance item of the card), so the delivery passes the delivery-note pre-check (Refs #1849).")
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
@@ -307,6 +307,100 @@ def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests
                  f"run `{st.get('run')}`, base `{str(st.get('base'))[:8]}`, lane status `{info.get('status')}`{verify_note}.")
     if summary: parts.append(f"Executor summary: {summary}")
     return title, "\n\n".join(parts)
+
+# --- 交付说明映射表预检（Refs #1849，rubric A7/F3）--------------------------------
+# 首轮与 fix 轮的交付说明须含「验收条目→改动文件→测试」映射表：缺行时评审必报流程性
+# BLOCKER，白烧一轮。AD 在推送前检查：缺表或缺行就把卡退回作者（不建 PR，不进评审，不计评审轮次）。
+DELIVERY_MAP_CLASS = "delivery_map"        # 预检失败：退回作者，不计入 lane-failed
+DELIVERY_NOTE_FILE = ".lane-review/PR-{n}.md"
+DELIVERY_MAP_MISSING = "交付说明缺「验收条目→改动文件→测试」映射表（每行写验收条目、改动文件和测试）"
+ACCEPT_SECTION_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*)?(?:验收|Verify|verify|Acceptance)[^:\n：]{0,24}[:：]?[ \t]*$")
+ACCEPT_ITEM_RE = re.compile(r"^[ \t]*(?:[-*+][ \t]*)?(?:验收|Verify|verify|Acceptance)[ \t]*[:：][ \t]*(.*)$")
+BULLET_RE = re.compile(r"^[ \t]*[-*+][ \t]+(\S.*)$")
+MAP_HEADER_ITEM = ("验收", "acceptance", "条目", "item")
+MAP_HEADER_TEST = ("测试", "test", "验证", "verify")
+SEPARATOR_CELL_RE = re.compile(r"^:?-{2,}:?$")
+PUNCTUATION_RE = re.compile(r"[\s`*_~()\[\]{}<>（）【】、,，.。:：;；!！?？/\\|+\-—–>#]+")
+
+def acceptance_items(body):
+    """The acceptance sentences of a card: the `验收：`/`Verify:` lines and the bullets of an acceptance section.
+
+    Each of them needs a row of the mapping table (Refs #1849)."""
+    items, section = [], False
+    for line in str(body or "").splitlines():
+        if ACCEPT_SECTION_RE.match(line): section = True; continue
+        if line.lstrip().startswith("#"): section = False; continue
+        found = ACCEPT_ITEM_RE.match(line)
+        if found and found.group(1).strip(): items.append(found.group(1).strip()); continue
+        bullet = BULLET_RE.match(line) if section else None
+        if bullet: items.append(bullet.group(1).strip())
+        elif section and line.strip(): section = False
+    return items
+
+def table_cells(line):
+    """The cells of a markdown table row ([] when the line is not a table row)."""
+    text = str(line or "").strip()
+    return [cell.strip() for cell in text.strip("|").split("|")] if "|" in text else []
+
+def mapping_rows(note):
+    """The rows of the 「验收条目→改动文件→测试」tables of a delivery note.
+
+    A table counts when its header names the acceptance column and the test column, the
+    next line is the separator and a data row follows; a row is (acceptance, changed
+    file, test) and only a row with all three cells counts."""
+    rows, lines = [], str(note or "").splitlines()
+    for index, line in enumerate(lines):
+        header = table_cells(line)
+        separator = table_cells(lines[index + 1]) if index + 1 < len(lines) else []
+        if len(header) < 3 or not separator or not all(SEPARATOR_CELL_RE.match(c) for c in separator): continue
+        def column(keywords):
+            return next((i for i, cell in enumerate(header) if any(w in cell.lower() for w in keywords)), None)
+        item_col, test_col = column(MAP_HEADER_ITEM), column(MAP_HEADER_TEST)
+        if item_col is None or test_col is None or item_col == test_col: continue
+        file_col = next((c for c in range(len(header)) if c not in (item_col, test_col)), None)
+        if file_col is None: continue
+        for row_line in lines[index + 2:]:
+            cells = table_cells(row_line)
+            if not cells or len(cells) <= max(item_col, file_col, test_col): break
+            item, files, test = cells[item_col], cells[file_col], cells[test_col]
+            if item and files and test: rows.append((item, files, test))
+    return rows
+
+def normalize_text(text):
+    """The comparable form of a text: no markdown, no punctuation, no spaces, lowercase."""
+    return PUNCTUATION_RE.sub("", str(text or "")).lower()
+
+def row_covers(row, item):
+    """Whether a mapping row covers an acceptance sentence: the acceptance column repeats
+    it or the test column carries the command that proves it."""
+    target = normalize_text(item)
+    return bool(target) and any(len(other) >= 2 and len(target) >= 2 and (target in other or other in target)
+                                 for other in (normalize_text(cell) for cell in row))
+
+def validate_delivery_map(card, note):
+    """The missing items of the delivery note's mapping table ([] when the delivery is complete).
+
+    Every acceptance sentence of the card needs a row of the 「验收条目→改动文件→测试」table."""
+    rows = mapping_rows(note)
+    if not rows: return [DELIVERY_MAP_MISSING]
+    return [f"验收条目缺映射行：{item}" for item in acceptance_items(card)
+            if not any(row_covers(row, item) for row in rows)]
+
+def delivery_map_missing(lane, n, message):
+    """The missing items of the delivery note's mapping table ([] when the delivery is complete).
+
+    The card body is read from GitHub; a failed read is not a delivery defect."""
+    rc, out, err = gh(["issue", "view", str(n), "--json", "body"])
+    card = ""
+    if rc:
+        log(f"issue #{n} body read failed ({(err or out).strip()[-80:]}); the check then only asks for the table", brain=False)
+    else:
+        try: card = json.loads(out).get("body") or ""
+        except ValueError: pass
+    note = str(message or "")
+    rc, out, _ = sh(["git", "-C", LOCAL, "show", f"refs/fleet/{lane}:{DELIVERY_NOTE_FILE.format(n=n)}"])
+    if not rc and out.strip(): note += "\n" + out
+    return validate_delivery_map(card, note)
 
 def log(msg, brain=True):
     line = f"{time.strftime('%F %T')} {msg}"
@@ -814,25 +908,27 @@ def record_pr_validation(cfg, run, record):
     except Exception as e:
         log(f"run {run}: PR validation run record not written to the host ({e!r})", brain=False)
 
-def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
+def block_pr_validation(lane, cfg, st, info, state, title, body, missing, error_class=PR_VALIDATION_CLASS):
     """Block a lane PR whose required fields are missing and hand the issue back for a quick fix.
 
     The missing items are returned to the runner as an explicit error and listed one by
     one on the issue; the run is recorded as a quick-fix class, so the lane-failed
-    statistics stay clean (Refs #1704)."""
+    statistics stay clean (Refs #1704).  The delivery-note pre-check hands the card back
+    the same way (Refs #1849)."""
     n, run = st["issue"], st["run"]
     record = {"run": run, "issue": n, "lane": lane, "class": PR_VALIDATION_FIX_CLASS,
-              "error_class": PR_VALIDATION_CLASS, "missing": list(missing), "title": title,
+              "error_class": error_class, "missing": list(missing), "title": title,
               "at": time.strftime("%F %T")}
     record_pr_validation(cfg, run, record)
     state["_pr_validation"] = (state.get("_pr_validation", []) + [record])[-200:]
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-    gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的 PR 未通过提交前校验，未创建 PR：\n\n"
+    gh(["issue", "comment", str(n), "--body", f"Lane {lane} (run `{run}`) 的交付未通过提交前校验，未创建 PR：\n\n"
         + "".join(f"- {item}\n" for item in missing)
-        + f"\n按可快速修复类（`{PR_VALIDATION_CLASS}`）处理，不计入 lane-failed 统计；已重新标记 `lane-ready`。"])
+        + f"\n按可快速修复类（`{error_class}`）处理，不计入 lane-failed 统计；未创建 PR，不进评审，"
+          f"不计评审轮次；已重新标记 `lane-ready`。"])
     mark_done(state, n)
-    return {"done": True, "status": "pr-validation-failed",
-            "error": f"PR 提交前校验未通过（{PR_VALIDATION_STRICT}）：{'；'.join(missing)}",
+    return {"done": True, "status": "delivery-map-failed" if error_class == DELIVERY_MAP_CLASS else "pr-validation-failed",
+            "error": f"提交前校验未通过：{'；'.join(missing)}",
             "missing": list(missing)}
 
 def finish(lane, cfg, st, info, state):
@@ -847,6 +943,19 @@ def finish(lane, cfg, st, info, state):
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
+        _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", f"refs/fleet/{lane}"])
+        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", f"refs/fleet/{lane}"])
+        mode = pr_validation_mode()
+        # Refs #1849 (rubric A7/F3): the delivery note must carry the
+        # 「验收条目→改动文件→测试」mapping table.  The check runs BEFORE the push: a
+        # delivery without the table goes back to the author, so no PR is opened, no
+        # review is dispatched and no review round is burned.
+        map_missing = delivery_map_missing(lane, n, msg)
+        if map_missing and mode == PR_VALIDATION_STRICT:
+            return block_pr_validation(lane, cfg, st, info, state, subj.strip(), "", map_missing,
+                                        error_class=DELIVERY_MAP_CLASS)
+        if map_missing:
+            log(f"{lane} #{n} run {run} delivery map validation ({mode}): 缺 {'；'.join(map_missing)}", brain=False)
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
@@ -854,11 +963,8 @@ def finish(lane, cfg, st, info, state):
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
-        _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", f"refs/fleet/{lane}"])
-        _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", f"refs/fleet/{lane}"])
         title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
         missing = validate_lane_pr(n, title, body)
-        mode = pr_validation_mode()
         if missing and mode == PR_VALIDATION_STRICT:
             return block_pr_validation(lane, cfg, st, info, state, title, body, missing)
         if missing:
