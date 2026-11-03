@@ -768,6 +768,74 @@ box-pauses.jsonl / 日志路径都落在该目录内，因此不会读写真实�
 `brain/log.md` 写假审查行。热修只存在于 box 运行副本，所以本机没有该副本时脚本输出
 `SKIP`（不假装契约成立），用 `--ad PATH` 可指定别的 AD 文件。
 
+## 失败收割的原因分类与 budget 窗口重投（Refs #1668）
+
+起因：MiniMax 5h 窗口撞顶时 run 以 `budget_exceeded` 死亡——限流重试的等待越过了 run
+自己的 deadline（`openswarm/bin/openswarm` 的 `run_executor_with_rate_limit`：等待超时后
+`attempts[-1]["error_class"] = "budget_exceeded"`）。收割阶段过去把它和真失败
+（`exec_error` 等）一起贴成 `lane-failed`，重投时机没有策略（2026-11-02：M17 的
+#1392 16:53、#1363 20:12）。
+
+两个收割器现在按同一口径分类（`budget` / `quota` / `real`）：
+
+- `openswarm/lib/dispatch/failure_class.py`：纯函数模块。`classify(error_class)` 归类，
+  `requeue_at(now, resets_at, delay_s)` 给出可以重投的时刻（窗口恢复时间优先，未知时
+  用兜底延迟，最长挂起 6h），`probe_state(probe)` / `window_state(probe, reset_passed)`
+  给出窗口状态（`open` / `exhausted` / `unknown`），
+  `reset_seconds_from_text(text)` 从 run 文本里读窗口恢复时间（`resets in 2h13m`、
+  `Retry-After: 120`）。
+- `openswarm/lib/dispatch/engine.py`（openswarm dispatcher）：`budget` 类不再贴
+  `lane-failed`，改为**挂起**该卡——保留 `in-progress`（所以没有车道会领走它），挂起
+  记录写在 state 的 `_budget_requeue` 里；窗口恢复后由 tick 自动贴回 `lane-ready`。
+  quota probe 仍报 `exhausted: true` 就再等一轮；挂起超过 `quota.budget_requeue_max`
+  （默认 2 次）才回到原来的 `lane-failed` 流程。`quota.budget_requeue_delay_s`
+  （默认 1800s）是窗口恢复时间未知时的兜底等待。
+- `tools/lane-autodispatch/autodispatch.py`（box 控制面 AD）：同样的挂起/自动重投。窗口
+  恢复时间取 run 的 `resets_at`（REMOTE_STATUS 已带出该字段），未知时用
+  `AD_BUDGET_REQUEUE_DELAY`（默认 1800s），挂起次数上限 `AD_BUDGET_REQUEUE_MAX`
+  （默认 2）。
+
+窗口状态怎么确认（关键）：实际执行器写的 result.json **没有顶层 `resets_at`**
+（`openswarm/bin/openswarm` 只写 `status`/`error_class`/`summary`），所以 5h 窗口撞顶的
+典型收割里拿不到恢复时间。两个收割器因此按同一口径取窗口恢复时间与窗口状态：
+
+1. run 的 `resets_at`（若执行器将来写）；
+2. run 文本里的恢复时间（`resets in 2h13m`、`Retry-After: 120`）；
+3. 窗口探针（engine：`quota.probe_cmd`；AD：`AD_BUDGET_PROBE_CMD`，输出 JSON
+   `{"exhausted": true|false, "resets_at": ...}`）的 `resets_at`。
+
+重投前还要看窗口**当前**状态：探针报 `exhausted: false` 才算窗口恢复；报
+`exhausted: true` 或没有回答（状态无法确认）就继续挂起，下一轮再看。恢复时间已知且已过
+时也视为窗口已恢复。这样窗口没恢复时不会反复把卡派出去。
+
+挂起不是无界的：同一张卡的 budget 失败次数跨重投累计（state 的 `_budget_tries`，重投
+只删 `_budget_requeue` 记录、不删计数），达到 `quota.budget_requeue_max`（默认 2）就回
+到原来的 `lane-failed` 流程；窗口状态一直无法确认且没有恢复时间时，挂起超过
+`quota.budget_max_hold_s`（默认 6h，AD 侧 `AD_BUDGET_REQUEUE_MAX_HOLD`）也回到
+`lane-failed`。终态（贴 `lane-failed`、卡被关掉、已经出了 PR）都会清掉这张卡的计数。
+
+`quota` 类（`rate_limit`/`quota`）与真失败维持原流程：前者照旧立刻重投并按配额信号暂停
+后端（派发前降速），后者照旧贴 `lane-failed`。
+
+离线验证：
+
+```bash
+cd openswarm && python3 -m unittest tests.test_dispatch_failure_class \
+    tests.test_dispatch_engine tests.test_autodispatch
+```
+
+覆盖的用例（Refs #1668）：
+
+- `tests.test_dispatch_failure_class`：分类、`requeue_at`、窗口状态（探针回答优先、
+  恢复时间已过才算开、无回答就是 unknown）、run 文本里的恢复时间。
+- `tests.test_dispatch_engine.BudgetFailureHarvest`：无 `resets_at` 的真实收割 →
+  挂起（不贴 `lane-failed`）；探针报关闭/不回答 → 继续挂起；探针报恢复 → 贴回
+  `lane-ready`；跨重投的第二次失败仍然计数 → 到上限贴 `lane-failed` 并清计数；未知
+  窗口挂起超时 → 贴 `lane-failed`；`test_the_tick_releases_the_lane_and_requeues_the_card`
+  是 tick 级证据（收割后车道释放、窗口恢复后下一轮贴回 `lane-ready`）。
+- `tests.test_autodispatch.BudgetFailureTests` / `BudgetFailureTickTests`：同样的口径，
+  外加 AD tick 级证据（挂起后车道释放、窗口恢复后自动重投、连续失败跨重投计数）。
+
 ## Manual one-shots
 
 ```bash

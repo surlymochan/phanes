@@ -1142,6 +1142,236 @@ class FailureReasonWithCommit(Base):
         self.assertEqual(self.read_run()["failure_reason"], "exec-error")
 
 
+class WindowProbe:
+    """A quota probe whose answer follows the window state of the test."""
+
+    def __init__(self, exhausted=True, resets_at=None):
+        self.exhausted = exhausted
+        self.resets_at = resets_at
+
+    def __call__(self, text):
+        answer = {"exhausted": self.exhausted}
+        if self.resets_at is not None:
+            answer["resets_at"] = self.resets_at
+        return 0, json.dumps(answer), ""
+
+
+class BudgetFailureHarvest(Base):
+    """A run that died on a spent budget window is held, not failed (Refs #1668)."""
+
+    ST = {"issue": 1392, "run": "r1", "base": SHA}
+
+    def harvest(self, error_class="budget_exceeded", summary="Token Plan 用量上限", resets_at=None):
+        d = self.make()
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "budget_exceeded", "error_class": error_class, "summary": summary,
+                "timestamp": d.clock()}
+        if resets_at:
+            info["resets_at"] = resets_at
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        return d, state
+
+    def test_budget_failure_is_not_lane_failed(self):
+        d, state = self.harvest()
+        self.assertEqual(d.runner.called("issue edit 1392"), [])
+        comment = d.runner.called("issue comment 1392")[0]
+        self.assertIn("budget window was spent", comment)
+        self.assertIn("not a card failure", comment)
+        held = state["_budget_requeue"]["1392"]
+        self.assertEqual(held["error_class"], "budget_exceeded")
+        self.assertEqual(held["tries"], 1)
+        self.assertGreater(held["requeue_at"], d.clock())
+
+    def test_the_hold_waits_for_the_window_reset(self):
+        d = self.make()
+        reset = d.clock() + 3600
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded", "summary": "",
+                "timestamp": d.clock(), "resets_at": reset}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        held = state["_budget_requeue"]["1392"]
+        self.assertEqual(held["requeue_at"], reset)
+        self.assertEqual(held["reset_at"], reset)
+        self.assertEqual(held["backend"], "pi")
+
+    def test_a_real_failure_keeps_the_normal_flow(self):
+        d = self.make()
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "failed", "error_class": "exec_error", "summary": "boom", "timestamp": d.clock()}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        edit = d.runner.called("issue edit 1392")[0]
+        self.assertIn("--add-label lane-failed", edit)
+        self.assertNotIn("_budget_requeue", state)
+
+    def test_a_run_without_a_reset_time_waits_for_the_window_probe(self):
+        """The real executor writes no top level `resets_at`: the probe has to answer."""
+        probe = WindowProbe(exhausted=True)
+        d = self.make([("probe", probe)])
+        d.cfg["quota"]["probe_cmd"] = "probe"
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded",
+                "summary": "Token Plan 用量上限", "timestamp": d.clock()}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        held = state["_budget_requeue"]["1392"]
+        self.assertIsNone(held["reset_at"])
+        self.assertGreater(held["requeue_at"], d.clock())
+
+    def test_the_run_text_may_name_the_window_reset(self):
+        d = self.make()
+        st = dict(self.ST)
+        state = {"M5": st}
+        now = d.clock()
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded",
+                "summary": "resets in 2h13m", "timestamp": now}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        held = state["_budget_requeue"]["1392"]
+        self.assertAlmostEqual(held["reset_at"], now + 2 * 3600 + 13 * 60, places=3)
+
+    def test_the_probe_may_name_the_window_reset(self):
+        probe = WindowProbe(exhausted=True, resets_at="2030-01-01T00:00:00Z")
+        d = self.make([("probe", probe)])
+        d.cfg["quota"]["probe_cmd"] = "probe"
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded", "summary": "",
+                "timestamp": d.clock()}
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        held = state["_budget_requeue"]["1392"]
+        self.assertEqual(held["reset_at"], 1893456000.0)
+
+    def test_the_held_card_returns_to_the_queue_when_the_window_recovered(self):
+        probe = WindowProbe(exhausted=False)
+        d = self.make([("probe", probe),
+                       ("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        d.cfg["quota"]["probe_cmd"] = "probe"
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M5", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "requeue_at": d.clock() - 1}}}
+        d.requeue_budget_cards(state)
+        edit = d.runner.called("issue edit 1392")[0]
+        self.assertIn("--add-label lane-ready", edit)
+        self.assertIn("--remove-label in-progress", edit)
+        self.assertIn("--remove-label lane-failed", edit)
+        self.assertNotIn("1392", state["_budget_requeue"])
+
+    def test_a_closed_window_keeps_the_card_held(self):
+        d = self.make([("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        d.cfg["quota"]["probe_cmd"] = "probe"
+        d.runner.rules.insert(0, ("probe", (0, json.dumps({"exhausted": True}), "")))
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M5", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "requeue_at": d.clock() - 1}}}
+        d.requeue_budget_cards(state)
+        self.assertEqual(d.runner.called("issue edit 1392"), [])
+        self.assertIn("1392", state["_budget_requeue"])
+        self.assertGreater(state["_budget_requeue"]["1392"]["requeue_at"], d.clock())
+
+    def test_an_unknown_window_keeps_the_card_held(self):
+        """No probe answer at all: the card is never put back into a closed window."""
+        d = self.make([("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M5", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "requeue_at": d.clock() - 1}}}
+        d.requeue_budget_cards(state)
+        self.assertEqual(d.runner.called("issue edit 1392"), [])
+        self.assertIn("1392", state["_budget_requeue"])
+
+    def test_a_card_that_keeps_hitting_a_closed_window_fails_for_real(self):
+        d = self.make([("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M5", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 2,
+                                             "requeue_at": d.clock() - 1}}}
+        d.requeue_budget_cards(state)
+        edit = d.runner.called("issue edit 1392")[0]
+        self.assertIn("--add-label lane-failed", edit)
+        self.assertNotIn("1392", state["_budget_requeue"])
+
+    def test_a_card_held_on_an_unknown_window_expires_into_lane_failed(self):
+        d = self.make([("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "lane": "M5", "run": "r1", "backend": "pi",
+                                             "error_class": "budget_exceeded", "tries": 1,
+                                             "since": d.clock() - 7 * 3600, "requeue_at": d.clock() - 1}}}
+        d.requeue_budget_cards(state)
+        edit = d.runner.called("issue edit 1392")[0]
+        self.assertIn("--add-label lane-failed", edit)
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertNotIn("1392", state.get("_budget_tries", {}))
+
+    def test_the_budget_failure_count_survives_a_requeue(self):
+        """B2: a card that fails again after a requeue counts as the second failure."""
+        probe = WindowProbe(exhausted=False)
+        d = self.make([("probe", probe),
+                       ("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        d.cfg["quota"]["probe_cmd"] = "probe"
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "budget_exceeded", "error_class": "budget_exceeded", "summary": "Token Plan",
+                "timestamp": d.clock()}
+        # the first failure holds the card
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        self.assertEqual(state["_budget_requeue"]["1392"]["tries"], 1)
+        # the window recovers: the card goes back into the queue, the count stays
+        state["_budget_requeue"]["1392"]["requeue_at"] = d.clock() - 1
+        d.requeue_budget_cards(state)
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertEqual(state["_budget_tries"]["1392"], 1)
+        # the card runs again and dies on the same closed window: the second failure counts
+        state["M5"] = st
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "pi"}, st, info, state))
+        self.assertEqual(state["_budget_requeue"]["1392"]["tries"], 2)
+        # the window recovers again, but the card already failed twice: it fails for real
+        state["_budget_requeue"]["1392"]["requeue_at"] = d.clock() - 1
+        d.requeue_budget_cards(state)
+        edit = d.runner.called("issue edit 1392")[-1]
+        self.assertIn("--add-label lane-failed", edit)
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertNotIn("1392", state.get("_budget_tries", {}))
+
+    def test_the_tick_releases_the_lane_and_requeues_the_card(self):
+        """The tick harvests the budget failure, frees the lane and requeues the card."""
+        probe = WindowProbe(exhausted=True)
+        d = self.make([("probe", probe),
+                       ("issue view 1392", (0, json.dumps({"state": "OPEN", "labels": []}), ""))])
+        d.cfg["quota"]["probe_cmd"] = "probe"
+        now = [1_000_000.0]
+        d.clock = lambda: now[0]
+        d.probe = lambda lanes, state: {"M5": {"lane": "idle", "run": {"status": "budget_exceeded",
+                                                                       "error_class": "budget_exceeded",
+                                                                       "summary": "Token Plan 用量上限",
+                                                                       "timestamp": now[0]}}}
+        lanes = {"M5": {"host": "box", "backend": "pi"}}
+        state = {"M5": dict(self.ST)}
+
+        d.tick(lanes, state)
+
+        # the lane slot is free again and the card waits for the window
+        self.assertNotIn("M5", state)
+        self.assertIn("1392", state["_budget_requeue"])
+        self.assertEqual(state["_budget_requeue"]["1392"]["tries"], 1)
+        self.assertFalse([c for c in d.runner.called("issue edit 1392") if "lane-ready" in c])
+
+        # the window recovers: the next tick puts the card back into the queue
+        probe.exhausted = False
+        now[0] += 2 * 3600
+        d.tick(lanes, state)
+
+        self.assertTrue([c for c in d.runner.called("issue edit 1392") if "lane-ready" in c])
+        self.assertNotIn("1392", state["_budget_requeue"])
+        self.assertEqual(state["_budget_tries"]["1392"], 1)
+
+    def test_the_leak_sweep_keeps_the_held_card(self):
+        issue_list = [{"number": 1392, "updatedAt": "2020-01-01T00:00:00Z"}]
+        d = self.make([("issue list", (0, json.dumps(issue_list), ""))])
+        d.clock = lambda: 2_000_000_000
+        state = {"_budget_requeue": {"1392": {"issue": 1392, "requeue_at": 2_000_000_100}}}
+        d.sweep_leaked_inprogress(state)
+        self.assertEqual(d.runner.called("issue edit 1392"), [])
+
+
 class FreshReads(Base):
     def test_read_failure_is_not_stale_and_budget_caps_reads(self):
         self.cfg["fresh_read_budget"] = 2
