@@ -4,7 +4,7 @@
 
 ## 1. 队列与任务水位检查（重点）
 
-`lane-autodispatch` 通过 `lanes-status.json` 输出全局派发状态，核心监控字段包括 `_busy`、`_ready`、`_blocked`。
+`lane-autodispatch` 通过 `lanes-status.json` 输出全局派发状态，核心监控字段包括 `_busy`、`_ready`、`_blocked`，以及每条车道最近一次空闲时长的 `_idle_s`（run 结束 → 派发，秒）与其原因 `_idle_reason`（Refs #1688）。
 
 - [ ] **检查 `_ready` 队列水位**：
   - 当 `lanes-status.json` 中 `_ready` 低于 10 时，表明可派发任务不足，需及时补充 backlog 或触发 planner：
