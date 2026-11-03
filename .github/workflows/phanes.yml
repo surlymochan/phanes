@@ -37,7 +37,7 @@ jobs:
           scenario=false
           while IFS= read -r path; do
             case "$path" in
-              openswarm/*|.github/*) openswarm=true ;;
+              openswarm/*|tools/lane-autodispatch/*|tools/tests/*|tools/ci-openswarm.*|.github/*) openswarm=true ;;
             esac
             case "$path" in
               openbot/*|.github/*) openbot=true ;;
@@ -45,7 +45,10 @@ jobs:
             case "$path" in
               examples/org-health-local/*|.github/*) scenario=true ;;
             esac
-          done < <(git diff --name-only "$BASE_SHA...HEAD")
+          # --no-renames: git reports only the target path of a rename, so a file
+          # moved out of openswarm/, tools/lane-autodispatch/ or tools/tests/ would
+          # otherwise slip past the path based test selection of the OpenSwarm gate.
+          done < <(git diff --name-only --no-renames "$BASE_SHA...HEAD")
           echo "openswarm=$openswarm" >> "$GITHUB_OUTPUT"
           echo "openbot=$openbot" >> "$GITHUB_OUTPUT"
           echo "scenario=$scenario" >> "$GITHUB_OUTPUT"
@@ -101,23 +104,17 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest]
         python: ["3.9", "3.11", "3.13"]
-    defaults:
-      run:
-        working-directory: openswarm
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit tests
-        run: python -m unittest discover -s tests -v
-      - name: Offline CLI smoke test
+      - name: OpenSwarm gate
         env:
-          OPENSWARM_STATE_FILE: examples/demo-state.json
-        run: |
-          export OPENSWARM_HOME="$(mktemp -d)"
-          python bin/openswarm status
-          python bin/openswarm route --type impl --difficulty 3
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash tools/ci-openswarm.sh
   openbot:
     name: OpenBot type and language checks
     needs: changes
