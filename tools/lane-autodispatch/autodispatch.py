@@ -51,6 +51,32 @@ BASE_REPO_URL = f"https://github.com/{REPO}.git"  # the upstream the base commit
 DISPATCH_BASE_FETCH_ATTEMPTS = 3  # bounded attempts (check -> fetch -> check) when the base is missing
 DISPATCH_BASE_FETCH_DELAY = 5     # seconds between two attempts
 BASE_MISSING_RE = re.compile(r"Not a valid object name", re.I)
+# Refs #1719: fetch resilience of the dispatch path.  Every git network operation of the
+# dispatch (the base fetch on the host and the seed push that carries the objects over ssh) runs
+# under one policy: a per-host attempt budget with backoff, a threshold after which the seed
+# push path takes over (the box pulls the objects, the host never talks to GitHub), and a
+# per-host failure attribution that the health output and the blocking diagnostics read.
+# The engine (openswarm/lib/dispatch/fetch_policy.py) holds the same policy; this mirror keeps
+# the box copy self-contained (it is deployed alone).
+FETCH_POLICY_DEFAULT = {"attempts": 3, "backoff_s": 5, "backoff_cap_s": 60, "fallback_after": 3,
+                         "health_window_s": 1800, "health_max_events": 50}
+FETCH_POLICY_ENV = "AD_FETCH_POLICY"     # JSON object: the policy and its per-host overrides
+FETCH_POLICY_FILE = "fetch-policy.json"  # <state dir>/fetch-policy.json (the same shape)
+FETCH_HEALTH_FILE = "fetch-health.json"  # <state dir>/fetch-health.json: the recent failures
+# The diagnosable types of a git network failure (the first match wins).  A TLS handshake failure
+# is a network problem, not a fatal one: another attempt (or the seed push) can still deliver.
+FETCH_ERROR_TYPES = (
+    ("tls", r"gnutls_handshake|gnutls|SSL (?:error|connect|handshake)|TLS handshake|certificate (?:verify|problem)|handshake failure"),
+    ("dns", r"could not resolve|name or service not known|temporary failure in name resolution|nodename nor servname"),
+    ("timeout", r"timed out|timeout|deadline exceeded"),
+    ("network", r"connection reset|network is unreachable|failed to connect|recv failure|early eof|"
+                r"connection closed|reset by peer|broken pipe|unexpected disconnect|connection refused"),
+    ("auth", r"authentication failed|could not read username|terminal prompts disabled|403 forbidden|"
+             r"permission denied \(publickey\)"),
+    ("not_found", r"repository not found|remote branch .* not found|404 not found|no such file or directory"),
+)
+FETCH_RETRYABLE_TYPES = {"tls", "dns", "timeout", "network", "unknown"}
+FETCH_EVENTS = {}  # host -> the recent git network failures (Refs #1719)
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -472,6 +498,7 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    status["_fetch_health"] = dispatch_fetch_health()
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -495,9 +522,198 @@ def base_fetch_command(repo_path, url, branch):
     """Remote snippet: fetch the base branch into the target repo."""
     return f"git -C {repo_path} fetch -q {url} {branch}"
 
+class FetchError(RuntimeError):
+    """A dispatch died in a git network operation, not in the lane assign.
+
+    The error type (`tls`, `dns`, `timeout`, ...) travels with the exception: the caller
+    attributes the failure to the host's fetch health instead of counting a vague dispatch error.
+    """
+    def __init__(self, message, error_type="unknown", op=""):
+        super().__init__(message); self.error_type = error_type; self.op = op
+
+def fetch_policy_config():
+    """The fetch policy: the defaults, the operator's config and its per-host overrides."""
+    config = dict(FETCH_POLICY_DEFAULT)
+    raw = os.environ.get(FETCH_POLICY_ENV) or ""
+    if not raw:
+        try: raw = open(f"{D}/{FETCH_POLICY_FILE}").read()
+        except OSError: raw = ""
+    try: parsed = json.loads(raw) if raw else {}
+    except ValueError: parsed = {}
+    if isinstance(parsed, dict):
+        for key in FETCH_POLICY_DEFAULT:
+            if key in parsed: config[key] = parsed[key]
+        hosts = parsed.get("hosts") if isinstance(parsed.get("hosts"), dict) else {}
+        config["hosts"] = hosts
+    else:
+        config["hosts"] = {}
+    return config
+
+def fetch_policy(host):
+    """The effective fetch policy of one host."""
+    config = fetch_policy_config()
+    policy = {key: value for key, value in config.items() if key != "hosts"}
+    override = config.get("hosts", {}).get(host) if host else None
+    if isinstance(override, dict): policy.update(override)
+    policy["attempts"] = max(1, int(policy.get("attempts") or 1))
+    policy["backoff_s"] = max(0, int(policy.get("backoff_s") or 0))
+    policy["backoff_cap_s"] = max(policy["backoff_s"], int(policy.get("backoff_cap_s") or 0))
+    policy["fallback_after"] = max(0, int(policy.get("fallback_after") or 0))
+    policy["health_window_s"] = max(0, int(policy.get("health_window_s") or 0))
+    policy["health_max_events"] = max(1, int(policy.get("health_max_events") or 1))
+    return policy
+
+def classify_fetch_error(error):
+    """The diagnosable type of a git network failure ("tls", "dns", "timeout", ... "unknown")."""
+    text = error or ""
+    for name, pattern in FETCH_ERROR_TYPES:
+        if re.search(pattern, text, re.I): return name
+    return "unknown"
+
+def retryable_fetch_error(error_type):
+    """True when another attempt (or the seed push fallback) can still fix the failure."""
+    return (error_type or "unknown") in FETCH_RETRYABLE_TYPES
+
+def fetch_backoff_seconds(attempt, policy):
+    """The wait before the next attempt: the base delay, doubled per failed attempt."""
+    attempt = max(1, int(attempt or 1))
+    base = int(policy.get("backoff_s") or 0); cap = int(policy.get("backoff_cap_s") or base)
+    return min(cap, base * 2 ** (attempt - 1))
+
+def fetch_should_fallback(failures, policy):
+    """True when the host's recent failure count reached the seed push threshold."""
+    threshold = int(policy.get("fallback_after") or 0)
+    return threshold > 0 and int(failures or 0) >= threshold
+
+def record_fetch_failure(host, op, error, error_type=None, fallback=False):
+    """Attribute one failed git operation to its host (the recent window keeps it)."""
+    FETCH_EVENTS.setdefault(str(host), []).append({
+        "at": time.time(), "op": str(op or ""),
+        "type": error_type or classify_fetch_error(error),
+        "detail": (error or "").strip()[-200:], "fallback": bool(fallback)})
+
+def load_fetch_health():
+    """Read the recent fetch failures of the previous runs (the counters survive a restart)."""
+    global FETCH_EVENTS
+    try: raw = json.load(open(f"{D}/{FETCH_HEALTH_FILE}"))
+    except (OSError, ValueError): return
+    if isinstance(raw, dict): FETCH_EVENTS = {h: list(rows) for h, rows in raw.items() if isinstance(rows, list)}
+
+def save_fetch_health():
+    """Write the recent fetch failures (pruned to the recent window)."""
+    policy = fetch_policy(None)
+    window = policy["health_window_s"]; cap = policy["health_max_events"]; now = time.time()
+    pruned = {}
+    for host, rows in FETCH_EVENTS.items():
+        kept = [row for row in rows if isinstance(row, dict) and (not window or now - float(row.get("at") or 0) <= window)]
+        pruned[host] = kept[-cap:]
+    FETCH_EVENTS.clear(); FETCH_EVENTS.update(pruned)
+    try:
+        tmp = f"{D}/{FETCH_HEALTH_FILE}.tmp"
+        with open(tmp, "w") as f: json.dump(pruned, f, indent=1, ensure_ascii=False)
+        os.replace(tmp, f"{D}/{FETCH_HEALTH_FILE}")
+    except OSError:
+        pass
+
+def dispatch_fetch_health(window_s=None, now=None):
+    """The per-host fetch health: the recent failure count and the main error types.
+
+    The rows answer the two questions the blocking diagnosis asks: how often did the host fail to
+    fetch recently, and what kind of failure was it.
+    """
+    moment = time.time() if now is None else now
+    window = fetch_policy(None)["health_window_s"] if window_s is None else window_s
+    rows = {}
+    for host, events in (FETCH_EVENTS or {}).items():
+        recent = [row for row in events if isinstance(row, dict)
+                  and (not window or moment - float(row.get("at") or 0) <= window)]
+        if not recent: continue
+        failures = [row for row in recent if not row.get("fallback")]
+        types = {}
+        for row in failures:
+            name = str(row.get("type") or "unknown"); types[name] = types.get(name, 0) + 1
+        last = failures[-1] if failures else recent[-1]
+        rows[str(host)] = {"failures": len(failures), "types": types,
+                           "last_type": str(last.get("type") or "unknown"), "last_op": str(last.get("op") or ""),
+                           "last_at": last.get("at"),
+                           "fallbacks": sum(1 for row in recent if row.get("fallback"))}
+    return rows
+
+def fetch_health_summary(row):
+    """One short line per host: `3 failure(s) (tls x3); last tls`."""
+    if not isinstance(row, dict) or not row.get("failures"): return "no recent fetch failure"
+    types = row.get("types") or {}
+    parts = ", ".join(f"{name} x{count}" for name, count in sorted(types.items(), key=lambda kv: (-kv[1], kv[0])))
+    return f"{row['failures']} failure(s) ({parts}); last {row.get('last_type') or 'unknown'}"
+
+def fetch_op(op, host, run, timeout=180):
+    """Run one git network operation under the host's fetch policy.
+
+    `run` performs the operation and returns (rc, out, err).  Returns (ok, error, error_type,
+    attempts): every failed attempt is attributed to the host (operation, error type, timestamp),
+    so a fetch failure is never counted as a vague dispatch error.
+    """
+    policy = fetch_policy(host)
+    error, error_type, used = "", "", 0
+    for attempt in range(1, policy["attempts"] + 1):
+        used = attempt
+        rc, out, err = run()
+        if not rc: return True, "", "", used
+        error = (err or out or f"rc={rc}").strip()
+        error_type = classify_fetch_error(error)
+        record_fetch_failure(host, op, error, error_type)
+        if attempt >= policy["attempts"] or not retryable_fetch_error(error_type): break
+        wait = fetch_backoff_seconds(attempt, policy)
+        log(f"{host} {op} failed ({error_type}: {error[-90:]}); attempt {attempt + 1}/{policy['attempts']} in {wait}s", brain=False)
+        time.sleep(wait)
+    return False, error, error_type, used
+
+def seed_push_base(host, repo_path, base, refs=()):
+    """Pull the base on the box and push it into the host's repo (the fallback path).
+
+    The host never talks to GitHub in this path: the box fetches the base and pushes the objects
+    over ssh.  Returns (ok, error, error_type).
+    """
+    def box_fetch():
+        return sh(["git", "-C", LOCAL, "fetch", "-q", BASE_REPO_URL, BASE_BRANCH], timeout=180)
+    ok, err, error_type, _ = fetch_op("fetch_main_box", "box", box_fetch)
+    if not ok: return False, err, error_type
+    def push():
+        ssh_command = git_ssh_command(ssh_opts(host))
+        return sh(["git", "-c", f"core.sshCommand={ssh_command}", "-C", LOCAL, "push", "-q", "-f",
+                   f"{host}:{repo_path}", f"{base}:refs/ad/base"] + list(refs), timeout=180)
+    ok, err, error_type, _ = fetch_op("seed_push", host, push)
+    return ok, err, error_type
+
+def fetch_base(host, repo_path, base):
+    """Fetch the base branch into the host's repo (fetch main) under the host's policy.
+
+    When the host's recent failures reach the threshold, the seed push path takes over: the box
+    pulls the base and pushes it into the host's repo, so the host never talks to GitHub.  The
+    base validation itself is not relaxed: the caller checks the base again.
+    Returns (ok, error, error_type).
+    """
+    def run():
+        return sh(ssh_argv(ssh_opts(host), host, base_fetch_command(repo_path, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
+    ok, err, error_type, _ = fetch_op("fetch_main", host, run)
+    if ok: return True, "", ""
+    failures = len(FETCH_EVENTS.get(host) or [])
+    if not fetch_should_fallback(failures, fetch_policy(host)): return False, err, error_type
+    log(f"{host} fetch failed {failures}x ({error_type}); falling back to the seed push path", brain=False)
+    record_fetch_failure(host, "seed_push_fallback", err, error_type, fallback=True)
+    ok, seed_err, seed_type = seed_push_base(host, repo_path, base)
+    if ok: return True, "", ""
+    return False, f"seed push failed after {failures} host fetch failure(s) ({error_type}): {seed_err}", seed_type
+
 def dispatch_failed(lane, cfg, item, error):
     """A failed dispatch drops the in-progress label and backs the host off (transient, unchanged)."""
     gh(["issue", "edit", str(item["n"]), "--remove-label", "in-progress"])
+    if isinstance(error, FetchError):
+        row = dispatch_fetch_health().get(cfg["host"]) or {}
+        log(f"dispatch #{item['n']} on {cfg['host']} failed in {error.op or 'fetch'} ({error.error_type}): {error}; "
+            f"recent fetch failures: {fetch_health_summary(row)}", brain=False)
+        host_fail(cfg["host"], f"dispatch #{item['n']} fetch {error.error_type}: {error}")
+        return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
 def dispatch(lane, cfg, item, base):
@@ -521,15 +737,18 @@ def dispatch(lane, cfg, item, base):
         if not base_missing(err) or attempt == DISPATCH_BASE_FETCH_ATTEMPTS: break
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
-        # own short-lived ref locks).
-        frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
-        if frc:
+        # own short-lived ref locks).  The fetch runs under the host's fetch policy (attempts with
+        # backoff); when the host's recent failures reach the threshold, the seed push path takes
+        # over (the box pulls the base and pushes it into the host's repo).
+        ok, ferr, ftype = fetch_base(h, R, base)
+        if not ok:
             # A failing fetch aborts the dispatch right away: the base could not be validated, and
             # a later successful check (e.g. a concurrent tick that fetched the object in the
             # meantime) must never mask the fetch failure. The caller backs the host off as usual.
-            # The fetch failure ends the message: the host backoff log keeps the last 80 chars.
-            raise RuntimeError(f"base check: {(err or out).strip()[-120:]} | "
-                               f"base fetch failed rc={frc}: {ferr.strip()[-40:]}")
+            # The failure is a fetch failure, not an assign failure: the host's fetch health
+            # carries the diagnosis (Refs #1719).
+            raise FetchError(f"base check: {(err or out).strip()[-120:]} | "
+                             f"base fetch failed ({ftype}): {ferr.strip()[-120:]}", ftype, "fetch_main")
         time.sleep(DISPATCH_BASE_FETCH_DELAY)
     raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
 
@@ -629,14 +848,23 @@ def finish(lane, cfg, st, info, state):
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
     else:
+        # A host whose fetches keep failing explains the run better than a vague exec_error:
+        # the failure is attributed to the fetch, not to the card (Refs #1719).
+        row = dispatch_fetch_health().get(cfg["host"]) or {}
+        error_class = info.get("error_class") or ""
+        fetch_failed = bool(row.get("failures")) and error_class in ("exec_error", "stalled", "")
+        reported = "fetch_failed" if fetch_failed else error_class
+        reason = (f"the host fetch failed ({fetch_health_summary(row)})" if fetch_failed
+                  else f"(error_class `{error_class}`)")
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
-            f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
-        mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
+            f"because {reason}.\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+        mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{reported}) → labelled lane-failed")
     return True
 
 def tick(lanes, state, last_warn):
     if os.path.exists(f"{D}/PAUSE"): return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
+    load_fetch_health()  # the recent fetch failures survive a restart (Refs #1719)
     state.setdefault("_done", [])
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
@@ -700,6 +928,7 @@ def tick(lanes, state, last_warn):
         elif time.time() - last_warn > 600:
             log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     st = status_snapshot(lanes, state, res, ready, blocked)
+    save_fetch_health()  # the per-host fetch counters outlive the tick (Refs #1719)
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
 

@@ -336,6 +336,9 @@ def lane_data(status: Any) -> Dict[str, Any]:
         "reported_busy": reported.get("_busy"),
         "reported_ready": reported.get("_ready"),
         "reported_blocked": reported.get("_blocked"),
+        # the per-host fetch failures of the dispatch path (Refs #1719): how often a host failed
+        # to fetch recently and which error type it was
+        "fetch_health": reported.get("_fetch_health") if isinstance(reported.get("_fetch_health"), dict) else {},
         "at": reported.get("_at"),
     }
 
@@ -613,6 +616,11 @@ def _lane_line(data: Dict[str, Any]) -> str:
     parts.append("in_flight=%d%s" % (len(cards),
                                       " (" + ",".join("#%d" % card for card in cards) + ")"
                                       if cards else ""))
+    fetch = data.get("fetch_health") or {}
+    if fetch:
+        parts.append("fetch=" + ",".join(
+            "%s:%d(%s)" % (host, (row or {}).get("failures", 0), (row or {}).get("last_type", "?"))
+            for host, row in sorted(fetch.items())))
     return " ".join(parts)
 
 

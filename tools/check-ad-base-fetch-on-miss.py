@@ -207,6 +207,12 @@ def prepare(module, sandbox: Sandbox, state_dir="ad-state"):
     module.BASE_REPO_URL = str(sandbox.origin)
     module.BASE_BRANCH = "main"
     module.BACKOFF.clear()
+    # The fetch policy of the dispatch path (Refs #1719) is pinned here: the retries run without
+    # a wait and the seed push fallback stays off, so this check keeps the base-validation
+    # contract of #1810 (a failing fetch aborts the dispatch).  The resilience policy itself
+    # (retries, backoff, seed push fallback) has its own check:
+    # tools/lane-autodispatch/test_dispatch_fetch.py
+    os.environ["AD_FETCH_POLICY"] = json.dumps({"attempts": 3, "backoff_s": 0, "fallback_after": 0})
 
 
 def tick(module, sandbox: Sandbox, lanes=None, state=None):
