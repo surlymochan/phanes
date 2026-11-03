@@ -12343,6 +12343,12 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         row["paused"] = scope in active
         row.setdefault("error", None)
         row["action"] = "none"
+        # The SSH backoff tier of the failure streak (Refs #1689): soft = flapping host
+        # (short retries), hard = the host counts as down (long retries).  The streak is
+        # cleared by the first successful probe, so the tier never sticks to a host that
+        # came back.
+        streak = int((row.get("metrics") or {}).get("ssh_fail_streak", 0) or 0)
+        row["ssh_backoff"] = {"streak": streak, "tier": health.ssh_backoff_tier(streak, limits)}
         if getattr(args, "apply", False):
             row["action"] = fleet_health_apply(store, row, active, moment)
             if row["action"] == "resumed":
@@ -12351,7 +12357,8 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                 active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
             row["paused"] = scope in active
         remembered[name] = {"ssh_fail_streak": row["metrics"].get("ssh_fail_streak", 0),
-                            "status": row["status"], "updated_at": moment}
+                            "status": row["status"], "backoff_tier": row["ssh_backoff"]["tier"],
+                            "updated_at": moment}
         rows.append(row)
     fleet_health_state_save(remembered, home)
     report = {"ok": all(row["status"] == "ok" for row in rows),
@@ -12367,6 +12374,9 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         metrics = " ".join(f"{key}={value}" for key, value in row["metrics"].items())
         if metrics:
             print(f"  metrics: {metrics}")
+        backoff = row.get("ssh_backoff") or {}
+        if backoff.get("streak"):
+            print(f"  ssh backoff: {backoff.get('tier')} tier (streak {backoff.get('streak')})")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")

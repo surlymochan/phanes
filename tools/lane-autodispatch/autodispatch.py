@@ -29,9 +29,21 @@ SSHO = ["-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInte
 # read from $AD_JUMP_HOSTS (JSON object) or <state dir>/jump-hosts.json; empty means "no injection".
 JUMP_HOSTS_ENV = "AD_JUMP_HOSTS"
 JUMP_HOSTS_FILE = "jump-hosts.json"
-BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
-HOST_BACKOFF_BASE = 30
+BACKOFF = {}  # host -> {"n": consecutive failures, "tier": soft|hard, "until": epoch, "probe_at": epoch}
+# transient ssh errors never mark a lane or issue failed
+# SSH backoff tiers (Refs #1689): a short retry interval while the failure streak is small
+# (soft tier) and a long one from the limit on (hard tier), where the host keeps a
+# low-frequency probe (once per backoff window).  Mirrored from
+# openswarm/lib/dispatch/ssh_backoff.py -- keep both in sync (openswarm/tests/test_autodispatch.py
+# asserts that they agree).
+HOST_BACKOFF_SOFT_LIMIT = 3  # consecutive failures below this count stay in the soft tier
+HOST_BACKOFF_BASE = 30      # soft tier: 30s, 60s, ... (capped by HOST_BACKOFF_SOFT_MAX)
+HOST_BACKOFF_SOFT_MAX = 120
+HOST_BACKOFF_HARD_BASE = 240  # hard tier: 240s, 480s, ... (capped by HOST_BACKOFF_MAX)
 HOST_BACKOFF_MAX = 600
+# A probe error with this prefix is a lane level failure: the ssh session worked and the
+# status script of the lane crashed on the host, so the host answered.
+LANE_ERROR_PREFIX = "remote status exc:"
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
 # Refs #947: a harvest fetch failure is transient until HARVEST_FETCH_MAX_TRANSIENT_FAILURES consecutive
@@ -140,13 +152,56 @@ def start_autodispatch(command=None):
     os.replace(temporary, state_path)
     return state
 
-def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
+def backoff_tier(n): return "soft" if int(n or 0) < HOST_BACKOFF_SOFT_LIMIT else "hard"
+def backoff_seconds(n):
+    """The wait before the next probe of a host that failed `n` times in a row (tiered, Refs #1689)."""
+    n = int(n or 0)
+    if n <= 0: return 0
+    if backoff_tier(n) == "soft": return min(HOST_BACKOFF_SOFT_MAX, HOST_BACKOFF_BASE * 2 ** (n - 1))
+    return min(HOST_BACKOFF_MAX, HOST_BACKOFF_HARD_BASE * 2 ** min(n - HOST_BACKOFF_SOFT_LIMIT, 16))
+def host_reachable(results):
+    """Whether the probes of one host show that the host answered (Refs #1689).
+
+    One lane that answered is enough: the failure streak of the host is cleared, so a lane
+    that failed while another lane of the same host answered never extends the backoff.
+    Mirrors openswarm/lib/dispatch/ssh_backoff.py -- keep both in sync."""
+    probed = False
+    for result in (results or {}).values():
+        if not isinstance(result, dict) or result.get("skip"): continue
+        probed = True; error = result.get("error")
+        if not error or str(error).startswith(LANE_ERROR_PREFIX): return True
+    return not probed
+def host_ok(h):
+    """Whether the host may be probed now: the soft tier retries quickly, the hard tier keeps a
+    low-frequency probe (once per backoff window) so a host that comes back is noticed."""
+    b = BACKOFF.get(h) or {}; return time.time() >= b.get("probe_at", b.get("until", 0))
+def host_dispatchable(h):
+    """Whether the host may receive a dispatch now: the soft tier opens when its backoff expired,
+    the hard tier stays closed until a successful probe cleared the failure streak."""
+    b = BACKOFF.get(h)
+    if not b: return True
+    if b.get("tier") == "hard": return False
+    return time.time() >= b.get("until", 0)
 def host_fail(h, why):
-    b = BACKOFF.setdefault(h, {"n": 0, "until": 0}); b["n"] += 1
-    wait = min(HOST_BACKOFF_MAX, HOST_BACKOFF_BASE * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
-    log(f"{h} ssh transient error #{b['n']} ({why[-80:]}); backing off {wait}s", brain=(b["n"] == 4))
+    now = time.time(); b = dict(BACKOFF.get(h) or {"n": 0})
+    b["n"] = int(b.get("n") or 0) + 1; wait = backoff_seconds(b["n"])
+    b.update({"tier": backoff_tier(b["n"]), "wait": wait, "until": now + wait, "probe_at": now + wait})
+    BACKOFF[h] = b
+    log(f"{h} ssh transient error #{b['n']} ({why[-80:]}); {b['tier']} backoff {wait}s", brain=(b["tier"] == "hard"))
 def host_good(h):
-    if BACKOFF.pop(h, None): log(f"{h} ssh recovered", brain=False)
+    """The host answered again: the failure streak is cleared (a host is never judged by its
+    historical peak, Refs #1689)."""
+    b = BACKOFF.pop(h, None)
+    if b: log(f"{h} ssh recovered (streak {b.get('n', 0)} cleared)", brain=False)
+def host_backoff_rows():
+    """The backoff rows of the hosts that are backing off: tier, streak and next probe time."""
+    now = time.time(); rows = {}
+    for h, b in sorted(BACKOFF.items()):
+        probe_at = b.get("probe_at", b.get("until", 0))
+        rows[h] = {"streak": int(b.get("n") or 0), "tier": b.get("tier") or "soft", "wait_s": int(b.get("wait") or 0),
+                   "until": b.get("until", 0), "next_probe_at": probe_at,
+                   "probe_due_in_s": max(0, int(probe_at - now)), "dispatchable": host_dispatchable(h)}
+    return rows
 
 def now(): return time.strftime("%H:%M")
 
@@ -554,6 +609,7 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    status["_host_backoff"] = host_backoff_rows()  # tier, streak and next probe time (Refs #1689)
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -787,6 +843,9 @@ def tick(lanes, state, last_warn):
     if os.path.exists(f"{D}/PAUSE"): return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
+    # A host in the hard backoff tier is not dropped: it keeps a low-frequency probe
+    # (once per backoff window), so a host that comes back is noticed and dispatched
+    # to again in the same tick (Refs #1689).
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
@@ -796,9 +855,15 @@ def tick(lanes, state, last_warn):
     for L in live:
         h = lanes[L]["host"]
         if h in seen: continue
-        errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-        if errs: host_fail(h, errs[0]["error"]); seen.add(h)
-        else: host_good(h); seen.add(h)
+        seen.add(h)
+        # The host is judged by its ssh results, not by its lanes: one lane that answered
+        # is enough to clear the streak, so a lane that failed while another lane of the
+        # same host answered never extends the backoff (Refs #1689).
+        results = {x: res[x] for x in live if lanes[x]["host"] == h}
+        if host_reachable(results): host_good(h)
+        else:
+            errs = [r["error"] for r in results.values() if r.get("error")]
+            host_fail(h, errs[0] if errs else "ssh status failed")
     for L, r in res.items():
         st = state.get(L)
         if "error" in r: continue
@@ -816,7 +881,7 @@ def tick(lanes, state, last_warn):
     base = None
     for L, cfg in lanes.items():
         r = res[L]
-        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
+        if "error" in r or not host_dispatchable(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])

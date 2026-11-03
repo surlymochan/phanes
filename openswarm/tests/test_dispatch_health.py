@@ -73,6 +73,21 @@ class EvaluateTests(unittest.TestCase):
         self.assertIn("inodes", reason)
 
 
+class BackoffTierTests(unittest.TestCase):
+    """The SSH backoff tier of a failure streak is visible next to the streak (Refs #1689)."""
+
+    def test_the_tier_switches_at_the_pause_threshold(self):
+        self.assertEqual([health.ssh_backoff_tier(n) for n in (0, 1, 2)], ["soft", "soft", "soft"])
+        self.assertEqual([health.ssh_backoff_tier(n) for n in (3, 58)], ["hard", "hard"])
+
+    def test_the_threshold_can_be_overridden(self):
+        self.assertEqual(health.ssh_backoff_tier(2, {"ssh_fail_pause_streak": 2}), "hard")
+        self.assertEqual(health.ssh_backoff_tier(1, {"ssh_fail_pause_streak": 2}), "soft")
+
+    def test_a_broken_streak_is_soft(self):
+        self.assertEqual(health.ssh_backoff_tier("nonsense"), "soft")
+
+
 class ProbeTests(unittest.TestCase):
     def test_parses_disk_inode_and_memory_from_injected_runner(self):
         calls = []

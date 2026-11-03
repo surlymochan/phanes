@@ -159,6 +159,17 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(row["action"], "paused")
         self.assertIn("SSH failure streak", self.pauses()["host:worker-a"]["reason"])
 
+    def test_the_ssh_backoff_tier_follows_the_failure_streak(self):
+        """The tier is visible next to the streak: soft while flapping, hard when down (Refs #1689)."""
+        for attempt in (1, 2):
+            report = self.health(runner=self.runner(failing=("worker-a",)), apply=True)
+            self.assertEqual(report["hosts"][0]["ssh_backoff"], {"streak": attempt, "tier": "soft"})
+        report = self.health(runner=self.runner(failing=("worker-a",)), apply=True)
+        self.assertEqual(report["hosts"][0]["ssh_backoff"], {"streak": 3, "tier": "hard"})
+        # one successful probe clears the streak: the tier never sticks to a host that came back
+        report = self.health(runner=self.runner(), apply=True)
+        self.assertEqual(report["hosts"][0]["ssh_backoff"], {"streak": 0, "tier": "soft"})
+
     def test_a_reachable_host_resets_the_failure_streak(self):
         self.health(runner=self.runner(failing=("worker-a",)), apply=True)
         report = self.health(runner=self.runner(), apply=True)
@@ -174,7 +185,7 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(report["thresholds"]["inode_pause_pct"], 95)
         row = report["hosts"][0]
         self.assertEqual(sorted(row), ["action", "decision", "error", "host", "metrics", "paused",
-                                       "reason", "status", "triggers"])
+                                       "reason", "ssh_backoff", "status", "triggers"])
         self.assertEqual(row["host"], "worker-a")
         self.assertFalse(row["paused"])
 

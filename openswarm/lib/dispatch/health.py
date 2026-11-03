@@ -51,6 +51,25 @@ def thresholds_from_policy(policy):
     return limits
 
 
+def ssh_backoff_tier(streak, thresholds=None):
+    """The SSH backoff tier of a consecutive failure count: soft or hard.
+
+    The tier switches at the threshold the SSH streak pauses a host at
+    (``ssh_fail_pause_streak``, default 3): below it the host is flapping (short
+    retries), from it on the host counts as down (long retries, one probe per
+    window).  One successful probe clears the streak, so the tier never sticks to
+    a host that came back (Refs #1689).
+    """
+    limits = dict(DEFAULT_THRESHOLDS)
+    if thresholds:
+        limits.update(thresholds)
+    try:
+        count = int(streak or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return "soft" if count < int(limits["ssh_fail_pause_streak"]) else "hard"
+
+
 def pressure_levels(probe, limits):
     """Classify every valid measurement of a probe against the pause/resume watermarks.
 

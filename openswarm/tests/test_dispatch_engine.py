@@ -248,6 +248,227 @@ class HostHealth(Base):
         self.assertFalse(d.host_ok("h1"))
 
 
+class SshBackoffTiers(Base):
+    """The SSH backoff of a flaky host is tiered: short retries, then long ones (Refs #1689)."""
+
+    def dispatcher(self, now):
+        d = self.make()
+        clock = [now]
+        d.clock = lambda: clock[0]
+        return d, clock
+
+    def test_the_streak_switches_to_the_hard_tier(self):
+        d, clock = self.dispatcher(1000)
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+            clock[0] += 1
+        self.assertEqual(d.backoff["h1"]["n"], 3)
+        self.assertEqual(d.backoff["h1"]["tier"], "hard")
+        self.assertEqual(d.backoff["h1"]["wait"], 240)
+        self.assertEqual(d.backoff["h1"]["until"], 1002 + 240)
+
+    def test_the_soft_tier_waits_a_short_interval(self):
+        d, clock = self.dispatcher(1000)
+        d.host_fail("h1", "ssh timeout")
+        self.assertEqual(d.backoff["h1"]["tier"], "soft")
+        self.assertEqual(d.backoff["h1"]["wait"], 30)
+        self.assertFalse(d.host_ok("h1"))
+        clock[0] = 1030
+        self.assertTrue(d.host_ok("h1"))
+        self.assertTrue(d.host_dispatchable("h1"))
+
+    def test_one_success_clears_the_streak(self):
+        d, clock = self.dispatcher(1000)
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+            clock[0] += 1
+        d.host_good("h1")
+        self.assertNotIn("h1", d.backoff)
+        d.host_fail("h1", "ssh timeout")
+        self.assertEqual(d.backoff["h1"]["n"], 1)
+        self.assertEqual(d.backoff["h1"]["tier"], "soft")
+        self.assertEqual(d.backoff["h1"]["wait"], 30)
+
+    def test_the_hard_tier_keeps_a_probe_but_no_dispatch(self):
+        d, clock = self.dispatcher(1000)
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+            clock[0] += 1
+        window = d.backoff["h1"]["until"]
+        clock[0] = window - 1
+        self.assertFalse(d.host_ok("h1"))
+        clock[0] = window
+        # the low-frequency probe of the hard tier is due, but the dispatch stays closed
+        self.assertTrue(d.host_ok("h1"))
+        self.assertFalse(d.host_dispatchable("h1"))
+        # the probe succeeds: the streak is cleared and the dispatch resumes at once
+        d.host_good("h1")
+        self.assertTrue(d.host_dispatchable("h1"))
+        self.assertTrue(d.host_ok("h1"))
+
+    def test_the_backoff_state_is_published_in_the_lanes_status(self):
+        d, clock = self.dispatcher(1000)
+        d.host_fail("h1", "ssh timeout")
+        lanes = {"P1": {"host": "h1", "backend": "pi"}}
+        d.probe = lambda _lanes, _state: {"P1": {"lane": "idle"}}
+        d.harvest = lambda *_args: None
+        d.sweep_leaked_inprogress = lambda *_args: None
+        d.queue = lambda: []
+        d.dispatch_reviews = lambda *_args: None
+        d.assign_issues = lambda *_args: None
+        d.replenish = lambda *_args: None
+        d.tick(lanes, {})
+        with open(d.path("lanes-status.json"), encoding="utf-8") as stream:
+            status = json.load(stream)
+        row = status["_host_backoff"]["h1"]
+        self.assertEqual(row["tier"], "soft")
+        self.assertEqual(row["streak"], 1)
+        self.assertEqual(row["next_probe_at"], 1030.0)
+        self.assertEqual(row["probe_due_in_s"], 30)
+
+    def test_a_lane_that_answered_clears_the_streak_of_the_host(self):
+        """A lane of the host that died while another lane answered must not extend the backoff.
+
+        The host is judged by its ssh results, not by its lanes: one answer is enough
+        to clear the streak and to open the dispatch window again (Refs #1689).
+        """
+        d, clock = self.dispatcher(1000)
+        lanes = {"A1": {"host": "h1", "backend": "pi"}, "A2": {"host": "h1", "backend": "pi"}}
+        for _ in range(3):
+            d.host_fail("h1", "ssh timeout")
+            clock[0] += 1
+        self.assertEqual(d.backoff["h1"]["tier"], "hard")
+        clock[0] = d.backoff["h1"]["until"]          # the low-frequency probe is due
+        d.local_hosts = set()
+        d.remote_multi = lambda _host, _items: {"A1": {"lane": "idle"},
+                                                "A2": {"error": "Connection closed"}}
+        res = d.probe(lanes, {})
+        self.assertNotIn("h1", d.backoff)             # the streak is cleared
+        self.assertTrue(d.host_dispatchable("h1"))    # the dispatch resumes at once
+        self.assertEqual(res["A2"]["error"], "Connection closed")
+
+    def test_a_host_whose_lanes_all_died_keeps_its_streak(self):
+        d, clock = self.dispatcher(1000)
+        lanes = {"A1": {"host": "h1", "backend": "pi"}, "A2": {"host": "h1", "backend": "pi"}}
+        d.local_hosts = set()
+        d.remote_multi = lambda _host, items: {L: {"error": "Connection closed"} for L, _ in items}
+        d.probe(lanes, {})
+        self.assertEqual(d.backoff["h1"]["n"], 1)
+        self.assertEqual(d.backoff["h1"]["tier"], "soft")
+        self.assertEqual(d.backoff["h1"]["wait"], 30)
+
+
+class BoxJitterReplay(Base):
+    """Replay of the box's ssh jitter of 2026-11-02 through the real dispatch path (Refs #1689).
+
+    The timeline is the one the issue reports: the box dispatched at 20:09 and at 20:15,
+    then its ssh flapped with "Connection closed" until the streak climbed into the hard
+    tier -- the old ladder reached 58 at 21:27 -- while the box kept answering now and
+    then.  The tick is 30 s and the runs of the box finish right away, so every tick in
+    which the host is dispatchable is a dispatch window.
+    """
+
+    TICK_S = 30
+    BASE = 1_762_000_000.0        # 20:00 of the day of the jitter
+    #: (tick, answer) change points: "ok" the ssh session worked, "closed" it died with
+    #: "Connection closed", "mixed" one lane of the host answered and the other one died.
+    TIMELINE = ((0, "ok"),        # 20:00:00 the box is alive
+                (19, "closed"),   # 20:09:30 the ssh starts to flap
+                (30, "mixed"),    # 20:15:00 one lane answers, the other one dies
+                (31, "closed"),   # 20:15:30 the ssh flaps again
+                (158, "ok"),      # 21:19:00 the low-frequency probe finds the box alive
+                (159, "closed"),  # 21:19:30 the ssh flaps again
+                (186, "ok"))      # 21:33:00 the next low-frequency probe finds it back
+    LAST_TICK = 192
+    HARD_TIER_START = 34          # 20:17:00, the streak of the second flap reaches the hard tier
+    HARD_TIER_END = 158           # 21:19:00, the probe that finds the box alive again
+    HARD_TIER_TICK = 100          # 21:00:00, a tick in the middle of the hard tier
+
+    def tick_of(self, moment):
+        """The tick index of a moment of the replay."""
+        return int((moment - self.BASE) // self.TICK_S)
+
+    def answer(self, tick):
+        """The answer of the box at a tick of the replay."""
+        state = "ok"
+        for index, value in self.TIMELINE:
+            if index > tick:
+                break
+            state = value
+        return state
+
+    def test_the_jitter_of_the_day_keeps_the_probes_and_the_dispatch_windows(self):
+        """The real tick of the dispatcher replays the jitter of the day (Refs #1689).
+
+        The hard tier keeps a low-frequency probe, and the first answer clears the
+        streak, so the dispatch window opens again in the very same tick instead of
+        being lost.
+        """
+        d = self.make([("issue list", (0, "[]", ""))])
+        clock = [self.BASE]
+        d.clock = lambda: clock[0]
+        d.local_hosts = set()                     # the box is reached over ssh, not locally
+        d.cfg["review"]["enabled"] = False
+        d.main_sha = lambda: SHA
+        d.label_state = lambda _n: "fresh"
+        d.queue = lambda: [{"n": n, "title": f"card {n}", "body": "", "backend": None,
+                            "strict": False, "prio": 1} for n in range(1, 60)]
+        lanes = {"A1": {"host": "box", "backend": "pi"}, "A2": {"host": "box", "backend": "pi"}}
+        probes, dispatched, streaks = [], [], []
+
+        def remote_multi(_host, items):
+            probes.append(self.tick_of(clock[0]))
+            answer = self.answer(self.tick_of(clock[0]))
+            if answer == "ok":
+                return {L: {"lane": "idle"} for L, _ in items}
+            if answer == "mixed":                 # one lane of the host answered, the other died
+                return {L: ({"lane": "idle"} if index == 0 else {"error": "Connection closed"})
+                        for index, (L, _) in enumerate(items)}
+            return {L: {"error": "Connection closed"} for L, _ in items}
+
+        def dispatch(lane, _lc, item, _base):
+            dispatched.append((self.tick_of(clock[0]), lane, item["n"]))
+            return f"run-{item['n']}", "verify"
+
+        d.remote_multi = remote_multi
+        d.dispatch = dispatch
+        state, status = {}, {}
+        for tick in range(self.LAST_TICK):
+            clock[0] = self.BASE + tick * self.TICK_S
+            d.tick(lanes, state)
+            for lane in [L for L in state if not L.startswith("_")]:
+                state.pop(lane)                   # the run of the box finishes right away
+            streaks.append((d.backoff.get("box") or {}).get("n", 0))
+            if tick == self.HARD_TIER_TICK:
+                with open(d.path("lanes-status.json"), encoding="utf-8") as stream:
+                    status = json.load(stream)
+        ticks = [tick for tick, _lane, _n in dispatched]
+        # the dispatch windows of the alive box are not lost: 20:09 and 20:15 dispatched
+        self.assertIn(18, ticks)                  # 20:09:00
+        self.assertIn(30, ticks)                  # 20:15:00 (one lane answered, the other died)
+        # the hard tier keeps a low-frequency probe: the ticks in between are skipped
+        hard_probes = [p for p in probes if self.HARD_TIER_START <= p <= self.HARD_TIER_END]
+        self.assertTrue(hard_probes, "the hard tier must keep a probe")
+        self.assertLess(len(hard_probes), 12)
+        # the gap between two probes is at least the first wait of the hard tier (240s)
+        self.assertGreaterEqual(min(b - a for a, b in zip(hard_probes, hard_probes[1:])), 8)
+        # the probe that finds the box alive again opens the dispatch window in the same tick
+        self.assertIn(158, ticks)                 # 21:19:00, the low-frequency probe of the hard tier
+        self.assertIn(186, ticks)                 # 21:33:00, the box is back (still down at 21:27)
+        # the streak never climbed into the dozens: one answer clears it
+        self.assertLessEqual(max(streaks), 10)
+        # at 21:27 the box was still flapping (the streak of the old ladder reached 58 there)
+        self.assertNotIn(174, ticks)
+        self.assertGreaterEqual(streaks[174], 3)
+        # the backoff state is visible in the lane status
+        row = status["_host_backoff"]["box"]
+        self.assertEqual(row["tier"], "hard")
+        self.assertGreaterEqual(row["streak"], 3)
+        self.assertGreater(row["next_probe_at"], self.BASE + self.HARD_TIER_TICK * self.TICK_S)
+        self.assertGreater(row["probe_due_in_s"], 0)
+        self.assertFalse(row["dispatchable"])
+
+
 class QuotaGuards(Base):
     """The quota guards classify with the pure module lib/dispatch/quota.py (Refs #1499)."""
 

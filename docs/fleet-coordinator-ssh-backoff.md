@@ -57,6 +57,19 @@
 4. **派发节拍平缓**：
    - box 上的 `lane-autodispatch` 循环按 60s 一 tick 运行（`brain/autopilot.md:10-11`），保证派发层不会对正在退避的主机产生密集连接冲击。
 
+### 主机 SSH 退避分层（Refs #1689）
+
+派发侧（`lane-autodispatch` shim 与 `openswarm/lib/dispatch/engine.py`）的主机退避按**连续失败次数**分档，策略集中在 `openswarm/lib/dispatch/ssh_backoff.py`：
+
+- **软退避**（连续失败 `< 3` 次）：短间隔重试（30s → 60s，封顶 120s）——主机只是抖动，不该错过派发窗口。
+- **硬退避**（连续失败 `>= 3` 次）：长间隔（240s → 480s，封顶 600s）——主机确实掉线时不做无谓探测。
+- **任一次成功即清零 streak**：主机以“历史峰值”论终身是不对的，恢复迹象立刻回到软退避档。
+- **主机按 SSH 结果判定，不按 lane 判定**：同一主机只要有一条 lane 的 SSH 探测成功就清零 streak；
+  另一条 lane 失败（“Connection closed”）不再延长退避、也不阻断派发。
+- 硬退避期间仍保留**低频探测**（每个退避窗口一次，跳过中间的 tick）；探测成功即恢复派发，退避档位、连续失败次数与下次探测时间写入 `lanes-status.json` 的 `_host_backoff`（`openswarm fleet health --json` 的 `ssh_backoff` 字段同样可见档位）。
+
+`PAUSE-HOST-*` 机制不变：本卡只改退避分层与恢复逻辑。
+
 ---
 
 ## 3. 建议观察命令
