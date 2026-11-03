@@ -15,6 +15,7 @@ DEFAULT_THRESHOLDS = {
     "mem_pause_mb": 512,
     "mem_resume_mb": 640,
     "ssh_fail_pause_streak": 3,
+    "zombie_pause_count": 200,
 }
 
 # The measured pressures: field, pause watermark, resume watermark, label, and
@@ -23,6 +24,7 @@ PRESSURES = (
     ("disk_pct", "disk_pause_pct", "disk_resume_pct", "% disk", True),
     ("inode_pct", "inode_pause_pct", "inode_resume_pct", "% inodes", True),
     ("mem_avail_mb", "mem_pause_mb", "mem_resume_mb", " MB memory available", False),
+    ("zombie_count", "zombie_pause_count", "zombie_pause_count", " zombies", True),
 )
 
 # The health of one host, from the operator's point of view.
@@ -202,17 +204,46 @@ def _memory(output):
     raise ValueError("free output missing Mem available column")
 
 
+ZOMBIE_PROBE_COMMAND = "ps -eo stat="
+
+
+def _zombie_count(output):
+    """The number of zombie (Z) processes in a ``ps -eo stat=`` listing."""
+    return sum(1 for line in (output or "").splitlines() if line.strip().startswith("Z"))
+
+
+def probe_zombies(host, runner):
+    """The number of zombie (Z) processes on a host, or None when it cannot be measured.
+
+    The zombie count is an optional measurement, so it never fails the host probe:
+    a host without ``ps`` (the runner raises OSError), a runner that does not know
+    the command (it raises KeyError) and unparsable output (ValueError) all mean
+    "this host has no zombie measurement".
+    """
+    try:
+        return _zombie_count(runner(host, ZOMBIE_PROBE_COMMAND))
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def run_probe(host, runner):
     """Run df/free commands through ``runner(host, command)`` and parse output.
 
-    The runner returns stdout text and may raise on SSH failure.
+    The runner returns stdout text and may raise on SSH failure.  The zombie count is
+    measured as well: a host that keeps unreaped children cannot start a new ``git``
+    (it fails with "unable to create threaded lstat"), so the leak is a host pressure
+    like a full disk.  A host without ``ps`` simply has no zombie measurement.
     """
     disk = runner(host, "df -P /")
     inode = runner(host, "df -Pi /")
     memory = runner(host, "free -m")
-    return {"host": host, "disk_pct": _df_percent(disk, "Use%"),
-            "inode_pct": _df_percent(inode, "IUse%"),
-            "mem_avail_mb": _memory(memory), "ssh_fail_streak": 0}
+    probe = {"host": host, "disk_pct": _df_percent(disk, "Use%"),
+             "inode_pct": _df_percent(inode, "IUse%"),
+             "mem_avail_mb": _memory(memory), "ssh_fail_streak": 0}
+    zombies = probe_zombies(host, runner)
+    if zombies is not None:
+        probe["zombie_count"] = zombies
+    return probe
 
 
 def next_ssh_streak(previous, reachable):
