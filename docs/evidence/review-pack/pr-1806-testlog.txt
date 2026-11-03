@@ -1,0 +1,195 @@
+# The raw test log of the PR #1806 head (local reproduction, Refs #1788)
+#
+# command : cd openswarm && python3 -m unittest discover -s tests
+# tree    : the tree of this PR (main 850ad326e + the PR, without the 6 junk ELF files
+#           the previous head carried) exported with `git archive` into a scratch dir
+# python  : 3.12.4 (this sandbox has no 3.9/3.11/3.13; the CI matrix runs those three)
+# kept    : the failure blocks and the summary, verbatim (the lines before them were
+#           the progress dots and ResourceWarnings of the sandbox)
+# result  : 8 of the 9 problems are limits of this sandbox and fail on the base too
+#           (openssl `req` and bwrap namespaces, see pr-1806-base-env-testlog.txt);
+#           the ninth (test_pi_broker ... test_exact_4kb_json_error_is_not_truncated,
+#           ConnectionRefusedError) is a flake of the sandbox: it passes when the module
+#           is run alone on this tree and on the base.
+#
+======================================================================
+ERROR: test_batchmode_probe_failure_is_excluded_from_hosts_ok (test_fleet_refresh.FleetRefreshTests.test_batchmode_probe_failure_is_excluded_from_hosts_ok)
+A non-zero BatchMode probe exit keeps the host out of hosts_ok (Refs #954).
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', '/tmp/fleet-refresh-zn6id_i8/key.pem', '-out', '/tmp/fleet-refresh-zn6id_i8/renewed.cert', '-days', '10', '-subj', '/CN=fake']' returned non-zero exit status 1.
+
+======================================================================
+ERROR: test_batchmode_probe_success_still_counts (test_fleet_refresh.FleetRefreshTests.test_batchmode_probe_success_still_counts)
+A zero BatchMode probe exit keeps the host in hosts_ok (Refs #954).
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', '/tmp/fleet-refresh-1dqc1zxh/key.pem', '-out', '/tmp/fleet-refresh-1dqc1zxh/renewed.cert', '-days', '10', '-subj', '/CN=fake']' returned non-zero exit status 1.
+
+======================================================================
+ERROR: test_nonempty_fleet_success_and_statuses (test_fleet_refresh.FleetRefreshTests.test_nonempty_fleet_success_and_statuses)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', '/tmp/fleet-refresh-rjkkx8gh/key.pem', '-out', '/tmp/fleet-refresh-rjkkx8gh/renewed.cert', '-days', '10', '-subj', '/CN=fake']' returned non-zero exit status 1.
+
+======================================================================
+ERROR: test_partial_failure_preserves_old_certificates (test_fleet_refresh.FleetRefreshTests.test_partial_failure_preserves_old_certificates)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', '/tmp/fleet-refresh-ts9q0szs/key.pem', '-out', '/tmp/fleet-refresh-ts9q0szs/renewed.cert', '-days', '10', '-subj', '/CN=fake']' returned non-zero exit status 1.
+
+======================================================================
+ERROR: test_restart_is_idempotent (test_fleet_refresh.FleetRefreshTests.test_restart_is_idempotent)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_fleet_refresh.py", line 23, in setUp
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', '/tmp/fleet-refresh-obdlhnf7/key.pem', '-out', '/tmp/fleet-refresh-obdlhnf7/renewed.cert', '-days', '10', '-subj', '/CN=fake']' returned non-zero exit status 1.
+
+======================================================================
+ERROR: test_exact_4kb_json_error_is_not_truncated (test_pi_broker.PiBrokerUpstreamErrorTests.test_exact_4kb_json_error_is_not_truncated)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_pi_broker.py", line 1100, in test_exact_4kb_json_error_is_not_truncated
+    status, _headers, returned = self.request(path)
+                                 ^^^^^^^^^^^^^^^^^^
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_pi_broker.py", line 1033, in request
+    client.request('POST', '/v1/messages', json.dumps({'model': 'allowed-model', 'messages': []}),
+  File "/usr/lib/python3.12/http/client.py", line 1365, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "/usr/lib/python3.12/http/client.py", line 1411, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.12/http/client.py", line 1360, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.12/http/client.py", line 1120, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.12/http/client.py", line 1064, in send
+    self.connect()
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_pi_broker.py", line 26, in connect
+    self.sock.connect(self.path)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+======================================================================
+FAIL: test_host_secrets_and_network_are_not_visible (test_pi_isolation.PiIsolationTests.test_host_secrets_and_network_are_not_visible)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_pi_isolation.py", line 55, in test_host_secrets_and_network_are_not_visible
+    self.assertEqual(result.returncode, 0, result.stderr)
+AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+
+
+======================================================================
+FAIL: test_linked_git_worktree_and_node_remain_available (test_pi_isolation.PiIsolationTests.test_linked_git_worktree_and_node_remain_available)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_pi_isolation.py", line 97, in test_linked_git_worktree_and_node_remain_available
+    self.assertEqual(result.returncode, 0, result.stderr)
+AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+
+
+======================================================================
+FAIL: test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty (test_pi_isolation.PiIsolationTests.test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.openswarm-tmp/head/openswarm/tests/test_pi_isolation.py", line 129, in test_sandbox_tmp_is_a_disk_directory_that_rpc_starts_empty
+    self.assertEqual(result.returncode, 0, result.stderr)
+AssertionError: 1 != 0 : bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+
+
+----------------------------------------------------------------------
+Ran 1785 tests in 316.259s
+
+FAILED (failures=3, errors=6)
+
+======================================================================
+# the two test modules of this PR, on the same tree
+#
+# command : cd openswarm && python3 -m unittest tests.test_review_evidence tests.test_dispatch_evidence_pack -v
+#
+test_a_section_with_an_empty_list_is_written_but_empty (tests.test_review_evidence.BuildEvidenceTests.test_a_section_with_an_empty_list_is_written_but_empty) ... ok
+test_a_section_without_data_is_left_out (tests.test_review_evidence.BuildEvidenceTests.test_a_section_without_data_is_left_out) ... ok
+test_the_diff_statistics_carry_the_effective_line_rule (tests.test_review_evidence.BuildEvidenceTests.test_the_diff_statistics_carry_the_effective_line_rule) ... ok
+test_the_fields_are_written_with_their_markers (tests.test_review_evidence.BuildEvidenceTests.test_the_fields_are_written_with_their_markers) ... ok
+test_the_optional_opinion_section_may_be_left_out (tests.test_review_evidence.BuildEvidenceTests.test_the_optional_opinion_section_may_be_left_out) ... ok
+test_the_pack_carries_the_five_sections (tests.test_review_evidence.BuildEvidenceTests.test_the_pack_carries_the_five_sections) ... ok
+test_the_sections_come_in_the_fixed_order (tests.test_review_evidence.BuildEvidenceTests.test_the_sections_come_in_the_fixed_order) ... ok
+test_a_binary_file_counts_as_no_line (tests.test_review_evidence.DiffstatTests.test_a_binary_file_counts_as_no_line) ... ok
+test_the_code_and_the_test_files_are_effective (tests.test_review_evidence.DiffstatTests.test_the_code_and_the_test_files_are_effective) ... ok
+test_the_documentation_does_not_count (tests.test_review_evidence.DiffstatTests.test_the_documentation_does_not_count) ... ok
+test_a_duplicated_section_is_refused (tests.test_review_evidence.FailureModeTests.test_a_duplicated_section_is_refused) ... ok
+test_a_judgement_line_in_the_pack_is_refused (tests.test_review_evidence.FailureModeTests.test_a_judgement_line_in_the_pack_is_refused) ... ok
+test_a_test_log_without_a_link_is_refused (tests.test_review_evidence.FailureModeTests.test_a_test_log_without_a_link_is_refused) ... ok
+test_a_test_log_without_the_raw_lines_is_refused (tests.test_review_evidence.FailureModeTests.test_a_test_log_without_the_raw_lines_is_refused) ... ok
+test_a_verdict_line_in_the_pack_is_refused (tests.test_review_evidence.FailureModeTests.test_a_verdict_line_in_the_pack_is_refused) ... ok
+test_an_acceptance_check_with_an_unknown_result_is_refused (tests.test_review_evidence.FailureModeTests.test_an_acceptance_check_with_an_unknown_result_is_refused) ... ok
+test_an_acceptance_check_without_the_raw_evidence_is_refused (tests.test_review_evidence.FailureModeTests.test_an_acceptance_check_without_the_raw_evidence_is_refused) ... ok
+test_an_unmarked_opinion_section_is_refused (tests.test_review_evidence.FailureModeTests.test_an_unmarked_opinion_section_is_refused) ... ok
+test_diff_statistics_without_the_effective_lines_are_refused (tests.test_review_evidence.FailureModeTests.test_diff_statistics_without_the_effective_lines_are_refused) ... ok
+test_a_pack_without_the_acceptance_checks_is_incomplete (tests.test_review_evidence.MissingSectionTests.test_a_pack_without_the_acceptance_checks_is_incomplete) ... ok
+test_a_pack_without_the_ci_section_is_incomplete (tests.test_review_evidence.MissingSectionTests.test_a_pack_without_the_ci_section_is_incomplete) ... ok
+test_a_pack_without_the_diff_statistics_is_incomplete (tests.test_review_evidence.MissingSectionTests.test_a_pack_without_the_diff_statistics_is_incomplete) ... ok
+test_a_pack_without_the_test_log_section_is_incomplete (tests.test_review_evidence.MissingSectionTests.test_a_pack_without_the_test_log_section_is_incomplete) ... ok
+test_an_empty_pack_is_not_a_pack (tests.test_review_evidence.MissingSectionTests.test_an_empty_pack_is_not_a_pack) ... ok
+test_free_text_is_not_a_pack (tests.test_review_evidence.MissingSectionTests.test_free_text_is_not_a_pack) ... ok
+test_a_complete_pack_is_complete (tests.test_review_evidence.ParseEvidenceTests.test_a_complete_pack_is_complete) ... ok
+test_a_github_conclusion_is_folded_into_the_status (tests.test_review_evidence.ParseEvidenceTests.test_a_github_conclusion_is_folded_into_the_status) ... ok
+test_the_acceptance_checks_carry_the_result_and_the_raw_evidence (tests.test_review_evidence.ParseEvidenceTests.test_the_acceptance_checks_carry_the_result_and_the_raw_evidence) ... ok
+test_the_ci_items_are_parsed_one_by_one (tests.test_review_evidence.ParseEvidenceTests.test_the_ci_items_are_parsed_one_by_one) ... ok
+test_the_diff_statistics_are_numbers (tests.test_review_evidence.ParseEvidenceTests.test_the_diff_statistics_are_numbers) ... ok
+test_the_opinion_is_read_and_marked (tests.test_review_evidence.ParseEvidenceTests.test_the_opinion_is_read_and_marked) ... ok
+test_the_raw_ci_detail_keeps_a_pipe_inside_it (tests.test_review_evidence.ParseEvidenceTests.test_the_raw_ci_detail_keeps_a_pipe_inside_it) ... ok
+test_the_raw_evidence_keeps_a_pipe_inside_it (tests.test_review_evidence.ParseEvidenceTests.test_the_raw_evidence_keeps_a_pipe_inside_it) ... ok
+test_the_raw_test_log_link_keeps_a_pipe_inside_it (tests.test_review_evidence.ParseEvidenceTests.test_the_raw_test_log_link_keeps_a_pipe_inside_it) ... ok
+test_the_test_logs_keep_the_summary_the_link_and_the_raw_lines (tests.test_review_evidence.ParseEvidenceTests.test_the_test_logs_keep_the_summary_the_link_and_the_raw_lines) ... ok
+test_the_three_results_of_an_acceptance_check (tests.test_review_evidence.ParseEvidenceTests.test_the_three_results_of_an_acceptance_check) ... ok
+test_the_spec_carries_the_pr_number (tests.test_review_evidence.SpecTests.test_the_spec_carries_the_pr_number) ... ok
+test_the_spec_names_every_section (tests.test_review_evidence.SpecTests.test_the_spec_names_every_section) ... ok
+test_the_spec_names_the_markers_and_the_rules (tests.test_review_evidence.SpecTests.test_the_spec_names_the_markers_and_the_rules) ... ok
+test_a_deleted_file_counts_under_its_own_name (tests.test_dispatch_evidence_pack.DiffstatOfTests.test_a_deleted_file_counts_under_its_own_name) ... ok
+test_a_removed_line_that_looks_like_a_header_is_a_removed_line (tests.test_dispatch_evidence_pack.DiffstatOfTests.test_a_removed_line_that_looks_like_a_header_is_a_removed_line) ... ok
+test_a_complete_pack_is_recorded (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_a_complete_pack_is_recorded) ... ok
+test_a_missing_pack_is_recorded_as_incomplete (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_a_missing_pack_is_recorded_as_incomplete) ... ok
+test_a_pack_without_a_section_is_recorded_as_incomplete (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_a_pack_without_a_section_is_recorded_as_incomplete) ... ok
+test_a_verdict_in_the_pack_is_refused_and_recorded (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_a_verdict_in_the_pack_is_refused_and_recorded) ... ok
+test_an_incomplete_pack_does_not_change_the_judgement (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_an_incomplete_pack_does_not_change_the_judgement) ... ok
+test_the_comment_carries_the_note_when_the_pack_is_incomplete (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_the_comment_carries_the_note_when_the_pack_is_incomplete) ... ok
+test_the_comment_carries_the_raw_pack_when_it_is_complete (tests.test_dispatch_evidence_pack.FinishReviewEvidenceTests.test_the_comment_carries_the_raw_pack_when_it_is_complete) ... ok
+test_an_older_local_ref_is_not_used_as_the_head (tests.test_dispatch_evidence_pack.HeadBoundDiffTests.test_an_older_local_ref_is_not_used_as_the_head) ... ok
+test_no_review_is_dispatched_for_a_head_without_a_local_commit (tests.test_dispatch_evidence_pack.HeadBoundDiffTests.test_no_review_is_dispatched_for_a_head_without_a_local_commit) ... ok
+test_the_block_is_written_to_the_log (tests.test_dispatch_evidence_pack.HeadBoundDiffTests.test_the_block_is_written_to_the_log) ... ok
+test_the_local_ref_of_another_commit_is_never_returned (tests.test_dispatch_evidence_pack.HeadBoundDiffTests.test_the_local_ref_of_another_commit_is_never_returned) ... ok
+test_the_local_ref_of_the_head_is_returned (tests.test_dispatch_evidence_pack.HeadBoundDiffTests.test_the_local_ref_of_the_head_is_returned) ... ok
+test_a_local_head_that_is_not_the_pr_head_is_flagged (tests.test_dispatch_evidence_pack.OfflineDiffTests.test_a_local_head_that_is_not_the_pr_head_is_flagged) ... ok
+test_the_diff_comes_from_the_local_objects_when_github_is_down (tests.test_dispatch_evidence_pack.OfflineDiffTests.test_the_diff_comes_from_the_local_objects_when_github_is_down) ... ok
+test_the_local_diff_is_not_used_when_github_answers (tests.test_dispatch_evidence_pack.OfflineDiffTests.test_the_local_diff_is_not_used_when_github_answers) ... ok
+test_without_a_local_head_there_is_no_diff (tests.test_dispatch_evidence_pack.OfflineDiffTests.test_without_a_local_head_there_is_no_diff) ... ok
+test_the_task_hands_the_raw_ci_conclusions_over (tests.test_dispatch_evidence_pack.ReviewTaskTests.test_the_task_hands_the_raw_ci_conclusions_over) ... ok
+test_the_task_hands_the_raw_diff_numbers_over (tests.test_dispatch_evidence_pack.ReviewTaskTests.test_the_task_hands_the_raw_diff_numbers_over) ... ok
+test_the_task_names_the_evidence_file_and_the_five_sections (tests.test_dispatch_evidence_pack.ReviewTaskTests.test_the_task_names_the_evidence_file_and_the_five_sections) ... ok
+test_a_complete_pack_is_read_and_persisted_by_the_tick (tests.test_dispatch_evidence_pack.ReviewTerminalIntegrationTests.test_a_complete_pack_is_read_and_persisted_by_the_tick) ... ok
+test_a_missing_pack_is_persisted_as_incomplete_by_the_tick (tests.test_dispatch_evidence_pack.ReviewTerminalIntegrationTests.test_a_missing_pack_is_persisted_as_incomplete_by_the_tick) ... ok
+test_a_pack_without_a_section_is_persisted_as_incomplete_by_the_tick (tests.test_dispatch_evidence_pack.ReviewTerminalIntegrationTests.test_a_pack_without_a_section_is_persisted_as_incomplete_by_the_tick) ... ok
+test_the_incomplete_pack_is_written_to_the_log_of_the_tick (tests.test_dispatch_evidence_pack.ReviewTerminalIntegrationTests.test_the_incomplete_pack_is_written_to_the_log_of_the_tick) ... ok
+
+----------------------------------------------------------------------
+Ran 64 tests in 0.047s
+
+OK
