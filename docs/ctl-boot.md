@@ -15,6 +15,7 @@ That script starts (if not already running):
 | lane-merge | `lane-merge` → `merge-loop.sh` | merge Linux-green `fleet/*` PRs | `~/phanes-ctl/autodispatch/merge-heartbeat` |
 | bus-worker-loop (`bus-worker`) | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
 | health-loop | `health-loop` → `health-check.py` | disk/mem/ssh/quota probes; auto PAUSE-* | `~/phanes-ctl/autodispatch/health.heartbeat`, `health.json`, `health.alert` |
+| disk-watermark-loop | `disk-watermark-guard.py --loop` | govpn2 disk high-watermark gate and brain log alert | `~/phanes-ctl/autodispatch/PAUSE-HOST-govpn2`, `~/phanes-ctl/brain.log` |
 
 ## Key loops: startup commands & heartbeats
 
@@ -498,6 +499,25 @@ python3 tools/check-soak-nine.py
 The SSH cooldown set/hold contract is checked offline with
 `python3 tools/check-health-pause.py`; it uses fake probe output and never
 starts the resident health loop or connects over SSH.
+
+### govpn2 disk watermark guard (Refs #1666)
+
+Deploy from a checkout on the control-plane host with
+`bash tools/install-disk-watermark-guard.sh`. This installs both the guard and
+its required `disk-usage-probe.py` dependency into `~/phanes-ctl/bin`, updates
+the actual `~/phanes-ctl/bin/start-control-plane` (not only the repository
+example), runs that entrypoint, and checks that the resident guard process
+started. The installer does not yet replace an already running guard or deploy the updated
+dispatcher gate; do not rely on this procedure for an existing control plane.
+The guard checks govpn2 `/` every five
+minutes, appends block/warn rows to `~/phanes-ctl/brain.log`, and gates govpn2
+using `autodispatch/PAUSE-HOST-govpn2`. It blocks at 93%, remains held until
+usage is at or below 88%, and does not replace a manual or other guard's pause.
+To reproduce the largest-directory probe, run
+`python3 tools/disk-usage-probe.py / --top 10` on govpn2; sizes are allocated
+disk blocks, not apparent file lengths.
+
+Offline regression: `python3 tools/check-disk-watermark.py`.
 
 ### Host cooldown vs `hosts_ok` (Refs #948)
 
