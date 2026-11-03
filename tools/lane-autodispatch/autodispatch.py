@@ -413,6 +413,35 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
+def card_quality(body):
+    """Check dispatch prerequisites against the main snapshot."""
+    for line in body.splitlines():
+        if re.search(r'(?<![A-Za-z0-9_])(?:govpn|gores|gocc|gorelay)(?![A-Za-z0-9_])', line, re.I) and not re.search(r'本机|localhost', line, re.I):
+            return "跨主机引用"
+        if re.search(r'(?<![A-Za-z0-9_.:/-])(?:/(?!/)[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*|~/[^\s`]*|\.\./[^\s`]*)', line):
+            return "仓外路径"
+    # A command must invoke a test/check tool or a script, not merely start an interpreter or inspect git.
+    command = re.compile(r'(?:^|[;&]\s*)(?:\./[\w./-]+|(?:bash|sh)\s+[\w./-]+|(?:python\d*\s+-m\s+)?(?:pytest|unittest|ruff|mypy|tox)\b|(?:npm|pnpm|yarn|cargo|go|make)\s+(?:run\s+)?(?:test|check|lint|build)\b|python\d*\s+[^\s]+(?:test|check|lint)[^\s]*)(?:\s|$)', re.I)
+    commands = any(command.search(line.strip().lstrip('$').strip()) for line in body.splitlines())
+    if not commands:
+        if re.search(r'(?:验收|acceptance)[^\n]*(?:或|至少|酌情)', body, re.I):
+            return "验收含糊且缺少可执行命令"
+        return "缺少可执行验证命令"
+    for branch in re.findall(r'(?:分支|branch)\s*[:：]?\s*[`\'"]?([A-Za-z0-9_./-]+)', body, re.I):
+        rc, _, _ = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", branch, BASE_BRANCH])
+        if rc: return f"分支不存在于 main: {branch}"
+    for line in body.splitlines():
+        if command.search(line.strip().lstrip('$').strip()) or '://' in line: continue
+        for match in re.finditer(r'(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|(?<![A-Za-z0-9_./-])[A-Za-z0-9_-]+\.[A-Za-z0-9]+', line):
+            path = match.group()
+            prefix = line[:match.start()]
+            # Determine the verb attached to this reference, not to the whole line.
+            verbs = list(re.finditer(r'新建|创建|新增|生成|读取|修改|查看|引用|编辑|分支|branch', prefix, re.I))
+            if verbs and verbs[-1].group().lower() in ('新建', '创建', '新增', '生成', '分支', 'branch'): continue
+            rc, _, _ = sh(["git", "-C", LOCAL, "cat-file", "-e", f"{BASE_BRANCH}:{path}"])
+            if rc: return f"main 文件不存在: {path}"
+    return None
+
 def queue():
     rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body"])
     if rc: raise RuntimeError(err)
@@ -423,6 +452,11 @@ def queue():
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
         be = next((l.split(":", 1)[1] for l in labels if l.startswith("backend:")), None)
         body = i["body"] or ""
+        defect = card_quality(body)
+        if defect:
+            rc, _, err = gh(["issue", "edit", str(i["number"]), "--remove-label", "lane-ready"])
+            log(f"卡 #{i['number']} 退回: {defect}" + (f"; 标签移除失败: {err.strip()}" if rc else ""))
+            continue
         verify = is_verify_issue(labels, body)
         # a `verify-intent` label without the `## Verify Intent` heading is an invalid card: it stays
         # undispatched. A heading without the label is an ordinary work card (only the label asks for
