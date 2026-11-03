@@ -18,7 +18,27 @@ tick that fetched the object in the meantime) must never mask it.
 python3 tools/lane-autodispatch/test_can_take.py
 python3 tools/check-ad-base-fetch-on-miss.py
 python3 -m unittest tools.tests.test_lane_pr_validation
+python3 -m unittest discover -s openswarm/tests -p 'test_lane_pr_guard.py'
 ```
+
+## 交付守卫：已出 PR 的卡不得重派（Refs #1772）
+
+PR 交付换标（`lane-ready`/`in-progress` → `lane-pr`）与一切重派路径都过同一道守卫：
+
+- **交付换标以 gh 实读核验终态**：PR 开出来后，issue 的交付标签必须读回为 `lane-pr` 单独存在
+  （优先级、`backend:` 等其它标签不算交付标签，不影响终态）。换标失败重试 3 次，仍失败则写
+  brain 告警，不静默丢弃。PR 根本没开出来时（`gh pr create` 失败）**不**标 `lane-pr`，按
+  `lane-failed` 处理（Refs #1701）。
+- **开放 PR 完整分页查询**：守卫用 GraphQL 的 `pageInfo`/`endCursor` 走完所有开放 PR，没有
+  `--limit` 上限，PR 不在第一页也不会漏判；只查 `states:OPEN`，已合并的 PR 不算开放 PR。
+  开放 PR 与 issue 的关联取自 GitHub 的关闭引用、PR 正文里的关闭关键字和 fleet 分支名。
+- **重派路径一律先查开放 PR**：失败 run 重排（`reconcile`）、PR 校验退回（`block_pr_validation`）、
+  配额失败重排（`tools/requeue-quota-failed.py`）在把卡加回 `lane-ready` 之前都先查开放 PR；
+  已有开放 PR 的卡改为修回交付终态 `lane-pr`。查询失败时不重排。
+- **派发决策层再挡一道**：即使卡上带着 `lane-ready`，只要 gh 实读有开放 PR 就不派发，日志写明
+  跳过原因（`skip #N: open PR #X already delivers it; not dispatched`），并把它的交付标签修回
+  终态，严格池深不再虚增。
+- **并发**：最终写入前与派发前后都重新用 gh 实读核验，旧决策不会覆盖已核验的交付终态。
 
 ## PR 提交前校验（Refs #1704）
 

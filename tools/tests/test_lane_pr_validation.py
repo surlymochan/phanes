@@ -90,6 +90,13 @@ class FakeLaneHost:
             self.comments.append(list(args)); return 0, "", ""
         return 0, "", ""
 
+    def gh_api(self, args, payload=None, timeout=120):
+        # the open PR query of the delivery guard: the fake has no open pull request
+        if args[:3] == ["api", "graphql", "--input"]:
+            return 0, json.dumps({"data": {"repository": {"pullRequests": {
+                "nodes": [], "pageInfo": {"hasNextPage": False}}}}}), ""
+        return 0, "", ""
+
     def log(self, msg, brain=True):
         self.logs.append(msg)
 
@@ -127,14 +134,15 @@ class LanePrSubmitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log)):
+        for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh),
+                            ("gh_api", MODULE.gh_api), ("log", MODULE.log)):
             self.addCleanup(setattr, MODULE, name, getattr(MODULE, name))
             setattr(MODULE, name, value)
         self.state = {}
 
     def finish(self, info=None, **kwargs):
         fake = FakeLaneHost(**kwargs)
-        MODULE.sh, MODULE.gh, MODULE.log = fake.sh, fake.gh, fake.log
+        MODULE.sh, MODULE.gh, MODULE.gh_api, MODULE.log = fake.sh, fake.gh, fake.gh_api, fake.log
         st = {"issue": ISSUE, "run": RUN, "base": "0123456789abcdef0123", "host": CFG["host"]}
         result = MODULE.finish("codex", CFG, st, info or fake.info(), self.state)
         return fake, result
@@ -252,7 +260,8 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh), ("log", MODULE.log)):
+        for name, value in (("D", self.tmp.name), ("sh", MODULE.sh), ("gh", MODULE.gh),
+                            ("gh_api", MODULE.gh_api), ("log", MODULE.log)):
             self.addCleanup(setattr, MODULE, name, getattr(MODULE, name))
             setattr(MODULE, name, value)
         self.state = {}
