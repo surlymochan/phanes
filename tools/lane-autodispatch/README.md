@@ -8,6 +8,13 @@ box is the deployed runtime the control plane syncs from it (sync steps:
 [`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)); a change here is
 only live on the box after that sync.
 
+**审查派发不在这个镜像里**：带 PR 审查派发（`review_item` / `finish_review` / `reviews.json`）的那份
+AD 在仓内是 [`openswarm/lib/dispatch/engine.py`](../../openswarm/lib/dispatch/engine.py)（box 运行副本
+`~/phanes-ctl/bin/autodispatch.py` 是它加上控制面热修的运行版）；本镜像没有审查派发，
+`tools/check-ad-review-pause-uncounted.py` 的契约对它不成立。#1828（审查任务不嵌 diff、沙箱本地读全量、
+TOOL_FAIL 证据不足不放行）因此改在 engine 上，详见
+[`openswarm/docs/review-evidence-pack.md`](../../openswarm/docs/review-evidence-pack.md)。
+
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
 (`git -C <repo> cat-file -e <base>^{commit}`). A missing base is fetched into the target repo and
 the check is repeated (Refs #1810); a base that is still missing is reported and backed off as

@@ -245,6 +245,54 @@ class PostStatusTests(unittest.TestCase):
         self.assertEqual(runner.calls, [])
 
 
+class ToolFailTests(unittest.TestCase):
+    """A review that could not read the diff is evidence-insufficient (Refs #1828).
+
+    The review sandbox has no network: the diff is read from the local clone. When that
+    fails, the review may only say so — it approves nothing, it rejects nothing, and it
+    must not carry findings about the code.
+    """
+
+    def test_the_wording_of_a_missing_diff_is_detected(self):
+        for summary in ("完整离线差异仍无法在本审查环境读取",
+                        "当前头和完整差异不可读取",
+                        "无法获取 diff",
+                        "无法读取差异",
+                        "无法取得提交",
+                        "分支不在本地",
+                        "diff 读取不到"):
+            self.assertTrue(status.tool_fail("VERDICT: APPROVE\nSUMMARY: %s\n" % summary),
+                            "not detected: %s" % summary)
+
+    def test_a_content_summary_is_not_a_tool_fail(self):
+        for summary in ("缺少测试覆盖，实现不满足验收",
+                        "实现不满足验收",
+                        "the acceptance is not met"):
+            self.assertFalse(status.tool_fail("VERDICT: CHANGES\nSUMMARY: %s\n" % summary),
+                             "wrongly detected: %s" % summary)
+
+    def test_a_review_without_a_summary_is_not_a_tool_fail(self):
+        self.assertFalse(status.tool_fail("VERDICT: APPROVE\n"))
+
+    def test_a_real_blocker_is_not_swallowed(self):
+        text = ("VERDICT: CHANGES\nSUMMARY: 无法获取 diff\nBLOCKERS: 1\n"
+                "## Findings\n- [BLOCKER] tools/lease-audit.py:103: the check never runs\n")
+
+        self.assertTrue(status.content_blocker(text))
+        self.assertFalse(status.tool_fail(text))
+
+    def test_the_count_line_of_a_review_is_no_blocker(self):
+        text = "VERDICT: CHANGES\nSUMMARY: 无法获取 diff\nBLOCKERS: 1\n## Findings\n- [BLOCKER] 无法核对\n"
+
+        self.assertFalse(status.content_blocker(text))
+        self.assertTrue(status.tool_fail(text))
+
+    def test_a_finding_without_a_blocker_marker_is_no_content_blocker(self):
+        text = "VERDICT: CHANGES\nSUMMARY: 无法获取 diff\n## Findings\n- tools/lease-audit.py:103: x\n"
+
+        self.assertFalse(status.content_blocker(text))
+
+
 class HeadChangedTests(unittest.TestCase):
     """A status belongs to the commit that was reviewed."""
 

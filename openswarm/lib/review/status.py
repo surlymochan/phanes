@@ -5,7 +5,7 @@ published as a GitHub *commit status* on the reviewed commit, under the ``lane-r
 context, so that a branch protection rule (or a human) can see it without reading the
 review text.
 
-Three pieces live here, all of them free of side effects except the last one:
+Four pieces live here, all of them free of side effects except the last one:
 
 ``parse_verdict(text)``
     Reads a review conclusion written in markdown and returns the ``(verdict, summary)``
@@ -28,6 +28,13 @@ Three pieces live here, all of them free of side effects except the last one:
     to the commit that was reviewed: any path that rewrites the head (rebase, a CI fix
     commit, a union merge) produces a commit nobody reviewed, so no status is sent for
     it and it has to be reviewed again.
+
+``tool_fail(text, summary)``
+    Answers whether a review is a *TOOL_FAIL*: the reviewer could not read the PR diff.
+    The review sandbox has no network, so the diff is read from the local clone; when
+    that fails the reviewer can only report the missing evidence.  Such a review is
+    evidence-insufficient: it approves nothing, it rejects nothing, and it must not
+    carry findings about the code (Refs #1828).
 
 The module is loaded by path: ``openswarm/lib/review/`` is a namespace package without
 an ``__init__.py``, so it must not be imported as a package.  Standard library only,
@@ -56,6 +63,25 @@ SUMMARY_LINE_RE = re.compile(r"^SUMMARY:[ \t]*(.*)$")
 # A commit sha is 40 hex characters; anything else is not a commit.
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
+# --- Refs #1828: a review that could not read the diff is not a verdict ------------------
+# The wording that reports a failure of the evidence gathering:
+#   * "cannot fetch / read / obtain the diff, the difference or the commit"
+#   * "the diff, the difference, the commit or the head ... cannot be read"
+#   * "is not in the local clone"
+#   * "cannot be read"
+# The words are the ones the review task asks for ("无法获取 diff"), so a reviewer that
+# follows the task is detected without guessing.
+TOOL_FAIL_RE = re.compile(
+    r"(?:无法|不能|不可)[^\n]{0,16}?(?:获取|读取|取得|拿到)[^\n]{0,16}?(?:diff|差异|提交)"
+    r"|(?:diff|差异|提交|头)[^\n]{0,40}?(?:无法|不可|不能)[^\n]{0,40}?读取"
+    r"|不在本地"
+    r"|读取不到", re.I)
+
+# A content-class blocker: a finding that names a place in the code (`file:line`).
+# The count line of a review ("BLOCKERS: 1") names no place, so it is not a finding.
+CONTENT_BLOCKER_RE = re.compile(r"\[BLOCKER\]", re.I)
+FILE_LINE_RE = re.compile(r"(?<![\w:/.-])(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9_]+:\d+")
+
 
 def parse_verdict(text):
     """Return the ``(verdict, summary)`` pair of a review conclusion.
@@ -81,6 +107,40 @@ def parse_verdict(text):
             if match:
                 summary = match.group(1).strip()
     return verdict, summary
+
+
+def content_blocker(text):
+    """Whether the review text carries a content-class blocker.
+
+    A content-class blocker is a finding that names a place in the code: a line that
+    has a ``[BLOCKER]`` marker *and* a ``file:line`` reference. The count line of a review
+    ("BLOCKERS: 1") names no place and is therefore not a finding.
+    """
+    for line in str(text or "").splitlines():
+        if CONTENT_BLOCKER_RE.search(line) and FILE_LINE_RE.search(line):
+            return True
+    return False
+
+
+def tool_fail(text, summary=None):
+    """Whether a review is a TOOL_FAIL: the evidence (the PR diff) could not be read.
+
+    Two conditions, both required:
+
+    * the SUMMARY reports that the diff (or the difference, or the commit) could not be
+      fetched, read or obtained, or that it is not in the local clone;
+    * the review carries no content-class blocker (a BLOCKER finding with a
+      ``file:line``).
+
+    A review that really found something in the code is not swallowed: it is a content
+    verdict, not a failure of the evidence gathering.  A review that could not read the
+    diff may only say so: it never approves and never rejects the code.
+    """
+    if summary is None:
+        summary = parse_verdict(text)[1]
+    if not TOOL_FAIL_RE.search(str(summary or "")):
+        return False
+    return not content_blocker(text)
 
 
 def verdict_state(verdict):
@@ -236,13 +296,17 @@ def post_status(repo, payload, runner=subprocess.run, env=os.environ):
 
 
 __all__ = [
+    "CONTENT_BLOCKER_RE",
     "DEFAULT_CONTEXT",
+    "FILE_LINE_RE",
     "MAX_DESCRIPTION",
     "STATE_PENDING",
+    "TOOL_FAIL_RE",
     "VERDICT_APPROVE",
     "VERDICT_CHANGES",
     "VERDICT_STATES",
     "build_status",
+    "content_blocker",
     "describe",
     "gh_authenticated",
     "has_token",
@@ -250,6 +314,7 @@ __all__ = [
     "parse_verdict",
     "post_status",
     "require_sha",
+    "tool_fail",
     "verdict_state",
     "verdict_word",
 ]
