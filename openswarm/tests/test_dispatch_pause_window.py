@@ -267,6 +267,68 @@ class HarvestPauseTests(unittest.TestCase):
         self.assertEqual(result["timestamp"], finished)
         self.assertEqual(P.classify(result, self.lane, P.load_pauses(self.pause_file), {"box"}), "exec_error")
 
+    def test_remote_status_requires_explicit_runner_and_executor_pid_evidence(self):
+        home = self.root / "probe"
+        run_dir = home / "runs" / "live-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"runner_pid": 99999999}))
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["remote", "M7", "live-run", str(home)]), \
+                contextlib.redirect_stdout(output):
+            exec(E.REMOTE_STATUS, {})
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["runner_alive"])
+        self.assertIsNone(result["executor_alive"])
+
+
+class ReconcileSafetyTests(HarvestPauseTests):
+    def test_unknown_executor_and_busy_remote_lane_are_never_reconciled(self):
+        st = {"issue": 1503, "run": "old-run", "at": "2026-11-02 08:00:00"}
+        state = {"M7": st}
+        remote = {"run": "running", "lane": "busy", "current_run": "old-run", "session": "unknown"}
+        self.assertFalse(self.dispatcher.reconcile("M7", self.lane, st, remote, state))
+        self.assertEqual(self.calls, [])
+
+    def test_live_executor_prevents_requeue_even_when_runner_is_dead(self):
+        st = {"issue": 1503, "run": "old-run", "at": "2026-11-02 08:00:00"}
+        remote = {"run": "running", "lane": "idle", "current_run": None, "session": "alive"}
+        self.assertFalse(self.dispatcher.reconcile("M7", self.lane, st, remote, {}))
+        self.assertEqual(self.calls, [])
+
+    def test_remote_cleanup_restores_lane_only_when_run_and_pids_still_match(self):
+        home = self.root / "remote-home"
+        lane_dir, run_dir = home / "lanes" / "M7", home / "runs" / "old-run"
+        lane_dir.mkdir(parents=True)
+        run_dir.mkdir(parents=True)
+        lane_state = lane_dir / "state.json"
+        lane_state.write_text(json.dumps({"state": "busy", "current_run": "old-run"}))
+        (run_dir / "status.json").write_text(json.dumps({"runner_pid": 987654321, "executor_pid": 987654322}))
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["clear", "M7", "old-run", str(home)]), \
+                mock.patch.object(os, "kill", side_effect=ProcessLookupError), \
+                contextlib.redirect_stdout(output):
+            exec(E.REMOTE_CLEAR_ORPHAN, {})
+        self.assertEqual(output.getvalue().strip(), "cleared")
+        cleared = json.loads(lane_state.read_text())
+        self.assertEqual(cleared["state"], "idle")
+        self.assertIsNone(cleared["current_run"])
+
+    def test_remote_cleanup_preserves_concurrent_reassignment(self):
+        home = self.root / "changed-home"
+        lane_dir, run_dir = home / "lanes" / "M7", home / "runs" / "old-run"
+        lane_dir.mkdir(parents=True)
+        run_dir.mkdir(parents=True)
+        lane_state = lane_dir / "state.json"
+        lane_state.write_text(json.dumps({"state": "busy", "current_run": "new-run"}))
+        (run_dir / "status.json").write_text(json.dumps({"runner_pid": 987654321, "executor_pid": 987654322}))
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["clear", "M7", "old-run", str(home)]), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                exec(E.REMOTE_CLEAR_ORPHAN, {})
+        self.assertEqual(output.getvalue().strip(), "changed")
+        self.assertEqual(json.loads(lane_state.read_text())["current_run"], "new-run")
+
 
 if __name__ == "__main__":
     unittest.main()

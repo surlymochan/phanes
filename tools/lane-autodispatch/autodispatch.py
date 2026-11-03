@@ -298,7 +298,86 @@ def dispatchable_issue(issue):
     return (issue.get("state", "OPEN") == "OPEN" and "lane-ready" in labels
             and not labels & DISPATCH_EXCLUDING_LABELS)
 
-REMOTE_STATUS = r'''
+SESSION_PROBE = r'''
+import glob,json,os
+PROC_ROOT=os.environ.get("OPEN_SWARM_PROC_ROOT","/proc")
+
+def pid_alive(pid):
+  if pid is None: return False
+  try: os.kill(int(pid),0); return True
+  except ProcessLookupError: return False
+  except PermissionError: return True
+  except (OSError,TypeError,ValueError): return False
+
+def group_alive(pgid):
+  if pgid is None: return False
+  try: os.killpg(int(pgid),0); return True
+  except ProcessLookupError: return False
+  except PermissionError: return True
+  except (OSError,TypeError,ValueError): return False
+
+def executor_records(status):
+  """The recorded executor session: its leader plus every descendant ever recorded."""
+  records=[]
+  if status.get("executor_pid") is not None or status.get("executor_pgid") is not None:
+    records.append({"pid":status.get("executor_pid"),"pgid":status.get("executor_pgid")})
+  for row in status.get("executor_descendants") or []:
+    if isinstance(row,dict) and (row.get("pid") is not None or row.get("pgid") is not None):
+      records.append({"pid":row.get("pid"),"pgid":row.get("pgid")})
+  return records
+
+def session_outputs(status,rdir):
+  """The files an executor keeps open for its whole life: its stdout/stderr event log."""
+  paths=set(glob.glob(os.path.join(rdir,"events*")))
+  if status.get("events"): paths.add(str(status["events"]))
+  return sorted(paths)
+
+def session_holders(paths):
+  """PIDs holding an executor output file open; None when the scan cannot be trusted."""
+  targets=set()
+  for path in paths:
+    try: targets.add(os.path.realpath(path))
+    except OSError: pass
+  if not targets: return []
+  try: entries=os.listdir(PROC_ROOT)
+  except OSError: return None
+  holders=[]
+  for entry in entries:
+    if not entry.isdigit(): continue
+    pid=int(entry)
+    if pid==os.getpid(): continue
+    fddir=os.path.join(PROC_ROOT,entry,"fd")
+    try: fds=os.listdir(fddir)
+    except OSError: return None
+    for fd in fds:
+      try: link=os.readlink(os.path.join(fddir,fd))
+      except OSError: return None
+      if link in targets: holders.append(pid); break
+  return holders
+
+def session_state(status,rdir):
+  """alive | dead | unknown: whether the whole executor session of a run is provably gone."""
+  try:
+    runner_pid=int(status.get("runner_pid"))
+    if runner_pid <= 0: return "unknown"
+  except (TypeError,ValueError,OverflowError): return "unknown"
+  try: os.kill(runner_pid,0)
+  except ProcessLookupError: pass
+  except PermissionError: return "alive"
+  except OSError: return "unknown"
+  else: return "alive"
+  records=executor_records(status)
+  for rec in records:
+    if pid_alive(rec.get("pid")) or group_alive(rec.get("pgid")): return "alive"
+  outputs=session_outputs(status,rdir)
+  if not outputs: return "unknown" if records else "dead"
+  holders=session_holders(outputs)
+  if holders is None: return "unknown"
+  # A detached child may have closed the inherited output descriptors.
+  return "alive" if holders else "unknown"
+'''
+
+REMOTE_STATUS = SESSION_PROBE + r'''
 import json,os,sys
 O=os.path.expanduser("~/.claude/openswarm-executor-candidate"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
@@ -317,13 +396,40 @@ if R:
   else:
     out["run"]="running"
     try:
-      s=json.load(open(f"{O}/runs/{R}/status.json")); pid=s.get("runner_pid"); out["run_state"]=s.get("state")
-      if pid:
-        try: os.kill(int(pid),0); out["runner_alive"]=True
-        except ProcessLookupError: out["runner_alive"]=False
-        except PermissionError: out["runner_alive"]=True
+      with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
+      out["run_state"]=s.get("state")
+      out["runner_alive"]=pid_alive(s.get("runner_pid")) if s.get("runner_pid") is not None else None
+      records=executor_records(s)
+      out["executor_alive"]=any(pid_alive(r.get("pid")) for r in records) if records else None
+      out["executor_group_alive"]=any(group_alive(r.get("pgid")) for r in records) if records else None
+      out["session"]=session_state(s,f"{O}/runs/{R}")
     except Exception: out["run_state"]="missing"
 print(json.dumps(out))
+'''
+
+REMOTE_CLEAR_ORPHAN = SESSION_PROBE + r'''
+import fcntl,json,os,stat,sys,tempfile,time
+O=os.path.expanduser("~/.claude/openswarm-executor-candidate"); L=sys.argv[1]; R=sys.argv[2]
+p=f"{O}/lanes/{L}/state.json"; lock_path=f"{O}/lanes/{L}/state.lock"
+os.makedirs(os.path.dirname(p),exist_ok=True)
+with open(lock_path,"a+") as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ try:
+  with open(p) as f: s=json.load(f)
+ except Exception: print("changed"); raise SystemExit
+ if s.get("state")!="busy" or s.get("current_run")!=R: print("changed"); raise SystemExit
+ try:
+  with open(f"{O}/runs/{R}/status.json") as f: status=json.load(f)
+ except Exception: print("unknown"); raise SystemExit
+ verdict=session_state(status,f"{O}/runs/{R}")
+ if verdict!="dead": print(verdict); raise SystemExit
+ s.update(state="idle",current_run=None,updated=time.time())
+ fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix=".state-")
+ with os.fdopen(fd,"w") as f: json.dump(s,f)
+ try: os.chmod(tmp,stat.S_IMODE(os.stat(p).st_mode))
+ except OSError: pass
+ os.replace(tmp,p)
+print("cleared")
 '''
 def remote(lane, cfg, run=""):
     try: rc, out, err = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", lane, run), timeout=60, inp=REMOTE_STATUS)
@@ -399,10 +505,17 @@ def age_s(st):
     except Exception: return 1e9
 
 def reconcile(L, cfg, st, r, state):
-    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
-    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
-    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
-    if r.get("runner_alive") or (r.get("runner_alive") is None and age_s(st) < 600) or age_s(st) < 180: return False
+    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and the whole
+    remote session is proven dead: the run was orphaned (lane restart / reassignment). Drop it; requeue the issue
+    unless it already got a PR or closed.  A live or unverifiable session is never requeued: it would double-run."""
+    remote_idle = r.get("lane") == "idle" and r.get("current_run") != st["run"]
+    remote_ours = r.get("lane") == "busy" and r.get("current_run") == st["run"]
+    if r.get("run") != "running" or not (remote_idle or remote_ours): return False
+    if r.get("session") != "dead" or age_s(st) < 180: return False
+    if remote_ours:
+        try: rc, out, _ = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", L, st["run"]), timeout=60, inp=REMOTE_CLEAR_ORPHAN)
+        except Exception: return False
+        if rc or out.strip().splitlines()[-1:] != ["cleared"]: return False
     n = st["issue"]; _, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
     try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
     except Exception: return False
@@ -410,7 +523,8 @@ def reconcile(L, cfg, st, r, state):
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
         what = "requeued (lane-ready)"
     else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
-    log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
+    log(f"{L} #{n} run {st['run']} orphaned (remote lane {r.get('lane')}, current_run={r.get('current_run')}, "
+        f"run_state={r.get('run_state')}, session dead) → {what}")
     return True
 
 def verify_of(body):

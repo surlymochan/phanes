@@ -8090,6 +8090,15 @@ def lane_state_path(name):
     return os.path.join(lane_root(name), "state.json")
 
 
+def lane_state_lock_path(name):
+    """The lock every lane state writer shares.
+
+    jsave() replaces state.json with a new inode, so a lock taken on state.json itself does
+    not exclude a concurrent writer; the lock therefore lives in its own, stable file.
+    """
+    return os.path.join(lane_root(name), "state.lock")
+
+
 def lane_socket_path(name):
     return os.path.join(lane_root(name), "ctl.sock")
 
@@ -8301,11 +8310,54 @@ def lanes_by_name(names=None, check_env_mode=True):
     return [by_name[n] for n in names]
 
 
+LANE_STATE_LOCKS = {}
+LANE_STATE_LOCK_GUARD = threading.Lock()
+
+
+class LaneStateLock:
+    """Serialize the writers of one lane state document across threads and processes."""
+
+    def __init__(self, name):
+        self.name = name
+        self.lock = threading.RLock()
+        self.handle = None
+        self.depth = 0
+
+    def __enter__(self):
+        self.lock.acquire()
+        if self.depth == 0:
+            path = lane_state_lock_path(self.name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self.handle = open(path, "a+")
+            fcntl.flock(self.handle, fcntl.LOCK_EX)
+        self.depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        self.depth -= 1
+        if self.depth == 0:
+            fcntl.flock(self.handle, fcntl.LOCK_UN)
+            self.handle.close()
+            self.handle = None
+        self.lock.release()
+        return False
+
+
+def lane_state_lock(name):
+    with LANE_STATE_LOCK_GUARD:
+        entry = LANE_STATE_LOCKS.get(name)
+        if entry is None:
+            entry = LaneStateLock(name)
+            LANE_STATE_LOCKS[name] = entry
+        return entry
+
+
 def lane_write_state(lane_name, **changes):
-    state = jload(lane_state_path(lane_name), {}) or {}
-    state.update(changes)
-    state["updated"] = NOW()
-    jsave(lane_state_path(lane_name), state)
+    with lane_state_lock(lane_name):
+        state = jload(lane_state_path(lane_name), {}) or {}
+        state.update(changes)
+        state["updated"] = NOW()
+        jsave(lane_state_path(lane_name), state)
     return state
 
 
@@ -8326,15 +8378,16 @@ def lane_idempotency_record(lane_name, key, run_id):
     The lane supervisor is the only writer of the lane state, so the table cannot
     lose an entry to a concurrent writer.
     """
-    state = jload(lane_state_path(lane_name), {}) or {}
-    table = lane_idempotency_table(state)
-    table.pop(key, None)
-    table[key] = run_id
-    while len(table) > LANE_IDEMPOTENCY_LIMIT:
-        table.pop(next(iter(table)))
-    state["idempotency_keys"] = table
-    state["updated"] = NOW()
-    jsave(lane_state_path(lane_name), state)
+    with lane_state_lock(lane_name):
+        state = jload(lane_state_path(lane_name), {}) or {}
+        table = lane_idempotency_table(state)
+        table.pop(key, None)
+        table[key] = run_id
+        while len(table) > LANE_IDEMPOTENCY_LIMIT:
+            table.pop(next(iter(table)))
+        state["idempotency_keys"] = table
+        state["updated"] = NOW()
+        jsave(lane_state_path(lane_name), state)
     return table
 
 

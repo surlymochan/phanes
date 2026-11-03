@@ -370,7 +370,92 @@ def quota_module():
     return _QUOTA_MOD
 
 
-REMOTE_STATUS = r'''
+SESSION_PROBE = r'''
+import glob,json,os
+PROC_ROOT=os.environ.get("OPEN_SWARM_PROC_ROOT","/proc")
+
+def pid_alive(pid):
+  if pid is None: return False
+  try: os.kill(int(pid),0); return True
+  except ProcessLookupError: return False
+  except PermissionError: return True
+  except (OSError,TypeError,ValueError): return False
+
+def group_alive(pgid):
+  if pgid is None: return False
+  try: os.killpg(int(pgid),0); return True
+  except ProcessLookupError: return False
+  except PermissionError: return True
+  except (OSError,TypeError,ValueError): return False
+
+def executor_records(status):
+  """The recorded executor session: its leader plus every descendant ever recorded."""
+  records=[]
+  if status.get("executor_pid") is not None or status.get("executor_pgid") is not None:
+    records.append({"pid":status.get("executor_pid"),"pgid":status.get("executor_pgid")})
+  for row in status.get("executor_descendants") or []:
+    if isinstance(row,dict) and (row.get("pid") is not None or row.get("pgid") is not None):
+      records.append({"pid":row.get("pid"),"pgid":row.get("pgid")})
+  return records
+
+def session_outputs(status,rdir):
+  """The files an executor keeps open for its whole life: its stdout/stderr event log."""
+  paths=set(glob.glob(os.path.join(rdir,"events*")))
+  if status.get("events"): paths.add(str(status["events"]))
+  return sorted(paths)
+
+def session_holders(paths):
+  """PIDs holding an executor output file open; None when the scan cannot be trusted."""
+  targets=set()
+  for path in paths:
+    try: targets.add(os.path.realpath(path))
+    except OSError: pass
+  if not targets: return []
+  try: entries=os.listdir(PROC_ROOT)
+  except OSError: return None
+  holders=[]
+  for entry in entries:
+    if not entry.isdigit(): continue
+    pid=int(entry)
+    if pid==os.getpid(): continue
+    fddir=os.path.join(PROC_ROOT,entry,"fd")
+    try: fds=os.listdir(fddir)
+    except OSError: return None
+    for fd in fds:
+      try: link=os.readlink(os.path.join(fddir,fd))
+      except OSError: return None
+      if link in targets: holders.append(pid); break
+  return holders
+
+def session_state(status,rdir):
+  """alive | dead | unknown: whether the whole executor session of a run is provably gone.
+
+  The runner, the executor leader, its process group and every recorded descendant must all be
+  gone; a process still holding the executor output file keeps the session alive as well.  When
+  the executor was never recorded (the runner died between spawning it and writing its pid) the
+  output file decides, and an unreadable process table stays unknown instead of guessing.
+  """
+  try:
+    runner_pid=int(status.get("runner_pid"))
+    if runner_pid <= 0: return "unknown"
+  except (TypeError,ValueError,OverflowError): return "unknown"
+  try: os.kill(runner_pid,0)
+  except ProcessLookupError: pass
+  except PermissionError: return "alive"
+  except OSError: return "unknown"
+  else: return "alive"
+  records=executor_records(status)
+  for rec in records:
+    if pid_alive(rec.get("pid")) or group_alive(rec.get("pgid")): return "alive"
+  outputs=session_outputs(status,rdir)
+  if not outputs: return "unknown" if records else "dead"
+  holders=session_holders(outputs)
+  if holders is None: return "unknown"
+  # A detached child may have closed the inherited output descriptors.
+  return "alive" if holders else "unknown"
+'''
+
+REMOTE_STATUS = SESSION_PROBE + r'''
 import json,os,sys
 O=os.path.expanduser(sys.argv[3] if len(sys.argv)>3 and sys.argv[3] else "~/.claude/openswarm"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
@@ -396,13 +481,40 @@ if R:
     out["run"]="running"
     try:
       with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
-      pid=s.get("runner_pid"); out["run_state"]=s.get("state")
-      if pid:
-        try: os.kill(int(pid),0); out["runner_alive"]=True
-        except ProcessLookupError: out["runner_alive"]=False
-        except PermissionError: out["runner_alive"]=True
+      out["run_state"]=s.get("state")
+      out["runner_alive"]=pid_alive(s.get("runner_pid")) if s.get("runner_pid") is not None else None
+      records=executor_records(s)
+      out["executor_alive"]=any(pid_alive(r.get("pid")) for r in records) if records else None
+      out["executor_group_alive"]=any(group_alive(r.get("pgid")) for r in records) if records else None
+      out["session"]=session_state(s,f"{O}/runs/{R}")
     except Exception: out["run_state"]="missing"
 print(json.dumps(out))
+'''
+
+REMOTE_CLEAR_ORPHAN = SESSION_PROBE + r'''
+import fcntl,json,os,stat,sys,tempfile,time
+O=os.path.expanduser(sys.argv[3]); L=sys.argv[1]; R=sys.argv[2]
+p=f"{O}/lanes/{L}/state.json"; lock_path=f"{O}/lanes/{L}/state.lock"
+os.makedirs(os.path.dirname(p),exist_ok=True)
+with open(lock_path,"a+") as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ try:
+  with open(p) as f: s=json.load(f)
+ except Exception: print("changed"); raise SystemExit
+ if s.get("state")!="busy" or s.get("current_run")!=R: print("changed"); raise SystemExit
+ d=f"{O}/runs/{R}/status.json"
+ try:
+  with open(d) as f: status=json.load(f)
+ except Exception: print("unknown"); raise SystemExit
+ verdict=session_state(status,f"{O}/runs/{R}")
+ if verdict!="dead": print(verdict); raise SystemExit
+ s.update(state="idle",current_run=None,updated=time.time())
+ fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix=".state-")
+ with os.fdopen(fd,"w") as f: json.dump(s,f)
+ try: os.chmod(tmp,stat.S_IMODE(os.stat(p).st_mode))
+ except OSError: pass
+ os.replace(tmp,p)
+print("cleared")
 '''
 
 
@@ -999,11 +1111,24 @@ class Dispatcher:
         return result
 
     def reconcile(self, L, lc, st, r, state):
-        """Local state busy but the remote lane is idle on another run with a dead runner: the run was orphaned."""
-        if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]:
+        """Requeue only after the whole remote session is proven dead and the remote lane is cleared."""
+        remote_idle = r.get("lane") == "idle" and r.get("current_run") != st["run"]
+        remote_ours = r.get("lane") == "busy" and r.get("current_run") == st["run"]
+        if r.get("run") != "running" or not (remote_idle or remote_ours):
             return False
-        if r.get("runner_alive") or (r.get("runner_alive") is None and self.age_s(st) < 600) or self.age_s(st) < 180:
+        if r.get("session") != "dead" or self.age_s(st) < 180:
             return False
+        if remote_ours:
+            try:
+                args = ["python3", "-", L, st["run"], self.cfg["remote_home"]]
+                if lc["host"] in self.cfg.get("local_hosts", []):
+                    rc, out, _ = self.sh(args, timeout=60, inp=REMOTE_CLEAR_ORPHAN)
+                else:
+                    rc, out, _ = self.sh(["ssh"] + self.ssh_opts(lc["host"]) + [lc["host"]] + args, timeout=60, inp=REMOTE_CLEAR_ORPHAN)
+            except Exception:
+                return False
+            if rc or out.strip().splitlines()[-1:] != ["cleared"]:
+                return False
         if st.get("review_pr"):
             self.log(f"{L} review PR#{st['review_pr']} run {st['run']} orphaned; dropped (will re-review)")
             return True
@@ -1016,8 +1141,8 @@ class Dispatcher:
             what = f"requeued ({self.L['ready']})"
         else:
             what = f"already {sst.lower()}/{self.L['pr'] if self.L['pr'] in labels else '-'}; dropped"
-        self.log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, "
-                 f"run_state={r.get('run_state')}, runner dead) → {what}")
+        self.log(f"{L} #{n} run {st['run']} orphaned (remote lane {r.get('lane')}, current_run={r.get('current_run')}, "
+                 f"run_state={r.get('run_state')}, session dead) → {what}")
         return True
 
     def quota_table(self):
