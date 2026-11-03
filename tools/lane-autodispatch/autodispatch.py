@@ -41,6 +41,16 @@ HARVEST_FETCH_BACKOFF_CAP = 600
 HARVEST_FETCH_TRANSIENT_RE = re.compile(r"Permission denied|Connection closed|broken pipe|timed out|banner|"
                                         r"unexpected disconnect|bad pack header|early eof|index-pack failed|"
                                         r"RPC failed|Connection reset|hung up unexpectedly", re.I)
+# Refs #1810: the base commit is read from upstream (ls-remote) and must exist in the target repo
+# before the lane is assigned. The target repo can lag behind upstream (its object store misses the
+# new base), which surfaced as `fatal: Not a valid object name <base>^{commit}` plus a 30s host
+# backoff on every base switch. The validation is NOT relaxed: a base that is still missing after
+# the fetch is reported (and backed off) exactly as before.
+BASE_BRANCH = "main"
+BASE_REPO_URL = f"https://github.com/{REPO}.git"  # the upstream the base commit is read from
+DISPATCH_BASE_FETCH_ATTEMPTS = 3  # bounded attempts (check -> fetch -> check) when the base is missing
+DISPATCH_BASE_FETCH_DELAY = 5     # seconds between two attempts
+BASE_MISSING_RE = re.compile(r"Not a valid object name", re.I)
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -429,6 +439,23 @@ def deps_met(item):
         if rc or json.loads(out)["state"] != "CLOSED": return False
     return True
 
+def base_missing(error):
+    """True when the failure says the base commit is not in the target repo yet (fetch lag)."""
+    return bool(BASE_MISSING_RE.search(error or ""))
+
+def base_check_command(repo_path, base):
+    """Remote snippet: verify that the base commit exists in the target repo."""
+    return f"git -C {repo_path} cat-file -e {base}^{{commit}}"
+
+def base_fetch_command(repo_path, url, branch):
+    """Remote snippet: fetch the base branch into the target repo."""
+    return f"git -C {repo_path} fetch -q {url} {branch}"
+
+def dispatch_failed(lane, cfg, item, error):
+    """A failed dispatch drops the in-progress label and backs the host off (transient, unchanged)."""
+    gh(["issue", "edit", str(item["n"]), "--remove-label", "in-progress"])
+    host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
+
 def dispatch(lane, cfg, item, base):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
@@ -437,13 +464,30 @@ def dispatch(lane, cfg, item, base):
         rc, _, err = sh(ssh_argv(ssh_opts(h), h, f"cat > /tmp/task-{lane}.md"), timeout=60, inp=task_file.read())
     if rc: raise RuntimeError(f"task upload: {err.strip()[-200:]}")
     ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
-    cmd = (f"git -C {R} fetch -q https://github.com/{REPO}.git main && git -C {R} cat-file -e {base}^{{commit}} && "
-           f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
-           + (f" --verify {shlex.quote(ver)}" if ver else ""))
-    rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
-    m = re.search(r'"id":\s*"([^"]+)"', out)
-    if rc or not m: raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
-    return m.group(1), ver
+    assign = (f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
+              + (f" --verify {shlex.quote(ver)}" if ver else ""))
+    # Refs #1810: the base commit must exist in the target repo before the lane is assigned. The
+    # target repo lags behind upstream, so a missing base is fetched and the check is repeated; the
+    # check itself is not relaxed (a base that stays missing is still an error).
+    cmd = f"{base_check_command(R, base)} && {assign}"
+    for attempt in range(1, DISPATCH_BASE_FETCH_ATTEMPTS + 1):
+        rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
+        m = re.search(r'"id":\s*"([^"]+)"', out)
+        if not rc and m: return m.group(1), ver
+        if not base_missing(err) or attempt == DISPATCH_BASE_FETCH_ATTEMPTS: break
+        # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
+        # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
+        # own short-lived ref locks).
+        frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
+        if frc:
+            # A failing fetch aborts the dispatch right away: the base could not be validated, and
+            # a later successful check (e.g. a concurrent tick that fetched the object in the
+            # meantime) must never mask the fetch failure. The caller backs the host off as usual.
+            # The fetch failure ends the message: the host backoff log keeps the last 80 chars.
+            raise RuntimeError(f"base check: {(err or out).strip()[-120:]} | "
+                               f"base fetch failed rc={frc}: {ferr.strip()[-40:]}")
+        time.sleep(DISPATCH_BASE_FETCH_DELAY)
+    raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
 
 def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
     """Build the harvest fetch argv without splitting SSH option values twice."""
@@ -590,11 +634,11 @@ def tick(lanes, state, last_warn):
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: continue
         if base is None:
-            _, out, _ = sh(["git", "ls-remote", f"https://github.com/{REPO}.git", "refs/heads/main"]); base = out.split()[0]
+            _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
-            gh(["issue", "edit", str(pick["n"]), "--remove-label", "in-progress"]); host_fail(cfg["host"], f"dispatch #{pick['n']}: {e}"); continue
+            dispatch_failed(L, cfg, pick, e); continue
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
