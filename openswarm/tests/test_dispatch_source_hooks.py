@@ -85,6 +85,14 @@ class SourceHookTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(runner.calls[0][0], ["source", "--json"])
 
+    def test_pause_markers_cover_both_spellings_of_the_scope(self):
+        # The protocol writes the scope in lower case ("mint"), the marker in the state
+        # directory in upper case (PAUSE-MINT): both spellings must find the pause.
+        self.assertEqual(source_hooks.pause_markers("mint"), ["PAUSE-MINT", "PAUSE-mint"])
+        self.assertEqual(source_hooks.pause_markers("MINT"), ["PAUSE-MINT"])
+        self.assertEqual(source_hooks.pause_markers(""), [])
+        self.assertEqual(source_hooks.pause_markers(None), [])
+
     def test_duplicate_issue_uses_best_priority_and_combines_reasons(self):
         runner = FakeRunner([
             completed(output({"issue": 21, "priority": "p2", "backend": None, "reason": "first"})),

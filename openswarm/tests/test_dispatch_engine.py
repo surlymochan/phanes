@@ -74,6 +74,70 @@ class Base(unittest.TestCase):
 
 
 class QueueAndRank(Base):
+    def source_hook_script(self, marker):
+        """A source hook that leaves a marker file behind when it is started."""
+        script = os.path.join(self.tmp, "source-hook.sh")
+        with open(script, "w") as handle:
+            handle.write("#!/bin/sh\necho started > {}\n".format(marker))
+        os.chmod(script, 0o755)
+        return script
+
+    def test_external_source_ranks_and_pins_only_existing_ready_cards(self):
+        issues = [issue(5, ["lane-ready", "p2"]), issue(3, ["lane-ready", "p1"])]
+        d = self.make([("issue list", (0, json.dumps(issues), ""))])
+        self.cfg["sources"] = {"hooks": [{"name": "phanes", "argv": ["source", "--json"]}]}
+        source_hooks = E.dispatch_module("source_hooks")
+        with mock.patch.object(source_hooks, "run_hooks", return_value={
+                "tasks": [{"issue": 5, "priority": "p0", "backend": "pi", "reason": "urgent"},
+                          {"issue": 99, "priority": "p0", "backend": None, "reason": "not in queue"}],
+                "errors": [], "rejected": 0, "skipped": []}) as run_hooks:
+            q = d.queue()
+        self.assertEqual([item["n"] for item in q], [5, 3])
+        self.assertEqual(q[0]["backend"], "pi")
+        self.assertTrue(q[0]["strict"])
+        self.assertEqual(len(q), 2)
+        run_hooks.assert_called_once()
+
+    def test_source_created_issue_is_admitted_and_ranked_in_same_queue(self):
+        d = self.make()
+        self.cfg["sources"] = {"hooks": [{"name": "mint", "argv": ["mint"]}]}
+        hooks = E.dispatch_module("source_hooks")
+        created = []
+        def run(*args, **kwargs):
+            created.extend([issue(42, ["lane-ready", "p2"]),
+                            issue(43, ["lane-ready", "in-progress"])])
+            return {"tasks": [{"issue": n, "priority": "p0", "backend": "pi", "reason": "mint"}
+                              for n in (42, 43)], "errors": [], "rejected": 0, "skipped": []}
+        with mock.patch.object(hooks, "run_hooks", side_effect=run), \
+             mock.patch.object(d, "gh", side_effect=lambda *args: (0, json.dumps(created), "")):
+            queue = d.queue()
+        self.assertEqual([(x["n"], x["prio"], x["backend"], x["strict"]) for x in queue],
+                         [(42, 0, "pi", True)])
+
+    def test_paused_external_source_does_not_start_the_command(self):
+        """The protocol example (`pause_scope: "mint"`) must not start the command while PAUSE-MINT exists."""
+        d = self.make([("issue list", (0, "[]", ""))])
+        marker = os.path.join(self.tmp, "hook-started")
+        self.cfg["sources"] = {"hooks": [{"name": "phanes", "argv": [self.source_hook_script(marker)],
+                                          "pause_scope": "mint"}]}
+        pause = os.path.join(d.D, "PAUSE-MINT")
+        with open(pause, "w") as handle:
+            handle.write("paused")
+        self.assertEqual(d.queue(), [])
+        self.assertFalse(os.path.exists(marker))
+        # the same hook runs once the pause is gone
+        os.remove(pause)
+        self.assertEqual(d.queue(), [])
+        self.assertTrue(os.path.exists(marker))
+
+    def test_shadow_mode_does_not_start_a_source_hook(self):
+        """A hook may have side effects (it can mint cards): a shadow tick starts none."""
+        d = self.make([("issue list", (0, "[]", ""))], dry_run=True)
+        marker = os.path.join(self.tmp, "hook-started")
+        self.cfg["sources"] = {"hooks": [{"name": "phanes", "argv": [self.source_hook_script(marker)]}]}
+        self.assertEqual(d.queue(), [])
+        self.assertFalse(os.path.exists(marker))
+
     def test_priority_pin_and_fallback_order(self):
         issues = [issue(5, ["lane-ready", "p2"]), issue(3, ["lane-ready", "p1", "backend:codex"]),
                   issue(4, ["lane-ready", "p0", "backend:agy"]), issue(9, ["lane-ready", "in-progress"]),
