@@ -21,9 +21,22 @@ class UnixHTTP(http.client.HTTPConnection):
         self.path = path
 
     def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(self.path)
+        # The broker creates the socket file when it binds it and listens a moment
+        # later: a connect in that window is refused (ConnectionRefusedError), which
+        # made the CI job fail at random.  Wait for the broker to accept the
+        # connection instead of the socket file to show up.
+        deadline = time.monotonic() + (self.timeout or 3)
+        while True:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(self.timeout)
+            try:
+                self.sock.connect(self.path)
+                return
+            except OSError:
+                self.sock.close()
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
 
 
 @unittest.skipUnless(shutil.which('node'), 'requires node')

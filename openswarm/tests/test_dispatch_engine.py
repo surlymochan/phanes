@@ -72,6 +72,41 @@ class Base(unittest.TestCase):
         self.addCleanup(d.out.close)
         return d
 
+    def real_git(self, *args):
+        """A real git command in the local clone: the artifact filter works on it."""
+        proc = subprocess.run(["git", "-C", self.tmp, *args], capture_output=True, text=True)
+        if proc.returncode:
+            raise AssertionError("git %s failed: %s" % (args[0], proc.stderr.strip()))
+        return proc.stdout.strip()
+
+    def init_repo(self):
+        """Turn the local clone into a real git repo with one base commit."""
+        self.real_git("init", "-q")
+        self.real_git("config", "user.name", "Test")
+        self.real_git("config", "user.email", "test@example.com")
+        with open(os.path.join(self.tmp, "base.txt"), "w") as stream:
+            stream.write("base\n")
+        self.real_git("add", "base.txt")
+        self.real_git("commit", "-qm", "base")
+        return self.real_git("rev-parse", "HEAD")
+
+    def lane_commit(self, files, message="result"):
+        """A commit of the lane branch (refs/fleet/M5); a None content deletes the file."""
+        for path, content in files.items():
+            full = os.path.join(self.tmp, path)
+            if content is None:
+                if os.path.exists(full):
+                    os.unlink(full)
+                continue
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as stream:
+                stream.write(content)
+        self.real_git("add", "-A", "--", *files.keys())
+        self.real_git("commit", "-qm", message)
+        sha = self.real_git("rev-parse", "HEAD")
+        self.real_git("update-ref", "refs/fleet/M5", sha)
+        return sha
+
 
 class QueueAndRank(Base):
     def test_priority_pin_and_fallback_order(self):
@@ -765,9 +800,16 @@ class RebaseHarvest(Base):
     ST = {"issue": 7, "run": "r1", "base": SHA, "rebase_pr": 70, "rebase_branch": "fleet/M5-issue7-r0"}
     INFO = {"branch": "lane/x", "commit": "c", "status": "done", "repo": "/w"}
 
+    def setUp(self):
+        super().setUp()
+        # the harvest filters the fetched lane branch: the local clone must be a real repo
+        self.base = self.init_repo()
+        self.lane_commit({"code.py": "print('lane')\n"})
+
     def harvest(self, rules, st=None):
         d = self.make(rules)
         st = dict(st or self.ST)
+        st["base"] = self.base
         state = {"M5": st}
         return d, d.finish("M5", {"host": "box", "backend": "pi"}, st, dict(self.INFO), state), state
 
@@ -803,6 +845,130 @@ class RebaseHarvest(Base):
         _, done, _ = self.harvest(rules, dict(self.ST, rebase_head=SHA2))
         self.assertTrue(done)
         self.assertIn("--add-label lane-pr", " ".join(self.runner.called("issue edit 7")))
+
+
+class HarvestArtifactFilter(Base):
+    """The artifacts of the lane never enter the PR (Refs #1835).
+
+    The filter runs on the fetched lane branch before the push: the hidden build
+    leftovers and the review products are dropped, and a branch that holds nothing
+    else is not pushed at all.
+    """
+
+    ST = {"issue": 7, "run": "r1", "rebase_pr": 70, "rebase_branch": "fleet/M5-issue7-r0",
+          "rebase_head": SHA2}
+    INFO = {"branch": "lane/x", "commit": "c", "status": "done", "repo": "/w"}
+    ARTIFACTS = {"openswarm/tests/.dde4xxx-00000000.so": "binary\n",
+                 ".lane-review/PR-1.md": "VERDICT: APPROVE\n"}
+    OK_RULES = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
+                ("issue view", (0, json.dumps({"state": "OPEN", "labels": []}), ""))]
+
+    def setUp(self):
+        super().setUp()
+        self.brain = os.path.join(self.tmp, "brain.md")
+        self.cfg["brain_log"] = self.brain
+        self.run_dir = os.path.join(self.tmp, "runs", "r1")
+        os.makedirs(self.run_dir, exist_ok=True)
+        self.base = self.init_repo()
+
+    def brain_text(self):
+        with open(self.brain, encoding="utf-8") as stream:
+            return stream.read()
+
+    def read_run(self):
+        with open(os.path.join(self.run_dir, "result.json"), encoding="utf-8") as stream:
+            return json.load(stream)
+
+    def write_run(self, record):
+        with open(os.path.join(self.run_dir, "result.json"), "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+
+    def harvest(self, st=None, rules=None, info=None):
+        d = self.make(list(self.OK_RULES) + list(rules or []))
+        st = dict(st or self.ST)
+        st["base"] = self.base
+        state = {"M5": st}
+        done = d.finish("M5", {"host": "box", "backend": "pi"}, st, dict(info or self.INFO), state)
+        return d, done, state
+
+    def pushed_source(self, push):
+        """The source of the push refspec: the head that went to the branch."""
+        return push.split(" origin ")[1].split(":")[0]
+
+    def test_the_fix_harvest_pushes_the_branch_without_the_artifacts(self):
+        self.lane_commit(dict(self.ARTIFACTS, **{"code.py": "print('lane')\n"}))
+        d, done, state = self.harvest()
+        push = d.runner.called(" push -q")
+        self.assertTrue(done)
+        self.assertEqual(len(push), 1)
+        source = self.pushed_source(push[0])
+        self.assertNotIn("refs/fleet/M5", push[0])
+        self.assertIn("--force-with-lease=refs/heads/fleet/M5-issue7-r0:", push[0])
+        files = self.real_git("ls-tree", "-r", "--name-only", source).splitlines()
+        self.assertIn("code.py", files)
+        self.assertNotIn("openswarm/tests/.dde4xxx-00000000.so", files)
+        self.assertNotIn(".lane-review/PR-1.md", files)
+        # the removal list is one line of the brain log
+        line = self.brain_text()
+        self.assertIn("harvest excluded", line)
+        self.assertIn("openswarm/tests/.dde4xxx-00000000.so", line)
+        self.assertIn(".lane-review/PR-1.md", line)
+
+    def test_a_branch_with_only_artifacts_is_not_pushed(self):
+        self.lane_commit(dict(self.ARTIFACTS))
+        d, done, state = self.harvest()
+        self.assertTrue(done)
+        self.assertEqual(d.runner.called(" push -q"), [])
+        edits = " ".join(d.runner.called("issue edit 7"))
+        self.assertIn("--add-label lane-failed", edits)
+        self.assertNotIn("--add-label lane-pr", edits)
+        self.assertIn(7, state["_done"])
+
+    def test_commits_that_cancel_each_other_leave_nothing_to_push(self):
+        self.lane_commit(dict(self.ARTIFACTS, **{"code.py": "print('lane')\n"}))
+        self.lane_commit({"code.py": None})          # the normal change is gone again
+        d, done, state = self.harvest()
+        self.assertTrue(done)
+        self.assertEqual(d.runner.called(" push -q"), [])
+        self.assertIn("--add-label lane-failed", " ".join(d.runner.called("issue edit 7")))
+
+    def test_a_failing_filter_pushes_nothing_and_records_the_cause(self):
+        # a merge commit cannot be rebuilt: the filter fails closed
+        self.real_git("checkout", "-q", "-b", "side")
+        self.lane_commit({"side.txt": "side\n"})
+        self.real_git("checkout", "-q", "-")
+        self.lane_commit({"main.txt": "main\n"})
+        self.real_git("merge", "-q", "--no-ff", "-m", "merge", "side")
+        self.real_git("update-ref", "refs/fleet/M5", self.real_git("rev-parse", "HEAD"))
+        self.write_run({"id": "r1", "status": "done", "branch": "lane/x", "commit": "c"})
+        d, done, state = self.harvest()
+        self.assertFalse(done)
+        self.assertEqual(d.runner.called(" push -q"), [])
+        self.assertIn("artifact filter failed", self.brain_text())
+        record = self.read_run()
+        self.assertEqual(record["harvest_failure_reason"], "exec-error")
+        self.assertIn("merge", record["harvest_failure_error"])
+
+    def test_the_new_pr_path_pushes_the_branch_without_the_artifacts(self):
+        self.lane_commit(dict(self.ARTIFACTS, **{"code.py": "print('lane')\n"}))
+        d, done, state = self.harvest(st={"issue": 7, "run": "r1"})
+        push = d.runner.called(" push -q")
+        self.assertTrue(done)
+        self.assertEqual(len(push), 1)
+        source = self.pushed_source(push[0])
+        files = self.real_git("ls-tree", "-r", "--name-only", source).splitlines()
+        self.assertIn("code.py", files)
+        self.assertNotIn("openswarm/tests/.dde4xxx-00000000.so", files)
+        self.assertNotIn(".lane-review/PR-1.md", files)
+
+    def test_the_new_pr_path_pushes_nothing_when_only_artifacts_are_left(self):
+        self.lane_commit(dict(self.ARTIFACTS))
+        d, done, state = self.harvest(st={"issue": 7, "run": "r1"})
+        self.assertTrue(done)
+        self.assertEqual(d.runner.called(" push -q"), [])
+        self.assertEqual(d.runner.called(" pr create"), [])
+        self.assertIn("--add-label lane-failed", " ".join(d.runner.called("issue edit 7")))
+        self.assertIn(7, state["_done"])
 
 
 class QuotaHarvest(Base):
@@ -987,6 +1153,9 @@ class FailureReasonWithCommit(Base):
         self.cfg["brain_log"] = self.brain
         self.run_dir = os.path.join(self.tmp, "runs", "r1")
         os.makedirs(self.run_dir, exist_ok=True)
+        # the harvest filters the fetched lane branch: the local clone must be a real repo
+        self.base = self.init_repo()
+        self.lane_commit({"code.py": "print('lane')\n"})
 
     def write_run(self, record):
         with open(os.path.join(self.run_dir, "result.json"), "w", encoding="utf-8") as stream:
@@ -1004,6 +1173,7 @@ class FailureReasonWithCommit(Base):
         d = self.make([("issue view", self.ISSUE_OPEN), ("diff --numstat", self.NUMSTAT)]
                       + list(rules or []))
         st = dict(st or self.ST)
+        st["base"] = self.base
         state = {"M5": st}
         done = d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state)
         return d, done, state
@@ -1040,7 +1210,7 @@ class FailureReasonWithCommit(Base):
     def test_the_duplicate_ending_with_a_commit_records_the_reason(self):
         self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
         d = self.make([("issue view", self.ISSUE_WITH_PR), ("diff --numstat", self.NUMSTAT)])
-        st = dict(self.ST)
+        st = dict(self.ST, base=self.base)
         state = {"M5": st}
         self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st,
                                  self.commit_info(), state))
@@ -1051,7 +1221,7 @@ class FailureReasonWithCommit(Base):
 
     def test_the_rebase_ending_with_a_commit_records_the_reason(self):
         self.write_run({"id": "r1", "status": "failed", "branch": "lane/x", "commit": "c"})
-        st = dict(self.ST, rebase_pr=70, rebase_branch="fleet/M5-issue7-r0", rebase_head=SHA2)
+        st = dict(self.ST, base=self.base, rebase_pr=70, rebase_branch="fleet/M5-issue7-r0", rebase_head=SHA2)
         d = self.make([("issue view", self.ISSUE_OPEN), ("diff --numstat", self.NUMSTAT),
                        ("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
                        (" push -q", (1, "", "! [rejected] (stale info)"))])
@@ -1066,7 +1236,7 @@ class FailureReasonWithCommit(Base):
     def rebase_without_anything_to_push(self, status):
         """Harvest a run that kept its commit when the rebase produced nothing to push."""
         self.write_run({"id": "r1", "status": status, "branch": "lane/x", "commit": "c"})
-        st = dict(self.ST, rebase_pr=70, rebase_branch="fleet/M5-issue7-r0", rebase_head=SHA2)
+        st = dict(self.ST, base=self.base, rebase_pr=70, rebase_branch="fleet/M5-issue7-r0", rebase_head=SHA2)
         # the lane branch is not based on the base commit: there is nothing to push
         d = self.make([("issue view", self.ISSUE_OPEN), ("diff --numstat", self.NUMSTAT),
                        ("merge-base", (1, "", "")), ("diff --stat", (0, "", ""))])
