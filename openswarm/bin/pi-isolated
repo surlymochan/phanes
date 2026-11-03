@@ -27,7 +27,9 @@ def sandbox_tmp_dir(base, fresh):
 
     A tmpfs /tmp is charged to the lane cgroup as shmem, so a PR checkout there can pin a small lane
     at memory.high. The wrapper owns only <dir>/openswarm-pi-tmp: an RPC session (one per lane turn
-    loop) starts it empty, and nothing else under <dir> is ever removed."""
+    loop) starts it empty, and nothing else under <dir> is ever removed. The pi session directory is
+    the one exception: it survives a lane restart, so a restarted lane can switch back into the
+    interrupted session instead of starting from scratch (Refs #1720)."""
     if not base:
         return None
     if not os.path.isabs(base):
@@ -37,9 +39,21 @@ def sandbox_tmp_dir(base, fresh):
         sys.exit('OPENSWARM_PI_SANDBOX_TMP must not be /')
     path = os.path.join(base, 'openswarm-pi-tmp')
     if fresh and os.path.isdir(path) and not os.path.islink(path):
-        shutil.rmtree(path, ignore_errors=True)
+        for name in os.listdir(path):
+            if name == 'pi-sessions':
+                continue
+            target = os.path.join(path, name)
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(target)
+                except OSError:
+                    pass
     os.makedirs(path, mode=0o700, exist_ok=True)
     os.chmod(path, 0o700)
+    if fresh:
+        os.makedirs(os.path.join(path, 'pi-sessions'), mode=0o700, exist_ok=True)
     return path
 model = os.environ.get('OPENSWARM_PI_ISOLATED_MODEL', 'MiniMax-M3.1-Flash')
 runtime = os.path.realpath(os.environ.get('OPENSWARM_PI_RUNTIME', ''))
