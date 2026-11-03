@@ -29,6 +29,7 @@ if sys.path and os.path.abspath(sys.path[0] or ".") == os.path.dirname(os.path.a
     del sys.path[0]
 
 import argparse  # noqa: E402
+import base64
 import calendar  # noqa: E402
 import concurrent.futures as cf
 import copy
@@ -80,6 +81,11 @@ def dispatch_module(name):
         spec.loader.exec_module(module)
         _DISPATCH_MODULES[name] = module
     return _DISPATCH_MODULES[name]
+
+
+def failure_reasons():
+    """The canonical run-ending reason module (lib/dispatch/failure_reason.py)."""
+    return dispatch_module("failure_reason")
 
 
 def _load_ci_checks():
@@ -377,7 +383,7 @@ if R:
       with open(f"{O}/runs/{R}/status.json") as stream: rs=json.load(stream)
     except Exception: rs={}
     out["run"]={"status":r.get("status"),"timestamp":r.get("finished_at") or r.get("updated_at") or os.path.getmtime(p),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
-      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
+      "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"failure_reason":r.get("failure_reason"),"error":r.get("error"),"harvest_failure_reason":r.get("harvest_failure_reason"),"resets_at":r.get("resets_at"),"summary":str(res.get("summary") if isinstance(res,dict) else res)[:600],
       "started":r.get("started") if r.get("started") is not None else rs.get("started"),
       "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
       "seconds":r.get("seconds"),
@@ -393,6 +399,29 @@ if R:
         except PermissionError: out["runner_alive"]=True
     except Exception: out["run_state"]="missing"
 print(json.dumps(out))
+'''
+
+
+RECORD_FAILURE_SRC = r'''
+import base64,json,os,sys
+home=os.path.expanduser(sys.argv[1]); run=sys.argv[2]
+payload=json.loads(base64.b64decode(sys.argv[3]).decode())
+directory=os.path.join(home,"runs",run); path=os.path.join(directory,"result.json")
+if not os.path.isdir(directory):
+    print("no run dir")
+else:
+    try:
+        with open(path,encoding="utf-8") as stream: record=json.load(stream)
+    except Exception:
+        record={"id":run,"status":"failed"}
+    if not record.get("failure_reason"):
+        record["failure_reason"]=payload.get("reason"); record["failure_error"]=payload.get("error")
+    if payload.get("harvest"):
+        record["harvest_failure_reason"]=payload.get("reason"); record["harvest_failure_error"]=payload.get("error")
+    tmp=path+".tmp"   # atomic replace: an interrupted write may not truncate the record
+    with open(tmp,"w",encoding="utf-8") as stream: json.dump(record,stream,ensure_ascii=False,indent=1)
+    os.replace(tmp,path)
+    print("ok")
 '''
 
 
@@ -1247,6 +1276,118 @@ class Dispatcher:
                  f"({pause['gap_s']}s); {info['error_class']} → vm_paused")
         return {**info, "error_class": error_class, "_vm_pause": pause}
 
+    def run_failure(self, info, reason=None, error=None):
+        """The canonical reason and the raw error of an ended run (never None).
+
+        The run's own ``failure_reason`` wins; without one the reason is
+        derived from the error class and the raw error text.
+        """
+        module = failure_reasons()
+        detail = error if error is not None else (info.get("error") or info.get("summary") or "")
+        name = module.canonical(reason or info.get("failure_reason"), detail)
+        if name == "unknown" and reason is None:
+            name = module.classify(info.get("error_class"), detail)
+        return name, module.tail(detail)
+
+    def ending_detail(self, info, cause="", limit=300):
+        """The raw error of the run plus the cause of the ending, in that order.
+
+        The run's own error says why the run ended; the cause says what the
+        harvest did with it.  Neither replaces the other: an ending line and
+        the run record always carry both, so the raw error never disappears
+        behind the cause of the harvest.  Both parts fit the tail of the
+        record, so a long error does not push the cause out of it.
+        """
+        raw = (info.get("error") or info.get("summary") or "").strip()
+        cause = str(cause or "").strip()
+        parts = [part for part in (raw, cause) if part]
+        if len(parts) < 2:
+            return parts[0] if parts else ""
+        budget = max(60, limit - len(" ; "))
+        raw_budget = int(budget * 0.6)
+        # the raw error first, the ending cause last: the tail keeps the cause
+        return " ; ".join([raw[-raw_budget:], cause[-(budget - raw_budget):]])
+
+    def record_failure(self, lane, lc, run, reason, error="", harvest=True):
+        """Persist the canonical ending reason into the lane run record.
+
+        The harvest ends runs too (fetch gave up, thin diff, watchdog abort).
+        Without the reason in result.json the run stays reason-less and the
+        fleet health histogram cannot count it.
+        """
+        module = failure_reasons()
+        name = module.canonical(reason, error)
+        detail = module.tail(error)
+        if not run:
+            return name
+        home = os.path.expanduser(self.cfg["remote_home"])
+        payload = {"reason": name, "error": detail, "harvest": bool(harvest)}
+        host = (lc or {}).get("host")
+        try:
+            if host in self.local_hosts:
+                self.record_failure_local(home, run, payload)
+            else:
+                blob = base64.b64encode(json.dumps(payload).encode()).decode()
+                cmd = ["ssh", *self.ssh_opts(host), host, "python3", "-", home, str(run), blob]
+                rc, out, err = self.sh(cmd, timeout=30, inp=RECORD_FAILURE_SRC)
+                if rc:
+                    self.log(f"{lane} run {run}: cannot write failure_reason ({name}): "
+                             f"{(err or '').strip()[-120:]}", brain=False)
+        except Exception as error:
+            self.log(f"{lane} run {run}: cannot write failure_reason ({name}): {error!r}", brain=False)
+        return name
+
+    def record_failure_local(self, home, run, payload):
+        """Write the ending reason into a local lane run record (same shape as RECORD_FAILURE_SRC)."""
+        directory = os.path.join(home, "runs", str(run))
+        path = os.path.join(directory, "result.json")
+        if not os.path.isdir(directory):
+            return False
+        try:
+            with open(path, encoding="utf-8") as stream:
+                record = json.load(stream)
+        except (OSError, ValueError):
+            record = {"id": run, "status": "failed"}
+        if not record.get("failure_reason"):
+            record["failure_reason"] = payload.get("reason")
+            record["failure_error"] = payload.get("error")
+        if payload.get("harvest"):
+            record["harvest_failure_reason"] = payload.get("reason")
+            record["harvest_failure_error"] = payload.get("error")
+        # atomic replace: an interrupted write may not truncate the run record
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+
+    def end_reason(self, lane, lc, run, info, cause=""):
+        """The canonical reason of an ended run that kept its commit.
+
+        A run that ends with a commit but did not finish cleanly (failed,
+        partial, stopped) still has to say why it ended: the ending line and
+        the run record may not stay reason-less.  A clean run has no failure
+        reason, so nothing is written for it.
+        """
+        if info.get("status") in ("done", "completed"):
+            return "", ""
+        detail = self.ending_detail(info, cause)
+        reason, tail = self.run_failure(info, None, detail)
+        # the run itself ended badly: the harvest reason would count it twice
+        self.record_failure(lane, lc, run, reason, tail, harvest=False)
+        return reason, tail
+
+    def harvest_reason(self, lane, lc, run, info, cause):
+        """The canonical reason of an ending the harvest itself broke.
+
+        The run kept its commit, but the harvest could not finish the card (a
+        PR that could not be created): the run record keeps the cause, so the
+        fleet health histogram can count it.
+        """
+        reason, tail = self.run_failure(info, "exec-error", self.ending_detail(info, cause))
+        self.record_failure(lane, lc, run, reason, tail)
+        return reason, tail
+
     def finish(self, lane, lc, st, info, state):
         if self.dry_run:
             self.plan.append({"would": "harvest", "lane": lane, "issue": st.get("issue"), "status": info.get("status")})
@@ -1275,12 +1416,16 @@ class Dispatcher:
                 self.log(f"{lane} #{n} run {run} vm_paused requeue labels failed; retry next tick", brain=False)
                 return False
             pause = info.get("_vm_pause") or {}
+            reason, detail = self.run_failure(info, None, self.ending_detail(
+                info, f"vm pause {pause.get('from', '?')} → {pause.get('to', '?')}"))
+            self.record_failure(lane, lc, run, reason, detail)
             self.gh_write(["issue", "comment", str(n), "--body",
                      f"Lane {lane} ({lc['host']}, run `{run}`): VM 暂停导致，非卡片失败。 "
                      f"Pause: {pause.get('from', '?')} → {pause.get('to', '?')}. "
                      f"Requeued as `{self.L['ready']}`; any partial commit is retained in the lane workspace."])
             self.mark_done(state, n)
-            self.log(f"{lane} #{n} run {run} vm_paused → requeued {self.L['ready']} (not a card failure)")
+            self.log(f"{lane} #{n} run {run} vm_paused → requeued {self.L['ready']} (not a card failure) "
+                     f"[failure_reason={reason}; error={detail}]")
             return True
         self.quota_lane_guard(lane, lc, info)
         self.heartbeat()
@@ -1306,12 +1451,16 @@ class Dispatcher:
             if rc:
                 st["fetch_fails"] = int(st.get("fetch_fails") or 0) + 1
                 if st["fetch_fails"] >= 3 and re.search(self.GIVEUP, err or "", re.I):
+                    reason, detail = self.run_failure(info, "fetch-failed", self.ending_detail(
+                        info, f"harvest gave up after {st['fetch_fails']} fetch failures: {err}"))
+                    self.record_failure(lane, lc, run, reason, detail)
                     self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                     self.gh_write(["issue", "comment", str(n), "--body",
                                    f"Lane {lane} harvest gave up after {st['fetch_fails']} fetch failures "
                                    f"(last: `{(err or '').strip()[-160:]}`). Labelled `{L['failed']}`; re-add `{L['ready']}` to retry."])
                     self.mark_done(state, n)
-                    self.log(f"{lane} #{n} run {run}: fetch failed {st['fetch_fails']}x → {L['failed']}")
+                    self.log(f"{lane} #{n} run {run}: fetch failed {st['fetch_fails']}x "
+                             f"[failure_reason={reason}; error={detail}] → {L['failed']}")
                     return True
                 self.log(f"{lane} #{n} run {run}: fetch failed: {(err or '').strip()[-200:]}")
                 return False
@@ -1324,11 +1473,15 @@ class Dispatcher:
                     # nothing usable to push: the PR is still conflicting, so do not report it as rebased
                     why = (f"not based on {self.cfg['base_branch']} {st['base'][:8]}" if anc != 0
                            else f"empty diff vs {self.cfg['base_branch']}")
+                    reason, detail = self.run_failure(info, None, self.ending_detail(
+                        info, f"rebase produced nothing to push: {why}"))
+                    self.record_failure(lane, lc, run, reason, detail)
                     self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                     self.gh_write(["issue", "comment", str(n), "--body",
                                    f"Lane {lane} rebase of PR #{pr} (run `{run}`) produced nothing to push ({why}). "
                                    f"Labelled `{L['failed']}`; re-add `{L['ready']}` to retry."])
-                    self.log(f"{lane} rebase #{n} PR#{pr}: {why}; not pushing → {L['failed']}")
+                    self.log(f"{lane} rebase #{n} PR#{pr}: {why}; not pushing → {L['failed']} "
+                             f"[failure_reason={reason}; error={detail}]")
                     self.mark_done(state, n)
                     return True
                 else:
@@ -1349,8 +1502,11 @@ class Dispatcher:
                     if rc and st.get("rebase_head") and ("stale info" in (err or "") or "rejected" in (err or "")):
                         # someone pushed a newer head (manual fix) while the lane ran: keep it, don't clobber
                         self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
+                        reason, detail = self.end_reason(lane, lc, run, info,
+                                                         "the PR head moved during the run; kept the newer head")
+                        note = f" [failure_reason={reason}; error={detail}]" if reason else ""
                         self.log(f"{lane} rebase #{n} PR#{pr}: PR head moved during the run (not {st['rebase_head'][:8]}); "
-                                 "kept the newer head, not force-pushing")
+                                 f"kept the newer head, not force-pushing{note}")
                         self.mark_done(state, n)
                         return True
                     if rc:
@@ -1361,7 +1517,10 @@ class Dispatcher:
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
                              f"Force-pushed to `{ob}`; it is merged after a fresh lane review and green CI."])
                 self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
-                self.log(f"{lane} rebased #{n} → PR #{pr} ({ob}, run {run}, {info.get('status')})")
+                reason, detail = self.end_reason(lane, lc, run, info,
+                                                 f"rebased onto {self.cfg['base_branch']}")
+                note = f" [failure_reason={reason}; error={detail}]" if reason else ""
+                self.log(f"{lane} rebased #{n} → PR #{pr} ({ob}, run {run}, {info.get('status')}){note}")
                 self.mark_done(state, n)
                 return True
             try:
@@ -1372,7 +1531,11 @@ class Dispatcher:
             if rc:
                 sst, labs = self.issue_labels(n)
                 if L["pr"] in labs or sst == "CLOSED":
-                    self.log(f"{lane} #{n} push failed after PR already exists/issue closed ({(err or '').strip()[-120:] or 'empty err'}); clearing lane")
+                    reason, detail = self.end_reason(lane, lc, run, info,
+                                                     f"the push failed: {(err or '').strip()[-160:] or 'empty err'}")
+                    note = f" [failure_reason={reason}; error={detail}]" if reason else ""
+                    self.log(f"{lane} #{n} push failed after PR already exists/issue closed "
+                             f"({(err or '').strip()[-120:] or 'empty err'}); clearing lane{note}")
                     self.mark_done(state, n)
                     return True
                 ls = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git", f"refs/heads/{b}"], timeout=30)[1]
@@ -1384,18 +1547,24 @@ class Dispatcher:
             if L["pr"] in labs:
                 self.gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate "
                          f"dispatch); branch `{b}` pushed for comparison, no second PR opened."])
-                self.log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR")
+                reason, detail = self.end_reason(lane, lc, run, info,
+                                                 "duplicate dispatch: the card already has a PR")
+                note = f" [failure_reason={reason}; error={detail}]" if reason else ""
+                self.log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR{note}")
                 self.mark_done(state, n)
                 return True
             thin = self.pr_diff_too_thin(st["base"], f"refs/fleet/{lane}")
             if thin:
                 mn = (self.cfg.get("thin_pr") or {}).get("min_effective_diff")
+                reason, detail = self.run_failure(info, None, self.ending_detail(info, f"thin diff: {thin}"))
+                self.record_failure(lane, lc, run, reason, detail)
                 self.relabel(n, L["failed"], [L["in_progress"], L["ready"]], state)
                 self.gh(["issue", "comment", str(n), "--body",
                          f"Lane {lane} run `{run}` produced a thin diff (`{thin}`): effective code <{mn} lines or mostly docs. "
                          f"Labelled `{L['failed']}`; PR not opened."])
                 self.mark_done(state, n)
-                self.log(f"{lane} #{n} thin PR blocked ({thin}) → {L['failed']}")
+                self.log(f"{lane} #{n} thin PR blocked ({thin}) → {L['failed']} "
+                         f"[failure_reason={reason}; error={detail}]")
                 return True
             subj = self.git("log", "-1", "--format=%s", f"refs/fleet/{lane}")[1]
             body = (f"Closes #{n}\n\nAutodispatched to lane **{lane}** on **{lc['host']}** ({info.get('backend')}/{info.get('model')}), "
@@ -1405,24 +1574,40 @@ class Dispatcher:
             rc, out, err = self.gh(["pr", "create", "--base", self.cfg["base_branch"], "--head", b, "--title", title, "--body", body])
             url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
             self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
-            self.log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}")
+            # the run kept its commit: a run that did not end cleanly still says why
+            reason, detail = self.end_reason(lane, lc, run, info, "the lane commit was kept and a PR was opened")
+            if rc:
+                broken, broken_detail = self.harvest_reason(lane, lc, run, info,
+                                                            f"pr create failed: {err.strip()[-160:]}")
+                reason, detail = reason or broken, detail or broken_detail
+            note = f" [failure_reason={reason}; error={detail}]" if reason else ""
+            self.log(f"{lane} finished #{n} (run {run}, {info.get('status')}){note} → {url}")
             self.mark_done(state, n)
             self.quota_backend_guard(lane, lc, info)
         elif run in self.watchdog_requeue():
             why = self.watchdog_requeue().get(run) or "watchdog"
+            # The liveness watchdog kills a run that stopped progressing: the
+            # run never finished in time, so it ends as a timeout.
+            reason, detail = self.run_failure(info, "timeout", self.ending_detail(info, f"watchdog abort: {why}"))
+            self.record_failure(lane, lc, run, reason, detail)
             self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
             self.gh(["issue", "comment", str(n), "--body", f"Lane {lane} run `{run}` was aborted by the liveness watchdog ({why}). "
                      f"Requeued as `{L['ready']}`."])
             self.mark_done(state, n)
-            self.log(f"{lane} #{n} run {run} watchdog-aborted ({why}) → requeued {L['ready']}")
+            self.log(f"{lane} #{n} run {run} watchdog-aborted ({why}) → requeued {L['ready']} "
+                     f"[failure_reason={reason}; error={detail}]")
         else:
             error_class = info.get("error_class") or ""
             if model_unavailable:
+                reason, detail = self.run_failure(info, None, self.ending_detail(
+                    info, f"model {info.get('model') or 'unknown'} unavailable"))
+                self.record_failure(lane, lc, run, reason, detail)
                 self.relabel(n, L["ready"], [L["in_progress"], L["failed"]])
                 self.gh(["issue", "comment", str(n), "--body",
                          f"Lane {lane} model `{info.get('model') or 'unknown'}` is unavailable; paused lane for 3600 seconds and requeued as `{L['ready']}`."])
                 self.mark_done(state, n)
-                self.log(f"{lane} #{n} model unavailable ({info.get('model') or 'unknown'}) → {L['ready']}")
+                self.log(f"{lane} #{n} model unavailable ({info.get('model') or 'unknown'}) → {L['ready']} "
+                         f"[failure_reason={reason}; error={detail}]")
                 return True
             requeue_classes = (self.cfg.get("quota") or {}).get("requeue_classes", ["rate_limit", "quota"])
             if error_class in requeue_classes:
@@ -1439,7 +1624,11 @@ class Dispatcher:
                          f"Label `{L['failed']}`; re-add `{L['ready']}` to retry."])
             self.mark_done(state, n)
             label = L["ready"] if error_class in requeue_classes else L["failed"]
-            self.log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{error_class}) → labelled {label}")
+            reason, detail = self.run_failure(info)
+            # The run record keeps the reason even when the executor wrote none.
+            self.record_failure(lane, lc, run, reason, detail, harvest=False)
+            self.log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{error_class}; "
+                     f"failure_reason={reason}; error={detail}) → labelled {label}")
             self.quota_backend_guard(lane, lc, info)
         return True
 
@@ -1689,19 +1878,24 @@ class Dispatcher:
         v, _ = status.parse_verdict(txt)
         if not v:
             error_class = info.get("error_class") or ""
+            reason, detail = self.run_failure(info, None, self.ending_detail(
+                info, f"review produced no verdict file ({error_class or 'no error class'})"))
+            self.record_failure(lane, lc, st.get("run"), reason, detail, harvest=False)
             if error_class == "vm_paused":
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/vm_paused); "
-                         "VM pause (not counted), will retry")
+                         f"VM pause (not counted), will retry [failure_reason={reason}; error={detail}]")
             elif error_class in {"rate_limit", "quota", "model_unavailable"}:
                 r["quota_backend"] = info.get("backend") or lc.get("backend")
-                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry")
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry "
+                         f"[failure_reason={reason}; error={detail}]")
             elif error_class == "budget_exceeded":
                 backend = info.get("backend") or lc.get("backend")
                 backends = list(r.get("budget_backends") or [])
                 if backend and backend not in backends:
                     backends.append(backend)
                 r["budget_backends"] = backends
-                self.log(f"review PR #{pr} by {lane}: budget exceeded ({backend or 'unknown'}); not counted, will retry on another backend")
+                self.log(f"review PR #{pr} by {lane}: budget exceeded ({backend or 'unknown'}); not counted, will retry on another backend "
+                         f"[failure_reason={reason}; error={detail}]")
             else:
                 if r.get("fails_sha", sha) != sha:      # new head: the counter of the old sha does not count
                     r["fails"] = 0
@@ -1711,7 +1905,8 @@ class Dispatcher:
                 classes = list(r.get("fail_classes") or [])
                 classes.append(error_class or "unknown")
                 r["fail_classes"] = classes[-4:]
-                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); fail #{r['fails']}, will retry")
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); fail #{r['fails']}, will retry "
+                         f"[failure_reason={reason}; error={detail}]")
             self.put_review(pr, r)
             return True
         rc, cur, _ = self.gh(["pr", "view", str(pr), "--json", "headRefOid,state,headRefName,body"])

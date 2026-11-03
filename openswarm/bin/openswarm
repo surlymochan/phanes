@@ -5509,13 +5509,19 @@ def cmd_run(args, policy):
                 except Exception:
                     pass
             error_class = bus_error_class(error)
-            output = {"id": rid, "status": "failed", "error_class": error_class, "error": bus_redact(str(error)),
+            failure_reason = lane_failure_reason(error_class, bus_redact(str(error)))
+            output = {"id": rid, "status": "failed", "error_class": error_class,
+                      "failure_reason": failure_reason,
+                      "failure_error": lane_failure_error(bus_redact(str(error))),
+                      "error": bus_redact(str(error)),
                       "title": title, "backend": "github-issue", "result": None, "branch": None,
                       "commit": None, "bus": {"issue_url": state.get("bus_issue_url"), "executor": None,
                                                 "pr_url": None}, "run_dir": rdir}
             jsave(f"{rdir}/result.json", output)
             append_ledger({"id": rid, "ts": NOW(), "title": title, "status": "failed",
-                           "backend": "github-issue", "error_class": error_class, "summary": bus_redact(str(error))[:300],
+                           "backend": "github-issue", "error_class": error_class,
+                           "failure_reason": failure_reason,
+                           "summary": bus_redact(str(error))[:300],
                            "card_type": card_type, "rework_of": rework_of,
                            **exec_pass_fields(False, False, bool(args.verify), None)})
             set_status(rdir, state="finished", status="failed", finished=NOW(), error_class=error_class)
@@ -5583,7 +5589,10 @@ def cmd_run(args, policy):
                budget_minutes=budget_min, runner_pid=os.getpid(), cwd=os.path.abspath(args.cwd))
     ws = prepare_workspace(os.path.abspath(args.cwd), rid, not args.no_worktree or prof["read_only"], getattr(args, "base", None))
     if prof["read_only"] and ws["mode"] != "worktree":
+        failure_reason = lane_failure_reason("worktree_unavailable", "review tasks require a committed Git worktree")
         jsave(f"{rdir}/result.json", {"id": rid, "status": "failed", "error_class": "worktree_unavailable",
+                                      "failure_reason": failure_reason,
+                                      "failure_error": lane_failure_error("review tasks require a committed Git worktree"),
                                       "error": "review tasks require a committed Git worktree", "run_dir": rdir})
         set_status(rdir, state="finished", status="failed", error_class="worktree_unavailable", finished=NOW())
         raise SystemExit("openswarm: review tasks require a committed Git worktree")
@@ -5599,7 +5608,10 @@ def cmd_run(args, policy):
                    "worktree": ws.get("root") if args.keep_worktree else None, "merge_hint": None}
             if not args.keep_worktree:
                 cleanup_worktree(ws, None)
+            prepare_error_text = f"workspace prepare {prepared.get('phase')} failed (rc {prepared.get('rc')})"
             out = {"id": rid, "status": "failed", "error_class": "prepare_failed", "title": title,
+                   "failure_reason": lane_failure_reason("prepare_failed", prepare_error_text),
+                   "failure_error": lane_failure_error(prepare_error_text),
                    "prepare": prepare, "workspace_note": note, "backend": decision["backend"],
                    "model": decision["model"], "effort": decision.get("effort"), "usage": None,
                    "seconds": prepared["seconds"], "result": None,
@@ -5609,7 +5621,9 @@ def cmd_run(args, policy):
             jsave(f"{rdir}/result.json", out)
             append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": "failed",
                            "backend": decision["backend"], "model": decision["model"],
-                           "error_class": "prepare_failed", "seconds": prepared["seconds"],
+                           "error_class": "prepare_failed",
+                           "failure_reason": out["failure_reason"],
+                           "seconds": prepared["seconds"],
                            "card_type": card_type, "rework_of": rework_of, **routing_fields,
                            **exec_pass_fields(False, False, bool(args.verify), None)})
             set_status(rdir, state="finished", status="failed", error_class="prepare_failed", finished=NOW())
@@ -5743,8 +5757,16 @@ def cmd_run(args, policy):
         read_only=read_only, verify=verify)
     usage = (attempts[-1].get("meta") or {}).get("usage")
     wall_seconds = round(sum(a["seconds"] for a in attempts), 3)
+    run_error_class = ("budget_exceeded_daily" if budget_denial else "prepare_failed" if prepare_error
+                       else attempts[-1]["error_class"])
+    run_error_tail = next((a.get("error_tail") for a in reversed(attempts)
+                           if isinstance(a, dict) and a.get("error_tail")), None)
+    failure_reason = (lane_failure_reason(run_error_class, run_error_tail)
+                      if status not in ("done", "completed") else None)
     out = {
-        "id": rid, "status": status, "error_class": "budget_exceeded_daily" if budget_denial else "prepare_failed" if prepare_error else attempts[-1]["error_class"],
+        "id": rid, "status": status, "error_class": run_error_class,
+        "failure_reason": failure_reason,
+        "failure_error": lane_failure_error(run_error_tail) if failure_reason else None,
         **({"budget_error": budget_denial, "error": "budget_exceeded_daily"} if budget_denial else {}),
         "title": title, "prepare": prepare, "workspace_note": note, "verify": verify, "verify_note": verify_note,
         "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
@@ -5759,6 +5781,7 @@ def cmd_run(args, policy):
                    "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
                    "tier": decision.get("tier"), "attempts": [{k: a[k] for k in a if k != "error_tail"} for a in attempts],
                    "error_class": out["error_class"],
+                   "failure_reason": failure_reason,
                    "seconds": wall_seconds, "usage": usage,
                    "risk_blocks": out["risk_blocks"], "summary": (result or {}).get("summary"),
                    "commit": fin.get("commit"), "files": len((result or {}).get("files_changed") or []),
@@ -6882,8 +6905,13 @@ def bus_finish_run(rid, rdir, title, root, remote, issue, result, executor, stat
     bus_info = {"issue_url": (issue or {}).get("html_url"), "executor": executor,
                 "pr_url": (result or {}).get("pr_url")}
     result_error_class = (result or {}).get("error_class")
+    bus_error_class_value = (bus_error_class(error) if error else result_error_class)
+    bus_failure_reason = (lane_failure_reason(bus_error_class_value, error)
+                          if status not in ("done", "completed") else None)
     output = {
-        "id": rid, "status": status, "error_class": (bus_error_class(error) if error else result_error_class), "title": title,
+        "id": rid, "status": status, "error_class": bus_error_class_value, "title": title,
+        "failure_reason": bus_failure_reason,
+        "failure_error": lane_failure_error(error) if bus_failure_reason else None,
         "backend": "github-issue", "model": None, "effort": None, "usage": None,
         "seconds": elapsed, "verify": verify, "verify_note": verify_note,
         "result": {key: result.get(key) for key in ("status", "summary", "files_changed", "tests", "followups", "verify")
@@ -9332,6 +9360,19 @@ def dispatch_quota_module():
     return module
 
 
+def dispatch_failure_reason_module():
+    """The canonical run-ending reason module (lib/dispatch/failure_reason.py), loaded by path."""
+    name = "openswarm_dispatch_failure_reason"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "failure_reason.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
 def lane_timing_record_tool(timings, command, seconds):
     """Record a completed tool interval and retain the five slowest redacted labels."""
     elapsed = max(0.0, float(seconds or 0))
@@ -9359,6 +9400,23 @@ def lane_quota_fields(error_class, attempts):
             fields["provider_code"] = match.group(1)
             break
     return fields
+
+
+RUN_FAILURE_REASONS = set(dispatch_failure_reason_module().RUN_FAILURE_REASONS)
+
+
+def lane_failure_reason(error_class, error_detail=None, rc=None):
+    """The canonical run-ending reason; never None and never outside the enumeration.
+
+    A cause outside the enumeration (or none at all) becomes ``unknown`` and
+    keeps the raw error next to it, so a failed run is never reason-less.
+    """
+    return dispatch_failure_reason_module().classify(error_class, error_detail, rc)
+
+
+def lane_failure_error(error_detail=None, rc=None):
+    """The raw error kept next to the reason: a reason alone cannot be debugged."""
+    return dispatch_failure_reason_module().tail(error_detail, rc)
 
 
 def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None):
@@ -9474,7 +9532,10 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                          if isinstance(a, dict) and a.get("error_tail")), None)
     if slowest_text:
         error_detail = (error_detail or "budget exceeded") + "; " + slowest_text
-    out = {"id": rid, "status": status, "error_class": error_class, "error": error_detail,
+    failure_reason = lane_failure_reason(error_class, error_detail, rc) if status not in ("done", "completed") else None
+    failure_error = lane_failure_error(error_detail, rc) if failure_reason else None
+    out = {"id": rid, "status": status, "error_class": error_class, "failure_reason": failure_reason,
+           "failure_error": failure_error, "error": error_detail,
            "timings": timings, "title": title, "lane": lane["name"],
            "prepare": ws.get("prepare", []), "workspace_note": ws.get("workspace_note"), "verify": verify,
            "verify_note": verify_note, "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
@@ -9492,7 +9553,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                                    bool(spec.get("verify")), verify)
     append_ledger({"id": rid, "ts": NOW(), "title": title, "status": status, "lane": lane["name"],
                    "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
-                   "attempts": attempts, "error_class": error_class,
+                   "attempts": attempts, "error_class": error_class, "failure_reason": failure_reason,
                    "seconds": round(sum(attempt["seconds"] for attempt in attempts), 3),
                    "usage": usage, "commit": fin.get("commit"),
                    "risk_blocks": out["risk_blocks"], "summary": (final or {}).get("summary"),
@@ -9701,9 +9762,12 @@ def lane_do_run(lane, spec, child, server, current):
         lane_record_event(evp, {"type": "error", "error": short(e, 400)})
         if ws is None:
             # Preserve a visible failed run even if lane worktree preparation was rejected.
+            failure_reason = lane_failure_reason(error_class, short(e, 500), 1)
+            failure_error = lane_failure_error(short(e, 500), 1)
             status = {"id": rid, "status": "failed", "title": spec.get("title"), "lane": lane["name"],
                       "backend": lane["backend"], "model": lane["model"], "result": None,
-                      "error_class": error_class,
+                      "error_class": error_class, "failure_reason": failure_reason,
+                      "failure_error": failure_error, "error": short(e, 500),
                       "attempts": [{"backend": lane["backend"], "model": lane["model"], "rc": 1,
                                     "error_class": error_class, "error_tail": short(e, 500)}], "run_dir": rdir}
             jsave(os.path.join(rdir, "result.json"), status)
@@ -9711,7 +9775,7 @@ def lane_do_run(lane, spec, child, server, current):
                        last_error=short(e, 500))
             append_ledger({"id": rid, "ts": NOW(), "title": spec.get("title"), "status": "failed",
                            "lane": lane["name"], "backend": lane["backend"], "model": lane["model"],
-                           "error_class": error_class, "card_type": spec.get("card_type"),
+                           "error_class": error_class, "failure_reason": failure_reason, "card_type": spec.get("card_type"),
                            "rework_of": spec.get("rework_of"),
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
@@ -11804,6 +11868,59 @@ def fleet_health_status(rows):
     return worst
 
 
+FAILED_RUN_STATUSES = ("failed", "error", "stopped", "budget_exceeded", "partial")
+
+
+def fleet_health_failure_reason(record):
+    """The canonical reason of a finished run record (never None, never outside the enumeration)."""
+    module = dispatch_failure_reason_module()
+    stored = record.get("failure_reason")
+    if stored:
+        return module.canonical(stored, record.get("error"))
+    detail = record.get("error") or (record.get("attempts") or [{}])[-1].get("error_tail")
+    return module.classify(record.get("error_class"), detail)
+
+
+def fleet_health_failure_reasons(home=None, limit=20):
+    """The recent failure reason histogram: the run failures and the harvest failures.
+
+    Every counted cause is one of the canonical reasons; a run without a
+    recorded reason is counted as ``unknown`` instead of disappearing.  A run
+    contributes one count per distinct cause: its own reason when the run
+    failed, plus the harvest reason when the harvest broke the ending, so a
+    harvest failure of an already failed run stays visible in the histogram.
+    """
+    module = dispatch_failure_reason_module()
+    counts = {}
+    run_root = os.path.join(home or DATA, "runs")
+    if not os.path.isdir(run_root):
+        return counts
+    results = sorted((path for path in glob.glob(os.path.join(run_root, "*", "result.json"))),
+                     key=os.path.getmtime, reverse=True)
+    for result_path in results:
+        try:
+            with open(result_path, encoding="utf-8") as stream:
+                record = json.load(stream)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        causes = []
+        if record.get("status") in FAILED_RUN_STATUSES:
+            # the run itself ended badly: it is counted with its own reason
+            causes.append(fleet_health_failure_reason(record))
+        harvest = record.get("harvest_failure_reason")
+        if harvest:
+            # the harvest broke the ending: counted even when the run had
+            # already failed, otherwise the harvest failure stays invisible
+            causes.append(module.canonical(harvest, record.get("harvest_failure_error")))
+        for cause in dict.fromkeys(causes):    # one count per distinct cause of a run
+            counts[cause] = counts.get(cause, 0) + 1
+        if sum(counts.values()) >= limit:
+            break
+    return counts
+
+
 def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
     """Probe every fleet host and report its health; --apply pauses the sick ones.
 
@@ -11826,6 +11943,7 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     previous = fleet_health_state_load(home)
     probe = runner if runner is not None else fleet_health_runner(config)
     rows, remembered = [], {}
+    recent_failures = fleet_health_failure_reasons(home)
     for name in names:
         scope = "host:" + name
         record = active.get(scope)
@@ -11854,7 +11972,7 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     report = {"ok": all(row["status"] == "ok" for row in rows),
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
-              "thresholds": limits,
+              "thresholds": limits, "recent_failure_reasons": recent_failures,
               "hosts": rows}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -11867,6 +11985,10 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         if row["action"] != "none":
             print(f"  action: {row['action']}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")
+    if recent_failures:
+        print("recent failure reasons (last 20):")
+        for reason, count in sorted(recent_failures.items(), key=lambda item: (-item[1], item[0])):
+            print(f"  {reason}: {count}")
     return report
 
 
