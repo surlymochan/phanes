@@ -128,3 +128,59 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 ```bash
 python3 tools/check-harvest-filter.py 1768 1677
 ```
+
+## 开关来源审计（Refs #1827）
+
+`PAUSE*` / `EXCLUDE*` 文件是派发开关：今天它们被不明来源写入，事后追不到创建者，只能
+人读 brain 日志。AD **每轮 tick** 比对 autodispatch 目录（`~/phanes-ctl/autodispatch`）下的
+开关集合（文件名 + mtime + 内容），有变化就往 `switch-audit.jsonl` 追加一行：
+
+| 字段 | 含义 |
+| --- | --- |
+| `at` | 审计时间（`%F %T`） |
+| `file` | 开关文件名 |
+| `action` | `created` / `deleted` / `changed`（mtime 或内容变了就是 `changed`） |
+| `before` / `after` | 前后内容摘要（首行，截断到 120 字符） |
+| `owner` | 属主（uid / gid / 用户名） |
+| `mtime` | 文件 mtime（epoch 秒；删除时是删除前的 mtime） |
+| `unattributed` | 是否缺授权条目 |
+| `authorization` | 命中的授权条目（brain 日志尾行或开关自身的 `auto:`） |
+
+基线（上一轮的快照）写在 `switch-audit-state.json`；基线损坏时只重建基线、不写行（不拿
+损坏的基线伪造一次变化）。
+
+**读不到 ≠ 不存在**：开关目录列不出来、或某个开关读不了（权限/IO 错误）时，这一轮的
+快照是不完整的，审计**跳过比较、也不更新基线**（只记一行日志）。读不到的文件不算被删除，
+恢复后仍与上一轮完好基线比较，不产生假的 `deleted` / `created`；这一轮里真实发生的删除，
+会在恢复后的那一轮按真实的 before/after 记一次。
+
+每个开关每轮**只 stat 一次**：`switch_stats()` 用这一次 `os.stat()` 的 `st_mode` 判断是不是
+普通文件，`switch_entry()` 复用同一个 stat 结果。不能再用第二次 stat（`os.path.isfile()`
+会自己吞掉 OSError）：第二次 stat 失败会把**仍存活**的开关踢出集合，快照却仍被标成完整，
+于是写出假的 `deleted`、改坏基线，恢复后再写出假的 `created`。
+
+授权判定：`brain/log.md` 最近 30 行命中 `用户.*令|user order|auto:` 就算有授权；开关自身
+内容以 `auto:` 开头也算有授权（health-loop 自己写的开关，见 `docs/ctl-boot.md`）。两条都
+没有的变化行标 `unattributed`，并往 `~/phanes-ctl/autodispatch/health.alert` 追加一条
+`level=hard source=switch-audit` 告警。
+
+**只审计、只告警：不自动删除、不自动恢复开关。** 审计文件损坏、开关目录不可读时，审计
+跳过后记一行日志即可，派发主循环不受影响（`audit_switches()` 内部吞掉所有异常）。
+
+离线验证：
+
+```bash
+python3 tools/check-ad-switch-audit.py                    # 临时目录里 touch 一个 PAUSE-DISPATCH，下一轮 tick 出审计行
+cd openswarm && python3 -m unittest tests.test_autodispatch.SwitchAuditTests -v
+```
+
+### 修复交付对照（review 意见 → 改动 → 测试）
+
+测试都在 `openswarm/tests/test_autodispatch.py::SwitchAuditTests`。
+
+| 轮次 | 意见（BLOCKER） | 对应改动 | 测试 |
+| --- | --- | --- | --- |
+| 第 1 轮 B1 | 单个开关 stat/读取失败被当成删除（`switch_entry` 返回 None → 快照省略它 → 假的 `deleted` + 告警、基线被写成缺文件的、恢复后再假 `created`） | `switch_entry()` 读失败返回 None；`switch_snapshot()` 快照不完整时返回 `complete=False`；`_audit_switches()` 快照不完整时**跳过比较、不更新基线**，派发循环照常跑 | `test_a_read_failure_does_not_fake_a_deletion`、`test_the_recovery_after_a_read_failure_does_not_fake_a_creation`、`test_a_deletion_during_a_read_failure_is_audited_after_the_recovery` |
+| 第 1 轮 B1 | 目录枚举失败被当成空开关集（`switch_stats()` 返回空集合） | `switch_stats()` 目录列不出来时返回 `complete=False`，同样跳过比较与基线更新 | `test_an_unreadable_directory_does_not_fake_a_deletion`、`test_an_unreadable_switch_directory_is_survivable` |
+| 第 2 轮 B1 | `os.path.isfile()` 的第二次 stat 吞掉 OSError：仍存活的开关被漏掉、快照被标成完整 → 假 `deleted` + 基线被改写，恢复后假 `created` | `switch_stats()` 复用第一次 `os.stat()` 的 `st_mode`（`stat.S_ISREG`）判断文件类型，不再第二次 stat；`switch_entry()` 复用同一个 stat 结果（每轮每开关只 stat 一次） | `test_a_stat_failure_does_not_fake_a_deletion`、`test_the_recovery_after_a_stat_failure_does_not_fake_a_creation`、`test_a_switch_is_stat_ed_only_once_per_tick`、`test_a_living_switch_is_audited_when_a_second_stat_would_fail` |
+| 第 2 轮 B2 | 交付说明没有逐条列出上轮 B1、对应改动和具体测试 | 本表（README）与提交信息里的同一张对照表 | — |

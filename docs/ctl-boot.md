@@ -72,6 +72,21 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      This prevents host suspend / nanosleep freeze from creating ~40-minute silent heartbeat
      gaps and false-positive supervisor stalls.
      Check offline with `python3 tools/check-ad-heartbeat-chunk.py`.
+   - **Switch source audit (Refs #1827)**: every tick compares the `PAUSE*` / `EXCLUDE*`
+     files of `~/phanes-ctl/autodispatch` (name, mtime, content) with the previous tick and
+     appends one line per change to `~/phanes-ctl/autodispatch/switch-audit.jsonl` (time,
+     file name, action `created`/`deleted`/`changed`, before/after content summary, owner,
+     file mtime). A change without an authorization entry (no `用户.*令` / `user order` /
+     `auto:` in the last 30 lines of `brain/log.md`, and no `auto:` body in the switch
+     itself) is marked `unattributed` and raises a `level=hard source=switch-audit` line in
+     `~/phanes-ctl/autodispatch/health.alert`. The audit only records: it never removes nor
+     restores a switch, and a broken audit file or an unreadable switch directory never
+     stops the dispatch loop. An unreadable directory or switch makes the snapshot
+     incomplete: the tick is skipped (no comparison, the baseline is kept), so a read error
+     never fakes a `deleted` or `created` row (Refs #1827). Every switch is stat'ed once
+     per tick and the file type comes from that stat: a second stat would swallow its own
+     error and drop a living switch from the set (Refs #1827).
+     Check offline with `python3 tools/check-ad-switch-audit.py`.
 
 3. **`lane-merge`** (merge Linux-green `fleet/*` PRs):
    - **Startup command**: `~/phanes-ctl/bin/lane-merge`  

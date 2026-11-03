@@ -9,7 +9,7 @@ Pause: the openswarm pause store ($OPENSWARM_HOME/pauses, written by `openswarm 
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
-import base64, json, os, re, shlex, subprocess, sys, time, tempfile, concurrent.futures as cf
+import base64, hashlib, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -152,6 +152,231 @@ def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
     scopes = paused_scopes() if scopes is None else scopes
     return "mint" in scopes
+
+# --- switch audit (Refs #1827) -------------------------------------------------------------
+# The PAUSE*/EXCLUDE* files of the autodispatch directory are the dispatch switches. Nobody
+# knows today who wrote them: the file is left behind and the dispatch silently stops. Every
+# tick compares the switch set (name, mtime, content) with the previous tick and appends one
+# line per change to `switch-audit.jsonl`. The audit only records: it never removes nor
+# restores a switch, and it never stops the dispatch loop (Refs #1827).
+SWITCH_AUDIT_FILE = "switch-audit.jsonl"
+SWITCH_AUDIT_STATE = "switch-audit-state.json"
+SWITCH_ALERT_FILE = "health.alert"
+SWITCH_PREFIXES = ("PAUSE", "EXCLUDE")
+# An authorization entry: an operator order in the brain log, or the `auto:` marker the
+# health loop writes into its own switches (docs/ctl-boot.md).
+AUTHORIZATION_RE = re.compile(r"用户.*令|user order|auto:")
+AUTHORIZATION_TAIL_LINES = 30
+
+def switch_audit_log(message):
+    """Write one line to the AD log; the audit never raises (Refs #1827)."""
+    try: log(message, brain=False)
+    except Exception: pass
+
+def switch_stats(directory=None):
+    """The stat result of every switch file of the autodispatch directory: (name -> stat).
+
+    The second value of the result is False when the directory cannot be listed or one of
+    the entries cannot be read: an unreadable directory is not an empty switch set, and an
+    unreadable entry is not a deleted switch (Refs #1827)."""
+    root = D if directory is None else directory
+    try: entries = sorted(os.listdir(root))
+    except OSError: return {}, False
+    found = {}
+    for name in entries:
+        if not name.startswith(SWITCH_PREFIXES): continue
+        path = os.path.join(root, name)
+        try: info = os.stat(path)              # the entry must be readable, else the set is unknown
+        except FileNotFoundError: continue     # it is really gone: a deletion, not a read error
+        except OSError: return {}, False       # it cannot be read: the switch set is unknown
+        # the file type comes from the stat above: a second stat (`os.path.isfile`) swallows
+        # its own OSError and would drop a living switch from the set, which fakes a
+        # deletion and breaks the baseline (Refs #1827)
+        if stat.S_ISREG(info.st_mode): found[name] = info
+    return found, True
+
+def switch_owner(info):
+    """The owner of a switch file: uid, gid and the user name (None when it is unknown)."""
+    owner = {"uid": info.st_uid, "gid": info.st_gid, "name": None}
+    try:
+        import pwd
+        owner["name"] = pwd.getpwuid(info.st_uid).pw_name
+    except (ImportError, KeyError, OSError):
+        pass
+    return owner
+
+def switch_summary(data):
+    """A one-line summary of a switch body (the first non-empty line, truncated)."""
+    text = data.decode("utf-8", "replace").strip()
+    if not text: return ""
+    line = text.splitlines()[0].strip()
+    return line if len(line) <= 120 else line[:120] + "…"
+
+def switch_entry(directory, name, info=None):
+    """The snapshot of one switch file: mtime, size, content digest, owner and summary.
+
+    `info` is the stat result of the file (the caller already did it): it is reused here so
+    that a switch is stat'ed only once per tick. None means the file cannot be read (a
+    permission error, a broken file): the switch is not proven to be gone, so the caller
+    must not record a deletion (Refs #1827)."""
+    path = os.path.join(directory, name)
+    try:
+        if info is None: info = os.stat(path)
+        with open(path, "rb") as stream: data = stream.read()
+    except OSError:
+        return None
+    return {"name": name, "mtime": info.st_mtime, "size": info.st_size,
+            "digest": hashlib.sha256(data).hexdigest(), "owner": switch_owner(info),
+            "summary": switch_summary(data)}
+
+def switch_snapshot(directory=None):
+    """The snapshot of every switch file of the directory: (file name -> entry, complete).
+
+    `complete` is False when the directory or one of the switches cannot be read: such a
+    snapshot is not comparable with the baseline, it would fake deletions and creations
+    (Refs #1827)."""
+    root = D if directory is None else directory
+    stats, listed = switch_stats(root)
+    if not listed: return {}, False
+    snapshot = {}
+    for name, info in stats.items():
+        entry = switch_entry(root, name, info)
+        if entry is None: return {}, False
+        snapshot[name] = entry
+    return snapshot, True
+
+def load_switch_audit_state(path):
+    """The snapshot of the previous tick (empty when there is none).
+
+    A corrupt state file is reported as corrupt: the caller rebuilds the baseline instead of
+    writing a row for every switch (a broken file must not fake a change)."""
+    try:
+        with open(path, encoding="utf-8") as stream: state = json.load(stream)
+    except FileNotFoundError: return {}, False
+    except (OSError, ValueError): return {}, True
+    switches = state.get("switches") if isinstance(state, dict) else None
+    if not isinstance(switches, dict): return {}, True
+    return {name: entry for name, entry in switches.items() if isinstance(entry, dict)}, False
+
+def save_switch_audit_state(path, snapshot):
+    """Write the snapshot of the switches as the baseline of the next tick."""
+    try:
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump({"at": time.strftime("%F %T"), "switches": snapshot}, stream, ensure_ascii=False)
+            stream.write("\n")
+        os.replace(temporary, path)
+    except OSError as e:
+        switch_audit_log(f"switch-audit: the baseline is not writable ({e!r})")
+
+def brain_authorization(path=None, lines=AUTHORIZATION_TAIL_LINES):
+    """The authorization entry of the last `lines` lines of the brain log (None when there is none).
+
+    The brain log is the only place where an operator writes down why a switch was written;
+    only its tail is read, so a long log stays cheap."""
+    source = BRAIN_LOG if path is None else path
+    try:
+        with open(source, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            position = stream.tell(); data = b""
+            while position > 0 and data.count(b"\n") <= lines:
+                step = min(8192, position); position -= step
+                stream.seek(position); data = stream.read(step) + data
+    except OSError:
+        return None
+    for line in data.decode("utf-8", "replace").splitlines()[-lines:]:
+        if AUTHORIZATION_RE.search(line): return line.strip()[:200]
+    return None
+
+def switch_changes(previous, current):
+    """The changes between two snapshots: (file name, action, before, after) per change.
+
+    A file is `created` when it was not there, `deleted` when it is gone and `changed` when
+    its mtime or its content differ (both are compared: a touched switch is a change too)."""
+    changes = []
+    for name in sorted(current):
+        before = previous.get(name)
+        if before is None:
+            changes.append((name, "created", None, current[name])); continue
+        same_mtime = float(before.get("mtime", -1)) == float(current[name]["mtime"])
+        if before.get("digest") != current[name]["digest"] or not same_mtime:
+            changes.append((name, "changed", before, current[name]))
+    for name in sorted(previous):
+        if name not in current: changes.append((name, "deleted", previous[name], None))
+    return changes
+
+def switch_audit_rows(changes, authorization, moment=None):
+    """Build one audit row per change (the authorization is the brain log entry, if any).
+
+    A switch whose own body starts with `auto:` is attributed to the health loop, so it is
+    not marked `unattributed` even when the brain log carries no order."""
+    stamp = time.strftime("%F %T") if moment is None else moment
+    rows = []
+    for name, action, before, after in changes:
+        source = after if after is not None else before
+        body = (source or {}).get("summary", "")
+        owner = (source or {}).get("owner") or {"uid": None, "gid": None, "name": None}
+        evidence = authorization
+        if evidence is None and "auto:" in body: evidence = "auto:"
+        rows.append({"at": stamp, "file": name, "action": action,
+                     "before": (before or {}).get("summary", ""), "after": (after or {}).get("summary", ""),
+                     "owner": owner, "mtime": (source or {}).get("mtime"),
+                     "unattributed": evidence is None, "authorization": evidence or ""})
+    return rows
+
+def write_switch_alert(root, row):
+    """Write the alert of an unattributed switch change into `health.alert`."""
+    owner = row.get("owner") or {}
+    line = (f"{row['at']} level=hard source=switch-audit file={row['file']} action={row['action']} "
+            f"owner={owner.get('name') or owner.get('uid')} uid={owner.get('uid')} mtime={row.get('mtime')} "
+            f"unattributed: the switch changed without an authorization entry")
+    with open(os.path.join(root, SWITCH_ALERT_FILE), "a", encoding="utf-8") as stream:
+        stream.write(line + "\n")
+
+def audit_switches(directory=None, brain_log=None):
+    """Audit the switch files of one tick and append the changes to `switch-audit.jsonl`.
+
+    Returns the audit rows of this tick (empty when nothing changed). Every failure is
+    swallowed: a broken audit file or an unreadable switch directory never stops the
+    dispatch loop (Refs #1827)."""
+    root = D if directory is None else directory
+    try:
+        return _audit_switches(root, brain_log)
+    except Exception as e:
+        switch_audit_log(f"switch-audit failed: {e!r}")
+        return []
+
+def _audit_switches(root, brain_log):
+    state_path = os.path.join(root, SWITCH_AUDIT_STATE)
+    previous, corrupt = load_switch_audit_state(state_path)
+    current, complete = switch_snapshot(root)
+    if not complete:
+        # the switch set is not fully readable: no change is proven, so nothing is compared
+        # and the baseline is kept as it is. A read error must not fake a deletion, and the
+        # next readable tick still compares against the last known good baseline, so the
+        # changes of the unreadable window are audited once, with the right before/after.
+        switch_audit_log("switch-audit: the switch set is not fully readable, this tick is skipped")
+        return []
+    if corrupt:
+        # the baseline is broken: rebuild it, but do not fake a change for every switch
+        switch_audit_log("switch-audit: the baseline is unreadable, it is rebuilt without rows")
+        save_switch_audit_state(state_path, current)
+        return []
+    rows = switch_audit_rows(switch_changes(previous, current), brain_authorization(brain_log))
+    if rows:
+        try:
+            with open(os.path.join(root, SWITCH_AUDIT_FILE), "a", encoding="utf-8") as stream:
+                for row in rows: stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError as e:
+            switch_audit_log(f"switch-audit: the audit file is not writable ({e!r})")
+        for row in rows:
+            switch_audit_log(f"switch-audit: {row['file']} {row['action']}"
+                             + (" (unattributed)" if row["unattributed"] else ""))
+            if row["unattributed"]:
+                try: write_switch_alert(root, row)
+                except OSError as e: switch_audit_log(f"switch-audit: the alert is not writable ({e!r})")
+    save_switch_audit_state(state_path, current)
+    return rows
 
 def worker_state_path():
     return os.path.join(ctl_state_dir(), "autodispatch.pid")
@@ -948,6 +1173,7 @@ def finish(lane, cfg, st, info, state):
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 def tick(lanes, state, last_warn):
+    audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
     scopes = paused_scopes()  # the openswarm pause store and the legacy PAUSE markers (Refs #1366)
     if "all" in scopes: return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
