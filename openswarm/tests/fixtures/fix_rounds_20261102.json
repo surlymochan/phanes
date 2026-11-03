@@ -1,0 +1,40 @@
+{
+  "note": "2026-11-02 晚间多轮修复样本（Refs #1713）：审查 CHANGES 触发的修复轮次卡与车道状态。",
+  "cases": [
+    {
+      "issue": 1642,
+      "pr": 1631,
+      "title": "同一 issue 连续三轮修复：旧轮次未完成时又来一轮审查",
+      "steps": [
+        {"event": "changes", "labels": ["lane-pr"]},
+        {"event": "take", "labels": ["lane-ready", "in-progress"]},
+        {"event": "changes", "labels": ["lane-ready", "in-progress"]},
+        {"event": "done", "labels": ["lane-pr"]},
+        {"event": "changes", "labels": ["lane-pr"]},
+        {"event": "take", "labels": ["lane-ready", "in-progress"]},
+        {"event": "done", "labels": ["lane-pr"]}
+      ]
+    },
+    {
+      "issue": 1651,
+      "pr": 1644,
+      "title": "旧卡还在队列里（未被认领）就来了新一轮审查",
+      "steps": [
+        {"event": "changes", "labels": ["lane-pr"]},
+        {"event": "changes", "labels": ["lane-ready"]},
+        {"event": "take", "labels": ["lane-ready", "in-progress"]},
+        {"event": "failed", "labels": ["lane-failed"]},
+        {"event": "changes", "labels": ["lane-failed"]}
+      ]
+    },
+    {
+      "issue": 1663,
+      "pr": 1655,
+      "title": "原 PR 已合并，卡片过期：清理后池子里不再有这张卡",
+      "steps": [
+        {"event": "changes", "labels": ["lane-pr"]},
+        {"event": "merged", "labels": ["lane-ready"]}
+      ]
+    }
+  ]
+}
