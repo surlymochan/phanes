@@ -821,3 +821,15 @@ setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
 ```
 
 Do not invent systemd units here; a documented start script is enough.
+
+Executor task probe integration (Refs #1826): the control-plane health check can
+invoke `python3 tools/executor-task-health.py HOST --health health.json --alert
+health.alert --snapshot-dir snapshots`. It connects with SSH and updates the
+host entry; deployment and invocation are managed separately. Example:
+
+```json
+{"hosts":{"gores1":{"executor_tasks":{"status":"collected","services":[{"service":"openswarm-executor-M19.service","collected":true,"tasks_current":869,"tasks_max":1552,"tasks_ratio":0.56,"zombie_count":844,"zombie_parent_pids":[1210977],"level":"hard"}]}}}}
+```
+
+An unavailable host uses `status: uncollected`; a host without systemd uses
+`status: skipped`. Alerts include the path to the saved full process snapshot.
