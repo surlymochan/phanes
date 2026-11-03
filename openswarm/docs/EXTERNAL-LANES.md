@@ -51,8 +51,10 @@ openswarm external tick --agent X                # agent side: one round, claims
 On each pass, the dispatcher tracks each agent's PRs by number. A PR is linked to its card by `Closes #N`, or by
 `fleet/<name>-issue<N>-…` when the body has no such line. The pass relabels the card `lane-claimed` → `lane-pr` and posts the
 commit status `external-lane/contract` on the PR head. The status is `failure` for a missing link or a thin diff (fewer
-than 30 effective lines, or mostly docs), and `success` otherwise. Review and merge stay with the normal lane review and
-merge gate. A failing status keeps the PR out of review and merge until a new head fixes it.
+than 30 effective lines, or mostly docs), and `success` otherwise. One exception: a rework card whose body carries both
+`重基PR：#<PR> <branch>` and `审查文档返工：#<PR>` for that same PR may pass the line threshold when every file the PR
+touches is a documentation file (code, tests and other files disqualify it, even inside `docs/`). Review and merge stay with
+the normal lane review and merge gate. A failing status keeps the PR out of review and merge until a new head fixes it.
 
 ## Event wake-ups (inbox PR)
 

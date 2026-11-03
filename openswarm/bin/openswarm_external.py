@@ -156,12 +156,16 @@ def plan(cfg, own, ready, prs, files_of, memory, now):
                              "desc": "no `Closes #N` in PR body and branch is not fleet/<agent>-issue<N>-<ts>"})
             continue
         linked.setdefault(n, []).append(pr)
-        if rec.get("contract_sha") != sha:
+        issue = own_by_n.get(n)
+        # The docs-rework exemption also depends on the card body, so it belongs in the cache key: adding or
+        # removing the review marker at the same head sha must re-publish the status (both directions).
+        docs_rework = bool(issue and C.review_docs_rework(issue.get("body") or "", num))
+        if rec.get("contract_sha") != sha or rec.get("docs_rework") != docs_rework:
             rec["contract_sha"] = sha
-            why = C.thin_reason(files_of(num), cfg["min_effective_lines"])
+            rec["docs_rework"] = docs_rework
+            why = C.thin_reason(files_of(num), cfg["min_effective_lines"], docs_rework)
             acts.append({"op": "status", "sha": sha, "pr": num, "state": "failure" if why else "success",
                          "desc": f"thin: {why}" if why else f"contract ok (issue #{n})"})
-        issue = own_by_n.get(n)
         if issue:
             labels = C.label_names(issue)
             rw = C.rework_target(issue.get("body") or "")

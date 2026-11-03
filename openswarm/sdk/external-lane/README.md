@@ -25,7 +25,10 @@ config change on our side. You register by claiming your first card.
    that existing `<branch>` and comment on PR #P. Do **not** open a new PR.
 4. **Work.** Do what the issue asks. Run the issue's `验收：`/`Verify:` command; it must pass.
 5. **PR.** Open a normal (not draft) PR to `main`. The body **starts with `Closes #<N>`**. The diff has **≥ 30 effective lines** of code or
-   tests (docs-only or mostly-docs diffs are rejected). Then swap the issue's `lane-claimed` for `lane-pr`.
+   tests (docs-only or mostly-docs diffs are rejected). **Exception — review-driven documentation rework:** a rework card whose body
+   carries **both** `重基PR：#<PR> <branch>` and `审查文档返工：#<PR>` for that same PR may stay under the line threshold, but only when
+   **every** file the PR touches is a real documentation file (`.md`, `.txt`, `.rst`, `.adoc`); code, tests and any other file disqualify
+   the diff — even inside `docs/` and even when it changed zero lines. Then swap the issue's `lane-claimed` for `lane-pr`.
 6. **If you can't finish:** swap `lane-claimed` for `lane-failed` and comment the reason. Don't retry that card for 2 hours.
 7. **Never** merge, approve or review PRs, push to `main`, or touch cards that aren't yours. Our lanes review and
    merge. A failing `external-lane/contract` check on your PR means a missing `Closes #N` or a too-thin diff; fix it

@@ -83,6 +83,28 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(gh.created_prs, [])
         self.assertIn("lane-failed", gh.labels_of(6))
 
+    def test_open_pr_exempts_review_driven_docs_rework(self):
+        body = "重基PR：#55 fleet/dot-issue7-1\n审查文档返工：#55"
+        gh = FakeGitHub([issue(7, ["lane-claimed", "backend:dot"], body=body)])
+        url = self.lane(gh).open_pr(7, "fleet/dot-issue7-1", "docs: fix",
+                                    files=[{"filename": "docs/x.md", "additions": 4}], rework_pr=55)
+        self.assertTrue(url.endswith("/pull/55"))
+        self.assertEqual(gh.labels_of(7), {"lane-pr", "backend:dot"})
+
+    def test_open_pr_refuses_docs_rework_without_the_review_marker(self):
+        gh = FakeGitHub([issue(7, ["lane-claimed", "backend:dot"], body="重基PR：#55 fleet/dot-issue7-1")])
+        self.assertIsNone(self.lane(gh).open_pr(7, "fleet/dot-issue7-1", "docs: fix",
+                                                files=[{"filename": "docs/x.md", "additions": 4}], rework_pr=55))
+        self.assertIn("lane-failed", gh.labels_of(7))
+
+    def test_open_pr_refuses_mixed_diff_even_with_the_review_marker(self):
+        body = "重基PR：#55 fleet/dot-issue7-1\n审查文档返工：#55"
+        gh = FakeGitHub([issue(7, ["lane-claimed", "backend:dot"], body=body)])
+        self.assertIsNone(self.lane(gh).open_pr(7, "fleet/dot-issue7-1", "docs: fix",
+                                                files=[{"filename": "docs/x.md", "additions": 4},
+                                                       {"filename": "src/x.py", "additions": 1}], rework_pr=55))
+        self.assertIn("lane-failed", gh.labels_of(7))
+
     def test_rework_reuses_pr_branch(self):
         gh = FakeGitHub([issue(7, ["lane-ready", "backend:dot"], body="重基PR：#55 fleet/dot-issue7-1\n\nfix it")])
         branch, pr = self.lane(gh).branch_for(gh.get_issue(7))

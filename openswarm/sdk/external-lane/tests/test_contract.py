@@ -60,6 +60,47 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(C.verify_command(body), "python3 -m pytest -q")
         self.assertEqual(C.rework_target("Rework PR: #5 fleet/dot-issue1-1"), (5, "fleet/dot-issue1-1"))
 
+    def test_review_docs_rework_exemption_hits(self):
+        """A review-driven docs rework of exactly this PR passes the line threshold."""
+        body = "重基PR：#55 fleet/dot-issue7-1\n审查文档返工：#55"
+        self.assertTrue(C.review_docs_rework(body, 55))
+        self.assertTrue(C.review_docs_rework(body + " fleet/dot-issue7-1", 55))  # trailing text is tolerated
+        self.assertFalse(C.review_docs_rework(body, 56))
+        docs = [{"filename": "docs/fix.md", "additions": 8, "deletions": 2}]
+        self.assertTrue(C.docs_only_diff(docs))
+        self.assertEqual(C.thin_reason(docs, review_docs_rework=True), "")
+        # without the exemption the same diff stays thin
+        self.assertIn("effective<30", C.thin_reason(docs))
+
+    def test_review_docs_rework_exemption_needs_matching_markers(self):
+        """Only the explicit review marker paired with this card's rework PR qualifies."""
+        docs = [{"filename": "docs/fix.md", "additions": 8}]
+        generic = "重基PR：#55 fleet/dot-issue7-1"
+        self.assertFalse(C.review_docs_rework(generic, 55))                       # no review marker
+        self.assertFalse(C.review_docs_rework(generic + "\n审查文档返工：#56", 55))  # marker for another PR
+        self.assertFalse(C.review_docs_rework("重基PR：#56 fleet/dot-issue7-1\n审查文档返工：#55", 55))  # rework of another PR
+        self.assertIn("effective<30", C.thin_reason(docs, review_docs_rework=C.review_docs_rework(generic, 55)))
+
+    def test_review_docs_rework_exemption_rejects_non_doc_files(self):
+        """The exemption is decided per file: code, tests and other files disqualify the whole diff."""
+        self.assertFalse(C.docs_only_diff([{"filename": "docs/example.py", "additions": 3}]))       # code in docs/
+        self.assertFalse(C.docs_only_diff([{"filename": "pkg/tests/test_x.md", "additions": 3}]))   # test file
+        self.assertFalse(C.docs_only_diff([{"filename": "tools/x.md", "additions": 3}]))             # helper script
+        self.assertFalse(C.docs_only_diff([{"filename": "docs/fix.md", "additions": 8},
+                                            {"filename": "src/fix.py", "additions": 0}]))  # zero-line code file
+        self.assertFalse(C.docs_only_diff([{"filename": "Makefile", "additions": 4}]))               # other file
+        self.assertFalse(C.docs_only_diff([]))
+        mixed = [{"filename": "docs/fix.md", "additions": 8}, {"filename": "src/fix.py", "additions": 1}]
+        self.assertIn("effective<30", C.thin_reason(mixed, review_docs_rework=True))
+
+    def test_is_doc_file(self):
+        self.assertTrue(C.is_doc_file("docs/guide.md"))
+        self.assertTrue(C.is_doc_file("README.md"))
+        self.assertTrue(C.is_doc_file("openswarm/docs/EXTERNAL-LANES.md"))
+        self.assertFalse(C.is_doc_file("docs/example.py"))
+        self.assertFalse(C.is_doc_file("openswarm/bin/openswarm"))
+        self.assertFalse(C.is_doc_file(""))
+
 
 if __name__ == "__main__":
     unittest.main()
