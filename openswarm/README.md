@@ -568,10 +568,19 @@ policy thresholds in `policy.local.json` under `resources`), and warns on memory
 counts in the summary and the exit code like the lane checks. The doctor only reads: it never installs a package, creates a
 symlink, or writes a file, so the fix hints stay the operator's decision.
 
+A `branch_protection` check reads the branch protection of the repository the lane-review commit status is published on and
+reports whether the protection requires the review context and binds administrators; a missing rule is a `warn` with a
+copyable `gh api -X PUT ...` repair command that the doctor never runs. The gate comes from the dispatcher config
+(`repo`, `review.status_context`, `base_branch`), the same source the status publisher and the CI filter use; the config is
+read from `--dispatch-config`, from `OPENSWARM_DISPATCH_CONFIG`, or from `~/.claude/openswarm-dispatch/config.json`.
+Without that config the gate is unknown — the dispatcher's `--config` is a required argument — so the check is a `warn`
+that asks for `--dispatch-config`, never an `ok` on a guessed repository or the default context.
+
 ```bash
 openswarm doctor                         # every configured lane
 openswarm doctor --lane C1               # one lane, text report with fix hints
 openswarm doctor --json                  # machine-readable report
+openswarm doctor --dispatch-config dispatch.json   # review gate of another dispatcher config
 ```
 
 Lane runs use the normal `runs/<id>` files, `openswarm/<id>` commit branch, host verification, ledger, `watch`,

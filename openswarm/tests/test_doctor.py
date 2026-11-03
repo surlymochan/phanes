@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -44,6 +45,23 @@ class DoctorTests(unittest.TestCase):
         path = self.bin / name
         path.write_text("#!/bin/sh\nexit 0\n")
         path.chmod(0o755)
+        return str(path)
+
+    def fake_gh(self, payload):
+        """A `gh` that answers the branch-protection query and records its arguments."""
+        calls = self.tmp / "gh-calls"
+        path = self.bin / "gh"
+        path.write_text("#!/bin/sh\n"
+                        f'echo "$@" >> "{calls}"\n'
+                        "echo '" + payload + "'\n")
+        path.chmod(0o755)
+        return calls
+
+    def dispatch_config(self, **overrides):
+        config = {"repo": "owner/repo", "review": {"status_context": "lane-review"}}
+        config.update(overrides)
+        path = self.tmp / "dispatch.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
         return str(path)
 
     def sandbox_binaries(self, include_slirp4netns=True):
@@ -154,7 +172,7 @@ class DoctorTests(unittest.TestCase):
         result = self.doctor("--json")
 
         report = json.loads(result.stdout)
-        self.assertEqual(set(report), {"ok", "lanes", "resources", "notes", "summary"})
+        self.assertEqual(set(report), {"ok", "lanes", "checks", "resources", "notes", "summary"})
         self.assertEqual(set(report["summary"]), {"ok", "warn", "fail", "lanes"})
         self.assertEqual(report["summary"]["lanes"], 1)
         lane = report["lanes"][0]
@@ -347,6 +365,52 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("sandbox.slirp4netns", linux)
         self.assertIn("sandbox.iptables", linux)
 
+    def test_the_branch_protection_check_reads_the_dispatcher_config(self):
+        calls = self.fake_gh(json.dumps({"required_status_checks": {"contexts": ["lane-review"]},
+                                         "enforce_admins": {"enabled": True}}))
+        config = self.dispatch_config(repo="owner/other", review={"status_context": "custom-review"})
+
+        result = self.doctor("--json", "--dispatch-config", config)
+
+        report = json.loads(result.stdout)
+        check = report["checks"][0]
+        # The dispatcher publishes under 'custom-review'; a branch that only requires the old
+        # default context enforces no review status, so the doctor warns.
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("custom-review", check["detail"])
+        # The repository of the dispatcher config is the one that is checked.
+        self.assertIn("repos/owner/other/branches/main/protection", calls.read_text())
+
+    def test_the_branch_protection_check_is_ok_when_the_gate_is_enforced(self):
+        self.fake_gh(json.dumps({"required_status_checks": {"contexts": ["lane-review"]},
+                                 "enforce_admins": {"enabled": True}}))
+        config = self.dispatch_config()
+
+        result = self.doctor("--json", "--dispatch-config", config)
+
+        check = json.loads(result.stdout)["checks"][0]
+        self.assertEqual(check["status"], "ok")
+        self.assertIsNone(check["fix"])
+
+    def test_without_the_dispatcher_config_the_gate_is_unknown_and_never_ok(self):
+        # The dispatcher serves with a config that is not at the default location and
+        # publishes under another context; the doctor must not report OK on the default
+        # context of a guessed repository.
+        calls = self.fake_gh(json.dumps({"required_status_checks": {"contexts": ["lane-review"]},
+                                         "enforce_admins": {"enabled": True}}))
+        self.dispatch_config(repo="owner/other", review={"status_context": "custom-review"})
+
+        result = self.doctor("--json")
+
+        report = json.loads(result.stdout)
+        check = report["checks"][0]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("unknown", check["detail"])
+        self.assertIn("--dispatch-config", check["fix"])
+        # No repository is guessed: GitHub is not asked about a branch nobody protects.
+        self.assertFalse(calls.exists())
+        self.assertTrue(any("dispatcher config" in note for note in report["notes"]))
+
     def test_doctor_changes_nothing_on_disk(self):
         self.sandbox_binaries(include_slirp4netns=False)
 
@@ -358,6 +422,121 @@ class DoctorTests(unittest.TestCase):
         # The missing slirp4netns only fails the report on Linux; elsewhere the sandbox tools are not checked.
         self.assertEqual(result.returncode, 1 if LINUX else 0, result.stdout)
         self.assertEqual(tree(), before)
+
+
+class BranchProtectionTests(unittest.TestCase):
+    """The branch-protection check asks GitHub and reports; it never changes the settings."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="openswarm-doctor-gate-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.commands = []
+
+    def runner(self, value=None, error=""):
+        def run(command, **kwargs):
+            self.commands.append(list(command))
+            return subprocess.CompletedProcess(command, 1 if error else 0,
+                                               json.dumps(value) if value is not None else "", error)
+        return run
+
+    def gate(self, **overrides):
+        base = {"repo": "owner/repo", "context": "lane-review", "branch": "main"}
+        base.update(overrides)
+        return base
+
+    def test_an_unprotected_branch_warns_with_a_repair_command(self):
+        check = xs.doctor_branch_protection(self.gate(), runner=self.runner(error="HTTP 404"))
+
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("no protection", check["detail"])
+        self.assertIn("gh api -X PUT repos/owner/repo/branches/main/protection --input -", check["fix"])
+
+    def test_a_missing_review_context_warns(self):
+        check = xs.doctor_branch_protection(self.gate(), runner=self.runner({
+            "required_status_checks": {"contexts": ["ci"]}, "enforce_admins": {"enabled": True}}))
+
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("lane-review", check["detail"])
+        self.assertIn("gh api -X PUT", check["fix"])
+
+    def test_a_protected_branch_that_requires_the_context_is_ok(self):
+        check = xs.doctor_branch_protection(self.gate(), runner=self.runner({
+            "required_status_checks": {"contexts": ["lane-review"]},
+            "enforce_admins": {"enabled": True}}))
+
+        self.assertEqual(check["status"], "ok")
+        self.assertIsNone(check["fix"])
+
+    def test_administrators_that_bypass_the_protection_warn(self):
+        check = xs.doctor_branch_protection(self.gate(), runner=self.runner({
+            "required_status_checks": {"contexts": ["lane-review"]},
+            "enforce_admins": {"enabled": False}}))
+
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("Administrators", check["detail"])
+        self.assertIn("gh api -X PUT", check["fix"])
+
+    def test_a_custom_context_of_the_dispatcher_config_is_required(self):
+        config = {"repo": "owner/repo", "review": {"status_context": "custom-review"}}
+
+        gate = xs.doctor_review_gate(config)
+        check = xs.doctor_branch_protection(gate, runner=self.runner({
+            "required_status_checks": {"contexts": ["lane-review"]},
+            "enforce_admins": {"enabled": True}}))
+
+        # The branch requires the old default context only: the review status of the
+        # dispatcher is not enforced, so the doctor warns instead of reporting OK.
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("custom-review", check["detail"])
+
+    def test_a_custom_repository_of_the_dispatcher_config_is_queried(self):
+        config = {"repo": "owner/other", "base_branch": "trunk"}
+
+        gate = xs.doctor_review_gate(config)
+        xs.doctor_branch_protection(gate, runner=self.runner({
+            "required_status_checks": {"contexts": ["lane-review"]},
+            "enforce_admins": {"enabled": True}}))
+
+        self.assertEqual(self.commands[0][-1], "repos/owner/other/branches/trunk/protection")
+
+    def test_without_a_dispatcher_config_the_gate_is_unknown(self):
+        with mock.patch.object(xs, "doctor_git_repo", return_value="owner/remote"):
+            gate = xs.doctor_review_gate(None)
+
+        # The dispatcher's `--config` is required: the repository, the context and the branch
+        # are unknown, not the ones of the current worktree.
+        self.assertFalse(gate["known"])
+        self.assertEqual(gate["repo"], "")
+        self.assertEqual(gate["context"], "lane-review")
+
+    def test_an_unknown_gate_warns_without_asking_github(self):
+        with mock.patch.object(xs, "doctor_git_repo", return_value="owner/remote"):
+            gate = xs.doctor_review_gate(None)
+
+        check = xs.doctor_branch_protection(gate, runner=self.runner({
+            "required_status_checks": {"contexts": ["lane-review"]},
+            "enforce_admins": {"enabled": True}}))
+
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("unknown", check["detail"])
+        self.assertIn("--dispatch-config", check["fix"])
+        self.assertEqual(self.commands, [])
+
+    def test_a_dispatcher_config_without_a_repository_is_not_replaced_by_the_git_remote(self):
+        with mock.patch.object(xs, "doctor_git_repo", return_value="owner/remote"):
+            gate = xs.doctor_review_gate({"review": {"status_context": "custom-review"}})
+
+        self.assertTrue(gate["known"])
+        self.assertEqual(gate["repo"], "")
+        self.assertEqual(gate["context"], "custom-review")
+
+    def test_without_a_repository_the_check_warns(self):
+        check = xs.doctor_branch_protection({"repo": "", "context": "lane-review", "branch": "main"},
+                                            runner=self.runner())
+
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("no GitHub repository", check["detail"])
+        self.assertEqual(self.commands, [])
 
 
 if __name__ == "__main__":

@@ -541,6 +541,35 @@ class ReviewGate(Base):
         self.assertIn("r1", status[0])
         self.assertEqual(d.load_reviews()["20"]["verdict"], "APPROVE")
 
+    def test_the_configured_status_context_is_published_and_excluded_from_ci(self):
+        # The dispatcher publishes the status under `review.status_context`; the CI filter
+        # and the doctor read the very same context.
+        self.cfg["review"]["status_context"] = "custom-review"
+        d = self.make([("git -C", (0, "VERDICT: APPROVE\n", "")),
+                       ("pr view 26", (0, json.dumps({"headRefOid": SHA, "state": "OPEN", "headRefName": "fleet/M5-issue260-r",
+                                                      "body": "Closes #260"}), ""))])
+        st = {"issue": "PR26", "run": "r1", "review_pr": 26, "review_sha": SHA}
+        info = {"branch": "lane/x", "commit": "c", "backend": "pi", "model": "m"}
+        self.assertTrue(d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {}))
+        status = self.runner.called(f"statuses/{SHA}")
+        self.assertEqual(len(status), 1)
+        self.assertIn("context=custom-review", status[0])
+        checks = d._checks({"statusCheckRollup": [{"context": "custom-review", "state": "PENDING"},
+                                                   {"context": "ci", "state": "SUCCESS"}]})
+        self.assertEqual([c["context"] for c in checks], ["ci"])
+
+    def test_the_review_gate_of_the_dispatcher_is_the_one_the_doctor_resolves(self):
+        # One source: the dispatcher publishes under it, filters the CI rollup with it and
+        # the doctor checks the same repository, context and branch.
+        self.cfg["review"]["status_context"] = "custom-review"
+        self.cfg["base_branch"] = "trunk"
+        d = self.make()
+
+        self.assertEqual(d.gate, E.status.resolve_gate(self.cfg))
+        self.assertEqual(d.gate["context"], "custom-review")
+        self.assertEqual(d.gate["repo"], self.cfg["repo"])
+        self.assertEqual(d.gate["branch"], "trunk")
+
     def test_changes_posts_failure_status(self):
         verdict = "VERDICT: CHANGES\nSUMMARY: please fix\n"
         d = self.make([("git -C", (0, verdict, "")),

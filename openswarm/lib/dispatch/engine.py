@@ -67,6 +67,18 @@ status = _load_review_module("status")
 evidence = _load_review_module("evidence")
 
 
+def review_gate(cfg):
+    """The review gate of a dispatcher config: repository, status context and branch.
+
+    The lane-review commit status is published under `review.status_context` of the
+    dispatcher config, and the CI filter excludes the very same context.  Both read it
+    through one resolution, so a checker (the doctor) can use the same source.
+    """
+    if status is None:
+        return {}
+    return status.resolve_gate(cfg)
+
+
 _DISPATCH_MODULES = {}
 
 
@@ -420,6 +432,11 @@ class Dispatcher:
         self.out = out or sys.stdout
         self.L = cfg["labels"]
         self.R = cfg["review"]
+        # One resolution of the review gate: the status context the publisher writes, the CI
+        # filter excludes and the doctor checks all come from the dispatcher config.
+        self.gate = review_gate(cfg) or {"repo": cfg.get("repo") or "",
+                                         "context": self.R.get("status_context") or "lane-review",
+                                         "branch": cfg.get("base_branch") or "main"}
         self.backoff = {}
         self.state_lock = threading.Lock()
         self.rev_lock = threading.RLock()
@@ -1477,7 +1494,7 @@ class Dispatcher:
 
     def _checks(self, pr):
         return [c for c in pr.get("statusCheckRollup") or []
-                if (c.get("context") or c.get("name") or c.get("workflowName")) != self.R["status_context"]]
+                if (c.get("context") or c.get("name") or c.get("workflowName")) != self.gate["context"]]
 
     def _ci_policy(self, pr):
         ignore_re = self.R.get("ignore_checks_re") or None
@@ -1958,7 +1975,7 @@ class Dispatcher:
                 backend=bk_backend,
                 model=bk_model,
                 run_id=st.get("run") or "?",
-                context=self.R.get("status_context") or status.DEFAULT_CONTEXT,
+                context=self.gate["context"],
             )
         except ValueError as e:
             self.log(f"review PR #{pr}: build status failed: {e}", brain=False)
