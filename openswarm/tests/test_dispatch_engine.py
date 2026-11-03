@@ -713,6 +713,32 @@ class QuotaHarvest(Base):
         self.assertIn("--add-label lane-failed", edit)
         self.assertNotIn("--add-label lane-ready", edit)
 
+    def test_executor_start_failure_requeues_and_pauses_lane(self):
+        d = self.make()
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "failed", "error_class": "executor_start_failed", "summary": "exit code 2"}
+
+        self.assertTrue(d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state))
+        edit = d.runner.called("issue edit 1537")[0]
+        self.assertIn("--add-label lane-ready", edit)
+        self.assertNotIn("--add-label lane-failed", edit)
+        self.assertEqual(state["_done"], [1537])
+        pauses = E.dispatch_module("pause").PauseStore(d.D)
+        pause = pauses._read(pauses._path("lane:M5"))
+        self.assertEqual(pause["expires_at"] - pause["created_at"], 600)
+
+    def test_executor_start_requeue_write_failure_keeps_label_debt_and_run(self):
+        d = self.make([("issue edit 1537", (1, "", "HTTP 502"))])
+        st = dict(self.ST)
+        state = {"M5": st}
+        info = {"status": "failed", "error_class": "executor_start_failed", "summary": "exit code 2"}
+
+        self.assertFalse(d.finish("M5", {"host": "box", "backend": "codex"}, st, info, state))
+        self.assertEqual(state["_label_debt"]["1537"]["add"], "lane-ready")
+        self.assertNotIn("_done", state)
+        self.assertEqual(d.runner.called("issue comment 1537"), [])
+
     def test_requeue_classes_can_be_overridden(self):
         d, _ = self.harvest("custom_quota", requeue_classes=["custom_quota"])
         edit = d.runner.called("issue edit 1537")[0]

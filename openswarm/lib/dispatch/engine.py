@@ -1398,10 +1398,17 @@ class Dispatcher:
             return False
         n, run = st["issue"], st["run"]
         model_unavailable = (info.get("error_class") == "model_unavailable")
+        executor_start_failed = info.get("error_class") == "executor_start_failed"
         if model_unavailable:
             model = info.get("model") or "unknown"
             dispatch_module("pause").PauseStore(self.D).pause(
                 "lane:" + lane, ttl_s=3600, reason="auto:model_unavailable " + str(model), now=self.clock())
+        if executor_start_failed:
+            retry = dispatch_module("retry")
+            ttl_s = retry.lane_pause_ttl("executor_start_failed")
+            dispatch_module("pause").PauseStore(self.D).pause(
+                "lane:" + lane, ttl_s=ttl_s,
+                reason="auto:executor_start_failed run " + str(run), now=self.clock())
         has_commit = info.get("branch") and info["branch"] != "None" and info.get("commit")
         if st.get("review_pr"):
             if has_commit:
@@ -1602,6 +1609,18 @@ class Dispatcher:
                      f"[failure_reason={reason}; error={detail}]")
         else:
             error_class = info.get("error_class") or ""
+            if executor_start_failed:
+                rc, _, err = self.relabel(n, L["ready"], [L["in_progress"], L["failed"]], state)
+                if rc:
+                    self.log(f"{lane} #{n} executor-start requeue labels failed ({(err or '').strip()[-120:]}); retry next tick", brain=False)
+                    return False
+                self.gh(["issue", "comment", str(n), "--body",
+                         f"Lane {lane} executor failed to start twice (run `{run}`); paused this lane for "
+                         f"{dispatch_module('retry').lane_pause_ttl(error_class)} seconds and requeued as `{L['ready']}`.\n\n"
+                         f"Executor summary: {info.get('summary')}"])
+                self.mark_done(state, n)
+                self.log(f"{lane} #{n} executor failed to start → paused lane and requeued {L['ready']}")
+                return True
             if model_unavailable:
                 reason, detail = self.run_failure(info, None, self.ending_detail(
                     info, f"model {info.get('model') or 'unknown'} unavailable"))
@@ -2102,10 +2121,12 @@ class Dispatcher:
             if error_class == "vm_paused":
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/vm_paused); "
                          f"VM pause (not counted), will retry [failure_reason={reason}; error={detail}]")
-            elif error_class in {"rate_limit", "quota", "model_unavailable"}:
-                r["quota_backend"] = info.get("backend") or lc.get("backend")
-                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); quota (not counted), will retry "
-                         f"[failure_reason={reason}; error={detail}]")
+            elif error_class in {"rate_limit", "quota", "model_unavailable", "executor_start_failed"}:
+                if error_class != "executor_start_failed":
+                    r["quota_backend"] = info.get("backend") or lc.get("backend")
+                category = "executor start failure" if error_class == "executor_start_failed" else "quota"
+                self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/{error_class}); "
+                         f"{category} (not counted), will retry [failure_reason={reason}; error={detail}]")
             elif error_class == "budget_exceeded":
                 backend = info.get("backend") or lc.get("backend")
                 backends = list(r.get("budget_backends") or [])

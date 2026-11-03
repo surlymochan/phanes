@@ -1173,12 +1173,16 @@ class LaneTests(unittest.TestCase):
     def test_agy_silent_stdout_eof_records_reaped_exit_code(self):
         self.set_config("agy")
         self.env["FAKE_AGY_MODE"] = "silent-eof"
+        # The fake disconnects after the lane's start grace window: an executor that dies
+        # inside the window never started and is restarted (#1595), a later disconnect is a
+        # task failure and stays an exec_error.
         self.start_lane()
         run_id = self.assign("inspect the fixture")
-        state = self.wait_run(run_id)
+        state = self.wait_run(run_id, timeout=30)
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["executor_exit_code"], 17)
+        self.assertEqual(state.get("executor_restarts", 0), 0, "a running executor is not restarted")
         self.assertEqual(result["attempts"][-1]["error_class"], "exec_error")
         self.assertIn("executor exit code 17", result["attempts"][-1]["error_tail"])
 
@@ -1187,11 +1191,53 @@ class LaneTests(unittest.TestCase):
         self.env["FAKE_AGY_MODE"] = "silent-eof-stderr"
         self.start_lane()
         run_id = self.assign("inspect the fixture")
-        self.wait_run(run_id)
+        self.wait_run(run_id, timeout=30)
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         tail = result["attempts"][-1]["error_tail"]
         self.assertIn("transient provider transport failure", tail)
         self.assertIn("executor exit code 17", tail)
+
+    def test_agy_start_crash_is_restarted_and_the_run_succeeds(self):
+        # The agy CLI cannot start: it exits with code 2 before any event.  The lane restarts
+        # the executor once with the same prompt, so the run finishes (#1595).
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "start-crash-once"
+        self.env["FAKE_AGY_ONCE_MARKER"] = str(self.root / "start-crash-once.marker")
+        self.start_lane()
+        run_id = self.assign("inspect the fixture")
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["executor_restarts"], 1)
+        self.assertEqual(result["attempts"][-1]["error_class"], None)
+        calls = [json.loads(line) for line in pathlib.Path(self.env["FAKE_AGY_LOG"]).read_text().splitlines()]
+        self.assertEqual(len(calls), 2, "the executor is started again after the start crash")
+        self.assertEqual(calls[1][calls[1].index("-p") + 1], calls[0][calls[0].index("-p") + 1],
+                         "the same prompt is re-sent")
+        events = [json.loads(line) for line in
+                  (self.data / "runs" / run_id / "events.1.agy.jsonl").read_text().splitlines() if line.strip()]
+        restarts = [event for event in events if event.get("type") == "executor_restart"]
+        self.assertEqual(len(restarts), 1)
+        self.assertEqual(restarts[0].get("exit_code"), 2)
+
+    def test_agy_two_start_crashes_are_an_executor_start_failure(self):
+        # The executor never comes up: the second start crash is an executor_start_failed and
+        # not a task failure (#1595).
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "start-crash"
+        self.start_lane()
+        run_id = self.assign("inspect the fixture")
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        attempt = result["attempts"][-1]
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(attempt["error_class"], "executor_start_failed")
+        self.assertEqual(attempt["error_tail"].count("executor exit code 2"), 2,
+                         "both exit codes are reported")
+        self.assertIn("agy: cannot start", attempt["error_tail"])
+        self.assertEqual(state["executor_restarts"], 1)
+        self.assertEqual(state["executor_exit_code"], 2)
+        self.assertIn("agy: cannot start", state["executor_stderr_tail"])
 
     def test_agy_steer_aborts_the_process_and_resumes_the_conversation(self):
         self.set_config("agy")
