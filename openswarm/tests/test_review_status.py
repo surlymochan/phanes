@@ -37,6 +37,40 @@ class FakeRunner:
         return [call[0] for call in self.calls]
 
 
+class ResolveGateTests(unittest.TestCase):
+    """The review gate has one source: the dispatcher config."""
+
+    def test_an_empty_config_has_no_repository_and_the_default_context(self):
+        gate = status.resolve_gate({})
+
+        self.assertEqual(gate["repo"], "")
+        self.assertEqual(gate["context"], "lane-review")
+        self.assertEqual(gate["branch"], "main")
+
+    def test_the_dispatcher_config_names_the_repository_the_context_and_the_branch(self):
+        gate = status.resolve_gate({"repo": "acme/project", "base_branch": "trunk",
+                                    "review": {"status_context": "custom-review"}})
+
+        self.assertEqual(gate, {"repo": "acme/project", "context": "custom-review", "branch": "trunk"})
+
+    def test_a_config_without_a_review_section_uses_the_default_context(self):
+        gate = status.resolve_gate({"repo": "acme/project"})
+
+        self.assertEqual(gate["context"], "lane-review")
+
+    def test_a_blank_context_falls_back_to_the_default_one(self):
+        gate = status.resolve_gate({"review": {"status_context": "  "}})
+
+        self.assertEqual(gate["context"], "lane-review")
+
+    def test_a_config_that_is_not_a_dict_has_no_gate(self):
+        gate = status.resolve_gate(None)
+
+        self.assertEqual(gate["repo"], "")
+        self.assertEqual(gate["context"], "lane-review")
+        self.assertEqual(gate["branch"], "main")
+
+
 class ParseVerdictTests(unittest.TestCase):
     """A review conclusion is read as `VERDICT:` and `SUMMARY:` lines."""
 

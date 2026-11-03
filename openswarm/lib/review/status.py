@@ -5,7 +5,11 @@ published as a GitHub *commit status* on the reviewed commit, under the ``lane-r
 context, so that a branch protection rule (or a human) can see it without reading the
 review text.
 
-Three pieces live here, all of them free of side effects except the last one:
+Five pieces live here, all of them free of side effects except ``post_status``:
+
+``resolve_gate(config)``
+    Resolves the review gate (repository, status context, branch) of a dispatcher config.
+    The gate has one source, so the publisher, the CI filter and the doctor agree on it.
 
 ``parse_verdict(text)``
     Reads a review conclusion written in markdown and returns the ``(verdict, summary)``
@@ -46,6 +50,8 @@ STATE_PENDING = "pending"
 
 # The context the status is published under; one lane review owns exactly one context.
 DEFAULT_CONTEXT = "lane-review"
+# The branch whose protection has to require the context.
+DEFAULT_BRANCH = "main"
 # GitHub truncates a status description at 140 characters.
 MAX_DESCRIPTION = 140
 
@@ -55,6 +61,24 @@ VERDICT_LINE_RE = re.compile(r"^VERDICT:[ \t]*(APPROVE|CHANGES)(?![A-Za-z0-9_])"
 SUMMARY_LINE_RE = re.compile(r"^SUMMARY:[ \t]*(.*)$")
 # A commit sha is 40 hex characters; anything else is not a commit.
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def resolve_gate(config):
+    """Return the review gate of a dispatcher config: repository, status context and branch.
+
+    The gate has exactly one source: the dispatcher config.  ``repo`` is the repository the
+    commit status is published on, ``review.status_context`` the context it is published
+    under and ``base_branch`` the branch whose protection has to require that context.  The
+    publisher, the CI filter and the doctor all resolve the gate here, so a checker can
+    never report a green gate that nobody enforces.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    review = cfg.get("review") if isinstance(cfg.get("review"), dict) else {}
+    return {
+        "repo": str(cfg.get("repo") or "").strip(),
+        "context": str(review.get("status_context") or "").strip() or DEFAULT_CONTEXT,
+        "branch": str(cfg.get("base_branch") or "").strip() or DEFAULT_BRANCH,
+    }
 
 
 def parse_verdict(text):
@@ -236,6 +260,7 @@ def post_status(repo, payload, runner=subprocess.run, env=os.environ):
 
 
 __all__ = [
+    "DEFAULT_BRANCH",
     "DEFAULT_CONTEXT",
     "MAX_DESCRIPTION",
     "STATE_PENDING",
@@ -250,6 +275,7 @@ __all__ = [
     "parse_verdict",
     "post_status",
     "require_sha",
+    "resolve_gate",
     "verdict_state",
     "verdict_word",
 ]

@@ -12,6 +12,26 @@ status 固定发在 `lane-review` 这个 context 下：一个车道审查只占�
 分支保护按 context 精确匹配。调用方也可以传别的 context（`build_status(..., context=...)`），
 但默认值就是 `lane-review`。
 
+## 门禁配置只有一个来源
+
+review 门禁（仓库、status context、目标分支）只从调度器配置里读：
+
+| 字段 | 含义 | 默认值 |
+| --- | --- | --- |
+| `repo` | status 发布在哪个仓库 | 无 |
+| `review.status_context` | status 发在哪个 context 下 | `lane-review` |
+| `base_branch` | 哪个分支的分支保护要 require 这个 context | `main` |
+
+`status.resolve_gate(cfg)` 是唯一的解析入口：发 status 的流程、CI 过滤（把本 context 从
+check rollup 里排除）、`openswarm doctor` 的分支保护检查都走它，不会各读各的配置。
+调度器把 context 改成 `custom-review`，分支保护就必须 require `custom-review`；doctor 读的
+也是同一个 context，不会拿默认的 `lane-review` 去报告 OK。
+
+doctor 读不到调度器配置时（调度器的 `--config` 是必填参数，配置可能在别的路径、别的仓库、
+别的 context），门禁就是**未知**而不是默认：doctor 报 WARN 并提示用
+`--dispatch-config <调度器配置路径>` 重新跑，不会拿当前 worktree 的 git remote 去猜仓库、
+也不会拿默认 context 去报 OK。
+
 ## 状态映射
 
 审查结论 markdown 里用 `VERDICT:` 行给出结论（行首、大小写敏感、只认第一处）：

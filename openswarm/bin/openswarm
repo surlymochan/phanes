@@ -14386,6 +14386,127 @@ def doctor_lanes_file():
     return envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
 
 
+# The review gate the doctor checks: the same repository, status context and branch the
+# lane-review commit status is published under.  The dispatcher config is its only source.
+DOCTOR_DISPATCH_CONFIG = "~/.claude/openswarm-dispatch/config.json"
+_REVIEW_MODULES = {}
+
+
+def doctor_review_module(name):
+    """Load one module of `lib/review` by path; the directory is a namespace package."""
+    if name not in _REVIEW_MODULES:
+        path = os.path.join(SKILL_DIR, "lib", "review", name + ".py")
+        spec = importlib.util.spec_from_file_location("openswarm_review_" + name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _REVIEW_MODULES[name] = module
+    return _REVIEW_MODULES[name]
+
+
+def doctor_dispatch_config(path=None):
+    """Read the dispatcher config the review gate is resolved from.
+
+    The path comes from the `--dispatch-config` option, the `OPENSWARM_DISPATCH_CONFIG`
+    environment variable or the default `~/.claude/openswarm-dispatch/config.json`.  The
+    result is the `(config, path)` pair; `config` is None when there is no readable config.
+    """
+    candidate = os.path.expanduser(path or envvar("DISPATCH_CONFIG") or DOCTOR_DISPATCH_CONFIG)
+    raw = jload(candidate)
+    if isinstance(raw, dict) and raw:
+        return raw, candidate
+    return None, candidate
+
+
+def doctor_git_repo():
+    """The GitHub repository of the current worktree, detected from the git remote."""
+    try:
+        remote = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True,
+                                text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    match = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", remote)
+    return match.group(1) if match else ""
+
+
+def doctor_review_gate(config=None):
+    """The review gate the doctor checks: repository, status context and branch.
+
+    The gate comes from the dispatcher config, the same source the lane-review status is
+    published from.  Without that config the gate is *unknown*: the dispatcher's `--config`
+    is a required argument and may name another repository, another status context or
+    another base branch, so nothing about the gate can be guessed from the worktree.
+    """
+    gate = doctor_review_module("status").resolve_gate(config or {})
+    gate["known"] = bool(config)
+    if not gate["known"]:
+        # An unknown gate is never a green one: the repository of the worktree is not
+        # necessarily the repository the lane-review status is published on.
+        gate["repo"] = ""
+    return gate
+
+
+def doctor_branch_protection(gate, runner=subprocess.run):
+    """Check that the review gate of the target branch is enforced; never change it.
+
+    The check asks GitHub for the branch protection of the repository the lane-review status
+    is published on and verifies that the protection requires the review context and binds
+    administrators.  A missing rule is a warning with a repair command, never an action.
+    """
+    repo = str(gate.get("repo") or "").strip()
+    branch = str(gate.get("branch") or "main").strip() or "main"
+    context = str(gate.get("context") or "lane-review").strip() or "lane-review"
+    if not gate.get("known", True):
+        # The dispatcher config was not read: the repository, the status context and the
+        # branch that are published and enforced are unknown, so nothing can be verified.
+        remote = doctor_git_repo()
+        return doctor_check(
+            "branch_protection", "warn",
+            "the review gate is unknown: no dispatcher config was read"
+            + (f" (the git remote of the worktree is {remote})" if remote else "")
+            + ", so the repository, the status context and the branch of the lane-review "
+              "status are unknown",
+            "run the doctor with --dispatch-config <path to the config the dispatcher serves "
+            "with>; the dispatcher's --config argument is required")
+    if not repo:
+        return doctor_check("branch_protection", "warn",
+                            "no GitHub repository configured or detected",
+                            "set `repo` in the dispatcher config or run the doctor in the repository")
+    protection = doctor_review_module("protection")
+    endpoint = "repos/{}/branches/{}/protection".format(
+        "/".join(urllib.parse.quote(part, safe="") for part in repo.split("/")),
+        urllib.parse.quote(branch, safe=""))
+    try:
+        result = runner([envvar("GH_BIN", "gh"), "api", endpoint], capture_output=True,
+                        text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return doctor_check("branch_protection", "warn", f"cannot query {repo}:{branch}: {error}")
+    stderr = str(getattr(result, "stderr", "") or "")
+    if getattr(result, "returncode", 1):
+        if "404" in stderr:
+            findings = protection.check_protection(None, context)
+            return doctor_check("branch_protection", "warn",
+                                f"{repo}:{branch}: " + "; ".join(f["message"] for f in findings),
+                                protection.fix_command(repo, branch, None, context))
+        reason = (stderr.strip().splitlines() or ["gh api failed"])[0]
+        return doctor_check("branch_protection", "warn",
+                            f"cannot query {repo}:{branch}: {reason}")
+    try:
+        value = json.loads(str(getattr(result, "stdout", "") or ""))
+    except (TypeError, ValueError):
+        return doctor_check("branch_protection", "warn",
+                            f"invalid protection response for {repo}:{branch}")
+    findings = protection.check_protection(value, context)
+    level = "warn" if any(f["level"] == "warn" for f in findings) else "ok"
+    fix = None
+    if level != "ok":
+        try:
+            fix = protection.fix_command(repo, branch, value, context)
+        except ValueError as error:
+            fix = str(error)
+    detail = f"{repo}:{branch}: " + "; ".join(f["message"] for f in findings)
+    return doctor_check("branch_protection", level, detail, fix)
+
+
 def doctor_backend_binary(lane, policy):
     """The executor binary a lane would start, resolved exactly like the lane child resolves it.
 
@@ -14753,7 +14874,7 @@ def doctor_resources(lanes, policy, sleep=time.sleep):
     return rows
 
 
-def doctor_report(lane_name=None, policy=None, system=None):
+def doctor_report(lane_name=None, policy=None, system=None, dispatch_config=None):
     """The doctor report for one lane or for every configured lane."""
     policy = load_policy() if policy is None else policy
     lanes_file = doctor_lanes_file()
@@ -14776,8 +14897,20 @@ def doctor_report(lane_name=None, policy=None, system=None):
         counts[DOCTOR_RESOURCE_STATUS[row["level"]]] += 1
     if not reports and not notes:
         notes.append("no lanes are configured")
-    return {"ok": counts["fail"] == 0, "lanes": reports, "resources": resources, "notes": notes,
-            "summary": {**counts, "lanes": len(reports)}}
+    # The review gate is checked against the dispatcher config: the same repository, status
+    # context and branch the lane-review commit status is published under.
+    config, config_path = doctor_dispatch_config(dispatch_config)
+    gate = doctor_review_gate(config)
+    checks = [doctor_branch_protection(gate)]
+    for check in checks:
+        counts[check["status"]] = counts.get(check["status"], 0) + 1
+    if config is None:
+        notes.append(f"no dispatcher config at {config_path}: the review gate is unknown, so the "
+                     f"branch protection is not verified; pass --dispatch-config")
+    else:
+        notes.append(f"the review gate is read from {config_path}")
+    return {"ok": counts["fail"] == 0, "lanes": reports, "checks": checks, "resources": resources,
+            "notes": notes, "summary": {**counts, "lanes": len(reports)}}
 
 
 def doctor_resource_detail(row):
@@ -14798,6 +14931,10 @@ def doctor_text(report):
     lines = []
     for note in report["notes"]:
         lines.append(f"note  {note}")
+    for check in report.get("checks", []):
+        lines.append(f"  {check['status']:<4} {check['name']:<20} {check['detail']}")
+        if check["fix"]:
+            lines.append(f"       fix: {check['fix']}")
     for lane in report["lanes"]:
         lines.append(f"lane  {lane['name']}  backend={lane['backend']}  status={lane['status']}")
         for check in lane["checks"]:
@@ -14815,7 +14952,7 @@ def doctor_text(report):
 
 
 def cmd_doctor(args, policy):
-    report = doctor_report(args.lane, policy)
+    report = doctor_report(args.lane, policy, dispatch_config=getattr(args, "dispatch_config", None))
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
@@ -15738,6 +15875,8 @@ def main():
 
     sp = sub.add_parser("doctor", help="report lane sandbox and proxy prerequisites (read-only)")
     sp.add_argument("--lane", help="check one configured lane; default checks every configured lane")
+    sp.add_argument("--dispatch-config", help="dispatcher config the review gate is read from; "
+                                             "default ~/.claude/openswarm-dispatch/config.json")
     sp.add_argument("--json", action="store_true", help="print the report as JSON")
 
     sp = sub.add_parser("ingest-claude")
