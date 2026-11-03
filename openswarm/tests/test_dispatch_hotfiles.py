@@ -43,6 +43,40 @@ class ParseHotFilesTests(unittest.TestCase):
 
 
 class HotLockTests(unittest.TestCase):
+    def test_preflight_reports_cap_conflict_and_suggests_reschedule(self):
+        lock = hotfiles.HotLock({"src/shared.py": 2})
+        result = lock.preflight(["src/shared.py"], {"src/shared.py": 2})
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["conflicts"], [{"file": "src/shared.py", "inflight": 2, "limit": 2}])
+        self.assertEqual(result["advice"], "改期或换题")
+
+    def test_preflight_allows_file_below_cap(self):
+        lock = hotfiles.HotLock({"src/shared.py": 2})
+        self.assertFalse(lock.preflight(["src/shared.py"], {"src/shared.py": 1})["blocked"])
+
+    def test_preflight_agrees_with_the_blocking_decision(self):
+        lock = hotfiles.HotLock({"src/shared.py": 1})
+        for count in (0, 1):
+            inflight = {"src/shared.py": count}
+            self.assertEqual(lock.preflight(["src/shared.py"], inflight)["blocked"],
+                             lock.blocked(["src/shared.py"], inflight))
+
+    def test_preflight_names_every_conflicting_file(self):
+        lock = hotfiles.HotLock({"a.py": 1, "b.py": 1})
+        result = lock.preflight(["a.py", "b.py"], {"a.py": 1, "b.py": 0})
+        self.assertTrue(result["blocked"])
+        self.assertEqual([c["file"] for c in result["conflicts"]], ["a.py"])
+
+    def test_preflight_never_blocks_a_documentation_file(self):
+        lock = hotfiles.HotLock({"README.md": 1})
+        result = lock.preflight(["README.md"], {"README.md": 5})
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["advice"], "可铸卡")
+
+    def test_merge_caps_normalizes_the_paths_before_merging(self):
+        merged = hotfiles.merge_caps({"src/a.py": 1}, {"./src/a.py": 2})
+        self.assertEqual(merged, {"src/a.py": 2})
+
     def test_a_file_below_its_cap_does_not_block(self):
         lock = hotfiles.HotLock({"openswarm/bin/openswarm": 2})
 

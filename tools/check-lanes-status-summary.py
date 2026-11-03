@@ -3,7 +3,9 @@
 
 The live dispatcher writes ``_busy`` and ``_ready`` to lanes-status.json.
 ``_ready`` is the count of open lane-ready issues that are not already owned,
-finished, or failed.  This check keeps that definition executable without GH
+finished, or failed.  A card that waits for its dependency or for a hot file
+that sits at its cap is blocked, not ready (Refs #1721), so it is not counted
+either.  This check keeps the plain definition executable without GH
 credentials or a network connection.
 """
 

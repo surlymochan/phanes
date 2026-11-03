@@ -153,7 +153,9 @@ DEFAULTS = {
     "verify_line_re": r"\s*(?:验收|Verify|verify|Acceptance)\s*[:：]",
     "depends_line_re": r"^\s*(?:依赖|Depends on)\s*[:：](.*)$",
     "rebase_line_re": r"^\s*(?:重基PR|Rebase-PR)\s*[:：]\s*#(\d+)\s+(\S+)",
-    "hot_files": {"line_re": r"^\s*(?:热文件|Hot-files)\s*[:：](.*)$", "union": [], "limits": {}, "default_limit": 1},
+    # hot_files.default_limit has no default here: the dispatch policy (openswarm/policy.json,
+    # section "dispatch") ships the default cap, and the dispatch config overrides it.
+    "hot_files": {"line_re": r"^\s*(?:热文件|Hot-files)\s*[:：](.*)$", "union": [], "limits": {}},
     "leak_grace_s": 900,
     "resume_grace_s": 120,
     "stale_strip_after": 5,
@@ -458,13 +460,23 @@ class Dispatcher:
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
-        self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
         hot_cfg = cfg["hot_files"]
-        hot_caps = dict(hot_cfg.get("limits") or {})
-        hot_caps.update(cfg.get("hot_shared") or {})
-        self.hot_lock = hotfiles.HotLock(
-            caps=hot_caps,
-            default_cap=hot_cfg.get("default_limit", 1))
+        # The hot-file caps have one source: the dispatch policy files.  The planner
+        # (minting a card) and the AD (handing the cards to the lanes) read the same
+        # policy, so the two sides cannot disagree about a cap (Refs #1721).  The
+        # dispatch config still wins: it refines the policy, it never replaces it.
+        policy = dispatch_module("hot_policy").load_hot_policy(cfg)
+        self.hot_policy = policy
+        union = list(hot_cfg.get("union") or []) + list(policy.get("union") or [])
+        self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(union)))
+        hot_caps = hotfiles.merge_caps(*policy.get("caps") or [],
+                                       hot_cfg.get("limits"), cfg.get("hot_shared"))
+        default_cap = hot_cfg.get("default_limit")
+        if default_cap is None:
+            default_cap = policy.get("default_limit")
+        if default_cap is None:
+            default_cap = 1
+        self.hot_lock = hotfiles.HotLock(caps=hot_caps, default_cap=default_cap)
         self.local_hosts = set(cfg.get("local_hosts") or [])
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
@@ -791,6 +803,38 @@ class Dispatcher:
     def hot_of(self, body):
         return {f for f in self.hotfiles.parse_hot_files(body)
                 if f not in self.hot_union and not self.hotfiles.is_doc_file(f)}
+
+    def hot_counts(self, lanes, state):
+        """Return the hot files that are in flight right now: one count per file.
+
+        The counts come from the lane state (the hot files of the cards the lanes work
+        on), so the mint side and the dispatch side judge a card against the same
+        numbers.
+        """
+        counts = {}
+        for L in lanes or {}:
+            lane_state = (state or {}).get(L) or {}
+            if not isinstance(lane_state, dict):
+                continue
+            for f in lane_state.get("hot") or []:
+                for normalized in self.hotfiles.parse_hot_files("热文件：" + str(f)):
+                    if normalized not in self.hot_union and not self.hotfiles.is_doc_file(normalized):
+                        counts[normalized] = counts.get(normalized, 0) + 1
+        return counts
+
+    def preflight_card(self, body, inflight=None):
+        """Preflight a card before it is minted (Refs #1721).
+
+        The verdict names the hot files that already sit at their cap and carries the
+        advice for the planner: a conflicting card is postponed (改期) or replaced
+        (换题), a free card may be minted.  It is the decision the dispatch side makes
+        when it hands a card to a lane, so both sides agree on every card.
+        """
+        files = sorted(self.hot_of(body))
+        counts = self.hot_lock.inflight() if inflight is None else inflight
+        verdict = self.hot_lock.preflight(files, counts)
+        verdict["files"] = files
+        return verdict
 
     def deps_met(self, item):
         m = re.search(self.cfg["depends_line_re"], item["body"], re.M)
@@ -2403,11 +2447,7 @@ class Dispatcher:
     def assign_issues(self, lanes, res, state, q):
         base = None
         self.hot_lock.counts.clear()
-        for L in lanes:
-            for f in (state.get(L) or {}).get("hot") or []:
-                for normalized in self.hotfiles.parse_hot_files("热文件：" + str(f)):
-                    if normalized not in self.hot_union and not self.hotfiles.is_doc_file(normalized):
-                        self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
+        self.hot_lock.counts.update(self.hot_counts(lanes, state))
         for L, lc in self.lane_order(lanes):
             r = res[L]
             if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
@@ -2473,6 +2513,84 @@ class Dispatcher:
             self.log(f"dispatched #{pick['n']} → {L} ({lc['host']}) run {run} base {base[:8]}")
             self.heartbeat()
 
+    def mint_issue(self, card):
+        """Create one card as an issue of the dispatch queue.
+
+        The card enters the queue with the ready label, so the AD picks it up like any
+        other card; the labels the card asks for are kept.
+        """
+        title = card.get("title") or ""
+        body = card.get("body") or ""
+        labels = [self.L["ready"]] + [l for l in (card.get("labels") or []) if l != self.L["ready"]]
+        args = ["issue", "create", "-t", title, "-b", body]
+        for label in labels:
+            args += ["-l", label]
+        rc, out, err = self.gh_write_retry(args)
+        if rc:
+            raise RuntimeError(f"issue create rc={rc}: {(err or out).strip()[-200:]}")
+        url = (out or "").strip().splitlines()[-1] if (out or "").strip() else ""
+        return url.rsplit("/", 1)[-1] or None
+
+    def record_mint(self, records):
+        """Keep the mint decisions in the mint ledger (the trace of the preflight).
+
+        The ledger tells the planner why a card was minted or refused, and it is the
+        only place where a refusal is written down: a card that was not minted leaves
+        no issue behind.
+        """
+        if self.dry_run or not records:
+            return
+        ledger = load_json(self.path("mint-log.json"), [])
+        if not isinstance(ledger, list):
+            ledger = []
+        ledger.extend(records)
+        write_json(self.path("mint-log.json"), ledger[-100:])
+
+    def mint_cards(self, cards, lanes=None, state=None, mint=None):
+        """Mint cards into the dispatch queue, refusing the ones that would be blocked.
+
+        A card whose hot file already sits at its cap would only pile up in the queue
+        as a blocked card, so the mint is refused and the planner is told to postpone
+        the card (改期) or to pick another topic (换题).  The verdict is the decision
+        the AD makes for the same card, so both sides block the same cards.  Every
+        decision is kept in the mint ledger, so a refused card leaves a trace as well.
+
+        The cards of one batch are judged one after the other: a minted card holds its
+        hot files, so a second card of the same batch on the same file is refused
+        instead of becoming a blocked card in the queue.
+        """
+        counts = self.hot_counts(lanes or {}, state or {})
+        mint = mint or self.mint_issue
+        records = []
+        for card in cards or []:
+            title = card.get("title") or ""
+            verdict = self.preflight_card(card.get("body") or "", counts)
+            record = {"at": time.strftime("%F %T"), "title": title, "issue": None,
+                      "minted": False, "preflight": verdict}
+            if verdict["blocked"]:
+                record["reason"] = "hot_file_conflict"
+                files = ", ".join(conflict["file"] for conflict in verdict["conflicts"])
+                self.log(f"mint refused '{title}': hot file at its cap ({files}); {verdict['advice']}", brain=False)
+                records.append(record)
+                continue
+            try:
+                record["issue"] = mint(card)
+            except Exception as e:
+                record["reason"] = "mint_failed"
+                record["error"] = str(e)[-200:]
+                self.log(f"mint failed '{title}': {record['error']}", brain=False)
+                records.append(record)
+                continue
+            record["minted"] = True
+            records.append(record)
+            # The minted card is on its way to a lane, so its hot files are busy from
+            # now on: a second card of the same batch on the same file would only
+            # become a blocked card, so it is refused like any other conflict.
+            for path in verdict["files"]:
+                counts[path] = counts.get(path, 0) + 1
+        self.record_mint(records)
+        return records
+
     def replenish(self, need, lanes, q, blocked):
         rp = self.cfg.get("replenish") or {}
         if not rp.get("cmd"):
@@ -2488,6 +2606,50 @@ class Dispatcher:
                 self.log(f"replenish: {out.strip().splitlines()[-1][:200]}")
         except Exception as e:
             self.log(f"replenish hook exc: {e!r}", brain=False)
+
+    def blocked_details(self, q, hot_blocked, state):
+        """Describe every blocked card: the reason, the files and the waiting time.
+
+        The waiting time is measured from the first tick the card was seen blocked, and
+        the first observation is kept in the state, so the time survives a restart of
+        the dispatcher.  The details go to the lanes status, so the supervisor reads why
+        a card waits and for how long instead of a single blocked total (Refs #1721).
+        """
+        now = float(self.clock())
+        since = state.setdefault("_blocked_since", {})
+        if not isinstance(since, dict):
+            since = {}
+            state["_blocked_since"] = since
+        details, blocked_numbers = [], set()
+        for item in q:
+            number = item.get("n")
+            reason, files = None, []
+            if not item.get("deps_ok", True):
+                reason = "deps"
+            elif number in hot_blocked:
+                reason = "hot_file"
+                files = [conflict["file"] for conflict in hot_blocked[number]["conflicts"]]
+            if reason is None:
+                continue
+            key = str(number)
+            blocked_numbers.add(key)
+            try:
+                first = float(since.get(key))
+            except (TypeError, ValueError):
+                first = None
+            if first is None:
+                first = now
+                since[key] = first
+            try:
+                stamp = time.strftime("%F %T", time.localtime(first))
+            except (TypeError, ValueError, OSError, OverflowError):
+                stamp = ""
+            details.append({"issue": number, "reason": reason, "files": files,
+                            "wait_seconds": max(0, int(now - first)), "since": stamp})
+        for key in list(since):
+            if key not in blocked_numbers:
+                since.pop(key, None)
+        return details
 
     def tick(self, lanes, state):
         self._quota_probe_cache = None
@@ -2532,9 +2694,21 @@ class Dispatcher:
         except Exception as e:
             self.log(f"review dispatch exc: {e!r}", brain=False)
         self.assign_issues(lanes, res, state, q)
-        ready = len(q) - blocked
+        # A card whose hot files sit at their cap cannot be handed to a lane: it is
+        # blocked, not ready.  Counting it as ready overstates the supply, and the
+        # supervisor reads `_ready` as the water level (Refs #1721).
+        hot_blocked = {}
+        for item in q:
+            if not item.get("deps_ok", True):
+                continue
+            verdict = self.preflight_card(item["body"])
+            if verdict["blocked"]:
+                hot_blocked[item["n"]] = verdict
+        blocked_details = self.blocked_details(q, hot_blocked, state)
+        ready = len(q) - blocked - len(hot_blocked)
         rp = self.cfg.get("replenish") or {}
-        short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and self.can_take(b, i))
+        short = {b: sum(c["backend"] == b for c in lanes.values())
+                    - sum(1 for i in q if i.get("deps_ok", True) and i["n"] not in hot_blocked and self.can_take(b, i))
                  for b in {c["backend"] for c in lanes.values()}}
         starve = max(short.values(), default=0)
         low, target = int(rp.get("low", 20)), int(rp.get("target", 24))
@@ -2581,7 +2755,9 @@ class Dispatcher:
             st[L] = entry
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
                                                 "model_drift": drift},
-                   "_busy": busy, "_ready": ready, "_blocked": blocked,
+                   "_busy": busy, "_ready": ready, "_blocked": blocked + len(hot_blocked),
+                   "_blocked_details": blocked_details,
+                   "_blocked_reasons": {"deps": blocked, "hot_file": len(hot_blocked)},
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
@@ -2634,13 +2810,59 @@ def add_parser(sub):
     sp = sub.add_parser("dispatch", help="push-mode GitHub label dispatcher for resident lanes (reviews, rebase/CI-fix queue)")
     dsub = sp.add_subparsers(dest="dispatch_cmd", required=True)
     for name, hlp in (("serve", "run the resident dispatch loop"), ("tick", "run one tick"),
-                      ("check-config", "print the merged config")):
+                      ("check-config", "print the merged config"),
+                      ("mint", "mint cards into the queue after the hot-file preflight")):
         p = dsub.add_parser(name, help=hlp)
         p.add_argument("--config", required=True)
         if name == "tick":
             p.add_argument("--dry-run", action="store_true", help="decide only: no labels, assigns, pushes or state writes")
             p.add_argument("--json", action="store_true")
+        if name == "mint":
+            p.add_argument("--card", action="append", default=[], help="card file to mint (repeatable)")
+            p.add_argument("--dir", default="", help="directory with the card files to mint")
+            p.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_dispatch)
+
+
+def cmd_mint(args):
+    """Mint cards into the dispatch queue after the hot-file preflight.
+
+    The cards are the files a planner run wrote (``docs/backlog/next/*.md``).  A card
+    whose hot file already sits at its cap is refused: minting it would only add a
+    blocked card to the queue.  The exit code is 2 when a card was refused.
+    """
+    cfg = load_config(args.config)
+    d = Dispatcher(cfg, out=sys.stderr if args.json else sys.stdout)
+    card_module = dispatch_module("card")
+    paths = list(args.card or [])
+    if args.dir:
+        paths += [os.path.join(args.dir, name) for name in sorted(os.listdir(args.dir))
+                  if name.endswith(".md")]
+    cards = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                text = stream.read()
+        except OSError as e:
+            print(f"card {path}: {e}", file=sys.stderr)
+            return 2
+        card = card_module.parse_card(text)
+        card["source"] = path
+        cards.append(card)
+    lanes = load_json(cfg["lanes_file"], {})
+    state = load_json(d.path("state.json"), {})
+    records = d.mint_cards(cards, lanes, state)
+    if args.json:
+        print(json.dumps(records, indent=1, ensure_ascii=False))
+    else:
+        for record in records:
+            verdict = record["preflight"]
+            if record["minted"]:
+                print(f"minted #{record['issue']} {record['title']}")
+            else:
+                files = ", ".join(conflict["file"] for conflict in verdict["conflicts"])
+                print(f"refused {record['title']}: {verdict['advice']} ({files})")
+    return 0 if all(record["minted"] for record in records) else 2
 
 
 def cmd_dispatch(args):
@@ -2651,6 +2873,8 @@ def cmd_dispatch(args):
     if args.dispatch_cmd == "serve":
         Dispatcher(cfg).serve()
         return 0
+    if args.dispatch_cmd == "mint":
+        return cmd_mint(args)
     d = Dispatcher(cfg, dry_run=args.dry_run, out=sys.stderr if args.json else sys.stdout)
     d.tick(load_json(cfg["lanes_file"], {}), load_json(d.path("state.json"), {}))
     if args.json:
