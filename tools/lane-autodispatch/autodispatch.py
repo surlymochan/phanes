@@ -5,7 +5,9 @@ Every TICK seconds: finish runs that ended (push branch + open PR, relabel issue
 lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 < p1 < p2 < unlabelled,
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
-Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
+Pause: the openswarm pause store ($OPENSWARM_HOME/pauses, written by `openswarm pause <scope>`) and the
+legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
+PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
 import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
@@ -71,6 +73,71 @@ def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)
     return directory
+
+def pause_store_dir():
+    """The openswarm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
+    home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/openswarm"
+    return os.path.join(os.path.expanduser(home), "pauses")
+
+def marker_scope(name):
+    """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
+    if name == "PAUSE": return "all"
+    if name == "PAUSE-MINT": return "mint"
+    for prefix, kind in (("PAUSE-HOST-", "host"), ("PAUSE-BACKEND-", "backend")):
+        if name.startswith(prefix) and len(name) > len(prefix): return f"{kind}:{name[len(prefix):]}"
+    if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
+    return None
+
+def pause_records(now=None):
+    """The active pause records: the openswarm pause store plus the legacy PAUSE markers.
+
+    A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy marker
+    carries no clock, so it never expires. The result is sorted by scope."""
+    now = time.time() if now is None else now
+    records = []
+    store = pause_store_dir()
+    try: names = sorted(os.listdir(store))
+    except OSError: names = []
+    for name in names:
+        if not name.endswith(".json"): continue
+        try:
+            with open(os.path.join(store, name)) as stream: record = json.load(stream)
+        except (OSError, ValueError): continue
+        if not isinstance(record, dict): continue
+        scope = record.get("scope")
+        if not isinstance(scope, str) or not scope.strip(): continue
+        expires = record.get("expires_at")
+        if isinstance(expires, bool) or not isinstance(expires, (int, float)): expires = None
+        elif expires <= now: continue
+        records.append({"scope": scope.strip(), "reason": str(record.get("reason") or ""),
+                        "created_at": record.get("created_at"), "expires_at": expires, "source": "store"})
+    try: names = sorted(os.listdir(D))
+    except OSError: names = []
+    for name in names:
+        scope = marker_scope(name)
+        if scope is None: continue
+        records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
+                        "expires_at": None, "source": "marker"})
+    return sorted(records, key=lambda row: row["scope"])
+
+def paused_scopes(now=None):
+    """The scopes that are paused right now (the store and the legacy markers)."""
+    return {row["scope"] for row in pause_records(now)}
+
+def lane_paused(lane, cfg=None, scopes=None):
+    """Whether a lane is paused by an all/lane/host/backend scope."""
+    scopes = paused_scopes() if scopes is None else scopes
+    if "all" in scopes: return True
+    if f"lane:{lane}" in scopes: return True
+    cfg = cfg or {}
+    if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
+    if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
+    return False
+
+def mint_paused(scopes=None):
+    """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
+    scopes = paused_scopes() if scopes is None else scopes
+    return "mint" in scopes
 
 def worker_state_path():
     return os.path.join(ctl_state_dir(), "autodispatch.pid")
@@ -784,7 +851,8 @@ def finish(lane, cfg, st, info, state):
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 def tick(lanes, state, last_warn):
-    if os.path.exists(f"{D}/PAUSE"): return last_warn
+    scopes = paused_scopes()  # the openswarm pause store and the legacy PAUSE markers (Refs #1366)
+    if "all" in scopes: return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
@@ -816,7 +884,7 @@ def tick(lanes, state, last_warn):
     base = None
     for L, cfg in lanes.items():
         r = res[L]
-        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
+        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])
@@ -845,11 +913,15 @@ def tick(lanes, state, last_warn):
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
     if ready < LOW or starve > 0:
-        filed = replenish(max(LOW - ready, starve), state)
         why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
-        if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
-        elif time.time() - last_warn > 600:
-            log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
+        if mint_paused(scopes):
+            if time.time() - last_warn > 600:
+                log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
+        else:
+            filed = replenish(max(LOW - ready, starve), state)
+            if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
+            elif time.time() - last_warn > 600:
+                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     st = status_snapshot(lanes, state, res, ready, blocked)
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn

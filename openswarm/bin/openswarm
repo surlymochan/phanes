@@ -29,6 +29,10 @@ Subcommands:
   watch            stream actionable events (progress, risk, stalls) for one or more runs
   runs / report    snapshot of recent runs / compact scheduled check-in
   resume           recover active runs and recent results after planner restart
+                   (`openswarm resume <scope>` clears one paused scope instead)
+  pause            pause a dispatch scope: openswarm pause <scope> [--ttl] [--reason]
+                   (scope: all|lane:X|host:H|backend:B|mint; the record lives in $OPENSWARM_HOME/pauses)
+  pauses           list the active dispatch pauses (the store plus the legacy PAUSE markers)
   retro            weekly fleet retrospective (Markdown report + JSON summary)
   stop             terminate a run (partial work is still committed to its branch)
   merge-gate       merge a pull request only when the reviewed head sha still matches and CI is green
@@ -8949,6 +8953,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                     answer = {"ok": True, "id": existing, "reused": True, "state": lane_run_state(existing)}
                 elif state.get("state") != "idle" or current.get("run_id"):
                     answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
+                elif (pause_error := lane_pause_check(lane["name"], lane)):
+                    answer = {"ok": False, **pause_error}
                 elif (drain_error := lane_drain_check(lane["name"])):
                     answer = {"ok": False, **drain_error}
                 else:
@@ -12322,7 +12328,7 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     names = fleet_health_hosts(args, config)
     if not names:
         raise ValueError("no fleet host to probe")
-    store = dispatch_pause_module().PauseStore(home or DATA)
+    store = dispatch_pause_module().PauseStore(home or openswarm_home())
     moment = NOW() if now is None else now
     active = {record["scope"]: record for record in store.active(moment)}
     previous = fleet_health_state_load(home)
@@ -13921,6 +13927,91 @@ def consult_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def openswarm_home():
+    """The openswarm home: the state, the ledger and the pause records.
+
+    The pause module owns the resolution so the CLI, the dispatcher and the
+    lane serve always read the same home, even without ``$OPENSWARM_HOME``.
+    """
+    return dispatch_pause_module().default_home()
+
+
+def openswarm_pause_store(home=None):
+    """The pause store of the openswarm home (the canonical home of the pause records)."""
+    return dispatch_pause_module().PauseStore(home or openswarm_home())
+
+
+def dispatch_state_dir():
+    """The state directory of the dispatch configuration (its lanes file lives there)."""
+    config = envvar("DISPATCH_CONFIG")
+    if config:
+        try:
+            with open(os.path.expanduser(config), encoding="utf-8") as stream:
+                raw = json.load(stream)
+            state_dir = raw.get("state_dir") if isinstance(raw, dict) else None
+            if isinstance(state_dir, str) and state_dir.strip():
+                return os.path.expanduser(state_dir.strip())
+        except (OSError, ValueError, UnicodeError):
+            pass
+    return os.path.expanduser(envvar("DISPATCH_STATE_DIR", "~/.claude/openswarm-dispatch"))
+
+
+def dispatch_lane_hosts():
+    """The host of every lane the dispatch configuration names (lane name -> host).
+
+    The dispatch lanes file is ``<state_dir>/lanes.json``; it is read leniently:
+    a missing or broken file only means "no host known here".
+    """
+    path = envvar("DISPATCH_LANES_FILE", os.path.join(dispatch_state_dir(), "lanes.json"))
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as stream:
+            config = json.load(stream)
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    lanes = config.get("lanes") if isinstance(config, dict) else None
+    if not isinstance(lanes, dict):
+        return {}
+    hosts = {}
+    for name, entry in lanes.items():
+        host = entry.get("host") if isinstance(entry, dict) else None
+        if isinstance(host, str) and host.strip():
+            hosts[str(name)] = host.strip()
+    return hosts
+
+
+def lane_host_identity(lane=None):
+    """The host this lane runs on, consistent with the dispatch configuration.
+
+    The lane configuration does not require a host, so a supervisor that
+    receives a direct assign would not know its own host and could not honour
+    a ``host:`` pause.  The dispatch configuration names the host of every
+    lane it drives; the machine name is the last resort (Refs #1366).
+    """
+    lane = lane or {}
+    host = lane.get("host")
+    if isinstance(host, str) and host.strip():
+        return host.strip()
+    name = lane.get("name")
+    mapped = dispatch_lane_hosts().get(str(name)) if name else None
+    return mapped or socket.gethostname()
+
+
+def lane_pause_check(name, lane=None):
+    """The refusal an assignment gets from a paused lane, else None.
+
+    A paused lane takes no new work: the scope may be the lane itself, its
+    host, its backend or every lane (``all``).
+    """
+    try:
+        paused = openswarm_pause_store().is_paused(
+            lane=name, host=lane_host_identity(lane), backend=(lane or {}).get("backend"), now=NOW())
+    except Exception as error:
+        return {"error": f"lane {name} cannot read the pause store, not taking new work: {error}"}
+    if paused:
+        return {"paused": True, "error": f"lane {name} is paused; not taking new work"}
+    return None
 
 
 def dispatch_engine_module():
@@ -15775,10 +15866,66 @@ def cmd_merge_gate(args, policy=None, runner=None, sleep=None):
     return 0
 
 
+PAUSE_SUBCOMMANDS = ("set", "clear", "list")
+
+
+def normalize_pause_argv(argv):
+    """Map the flat pause verbs onto the `pause` subcommands.
+
+    `openswarm pause <scope>` is the short form of `openswarm pause set <scope>`;
+    `openswarm pauses` is the short form of `openswarm pause list`.
+    """
+    if len(argv) >= 2 and argv[0] == "pause" and argv[1] not in PAUSE_SUBCOMMANDS \
+            and not argv[1].startswith("-"):
+        return ["pause", "set", *argv[1:]]
+    return argv
+
+
+def cmd_pause_set(scope, ttl=None, reason="", home=None):
+    """Write one pause record into $OPENSWARM_HOME/pauses and print it."""
+    module = dispatch_pause_module()
+    store = module.PauseStore(home or openswarm_home())
+    record = store.pause(scope, ttl_s=module.parse_ttl(ttl) if ttl is not None else None,
+                         reason=reason, now=time.time())
+    print(json.dumps(record, ensure_ascii=False))
+    return record
+
+
+def cmd_pause_resume(scope, home=None):
+    """Remove one pause record; exit 1 when the scope carries no pause."""
+    store = dispatch_pause_module().PauseStore(home or openswarm_home())
+    if not store.resume(scope):
+        print("openswarm: pause not found: {}".format(scope), file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_pause_list(as_json=False, legacy_dir=None, home=None):
+    """Print the active pauses: the store plus the legacy markers of `legacy_dir`."""
+    module = dispatch_pause_module()
+    store = module.PauseStore(home or openswarm_home())
+    now = time.time()
+    records = store.active(now)
+    if legacy_dir:
+        records += [dict(row, legacy=True) for row in module.legacy_markers(legacy_dir)]
+    for row in records:
+        row.setdefault("legacy", False)
+        row["remaining_ttl_s"] = (None if row["expires_at"] is None else
+                                   max(0, row["expires_at"] - now))
+    if as_json:
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+    else:
+        for row in records:
+            remaining = "forever" if row["remaining_ttl_s"] is None else "{:.0f}s".format(row["remaining_ttl_s"])
+            label = " legacy" if row["legacy"] else ""
+            print("{}  ttl={}  reason={}  created_at={}{}".format(
+                row["scope"], remaining, row["reason"], row["created_at"], label))
+    return records
+
+
 def main():
     ap = argparse.ArgumentParser(prog="openswarm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    pause_parser = sub.add_parser("pause", help="manage dispatch pauses")
+    pause_parser = sub.add_parser("pause", help="manage dispatch pauses (all|lane:X|host:H|backend:B|mint)")
     pause_sub = pause_parser.add_subparsers(dest="pause_cmd", required=True)
     pause_set = pause_sub.add_parser("set")
     pause_set.add_argument("scope")
@@ -15789,6 +15936,9 @@ def main():
     pause_list = pause_sub.add_parser("list")
     pause_list.add_argument("--json", action="store_true")
     pause_list.add_argument("--legacy-dir")
+    pauses_parser = sub.add_parser("pauses", help="list the active dispatch pauses")
+    pauses_parser.add_argument("--json", action="store_true")
+    pauses_parser.add_argument("--legacy-dir")
     consult_module().add_parser(sub)
 
     dispatch_load_error = None
@@ -15975,6 +16125,8 @@ def main():
     sp.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("resume", help="list active runs and busy lanes after planner restart")
+    sp.add_argument("scope", nargs="?",
+                    help="resume one paused scope (all|lane:X|host:H|backend:B|mint) instead of listing the runs")
     sp.add_argument("--since-hours", type=float, default=6,
                     help="include finished runs from the last N hours (default: 6)")
     sp.add_argument("--json", action="store_true")
@@ -16169,44 +16321,22 @@ def main():
     sp.add_argument("--post-merge-hook",
                     help="command to run once per new sha of main after a merge landed")
 
-    a = ap.parse_args()
+    a = ap.parse_args(normalize_pause_argv(sys.argv[1:]))
     if a.cmd == "pause":
-        pause_path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                                  "lib", "dispatch", "pause.py")
-        pause_spec = importlib.util.spec_from_file_location("openswarm_dispatch_pause", pause_path)
-        pause_module = importlib.util.module_from_spec(pause_spec)
-        pause_spec.loader.exec_module(pause_module)
-        PauseStore, legacy_markers, parse_ttl = (pause_module.PauseStore,
-                                                  pause_module.legacy_markers,
-                                                  pause_module.parse_ttl)
-        home = os.environ.get("OPENSWARM_HOME", DATA)
-        store = PauseStore(home)
         try:
             if a.pause_cmd == "set":
-                ttl = parse_ttl(a.ttl) if a.ttl is not None else None
-                record = store.pause(a.scope, ttl_s=ttl, reason=a.reason, now=time.time())
-                print(json.dumps(record, ensure_ascii=False))
+                cmd_pause_set(a.scope, a.ttl, a.reason)
             elif a.pause_cmd == "clear":
-                if not store.resume(a.scope):
-                    print("openswarm: pause not found: {}".format(a.scope), file=sys.stderr)
-                    sys.exit(1)
+                cmd_pause_resume(a.scope)
             else:
-                now = time.time()
-                records = store.active(now)
-                if a.legacy_dir:
-                    records += [dict(row, legacy=True) for row in legacy_markers(a.legacy_dir)]
-                for row in records:
-                    row.setdefault("legacy", False)
-                    row["remaining_ttl_s"] = (None if row["expires_at"] is None else
-                                               max(0, row["expires_at"] - now))
-                if a.json:
-                    print(json.dumps(records, ensure_ascii=False, indent=2))
-                else:
-                    for row in records:
-                        remaining = "forever" if row["remaining_ttl_s"] is None else "{:.0f}s".format(row["remaining_ttl_s"])
-                        label = " legacy" if row["legacy"] else ""
-                        print("{}  ttl={}  reason={}  created_at={}{}".format(
-                            row["scope"], remaining, row["reason"], row["created_at"], label))
+                cmd_pause_list(a.json, a.legacy_dir)
+        except ValueError as error:
+            print("openswarm: {}".format(error), file=sys.stderr)
+            sys.exit(2)
+        return
+    if a.cmd == "pauses":
+        try:
+            cmd_pause_list(a.json, a.legacy_dir)
         except ValueError as error:
             print("openswarm: {}".format(error), file=sys.stderr)
             sys.exit(2)
@@ -16316,7 +16446,10 @@ def main():
         cmd_runs(a, policy)
     elif a.cmd == "resume":
         try:
-            cmd_resume(a)
+            if a.scope:
+                cmd_pause_resume(a.scope)
+            else:
+                cmd_resume(a)
         except ValueError as error:
             print(f"openswarm: {error}", file=sys.stderr)
             sys.exit(2)

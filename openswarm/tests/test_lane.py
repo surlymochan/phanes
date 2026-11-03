@@ -255,6 +255,28 @@ class LanePureFunctionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             xs.lane_memory_limit({}, {"lane": {"memory_max": "0"}})
 
+    def test_a_paused_lane_refuses_new_work(self):
+        with tempfile.TemporaryDirectory() as home:
+            store = pathlib.Path(home) / "pauses"
+            store.mkdir()
+            (store / "lane_L1.json").write_text(json.dumps(
+                {"scope": "lane:L1", "created_at": 1, "expires_at": None, "reason": "drain"}))
+            with mock.patch.dict(os.environ, {"OPENSWARM_HOME": home}):
+                refusal = xs.lane_pause_check("L1", {"backend": "codex"})
+
+                self.assertTrue(refusal["paused"])
+                self.assertIn("is paused", refusal["error"])
+                self.assertIsNone(xs.lane_pause_check("L2", {"backend": "codex"}))
+
+    def test_an_expired_pause_does_not_pause_a_lane(self):
+        with tempfile.TemporaryDirectory() as home:
+            store = pathlib.Path(home) / "pauses"
+            store.mkdir()
+            (store / "backend_codex.json").write_text(json.dumps(
+                {"scope": "backend:codex", "created_at": 1, "expires_at": 1, "reason": "quota"}))
+            with mock.patch.dict(os.environ, {"OPENSWARM_HOME": home}):
+                self.assertIsNone(xs.lane_pause_check("L1", {"backend": "codex"}))
+
 
 # Running bin/openswarm as a script recompiles the whole ~600 KB source on every
 # invocation. Loading it as a module reuses the cached bytecode instead, the same

@@ -199,6 +199,19 @@ class Pauses(Base):
             self.assertTrue(d.paused_lane("CX1", lc), name)
             os.unlink(d.path(name))
 
+    def test_the_openswarm_home_store_pauses_a_lane(self):
+        d = self.make()
+        lc = {"host": "h1", "backend": "codex"}
+        home = os.path.join(self.tmp, "openswarm-home")
+        os.makedirs(os.path.join(home, "pauses"))
+        with open(os.path.join(home, "pauses", "lane_CX1.json"), "w") as f:
+            json.dump({"scope": "lane:CX1", "created_at": 1, "expires_at": None, "reason": "drain"}, f)
+        with open(os.path.join(home, "pauses", "lane_M1.json"), "w") as f:
+            json.dump({"scope": "lane:M1", "created_at": 1, "expires_at": 1, "reason": "old"}, f)
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": home}):
+            self.assertTrue(d.paused_lane("CX1", lc))
+            self.assertFalse(d.paused_lane("M1", lc))  # the record expired
+
     def test_inode_hysteresis(self):
         d = self.make()
         self.assertFalse(d.inode_decide(94.0))
