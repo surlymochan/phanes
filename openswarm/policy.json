@@ -341,5 +341,15 @@
     "prepare_replaces_links": [
       "node_modules"
     ]
+  },
+  "executor": {
+    "_doc": "Executor-side housekeeping of this host. retention expires the run workspaces that are due: a successful run keeps its workspace for success_hours, a failed run for failure_hours, and a run that is still in flight is never cleaned. The cleanup only runs when the disk watermark of the executor home reaches disk_threshold_pct (a host with room keeps the material for review); disk_alert_pct is the watermark that warns in `openswarm doctor` and in the fleet health output, and raises the cleanup priority. reclaim_abandoned stays false: a run whose state is still in flight is kept even when its runner died, because its children may still write into the workspace.",
+    "retention": {
+      "success_hours": 24,
+      "failure_hours": 72,
+      "disk_threshold_pct": 85,
+      "disk_alert_pct": 85,
+      "reclaim_abandoned": false
+    }
   }
 }

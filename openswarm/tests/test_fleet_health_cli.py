@@ -22,6 +22,13 @@ DISK = ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
         "/dev/root 1000 700 300 70% /\n")
 MEMORY = ("              total used free shared buff/cache available\n"
           "Mem: 8000 3000 2000 100 3000 5000\nSwap: 0 0 0\n")
+RETENTION_COMMAND = xs.dispatch_health_module().RETENTION_PROBE_COMMAND
+
+
+def home_disk(percent):
+    """The df output of the filesystem that holds the executor home."""
+    return ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+            f"/dev/root 1000 {percent} {100 - percent} {percent}% /\n")
 
 
 def inode_output(percent):
@@ -43,13 +50,16 @@ class FleetHealthCliTests(unittest.TestCase):
 
     # ---------------------------------------------------------------- fixtures
 
-    def runner(self, inode=10, failing=()):
+    def runner(self, inode=10, failing=(), home=70, no_retention=False):
         """A fake probe runner: fixed outputs per command, transport failures per host."""
-        outputs = {"df -P /": DISK, "df -Pi /": inode_output(inode), "free -m": MEMORY}
+        outputs = {"df -P /": DISK, "df -Pi /": inode_output(inode), "free -m": MEMORY,
+                   RETENTION_COMMAND: home_disk(home)}
 
         def run(host, command):
             if host in failing:
                 raise OSError("ssh: connect to host %s port 22: Connection refused" % host)
+            if no_retention and command == RETENTION_COMMAND:
+                raise OSError("df: cannot read $HOME")
             return outputs[command]
         return run
 
@@ -164,13 +174,15 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "retention_alerts",
+                                          "retention_thresholds", "status", "thresholds"])
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
         self.assertEqual(report["thresholds"]["inode_pause_pct"], 95)
+        self.assertEqual(report["retention_thresholds"]["disk_alert_pct"], 85)
         row = report["hosts"][0]
-        self.assertEqual(sorted(row), ["action", "decision", "error", "host", "metrics", "paused",
-                                       "reason", "status", "triggers"])
+        self.assertEqual(sorted(row), ["action", "alerts", "decision", "error", "host", "metrics",
+                                       "paused", "reason", "retention", "status", "triggers"])
         self.assertEqual(row["host"], "worker-a")
         self.assertFalse(row["paused"])
 
@@ -195,6 +207,52 @@ class FleetHealthCliTests(unittest.TestCase):
         self.assertEqual(row["host"], "worker-b")
         self.assertEqual(row["status"], "unreachable")
         self.assertEqual(row["error"], "unknown fleet host")
+
+    def test_a_full_executor_home_warns_and_raises_the_cleanup_priority(self):
+        report = self.health(runner=self.runner(home=91.7))
+        row = report["hosts"][0]
+        self.assertTrue(row["retention"]["alert"])
+        self.assertEqual(row["retention"]["priority"], "high")
+        self.assertEqual(row["retention"]["disk_used_pct"], 91.7)
+        self.assertEqual(row["alerts"], ["workspace retention: disk 91.7% used "
+                                          "(alert 85%), cleanup priority high"])
+        self.assertEqual(report["retention_alerts"], ["worker-a"])
+        self.assertEqual(row["status"], "soft")
+        self.assertEqual(row["decision"], "none")
+        self.assertFalse(report["ok"])
+
+    def test_the_alert_is_printed_in_the_health_output(self):
+        args = argparse.Namespace(hosts=None, json=False, apply=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            xs.cmd_fleet_health(args, policy={}, runner=self.runner(home=91.7),
+                                hosts={"worker-a": {"name": "worker-a", "kind": "local"}},
+                                now=self.now, home=self.home)
+        printed = output.getvalue()
+        self.assertIn("alert: workspace retention", printed)
+        self.assertIn("cleanup priority high", printed)
+
+    def test_a_quiet_executor_home_does_not_warn(self):
+        report = self.health(runner=self.runner(home=42.0))
+        row = report["hosts"][0]
+        self.assertFalse(row["retention"]["alert"])
+        self.assertEqual(row["retention"]["priority"], "normal")
+        self.assertEqual(row["alerts"], [])
+        self.assertEqual(report["retention_alerts"], [])
+        self.assertEqual(row["status"], "ok")
+
+    def test_the_retention_alert_watermark_is_configurable(self):
+        policy = {"executor": {"retention": {"disk_alert_pct": 50}}}
+        report = self.health(runner=self.runner(home=60.0), policy=policy)
+        self.assertTrue(report["hosts"][0]["retention"]["alert"])
+        self.assertEqual(report["retention_thresholds"]["disk_alert_pct"], 50)
+
+    def test_a_host_that_cannot_answer_the_retention_probe_is_not_unhealthy(self):
+        report = self.health(runner=self.runner(no_retention=True))
+        row = report["hosts"][0]
+        self.assertFalse(row["retention"]["alert"])
+        self.assertIsNone(row["retention"]["disk_used_pct"])
+        self.assertEqual(row["status"], "ok")
 
 
 if __name__ == "__main__":

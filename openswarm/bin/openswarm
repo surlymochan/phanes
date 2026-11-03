@@ -5773,6 +5773,7 @@ def cmd_run(args, policy):
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"))
     if not getattr(args, "no_auto_review", False):
         maybe_schedule_auto_review(rid, card_type, status, fin.get("branch"), fin.get("commit"), policy)
+    executor_retention_after_run(policy)
     print(json.dumps(out, indent=2, ensure_ascii=False))
     sys.exit(3 if budget_denial else 0 if status == "done" else 1)
 
@@ -9507,6 +9508,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
                timings=timings, **({"error": error_detail} if error_detail else {}))
     cleanup_executor_tmp(ws.get("root") or ws["path"])
+    executor_retention_after_run(load_policy())
     return out
 
 
@@ -11816,6 +11818,7 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     policy = load_policy() if policy is None else policy
     health = dispatch_health_module()
     limits = health.thresholds_from_policy(policy)
+    retention_limits = health.retention_thresholds_from_policy(policy)
     config = fleet_config() if hosts is None else hosts
     names = fleet_health_hosts(args, config)
     if not names:
@@ -11836,7 +11839,7 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                    "metrics": {}, "triggers": []}
         else:
             row = health.check_host(name, probe, limits, paused=record is not None,
-                                    ssh_fail_streak=streak)
+                                    ssh_fail_streak=streak, retention_limits=retention_limits)
         row["paused"] = scope in active
         row.setdefault("error", None)
         row["action"] = "none"
@@ -11855,6 +11858,9 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits,
+              "retention_thresholds": retention_limits,
+              "retention_alerts": [row["host"] for row in rows
+                                   if (row.get("retention") or {}).get("alert")],
               "hosts": rows}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -11864,6 +11870,8 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         metrics = " ".join(f"{key}={value}" for key, value in row["metrics"].items())
         if metrics:
             print(f"  metrics: {metrics}")
+        for alert in row.get("alerts") or []:
+            print(f"  alert: {alert}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")
@@ -14608,6 +14616,9 @@ def doctor_resources(lanes, policy, sleep=time.sleep):
         except (OSError, ValueError, TypeError) as error:
             rows.append({"path": path, "kind": "filesystem", "used_pct": None,
                          "level": "WARN", "detail": str(error)})
+    retention = doctor_retention_row(policy, usage=probe.fs_usage)
+    if retention:
+        rows.append(retention)
     for lane in lanes:
         unit = lane.get("systemd_unit")
         if not unit:
@@ -14700,6 +14711,134 @@ def cmd_doctor(args, policy):
         print(doctor_text(report))
     if not report["ok"]:
         sys.exit(1)
+
+
+# ---------------------------------------------------------------- workspace retention
+#
+# The executor host keeps one directory per run under $OPENSWARM_HOME/runs
+# (task, logs, result) and the git worktree the executor worked in, and
+# nothing removed them, so a full host blocked new runs (govpn2: 91.7% used,
+# 3.26G free on 2026-11-02).  The retention policy expires the workspaces
+# that are due: a successful run after 24h, a failed run after 72h, a run
+# that is still in flight never.  The cleanup only runs when the disk
+# watermark asks for it, and it only touches paths under the executor
+# workspace roots.
+
+
+def workspace_retention_module():
+    """The workspace retention module (lib/resources/workspace_retention.py), loaded by path."""
+    name = "openswarm_workspace_retention"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "resources", "workspace_retention.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load the workspace retention module at {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def executor_retention_sweep(policy=None, now=None, apply=True, alive=None, usage=None, holders=None):
+    """Expire the run workspaces that are due, when the host disk needs the space.
+
+    The sweep never raises: a cleanup problem must not fail the run that
+    triggered it.  The report says what was planned, what was deleted, what
+    was skipped and how many bytes the filesystem gave back.
+    """
+    policy = load_policy() if policy is None else policy
+    module = workspace_retention_module()
+    moment = NOW() if now is None else now
+    try:
+        config = module.retention_config(policy)
+        runs_root = os.path.join(DATA, "runs")
+        probe = alive or module.pid_alive
+        holders = holders or module.holder_probe()
+        records = module.scan_runs(runs_root, alive=probe, holders=holders, config=config, home_root=DATA)
+        disk = module.disk_watermark(DATA, usage=usage)
+        plan = module.plan_retention(records, moment, config, disk)
+        roots = module.workspace_roots(DATA, records)
+        report = {"ok": True, "now": moment, "runs_root": runs_root, "config": config, "roots": roots,
+                  "disk_used_pct": plan["disk_used_pct"], "threshold_pct": plan["threshold_pct"],
+                  "alert_pct": plan["alert_pct"], "priority": plan["priority"], "reason": plan["reason"],
+                  "expired": len(plan["expired"]), "retained": len(plan["retained"]),
+                  "candidates": plan["candidates"], "deleted": [], "refused": [], "skipped": [],
+                  "freed_bytes": 0, "measured_freed_bytes": 0, "applied": False,
+                  "audit_path": os.path.join(DATA, module.AUDIT_NAME)}
+        if apply and plan["candidates"]:
+            outcome = module.expire_workspaces(plan["candidates"], roots, audit_path=report["audit_path"],
+                                               now=moment, alive=probe, holders=holders)
+            report.update({"applied": True, "deleted": outcome["deleted"], "refused": outcome["refused"],
+                           "skipped": outcome["skipped"], "freed_bytes": outcome["freed_bytes"],
+                           "measured_freed_bytes": outcome["measured_freed_bytes"]})
+        return report
+    except (OSError, ValueError) as error:
+        return {"ok": False, "error": str(error)}
+
+
+def executor_retention_after_run(policy):
+    """Sweep the expired workspaces after a run finished.  Best effort only.
+
+    A cleanup problem must never fail the run that triggered it, so every
+    error is swallowed here.
+    """
+    try:
+        return executor_retention_sweep(policy)
+    except Exception as error:
+        return {"ok": False, "error": str(error)}
+
+
+def doctor_retention_row(policy, usage=None, now=None):
+    """The workspace retention health of this host.
+
+    The row warns when the disk watermark reached the alert level: the expired
+    run workspaces are then cleaned with the highest priority.
+    """
+    module = workspace_retention_module()
+    try:
+        config = module.retention_config(policy)
+        disk = module.disk_watermark(DATA, usage=usage)
+        records = module.scan_runs(os.path.join(DATA, "runs"), config=config, home_root=DATA)
+        report = module.health_report(records, config, disk, now)
+    except (OSError, ValueError) as error:
+        return {"path": DATA, "kind": "workspace_retention", "used_pct": None,
+                "level": "WARN", "detail": str(error)}
+    return {"path": DATA, "kind": "workspace_retention", "used_pct": report["disk_used_pct"],
+            "free": None, "level": "WARN" if report["alert"] else "OK",
+            "reasons": [report["message"]], "detail": report["message"],
+            "priority": report["priority"], "expired": report["expired"]}
+
+
+def cmd_workspaces(args, policy=None):
+    """Report the workspace retention of this host and expire what is due."""
+    policy = load_policy() if policy is None else policy
+    action = getattr(args, "workspaces_cmd", "status")
+    apply = action == "cleanup" and bool(getattr(args, "apply", False))
+    report = executor_retention_sweep(policy, apply=apply)
+    if not report.get("ok"):
+        print(json.dumps(report, ensure_ascii=False), file=sys.stderr)
+        sys.exit(2)
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return report
+    disk = report["disk_used_pct"]
+    used = "unknown" if disk is None else f"{disk:.1f}%"
+    print(f"disk {used} used (cleanup threshold {report['threshold_pct']:g}%, "
+          f"alert {report['alert_pct']:g}%, cleanup priority {report['priority']})")
+    print(f"{report['expired']} expired workspace(s), {report['retained']} kept — {report['reason']}")
+    if report["applied"]:
+        print(f"deleted {len(report['deleted'])} workspace(s), released {report['freed_bytes']} bytes "
+              f"(measured {report['measured_freed_bytes']} bytes, audit: {report['audit_path']})")
+    else:
+        planned = sum(row.get("size_bytes") or 0 for row in report["candidates"])
+        print(f"{len(report['candidates'])} workspace(s) would release {planned} bytes; "
+              f"run 'openswarm workspaces cleanup --apply' to delete them")
+    for row in report["refused"]:
+        print(f"refused {row.get('path')}: {row.get('reason')}")
+    for row in report["skipped"]:
+        print(f"skipped {row.get('path')}: {row.get('reason')}")
+    return report
 
 
 # ---------------------------------------------------------------- merge gate
@@ -15618,6 +15757,15 @@ def main():
     sp.add_argument("--lane", help="check one configured lane; default checks every configured lane")
     sp.add_argument("--json", action="store_true", help="print the report as JSON")
 
+    sp = sub.add_parser("workspaces", help="report and expire the run workspaces of this host")
+    ws_sub = sp.add_subparsers(dest="workspaces_cmd", required=True)
+    wp = ws_sub.add_parser("status", help="report the retention state of this host")
+    wp.add_argument("--json", action="store_true", help="print the report as JSON")
+    wp = ws_sub.add_parser("cleanup", help="delete the expired run workspaces")
+    wp.add_argument("--apply", action="store_true",
+                    help="delete the expired workspaces (without it nothing is removed)")
+    wp.add_argument("--json", action="store_true", help="print the report as JSON")
+
     sp = sub.add_parser("ingest-claude")
     sp.add_argument("--five-hour", type=float)
     sp.add_argument("--seven-day", type=float)
@@ -15896,6 +16044,8 @@ def main():
         except ValueError as error:
             print(f"openswarm: {error}", file=sys.stderr)
             sys.exit(2)
+    elif a.cmd == "workspaces":
+        cmd_workspaces(a, policy)
     elif a.cmd == "merge-gate":
         try:
             code = cmd_merge_gate(a, policy)

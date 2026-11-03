@@ -11,3 +11,5 @@ venv/
 /state.json
 /ledger.jsonl
 .openswarm-wt-*/
+# build artifacts of the test run: they are not part of the suite
+/tests/.*.so
