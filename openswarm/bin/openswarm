@@ -11965,8 +11965,10 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
             elif row["action"] == "paused":
                 active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
             row["paused"] = scope in active
-        remembered[name] = {"ssh_fail_streak": row["metrics"].get("ssh_fail_streak", 0),
-                            "status": row["status"], "updated_at": moment}
+        # the remembered shape of a host record lives in lib/dispatch/health.py:
+        # the dispatch gate reads the same field (Refs #1674)
+        remembered[name] = health.ssh_fail_record(row["metrics"].get("ssh_fail_streak", 0),
+                                                  row["status"], moment)
         rows.append(row)
     fleet_health_state_save(remembered, home)
     report = {"ok": all(row["status"] == "ok" for row in rows),

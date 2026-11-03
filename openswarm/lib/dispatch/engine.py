@@ -605,41 +605,67 @@ class Dispatcher:
 
     def ssh_health_blocked(self, host):
         """Skip hosts whose fleet health probe still reports an SSH failure streak."""
-        home = (os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
-                or os.path.expanduser("~/.claude/openswarm"))
-        try:
-            with open(self.cfg.get("fleet_health_file") or os.path.join(home, "fleet-health.json"),
-                      encoding="utf-8") as stream:
-                health = json.load(stream)
-            hosts = health.get("hosts") if isinstance(health, dict) else None
-            if not isinstance(hosts, dict):
-                return False
-            record = hosts.get(host)
-            metrics = record.get("metrics") if isinstance(record, dict) else None
-            streak = metrics.get("ssh_fail_streak") if isinstance(metrics, dict) else None
-            if not isinstance(streak, (int, float)) or isinstance(streak, bool):
-                return False
-        except (OSError, ValueError, TypeError):
-            return False
+        return host in self.ssh_fail_gate()[1]
 
-        policy = {}
-        paths = [os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), "policy.json"),
-            self.cfg.get("policy_file") or os.path.join(home, "policy.local.json")]
-        for path in paths:
-            try:
-                with open(path, encoding="utf-8") as stream:
-                    policy = deep_merge(policy, json.load(stream))
-            except (OSError, ValueError, TypeError):
-                pass
-        health_policy = ((policy.get("resources") or {}).get("health")
-                         if isinstance(policy.get("resources"), dict) else {})
-        threshold = (health_policy or {}).get("ssh_fail_pause_streak", 3)
+    # ------------------------------------------------------------ host health gate
+    def openswarm_home(self):
+        """The OpenSwarm home: $OPENSWARM_HOME (or $XSWARM_HOME), else ~/.claude/openswarm.
+
+        It is the home `openswarm fleet health` writes fleet-health.json to and
+        reads policy.local.json from, so the dispatch gate and the probe share
+        their state and their thresholds.
+        """
+        return (os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+                or os.path.expanduser("~/.claude/openswarm"))
+
+    def fleet_health_file(self):
+        """The health probe's state file: <openswarm home>/fleet-health.json."""
+        return self.cfg.get("fleet_health_file") or os.path.join(self.openswarm_home(),
+                                                                 "fleet-health.json")
+
+    def fleet_health_state(self):
+        """The health probe's remembered state; {} when it is missing or damaged."""
         try:
-            threshold = float(threshold)
-        except (TypeError, ValueError):
-            threshold = 3
-        return streak >= threshold
+            with open(self.fleet_health_file(), encoding="utf-8") as stream:
+                state = json.load(stream)
+        except (OSError, ValueError, UnicodeError):
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def policy(self):
+        """The merged policy: the repo policy.json over the local one of the openswarm home."""
+        policy = {}
+        for policy_path in (self.repo_policy_file(),
+                            self.cfg.get("policy_file")
+                            or os.path.join(self.openswarm_home(), "policy.local.json")):
+            try:
+                with open(policy_path, encoding="utf-8") as stream:
+                    loaded = json.load(stream)
+            except (OSError, ValueError, TypeError):
+                continue
+            if isinstance(loaded, dict):
+                policy = deep_merge(policy, loaded)
+        return policy
+
+    def repo_policy_file(self):
+        """The policy.json that ships with the openswarm skill."""
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "policy.json")
+
+    def ssh_fail_gate(self):
+        """The health probe's SSH failure gate: (threshold, {host: SSH failure streak}).
+
+        The probe remembers how often its SSH to a host failed in a row
+        (fleet-health.json); a host whose streak reached the probe's pause
+        threshold is unreachable and gets no dispatch, whatever the dispatcher's
+        own backoff says.  A recovered host (streak 0) is dispatched again.
+        """
+        health = dispatch_module("health")
+        limits = health.thresholds_from_policy(self.policy())
+        streaks = health.ssh_fail_streaks(self.fleet_health_state())
+        blocked = {host: streak for host, streak in streaks.items()
+                   if health.ssh_fail_blocked(streak, limits)}
+        return limits["ssh_fail_pause_streak"], blocked
 
     def host_fail(self, h, why, started_at=None, timeout_s=None):
         now = self.clock()
@@ -2446,10 +2472,15 @@ class Dispatcher:
                 for normalized in self.hotfiles.parse_hot_files("热文件：" + str(f)):
                     if normalized not in self.hot_union and not self.hotfiles.is_doc_file(normalized):
                         self.hot_lock.counts[normalized] = self.hot_lock.counts.get(normalized, 0) + 1
+        # A host the health probe counts as unreachable gets no dispatch this round
+        # (Refs #1674): its SSH keeps failing, whatever the dispatcher's own backoff says.
+        threshold, unreachable = self.ssh_fail_gate()
         for L, lc in self.lane_order(lanes):
             r = res[L]
-            if self.ssh_health_blocked(lc["host"]):
-                self.log(f"skip {L}: host {lc['host']} SSH failure streak exceeds health threshold", brain=False)
+            if lc["host"] in unreachable:
+                self.log(f"skip {L}: host {lc['host']} SSH failure streak "
+                         f"{unreachable[lc['host']]} >= {threshold}; the health probe counts it unreachable",
+                         brain=False)
                 continue
             if ("error" in r or not self.host_ok(lc["host"]) or state.get(L) or r.get("lane") != "idle"
                     or self.paused_lane(L, lc) or lc.get("drain")):
@@ -2588,16 +2619,7 @@ class Dispatcher:
                 model_history[L] = {"model": run["model"], "at": run.get("timestamp")}
         if not self.dry_run:
             self.save_state(state)
-        policy = {}
-        policy_paths = [os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), "policy.json"),
-            self.cfg.get("policy_file") or os.path.expanduser("~/.claude/openswarm/policy.local.json")]
-        for policy_path in policy_paths:
-            try:
-                with open(policy_path, encoding="utf-8") as stream:
-                    policy = deep_merge(policy, json.load(stream))
-            except (OSError, ValueError, TypeError):
-                pass
+        policy = self.policy()
         st, by_backend, drift = {}, {}, []
         busy = idle = 0
         for L, lc in lanes.items():

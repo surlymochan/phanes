@@ -247,46 +247,116 @@ class HostHealth(Base):
         self.assertEqual(d.backoff["h1"]["n"], 3)
         self.assertFalse(d.host_ok("h1"))
 
-    def health_dispatch(self, streak, threshold=3, hosts_value=None, expired_backoff=False):
-        home = os.path.join(self.tmp, "custom-home")
-        os.makedirs(home, exist_ok=True)
-        health_path = os.path.join(home, "fleet-health.json")
-        data = {"hosts": hosts_value if hosts_value is not None else {
-            "box": {"metrics": {"ssh_fail_streak": streak}}}}
-        with open(health_path, "w") as stream:
-            json.dump(data, stream)
-        with open(os.path.join(home, "policy.local.json"), "w") as stream:
+
+
+class HealthProbeGate(Base):
+    """The dispatch gate of the health probe's SSH failure streaks (Refs #1674).
+
+    `openswarm fleet health` probes every fleet host and remembers how often its
+    SSH to a host failed in a row; the streak lives in the openswarm home's
+    fleet-health.json, next to the policy.local.json that names the threshold.
+    A host whose streak reached the threshold is unreachable and gets no
+    dispatch, whatever the dispatcher's own backoff says.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "openswarm-home")
+        os.makedirs(self.home, exist_ok=True)
+
+    # ---------------------------------------------------------------- fixtures
+
+    def write_health(self, hosts, updated_at=1700000000.0):
+        """Write the fleet-health.json the health probe leaves behind (its real format)."""
+        path = os.path.join(self.home, "fleet-health.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump({"hosts": hosts, "updated_at": updated_at}, stream)
+        return path
+
+    def write_policy(self, threshold):
+        """Write the policy.local.json of the openswarm home (the probe reads it too)."""
+        path = os.path.join(self.home, "policy.local.json")
+        with open(path, "w", encoding="utf-8") as stream:
             json.dump({"resources": {"health": {"ssh_fail_pause_streak": threshold}}}, stream)
+        return path
+
+    def dispatcher(self):
         d = self.make()
         d.clock = lambda: 1000
         d.main_sha = lambda: SHA
         d.label_state = lambda n: "fresh"
-        d.dispatch = lambda lane, lc, item, base: ("run", "verify")
+        d.dispatch = lambda lane, lc, item, base: (f"run-{item['n']}", "verify")
         d.gh_write_retry = lambda args, **kwargs: (0, "", "")
-        if expired_backoff:
-            d.backoff["box"] = {"n": 1, "until": 999}
-        lane = {"P0": {"host": "box", "backend": "pi"}}
+        return d
+
+    def assign(self, d, host="box"):
+        """Run one dispatch round for a lane on `host` and return the written state."""
+        lanes = {"P0": {"host": host, "backend": "pi"}}
         state = {}
         item = {"n": 1, "title": "task", "body": "", "backend": None,
                 "strict": False, "prio": 1}
-        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": home}, clear=False):
-            d.assign_issues(lane, {"P0": {"lane": "idle"}}, state, [item])
-        return d, state
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            d.assign_issues(lanes, {"P0": {"lane": "idle"}}, state, [item])
+        return state
 
-    def test_health_streak_blocks_without_or_with_expired_backoff(self):
-        for expired in (False, True):
-            with self.subTest(expired_backoff=expired):
-                d, state = self.health_dispatch(2, threshold=2, expired_backoff=expired)
-                self.assertEqual(state, {})
-                self.assertTrue(d.host_ok("box"))
+    def log_text(self, d):
+        try:
+            with open(d.path(d.cfg["log_file"]), encoding="utf-8") as stream:
+                return stream.read()
+        except OSError:
+            return ""
 
-    def test_health_streak_recovery_allows_dispatch(self):
-        _, state = self.health_dispatch(0, threshold=2)
-        self.assertEqual(state["P0"]["issue"], 1)
+    # ---------------------------------------------------------------- tests
 
-    def test_malformed_health_hosts_does_not_interrupt_dispatch(self):
-        _, state = self.health_dispatch(0, threshold=2, hosts_value=["bad", "state"])
-        self.assertEqual(state["P0"]["issue"], 1)
+    def test_the_health_probe_state_blocks_the_dispatch(self):
+        # the probe writes the streak on the host record itself (fleet-health.json)
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 3, "status": "unreachable",
+                                   "updated_at": 1700000000.0}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d), {})          # the unreachable host gets no dispatch
+        self.assertIn("SSH failure streak 3", self.log_text(d))
+
+    def test_the_block_survives_an_expired_dispatcher_backoff(self):
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 3, "status": "unreachable"}})
+        d = self.dispatcher()
+        d.backoff["box"] = {"n": 1, "until": 999}      # the dispatcher's own backoff expired
+        self.assertTrue(d.host_ok("box"))
+        self.assertEqual(self.assign(d), {})
+
+    def test_a_recovered_host_is_dispatched_again(self):
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 3, "status": "unreachable"}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d), {})
+        self.write_health({"box": {"ssh_fail_streak": 0, "status": "ok", "updated_at": 1700000000.0}})
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+    def test_a_streak_below_the_threshold_does_not_block(self):
+        self.write_policy(3)
+        self.write_health({"box": {"ssh_fail_streak": 2, "status": "unreachable"}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+    def test_the_openswarm_home_decides_the_threshold(self):
+        # the probe pauses a host after two failures when its home says so
+        self.write_policy(2)
+        self.write_health({"box": {"ssh_fail_streak": 2, "status": "unreachable"}})
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d), {})
+        self.assertIn("streak 2", self.log_text(d))
+
+    def test_a_damaged_hosts_entry_does_not_interrupt_the_dispatch(self):
+        self.write_policy(3)
+        self.write_health(["bad", "state"])
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
+
+    def test_a_missing_health_state_does_not_block(self):
+        self.write_policy(3)
+        d = self.dispatcher()
+        self.assertEqual(self.assign(d)["P0"]["issue"], 1)
 
 
 class QuotaGuards(Base):

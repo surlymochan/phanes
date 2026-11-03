@@ -106,5 +106,52 @@ class ProbeTests(unittest.TestCase):
             health.run_probe("h", failed)
 
 
+class SshFailStreakTests(unittest.TestCase):
+    """The remembered SSH failure streaks of the fleet-health state (Refs #1674)."""
+
+    def test_the_streak_sits_on_the_host_record_itself(self):
+        state = {"hosts": {"box": {"ssh_fail_streak": 3, "status": "unreachable",
+                                   "updated_at": 1700000000.0},
+                           "pi": {"ssh_fail_streak": 0, "status": "ok", "updated_at": 1700000000.0}},
+                 "updated_at": 1700000000.0}
+        self.assertEqual(health.ssh_fail_streaks(state), {"box": 3, "pi": 0})
+
+    def test_a_damaged_state_is_never_evidence_of_a_failure(self):
+        for state in ({}, {"hosts": None}, {"hosts": {"box": "broken"}},
+                      {"hosts": {"box": {"ssh_fail_streak": "x"}}}, None, []):
+            with self.subTest(state=state):
+                self.assertEqual(health.ssh_fail_streaks(state), {})
+
+    def test_a_hosts_entry_that_is_not_an_object_is_never_evidence_of_a_failure(self):
+        for hosts in (["box"], "box", 3, [1, 2]):
+            with self.subTest(hosts=hosts):
+                self.assertEqual(health.ssh_fail_streaks({"hosts": hosts}), {})
+
+    def test_the_record_is_written_the_way_the_gate_reads_it(self):
+        record = health.ssh_fail_record(3, "unreachable", 1700000000.0)
+        self.assertEqual(record, {"ssh_fail_streak": 3, "status": "unreachable",
+                                  "updated_at": 1700000000.0})
+        self.assertEqual(health.ssh_fail_streaks({"hosts": {"box": record}}), {"box": 3})
+
+    def test_a_damaged_streak_is_counted_as_zero(self):
+        self.assertEqual(health.ssh_fail_record("x", "unreachable", 1)["ssh_fail_streak"], 0)
+        self.assertEqual(health.ssh_fail_record(None, "ok", 1)["ssh_fail_streak"], 0)
+
+    def test_the_threshold_decides_whether_a_host_is_blocked(self):
+        self.assertFalse(health.ssh_fail_blocked(2))
+        self.assertTrue(health.ssh_fail_blocked(3))
+        self.assertTrue(health.ssh_fail_blocked(4))
+        self.assertFalse(health.ssh_fail_blocked(None))
+        self.assertFalse(health.ssh_fail_blocked("broken"))
+
+    def test_a_configured_threshold_wins(self):
+        self.assertFalse(health.ssh_fail_blocked(4, {"ssh_fail_pause_streak": 5}))
+        self.assertTrue(health.ssh_fail_blocked(5, {"ssh_fail_pause_streak": 5}))
+
+    def test_a_damaged_threshold_falls_back_to_the_default(self):
+        self.assertTrue(health.ssh_fail_blocked(3, {"ssh_fail_pause_streak": "x"}))
+        self.assertFalse(health.ssh_fail_blocked(2, {"ssh_fail_pause_streak": "x"}))
+
+
 if __name__ == "__main__":
     unittest.main()
