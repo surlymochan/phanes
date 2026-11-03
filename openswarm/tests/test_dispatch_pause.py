@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
@@ -61,6 +62,102 @@ class PauseStoreTests(unittest.TestCase):
             [row["scope"] for row in self.store.active(1)],
             ["all", "backend:b", "host:z", "lane:A"],
         )
+
+
+class DerivedScopeTests(unittest.TestCase):
+    """Refs #1367: a hold under a scope of its own pauses the target it derives from.
+
+    The fleet health check keeps a hold of a host under ``host:<host>@health``
+    when another program owns the scope of the host, so neither record
+    overwrites the other.  The pause store still reports the host as paused
+    for the callers that ask about the host.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-pause-derived-")
+        self.addCleanup(self.tmp.cleanup)
+        self.home = pathlib.Path(self.tmp.name)
+        self.store = pause.PauseStore(self.home)
+
+    def test_a_scope_of_its_own_pauses_the_host_it_derives_from(self):
+        self.store.pause("host:worker-a@health", reason="auto:health disk", now=100)
+
+        self.assertTrue(self.store.is_paused(host="worker-a", now=100))
+        self.assertFalse(self.store.is_paused(host="worker-b", now=100))
+        self.assertFalse(self.store.is_paused(host="worker-ab", now=100))
+        self.assertFalse(self.store.is_paused(lane="M1", now=100))
+
+    def test_the_hold_of_another_program_stays_a_record_of_its_own(self):
+        self.store.pause("host:worker-a", reason="operator: maintenance", now=100)
+        self.store.pause("host:worker-a@health", reason="auto:health disk", now=100)
+
+        scopes = {row["scope"]: row["reason"] for row in self.store.active(100)}
+        self.assertEqual(scopes["host:worker-a"], "operator: maintenance")
+        self.assertEqual(scopes["host:worker-a@health"], "auto:health disk")
+        # The operator releases their own pause: the health hold stays and the
+        # host is still paused.
+        self.store.resume("host:worker-a")
+        self.assertTrue(self.store.is_paused(host="worker-a", now=100))
+        self.assertEqual([row["scope"] for row in self.store.active(100)],
+                         ["host:worker-a@health"])
+        # The health hold is released: the host is dispatchable again.
+        self.store.resume("host:worker-a@health")
+        self.assertFalse(self.store.is_paused(host="worker-a", now=100))
+
+
+class PauseDirTests(unittest.TestCase):
+    """Refs #1367: the host-level pause markers live in one shared directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-pause-dir-")
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = pathlib.Path(self.tmp.name)
+        self.previous = {name: os.environ.get(name)
+                         for name in ("OPENSWARM_PAUSE_DIR", "OPENSWARM_HOME")}
+        for name in self.previous:
+            os.environ.pop(name, None)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for name, value in self.previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_the_pause_dir_env_names_the_marker_directory(self):
+        os.environ["OPENSWARM_PAUSE_DIR"] = str(self.directory)
+        self.assertEqual(pause.pause_dir(), str(self.directory))
+
+    def test_the_openswarm_home_holds_the_markers_without_the_override(self):
+        os.environ["OPENSWARM_HOME"] = str(self.directory)
+        self.assertEqual(pause.pause_dir(), str(self.directory))
+
+    def test_a_home_argument_overrides_the_openswarm_home(self):
+        os.environ["OPENSWARM_HOME"] = "/nowhere"
+        self.assertEqual(pause.pause_dir(str(self.directory)), str(self.directory))
+
+    def test_the_host_marker_path_and_the_marker_lookup(self):
+        path = pause.host_marker_path(self.directory, "worker-a")
+        self.assertEqual(path, os.path.join(str(self.directory), "PAUSE-HOST-worker-a"))
+        self.assertFalse(pause.host_paused("worker-a", [self.directory]))
+        pathlib.Path(path).write_text("auto:health disk 97% used\n", encoding="utf-8")
+        self.assertTrue(pause.host_paused("worker-a", [self.directory]))
+        self.assertFalse(pause.host_paused("worker-b", [self.directory]))
+
+    def test_the_health_marker_dir_lives_below_the_pause_dir(self):
+        os.environ["OPENSWARM_PAUSE_DIR"] = str(self.directory)
+        self.assertEqual(pause.health_pause_dir(), os.path.join(str(self.directory), "health"))
+        self.assertEqual(pause.pause_dirs(), [str(self.directory),
+                                              os.path.join(str(self.directory), "health")])
+
+    def test_the_health_marker_of_a_host_is_found_in_the_pause_dirs(self):
+        os.environ["OPENSWARM_PAUSE_DIR"] = str(self.directory)
+        path = pause.host_marker_path(pause.health_pause_dir(), "worker-a")
+        pathlib.Path(os.path.dirname(path)).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(path).write_text("auto:health disk 97% used\n", encoding="utf-8")
+        self.assertTrue(pause.host_paused("worker-a", pause.pause_dirs()))
+        self.assertFalse(pause.host_paused("worker-b", pause.pause_dirs()))
 
 
 if __name__ == "__main__":

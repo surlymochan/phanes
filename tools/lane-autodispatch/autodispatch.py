@@ -6,6 +6,13 @@ lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 <
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
+A health check that holds a host writes PAUSE-HOST-<HOST>: no lane of that host is dispatched.
+The box health check writes it next to this scheduler's state; the openswarm fleet health check
+(`openswarm fleet health --apply`) writes it into the openswarm pause dir ($OPENSWARM_PAUSE_DIR,
+else the openswarm home $OPENSWARM_HOME), the same place the openswarm dispatch engine reads it
+from, and into the health marker dir below it ($OPENSWARM_PAUSE_DIR/health), where its own holds
+live: a hold of one health check never collides with the marker of another one. All are honoured
+(Refs #1367).
 """
 import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
@@ -59,6 +66,18 @@ READ_ERROR_LOGGED = set()  # issues whose unreadable state was already logged in
 # GitHub charges one GraphQL point per `gh issue view`: cap the authoritative reads of one
 # tick so a 100-row queue and a 60s tick cannot blow through the hourly quota (Refs #950).
 FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
+# The host-level pause markers (Refs #1367). The box health check writes PAUSE-HOST-<host>
+# next to this scheduler's state (D); the openswarm fleet health check writes it into the
+# openswarm pause dir (OPENSWARM_PAUSE_DIR, else the openswarm home $OPENSWARM_HOME), the
+# directory the openswarm dispatch engine reads it from. Both are honoured, so a hold from
+# either check keeps the host out of the dispatch.
+PAUSE_HOST_PREFIX = "PAUSE-HOST-"
+PAUSE_DIR_ENV = "OPENSWARM_PAUSE_DIR"
+OPENSWARM_HOME_DEFAULT = f"{HOME}/.claude/openswarm"
+# The health marker directory below the shared pause dir: the openswarm fleet health check
+# writes its own host markers there, so its hold never collides with a marker of another
+# program (Refs #1367).
+HEALTH_DIR_NAME = "health"
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -133,7 +152,25 @@ def start_autodispatch(command=None):
     os.replace(temporary, state_path)
     return state
 
+def pause_dirs():
+    """The directories a host-level PAUSE-HOST-<host> marker can live in.
+
+    The scheduler's own state dir holds the markers the box health check writes;
+    the openswarm pause dir holds the markers `openswarm fleet health --apply`
+    writes (OPENSWARM_PAUSE_DIR, else the openswarm home $OPENSWARM_HOME) and the
+    health marker directory below it holds the markers of the fleet health check itself.
+    The openswarm dispatch engine reads the markers from the same directories.
+    """
+    shared = (os.environ.get(PAUSE_DIR_ENV) or os.environ.get("XSWARM_PAUSE_DIR")
+              or os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+              or OPENSWARM_HOME_DEFAULT)
+    shared = os.path.expanduser(shared)
+    dirs = [D, shared, os.path.join(shared, HEALTH_DIR_NAME)]
+    return list(dict.fromkeys([d for d in dirs if d]))
+
 def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
+def host_paused(h): return any(os.path.exists(f"{d}/{PAUSE_HOST_PREFIX}{h}") for d in pause_dirs())
+def host_dispatchable(h): return host_ok(h) and not host_paused(h)
 def host_fail(h, why):
     b = BACKOFF.setdefault(h, {"n": 0, "until": 0}); b["n"] += 1
     wait = min(HOST_BACKOFF_MAX, HOST_BACKOFF_BASE * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
@@ -594,11 +631,11 @@ def tick(lanes, state, last_warn):
     if os.path.exists(f"{D}/PAUSE"): return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
-    live = [L for L in lanes if host_ok(lanes[L]["host"])]
+    live = [L for L in lanes if host_dispatchable(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
     for L in lanes:
-        if L not in res: res[L] = {"error": "host in backoff", "skip": True}
+        if L not in res: res[L] = {"error": "host paused" if host_paused(lanes[L]["host"]) else "host in backoff", "skip": True}
     seen = set()
     for L in live:
         h = lanes[L]["host"]
@@ -621,7 +658,7 @@ def tick(lanes, state, last_warn):
     base = None
     for L, cfg in lanes.items():
         r = res[L]
-        if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
+        if "error" in r or not host_dispatchable(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or os.path.exists(f"{D}/PAUSE-{L}"): continue
         pick = None
         for c in sorted((i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i)), key=lambda i: rank(cfg["backend"], i)):
             status, detail = label_state(c["n"])

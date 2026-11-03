@@ -11672,11 +11672,18 @@ def cmd_fleet_render_lanes(args):
 
 # ---------------------------------------------------------------- fleet health: probe the hosts, pause the sick ones
 
-FLEET_HEALTH_PAUSE_TTL = 1800
+# The health check owns the pause of a host until the host recovers, so its
+# pause-store record has no expiry: a pause must not lapse while the host is
+# still sick (the record is released when the host recovers).
+FLEET_HEALTH_PAUSE_TTL = None
 FLEET_HEALTH_TIMEOUT = 30
 FLEET_HEALTH_STATE_FILE = "fleet-health.json"
 FLEET_HEALTH_REASON = "auto:health"
 FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "unreachable": 2, "hard": 3}
+# The scope of the health pause while an operator's pause owns the host scope:
+# the health pause takes a scope of its own, so neither record overwrites the
+# other (Refs #1367).
+FLEET_HEALTH_SCOPE_SUFFIX = "@health"
 
 
 def dispatch_health_module():
@@ -11726,13 +11733,113 @@ def fleet_health_lane_hosts(home=None):
     return names
 
 
-def fleet_health_hosts(args, hosts):
+def fleet_health_hosts(args, hosts, home=None):
     """The hosts to probe: --hosts, else the hosts the lanes.json names."""
     requested = [name.strip() for name in (getattr(args, "hosts", None) or "").split(",") if name.strip()]
     if requested:
         return list(dict.fromkeys(requested))
-    named = fleet_health_lane_hosts()
+    named = fleet_health_lane_hosts(home)
     return named or list(hosts)
+
+
+def fleet_health_pause_dir(home=None):
+    """The shared pause dir, the interchange format between the programs.
+
+    The dispatchers read the host markers from this directory;
+    ``OPENSWARM_PAUSE_DIR`` names another directory for all of them
+    (lib/dispatch/pause.py owns the rule).
+    """
+    return dispatch_pause_module().pause_dir(home or DATA)
+
+
+def fleet_health_marker_dir(home=None):
+    """The directory this command writes its own host markers into.
+
+    It is a subdirectory of the shared pause dir (``<pause dir>/health``): the
+    hold of the health check never collides with a marker another program owns
+    in the shared dir, and that marker is never rewritten nor removed.
+    """
+    return dispatch_pause_module().health_pause_dir(home or DATA)
+
+
+def fleet_health_marker_path(home, host):
+    """The host marker of this command: <pause dir>/health/PAUSE-HOST-<host>.
+
+    The marker is the interchange format the dispatchers read (the dispatch
+    engine and the box autodispatcher both honour ``PAUSE-HOST-<host>``), so
+    the health check reaches the dispatchers that do not read the pause store.
+    """
+    return dispatch_pause_module().host_marker_path(fleet_health_marker_dir(home), host)
+
+
+def fleet_health_marker_body(home, host):
+    """The body of the host marker of this command, or None when there is none."""
+    try:
+        with open(fleet_health_marker_path(home, host), encoding="utf-8") as stream:
+            return stream.read()
+    except OSError:
+        return None
+
+
+def fleet_health_marker_write(home, host, reason):
+    """Write the host marker of this command (and only that one)."""
+    path = fleet_health_marker_path(home, host)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write(FLEET_HEALTH_REASON + " " + reason + "\n")
+    return "paused"
+
+
+def fleet_health_marker_clear(home, host):
+    """Remove the host marker of this command (and only that one)."""
+    try:
+        os.unlink(fleet_health_marker_path(home, host))
+    except OSError:
+        return "none"
+    return "cleared"
+
+
+def fleet_health_foreign_marker_body(home, host):
+    """The host marker of the shared pause dir, or None when there is none.
+
+    This command never writes that file: a marker there belongs to another
+    program (an operator, the box health check) and is never rewritten nor
+    removed.
+    """
+    path = dispatch_pause_module().host_marker_path(fleet_health_pause_dir(home), host)
+    try:
+        with open(path, encoding="utf-8") as stream:
+            return stream.read()
+    except OSError:
+        return None
+
+
+def fleet_health_holds(active, home, host):
+    """The holds of a host: the one of this command and the ones of other programs.
+
+    ``scope`` is the scope of the pause record of this command: the host scope
+    while it is free or already holds the health pause, the
+    ``host:<host>@health`` scope while an operator's pause owns the host scope.
+    ``health`` says whether this command holds the host (its own record or its
+    own marker), ``foreign`` whether another program holds it.
+    """
+    scope = "host:" + host
+    record = active.get(scope)
+    health_record, health_scope = None, scope
+    if record is not None and str(record.get("reason", "")).startswith(FLEET_HEALTH_REASON):
+        health_record, health_scope = record, scope
+    else:
+        alternative = active.get(scope + FLEET_HEALTH_SCOPE_SUFFIX)
+        if alternative is not None and str(alternative.get("reason", "")).startswith(FLEET_HEALTH_REASON):
+            health_record, health_scope = alternative, scope + FLEET_HEALTH_SCOPE_SUFFIX
+        elif record is not None:
+            health_scope = scope + FLEET_HEALTH_SCOPE_SUFFIX
+    health_marker = fleet_health_marker_body(home, host) is not None
+    foreign_record = record is not None and health_record is None
+    foreign_marker = fleet_health_foreign_marker_body(home, host) is not None
+    return {"scope": health_scope, "record": health_record, "marker": health_marker,
+            "health": health_record is not None or health_marker,
+            "foreign": foreign_record or foreign_marker}
 
 
 def fleet_health_runner(hosts, timeout=FLEET_HEALTH_TIMEOUT):
@@ -11765,33 +11872,53 @@ def fleet_health_state_save(hosts, home=None):
     jsave(fleet_health_state_path(home), {"hosts": hosts, "updated_at": NOW()})
 
 
-def fleet_health_apply(store, row, active, moment):
+def fleet_health_apply(store, row, active, moment, home=None):
     """Pause or resume one host from its health decision.
 
-    Only the pauses this command wrote (``auto:health ...``) are managed: a
-    manual pause is never rewritten and never cleared.
+    The health check owns its hold of a sick host: a pause-store record and
+    the ``PAUSE-HOST-<host>`` marker in the health marker directory.  The
+    hold is independent of the holds other programs own (an operator's
+    pause, a marker of the box health check): those are never rewritten and
+    never removed, and they never hide a health fault - a host that is sick
+    keeps its own health hold until it recovers.
+
+    A host that did not recover yet keeps its pause: the pause-store record
+    has no expiry and is refreshed on every run, so it cannot lapse while the
+    host is still sick.  The pause ends when the host recovers, not when the
+    record ages out.
     """
-    scope = "host:" + row["host"]
-    record = active.get(scope)
-    if record is not None and not str(record.get("reason", "")).startswith(FLEET_HEALTH_REASON):
-        if row["decision"] == "pause":
-            return "paused-manual"
-        if row["decision"] == "resume":
-            return "kept"
-        if row["status"] == "hard":
-            return "paused-manual"
-        return "none"
+    holds = fleet_health_holds(active, home, row["host"])
+    scope = holds["scope"]
     if row["decision"] == "pause":
+        # The host is sick: take the health hold.  An operator's pause keeps
+        # its own scope, so the health record never overwrites it.
         store.pause(scope, ttl_s=FLEET_HEALTH_PAUSE_TTL,
                     reason=FLEET_HEALTH_REASON + " " + row["reason"], now=moment)
+        fleet_health_marker_write(home, row["host"], row["reason"])
+        active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
         return "paused"
     if row["decision"] == "resume":
-        if record is None:
+        # The host recovered: release the health hold (and only that one).
+        released = store.resume(scope) if holds["record"] is not None else False
+        cleared = fleet_health_marker_clear(home, row["host"])
+        if released:
+            active.pop(scope, None)
+        if not released and cleared == "none":
             return "none"
-        if not str(record.get("reason", "")).startswith(FLEET_HEALTH_REASON):
-            return "kept"
-        store.resume(scope)
         return "resumed"
+    if holds["health"]:
+        # The health check holds the host and it did not recover yet: refresh
+        # the pause-store record so the pause stays valid until it recovers.
+        store.pause(scope, ttl_s=FLEET_HEALTH_PAUSE_TTL,
+                    reason=FLEET_HEALTH_REASON + " " + row["reason"], now=moment)
+        if not holds["marker"]:
+            fleet_health_marker_write(home, row["host"], row["reason"])
+        active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
+        return "renewed"
+    if holds["foreign"]:
+        # Another program holds the host and this command has nothing to do:
+        # that hold stays untouched.
+        return "kept"
     return "none"
 
 
@@ -11810,14 +11937,15 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     The hosts are the ones ``lanes.json`` names (or ``--hosts``); each one is
     probed with ``lib/dispatch/health.py`` and judged with the policy thresholds
     (``resources.health``, else the built-in defaults).  ``--apply`` pauses a
-    host that needs it and releases the host that recovered; a manual pause is
-    never touched.
+    host that needs it and releases the host that recovered; the pause of
+    another program (a manual pause, a hold of the box health check) is never
+    touched.
     """
     policy = load_policy() if policy is None else policy
     health = dispatch_health_module()
     limits = health.thresholds_from_policy(policy)
     config = fleet_config() if hosts is None else hosts
-    names = fleet_health_hosts(args, config)
+    names = fleet_health_hosts(args, config, home)
     if not names:
         raise ValueError("no fleet host to probe")
     store = dispatch_pause_module().PauseStore(home or DATA)
@@ -11827,26 +11955,24 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     probe = runner if runner is not None else fleet_health_runner(config)
     rows, remembered = [], {}
     for name in names:
-        scope = "host:" + name
-        record = active.get(scope)
         streak = int((previous.get(name) or {}).get("ssh_fail_streak") or 0)
+        holds = fleet_health_holds(active, home, name)
         if name not in config:
             row = {"host": name, "status": "unreachable", "decision": "none",
                    "reason": f"{name}: not a configured fleet host", "error": "unknown fleet host",
                    "metrics": {}, "triggers": []}
         else:
-            row = health.check_host(name, probe, limits, paused=record is not None,
+            # The decision follows the hold of this command: a hold of another
+            # program never hides a health fault.
+            row = health.check_host(name, probe, limits, paused=holds["health"],
                                     ssh_fail_streak=streak)
-        row["paused"] = scope in active
+        row["paused"] = holds["health"] or holds["foreign"]
         row.setdefault("error", None)
         row["action"] = "none"
         if getattr(args, "apply", False):
-            row["action"] = fleet_health_apply(store, row, active, moment)
-            if row["action"] == "resumed":
-                active.pop(scope, None)
-            elif row["action"] == "paused":
-                active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
-            row["paused"] = scope in active
+            row["action"] = fleet_health_apply(store, row, active, moment, home)
+            holds = fleet_health_holds(active, home, name)
+            row["paused"] = holds["health"] or holds["foreign"]
         remembered[name] = {"ssh_fail_streak": row["metrics"].get("ssh_fail_streak", 0),
                             "status": row["status"], "updated_at": moment}
         rows.append(row)

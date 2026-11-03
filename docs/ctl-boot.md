@@ -470,6 +470,25 @@ Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft ale
 `PAUSE-HOST-*` file. The disk boundary contract is checked offline with
 `python3 tools/check-health-disk-soft.py`.
 
+`PAUSE-HOST-<host>` holds the whole host: the lane autodispatcher dispatches no
+lane of a held host (`host_dispatchable()` in `tools/lane-autodispatch/autodispatch.py`),
+so a disk or SSH hold stops the traffic to that host even when only the host
+pause was written. The openswarm side writes the same marker: `openswarm fleet
+health --apply` holds a sick host with `PAUSE-HOST-<host>` (and a pause-store
+record) and releases both once the host recovered.
+
+The two health checks write the marker into different directories, and every dispatcher reads
+all of them: the box health check writes it into `~/phanes-ctl/autodispatch` (the state dir next to
+this scheduler), the openswarm fleet health writes its own markers into the health marker dir below
+the openswarm pause dir (`$OPENSWARM_PAUSE_DIR`, else the openswarm home `$OPENSWARM_HOME`, default
+`~/.claude/openswarm`), the directory the openswarm dispatch engine reads it from. The health marker
+dir is `<pause dir>/health`: the hold of the fleet health check never collides with the marker of
+another program, which is never rewritten nor removed, and it never hides a health fault - a sick
+host keeps its own hold until it recovers. `OPENSWARM_PAUSE_DIR` names one
+directory for all the programs. A host that did not recover yet keeps its pause: the fleet health
+owns its pause-store record, which has no expiry and is refreshed on every run, so the pause ends
+when the host recovers and not when the record ages out.
+
 For low-memory `govpn2`-class hosts, the offline contract uses
 `HEALTH_MEM_HARD_MB=256` and `HEALTH_MEM_SOFT_MB=512`. A `health.json` snapshot
 below hard writes `auto:host_hard` to `PAUSE-HOST-govpn2` and `auto:mem_hard`

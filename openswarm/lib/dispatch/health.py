@@ -39,14 +39,26 @@ def _number(probe, field):
     return None
 
 
+def _threshold(value):
+    """A threshold value that is a number, or None when the policy spells it wrong."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
 def thresholds_from_policy(policy):
-    """The health thresholds of a policy: ``resources.health`` over DEFAULT_THRESHOLDS."""
+    """The health thresholds of a policy: ``resources.health`` over DEFAULT_THRESHOLDS.
+
+    A threshold the policy spells with a value that is not a number is
+    ignored: the built-in default stays in place instead of breaking the
+    comparison the health decision makes.
+    """
     limits = dict(DEFAULT_THRESHOLDS)
     resources = policy.get("resources") if isinstance(policy, dict) else None
     health = resources.get("health") if isinstance(resources, dict) else None
     if isinstance(health, dict):
         for key, value in health.items():
-            if key in limits:
+            if key in limits and _threshold(value) is not None:
                 limits[key] = value
     return limits
 

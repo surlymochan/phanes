@@ -236,6 +236,8 @@ the `验收：` line and the section headings do not count. A pull request's eff
 | `openswarm fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `openswarm fleet exec worker -- lane status` |
 | `openswarm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `openswarm fleet ledger pull --hosts worker,sandbox` |
 | `openswarm fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `openswarm fleet render-lanes --inventory fleet-inventory.json --check` |
+| `openswarm fleet health` | Probe the fleet hosts (disk, inodes, memory, SSH) and report their health. | `openswarm fleet health --hosts ib1,ib2 --json` |
+| `openswarm fleet health --apply` | Pause the unhealthy hosts and release the recovered ones (host-level pause). | `openswarm fleet health --apply` |
 | `openswarm doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk) without installing anything. | `openswarm doctor --lane C1 --json` |
 | `openswarm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `openswarm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
 
@@ -678,6 +680,35 @@ schema (`name`, `backend`, `model`, absolute `repo`, plus the backend extras suc
 or a duplicate lane name is an error. `--check` reads the `lanes.json` each host has (the local file, or `cat`
 over the host transport) and reports the extra, missing, and changed lanes; it exits non-zero when a host
 drifted. The command only renders and compares: it never writes to a host.
+
+`fleet health` probes every host (disk, inodes, free memory, SSH) and judges the result against the
+`resources.health` thresholds of the policy; `--apply` writes a host-level pause for a sick host and releases
+it once the host recovered:
+
+```bash
+openswarm fleet health                       # report only
+openswarm fleet health --hosts ib1,ib2 --json
+openswarm fleet health --apply               # pause the sick hosts, release the recovered ones
+```
+
+The pause is written twice: as a pause-store record (`openswarm pause list` shows it) and as the
+`PAUSE-HOST-<host>` marker the dispatchers read, so no lane of a held host is dispatched. The hold of
+the health check is its own: its marker lives in the health marker dir (`<pause dir>/health`) and,
+while an operator's pause owns the host scope, its pause record takes the `host:<host>@health` scope.
+The pauses of the other programs (a manual pause, a hold another health check owns) are never
+rewritten and never cleared, and they never hide a health fault: a sick host keeps its own hold until
+it recovers. An unreachable host is paused after `ssh_fail_pause_streak` consecutive SSH failures.
+
+The host marker lives in the openswarm pause dir (`$OPENSWARM_PAUSE_DIR`, else the openswarm home
+`$OPENSWARM_HOME`), the directory the dispatch engine and the lane autodispatcher
+(`tools/lane-autodispatch/autodispatch.py`) read it from, so a sick host gets no lane dispatched
+to it; the health check writes its own markers into the health marker dir below it
+(`<pause dir>/health`), so its hold never collides with the marker of another program.
+`OPENSWARM_PAUSE_DIR` names another directory for all of them.
+A host that did not recover yet keeps its pause: the pause-store record it owns has no expiry and
+is refreshed on every run (`action: renewed`), so it cannot lapse while the host is still sick.
+The pause ends when the host recovers, not when the record ages out; a health check that is
+decommissioned leaves its pause behind until the record is removed.
 
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
