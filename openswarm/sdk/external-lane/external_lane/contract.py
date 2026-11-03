@@ -37,6 +37,8 @@ LABEL_COLORS = {READY: "0e8a16", CLAIMED: "fbca04", PR_OPEN: "1d76db", FAILED: "
 MIN_EFFECTIVE_LINES = 30
 CODE_EXT = (".py", ".ts", ".tsx", ".js", ".mjs", ".go", ".rs", ".sh")
 DOC_EXT = (".md", ".txt", ".rst", ".adoc")
+# Path components whose files are code, not documentation (a `docs/` directory does not make a file a doc).
+NON_DOC_DIRS = ("tests", "test", "spec", "__tests__", "tools", "scripts")
 
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}$")
 CLOSES_RE = re.compile(r"\b(?:Closes|Fixes|Resolves)\s+#(\d+)\b", re.I)
@@ -45,6 +47,9 @@ REWORK_RE = re.compile(r"^\s*(?:重基PR|Rework PR)\s*[:：]\s*#(\d+)\s+(\S+)", 
 DEPENDS_RE = re.compile(r"^\s*(?:依赖|Depends on)\s*[:：](.*)$", re.M)
 HOT_RE = re.compile(r"^\s*(?:热文件|Hot files)\s*[:：](.*)$", re.M)
 VERIFY_RE = re.compile(r"^\s*(?:验收|Verify|Acceptance)\s*[:：].*`([^`]+)`", re.M)
+# Review-driven documentation rework: the dispatcher writes this marker on the card when the lane review asked for a
+# documentation-only correction. It only pairs with the rework marker of the very same PR.
+REVIEW_DOCS_REWORK_RE = re.compile(r"^\s*(?:审查文档返工|Review docs rework)\s*[:：]\s*#(\d+)\b", re.M)
 
 
 def check_agent(agent: str) -> str:
@@ -170,11 +175,46 @@ def diff_weight(files):
     return eff, docs, other
 
 
-def thin_reason(files, minimum: int = MIN_EFFECTIVE_LINES) -> str:
+def is_doc_file(path: str) -> bool:
+    """Strict documentation test (used by the review-driven rework exemption): real docs only.
+    Code, tests and everything else are rejected, even when they sit in a `docs/` directory."""
+    p = str(path or "").strip().lower()
+    if not p or p.endswith(CODE_EXT):
+        return False
+    parts = p.split("/")
+    if any(part in NON_DOC_DIRS for part in parts[:-1]):
+        return False
+    name = parts[-1]
+    if name.startswith("test_") or name.endswith("_test.md"):
+        return False
+    return p.endswith(DOC_EXT)
+
+
+def docs_only_diff(files) -> bool:
+    """True when every changed file is a documentation file. Checked per file: one code, test or other file
+    (even one with zero changed lines) disqualifies the whole diff."""
+    files = files or []
+    return bool(files) and all(is_doc_file(f.get("filename") or f.get("path") or "") for f in files)
+
+
+def review_docs_rework(body: str, pr_number: int) -> bool:
+    """True when this card asks for a documentation-only rework of exactly this PR: the rework marker and the
+    review-docs marker must both name that PR (anti-abuse: one card cannot excuse another PR)."""
+    target = rework_target(body or "")
+    marker = REVIEW_DOCS_REWORK_RE.search(body or "")
+    if not target or not marker:
+        return False
+    return int(target[0]) == int(pr_number) and int(marker.group(1)) == int(pr_number)
+
+
+def thin_reason(files, minimum: int = MIN_EFFECTIVE_LINES, review_docs_rework: bool = False) -> str:
     """'' when the change is substantial enough; else why it is thin (same rule the fleet harvest uses)."""
     eff, docs, other = diff_weight(files)
     if eff + docs + other == 0:
         return "empty-diff"
+    # A review-driven documentation rework may be small, but only when every touched file is documentation.
+    if review_docs_rework and docs_only_diff(files):
+        return ""
     if eff < minimum:
         return f"effective<{minimum}: effective={eff} docs={docs} other={other}"
     if docs > eff and eff < minimum * 2:

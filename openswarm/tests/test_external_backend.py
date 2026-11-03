@@ -108,6 +108,52 @@ class PullRequestTest(unittest.TestCase):
         self.assertEqual(acts[0]["state"], "failure")
         self.assertIn("Closes", acts[0]["desc"])
 
+    def test_review_docs_rework_exempts_a_docs_only_pr(self):
+        docs = [{"filename": "docs/review-fix.md", "additions": 9}]
+        body = "重基PR：#70 fleet/chatgpt-agent-issue7-1\n审查文档返工：#70"
+        own = [issue(7, ["lane-claimed", "backend:chatgpt-agent"], body)]
+        acts = X.plan(cfg(auto_assign=False), own, [], [pr(70, "fleet/chatgpt-agent-issue7-1", "Closes #7")],
+                      lambda n: docs, {}, NOW)
+        self.assertEqual(acts[0]["state"], "success")
+        self.assertIn("contract ok", acts[0]["desc"])
+
+    def test_review_docs_rework_does_not_exempt_code_or_mixed_diffs(self):
+        docs = [{"filename": "docs/review-fix.md", "additions": 9}]
+        body = "重基PR：#70 fleet/chatgpt-agent-issue7-1\n审查文档返工：#70"
+        own = [issue(7, ["lane-claimed", "backend:chatgpt-agent"], body)]
+        mixed = docs + [{"filename": "src/fix.py", "additions": 2}]
+        acts = X.plan(cfg(auto_assign=False), own, [], [pr(70, "fleet/chatgpt-agent-issue7-1", "Closes #7")],
+                      lambda n: mixed, {}, NOW)
+        self.assertEqual(acts[0]["state"], "failure")
+        # a code file inside docs/ is not documentation either
+        code_in_docs = [{"filename": "docs/example.py", "additions": 9}]
+        acts = X.plan(cfg(auto_assign=False), own, [], [pr(70, "fleet/chatgpt-agent-issue7-1", "Closes #7")],
+                      lambda n: code_in_docs, {}, NOW)
+        self.assertEqual(acts[0]["state"], "failure")
+
+    def test_review_docs_rework_status_follows_the_marker_at_the_same_head(self):
+        """The exemption depends on the card body: adding or removing the marker must re-publish the status."""
+        docs = [{"filename": "docs/review-fix.md", "additions": 9}]
+        marked = "重基PR：#70 fleet/chatgpt-agent-issue7-1\n审查文档返工：#70"
+        plain = "重基PR：#70 fleet/chatgpt-agent-issue7-1"
+        prs = [pr(70, "fleet/chatgpt-agent-issue7-1", "Closes #7")]
+        mem = {}
+        # no marker -> thin failure
+        acts = X.plan(cfg(auto_assign=False), [issue(7, ["lane-claimed", "backend:chatgpt-agent"], plain)],
+                      [], prs, lambda n: docs, mem, NOW)
+        self.assertEqual(acts[0]["state"], "failure")
+        # marker added at the same head sha -> re-published as success
+        acts = X.plan(cfg(auto_assign=False), [issue(7, ["lane-claimed", "backend:chatgpt-agent"], marked)],
+                      [], prs, lambda n: docs, mem, NOW)
+        self.assertEqual(acts[0]["state"], "success")
+        # nothing changed -> no duplicate status
+        self.assertEqual(X.plan(cfg(auto_assign=False), [issue(7, ["lane-claimed", "backend:chatgpt-agent"], marked)],
+                                 [], prs, lambda n: docs, mem, NOW), [])
+        # marker removed at the same head sha -> the exemption is withdrawn, failure again
+        acts = X.plan(cfg(auto_assign=False), [issue(7, ["lane-claimed", "backend:chatgpt-agent"], plain)],
+                      [], prs, lambda n: docs, mem, NOW)
+        self.assertEqual(acts[0]["state"], "failure")
+
     def test_rework_claim_is_not_relabelled_by_its_own_pr(self):
         own = [issue(7, ["lane-claimed", "backend:chatgpt-agent"], "重基PR：#70 fleet/chatgpt-issue7-1", updated_at=iso(NOW))]
         acts = X.plan(cfg(auto_assign=False), own, [], [pr(70, "fleet/chatgpt-issue7-1", "Closes #7")], lambda n: FAT, {}, NOW)

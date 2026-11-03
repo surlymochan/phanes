@@ -95,12 +95,12 @@ class ExternalLane:
 
     def open_pr(self, n, branch, title, summary="", files=None, rework_pr=None):
         """After the branch is pushed. `files` ([{filename, additions, deletions}]) enables the thin-diff gate."""
+        issue = self.gh.get_issue(n)
         if files is not None:
-            why = C.thin_reason(files)
+            why = C.thin_reason(files, review_docs_rework=C.review_docs_rework(issue.get("body") or "", rework_pr or 0))
             if why:
                 self.fail(n, f"thin diff ({why}); the contract needs >= {C.MIN_EFFECTIVE_LINES} effective code/test lines")
                 return None
-        issue = self.gh.get_issue(n)
         if rework_pr:
             self.gh.comment(rework_pr, f"external lane **{self.agent}** pushed a rework to `{branch}` for #{n}. {summary}".strip())
             url = f"https://github.com/{self.repo}/pull/{rework_pr}"
@@ -168,7 +168,7 @@ class ExternalLane:
                 if v.returncode:
                     return self.fail(n, f"acceptance `{verify}` failed: {(v.stderr or v.stdout).strip()[-800:]}")
             files = self.numstat(workdir)
-            why = C.thin_reason(files)
+            why = C.thin_reason(files, review_docs_rework=C.review_docs_rework(issue.get("body") or "", rework_pr or 0))
             if why:
                 return self.fail(n, f"thin diff ({why})")
             self.push(workdir, branch, force=bool(rework_pr))
