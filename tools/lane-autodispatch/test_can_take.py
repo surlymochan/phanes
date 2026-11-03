@@ -76,5 +76,12 @@ class BackendFallbackTest(unittest.TestCase):
         self.assertFalse(AUTODISPATCH.should_retry_harvest_fetch("fatal: repository not found", 1))
         self.assertEqual(AUTODISPATCH.HARVEST_FETCH_MAX_ATTEMPTS, 3)
 
+    def test_base_missing_is_only_the_missing_base_commit(self):
+        # Refs #1810: only the missing base commit triggers the fetch-on-miss retry.
+        self.assertTrue(AUTODISPATCH.base_missing("fatal: Not a valid object name abc123^{commit}"))
+        self.assertFalse(AUTODISPATCH.base_missing("fatal: could not read Username for 'https://github.com'"))
+        self.assertFalse(AUTODISPATCH.base_missing(""))
+        self.assertEqual(AUTODISPATCH.DISPATCH_BASE_FETCH_ATTEMPTS, 3)
+
 if __name__ == "__main__":
     unittest.main()
