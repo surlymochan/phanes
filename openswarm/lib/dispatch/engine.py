@@ -425,6 +425,43 @@ print(json.dumps(out))
 '''
 
 
+REMOTE_USAGE = r'''
+import json,os,sys,time
+O=os.path.expanduser(sys.argv[1] if len(sys.argv)>1 and sys.argv[1] else "~/.claude/openswarm")
+now=time.time()
+out={"now":now,"samples":[]}
+root=os.path.join(O,"runs")
+try:
+    names=os.listdir(root)
+except Exception:
+    names=[]
+names.sort()          # the run ids sort chronologically: the newest ones are the last
+scanned=0
+for name in names[-200:]:    # the scan stays bounded: only the recent runs matter
+    scanned+=1
+    directory=os.path.join(root,name)
+    record=None; status=None
+    try:
+        with open(os.path.join(directory,"result.json"),encoding="utf-8") as stream: record=json.load(stream)
+    except Exception: record=None
+    try:
+        with open(os.path.join(directory,"status.json"),encoding="utf-8") as stream: status=json.load(stream)
+    except Exception: status=None
+    record=record if isinstance(record,dict) else {}
+    status=status if isinstance(status,dict) else {}
+    lane=record.get("lane") or status.get("lane")
+    if not lane: continue
+    at=record.get("finished_at") or record.get("finished") or status.get("finished")
+    if at is None:
+        try: at=os.path.getmtime(os.path.join(directory,"result.json"))
+        except Exception: at=status.get("started")
+    usage=record.get("usage")
+    if usage is None: usage=status.get("usage")
+    out["samples"].append({"run":name,"lane":lane,"at":at,"usage":usage,"running":not record})
+print(json.dumps(out))
+'''
+
+
 RECORD_FAILURE_SRC = r'''
 import base64,json,os,sys
 home=os.path.expanduser(sys.argv[1]); run=sys.argv[2]
@@ -972,6 +1009,73 @@ class Dispatcher:
             e = "ssh status timeout" if rc in (124, 137) else ((err or out).strip()[-200:] or f"rc={rc}")
             return {L: {"error": e} for L, _ in items}
         return {L: d.get(L, {"error": "missing in batch"}) for L, _ in items}
+
+    def remote_usage(self, host):
+        """The token usage samples of one host: what its runs burned (Refs #1690).
+
+        The scan runs on the host that owns the runs, so the control plane
+        reads the numbers the executor wrote instead of guessing them from the
+        busy/idle state.  ``None`` means the host could not be read: its burn
+        is unknown, never zero.
+        """
+        home = self.cfg["remote_home"]
+        try:
+            if host in self.local_hosts:
+                rc, out, err = self.sh(["python3", "-", home], timeout=25, inp=REMOTE_USAGE)
+            else:
+                s = self.cfg["ssh"]
+                rc, out, err = self.sh(["ssh"] + self.ssh_opts(host) + [host, "python3", "-", home],
+                                       timeout=s["status_timeout_s"], inp=REMOTE_USAGE)
+        except subprocess.TimeoutExpired:
+            return None
+        except Exception:
+            return None
+        try:
+            data = json.loads((out or "").strip().splitlines()[-1])
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def collect_usage(self, lanes, res):
+        """The usage samples of every host, one remote scan per host (Refs #1690).
+
+        A host the tick could not reach contributes no samples: the lanes of
+        that host are reported as "not collected" instead of as a zero burn.
+        """
+        hosts = {}
+        for name, lc in (lanes or {}).items():
+            host = (lc or {}).get("host")
+            if host:
+                hosts.setdefault(host, []).append(name)
+        out = {}
+        for host, names in hosts.items():
+            if any((res.get(name) or {}).get("error") for name in names):
+                continue        # the host is unreachable: its burn is unknown
+            data = self.remote_usage(host)
+            if not data:
+                continue
+            samples = data.get("samples")
+            if isinstance(samples, list):
+                out[host] = samples
+        return out
+
+    def usage_views(self, lanes, samples_by_host, now):
+        """The burn view of every lane: its last run and the two windows."""
+        module = dispatch_module("usage")
+        by_lane = {}
+        for host, samples in (samples_by_host or {}).items():
+            for entry in samples:
+                if not isinstance(entry, dict):
+                    continue
+                lane = entry.get("lane")
+                if lane in lanes:
+                    by_lane.setdefault(lane, []).append(entry)
+        views = {}
+        for name in lanes:
+            views[name] = module.lane_view(by_lane.get(name, []), now)
+        return views, module.fleet_view(
+            {name: {"host": (lanes[name] or {}).get("host"), "samples": by_lane.get(name, [])}
+             for name in lanes}, now)
 
     def remote_local(self, lane, run=""):
         try:
@@ -2987,6 +3091,16 @@ class Dispatcher:
         if not self.dry_run:
             self.save_state(state)
         policy = self.policy()
+        # The burn of the lanes: the last run of every lane and the two windows
+        # around it.  The windows are recomputed here, against the clock of
+        # this tick, so a lane that stopped running ages out of the 15 minute
+        # window instead of keeping the numbers of its last run (Refs #1690).
+        try:
+            usage_samples = self.collect_usage(lanes, res)
+            usage_views, fleet_burn = self.usage_views(lanes, usage_samples, self.clock())
+        except Exception as e:
+            self.log(f"usage collection exc: {e!r}", brain=False)
+            usage_samples, usage_views, fleet_burn = {}, {}, None
         st, by_backend, drift = {}, {}, []
         busy = idle = 0
         for L, lc in lanes.items():
@@ -3003,12 +3117,17 @@ class Dispatcher:
                      "pr": active.get("review_pr") if active else None, "backend": backend, "host": lc.get("host"),
                      "model_cfg": model_cfg, "model_last": last.get("model"), "model_last_at": last.get("at"),
                      "paused_reason": self.paused_reason(L, lc)}
+            # The burn of the lane: the last run (with or without a reading) and
+            # the 15 minute and one hour windows around it (Refs #1690).
+            entry["usage"] = usage_views.get(L) or dispatch_module("usage").lane_view([], self.clock())
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)
             st[L] = entry
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
-                                                "model_drift": drift},
+                                                "model_drift": drift,
+                                                "burn_15m": (fleet_burn or {}).get("window_15m"),
+                                                "burn_1h": (fleet_burn or {}).get("window_1h")},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
