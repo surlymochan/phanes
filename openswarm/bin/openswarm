@@ -3632,6 +3632,8 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
         return []
     ttl = fleet_recovery_ttl_seconds(policy)
     now, recovered, candidates = NOW(), [], []
+    if os.environ.get("OPENSWARM_DEBUG_RECOVERY"):
+        print(f"RECOVERY tick now={now:.3f} ttl={ttl}", file=sys.stderr, flush=True)
     for path in glob.glob(os.path.join(RUNS, "*", "status.json")):
         status = jload(path, {}) or {}
         rdir = os.path.dirname(path)
@@ -3682,6 +3684,8 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
             continue
         candidates.append((checked, path, status, rdir, run_id, "dead-runner"))
     for _, path, status, rdir, run_id, recovery_kind in sorted(candidates, key=lambda row: row[0])[:max_candidates]:
+        if os.environ.get("OPENSWARM_DEBUG_RECOVERY"):
+            print(f"RECOVERY candidate run={run_id} kind={recovery_kind} stopped={executor_stopped(rdir)}", file=sys.stderr, flush=True)
         set_status(rdir, fleet_recovery_checked_at=now)
         if recovery_kind == "release-pending":
             if release_fleet_slot(rdir, confirmed=True, pending_release=status["fleet_release_pending"],
@@ -3718,8 +3722,12 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
             answer = fleet_guard_call(command, {"op": "recover", "host": owner, "run_id": run_id,
                                                 "confirm": "runner-and-executors-stopped-after-ttl"}, timeout=call_timeout)
         except RuntimeError as error:
+            if os.environ.get("OPENSWARM_DEBUG_RECOVERY"):
+                print(f"RECOVERY call failed run={run_id} error={error}", file=sys.stderr, flush=True)
             set_status(rdir, fleet_reservation_error=str(error))
             continue
+        if os.environ.get("OPENSWARM_DEBUG_RECOVERY"):
+            print(f"RECOVERY answer run={run_id} {answer}", file=sys.stderr, flush=True)
         if answer.get("recovered"):
             set_status(rdir, fleet_recovered_at=now, fleet_reservation_error=None,
                        fleet_reservation_token=None, fleet_reservation_pending=None)
