@@ -18,3 +18,15 @@
 全读线设为 20 文件或增删合计 1000 行、4 轮 lane 评审。20 文件/1000 行是便于机械执行的初始操作阈值，不代表统计学风险界线。4 轮阈值锚定本仓库今晚（2026-11-02）审查实证：[`docs/evidence/architecture-review/report-c.json.gz`](evidence/architecture-review/report-c.json.gz) 的 review-round 分布包含 round>3 前科名单；复核报告 [`docs/architecture-review-brief.md`](architecture-review-brief.md) 记录该次快照和复核口径。阈值选择意味着名单中的高轮次 PR 全读，不把该样本外推为概率模型。
 
 分类器结果随执行记录保存：tester 将命令 JSON 输出附入该 PR 的审查记录，保留分级理由和抽样文件清单，供后续复核。
+
+## 实时命令验收记录（Refs #1854）
+
+2026-11-04 在本仓库（`surlymochan/phanes`）已登录 `gh` 环境下实跑，三个样本均正常退出并给出风险结论：
+
+| 命令 | 退出码 | 分级 | 理由 |
+| --- | --- | --- | --- |
+| `python3 tools/tester-risk.py 1680` | 0 | 全读 | review 轮次 4 >= 4（lane-review 评论）；PR 有 needs-human 前科标签 |
+| `python3 tools/tester-risk.py 1647` | 0 | 全读 | 大 diff: 10 文件, +1049/-40 行；review 轮次 4 >= 4（lane-review 评论）；PR 有 needs-human 前科标签 |
+| `python3 tools/tester-risk.py 1743` | 0 | 全读 | 大 diff: 20 文件, +1542/-35 行；关联 issue 失败记录: lane-failed |
+
+实时读取路径（`gh pr view` + `gh issue view`）由 `tools/tests/test_tester_risk.py` 的 `LivePathTests` 覆盖：用 gh stub 回放上述真实 gh 输出，断言 CLI 退出码、请求字段含 `comments`/`closingIssuesReferences`、closing issue 被解析，以及 `gh` 失败时退出码为 2 且无 traceback。CI 无网络时该覆盖仍然生效。
