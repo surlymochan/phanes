@@ -145,6 +145,9 @@ DEFAULTS = {
         "ready": "lane-ready", "in_progress": "in-progress", "pr": "lane-pr", "failed": "lane-failed",
         "reviewed": "lane-reviewed", "needs_changes": "needs-changes", "needs_human": "needs-human",
         "strict_backend": "strict-backend", "backend_prefix": "backend:",
+        # The label of a follow-up card (Refs #1733).  It is added after the card is
+        # created, so a repo without that label still gets the card.
+        "follow_up": "follow-up",
     },
     "priorities": {"p0": 0, "p1": 1, "p2": 2},
     "fallback": {"pi": ["codex", "copilot", "agy"], "codex": ["pi", "copilot", "agy"],
@@ -1842,9 +1845,15 @@ class Dispatcher:
                         return False
                     # The head that went to the PR branch is the head of the push source (the artifact
                     # filter may have rebuilt it): the rebase of that head is done (Refs #1842).
-                    rc_head, pushed_head, _ = self.git("rev-parse", head)
-                    if not rc_head and pushed_head.strip():
-                        self.merge_review(pr, {"rebase_sha": pushed_head.strip(), "rebase_base_sha": st["base"]})
+                    # The dispatcher moved the head of the pull request itself, so the review that
+                    # follows is a rebase re-review and not a new formal round (Refs #1733): the
+                    # pushed head is remembered under `rebased_sha` and the metrics compare it with
+                    # the reviewed head.
+                    pushed = (head if re.fullmatch(r"[0-9a-f]{40}", head or "")
+                              else self.git("rev-parse", head)[1].strip())
+                    if pushed:
+                        self.merge_review(pr, {"rebase_sha": pushed, "rebase_base_sha": st["base"],
+                                               "rebased_sha": pushed})
                     self.gh_write(["pr", "comment", str(pr), "--body",
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
@@ -2598,8 +2607,39 @@ class Dispatcher:
         comment += self.evidence_comment(ev_txt, ev)
         comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"
         self.gh(["pr", "comment", str(pr), "--body", comment])
+        # The lane review metrics read these fields (Refs #1733): the round count of
+        # the pull request, the first verdict of the pull request, the backend of the
+        # reviewing lane, the PR data and the finding counts of the conclusion.
+        metrics = dispatch_module("review_metrics")
+        counts = metrics.parse_counts(txt)
+        first_verdict = metrics.first_verdict_of(r)      # the verdict of the first formal round
+        previous_rounds = metrics.formal_rounds(r)[0] or 0
+        rebased = bool(r.get("rebased_sha")) and r.get("rebased_sha") == sha
+        if rebased and r.get("verdict"):
+            # the dispatcher moved the head itself (a rebase): the code did not change,
+            # so the re-review is not a formal round and it cannot rewrite the verdict
+            # of the first round either
+            r["rebase_reviews"] = int(r.get("rebase_reviews") or 0) + 1
+        else:
+            r["review_rounds"] = previous_rounds + 1
+            # the first formal verdict is written once and never changed: a later
+            # verdict (a new head, a re-review) must not turn a pull request that
+            # failed its first round into a first-round pass
+            r["first_verdict"] = metrics.verdict_word(first_verdict) or v
+        issue_number = None
+        closes = self.closes_re.search(cj.get("body") or "")
+        if closes:
+            issue_number = int(closes.group(1))
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
-                  "fails_sha": sha, "fail_classes": []})
+                  "fails_sha": sha, "fail_classes": [],
+                  "backend": bk_backend, "model": bk_model, "run": st.get("run"),
+                  "pr": pr, "issue": issue_number,
+                  "author_lane": self.author_lane(cj.get("headRefName")),
+                  "head_branch": cj.get("headRefName"),
+                  "blockers": counts["blockers"], "follow_ups": counts["follow_ups"]})
+        # the follow-up cards of the [FOLLOW-UP] findings: they are real issues of
+        # their own, and the metrics count the ones that were really opened
+        r["followup_issues"] = self.open_follow_up_cards(pr, lane, sha, v, txt, r)
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -2621,10 +2661,63 @@ class Dispatcher:
                        T["changes_section"].format(round=r["rounds"], who=who, pr=pr, sha10=sha[:10], branch=cj["headRefName"],
                                                    notes=txt.strip()[:8000]) + "\n")
                 self.gh(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
+                # the rework task of this round (Refs #1733): it is queued on the
+                # original issue, so it is NOT a follow-up card (those are issues of
+                # their own); the metrics count the two apart
+                r["rework_tasks"] = int(r.get("rework_tasks") or 0) + 1
                 self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
         self.put_review(pr, r)
         self.log(f"reviewed PR #{pr} by {who}: {v}")
         return True
+
+    def open_follow_up_cards(self, pr, lane, sha, verdict, text, record):
+        """The follow-up cards of a review: one real issue per [FOLLOW-UP] finding (Refs #1733).
+
+        A follow-up card is an issue of its own: the rework task of a changes round is
+        not one of them, that one stays on the original issue.  The metric counts the
+        cards that were really opened: a card that could not be created is not counted,
+        and a finding that already has a card never gets a second one.
+
+        The card is created first and labelled afterwards: a repo without the
+        ``follow-up`` label still gets the card (the label is then missing, not the
+        card), so the number of cards stays the number of real issues.
+        """
+        metrics = dispatch_module("review_metrics")
+        items = metrics.follow_up_entries(text)
+        opened = list(record.get("followup_issues") or [])     # the cards of the earlier rounds
+        done = list(record.get("followup_items") or [])        # the findings that have a card
+        if not items or self.dry_run:
+            return opened
+        for item in items:
+            if item in done:
+                continue                                       # this finding already has a card
+            title = "Follow-up of PR #%s review (%s): %s" % (pr, lane, item[:80])
+            body = ("Follow-up of the lane review of PR #%s (head `%s`, lane %s, verdict %s).\n\n%s\n\n"
+                    "<!-- lane-review-followup pr=%s sha=%s lane=%s -->"
+                    % (pr, sha[:10], lane, verdict, item, pr, sha, lane))
+            rc, out, err = self.gh_write(["issue", "create", "-t", title, "-b", body])
+            number = self.issue_number(out)
+            if rc or not number:
+                self.log(f"review PR #{pr}: follow-up card NOT opened ({item[:60]!r})", brain=False)
+                continue
+            label = self.L.get("follow_up") or ""
+            if label:
+                lrc, _, lerr = self.gh_write(["issue", "edit", str(number), "--add-label", label])
+                if lrc:
+                    self.log(f"review PR #{pr}: follow-up card #{number} opened without the `{label}` label "
+                             f"({(lerr or '').strip()[-80:]})", brain=False)
+            opened.append(number)
+            done.append(item)
+            self.log(f"review PR #{pr}: follow-up card #{number} opened ({item[:60]!r})")
+        record["followup_items"] = done
+        record["followup_issues"] = opened
+        return opened
+
+    @staticmethod
+    def issue_number(out):
+        """The issue number of a `gh issue create` answer (the URL that it prints)."""
+        match = re.search(r"/issues/(\d+)", str(out or ""))
+        return int(match.group(1)) if match else None
 
     def idle_lanes(self, lanes, res, state):
         return [L for L, lc in lanes.items() if "error" not in res[L] and self.host_ok(lc["host"]) and not state.get(L)
@@ -3013,7 +3106,22 @@ class Dispatcher:
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
+            self.write_review_metrics()
         return res
+
+    def write_review_metrics(self):
+        """Refresh the lane review metrics next to lanes-status.json (Refs #1733).
+
+        The metrics are a reading of the review records, never a gate: a failure
+        here is logged and the tick goes on.
+        """
+        try:
+            metrics = dispatch_module("review_metrics")
+            report = metrics.compute(self.load_reviews(), generated_at=time.strftime("%F %T"))
+            report["source"] = self.path("reviews.json")
+            write_json(self.path(metrics.METRICS_FILE), report)
+        except Exception as e:
+            self.log(f"review metrics exc: {e!r}", brain=False)
 
     def serve(self):
         while True:

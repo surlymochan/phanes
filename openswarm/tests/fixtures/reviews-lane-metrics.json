@@ -1,0 +1,49 @@
+{
+  "1700": {
+    "sha": "1111111111111111111111111111111111111111",
+    "verdict": "CHANGES",
+    "lane": "CX4",
+    "rounds": 1,
+    "at": "2026-10-29 09:00:00"
+  },
+  "1746": {
+    "sha": "2222222222222222222222222222222222222222",
+    "verdict": "APPROVE",
+    "lane": "CX4",
+    "backend": "codex",
+    "model": "gpt-6.1-terra",
+    "run": "r2",
+    "pr": 1746,
+    "issue": 1733,
+    "author_lane": "M5",
+    "head_branch": "fleet/M5-issue1746-20261103",
+    "blockers": 1,
+    "follow_ups": 1,
+    "followup_issues": [42],
+    "rework_tasks": 1,
+    "rebase_reviews": 0,
+    "review_rounds": 2,
+    "first_verdict": "CHANGES",
+    "at": "2026-11-04 15:00:00"
+  },
+  "1747": {
+    "sha": "3333333333333333333333333333333333333333",
+    "verdict": "APPROVE",
+    "lane": "M5",
+    "backend": "pi",
+    "model": "minimax",
+    "run": "r1",
+    "pr": 1747,
+    "issue": 1747,
+    "author_lane": "M11",
+    "head_branch": "fleet/M11-issue1747-20261104",
+    "blockers": 0,
+    "follow_ups": 0,
+    "followup_issues": [],
+    "rework_tasks": 0,
+    "rebase_reviews": 0,
+    "review_rounds": 1,
+    "first_verdict": "APPROVE",
+    "at": "2026-11-05 10:00:00"
+  }
+}

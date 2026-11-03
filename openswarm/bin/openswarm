@@ -12160,6 +12160,49 @@ def dispatch_pause_module():
     return module
 
 
+def dispatch_review_metrics_module():
+    """The lane review metrics module (lib/dispatch/review_metrics.py), loaded by path."""
+    name = "openswarm_dispatch_review_metrics"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "review_metrics.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def lane_review_metrics_report(home=None):
+    """The lane review metrics of the daily brief (Refs #1733).
+
+    The dispatcher writes ``lane-review-metrics.json`` next to
+    ``lanes-status.json``; when that file is missing the metrics are computed
+    from the review records, so the brief always shows the numbers it can prove.
+    Both files live in the dispatch state directory (the one that holds
+    ``lanes-status.json`` and ``reviews.json``), not in the lane home.
+    """
+    module = dispatch_review_metrics_module()
+    where = home or dispatch_state_dir()
+    path = os.path.join(where, module.METRICS_FILE)
+    data = jload(path, None)
+    if isinstance(data, dict) and isinstance(data.get("lanes"), dict):
+        data.setdefault("source", path)
+        return data
+    reviews = jload(os.path.join(where, "reviews.json"), {}) or {}
+    report = module.compute(reviews if isinstance(reviews, dict) else {})
+    report["source"] = os.path.join(where, "reviews.json")
+    return report
+
+
+def lane_review_metrics_text(report):
+    """The one-screen lane review summary of the daily brief (Refs #1733)."""
+    module = dispatch_review_metrics_module()
+    if not isinstance(report, dict) or not report.get("lanes"):
+        return "lane review metrics: no review records yet (no lane review metrics file)"
+    return module.render(report)
+
+
 def fleet_health_lane_hosts(home=None):
     """The host names the lanes.json names, in the order they appear.
 
@@ -13352,6 +13395,7 @@ def daily_report(policy, date=None):
                      "executor_minutes": seconds / 60, "summary": short(summary or entry.get("title"), 220)})
     return {"date": day, "timezone": timezone, "totals": totals, "per_backend": per_backend, "per_lane": per_lane,
             "budget": budget_status(policy, day, entries), "risks": risks,
+            "lane_review_metrics": lane_review_metrics_report(),
             "slowest_runs": sorted(rows, key=lambda r: r["executor_minutes"], reverse=True)[:10],
             "failed_runs": [r for r in rows if r["status"] in ("failed", "budget_exceeded", "unroutable")]}
 
@@ -13386,6 +13430,27 @@ def daily_report_html(report):
              ("Executor minutes", f"{totals['executor_minutes']:.2f}"), ("Tokens", totals["tokens"]),
              ("Risk blocks", totals["risk_blocks"])]
     cards_html = "".join(f"<div class='card'><span>{esc(label)}</span><strong>{esc(value)}</strong></div>" for label, value in cards)
+    metrics = report.get("lane_review_metrics") or {}
+    metrics_rows = []
+    for name, row in sorted((metrics.get("lanes") or {}).items()):
+        rate = row.get("first_round_pass_rate")
+        average = row.get("avg_rounds")
+        ok = bool(row.get("meets_first_round_target")) and bool(row.get("meets_rounds_target"))
+        metrics_rows.append([name, row.get("reviews") or 0,
+                              "n/a" if rate is None else f"{rate * 100:.1f}%",
+                              "n/a" if average is None else f"{average:.2f}",
+                              row.get("followup_tickets") or 0,
+                              "ok" if ok else "below target"])
+    bottom = ", ".join(f"{row['lane']} ({', '.join(row['weeks'])})" for row in (metrics.get("bottom_lanes") or []))
+    bottom_author = ", ".join(f"{row['lane']} ({', '.join(row['weeks'])})"
+                               for row in (metrics.get("bottom_author_lanes") or []))
+    metrics_note = ("首轮通过率 = the pull request passed its first formal review round; 平均轮次 = the mean "
+                     "number of formal review rounds (a rebase re-review is not a formal round). "
+                     "Target: first-round pass >= 60%, average rounds <= 2.")
+    if bottom:
+        metrics_note += f" Bottom in two consecutive weeks: {bottom} (a hint for the scheduler, no automatic downgrade)."
+    if bottom_author:
+        metrics_note += f" Bottom in two consecutive weeks (author lanes): {bottom_author}."
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>openswarm daily report — {esc(report['date'])}</title>
@@ -13406,6 +13471,8 @@ footer{{color:var(--muted);margin-top:24px;font-size:13px}}
 <section><h2>Budget use</h2>{table(['Backend', 'Used min', 'Daily cap min'], budget_rows)}
 <p>Per-run maximum: {esc(cap(budget['per_run_max_minutes']))} minutes. Usage is actual executor time; admission also reserves live runs' requested budgets.</p></section>
 <section><h2>Risk blocks</h2>{table(['Risk', 'Blocks'], sorted(report['risks'].items()))}</section>
+<section><h2>Lane review metrics</h2>{table(['Lane', 'Reviews', 'First-round pass', 'Average rounds', 'Follow-up cards', 'Target'], metrics_rows)}
+<p>{esc(metrics_note)}</p></section>
 {runs('Slowest runs', report['slowest_runs'])}{runs('Failed runs', report['failed_runs'])}
 <footer>Runs belong to the local day of their ledger timestamp. Backend rows count each contributing backend once per run; fallback runs can appear in multiple rows.
 Tokens use reported usage; absent usage counts as zero. Verification time is excluded from executor minutes.</footer>
@@ -13426,6 +13493,7 @@ def cmd_daily_report(args, policy):
         print(f"openswarm daily {report['date']} ({report['timezone']}): {total['runs']} runs, "
               f"{total['executor_minutes']:.2f} executor minutes, {total['tokens']} tokens, {total['risk_blocks']} risk blocks")
         print(json.dumps(total["counts"]))
+        print(lane_review_metrics_text(report.get("lane_review_metrics")))
         if getattr(args, "html", None):
             print(f"HTML: {os.path.abspath(args.html)}")
 
