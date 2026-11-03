@@ -8507,6 +8507,113 @@ def pi_retry_wait_seconds():
         return 8.0
 
 
+PI_RETRY_MAX_WAIT_S_DEFAULT = 600.0
+PI_RETRY_BUDGET_MARKER = "pi auto-retry wait budget exhausted"
+PI_RATE_LIMIT_ERROR_RE = re.compile(r"\b429\b|overloaded|too many requests|rate.?limit", re.I)
+
+
+def pi_retry_max_wait_s(policy=None):
+    """The cumulative auto-retry waiting one lane run may spend, in seconds.
+
+    ``PI_RETRY_MAX_WAIT_S`` overrides the policy value ``pi.retry_max_wait_s``.
+    """
+    raw = os.environ.get("PI_RETRY_MAX_WAIT_S")
+    if raw is None or raw == "":
+        policy = load_policy() if policy is None else policy
+        raw = ((policy or {}).get("pi") or {}).get("retry_max_wait_s")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return PI_RETRY_MAX_WAIT_S_DEFAULT
+
+
+def pi_retry_budget_error(last_error):
+    """The error class of a run whose auto-retry wait budget ran out.
+
+    A 429/overloaded provider error is a rate limit, every other error is an
+    execution error.
+    """
+    return "rate_limit" if PI_RATE_LIMIT_ERROR_RE.search(last_error or "") else "exec_error"
+
+
+class PiRetryBudget:
+    """The cumulative auto-retry waiting budget of one lane run (#1562).
+
+    pi retries a transient provider error on its own and waits its own backoff
+    between the attempts, so a single run could hold the lane for many minutes.
+    The budget caps that waiting for the whole run: every retry wait is jittered
+    by 0-20% and never lasts longer than the remaining budget, and once the cap
+    is reached the run stops retrying and ends.
+    """
+
+    def __init__(self, max_wait_s=PI_RETRY_MAX_WAIT_S_DEFAULT, jitter=None):
+        self.max_wait_s = max(0.0, float(max_wait_s))
+        self.waited_s = 0.0
+        self.last_error = None
+        self.exceeded = False
+        self._jitter = jitter or (lambda: random.uniform(1.0, 1.2))
+        self._started_at = None
+        self._pending_s = 0.0
+
+    def note_error(self, error):
+        """Remember the last provider error; it decides the error class later."""
+        if error:
+            self.last_error = short(error, 200)
+
+    def jitter_factor(self):
+        """The jitter of one retry wait: 0-20% on top of the requested wait."""
+        try:
+            factor = float(self._jitter())
+        except (TypeError, ValueError):
+            factor = 1.0
+        return min(1.2, max(1.0, factor))
+
+    def remaining_s(self):
+        """The waiting the run may still spend on retries."""
+        return max(0.0, self.max_wait_s - self.waited_s)
+
+    def schedule(self, delay_s):
+        """Open the wait window of one retry; returns the jittered wait.
+
+        The window never lasts longer than the remaining budget and a stale
+        window is settled first, so an abandoned wait is not counted twice.
+        """
+        self.resumed()
+        requested = max(0.0, float(delay_s)) * self.jitter_factor()
+        wait = min(requested, self.remaining_s())
+        self._started_at = time.monotonic()
+        self._pending_s = wait
+        if requested > self.remaining_s():
+            self.exceeded = True
+        return wait
+
+    def resumed(self):
+        """Close the open wait window and account it.
+
+        The window is the wait the lane committed to for that retry, so the
+        jittered wait is counted even when the retry returned earlier.
+        """
+        if self._started_at is None:
+            return 0.0
+        elapsed = max(0.0, time.monotonic() - self._started_at)
+        waited = max(self._pending_s, elapsed)
+        self._started_at = None
+        self._pending_s = 0.0
+        self.waited_s += waited
+        if self.waited_s >= self.max_wait_s:
+            self.exceeded = True
+        return waited
+
+    def exhausted(self):
+        """True when the run must not wait for another retry."""
+        return bool(self.exceeded) or self.waited_s >= self.max_wait_s
+
+    def summary(self):
+        """The cumulative waiting and the last provider error, for the run summary."""
+        return (f"{PI_RETRY_BUDGET_MARKER} after {round(self.waited_s, 1)}s of cumulative waiting "
+                f"(cap {round(self.max_wait_s, 1)}s); last provider error: {self.last_error or 'unknown'}")
+
+
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -8905,6 +9012,12 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         open(event_file, "w").close()
     deadline = spec["started"] + max(0, float(spec["budget_minutes"] or 0)) * 60
     policy = load_policy()
+    # The auto-retry wait budget belongs to the whole run: every attempt of the run
+    # shares it, so a run cannot spend the cap again in every turn (#1562).
+    budget = spec.get("_pi_retry_budget")
+    if budget is None:
+        budget = PiRetryBudget(pi_retry_max_wait_s(policy))
+        spec["_pi_retry_budget"] = budget
     provider = execution_provider(lane["backend"], policy=policy, lane=lane)
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
@@ -8984,6 +9097,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         """Classify a turn that ended without a report; a stalled turn keeps its own class."""
         if stall_hit:
             return None, usage, "stalled", 124, event_file, stall_detail
+        if pi_budget_hit:
+            # The auto-retry wait budget is used up: the run ends with the class of
+            # the last provider error and with the budget's summary (#1562).
+            budget.resumed()
+            return None, usage, pi_retry_budget_error(budget.last_error), 1, event_file, budget.summary()
         return None, usage, error_class, rc, event_file, detail
 
     if budget_hit:
@@ -8998,6 +9116,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     # pi auto-retry: a deadline (monotonic seconds) by which pi must show the retry progressing.
     pi_retry_wait = None
     pi_retry_started = False
+    pi_budget_hit = False        # the auto-retry wait budget of the run is used up
     while not ended:
         # Scanning descendants costs one pgrep per process plus a status.json rewrite; doing it
         # for every streamed event throttled pi/codex lanes and left the model idle while the
@@ -9016,6 +9135,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             abort_deadline = now + 30
             set_status(rdir, budget_expired=now)
         if spec.get("abort_requested") and not abort_deadline:
+            lane_abort_child(lane, child, turn)
+            abort_deadline = now + 30
+        if pi_budget_hit and not abort_deadline:
+            # The auto-retry wait budget is used up: stop the resident executor and
+            # wait for it to acknowledge before the lane slot is released (#1562).
             lane_abort_child(lane, child, turn)
             abort_deadline = now + 30
         if stall_after and not stall_hit and not budget_hit and not spec.get("abort_requested"):
@@ -9050,6 +9174,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after stall interrupt"})
             child.close()
             return turn_failed("stalled", 124, stall_detail)
+        if pi_budget_hit and abort_deadline and now >= abort_deadline:
+            lane_record_event(event_file, {"type": "error",
+                                           "error": "executor did not stop within 30s after the retry budget abort"})
+            child.close()
+            return turn_failed("exec_error", 1, "executor did not stop within 30s after the retry budget abort")
         if pi_retry_wait is not None and time.monotonic() >= pi_retry_wait:
             if not errors:
                 errors.append("pi auto-retry did not resume after a transient provider error")
@@ -9165,7 +9294,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                                    if isinstance(b, dict) and b.get("type") == "text")
                     final = extract_json(text) or final
                     if message.get("errorMessage") or message.get("stopReason") == "error":
-                        errors.append(short(message.get("errorMessage") or "provider returned stopReason=error", 400))
+                        error_text = short(message.get("errorMessage") or "provider returned stopReason=error", 400)
+                        errors.append(error_text)
+                        budget.note_error(error_text)
             if msg.get("type") == "agent_end":
                 last_err = ""
                 for message in msg.get("messages") or []:
@@ -9183,8 +9314,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 elif last_err and retry:
                     # pi may auto-retry a transient provider error: wait for auto_retry_start (or,
                     # if it already arrived, keep its longer deadline) instead of ending now.
-                    wait_until = time.monotonic() + pi_retry_wait_seconds()
-                    pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
+                    budget.note_error(last_err)
+                    if budget.exhausted():
+                        # The run already spent its whole auto-retry wait budget: no
+                        # further retry, the run ends (#1562).
+                        pi_budget_hit = True
+                        errors.append(last_err)
+                    else:
+                        wait_until = time.monotonic() + pi_retry_wait_seconds()
+                        pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
                 else:
                     if pi_retry_started and not last_err:
                         errors.clear()  # a failed attempt was superseded by the successful retry
@@ -9195,11 +9333,29 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     delay = max(0.0, float(msg.get("delayMs") or 0) / 1000.0)
                 except (TypeError, ValueError):
                     delay = 0.0
-                wait_until = time.monotonic() + delay + pi_retry_wait_seconds()
+                # The wait of this retry is jittered by 0-20% and never longer than
+                # the remaining budget of the run (#1562).
+                wait = budget.schedule(delay)
+                lane_record_event(event_file, {"type": "pi_retry_wait", "delay_s": round(delay, 3),
+                                               "wait_s": round(wait, 3),
+                                               "cumulative_s": round(budget.waited_s, 3),
+                                               "max_wait_s": round(budget.max_wait_s, 3)})
+                wait_until = time.monotonic() + wait + pi_retry_wait_seconds()
                 pi_retry_wait = wait_until if pi_retry_wait is None else max(pi_retry_wait, wait_until)
                 pi_retry_started = True
+                if budget.exhausted():
+                    # The cap does not cover this retry: stop the run instead of
+                    # waiting for another attempt (#1562).
+                    pi_budget_hit = True
+                    lane_record_event(event_file, {"type": "pi_retry_budget_exceeded",
+                                                   "waited_s": round(budget.waited_s, 3),
+                                                   "max_wait_s": round(budget.max_wait_s, 3),
+                                                   "error_class": pi_retry_budget_error(budget.last_error)})
             elif msg.get("type") == "auto_retry_end":
                 pi_retry_wait = None
+                # The retry is over: settle its wait window, so the waiting is counted
+                # and no stale window leaks into the next retry (#1562).
+                budget.resumed()
                 if msg.get("success"):
                     errors.clear()
                 else:
@@ -9272,6 +9428,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     # An end-of-turn event is an acknowledgement that this turn has stopped,
     # including cancelled and failed turns. Clear this marker before each retry.
     spec["_turn_completed"] = True
+    # The turn is over: settle a wait window that is still open, so the waiting is
+    # counted and no stale window leaks into the next attempt (#1562).
+    budget.resumed()
     timings["model_s"] += max(0.0, NOW() - turn_started
                                 - (timings["tools_s"] - tools_started)
                                 - (timings["first_event_s"] - first_event_started))
@@ -9284,6 +9443,12 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         return final, usage, "stalled", 124, event_file, stall_detail
     if budget_hit:
         return final, usage, "budget_exceeded", 124, event_file, None
+    if pi_budget_hit:
+        # The auto-retry wait budget of the run is used up: the run ends here with
+        # the class of the last provider error and with the budget's summary (#1562).
+        spec["pi_retry_budget_exceeded"] = True
+        spec["failure_summary"] = budget.summary()
+        return final, usage, pi_retry_budget_error(budget.last_error), 1, event_file, budget.summary()
     if errors:
         text = " ".join(errors)
         if agy_upstream_forbidden(lane["backend"], text):
