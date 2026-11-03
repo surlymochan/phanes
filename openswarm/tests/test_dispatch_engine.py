@@ -685,6 +685,22 @@ class ReviewGate(Base):
         self.assertIn("description=CHANGES by CX1 (codex/m2) run r2", status[0])
         self.assertEqual(d.load_reviews()["21"]["verdict"], "CHANGES")
 
+    def test_diff_unavailable_changes_is_tool_failure(self):
+        for finding in ("BLOCKER: unable to obtain PR diff", "BLOCKER: diff 获取失败"):
+            with self.subTest(finding=finding):
+                verdict = "VERDICT: CHANGES\n" + finding + "\n"
+                d = self.make([("git -C", (0, verdict, ""))])
+                d.put_review(21, {"rounds": 2})
+                st = {"issue": "PR21", "run": "r2", "review_pr": 21, "review_sha": SHA}
+                self.assertTrue(d.finish_review("CX1", {"host": "box", "backend": "codex"}, st,
+                                                {"branch": "lane/x", "commit": "c"}, {}))
+                review = d.load_reviews()["21"]
+                self.assertEqual(review["rounds"], 2)
+                self.assertEqual(review["fail_classes"][-1], "TOOL_FAIL")
+                self.assertEqual(d.runner.called("statuses/"), [])
+                self.assertEqual(d.runner.called("issue edit"), [])
+                self.assertEqual(d.runner.called("pr comment"), [])
+
     def test_changes_requeues_fix_task_then_needs_human(self):
         verdict = "VERDICT: CHANGES\nSUMMARY: bug\n"
         d = self.make([("git -C", (0, verdict, "")),

@@ -2339,10 +2339,17 @@ class Dispatcher:
             self.log(f"review PR #{pr} by {lane}: evidence pack INCOMPLETE "
                      f"(missing: {', '.join(ev['missing']) or '-'}; errors: {', '.join(ev['errors']) or '-'}) "
                      f"— recorded, the judgement is untouched")
-        if not v:
-            error_class = info.get("error_class") or ""
+        # A review unable to obtain the diff is a tool failure, even if it
+        # accidentally emits CHANGES. Never turn it into a rework round.
+        diff_failure = v == "CHANGES" and re.search(
+            r"(?:diff[^\n]{0,100}(?:unavailable|failed|failure|cannot|could not|unable|missing|取不到|无法|失败|不可|没有|缺失)|"
+            r"(?:cannot|could not|unable to|failed to|取不到|无法|不能|未能|没有)[^\n]{0,100}diff)",
+            txt, re.I)
+        if not v or diff_failure:
+            error_class = "TOOL_FAIL" if diff_failure else (info.get("error_class") or "")
             reason, detail = self.run_failure(info, None, self.ending_detail(
-                info, f"review produced no verdict file ({error_class or 'no error class'})"))
+                info, ("TOOL_FAIL: review could not obtain diff" if diff_failure else
+                       f"review produced no verdict file ({error_class or 'no error class'})")))
             self.record_failure(lane, lc, st.get("run"), reason, detail, harvest=False)
             if error_class == "vm_paused":
                 self.log(f"review PR #{pr} by {lane}: no verdict file ({info.get('status')}/vm_paused); "
