@@ -176,6 +176,13 @@ DEFAULTS = {
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
     # A legacy file marker remains supported when no timed parameters are supplied.
     "burn": {"file": "", "backend": ""},
+    # Per-backend quota window burn policy: quota_window.<backend> holds
+    # burn_before_reset_h (the hours before the window resets in which the
+    # backend may burn its leftover quota) and factor (the multiplier).  The
+    # window itself comes from the openswarm state (quota_window.state_file,
+    # default $OPENSWARM_HOME/state.json); a backend without a policy entry
+    # never burns, and a backend without a known window never burns either.
+    "quota_window": {},
     "local_hosts": [],
     "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
     "min_gap_s": 120,
@@ -750,6 +757,81 @@ class Dispatcher:
                           "factor": max(2, int(self.R["burn_max"]) / max(1, int(self.R["max"])))}
         factor = dispatch_module("burn").burn_factor(backend, now, window, {backend: factor_cfg})
         return backend, factor
+
+    def quota_state_file(self):
+        """The openswarm state file the quota windows are read from."""
+        cfg = self.cfg.get("quota_window") or {}
+        path = str(cfg.get("state_file") or "")
+        if path:
+            return os.path.expanduser(path)
+        home = os.environ.get("OPENSWARM_HOME") or os.path.expanduser("~/.claude/openswarm")
+        return os.path.join(home, "state.json")
+
+    def quota_windows(self):
+        """The quota window of every backend, read from the openswarm state."""
+        path = self.quota_state_file()
+        try:
+            with open(path, encoding="utf-8") as stream:
+                state = json.load(stream)
+        except (OSError, ValueError):
+            return {}
+        return dispatch_module("burn").state_windows(state)
+
+    def burn_backends(self):
+        """Return {backend: factor} for every backend that may burn its window.
+
+        The legacy single-backend burn (config ``burn``) keeps its own rule; the
+        per-backend policy (config ``quota_window.<backend>``) adds every
+        backend whose quota window the openswarm state reports.
+        """
+        out = {}
+        backend, factor = self.burn_state()
+        if backend and factor > 1:
+            out[backend] = factor
+        policy = self.cfg.get("quota_window") or {}
+        if isinstance(policy, dict) and any(isinstance(v, dict) for v in policy.values()):
+            windows = self.quota_windows()
+            for be, factor in dispatch_module("burn").factors(windows, policy, self.clock()).items():
+                out[be] = max(out.get(be, 1), factor)
+        return out
+
+    def review_capacity(self):
+        """Return the review caps: the base budget, the global cap, the per-backend limits.
+
+        The base budget is ``review.max``.  A backend whose quota window is
+        about to reset may use the extra capacity (up to ``review.burn_max``),
+        and the extra slots belong to that backend alone: a backend that is not
+        burning never pushes the fleet past the base budget.
+        """
+        base = int(self.R["max"])
+        burn_max = max(base, int(self.R["burn_max"]))
+        legacy = self.review_max()
+        burning = self.burn_backends()
+        legacy_backend, legacy_factor = self.burn_state()
+        limits = {}
+        for backend, factor in burning.items():
+            if backend == legacy_backend and legacy_factor > 1:
+                limits[backend] = max(legacy, base)      # the legacy marker keeps its own ceiling
+            else:
+                limits[backend] = dispatch_module("burn").apply(
+                    {"review": base, "max_review": burn_max}, factor)["review"]
+        extra = sum(max(0, limits[backend] - base) for backend in limits)
+        return {"base": base, "global": max(legacy, base + extra), "limits": limits,
+                "burning": set(burning)}
+
+    def review_slot(self, backend, inflight, per_backend, cap):
+        """True when a review may start on ``backend`` right now.
+
+        A burning backend may use the extra capacity (its own limit, and the
+        global cap); every other backend only has the base budget, so the
+        slots beyond it stay with the burning backend.
+        """
+        limits = cap["limits"]
+        if backend in limits:
+            if inflight >= cap["global"]:
+                return False
+            return per_backend.get(backend, 0) < limits[backend]
+        return inflight < cap["base"]
 
     # ------------------------------------------------------------ remote status
     def remote_multi(self, h, items):
@@ -1839,7 +1921,7 @@ class Dispatcher:
                 continue
             if r.get("sha") == p["headRefOid"]:
                 continue
-            if ((self.burn_state()[1] > 1 or not self.R.get("cifix_needs_burn", True)) and p["mergeable"] == "MERGEABLE"
+            if ((self.burn_backends() or not self.R.get("cifix_needs_burn", True)) and p["mergeable"] == "MERGEABLE"
                     and not self.green(p) and p["issue"] and p["headRefName"].startswith(fix)
                     and r.get("cifix_sha") != p["headRefOid"]):
                 tasks = sources.ci_fix_source([p], inflight,
@@ -1895,14 +1977,14 @@ class Dispatcher:
         c = [L for L in idle if L != author]
         if not c:
             return None
-        backend, factor = self.burn_state()
+        burning = set(self.burn_backends())
         def priority(lane):
-            return (factor > 1 and lanes[lane]["backend"] != backend, lanes[lane]["backend"] == ab)
+            return (lanes[lane]["backend"] not in burning, lanes[lane]["backend"] == ab)
         best_priority = min(map(priority, c))
         available = [lane for lane in c if priority(lane) == best_priority]
         picker = self.lru_picker()
         oldest = picker.pick(available)
-        if factor > 1:
+        if burning:
             return oldest
         history = picker.state()["lanes"]
         tied = [lane for lane in available if history.get(lane) == history.get(oldest)]
@@ -2307,12 +2389,23 @@ class Dispatcher:
         if not self.R.get("enabled", True) or os.path.exists(self.path("NO-LANE-REVIEW")):
             return
         inflight = sum(1 for s in state.values() if isinstance(s, dict) and s.get("review_pr"))
+        per_backend = {}
+        for lane, s in state.items():
+            if isinstance(s, dict) and s.get("review_pr"):
+                backend = (lanes.get(lane) or {}).get("backend") or ""
+                per_backend[backend] = per_backend.get(backend, 0) + 1
+        cap = self.review_capacity()
         idle = self.idle_lanes(lanes, res, state)
-        if inflight >= self.review_max() or not idle:
+        if not idle:
             return
         revs = self.load_reviews()
         for p in self.review_candidates(lanes, state, q):
-            if inflight >= self.review_max() or not idle:
+            # The slots beyond the base budget belong to the burning backends:
+            # a lane of another backend may only start while the fleet stays
+            # inside the base budget.
+            eligible = [lane for lane in idle
+                        if self.review_slot((lanes.get(lane) or {}).get("backend"), inflight, per_backend, cap)]
+            if not eligible:
                 break
             review = revs.get(str(p["number"])) or {}
             fails_sha = review.get("fails_sha", p["headRefOid"])   # legacy rows count on the current head
@@ -2321,8 +2414,8 @@ class Dispatcher:
                 self.notify_review_fails(p, review, fails)
                 continue
             timed_out = set(review.get("budget_backends") or [])
-            alternatives = [lane for lane in idle if lanes[lane].get("backend") not in timed_out]
-            eligible = alternatives or idle  # retry without exclusions if every idle backend timed out
+            alternatives = [lane for lane in eligible if lanes[lane].get("backend") not in timed_out]
+            eligible = alternatives or eligible  # retry without exclusions if every idle backend timed out
             L = self.pick_reviewer(eligible, lanes, self.author_lane(p["headRefName"]))
             previous_backend = review.get("quota_backend")
             quota_alternatives = [lane for lane in eligible if lanes[lane].get("backend") != previous_backend]
@@ -2343,6 +2436,8 @@ class Dispatcher:
                 continue
             idle.remove(L)
             inflight += 1
+            backend = lanes[L].get("backend") or ""
+            per_backend[backend] = per_backend.get(backend, 0) + 1
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
@@ -2451,13 +2546,13 @@ class Dispatcher:
             ex.shutdown(wait=False)
 
     def lane_order(self, lanes):
-        backend, factor = self.burn_state()
-        groups = (False, True) if factor > 1 else (False,)
+        burning = set(self.burn_backends())
+        groups = (True, False) if burning else (False,)
         ordered = []
         picker = self.lru_picker()
-        for other_backend in groups:
+        for burning_lane in groups:
             remaining = [name for name, lane in lanes.items()
-                         if (factor > 1 and lane.get("backend") != backend) == other_backend]
+                         if (lane.get("backend") in burning) == burning_lane]
             while remaining:
                 lane = picker.pick(remaining)
                 ordered.append((lane, lanes[lane]))

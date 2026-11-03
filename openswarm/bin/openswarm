@@ -94,6 +94,11 @@ RUNS = f"{DATA}/runs"
 WORKTREES = f"{DATA}/worktrees"
 OPENCODE_DB = envvar("OPENCODE_DB", f"{HOME}/.local/share/opencode/opencode.db")
 
+# The Pi broker socket the fleet coordinator exports, and the read-only
+# MiniMax coding_plan API that reports the Token Plan windows.
+PI_BROKER_SOCKET_DEFAULT = "/run/openswarm-pi/broker.sock"
+MINIMAX_REMAINS_URL = "https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains"
+
 NOW = time.time
 
 # The Antigravity CLI (`agy`) is the executor behind the `gemini` alias.
@@ -2196,6 +2201,9 @@ def probe(policy, quiet=False):
              "claude": probe_claude(policy), "codex": probe_codex(policy),
              "ocgo": probe_ocgo(policy), "deepseek": probe_deepseek(policy),
              "cursor": probe_cursor(policy), "agy": probe_agy(policy), "pi": probe_pi(policy)}
+    # The quota window of every backend whose window end is known: the dispatch
+    # reads them to decide which backend may burn its leftover quota.
+    state["quota_window"] = quota_windows(policy, state)
     jsave(STATE, state)
     return state
 
@@ -3295,10 +3303,209 @@ def pi_bin():
     return None
 
 
+def pi_broker_paths(lane=None):
+    """The Pi broker socket and its request log: the real paths, not a guess.
+
+    The socket comes from the lane config, then OPENSWARM_PI_BROKER_SOCKET (the
+    variable the fleet coordinator exports), then the fleet default.  The
+    request log is the broker's own audit log: PI_BROKER_LOG, default
+    `<socket>.requests.jsonl` like the broker itself.
+    """
+    lane = lane if isinstance(lane, dict) else {}
+    socket_path = str(lane.get("broker_socket") or envvar("PI_BROKER_SOCKET") or PI_BROKER_SOCKET_DEFAULT)
+    log_path = os.environ.get("PI_BROKER_LOG") or (socket_path + ".requests.jsonl")
+    return socket_path, log_path
+
+
+def pi_broker_window(log_path, now=None):
+    """The MiniMax quota window end from the broker's own request log.
+
+    The broker records the provider's rate-limit headers on the requests it
+    forwards: `x-ratelimit-reset` is an epoch second, `retry-after` a number of
+    seconds.  The newest row that carries one of them gives the window end the
+    provider reported -- not a guess from the request times.
+    """
+    now = NOW() if now is None else now
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as log:
+            rows = log.readlines()[-500:]
+    except OSError:
+        return None
+    end = None
+    for line in rows:
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        retry = row.get("retry_after")
+        if not isinstance(retry, dict):
+            continue
+        stamp = to_epoch(row.get("ts"))
+        value = retry.get("x-ratelimit-reset")
+        if value is not None:
+            try:
+                candidate = float(value)
+            except (TypeError, ValueError):
+                continue
+            if candidate > 1e11:              # milliseconds
+                candidate /= 1000
+            elif candidate < 1e6 and stamp is not None:
+                candidate = stamp + candidate  # a delta, not an epoch
+        else:
+            value = retry.get("retry-after")
+            if value is None or stamp is None:
+                continue
+            try:
+                candidate = stamp + float(value)
+            except (TypeError, ValueError):
+                continue
+        if candidate > now:
+            end = candidate
+    return end
+
+
+def minimax_plan_window():
+    """The MiniMax Token Plan windows from the read-only coding_plan API.
+
+    The remains API is authoritative for the plan's windows (the 5 hour
+    interval and the week): it reports the instant they end, also while they
+    still have quota left.  The call is read-only and spends no quota.
+    """
+    key = minimax_key_from_pi()
+    if not key:
+        return None
+    request = urllib.request.Request(MINIMAX_REMAINS_URL,
+                                     headers={"authorization": f"Bearer {key}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except Exception:  # noqa: BLE001 - the window is optional, the probe keeps working without it
+        return None
+    windows = dispatch_quota_module().minimax_windows(payload)
+    if not windows or windows.get("interval_end") is None:
+        return None
+    out = {"resets_at": windows["interval_end"], "source": "minimax-coding-plan"}
+    if windows.get("weekly_end") is not None:
+        out["weekly_end"] = windows["weekly_end"]
+    if windows.get("interval_pct") is not None:
+        out["interval_pct"] = windows["interval_pct"]
+    if windows.get("weekly_pct") is not None:
+        out["weekly_pct"] = windows["weekly_pct"]
+    return out
+
+
+def monthly_cycle_end(declaration, now):
+    """The end of the monthly cycle that follows ``now``.
+
+    ``declaration`` is either the day of the month the plan renews (1..28) or
+    the ISO start of the current cycle; the next cycle boundary after ``now``
+    is returned in epoch seconds.
+    """
+    day, start = None, None
+    if isinstance(declaration, dict):
+        day, start = declaration.get("day"), declaration.get("start")
+    elif isinstance(declaration, bool):
+        return None
+    elif isinstance(declaration, (int, float)):
+        day = int(declaration)
+    else:
+        text = str(declaration).strip()
+        day, start = (int(text), None) if text.isdigit() else (None, text)
+    if day is not None:
+        day = max(1, min(28, int(day)))
+        moment = dt.datetime.fromtimestamp(now, dt.timezone.utc)
+        for months in (0, 1):
+            year = moment.year + (moment.month - 1 + months) // 12
+            month = (moment.month - 1 + months) % 12 + 1
+            try:
+                candidate = dt.datetime(year, month, day, tzinfo=dt.timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if candidate > now:
+                return candidate
+        return None
+    if start:
+        try:
+            moment = dt.datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=dt.timezone.utc)
+        while moment.timestamp() <= now:
+            year, month = moment.year + (1 if moment.month == 12 else 0), 1 if moment.month == 12 else moment.month + 1
+            try:
+                moment = moment.replace(year=year, month=month)
+            except ValueError:            # e.g. the 29th of February
+                moment = moment.replace(year=year, month=month, day=28)
+        return moment.timestamp()
+    return None
+
+
+def ocgo_quota_window(policy, now=None):
+    """The opencode-go monthly cycle end.
+
+    opencode-go reports no reset time: the Go plan publishes the monthly,
+    weekly and 5 hour *allowances*, not the instants they end, and the monthly
+    cycle is a property of the subscription.  openswarm therefore takes the
+    cycle from an explicit declaration (policy ``ocgo.quota_cycle`` or
+    OPENSWARM_OCGO_QUOTA_CYCLE) instead of deriving it from the request
+    times: the request times only say when the plan was used, so they produced
+    wrong reset times on idle or rolling usage.
+    """
+    now = NOW() if now is None else now
+    declaration = envvar("OCGO_QUOTA_CYCLE") or (policy.get("ocgo") or {}).get("quota_cycle") or ""
+    if not declaration:
+        return None
+    end = monthly_cycle_end(declaration, now)
+    if end is None:
+        return None
+    return {"resets_at": end, "source": "opencode-go-cycle"}
+
+
+def quota_windows(policy, state):
+    """The quota window of every backend whose window end is known.
+
+    {backend: {"resets_at": epoch, "source": str}}: codex from the codex CLI's
+    own rate-limit report, pi from the MiniMax Token Plan (the coding_plan API,
+    then the broker's request log), ocgo from the declared monthly cycle.
+    """
+    out = {}
+    codex = state.get("codex")
+    limits = codex.get("limits") if isinstance(codex, dict) else None
+    ends = []
+    for limit in (limits or {}).values():
+        for window in ((limit or {}).get("windows") or {}).values():
+            resets_at = to_epoch((window or {}).get("resets_at"))
+            if resets_at:
+                ends.append(resets_at)
+    if ends:
+        out["codex"] = {"resets_at": min(ends), "source": "codex-rate-limit"}
+    pi = state.get("pi")
+    quota = pi.get("quota") if isinstance(pi, dict) else None
+    if isinstance(quota, dict) and quota.get("resets_at"):
+        entry = {"resets_at": to_epoch(quota["resets_at"]),
+                 "source": quota.get("source") or "minimax-coding-plan"}
+        if quota.get("weekly_end"):
+            entry["weekly_end"] = to_epoch(quota["weekly_end"])
+        out["pi"] = entry
+    ocgo = ocgo_quota_window(policy)
+    if ocgo:
+        out["ocgo"] = ocgo
+    return out
+
+
 def probe_pi(policy):
     cfg = policy.get("pi") or {}
+    quota = minimax_plan_window()
+    if not quota:
+        _, log_path = pi_broker_paths()
+        end = pi_broker_window(log_path)
+        if end:
+            quota = {"resets_at": end, "source": "pi-broker-log"}
     return {"binary": pi_bin(), "provider": cfg.get("provider"), "default_model": cfg.get("default_model"),
-            "quota": None}
+            "quota": quota}
 
 
 def plan_pi(prof, st, policy, forced, notes):
@@ -3521,7 +3728,7 @@ def execution_provider(backend, decision=None, policy=None, lane=None):
     return provider or ("minimax-cn" if backend == "hermes" else None)
 
 
-def provider_concurrency_limits(policy, keys):
+def provider_concurrency_limits(policy, keys, burn=None):
     configured = policy.get("concurrency") or {}
     if not isinstance(configured, dict):
         return {}
@@ -3529,8 +3736,60 @@ def provider_concurrency_limits(policy, keys):
     for key in keys:
         value = configured.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            factor = (burn or {}).get(key)
+            if factor and factor > 1:
+                # The quota window of this backend is about to reset: the leftover
+                # capacity would be lost, so the cap is raised for that window.
+                value = max(1, int(round(value * factor)))
             limits[key] = value
     return limits
+
+
+_QUOTA_WINDOW_CACHE = {"mtime": None, "windows": {}}
+
+
+def quota_window_windows():
+    """The quota windows of the probe state, re-read when the state file changes."""
+    try:
+        mtime = os.path.getmtime(STATE)
+    except OSError:
+        return {}
+    if _QUOTA_WINDOW_CACHE["mtime"] != mtime:
+        _QUOTA_WINDOW_CACHE["mtime"] = mtime
+        _QUOTA_WINDOW_CACHE["windows"] = dispatch_burn_module().state_windows(jload(STATE) or {})
+    return _QUOTA_WINDOW_CACHE["windows"]
+
+
+def quota_window_factors(policy, now=None):
+    """Return {backend: factor} for the backends whose quota window resets soon.
+
+    The windows come from the probe state, the policy from
+    policy.quota_window.<backend> (burn_before_reset_h and factor).
+    """
+    configured = policy.get("quota_window") or {}
+    if not isinstance(configured, dict) or not configured:
+        return {}
+    windows = quota_window_windows()
+    if not windows:
+        return {}
+    return dispatch_burn_module().factors(windows, configured, NOW() if now is None else now)
+
+
+def burn_concurrency_limits(policy, backend, provider, factors):
+    """The concurrency caps that the burn policy raises for ``backend``.
+
+    The backend cap, the cap of its provider and the fleet total are raised:
+    the slots a backend may use while its quota window is about to reset.
+    """
+    factor = factors.get(backend)
+    if not factor or factor <= 1:
+        return {}
+    out = {backend: factor}
+    provider = provider or execution_provider(backend, policy=policy)
+    if provider:
+        out[provider] = factor
+    out["total"] = max(factors.values())
+    return out
 
 
 # Tokens stay in this supervisor process. Recovery is only eligible after the
@@ -3812,7 +4071,8 @@ def release_fleet_slot(rdir, *, confirmed=False, pending_release=None, guard_com
 def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_waiting=None, poll=0.1):
     """Atomically admit a turn against provider/backend caps stored in policy.concurrency."""
     keys = concurrency_keys(backend, provider)
-    limits = provider_concurrency_limits(policy, keys)
+    limits = provider_concurrency_limits(policy, keys, burn=burn_concurrency_limits(
+        policy, backend, provider, quota_window_factors(policy)))
     lock_path = os.path.join(DATA, "provider-concurrency.lock")
     os.makedirs(DATA, exist_ok=True)
     os.makedirs(rdir, exist_ok=True)
@@ -9738,6 +9998,19 @@ def dispatch_quota_module():
     return module
 
 
+def dispatch_burn_module():
+    """The quota-window burn policy (lib/dispatch/burn.py), loaded by path like dispatch_quota_module()."""
+    name = "openswarm_dispatch_burn"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "burn.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
 def dispatch_failure_reason_module():
     """The canonical run-ending reason module (lib/dispatch/failure_reason.py), loaded by path."""
     name = "openswarm_dispatch_failure_reason"
@@ -14922,8 +15195,7 @@ def doctor_pi_broker(lane):
     variable), then the default the fleet coordinator exports. The request log is the broker's own
     audit log: PI_BROKER_LOG, default `<socket>.requests.jsonl` like the broker itself.
     """
-    socket_path = str(lane.get("broker_socket") or envvar("PI_BROKER_SOCKET")
-                      or "/run/openswarm-pi/broker.sock")
+    socket_path, log_path = pi_broker_paths(lane)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(1.0)
@@ -14933,7 +15205,6 @@ def doctor_pi_broker(lane):
                             f"broker socket is not reachable: {socket_path} ({error})",
                             "start the Pi broker or correct OPENSWARM_PI_BROKER_SOCKET")
 
-    log_path = os.environ.get("PI_BROKER_LOG") or (socket_path + ".requests.jsonl")
     parent = os.path.dirname(os.path.abspath(log_path))
     if os.path.exists(log_path):
         writable = os.access(log_path, os.W_OK)

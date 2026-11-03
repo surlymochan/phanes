@@ -1394,6 +1394,98 @@ class LanePickingAndBurn(Base):
         self.assertEqual(history["lanes"]["P1"], history["counter"])
 
 
+class QuotaWindowBurn(Base):
+    """The per-backend quota window burn (Refs #1370).
+
+    The policy is quota_window.<backend>.burn_before_reset_h plus the factor;
+    the window comes from the openswarm state the probe writes.
+    """
+
+    def state_file(self, windows):
+        path = os.path.join(self.tmp, "openswarm-state.json")
+        with open(path, "w") as stream:
+            json.dump({"quota_window": windows}, stream)
+        return path
+
+    def burn(self, windows, policy=None, now=1000.0):
+        """Configure the per-backend burn policy and the state file it reads."""
+        self.cfg["burn"] = {}
+        self.cfg["quota_window"] = dict(policy or {"pi": {"burn_before_reset_h": 1.5, "factor": 2}})
+        self.cfg["quota_window"]["state_file"] = self.state_file(windows)
+        d = self.make()
+        d.clock = lambda: now
+        return d
+
+    def reviews(self, d, lanes, state, count=4):
+        """Dispatch `count` reviews and return the lanes that got one."""
+        picked = []
+        d.review_candidates = lambda *args: [pr(10 + i, 100 + i) for i in range(count)]
+        d.review_item = lambda item: {"n": "PR", "title": "review", "body": ""}
+        d.dispatch = lambda lane, *args: (picked.append(lane), ("review-run", "verify"))[1]
+        d.main_sha = lambda: SHA
+        d.dispatch_reviews(lanes, {lane: {"lane": "idle"} for lane in lanes}, state, [])
+        return picked
+
+    def lanes_and_state(self, pi_busy=1, codex_busy=7):
+        """The lanes of the fleet and the reviews that are already running."""
+        lanes = {"P1": {"host": "far", "backend": "pi"}}
+        lanes.update({f"C{i}": {"host": "far", "backend": "codex"} for i in range(1, 9)})
+        state = {f"P{i}": {"review_pr": i} for i in range(1, pi_busy + 1)}
+        state.update({f"C{i}": {"review_pr": 100 + i} for i in range(1, codex_busy + 1)})
+        return lanes, state
+
+    def test_a_backend_inside_its_window_burns_and_another_one_does_not(self):
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}})
+        self.assertEqual(d.burn_backends(), {"pi": 2})
+        self.assertEqual(d.review_capacity()["limits"], {"pi": 12})
+
+    def test_outside_the_window_nothing_burns(self):
+        d = self.burn({"pi": {"resets_at": 1000 + 10 * 3600}})
+        self.assertEqual(d.burn_backends(), {})
+        self.assertEqual(d.review_capacity()["global"], 8)
+
+    def test_a_backend_without_a_window_never_burns(self):
+        d = self.burn({"codex": {"resets_at": 1000 + 60}})
+        self.assertEqual(d.burn_backends(), {})
+
+    def test_the_extra_review_slots_belong_to_the_burning_backend(self):
+        # The base budget is 8: the burning backend holds one review and another
+        # backend seven.  The eighth slot is the last one of the base budget, so
+        # the backend that is not burning may not take it.
+        lanes, state = self.lanes_and_state(pi_busy=1, codex_busy=7)
+        lanes["P2"] = {"host": "far", "backend": "pi"}
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}})
+        self.assertEqual(self.reviews(d, lanes, state), ["P2"])   # the burning backend takes the extra slot
+
+    def test_a_burning_backend_without_a_free_lane_leaves_the_base_budget_to_the_others(self):
+        lanes, state = self.lanes_and_state(pi_busy=1, codex_busy=6)
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}})
+        self.assertEqual(self.reviews(d, lanes, state), ["C7"])     # the 8th slot is still inside the budget
+
+    def test_a_full_base_budget_stops_every_other_backend(self):
+        lanes, state = self.lanes_and_state(pi_busy=1, codex_busy=7)
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}})
+        self.assertEqual(self.reviews(d, lanes, state), [])         # the burning backend has no free lane
+
+    def test_two_burning_backends_each_get_their_own_extra_capacity(self):
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}, "codex": {"resets_at": 1000 + 3600}},
+                      policy={"pi": {"burn_before_reset_h": 1.5, "factor": 2},
+                              "codex": {"burn_before_reset_h": 1.5, "factor": 1.5}})
+        cap = d.review_capacity()
+        self.assertEqual(cap["limits"], {"pi": 12, "codex": 12})
+        self.assertEqual(cap["global"], 16)      # the base budget plus the extra capacity of both backends
+
+    def test_the_burning_backend_is_picked_first(self):
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}})
+        lanes = {"P1": {"host": "far", "backend": "pi"}, "C1": {"host": "far", "backend": "codex"}}
+        self.assertEqual(d.pick_reviewer(["C1", "P1"], lanes, None), "P1")
+
+    def test_a_backend_without_a_free_lane_is_picked_when_the_burning_one_is_busy(self):
+        d = self.burn({"pi": {"resets_at": 1000 + 3600}})
+        lanes = {"C1": {"host": "far", "backend": "codex"}}
+        self.assertEqual(d.pick_reviewer(["C1"], lanes, None), "C1")
+
+
 class Defaults(unittest.TestCase):
     def test_remote_home_matches_fleet_wrapper(self):
         with open(os.path.join(os.path.dirname(HERE), "bin", "openswarm-fleet")) as f:
