@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,8 +16,145 @@ spec = importlib.util.spec_from_file_location("autodispatch", AUTODISPATCH)
 autodispatch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(autodispatch)
 
+MINT_SOURCE = pathlib.Path(__file__).parents[2] / "tools" / "lane-autodispatch" / "mint_source.py"
+
+# A fake `gh` for the seed-mint hook: it files the cards and remembers their labels.
+GH_STUB = '''import json, os, sys
+
+record = os.environ["STUB_RECORD"]
+args = sys.argv[1:]
+
+
+def load():
+    try:
+        with open(record) as stream:
+            return json.load(stream)
+    except (OSError, ValueError):
+        return {}
+
+
+if args[:2] == ["issue", "create"]:
+    labels = [args[i + 1] for i, a in enumerate(args) if a == "-l" and i + 1 < len(args)]
+    data = load()
+    number = 501 + len(data)
+    data[str(number)] = labels
+    with open(record, "w") as stream:
+        json.dump(data, stream)
+    print("https://github.com/acme/x/issues/%d" % number)
+elif args[:2] == ["issue", "view"]:
+    labels = load().get(args[2], [])
+    print(json.dumps({"state": "OPEN", "labels": [{"name": name} for name in labels]}))
+else:
+    print("[]")
+'''
+
+
+class SeedMintSourceHookTests(unittest.TestCase):
+    """The phanes seed-mint dispatch source hook (Refs #1371).
+
+    The hook is an external command of ``sources.hooks``: it prints one JSON
+    task per line (issue, priority, backend, reason) and stays quiet while the
+    operator pause is up.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mint-source-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state = pathlib.Path(self.tmp, "ad")
+        (self.state / "backlog").mkdir(parents=True)
+        self.record = pathlib.Path(self.tmp, "gh-record.json")
+        stub = pathlib.Path(self.tmp, "gh_stub.py")
+        stub.write_text(GH_STUB)
+        gh = pathlib.Path(self.tmp, "bin", "gh")
+        gh.parent.mkdir(parents=True, exist_ok=True)
+        gh.write_text('#!/bin/sh\nexec "{}" "{}" "$@"\n'.format(sys.executable, stub))
+        gh.chmod(0o755)
+
+    def run_hook(self, target="1"):
+        env = dict(os.environ)
+        env["PATH"] = str(pathlib.Path(self.tmp, "bin")) + os.pathsep + env.get("PATH", "")
+        env["STUB_RECORD"] = str(self.record)
+        return subprocess.run(
+            [sys.executable, str(MINT_SOURCE), "--state-dir", str(self.state), "--repo", "acme/x",
+             "--repo-path", str(pathlib.Path(self.tmp, "no-repo")), "--target", target],
+            capture_output=True, text=True, env=env, timeout=120)
+
+    def filed_cards(self):
+        """The cards the fake gh filed: issue number -> labels."""
+        try:
+            with open(self.record) as stream:
+                return json.load(stream)
+        except (OSError, ValueError):
+            return {}
+
+    def test_hook_files_a_backlog_card_and_reports_it_in_the_protocol(self):
+        (self.state / "backlog" / "card.md").write_text(
+            "# Seed card\nlabels: p2,backend:pi\nRefill the queue with one bounded card.\n")
+
+        result = self.run_hook()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, result.stdout)
+        task = json.loads(lines[0])
+        self.assertEqual(sorted(task), ["backend", "issue", "priority", "reason"])
+        self.assertEqual(task["issue"], 501)
+        self.assertEqual(task["priority"], "p2")
+        self.assertEqual(task["backend"], "pi")
+        self.assertIn("seed-mint", task["reason"])
+        self.assertEqual(self.filed_cards()["501"], ["lane-ready", "p2", "backend:pi"])
+        # the filed card is consumed: it moved to backlog/filed/
+        self.assertTrue((self.state / "backlog" / "filed" / "card.md").exists())
+
+    def test_hook_files_the_planner_card_when_the_backlog_is_empty(self):
+        result = self.run_hook()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, result.stdout)
+        task = json.loads(lines[0])
+        self.assertEqual(task["issue"], 501)
+        self.assertEqual(task["priority"], "p1")
+        self.assertEqual(task["backend"], "codex")
+        self.assertIn("planner", self.filed_cards()["501"])
+
+    def test_import_history_is_shared_across_hook_and_autodispatch(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mint_source_test", MINT_SOURCE)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        (self.state / "state.json").write_text(json.dumps({"_imported": ["old.md"], "CX1": {"run": 1}}))
+        self.assertEqual(hook.load_state(str(self.state))["_imported"], ["old.md"])
+        hook.save_state(str(self.state), {"_imported": ["new.md"]})
+        with mock.patch.object(autodispatch, "D", str(self.state)):
+            autodispatch.save_state({"_imported": ["old.md"], "CX1": {"run": 2}})
+        state = hook.load_state(str(self.state))
+        self.assertEqual(state["_imported"], ["old.md", "new.md"])
+        self.assertEqual(state["CX1"], {"run": 2})
+
+    def test_hook_is_silent_and_files_nothing_while_pause_mint_is_up(self):
+        (self.state / "backlog" / "card.md").write_text("# Seed card\nlabels: p2,backend:pi\nBody.\n")
+        (self.state / "PAUSE-MINT").write_text("operator pause\n")
+
+        result = self.run_hook()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+        self.assertEqual(self.filed_cards(), {})
+        self.assertTrue((self.state / "backlog" / "card.md").exists())
+
 
 class GitSSHCommandTests(unittest.TestCase):
+    def test_replenish_respects_pause_mint_without_touching_backlog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pause = pathlib.Path(directory, "PAUSE-MINT")
+            pause.write_text("operator pause\n")
+            with mock.patch.object(autodispatch, "D", directory), \
+                    mock.patch.object(autodispatch, "file_issue") as file_issue:
+                self.assertEqual(autodispatch.replenish(3, {}), [])
+            file_issue.assert_not_called()
+            self.assertEqual({path.name for path in pathlib.Path(directory).iterdir()}, {"PAUSE-MINT"})
+
     def test_ssh_command_quotes_proxy_command_as_one_option(self):
         options = ["-o", "ConnectTimeout=20", "-o", "ProxyCommand=ssh -W %h:%p bastion"]
 

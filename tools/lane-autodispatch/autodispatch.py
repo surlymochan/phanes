@@ -7,7 +7,7 @@ then by issue number. Optional `backend:pi|agy|codex` label pins an issue to tha
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
-import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import base64, fcntl, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -282,7 +282,11 @@ def load(p, d):
     try: return json.load(open(p))
     except Exception: return d
 def save_state(s):
-    tmp = f"{D}/state.json.tmp"; json.dump(s, open(tmp, "w"), indent=1, ensure_ascii=False); os.replace(tmp, f"{D}/state.json")
+    with open(f"{D}/state.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        previous = load(f"{D}/state.json", {})
+        s["_imported"] = list(dict.fromkeys(previous.get("_imported", []) + s.get("_imported", [])))
+        tmp = f"{D}/state.json.tmp"; json.dump(s, open(tmp, "w"), indent=1, ensure_ascii=False); os.replace(tmp, f"{D}/state.json")
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
 
@@ -889,6 +893,21 @@ def replenish(k, state):
     """Queue refill, in order: (1) ~/phanes-ctl/autodispatch/backlog/*.md (`# title` / `labels: a,b` / body; moved to backlog/filed/);
     (2) docs/backlog/next/*.md on origin/main not yet imported (written by planner runs); (3) if still short and no planner
     issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/."""
+    # Seed creation stays opt-in while the operator pause is present. Dispatch source hooks
+    # use the same scope marker so a future external invocation observes this pause too.
+    if os.path.exists(f"{D}/PAUSE-MINT"):
+        return []
+    os.makedirs(D, exist_ok=True)
+    with open(f"{D}/mint.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if os.path.exists(f"{D}/PAUSE-MINT") or os.path.exists(f"{D}/NO_SEED_MINT"):
+            return []
+        legacy = load(f"{D}/mint-source-state.json", {})
+        state["_imported"] = list(dict.fromkeys(load(f"{D}/state.json", {}).get("_imported", []) + legacy.get("_imported", []) + state.get("_imported", [])))
+        save_state(state)
+        return _replenish_locked(k, state)
+
+def _replenish_locked(k, state):
     bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
         if len(out) >= k: return out

@@ -21,6 +21,11 @@ The hook configuration is a dict per hook::
 ``pause_scope`` is the scope the hook belongs to (``"mint"`` or ``None``).  When
 ``is_paused`` reports that scope as paused, the hook is skipped: a paused scope
 must not spawn new work.
+
+The scope is matched case-insensitively: the protocol writes it in lower case
+(``"mint"``) while the pause marker in the dispatch state directory is upper
+case (``PAUSE-MINT``).  ``pause_markers`` maps a scope to the marker names that
+pause it, so both spellings refer to the same pause.
 """
 import json
 import subprocess
@@ -30,6 +35,25 @@ PRIORITIES = ("p0", "p1", "p2")
 _PRIORITY = {"p0": 0, "p1": 1, "p2": 2, None: 3}
 _TASK_FIELDS = ("issue", "priority", "backend", "reason")
 _STDERR_TAIL = 300
+
+
+def pause_markers(scope):
+    """The marker file names that pause ``scope``.
+
+    The protocol spells the scope in lower case (``"mint"``) and the marker in
+    the state directory in upper case (``PAUSE-MINT``); both spellings are
+    returned so a paused scope is recognized however the hook was configured.
+    An empty scope has no marker.
+    """
+    text = str(scope or "").strip()
+    if not text:
+        return []
+    markers = []
+    for candidate in (text.upper(), text):
+        marker = "PAUSE-" + candidate
+        if marker not in markers:
+            markers.append(marker)
+    return markers
 
 
 def _valid_task(value):

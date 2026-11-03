@@ -221,6 +221,9 @@ DEFAULTS = {
                 "code_ext": [".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".go", ".rs", ".sh"],
                 "code_dirs": ["tests/", "tools/", "bin/"]},
     "replenish": {"cmd": [], "low": 20, "target": 24, "skip_files": ["PAUSE-MINT", "NO_SEED_MINT"]},
+    # External task sources: commands that print one JSON task per line (protocol:
+    # lib/dispatch/source_hooks.py). A hook may only rank/pin cards of the label queue.
+    "sources": {"hooks": [], "timeout_s": 60},
     "templates": {
         "rules": ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or "
                   "delete files outside it. Do not push, do not open PRs, do not touch credentials, no network installs. "
@@ -739,6 +742,7 @@ class Dispatcher:
         return skip
 
     def queue(self):
+        source_result = self.run_sources()
         rc, out, err = self.gh(["issue", "list", "--state", "open", "--label", self.L["ready"], "--limit", "100",
                                 "--json", "number,title,labels,body"])
         if rc:
@@ -755,7 +759,60 @@ class Dispatcher:
                           "prio": min([pr[l] for l in labels if l in pr] or [len(pr)]),
                           "backend": next((l[len(bp):] for l in labels if l.startswith(bp)), None),
                           "strict": self.L["strict_backend"] in labels})
+        # External sources may rank/pin cards already admitted by the normal label queue.
+        # They cannot bypass lane-ready, in-progress, or external-backend filtering above.
+        self.apply_sources(items, source_result)
         return sorted(items, key=lambda x: (x["prio"], x["n"]))
+
+    def run_sources(self):
+        """Run configured external sources before querying the label queue.
+
+        A source hook is an external command that prints one JSON task per line
+        (the protocol lives in ``lib/dispatch/source_hooks.py``).  Its tasks may
+        lower the priority and pin the backend of a card the label queue already
+        admitted; a hook never adds a card and never lifts a pause.
+
+        No hook is started in shadow mode: a hook may have side effects (it can
+        mint cards), and a shadow tick must not have any.
+        """
+        source_cfg = self.cfg.get("sources") or {}
+        hooks = source_cfg.get("hooks") if isinstance(source_cfg, dict) else source_cfg
+        if not isinstance(hooks, (list, tuple)) or not hooks or self.dry_run:
+            return
+        source_hooks = dispatch_module("source_hooks")
+        timeout_s = 60
+        if isinstance(source_cfg, dict):
+            try:
+                timeout_s = int(source_cfg.get("timeout_s", 60))
+            except (TypeError, ValueError):
+                timeout_s = 60
+        result = source_hooks.run_hooks(
+            hooks,
+            timeout_s=timeout_s,
+            # The protocol spells the scope in lower case ("mint"), the marker in the state
+            # directory in upper case (PAUSE-MINT): both spellings must find the pause.
+            is_paused=lambda scope: any(os.path.exists(self.path(name))
+                                        for name in source_hooks.pause_markers(scope)))
+        return result
+
+    def apply_sources(self, items, result):
+        if result is None:
+            return
+        by_number = {item["n"]: item for item in items}
+        priorities = {"p0": 0, "p1": 1, "p2": 2}
+        for task in result["tasks"]:
+            item = by_number.get(task["issue"])
+            if item is None:
+                continue
+            if task["priority"] is not None:
+                item["prio"] = min(item["prio"], priorities[task["priority"]])
+            if task["backend"] is not None:
+                item["backend"] = task["backend"]
+                item["strict"] = True
+        for error in result["errors"]:
+            self.log(f"dispatch source {error.get('name') or '<invalid>'}: {error.get('error')}", brain=False)
+        if result["rejected"]:
+            self.log(f"dispatch sources: rejected {result['rejected']} task line(s)", brain=False)
 
     def can_take(self, backend, item):
         if item["backend"] in (None, backend):
