@@ -17,6 +17,19 @@ DEFAULT_THRESHOLDS = {
     "ssh_fail_pause_streak": 3,
 }
 
+# The workspace retention of the executor home.  The executor home lives under
+# the home directory of the executor, so the filesystem of $HOME is the one that
+# fills up with the run workspaces.  Above the alert watermark the operator is
+# warned and the cleanup of the expired workspaces runs with the highest
+# priority; the pause watermarks above are a separate, stricter decision.
+DEFAULT_RETENTION_THRESHOLDS = {
+    "disk_alert_pct": 85,
+    "disk_threshold_pct": 85,
+}
+
+# The remote command that measures the filesystem of the executor home.
+RETENTION_PROBE_COMMAND = 'df -P "$HOME"'
+
 # The measured pressures: field, pause watermark, resume watermark, label, and
 # whether a high value is the bad one (percentages) or a low one (free memory).
 PRESSURES = (
@@ -49,6 +62,32 @@ def thresholds_from_policy(policy):
             if key in limits:
                 limits[key] = value
     return limits
+
+
+def retention_thresholds_from_policy(policy):
+    """The retention watermarks of a policy: ``executor.retention`` over the defaults."""
+    limits = dict(DEFAULT_RETENTION_THRESHOLDS)
+    section = ((policy or {}).get("executor") or {}).get("retention") if isinstance(policy, dict) else None
+    if isinstance(section, dict):
+        for key, value in section.items():
+            if key in limits and isinstance(value, (int, float)) and not isinstance(value, bool):
+                limits[key] = value
+    return limits
+
+
+def retention_state(disk_pct, limits=None):
+    """The retention alert and the cleanup priority of a host.
+
+    Above the alert watermark the host needs the space back: the operator is
+    warned and the expired run workspaces are cleaned with the highest
+    priority.  An unmeasured watermark never warns.
+    """
+    limits = {**DEFAULT_RETENTION_THRESHOLDS, **(limits or {})}
+    disk = disk_pct if isinstance(disk_pct, (int, float)) and not isinstance(disk_pct, bool) else None
+    alert = disk is not None and disk >= limits["disk_alert_pct"]
+    return {"disk_used_pct": disk, "alert_pct": limits["disk_alert_pct"],
+            "threshold_pct": limits["disk_threshold_pct"], "alert": alert,
+            "priority": "high" if alert else "normal"}
 
 
 def pressure_levels(probe, limits):
@@ -147,6 +186,27 @@ def _memory(output):
     raise ValueError("free output missing Mem available column")
 
 
+def _df_last_percent(output, usage_column="Use%"):
+    """The used percentage of the last data row of a df output.
+
+    ``df -P "$HOME"`` reports the filesystem of the home directory, which is
+    not necessarily mounted on "/".
+    """
+    lines = [line.split() for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ValueError("df output has no data row")
+    header = lines[0]
+    alternatives = {"Use%": ("Capacity",), "IUse%": ("%iused",)}
+    index = next((header.index(name) for name in (usage_column,) + alternatives.get(usage_column, ())
+                  if name in header), None)
+    if index is None:
+        raise ValueError("df output missing " + usage_column)
+    row = lines[-1]
+    if len(row) <= index:
+        raise ValueError("truncated df data row")
+    return _percent(row[index])
+
+
 def run_probe(host, runner):
     """Run df/free commands through ``runner(host, command)`` and parse output.
 
@@ -160,6 +220,16 @@ def run_probe(host, runner):
             "mem_avail_mb": _memory(memory), "ssh_fail_streak": 0}
 
 
+def run_retention_probe(host, runner):
+    """Measure the filesystem of the executor home of a host.
+
+    The probe is separate from ``run_probe`` because it is best effort: a
+    host that cannot answer it is not unhealthy, it is simply not measured.
+    """
+    output = runner(host, RETENTION_PROBE_COMMAND)
+    return {"home_disk_pct": _df_last_percent(output, "Use%")}
+
+
 def next_ssh_streak(previous, reachable):
     """The consecutive SSH failure count of a host after one probe."""
     if reachable:
@@ -171,7 +241,7 @@ def next_ssh_streak(previous, reachable):
     return count + 1
 
 
-def check_host(host, runner, thresholds=None, paused=False, ssh_fail_streak=0):
+def check_host(host, runner, thresholds=None, paused=False, ssh_fail_streak=0, retention_limits=None):
     """Probe one host and describe its health.
 
     ``runner(host, command)`` returns the command output and raises OSError when
@@ -179,6 +249,11 @@ def check_host(host, runner, thresholds=None, paused=False, ssh_fail_streak=0):
     the pause decision, the measured metrics, and the metrics that triggered it.
     An unreachable host keeps counting its SSH failures: the streak reaches the
     pause threshold before the host is paused.
+
+    The row also carries the workspace retention of the host: the disk
+    watermark of the executor home, the alert when it reaches the watermark
+    and the cleanup priority the alert raises.  The retention probe is best
+    effort: a host that cannot answer it is not measured, not unhealthy.
     """
     limits = dict(DEFAULT_THRESHOLDS)
     if thresholds:
@@ -192,24 +267,35 @@ def check_host(host, runner, thresholds=None, paused=False, ssh_fail_streak=0):
                                      "ssh_fail_streak": streak}, limits)
         return {"host": host, "status": STATUS_UNREACHABLE, "decision": decision, "reason": reason,
                 "error": str(error), "metrics": {"ssh_fail_streak": streak},
-                "triggers": ["ssh_fail_streak"] if decision == "pause" else []}
+                "triggers": ["ssh_fail_streak"] if decision == "pause" else [],
+                "retention": retention_state(None, retention_limits), "alerts": []}
     except ValueError as error:
         decision, reason = evaluate({"host": host, "paused": paused}, limits)
         return {"host": host, "status": STATUS_UNREACHABLE, "decision": decision, "reason": reason,
-                "error": str(error), "metrics": {}, "triggers": []}
+                "error": str(error), "metrics": {}, "triggers": [],
+                "retention": retention_state(None, retention_limits), "alerts": []}
     probe["paused"] = bool(paused)
     probe["ssh_fail_streak"] = 0
     decision, reason = evaluate(probe, limits)
     levels = pressure_levels(probe, limits)
     triggers = [row["field"] for row in levels if row["over_pause"]]
     pending = [row["field"] for row in levels if not row["over_pause"] and row["over_resume"]]
+    retention = retention_state(None, retention_limits)
+    try:
+        retention = retention_state(run_retention_probe(host, runner)["home_disk_pct"], retention_limits)
+    except (OSError, ValueError):
+        pass
+    alerts = []
+    if retention["alert"]:
+        alerts.append(f"workspace retention: disk {retention['disk_used_pct']:g}% used "
+                      f"(alert {retention['alert_pct']:g}%), cleanup priority high")
     if triggers:
         status = STATUS_HARD
-    elif pending:
+    elif pending or alerts:
         status = STATUS_SOFT
     else:
         status = STATUS_OK
     metrics = {row["field"]: row["value"] for row in levels}
     metrics["ssh_fail_streak"] = 0
     return {"host": host, "status": status, "decision": decision, "reason": reason,
-            "metrics": metrics, "triggers": triggers}
+            "metrics": metrics, "triggers": triggers, "retention": retention, "alerts": alerts}

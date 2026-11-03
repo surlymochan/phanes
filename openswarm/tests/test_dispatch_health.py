@@ -106,5 +106,76 @@ class ProbeTests(unittest.TestCase):
             health.run_probe("h", failed)
 
 
+class RetentionTests(unittest.TestCase):
+    """The workspace retention of the executor home is part of the host health."""
+
+    def test_the_retention_probe_measures_the_home_filesystem(self):
+        calls = []
+        def runner(host, command):
+            calls.append((host, command))
+            return ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                    "/dev/root 1000 917 83 92% /\n")
+        result = health.run_retention_probe("node-a", runner)
+        self.assertEqual(result, {"home_disk_pct": 92.0})
+        self.assertEqual(calls, [("node-a", health.RETENTION_PROBE_COMMAND)])
+
+    def test_the_home_mountpoint_is_not_required_to_be_root(self):
+        output = ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                  "/dev/data 1000 90 10 90% /home/worker\n")
+        self.assertEqual(health._df_last_percent(output, "Use%"), 90.0)
+
+    def test_a_full_disk_raises_the_cleanup_priority(self):
+        state = health.retention_state(91.7)
+        self.assertTrue(state["alert"])
+        self.assertEqual(state["priority"], "high")
+        self.assertEqual(state["alert_pct"], 85)
+
+    def test_a_quiet_disk_keeps_the_normal_priority(self):
+        state = health.retention_state(42.0)
+        self.assertFalse(state["alert"])
+        self.assertEqual(state["priority"], "normal")
+
+    def test_an_unmeasured_disk_never_warns(self):
+        state = health.retention_state(None)
+        self.assertFalse(state["alert"])
+        self.assertIsNone(state["disk_used_pct"])
+
+    def test_the_alert_watermark_comes_from_the_policy(self):
+        limits = health.retention_thresholds_from_policy(
+            {"executor": {"retention": {"disk_alert_pct": 50, "disk_threshold_pct": 60}}})
+        self.assertEqual(limits["disk_alert_pct"], 50)
+        self.assertEqual(limits["disk_threshold_pct"], 60)
+        self.assertTrue(health.retention_state(55.0, limits)["alert"])
+        self.assertFalse(health.retention_state(45.0, limits)["alert"])
+
+    def test_the_shipped_policy_alerts_at_85_percent(self):
+        import json
+        import pathlib
+        policy = json.loads((pathlib.Path(__file__).resolve().parents[1] / "policy.json")
+                             .read_text(encoding="utf-8"))
+        limits = health.retention_thresholds_from_policy(policy)
+        self.assertEqual(limits["disk_alert_pct"], 85)
+
+    def test_a_host_row_carries_the_retention_alert(self):
+        def runner(_host, command):
+            if command == health.RETENTION_PROBE_COMMAND:
+                return ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                        "/dev/root 1000 917 83 92% /\n")
+            if command == "df -P /":
+                return ("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                        "/dev/root 1000 700 300 70% /\n")
+            if command == "df -Pi /":
+                return ("Filesystem Inodes IUsed IFree IUse% Mounted on\n"
+                        "/dev/root 1000 950 50 10% /\n")
+            return ("              total used free shared buff/cache available\n"
+                    "Mem: 8000 3000 2000 100 3000 5000\nSwap: 0 0 0\n")
+        row = health.check_host("node-a", runner)
+        self.assertTrue(row["retention"]["alert"])
+        self.assertEqual(row["retention"]["priority"], "high")
+        self.assertEqual(row["alerts"], ["workspace retention: disk 92% used "
+                                          "(alert 85%), cleanup priority high"])
+        self.assertEqual(row["status"], health.STATUS_SOFT)
+
+
 if __name__ == "__main__":
     unittest.main()
