@@ -11676,7 +11676,7 @@ FLEET_HEALTH_PAUSE_TTL = 1800
 FLEET_HEALTH_TIMEOUT = 30
 FLEET_HEALTH_STATE_FILE = "fleet-health.json"
 FLEET_HEALTH_REASON = "auto:health"
-FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "unreachable": 2, "hard": 3}
+FLEET_HEALTH_STATUS_RANK = {"ok": 0, "soft": 1, "stale": 2, "unreachable": 3, "hard": 4}
 
 
 def dispatch_health_module():
@@ -11795,13 +11795,226 @@ def fleet_health_apply(store, row, active, moment):
     return "none"
 
 
-def fleet_health_status(rows):
-    """The worst status of the probed hosts."""
+def fleet_health_status(rows, alerts=()):
+    """The worst status of the probed hosts (a stalled control plane degrades the report too)."""
     worst = "ok"
     for row in rows:
         if FLEET_HEALTH_STATUS_RANK.get(row["status"], 0) > FLEET_HEALTH_STATUS_RANK[worst]:
             worst = row["status"]
+    if alerts and FLEET_HEALTH_STATUS_RANK["stale"] > FLEET_HEALTH_STATUS_RANK[worst]:
+        worst = "stale"
     return worst
+
+
+# ---------------------------------------------------------------- fleet health: the dispatcher snapshot and its writer
+
+FLEET_LANES_SNAPSHOT_STALE_SECONDS = 180
+FLEET_LANES_WRITER_STALE_SECONDS = 600
+FLEET_LANES_SNAPSHOT_FILE_ENV = "LANES_STATUS_FILE"
+FLEET_AD_STATE_DIR_ENV = "AD_STATE_DIR"
+FLEET_AD_CTL_STATE_DIR_ENV = "CTL_STATE_DIR"
+
+
+def fleet_ad_state_dir(home=None):
+    """The dispatcher's state dir: it holds the snapshot and the heartbeat."""
+    directory = envvar(FLEET_AD_STATE_DIR_ENV)
+    if not directory:
+        directory = os.path.join(home or os.path.expanduser("~"), "phanes-ctl", "autodispatch")
+    return os.path.expanduser(directory)
+
+
+def fleet_lanes_snapshot_path(home=None):
+    """The lanes-status snapshot the dispatcher writes and the control plane reads.
+
+    The dispatcher writes ``<state dir>/lanes-status.json``; the state dir is
+    ``~/phanes-ctl/autodispatch`` by default, ``OPENSWARM_AD_STATE_DIR`` overrides
+    the directory and ``OPENSWARM_LANES_STATUS_FILE`` the file itself.  Reading
+    any other path would always report "missing" and hide a stalled dispatcher
+    (Refs #1697).
+    """
+    explicit = envvar(FLEET_LANES_SNAPSHOT_FILE_ENV)
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    return os.path.join(fleet_ad_state_dir(home), "lanes-status.json")
+
+
+def fleet_lanes_stamp_age(stamp, moment):
+    """The age of a ``%Y-%m-%d %H:%M:%S`` stamp in seconds (None when unreadable)."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return max(0, int(moment - time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))))
+    except (TypeError, ValueError):
+        return None
+
+
+def fleet_lanes_snapshot(home=None, moment=None, path=None, stale_after=None):
+    """Read the dispatcher's snapshot and judge its freshness.
+
+    ``_at`` is the queue watermark every supervisor reads: when it is older than
+    the threshold the snapshot is reported as stale, together with the last stamp,
+    so a frozen writer cannot pass for a healthy control plane (Refs #1697).
+    """
+    now = NOW() if moment is None else moment
+    limit = FLEET_LANES_SNAPSHOT_STALE_SECONDS if stale_after is None else int(stale_after)
+    location = path or fleet_lanes_snapshot_path(home)
+    snapshot = {"path": location, "status": "missing", "at": None, "age_seconds": None,
+                "stale_after_seconds": limit, "busy": None, "ready": None, "blocked": None,
+                "phase": None, "tick_at": None}
+    try:
+        with open(location, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return snapshot
+    except (OSError, ValueError) as error:
+        snapshot["status"] = "unreadable"
+        snapshot["error"] = str(error)
+        return snapshot
+    if not isinstance(data, dict):
+        snapshot["status"] = "unreadable"
+        snapshot["error"] = "the snapshot is not a JSON object"
+        return snapshot
+    stamp = data.get("_at")
+    age = fleet_lanes_stamp_age(stamp, now)
+    snapshot["at"] = stamp if isinstance(stamp, str) else None
+    snapshot["age_seconds"] = age
+    phase = data.get("_phase")
+    snapshot["phase"] = phase if isinstance(phase, str) else None
+    tick_at = data.get("_tick_at")
+    snapshot["tick_at"] = tick_at if isinstance(tick_at, str) else None
+    for key, name in (("_busy", "busy"), ("_ready", "ready"), ("_blocked", "blocked")):
+        value = data.get(key)
+        snapshot[name] = value if isinstance(value, int) and not isinstance(value, bool) else None
+    if age is None:
+        snapshot["status"] = "invalid"
+        snapshot["error"] = f"no usable _at stamp: {stamp!r}"
+    else:
+        snapshot["status"] = "fresh" if age <= limit else "stale"
+    return snapshot
+
+
+def fleet_ad_ctl_state_dir():
+    """The control-plane state dir that holds the dispatcher's pid file."""
+    directory = envvar(FLEET_AD_CTL_STATE_DIR_ENV)
+    if not directory:
+        directory = os.path.join(os.path.expanduser("~"), "phanes-ctl", "state")
+    return os.path.expanduser(directory)
+
+
+def fleet_process_start_time(pid):
+    """The start time of a pid in epoch seconds (/proc on Linux, None elsewhere)."""
+    try:
+        with open(f"/proc/{pid}/stat") as stream:
+            stat = stream.read()
+        fields = stat[stat.rfind(")") + 2:].split()
+        with open("/proc/stat") as stream:
+            boot_time = float(stream.read().split("btime ", 1)[1].split()[0])
+        return boot_time + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def fleet_process_alive(pid, started_at=None):
+    """Is the pid a live process?  A recorded start time also rules out a reused pid."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    if started_at:
+        began = fleet_process_start_time(pid)
+        if began is not None and abs(float(started_at) - began) > 5:
+            return False  # the pid was taken over by another process
+    return True
+
+
+def fleet_lanes_writer(snapshot_path, moment=None, stale_after=None, home=None):
+    """Is the dispatcher that writes the snapshot still alive?
+
+    Two independent signals: the heartbeat file the dispatcher refreshes on every
+    tick and on every snapshot publish, and the pid file the launcher writes.  A
+    silent or dead writer is reported, so the health check alarms instead of
+    trusting a frozen snapshot (Refs #1697).
+    """
+    now = NOW() if moment is None else moment
+    limit = FLEET_LANES_WRITER_STALE_SECONDS if stale_after is None else int(stale_after)
+    heartbeat_path = os.path.join(fleet_ad_state_dir(home), "heartbeat")
+    pid_path = os.path.join(fleet_ad_ctl_state_dir(), "autodispatch.pid")
+    writer = {"status": "unknown", "pid": None, "pid_alive": None, "heartbeat_at": None,
+              "heartbeat_age_seconds": None, "heartbeat_path": heartbeat_path, "pid_path": pid_path,
+              "snapshot_path": snapshot_path,
+              "stale_after_seconds": limit, "checked_at": time.strftime("%F %T", time.localtime(now))}
+    stamp = None
+    try:
+        with open(heartbeat_path, encoding="utf-8") as stream:
+            stamp = stream.read().strip()
+    except FileNotFoundError:
+        stamp = None
+    except OSError as error:
+        writer["heartbeat_error"] = str(error)
+    if stamp:
+        writer["heartbeat_at"] = stamp
+        writer["heartbeat_age_seconds"] = fleet_lanes_stamp_age(stamp, now)
+    pid = started = None
+    try:
+        with open(pid_path, encoding="utf-8") as stream:
+            record = json.load(stream)
+        pid = int(record["pid"])
+        started = float(record.get("started_at") or 0)
+    except (OSError, ValueError, KeyError, TypeError):
+        record = None
+    if pid is not None:
+        writer["pid"] = pid
+        writer["pid_alive"] = fleet_process_alive(pid, started)
+    age = writer["heartbeat_age_seconds"]
+    if writer["pid_alive"] is False:
+        # The launcher writes the pid file, so it survives the process it names: a fresh
+        # heartbeat is NOT proof of life. A dead writer is reported as dead and alarms,
+        # even when the heartbeat was refreshed a second ago (Refs #1697).
+        writer["status"] = "dead"
+    elif age is not None:
+        writer["status"] = "alive" if age <= limit else "stalled"
+    elif writer["pid_alive"] is True:
+        writer["status"] = "alive"
+    else:
+        writer["status"] = "unknown"
+    return writer
+
+
+def fleet_lanes_alerts(snapshot, writer):
+    """The control-plane alarms: a frozen snapshot or a dead/stalled dispatcher."""
+    alerts = []
+    status = snapshot.get("status")
+    if status == "stale":
+        alerts.append({"kind": "lanes-snapshot-stale",
+                       "message": f"the lanes-status snapshot is {snapshot['age_seconds']}s old "
+                                  f"(threshold {snapshot['stale_after_seconds']}s), last _at {snapshot['at']}",
+                       "at": snapshot.get("at"), "age_seconds": snapshot.get("age_seconds"),
+                       "path": snapshot.get("path")})
+    elif status in ("unreadable", "invalid"):
+        alerts.append({"kind": "lanes-snapshot-" + status,
+                       "message": f"the lanes-status snapshot is {status}: {snapshot.get('error')}",
+                       "at": snapshot.get("at"), "age_seconds": snapshot.get("age_seconds"),
+                       "path": snapshot.get("path")})
+    if writer.get("status") in ("stalled", "dead"):
+        alerts.append({"kind": "autodispatch-writer-" + writer["status"],
+                       "message": f"the autodispatch writer is {writer['status']} "
+                                  f"(pid {writer.get('pid')}, alive={writer.get('pid_alive')}, "
+                                  f"heartbeat {writer.get('heartbeat_at')}, "
+                                  f"{writer.get('heartbeat_age_seconds')}s old, "
+                                  f"threshold {writer.get('stale_after_seconds')}s)",
+                       "at": writer.get("heartbeat_at"), "age_seconds": writer.get("heartbeat_age_seconds"),
+                       "path": writer.get("heartbeat_path")})
+    return alerts
 
 
 def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
@@ -11822,6 +12035,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         raise ValueError("no fleet host to probe")
     store = dispatch_pause_module().PauseStore(home or DATA)
     moment = NOW() if now is None else now
+    # The dispatcher snapshot is the control plane's queue watermark. Surface stale
+    # data explicitly so consumers do not mistake an old pool reading for current health.
+    snapshot = fleet_lanes_snapshot(home, moment)
+    writer = fleet_lanes_writer(snapshot["path"], moment, home=home)
+    alerts = fleet_lanes_alerts(snapshot, writer)
     active = {record["scope"]: record for record in store.active(moment)}
     previous = fleet_health_state_load(home)
     probe = runner if runner is not None else fleet_health_runner(config)
@@ -11851,8 +12069,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                             "status": row["status"], "updated_at": moment}
         rows.append(row)
     fleet_health_state_save(remembered, home)
-    report = {"ok": all(row["status"] == "ok" for row in rows),
-              "status": fleet_health_status(rows),
+    report = {"ok": all(row["status"] == "ok" for row in rows) and not alerts,
+              "status": fleet_health_status(rows, alerts),
+              "lanes_snapshot": snapshot,
+              "writer": writer,
+              "alerts": alerts,
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits,
               "hosts": rows}
@@ -11866,6 +12087,22 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
             print(f"  metrics: {metrics}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
+    if snapshot["at"]:
+        snapshot_line = (f"last _at {snapshot['at']}, {snapshot['age_seconds']}s old "
+                         f"(threshold {snapshot['stale_after_seconds']}s)")
+        if snapshot.get("phase"):
+            snapshot_line += f", phase {snapshot['phase']}"
+    else:
+        snapshot_line = f"no readable snapshot ({snapshot['path']})"
+    if writer["heartbeat_at"]:
+        writer_line = (f"pid {writer['pid']}, heartbeat {writer['heartbeat_at']} "
+                       f"({writer['heartbeat_age_seconds']}s old, threshold {writer['stale_after_seconds']}s)")
+    else:
+        writer_line = f"pid {writer['pid']}, no heartbeat ({writer['heartbeat_path']})"
+    print(f"lanes-status  {snapshot['status']:<9}  {snapshot_line}  {snapshot['path']}")
+    print(f"autodispatch  {writer['status']:<9}  {writer_line}")
+    for alert in alerts:
+        print(f"WARNING {alert['message']}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")
     return report
 
@@ -11878,7 +12115,9 @@ def cmd_fleet(args):
         cmd_fleet_render_lanes(args)
         return
     if args.fleet_cmd == "health":
-        cmd_fleet_health(args)
+        report = cmd_fleet_health(args)
+        if not report.get("ok"):
+            raise SystemExit(1)  # the alarm: a sick host or a stalled dispatcher
         return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
