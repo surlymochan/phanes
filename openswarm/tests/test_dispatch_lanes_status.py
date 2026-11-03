@@ -24,6 +24,7 @@ class LaneStatus(unittest.TestCase):
             json.dump({"claude": {"default_model": "claude-haiku-4.5"}}, stream)
         with open(self.cfg_path, "w", encoding="utf-8") as stream:
             json.dump({"repo": "a/b", "local_repo": self.tmp.name, "state_dir": self.state_dir,
+                       "pause_home": os.path.join(self.tmp.name, "pause-home"),
                        "policy_file": self.policy_path,
                        "ssh": {"control_dir": os.path.join(self.tmp.name, "cm")}}, stream)
         self.cfg = E.load_config(self.cfg_path)

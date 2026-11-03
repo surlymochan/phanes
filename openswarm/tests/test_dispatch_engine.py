@@ -58,6 +58,7 @@ class Base(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         raw = {"repo": "acme/project", "local_repo": self.tmp, "state_dir": os.path.join(self.tmp, "state"),
                "remote_home": self.tmp,
+               "pause_home": os.path.join(self.tmp, "pause-home"),
                "ssh": {"control_dir": os.path.join(self.tmp, "cm")}, "local_hosts": ["box"],
                "hot_files": {"limits": {"bin/big": 2}, "union": ["docs/log.md"]},
                "burn": {"file": "BURN-X", "backend": "pi"}}
@@ -342,7 +343,7 @@ class QuotaGuards(Base):
         self.assertEqual(self.read(d.path("PAUSE-BACKEND-agy")),
                          "auto:quota:M5:RESOURCE_EXHAUSTED until=1970-01-01T00:46:40Z\n")
 
-    def test_backend_pause_until_is_reaped_only_after_expiry(self):
+    def test_backend_pause_until_expires_without_removal(self):
         d = self.dispatcher()
         p = d.path("PAUSE-BACKEND-agy")
         with open(p, "w") as f:
@@ -351,7 +352,8 @@ class QuotaGuards(Base):
         self.assertTrue(os.path.exists(p))
         d.clock = lambda: 1201.0
         d.reap_quota_pauses()
-        self.assertFalse(os.path.exists(p))
+        self.assertTrue(os.path.exists(p))
+        self.assertFalse(d.paused_lane("M5", {"backend": "agy"}))
 
     def test_probe_available_early_clears_backend_pause(self):
         d = self.make([("probe", (0, '{"exhausted":false}', ""))])
@@ -1331,7 +1333,7 @@ class DryRunTick(Base):
         d.tick({"M5": {"host": "box", "backend": "pi"}}, {})
         self.assertTrue(os.path.exists(pause))
         unlinks = [p for p in d.plan if p.get("would") == "unlink" and p.get("file") == "PAUSE-BACKEND-pi"]
-        self.assertEqual(len(unlinks), 1)
+        self.assertEqual(len(unlinks), 0)
 
 
 class Cli(Base):

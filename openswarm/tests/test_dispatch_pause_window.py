@@ -124,7 +124,8 @@ class HarvestPauseTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         raw = {"repo": "acme/project", "local_repo": str(self.root),
-               "state_dir": str(self.root / "state"), "local_hosts": ["box"],
+               "state_dir": str(self.root / "state"), "pause_home": str(self.root / "pause-home"),
+               "local_hosts": ["box"],
                "ssh": {"control_dir": str(self.root / "cm")}}
         cfg_path = self.root / "config.json"
         cfg_path.write_text(json.dumps(raw))
