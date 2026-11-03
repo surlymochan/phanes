@@ -114,6 +114,16 @@
     "min_samples": 8,
     "weighted": false
   },
+  "dispatch": {
+    "_doc": "Cross-backend fallback for the dispatchers (Refs #1361). A card pinned to backend X waits fallback_wait_s seconds for an idle lane of X; after that it may fall back to the backends listed for X, in the order they are tried. A paused backend is skipped, and fallback_strict switches the fallback off. Without a mapping a card stays on its pinned backend.",
+    "fallback": {
+      "codex": ["pi"],
+      "agy": ["codex", "pi"],
+      "pi": ["codex", "agy"],
+      "copilot": ["codex", "pi"]
+    },
+    "fallback_wait_s": 600
+  },
   "codex": {
     "min_cli_version": "",
     "default_model": "gpt-6-luna",

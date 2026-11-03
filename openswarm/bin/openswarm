@@ -13437,6 +13437,43 @@ def dispatch_engine_module():
         raise ImportError(f"cannot load dispatch engine at {path}: {error}") from error
 
 
+def dispatch_fallback_module():
+    """Load lib/dispatch/fallback.py by path (the dispatch lib has no __init__.py)."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                        "lib", "dispatch", "fallback.py")
+    name = "openswarm_dispatch_fallback"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError("no import loader available")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception as error:
+        sys.modules.pop(name, None)
+        raise ImportError(f"cannot load dispatch fallback module at {path}: {error}") from error
+
+
+def dispatch_fallback_config(policy):
+    """The cross-backend fallback configuration of the policy (Refs #1361).
+
+    ``dispatch.fallback`` maps a pinned backend to the backends its cards may fall
+    back to, in the order they are tried; ``dispatch.fallback_wait_s`` is how long
+    the pinned backend gets an idle lane before a card may fall back.  The dispatch
+    engine uses this configuration to decide whether a lane of another backend may
+    run a pinned card.
+    """
+    try:
+        module = dispatch_fallback_module()
+    except ImportError:
+        return {}
+    return module.policy_config(policy)
+
+
 COMPARE_DEFAULT_ORDER = ("codex", "ocgo", "deepseek", "agy", "cursor", "pi")
 
 
@@ -15709,7 +15746,7 @@ def main():
             print(f"openswarm: {dispatch_load_error}", file=sys.stderr)
             sys.exit(2)
         try:
-            result = dispatch_engine_module().cmd_dispatch(a)
+            result = dispatch_engine_module().cmd_dispatch(a, fallback=dispatch_fallback_config(load_policy()))
             sys.exit(result or 0)
         except Exception as error:
             print(f"openswarm: dispatch failed: {error}", file=sys.stderr)
