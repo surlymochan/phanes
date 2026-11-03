@@ -35,6 +35,7 @@ import concurrent.futures as cf
 import copy
 import datetime
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import math
@@ -269,6 +270,10 @@ def deep_merge(base, over):
         else:
             out[k] = copy.deepcopy(v)
     return out
+
+
+def review_rules_hash(template):
+    return hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
 
 
 def load_config(path):
@@ -2428,10 +2433,11 @@ class Dispatcher:
         comment = (f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, "
                    f"run `{st['run']}`, head `{sha[:10]}`\n\n{txt.strip()[:36000]}")
         comment += self.evidence_comment(ev_txt, ev)
-        comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"
+        rules_hash = st.get("rules_hash") or "unknown"
+        comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} rules_hash={rules_hash} -->"
         self.gh(["pr", "comment", str(pr), "--body", comment])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
-                  "fails_sha": sha, "fail_classes": []})
+                  "fails_sha": sha, "fail_classes": [], "rules_hash": rules_hash})
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -2530,7 +2536,8 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
-                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
+                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"],
+                        "rules_hash": review_rules_hash(self.cfg["templates"]["review_task"])}
             self.save_state(state)
             self.lru_picker().touch(L)
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "

@@ -656,7 +656,7 @@ class ReviewGate(Base):
         d = self.make([("git -C", (0, verdict, "")),
                        ("pr view 20", (0, json.dumps({"headRefOid": SHA, "state": "OPEN", "headRefName": "fleet/M5-issue200-r",
                                                       "body": "Closes #200"}), ""))])
-        st = {"issue": "PR20", "run": "r1", "review_pr": 20, "review_sha": SHA}
+        st = {"issue": "PR20", "run": "r1", "review_pr": 20, "review_sha": SHA, "rules_hash": "123456789abc"}
         info = {"branch": "lane/x", "commit": "c", "backend": "pi", "model": "m"}
         self.assertTrue(d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {}))
         status = self.runner.called(f"statuses/{SHA}")
@@ -668,6 +668,8 @@ class ReviewGate(Base):
         self.assertIn("pi", status[0])
         self.assertIn("r1", status[0])
         self.assertEqual(d.load_reviews()["20"]["verdict"], "APPROVE")
+        self.assertEqual(d.load_reviews()["20"]["rules_hash"], "123456789abc")
+        self.assertIn("rules_hash=123456789abc -->", self.runner.called("pr comment 20")[0])
 
     def test_changes_posts_failure_status(self):
         verdict = "VERDICT: CHANGES\nSUMMARY: please fix\n"
@@ -1401,6 +1403,7 @@ class LanePickingAndBurn(Base):
         state = {}
         d.dispatch_reviews(lanes, {"P1": {"lane": "idle"}}, state, [])
         self.assertEqual(state["P1"]["review_pr"], 11)
+        self.assertEqual(state["P1"]["rules_hash"], E.review_rules_hash(d.cfg["templates"]["review_task"]))
         with open(d.path("lane-lru.json")) as stream:
             history = json.load(stream)
         self.assertEqual(history["version"], 1)
@@ -1408,6 +1411,12 @@ class LanePickingAndBurn(Base):
 
 
 class Defaults(unittest.TestCase):
+    def test_review_rules_hash_tracks_template_content(self):
+        template = E.DEFAULTS["templates"]["review_task"]
+        self.assertEqual(E.review_rules_hash(template), E.review_rules_hash(template))
+        self.assertRegex(E.review_rules_hash(template), r"^[0-9a-f]{12}$")
+        self.assertNotEqual(E.review_rules_hash(template), E.review_rules_hash(template + "!"))
+
     def test_remote_home_matches_fleet_wrapper(self):
         with open(os.path.join(os.path.dirname(HERE), "bin", "openswarm-fleet")) as f:
             m = __import__("re").search(r'OPENSWARM_HOME="\$HOME/([^"]+)"', f.read())
