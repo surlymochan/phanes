@@ -1592,6 +1592,62 @@ class Assign(Base):
         self.assertNotIn("--idempotency-key", self.runner.called("lane assign")[0])
 
 
+class FixRoundThinking(Base):
+    """A pi fix round runs at the thinking level of its round (Refs #1847)."""
+
+    def fix_body(self, round_no):
+        return ("Rebase-PR: 11 fleet/M5-issue5-r1\n\n## Lane review requested changes\n\n"
+                f"Review round {round_no} (P1 (pi)) on PR #11 head `abc1234567` returned CHANGES. "
+                "Start from branch `rebase-pr-11`.")
+
+    def dispatch(self, body, backend="pi", item=None):
+        d = self.make([("cat > /tmp/task", (0, "", "")), ("lane assign", (0, '{"id": "run-1"}', ""))])
+        item = item or {"n": 5, "title": "t", "body": body, "backend": None}
+        d.dispatch("M8", {"host": "far", "backend": backend}, item, SHA)
+        return self.runner.called("lane assign")[0]
+
+    def test_the_first_fix_round_runs_at_high(self):
+        self.assertIn("--thinking high", self.dispatch(self.fix_body(1)))
+
+    def test_a_later_fix_round_steps_down_the_ladder(self):
+        self.assertIn("--thinking medium", self.dispatch(self.fix_body(2)))
+        self.assertIn("--thinking low", self.dispatch(self.fix_body(3)))
+        # The last entry of the ladder covers every further round.
+        self.assertIn("--thinking low", self.dispatch(self.fix_body(4)))
+
+    def test_a_review_task_keeps_the_level_of_the_lane(self):
+        item = {"n": 11, "title": "review", "body": self.fix_body(1), "review": True}
+        self.assertNotIn("--thinking", self.dispatch(self.fix_body(1), item=item))
+
+    def test_a_lane_that_is_not_pi_gets_no_thinking_level(self):
+        self.assertNotIn("--thinking", self.dispatch(self.fix_body(1), backend="codex"))
+
+    def test_a_task_without_a_fix_round_gets_no_thinking_level(self):
+        self.assertNotIn("--thinking", self.dispatch("just a card"))
+
+    def test_the_fix_round_of_a_body_is_read_from_the_round_marker(self):
+        self.assertEqual(E.fix_round_of(self.fix_body(1)), 1)
+        self.assertEqual(E.fix_round_of(self.fix_body(3)), 3)
+        self.assertIsNone(E.fix_round_of("no marker here"))
+
+    def test_an_old_lane_host_without_the_flag_still_gets_the_card(self):
+        seen = []
+
+        def lane_assign(text):
+            seen.append(text)
+            if len(seen) == 1:
+                return 2, "", "error: unrecognized arguments: --thinking high"
+            return 0, '{"id": "run-1"}', ""
+
+        d = self.make([("cat > /tmp/task", (0, "", "")), ("lane assign", lane_assign)])
+        item = {"n": 5, "title": "t", "body": self.fix_body(1), "backend": None}
+        run, _ = d.dispatch("M8", {"host": "far", "backend": "pi"}, item, SHA)
+        self.assertEqual(run, "run-1")
+        self.assertEqual(len(self.runner.called("lane assign")), 2)
+        self.assertIn("--thinking high", self.runner.called("lane assign")[0])
+        self.assertNotIn("--thinking", self.runner.called("lane assign")[1])
+
+
 class LanePickingAndBurn(Base):
     def lanes(self):
         return {"P1": {"host": "far", "backend": "pi"},

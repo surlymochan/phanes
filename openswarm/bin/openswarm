@@ -102,6 +102,10 @@ NOW = time.time
 
 # The Antigravity CLI (`agy`) is the executor behind the `gemini` alias.
 AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
+# pi's own thinking levels (pi --thinking <level>): pi-coding-agent README.md "Model Options",
+# dist/cli/args.js VALID_THINKING_LEVELS. The launch flag is the control pi reads at start-up;
+# the RPC also knows `set_thinking_level` (docs/rpc.md), but the flag is what `ps` shows.
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
 BACKEND_ALIASES = {"gemini": "agy"}
 AGY_LOGIN_TIMEOUT = 5
 _AGY_LOGIN_CACHE = {}
@@ -8174,6 +8178,9 @@ def lane_config(check_env_mode=True):
             raise ValueError(f"invalid lane config {where}: codex effort must be one of {load_policy().get('efforts')}")
         if lane.get("provider") is not None and not isinstance(lane.get("provider"), str):
             raise ValueError(f"invalid lane config {where}: provider must be a string")
+        if lane.get("thinking") is not None and lane.get("thinking") not in PI_THINKING_LEVELS:
+            raise ValueError(f"invalid lane config {where}: thinking must be one of "
+                             f"{', '.join(PI_THINKING_LEVELS)}")
         if lane.get("binary") is not None and (not isinstance(lane["binary"], str) or not os.path.isabs(lane["binary"])):
             raise ValueError(f"invalid lane config {where}: binary override must be an absolute path")
         if lane.get("binary") and not os.access(lane["binary"], os.X_OK):
@@ -8509,6 +8516,7 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
 class LaneChild:
     def __init__(self, lane, cwd, policy, on_started=None):
         self.lane, self.cwd = lane, cwd
+        self.thinking = lane.get("thinking")     # pi: the thinking level this child was launched with
         _tmpdir, self.env = configure_executor_environment(cwd)
         self.events = queue.Queue()
         self.backlog = []
@@ -8537,6 +8545,10 @@ class LaneChild:
             if lane.get("provider"):
                 cmd += ["--provider", lane["provider"]]
             cmd += ["--model", lane["model"]]
+            # The thinking level pi starts with (lanes.json "thinking", or the level the fix round
+            # asked for). pi reads it once, at start-up, from the command line (Refs #1847).
+            if lane.get("thinking"):
+                cmd += ["--thinking", lane["thinking"]]
         elif backend == "hermes":
             binary = lane.get("binary") or hermes_bin(policy)
             if not binary:
@@ -8842,6 +8854,39 @@ def lane_child(lane, cwd, policy):
     return LaneChild(lane, cwd, policy)
 
 
+def lane_pi_thinking_child(lane, child, spec, policy):
+    """The pi child a run has to use, relaunched when the run asks for another thinking level.
+
+    pi reads its thinking level once, from `--thinking <level>` on the command line, so a fix
+    round that asks for another level needs a new pi process: the flag stays the single source of
+    truth and `ps` shows the level the run really runs at (Refs #1847). A run without a level of
+    its own keeps the resident child.
+    """
+    level = spec.get("thinking")
+    if not level or child is None or level == getattr(child, "thinking", None):
+        return child
+    event_file = spec.get("_event_file") or os.path.join(RUNS, spec.get("run_id", ""),
+                                                        f"events.1.{lane['backend']}.jsonl")
+    active = dict(lanes_by_name([lane["name"]])[0])
+    active["thinking"] = level
+    wt = os.path.join(lane_root(lane["name"]), "wt")
+    try:
+        new_child = lane_child(active, wt, policy)
+    except Exception as error:
+        # The lane keeps its resident child; the run goes on at the level it already had, and the
+        # event file says why the requested level was not applied.
+        lane_record_event(event_file, {"type": "pi_thinking_level_failed", "level": level,
+                                       "error": short(error, 200)})
+        return child
+    try:
+        child.close()
+    except Exception:
+        pass
+    lane_record_event(event_file, {"type": "pi_thinking_level", "level": level})
+    lane_write_state(lane["name"], child_pid=new_child.pid)
+    return new_child
+
+
 def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
     if lane.get("backend") != "codex" or not child:
         return child, False
@@ -8974,7 +9019,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         with open(os.path.join(rdir, "task.md"), "w") as f:
                             f.write(task)
                         spec = {k: req.get(k) for k in ("title", "verify", "verify_baseline", "budget_minutes", "base",
-                                                        "card_type", "rework_of", "paths", "regress_label", "read_only")}
+                                                        "card_type", "rework_of", "paths", "regress_label", "read_only",
+                                                        "thinking")}
                         provider = execution_provider(lane["backend"], policy=load_policy(), lane=lane)
                         spec.update({"run_id": rid, "task": task, "started": NOW(), "provider": provider})
                         spec["_event_file"] = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
@@ -10316,6 +10362,9 @@ def cmd_lane_serve(lane, policy):
                         RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl")
                     active_lane = lanes_by_name([lane["name"]])[0]
                     child, _ = lane_refresh_codex_child_if_stale(active_lane, child, policy, evp)
+                elif lane["backend"] == "pi" and child:
+                    # A fix round may ask for its own thinking level; pi only reads it at start-up.
+                    child = lane_pi_thinking_child(lane, child, spec, policy)
                 lane_do_run(lanes_by_name([lane["name"]])[0], spec, child, server, current)
             finally:
                 down_after = bool(spec.get("down_requested"))
@@ -10584,6 +10633,7 @@ def cmd_lane_assign(args):
                                          "rework_of": getattr(args, "rework_of", None),
                                          "paths": getattr(args, "paths", None) or [],
                                          "read_only": getattr(args, "read_only", False),
+                                         "thinking": getattr(args, "thinking", None),
                                          "idempotency_key": key})
     if response.get("ok"):
         if response.get("reused"):
@@ -16257,6 +16307,8 @@ def main():
     add_dispatch_arguments(lp, "task-source", "title", "verify", "verify-baseline", "budget",
                            task_source_required=True)
     lp.add_argument("--base")
+    lp.add_argument("--thinking", choices=PI_THINKING_LEVELS,
+                    help="pi thinking level for this run (the lane relaunches pi with --thinking <level>)")
     lp.add_argument("--run-id", help=argparse.SUPPRESS)
     lp.add_argument("--idempotency-key",
                     help="retry-safe key: repeating it returns the existing run instead of creating a second one")

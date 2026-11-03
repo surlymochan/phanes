@@ -656,6 +656,18 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertIn("overloaded", json.dumps(result))
 
+    def test_pi_runs_at_the_thinking_level_of_the_run(self):
+        """A run that asks for a thinking level starts pi with it (Refs #1847)."""
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_WAIT_SHORT pi thinking level", "--thinking", "high")
+        self.assertEqual(self.wait_run(run_id)["status"], "done")
+        pid = self.lane_state().get("child_pid")
+        self.assertTrue(pid)
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True,
+                                 capture_output=True, check=False).stdout
+        self.assertIn("--thinking high", command)
+
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
         (self.data / "policy.local.json").write_text(json.dumps({"rate_limit": {

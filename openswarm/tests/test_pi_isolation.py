@@ -11,6 +11,30 @@ import unittest
 
 WRAPPER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-isolated'
 
+# A stand-in for bubblewrap: it runs the wrapped command as it is, with the pi binary replaced by
+# a fake one, so the wrapper can be checked without user namespaces (Refs #1847).
+FAKE_BWRAP = '''#!/usr/bin/env python3
+import os, subprocess, sys
+args = sys.argv[1:]
+if "--unshare-all" in args and "/usr/bin/true" in args:
+    sys.exit(0)
+index = args.index("-c")
+script = args[index + 1]
+root = os.environ["FAKE_SANDBOX_ROOT"]
+script = (script.replace("/runtime/node_modules/.bin/pi", os.environ["FAKE_PI_BINARY"])
+                .replace("/config/models.json", os.path.join(root, "models.json"))
+                .replace("/run/broker.sock", os.environ["FAKE_BROKER_SOCKET"])
+                .replace("/tmp/agent", os.path.join(root, "agent"))
+                .replace("/home/pi", os.path.join(root, "home")))
+sys.exit(subprocess.call(["/usr/bin/sh", "-c", script, *args[index + 2:]]))
+'''
+
+# The fake pi reports the command line it was started with.
+FAKE_PI = '''#!/usr/bin/env python3
+import json, sys
+print(json.dumps(sys.argv))
+'''
+
 
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('bwrap') and shutil.which('socat'),
                      'requires Linux, bubblewrap and socat')
@@ -142,6 +166,58 @@ class PiIsolationTests(unittest.TestCase):
                 self.assertIn('absolute path', result.stderr)
             finally:
                 sock.close()
+
+
+class PiThinkingFlagTests(unittest.TestCase):
+    """The isolated launcher hands the thinking level to pi (Refs #1847)."""
+
+    def wrapper(self, *extra):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            binary = root / 'bwrap'
+            binary.write_text(FAKE_BWRAP)
+            binary.chmod(0o755)
+            pi = root / 'pi'
+            pi.write_text(FAKE_PI)
+            pi.chmod(0o755)
+            runtime = root / 'runtime'
+            (runtime / 'node_modules' / '.bin').mkdir(parents=True)
+            (runtime / 'node_modules' / '.bin' / 'pi').write_text('#!/bin/sh\\nexit 0\\n')
+            work = root / 'work'
+            work.mkdir()
+            (root / 'models.json').write_text('{}')
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                path = str(root / 'broker.sock')
+                sock.bind(path)
+                sock.listen()
+                env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                           FAKE_PI_BINARY=str(pi), FAKE_SANDBOX_ROOT=str(root),
+                           FAKE_BROKER_SOCKET=path, OPENSWARM_PI_RUNTIME=str(runtime),
+                           OPENSWARM_PI_BROKER_SOCKET=path)
+                command = [str(WRAPPER), '--mode', 'rpc', '--provider', 'minimax-cn', '--model',
+                           'MiniMax-M3.1-Flash', '--tools', 'read,bash,edit,write,grep,find,ls', *extra]
+                result = subprocess.run(command, cwd=work, env=env, capture_output=True, text=True, timeout=30)
+                return result
+            finally:
+                sock.close()
+
+    def test_the_thinking_level_reaches_pi(self):
+        result = self.wrapper('--thinking', 'high')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(result.stdout)
+        self.assertIn('--thinking', argv)
+        self.assertEqual(argv[argv.index('--thinking') + 1], 'high')
+
+    def test_without_a_level_pi_is_started_without_one(self):
+        result = self.wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--thinking', json.loads(result.stdout))
+
+    def test_an_unknown_level_is_refused(self):
+        result = self.wrapper('--thinking', 'deeper')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--thinking', result.stderr)
 
 
 if __name__ == '__main__':
