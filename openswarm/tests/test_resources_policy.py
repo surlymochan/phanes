@@ -63,6 +63,12 @@ class ResourcesPolicyTests(unittest.TestCase):
         self.assertEqual(policy.decide("inode", 91, False, loaded), "cleanup")
         self.assertEqual(policy.decide("inode", 89, False, loaded), "ok")
 
+    def test_resume_watermark_is_inclusive(self):
+        """92% used resumes the host: the resume watermark itself recovers it."""
+        loaded, _ = policy.load_resources_policy({})
+        self.assertEqual(policy.decide("inode", 93, True, loaded), "stay_paused")
+        self.assertEqual(policy.decide("inode", 92, True, loaded), "resume")
+
     def test_cli_exit_codes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "policy.json"

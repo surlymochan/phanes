@@ -95,6 +95,13 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(health._df_percent(disk, "Use%"), 70.0)
         self.assertEqual(health._df_percent(inode, "IUse%"), 1.0)
 
+    def test_inode_row_of_a_non_root_mountpoint_is_read_without_a_mount_filter(self):
+        inode = ("Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n"
+                 "/dev/vdb1 41153856 12345678 26640000 32% 2031615 0 100% /home\n")
+        self.assertEqual(health._df_percent(inode, "IUse%", mountpoint=None), 100.0)
+        with self.assertRaises(ValueError):
+            health._df_percent(inode, "IUse%")  # the root-mount filter does not match
+
     def test_bad_output_raises_value_error(self):
         with self.assertRaises(ValueError):
             health.run_probe("h", lambda _host, _command: "unexpected output")

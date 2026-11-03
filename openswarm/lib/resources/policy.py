@@ -82,13 +82,17 @@ def validate(policy):
 
 
 def decide(kind, used_pct, was_paused, policy):
-    """Choose a resource action using pause/resume hysteresis thresholds."""
+    """Choose a resource action using pause/resume hysteresis thresholds.
+
+    The resume watermark is inclusive: a paused workload resumes at
+    ``resume_pct`` used or below.
+    """
     resources = policy.get("resources", policy)
     thresholds = resources[kind]
     if used_pct >= thresholds["pause_pct"]:
         return "pause"
     if was_paused:
-        return "stay_paused" if used_pct >= thresholds["resume_pct"] else "resume"
+        return "stay_paused" if used_pct > thresholds["resume_pct"] else "resume"
     if used_pct >= thresholds["cleanup_pct"]:
         return "cleanup"
     return "ok"
