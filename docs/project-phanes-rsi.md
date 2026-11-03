@@ -124,16 +124,63 @@ gh project item-edit 6 --owner surlymochan \
 
 ## 5. 现状与边界
 
-- **本文件只是口径文档，不是自动化实现。** 仓库内没有把 `lane-*` 标签同步到看板 Status 的脚本；
+- **本文件第 1–5 节只是口径文档，不是自动化实现。** 仓库内没有把 `lane-*` 标签同步到看板 Status 的脚本；
   `lane-autodispatch` 与 `lane-merge` 跑在 box 控制面上（`~/phanes-ctl/bin/...`），不在本仓库
   （`brain/autopilot.md:11-12`、`brain/autopilot.md:39-40`）。要自动化，得改 box 侧脚本。
+  唯一的例外是第 7 节：assignee 与 Lane 字段由 openswarm dispatcher 在派发时自动写。
 - `brain/dual-mode-status.md:24` 的「与 phanes Project / lane-ready 标签体系衔接说明」条目即本文；
   issue bus 一侧的落地仍是 #238 / backlog rsi-08。
 - 看板是视图，issue 才是队列真相来源；看板状态与标签冲突时，以 issue 标签为准并修正看板。
 
 ---
 
-## 6. 引用来源
+## 7. 派发时自动落 assigner 与 Lane 字段（Refs #1761）
+
+2026-11-03 起，AD（openswarm dispatcher，`openswarm/lib/dispatch/engine.py`）在**派发成功**的同一点
+（issue 贴上 `in-progress`、lane 领到卡之后）自动写两样东西：
+
+1. **assigner**：`gh issue edit <N> --add-assignee <assignee>`，**只增不删**既有 assignee。
+   默认取仓库 owner（`surlymochan`）；OpenBot 层架设后改为 bot name，由配置给出。
+2. **Project 6 的 Lane 字段**：`gh project item-edit --field-id <Lane 字段 id> --text <lane id>`。
+   字段**按名 `Lane` 解析 id，不写死**；issue 不在 Project 6 时先 `gh project item-add` 再设值，
+   与看板同步脚本不冲突。
+
+改派/重派会**覆写** Lane 字段（以最终落活的 lane 为准）；审查派发能定位关联 issue 时同样落 Lane 字段
+（落审查 lane），但不改 assignee。
+
+配置（dispatch config 的 `issue_meta` 段）：
+
+```json
+{
+  "issue_meta": {
+    "enabled": true,
+    "assignee": "surlymochan",
+    "project_number": 6,
+    "project_owner": "surlymochan",
+    "lane_field": "Lane"
+  }
+}
+```
+
+`assignee` 留空 = 仓库 owner；`project_number` 为 0 = 不写看板字段。
+
+失败模式（**都不阻塞派发**）：
+
+| 情况 | 行为 |
+|---|---|
+| 字段按名解析不到 | 只落 assignee，记日志告警，不中断派发 |
+| issue 不在 Project 6 | 先 `item-add` 再设值，不因缺 item 抛错 |
+| `gh` 限流 / 异常 | 记日志，下一个 tick 重试一次，仍失败则放弃 |
+| 并发派发同一 issue | 同一 issue 的字段写入串行化，避免互相覆写 |
+
+待写清单落在 `<state_dir>/meta-debt.json`（与 lane state 分开），由下一 tick 的 `replay_meta_debt()` 重试一次。
+
+代码：`openswarm/lib/dispatch/issue_meta.py`（写入逻辑）、`openswarm/lib/dispatch/engine.py`
+（`stamp_claim` / `replay_meta_debt` 与两个调用点）、`openswarm/tests/test_dispatch_issue_meta.py`（回归）。
+
+---
+
+## 8. 引用来源
 
 - `README.md:8` —— 看板 URL、看板名称与仓库入口关系
 - `brain/autopilot.md:3` —— 主看板 URL；`:11-12` —— 派活/合并两个常驻循环；`:17` —— 建 issue 的标签口径；

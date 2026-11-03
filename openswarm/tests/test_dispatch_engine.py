@@ -1076,10 +1076,10 @@ class Assign(Base):
 
     def test_in_progress_write_retries_before_assigning(self):
         outcomes = iter([(1, "", "502"), (1, "", "502"), (0, "", "")])
-        d = self.make([("issue edit 1", lambda _: next(outcomes))])
+        d = self.make([("issue edit 1 --add-label", lambda _: next(outcomes))])
         d.sleep = lambda _: None
         self.assertEqual(self.assignment_fixture(d), ["P1"])
-        self.assertEqual(len(self.runner.called("issue edit 1")), 3)
+        self.assertEqual(len(self.runner.called("issue edit 1 --add-label")), 3)
 
     def test_three_failed_in_progress_writes_skip_lane_assignment(self):
         d = self.make([("issue edit 1", (1, "", "502"))])

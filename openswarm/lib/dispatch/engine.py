@@ -215,6 +215,16 @@ DEFAULTS = {
                    "cooldown_s": 1800, "scope": "backend"},
         },
     },
+    # Claim metadata written when a lane takes a card (Refs #1761): an assignee and the
+    # lane id in the project's Lane field.  The field is resolved by name at runtime,
+    # its id is never hardcoded; a failed write is retried once and never blocks.
+    "issue_meta": {
+        "enabled": True,
+        "assignee": "",                   # login to assign; empty = the repo owner
+        "project_number": 6,              # GitHub project number; 0 = no project write
+        "project_owner": "",              # project owner login; empty = the repo owner
+        "lane_field": "Lane",             # the project field that carries the lane id (TEXT)
+    },
     "upstream_manifest": "",              # e.g. upstream-sync.json: prefix PR title with upstream(<comp>):
     "thin_pr": {"min_effective_diff": 30,
                 "doc_ext": [".md", ".txt", ".rst", ".adoc"],
@@ -469,6 +479,12 @@ class Dispatcher:
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
         self._quota_probe_cache = None
+        # Claim metadata: the assignee and the project's Lane field of a dispatched issue (Refs #1761).
+        self.meta = dispatch_module("issue_meta").IssueMeta(
+            cfg["repo"], cfg.get("issue_meta"), runner=self.write, log=self.log,
+            plan=self.plan.append, dry_run=dry_run, clock=self.clock)
+        self._meta_guard = threading.Lock()
+        self._meta_locks = {}      # issue number -> lock: one claim writer per issue
 
     # ------------------------------------------------------------ io helpers
     def path(self, name):
@@ -548,6 +564,134 @@ class Dispatcher:
 
     def git(self, *args, timeout=120):
         return self.sh(["git", "-C", self.cfg["local_repo"]] + list(args), timeout=timeout)
+
+    # ------------------------------------------------------------ claim metadata (Refs #1761)
+    def _log_meta(self, msg):
+        """Log a claim-metadata problem; even a broken log must not break the dispatch."""
+        try:
+            self.log(msg, brain=False)
+        except Exception:
+            pass
+
+    def _meta_lock(self, n):
+        """One writer per issue: a new dispatch and the debt replay must not overlap.
+
+        The lock is reentrant so that the helpers below can take it again.
+        """
+        key = str(n)
+        with self._meta_guard:
+            lock = self._meta_locks.get(key)
+            if lock is None:
+                lock = self._meta_locks[key] = threading.RLock()
+            return lock
+
+    def stamp_claim(self, n, lane, assignee=True):
+        """Write the claim metadata of a dispatched issue: assignee + project Lane field.
+
+        A failed write never blocks the dispatch: it is logged and retried once on the
+        next tick (see replay_meta_debt).  Nothing here raises — the lane state of a
+        dispatched card has to be saved even when the metadata cannot be written.
+
+        The per-issue lock keeps a new dispatch and the retry of an older one apart:
+        the lane that claims the card last is the lane that owns the Lane field.
+        """
+        with self._meta_lock(n):
+            try:
+                res = self.meta.claim(n, lane, assignee=assignee)
+            except Exception as e:
+                self._log_meta(f"claim metadata #{n}: {e!r}")
+                res = {"ok": False, "errors": [repr(e)]}
+            errors = res.get("errors") or []
+            if errors:
+                for err in errors:
+                    self._log_meta(f"claim metadata #{n}: {err}")
+                try:
+                    self.record_meta_debt(n, lane, assignee, errors)
+                except Exception as e:
+                    self._log_meta(f"claim metadata #{n}: debt not recorded: {e!r}")
+                return False
+            try:
+                self.clear_meta_debt(n)
+            except Exception as e:
+                self._log_meta(f"claim metadata #{n}: debt not cleared: {e!r}")
+            return True
+
+    def load_meta_debt(self):
+        """The issues whose claim metadata still has to be written (its own file, not the lane state)."""
+        return load_json(self.path("meta-debt.json"), {}) or {}
+
+    def save_meta_debt(self, debt):
+        """Write the debt file.  A broken file is logged, never raised: the dispatch goes on."""
+        if self.dry_run:
+            return
+        try:
+            write_json(self.path("meta-debt.json"), debt)
+        except Exception as e:
+            self._log_meta(f"claim metadata: debt file not written: {e!r}")
+
+    def record_meta_debt(self, n, lane, assignee, errors):
+        with self._meta_lock(n):
+            with self.state_lock:
+                debt = self.load_meta_debt()
+                entry = debt.get(str(n)) or {"attempts": 0}
+                entry.update({"lane": lane, "assignee": bool(assignee),
+                              "errors": [str(e)[:200] for e in (errors or [])[:3]],
+                              "at": time.strftime("%F %T")})
+                debt[str(n)] = entry
+                self.save_meta_debt(debt)
+
+    def clear_meta_debt(self, n):
+        with self._meta_lock(n):
+            with self.state_lock:
+                debt = self.load_meta_debt()
+                if str(n) not in debt:
+                    return
+                debt.pop(str(n), None)
+                self.save_meta_debt(debt)
+
+    def replay_meta_debt(self):
+        """Retry the claim metadata of the issues whose write failed — once, then give up.
+
+        A broken debt file must not break the tick: the failure is logged instead.
+        """
+        try:
+            self._replay_meta_debt()
+        except Exception as e:
+            self._log_meta(f"claim metadata: replay failed: {e!r}")
+
+    def _replay_meta_debt(self):
+        # The debt file is written atomically (tmp file + rename), so the snapshot needs
+        # no lock: a read sees either the old or the new file, never a half written one.
+        snapshot = copy.deepcopy(self.load_meta_debt())
+        for n in snapshot:
+            with self._meta_lock(n):
+                # The card may have been claimed again since the snapshot: the newest
+                # claim owns the Lane field, so the debt is read again under the lock.
+                current = self.load_meta_debt().get(str(n))
+                if current is None:
+                    continue                    # a newer dispatch already wrote the metadata
+                entry = dict(current)
+                if int(entry.get("attempts") or 0) >= 1:      # already retried once: drop it
+                    self.clear_meta_debt(n)
+                    self._log_meta(f"claim metadata #{n}: giving up after one retry (lane {entry.get('lane')})")
+                    continue
+                try:
+                    res = self.meta.claim(int(n), entry.get("lane") or "", assignee=entry.get("assignee", True))
+                except Exception as e:
+                    res = {"ok": False, "errors": [repr(e)]}
+                errors = res.get("errors") or []
+                if not errors:
+                    self.clear_meta_debt(n)
+                    self._log_meta(f"claim metadata #{n}: retry ok (lane {entry.get('lane')})")
+                    continue
+                with self.state_lock:
+                    debt = self.load_meta_debt()
+                    current = debt.get(n)
+                    if current is not None:
+                        current["attempts"] = 1
+                        current["errors"] = [str(e)[:200] for e in errors[:3]]
+                        self.save_meta_debt(debt)
+                self._log_meta(f"claim metadata #{n}: retry failed ({'; '.join(errors)[:200]})")
 
     def now_hm(self):
         return time.strftime("%H:%M")
@@ -2279,6 +2423,9 @@ class Dispatcher:
                 continue
             idle.remove(L)
             inflight += 1
+            # The reviewing lane takes over the card: the project's Lane field follows it (Refs #1761).
+            if p.get("issue"):
+                self.stamp_claim(p["issue"], L, assignee=False)
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
@@ -2453,6 +2600,8 @@ class Dispatcher:
             q.remove(pick)
             hot = self.hot_of(pick["body"])
             self.hot_lock.acquire(hot)
+            # The card is claimed: the assignee and the project's Lane field follow the lane (Refs #1761).
+            self.stamp_claim(pick["n"], L)
             if self.dry_run:
                 continue
             state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
@@ -2506,6 +2655,7 @@ class Dispatcher:
             pass
         state.setdefault("_done", [])
         self.replay_label_debt(state)
+        self.replay_meta_debt()
         cm = os.path.expanduser(self.cfg["ssh"]["control_dir"])
         for name in os.listdir(cm):
             try:
