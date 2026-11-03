@@ -1,9 +1,19 @@
 // Runs the real catalog checker against external example sources.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { TRANSLATED_LOCALES } from "@openbot/i18n";
 import { createOpenBotLogger } from "@openbot/logging";
 
 const logger = createOpenBotLogger("i18n-check-e2e");
@@ -17,8 +27,16 @@ let error: string | null = null;
 
 function check(name: string, roots: string[]) {
   const args = roots.flatMap((path) => ["--example-root", path]);
-  const result = spawnSync(process.execPath, [checker, ...args], {
-    cwd: root,
+  return run(name, [checker, ...args], root);
+}
+
+function run(name: string, args: string[], cwd: string) {
+  const result = spawnSync(process.execPath, args, {
+    cwd,
+    env: {
+      ...process.env,
+      PATH: `${dirname(process.execPath)}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+    },
     encoding: "utf8",
     timeout: 120_000,
     maxBuffer: 8 * 1024 * 1024,
@@ -29,11 +47,50 @@ function check(name: string, roots: string[]) {
   return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
 }
 
+function checkDefaultExamples() {
+  const workspace = join(temporary, "default-workspace", "openbot");
+  const sibling = resolve(workspace, "..", "examples");
+  for (const directory of ["src", "packages", "apps/mobile/src", "apps/auth-api/src", "scripts"]) {
+    mkdirSync(join(workspace, directory), { recursive: true });
+  }
+  symlinkSync(join(root, "node_modules"), join(workspace, "node_modules"), "dir");
+  writeFileSync(join(workspace, "scripts", "i18n-check.ts"), readFileSync(checker));
+  writeFileSync(
+    join(workspace, "package.json"),
+    JSON.stringify({ scripts: { "i18n:check": "bun scripts/i18n-check.ts" } }),
+  );
+  const key = "fixture.onlySiblingExample";
+  for (const locale of TRANSLATED_LOCALES) {
+    const directory = join(workspace, "packages", "i18n", "src", "messages", locale);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "fixture.ts"), `export const messages = {\n  "${key}": "Fixture text",\n};\n`);
+  }
+  mkdirSync(sibling, { recursive: true });
+  writeFileSync(join(sibling, "app.js"), `const label = "${key}";\n`);
+  assert.equal(existsSync(join(workspace, "examples")), false);
+  const found = run("default-package-command-scans-sibling-example", ["run", "i18n:check"], workspace);
+  assert.equal(found.status, 0, found.output);
+  checks.push("The default package command finds a key used only by a sibling example.");
+
+  writeFileSync(join(sibling, "app.js"), "const label = 'No catalog reference';\n");
+  const unused = run("default-package-command-rejects-unused-key", ["run", "i18n:check"], workspace);
+  assert.notEqual(unused.status, 0, unused.output);
+  assert.ok(unused.output.includes(`${key} is not used`), unused.output);
+  checks.push("The default package command still rejects unused catalog keys.");
+
+  renameSync(sibling, `${sibling}-not-scanned`);
+  writeFileSync(join(workspace, "src", "fixture.ts"), `const label = "${key}";\n`);
+  const absent = run("default-package-command-without-sibling-root", ["run", "i18n:check"], workspace);
+  assert.equal(absent.status, 0, absent.output);
+  checks.push("A standalone workspace with no sibling examples passes the default package command.");
+}
+
 try {
   const args = process.argv.slice(2);
   assert.equal(args.length, 2, "Use --example-root PATH to name the moved example.");
   assert.equal(args[0], "--example-root");
   assert.ok(args[1]);
+  checkDefaultExamples();
   const source = resolve(root, args[1]);
   const fixture = join(temporary, "external-example");
   mkdirSync(fixture);

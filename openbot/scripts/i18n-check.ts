@@ -19,7 +19,8 @@ import { createOpenBotLogger } from "@openbot/logging";
 // are not in the English order. `--fix` puts those keys in the English order; it moves each
 // key with the comments and blank lines above it and does not change the text. `--json` writes the
 // report to .openbot-build/i18n-report.json.
-// Repeat `--example-root PATH` to scan examples outside this workspace. Paths are relative to ROOT.
+// Without `--example-root`, also scan an optional sibling examples directory.
+// Repeat `--example-root PATH` to use explicit external roots instead. Paths are relative to ROOT.
 
 const ROOT = resolve(import.meta.dirname, "..");
 const MESSAGES = resolve(ROOT, "packages/i18n/src/messages");
@@ -283,26 +284,30 @@ for (const [name, messages] of english) {
   }
 }
 
-const legacyExamples = resolve(ROOT, "examples");
-let legacyExampleFiles: string[] = [];
-try {
-  legacyExampleFiles = files(legacyExamples, EXAMPLE_EXTENSIONS);
-} catch (error) {
-  // Only the legacy example root is optional. Required roots and explicit paths stay strict.
-  if (
-    !(error instanceof Error) ||
-    !("code" in error) ||
-    error.code !== "ENOENT" ||
-    !("path" in error) ||
-    error.path !== legacyExamples
-  ) {
+function optionalExampleFiles(directory: string): string[] {
+  try {
+    return files(directory, EXAMPLE_EXTENSIONS);
+  } catch (error) {
+    // Only an absent default root is optional. Required roots and explicit paths stay strict.
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT" &&
+      "path" in error &&
+      error.path === directory
+    ) {
+      return [];
+    }
     throw error;
   }
 }
 
+const defaultExampleRoots = [resolve(ROOT, "examples")];
+if (exampleRoots.length === 0) defaultExampleRoots.push(resolve(ROOT, "..", "examples"));
+
 const code = CODE_ROOTS.flatMap((root) => files(resolve(ROOT, root), CODE_EXTENSIONS))
   .concat(
-    legacyExampleFiles,
+    defaultExampleRoots.flatMap(optionalExampleFiles),
     exampleRoots.flatMap((root) => files(root, EXAMPLE_EXTENSIONS)),
   )
   .filter((path) => !path.startsWith(MESSAGES) && !path.endsWith(".bundle.js"))
