@@ -1795,6 +1795,21 @@ def codex_config_writable_roots():
     return [double or single for double, single in re.findall(r'"([^"]*)"|\'([^\']*)\'', arr.group(1))]
 
 
+def codex_writable_roots(wd, policy=None):
+    """Writable roots of a Codex sandbox: the configured ones plus the worktree's git metadata roots.
+
+    The roots configured in ``~/.codex/config.toml`` are kept so a host that pinned extra
+    directories does not lose them, and the git metadata roots are added because a Codex sandbox
+    mounts a worktree's git metadata read-only: without them a lane cannot write its own index and
+    every commit inside the sandbox fails with "Read-only file system" (Refs #1832).
+    """
+    roots = []
+    for root in codex_config_writable_roots() + codex_gitdir_writable_roots(wd, policy):
+        if root and root not in roots:
+            roots.append(root)
+    return roots
+
+
 def codex_exec_supports_add_dir(binary, resume=False):
     """Whether this codex build takes ``--add-dir`` (appends writable roots instead of replacing them)."""
     if not binary:
@@ -1825,6 +1840,22 @@ def codex_writable_roots_flags(wd, policy=None, binary=None, resume=False):
     configured = codex_config_writable_roots()
     merged = configured + [root for root in roots if root not in configured]
     return ["-c", "sandbox_workspace_write.writable_roots=" + json.dumps(merged)]
+
+
+def codex_app_server_command(binary, cwd, policy=None):
+    """``codex app-server`` command for a lane worktree.
+
+    The sandbox writable roots are passed as a config override: a Codex sandbox mounts a
+    worktree's git metadata read-only, so a lane that commits inside the sandbox fails with
+    "Read-only file system" unless its own git admin dir is writable (Refs #1832). The per-turn
+    thread/start config recomputes the roots after a worktree rebuild; this launch-time override
+    covers builds whose thread/start ignores the sandbox config.
+    """
+    cmd = [binary, *codex_executor_flags(), "app-server"]
+    roots = codex_writable_roots(cwd, policy)
+    if roots:
+        cmd += ["-c", "sandbox_workspace_write.writable_roots=" + json.dumps(roots)]
+    return cmd
 
 
 def codex_resolved_binary(policy, lane=None):
@@ -8437,6 +8468,67 @@ def lane_worktree_matches(repo, wt):
     return os.path.realpath(wt_common) == os.path.realpath(repo_common)
 
 
+def lane_git_common_dir(path):
+    """Absolute common git dir of a checkout or worktree."""
+    rc, out, _ = lane_git(["rev-parse", "--git-common-dir"], path)
+    if rc:
+        return None
+    out = out.strip()
+    if not os.path.isabs(out):
+        out = os.path.join(path, out)
+    return os.path.realpath(out)
+
+
+def lane_gitdir_admin_name(lane_name):
+    """Git admin dir name of a lane worktree.
+
+    Every lane used a worktree directory named ``wt``, so a host with several lanes got the
+    numbered admin dirs ``.git/worktrees/wt``, ``wt1``, ... A sandbox root pinned to one of those
+    names covered a single lane only (Refs #1832). The lane id makes the name unique per lane
+    and keeps it stable when the worktree is rebuilt.
+    """
+    return "wt-{}".format(re.sub(r"[^A-Za-z0-9_.-]", "_", str(lane_name)))
+
+
+def lane_align_worktree_admin_dir(repo, wt, lane_name):
+    """Move the worktree's git admin dir to a lane-owned name and return its absolute path.
+
+    Only the admin dir name changes; the worktree directory stays where it is. Git keeps the
+    link in two places (``.git/worktrees/<name>/gitdir`` and the worktree's ``.git`` file), so the
+    rename is followed by a ``git worktree repair`` that re-links both.
+    """
+    rc, gitdir, _ = lane_git(["rev-parse", "--absolute-git-dir"], wt)
+    if rc:
+        return None
+    gitdir = os.path.realpath(gitdir.strip())
+    common = lane_git_common_dir(repo)
+    if not common:
+        return gitdir
+    if gitdir == common:
+        # The main checkout has no admin dir of its own; only linked worktrees have one.
+        return gitdir
+    target = os.path.join(common, "worktrees", lane_gitdir_admin_name(lane_name))
+    if gitdir == os.path.realpath(target):
+        return target
+    if os.path.exists(target):
+        # The lane-owned name is taken by a stale admin dir: prune it, then fall back to the
+        # current name when it is still in use.
+        lane_git(["worktree", "prune"], repo, timeout=300)
+        if os.path.exists(target):
+            return gitdir
+    pointer = os.path.join(wt, ".git")
+    if not os.path.isfile(pointer):
+        return gitdir
+    try:
+        os.rename(gitdir, target)
+    except OSError:
+        return gitdir
+    with open(pointer, "w", encoding="utf-8") as handle:
+        handle.write("gitdir: {}\n".format(target))
+    lane_git(["worktree", "repair", wt], repo, timeout=300)
+    return target
+
+
 def lane_rebuild_worktree(repo, wt, base):
     if os.path.islink(wt) or (os.path.lexists(wt) and not os.path.isdir(wt)):
         os.unlink(wt)
@@ -8501,9 +8593,12 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
                     if "/" + rel not in have:
                         f.write("/" + rel + "\n")
     configure_executor_environment(wt)
+    # The lane owns its git admin dir, so a second lane on the same host never shares (or
+    # inherits the numbered suffix of) another lane's ``.git/worktrees/<name>`` (Refs #1832).
+    admin_dir = lane_align_worktree_admin_dir(repo, wt, lane["name"])
     return {"mode": "worktree", "path": wt, "root": wt, "repo": repo, "branch": f"openswarm/{rid}",
             "base": base, "base_dirty": False, "linked": linked, "lane": lane["name"],
-            "workspace_note": workspace_note(repo)}
+            "gitdir": admin_dir, "workspace_note": workspace_note(repo)}
 
 
 class LaneChild:
@@ -8522,7 +8617,7 @@ class LaneChild:
             block = codex_min_version_block(load_policy(), lane, binary=binary)
             if block:
                 raise block
-            cmd = [binary, *codex_executor_flags(), "app-server"]
+            cmd = codex_app_server_command(binary, cwd, policy)
         elif backend == "pi":
             binary = envvar("PI_RPC_BIN") or lane.get("binary") or pi_bin()
             if not binary:
@@ -9091,7 +9186,7 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
         policy = load_policy()
         params = {"cwd": worktree, "model": lane["model"], "approvalPolicy": "never",
                   "sandbox": policy.get("codex", {}).get("sandbox", "workspace-write"), "ephemeral": True}
-        roots = codex_gitdir_writable_roots(worktree, policy)
+        roots = codex_writable_roots(worktree, policy)
         if roots:
             params["config"] = {"sandbox_workspace_write.writable_roots": roots}
             lane_record_event(event_file, {"type": "codex_writable_roots", "roots": roots})
@@ -10232,6 +10327,7 @@ def cmd_lane_serve(lane, policy):
             rc, _, err = lane_git(["worktree", "add", "--detach", "-q", wt, base], top, timeout=300)
             if rc:
                 raise RuntimeError(f"lane worktree creation failed: {err[:250]}")
+        lane_align_worktree_admin_dir(os.path.realpath(top), wt, name)
         child = lane_child(lane, wt, policy)
         lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
                          turn_state=None, concurrency_keys=[])
