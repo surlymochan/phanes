@@ -15,9 +15,18 @@ from unittest import mock
 
 
 AUTODISPATCH = pathlib.Path(__file__).parents[2] / "tools" / "lane-autodispatch" / "autodispatch.py"
+READY_TARGET = pathlib.Path(__file__).parents[2] / "tools" / "check-ad-ready-target.py"
 spec = importlib.util.spec_from_file_location("autodispatch", AUTODISPATCH)
 autodispatch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(autodispatch)
+
+
+def load_ready_target_contract():
+    """Load the shared card-shape contract of tools/check-ad-ready-target.py."""
+    spec = importlib.util.spec_from_file_location("ad_ready_target_contract", READY_TARGET)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 CLI = pathlib.Path(__file__).parents[1] / "bin" / "openswarm"
 
@@ -601,6 +610,294 @@ class PauseLaneServeAssignTests(unittest.TestCase):
     def test_the_lane_serve_resolves_its_host_from_the_dispatch_configuration(self):
         self.assertEqual(cli.lane_host_identity(self.lane), "ib1")
         self.assertEqual(cli.lane_host_identity({"name": "L1", "host": "explicit"}), "explicit")
+
+
+class ReplenishTriggerTests(unittest.TestCase):
+    """Refs #1662: a pool that runs dry is refilled, and every skipped card leaves a trace.
+
+    The 2026-11-02 19:00 incident: the pool fell from 14 to 5, ``autodispatch.log`` got
+    no mint record, and the 19:45 watchdog round found no usable card among the 21 cards
+    of the local backlog.  The refill used to give up on the whole batch as soon as one
+    card was unusable, it refilled only up to the low-water mark, and a failed queue read
+    left no trace at all.
+    """
+
+    THICK = ("# Local card\nlabels: p1\nImplement the bounded refill path.\n"
+             "验收：python3 tools/check-ready-refill-contract.py\n")
+    THIN = "# Thin card\nlabels: p1\n"
+
+    def patch(self, name, value):
+        """Replace a module attribute for the duration of one test."""
+        self.addCleanup(setattr, autodispatch, name, getattr(autodispatch, name))
+        setattr(autodispatch, name, value)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = pathlib.Path(self.temp.name)
+        self.patch("D", str(self.dir))
+        self.patch("BRAIN_LOG", str(self.dir / "brain.log"))
+        self.patch("LAST_MINT_LOG", 0.0)
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.dir / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        autodispatch.MINT_EVIDENCE.clear()
+        self.filed = []
+        self.patch("file_issue", lambda text, extra=(): self.filed.append(text.splitlines()[0]) or "#501")
+        self.patch("gh", self.fake_gh)
+        self.patch("sh", lambda *args, **kwargs: (0, "", ""))
+
+    def fake_gh(self, args, timeout=60):
+        """A planner issue is already open, so no second planner card may be minted."""
+        if args[:2] == ["issue", "list"] and "planner" in args:
+            return 0, json.dumps([{"number": 42}]), ""
+        return 0, json.dumps([]), ""
+
+    def log_text(self):
+        return (self.dir / "autodispatch.log").read_text(encoding="utf-8")
+
+    def backlog(self, **cards):
+        backlog = self.dir / "backlog"
+        backlog.mkdir(exist_ok=True)
+        for name, text in cards.items():
+            (backlog / f"{name}.md").write_text(text, encoding="utf-8")
+        return backlog
+
+    def test_the_pool_is_topped_up_to_the_target_below_the_low_water_mark(self):
+        self.assertEqual(autodispatch.refill_need(5), autodispatch.TARGET - 5)
+        self.assertEqual(autodispatch.refill_need(autodispatch.LOW), 0)
+        self.assertEqual(autodispatch.refill_need(autodispatch.LOW, starved=3), 3)
+        self.assertEqual(autodispatch.refill_need(5, starved=25), 25)
+        self.assertEqual(autodispatch.refill_need(autodispatch.TARGET + 5), 0)
+
+    def test_an_unusable_card_does_not_block_the_rest_of_the_batch(self):
+        backlog = self.backlog(a_thin=self.THIN, b_good=self.THICK)
+
+        filed = autodispatch.replenish(5, {})
+
+        self.assertEqual(filed, ["#501"])
+        self.assertEqual(self.filed, ["# Local card"])
+        self.assertTrue((backlog / "rejected" / "a_thin.md").is_file())
+        self.assertTrue((backlog / "filed" / "b_good.md").is_file())
+        self.assertIn("backlog a_thin.md", self.log_text())
+        self.assertIn("thin card", self.log_text())
+
+    def test_a_failing_card_does_not_block_the_rest_of_the_batch(self):
+        broken = self.THICK.replace("# Local card", "# Broken card")
+        self.backlog(a_broken=broken, b_good=self.THICK)
+
+        def file_issue(text, extra=()):
+            if text.startswith("# Broken card"):
+                raise RuntimeError("gh: could not add label: 'nope' not found")
+            return "#502"
+
+        self.patch("file_issue", file_issue)
+
+        filed = autodispatch.replenish(5, {})
+
+        self.assertEqual(filed, ["#502"])
+        self.assertIn("backlog a_broken.md", self.log_text())
+
+    def test_the_mint_pause_marker_skips_the_mint_and_says_why(self):
+        self.backlog(a_good=self.THICK)
+        (self.dir / "PAUSE-MINT").write_text("", encoding="utf-8")
+
+        self.assertEqual(autodispatch.replenish(5, {}), [])
+        self.assertIn("replenish skipped", self.log_text())
+        self.assertIn("PAUSE-MINT", self.log_text())
+
+    def test_an_open_planner_issue_is_logged_and_blocks_a_second_planner_card(self):
+        self.assertEqual(autodispatch.replenish(5, {}), [])
+        self.assertIn("planner issue already open (#42)", self.log_text())
+        self.assertEqual(self.filed, [])
+
+    def test_the_tick_refills_the_pool_when_it_drops_below_the_threshold(self):
+        needs = []
+        self.patch("queue", lambda: [])
+        self.patch("replenish", lambda k, state: needs.append(k) or [])
+
+        autodispatch.tick({}, {}, 0)
+
+        self.assertEqual(needs, [autodispatch.TARGET])
+        self.assertIn("WARNING queue low", self.log_text())
+        self.assertIn(f"need {autodispatch.TARGET} card(s)", self.log_text())
+
+    def test_the_card_rules_agree_with_the_shared_thin_card_contract(self):
+        contract = load_ready_target_contract()
+        samples = [
+            "",
+            "# Thin card\nlabels: p1\n",
+            "No title\nlabels: p1\nImplement the path.\n验收：python3 check.py\n",
+            "# Title\nNo labels line\nImplement the path.\n验收：python3 check.py\n",
+            "# Title\nlabels: p1\nImplement the path.\nNo acceptance.\n",
+            "# Title\nlabels: p1\n验收：python3 check.py\n",
+            "# Title\nlabels: p1\nImplement the bounded refill path.\n验收：python3 check.py\n",
+        ]
+        for text in samples:
+            self.assertEqual(autodispatch.card_defect(text) is None, not contract.is_thin_card(text), text)
+
+
+class ReplenishUnreadableQueueTests(unittest.TestCase):
+    """Refs #1662: an unreadable queue must not mint a new batch on every tick.
+
+    The pool level is unknown while the queue read fails.  The AD mints against the last
+    known level (plus the cards it minted since) and bounds the number of consecutive
+    retries; past the bound it waits for an authoritative read.
+    """
+
+    def patch(self, name, value):
+        self.addCleanup(setattr, autodispatch, name, getattr(autodispatch, name))
+        setattr(autodispatch, name, value)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = pathlib.Path(self.temp.name)
+        self.patch("D", str(self.dir))
+        self.patch("BRAIN_LOG", str(self.dir / "brain.log"))
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.dir / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.needs = []
+        self.patch("replenish", lambda k, state: self.needs.append(k) or ["#501"])
+
+        def broken_queue():
+            raise RuntimeError("gh: API rate limit exceeded")
+
+        self.patch("queue", broken_queue)
+
+    def log_text(self):
+        return (self.dir / "autodispatch.log").read_text(encoding="utf-8")
+
+    def test_a_persistent_queue_failure_mints_within_a_bound_and_then_waits(self):
+        state = {"_ready": 5}
+
+        for _ in range(autodispatch.QUEUE_UNREADABLE_REFILL_MAX + 2):
+            autodispatch.tick({}, state, 0)
+
+        # the retries are bounded, and every minted card raises the estimated pool level
+        self.assertEqual(len(self.needs), autodispatch.QUEUE_UNREADABLE_REFILL_MAX)
+        self.assertEqual(self.needs[0], autodispatch.TARGET - 5)
+        self.assertEqual(self.needs, sorted(self.needs, reverse=True))
+        self.assertIn("bounded retries exhausted", self.log_text())
+        self.assertEqual(state["_queue_failures"], autodispatch.QUEUE_UNREADABLE_REFILL_MAX + 2)
+
+    def test_the_minted_cards_are_counted_into_the_pool_level(self):
+        state = {"_ready": 5}
+
+        autodispatch.tick({}, state, 0)
+
+        self.assertEqual(state["_minted"], 1)
+        self.assertEqual(autodispatch.pool_level(state), 6)
+
+    def test_an_unknown_pool_level_mints_nothing(self):
+        state = {}
+
+        autodispatch.tick({}, state, 0)
+
+        self.assertEqual(self.needs, [])
+        self.assertIn("pool level unknown", self.log_text())
+
+    def test_a_readable_queue_resets_the_failure_counter_and_the_level(self):
+        state = {"_ready": 5}
+        autodispatch.tick({}, state, 0)
+
+        self.patch("queue", lambda: [])
+        autodispatch.tick({}, state, 0)
+
+        self.assertEqual(state["_queue_failures"], 0)
+        self.assertEqual(state["_ready"], 0)
+        self.assertIn("queue error", self.log_text())
+
+
+class QuarantineKeepsBothCardsTests(unittest.TestCase):
+    """Refs #1662: a quarantined card never overwrites an earlier card of the same name."""
+
+    def patch(self, name, value):
+        self.addCleanup(setattr, autodispatch, name, getattr(autodispatch, name))
+        setattr(autodispatch, name, value)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = pathlib.Path(self.temp.name)
+        self.patch("D", str(self.dir))
+        self.patch("BRAIN_LOG", str(self.dir / "brain.log"))
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.dir / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.patch("file_issue", lambda text, extra=(): "#501")
+        self.patch("gh", lambda args, timeout=60: (0, json.dumps([{"number": 42}]), ""))
+        self.patch("sh", lambda *args, **kwargs: (0, "", ""))
+
+    def test_move_without_overwrite_preserves_both_card_contents(self):
+        filed = self.dir / "filed"
+        filed.mkdir()
+        original = filed / "card.md"
+        original.write_text("earlier card")
+        source = self.dir / "incoming.md"
+        source.write_text("new card")
+
+        moved = pathlib.Path(autodispatch.move_without_overwrite(str(source), str(original)))
+
+        self.assertEqual(original.read_text(), "earlier card")
+        self.assertEqual(moved.read_text(), "new card")
+        self.assertNotEqual(moved, original)
+
+    def test_the_quarantine_keeps_an_earlier_card_of_the_same_name(self):
+        backlog = self.dir / "backlog"
+        backlog.mkdir()
+        (backlog / "a_thin.md").write_text("# Thin card\nlabels: p1\n")
+        rejected = backlog / "rejected"
+        rejected.mkdir()
+        (rejected / "a_thin.md").write_text("earlier card")
+
+        filed = autodispatch.replenish(5, {})
+
+        self.assertEqual(filed, [])
+        self.assertEqual((rejected / "a_thin.md").read_text(), "earlier card")
+        moved = rejected / "a_thin.1.md"
+        self.assertTrue(moved.is_file(), sorted(path.name for path in rejected.iterdir()))
+        self.assertIn("Thin card", moved.read_text())
+
+
+class PlannerGateTests(unittest.TestCase):
+    """Refs #1662: an unreadable planner query keeps the single-planner gate closed."""
+
+    def patch(self, name, value):
+        self.addCleanup(setattr, autodispatch, name, getattr(autodispatch, name))
+        setattr(autodispatch, name, value)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = pathlib.Path(self.temp.name)
+        self.patch("D", str(self.dir))
+        self.patch("BRAIN_LOG", str(self.dir / "brain.log"))
+        self.patch("LAST_MINT_LOG", 0.0)
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.dir / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.patch("sh", lambda *args, **kwargs: (0, "", ""))
+
+    def log_text(self):
+        return (self.dir / "autodispatch.log").read_text(encoding="utf-8")
+
+    def test_an_unreadable_planner_query_skips_the_creation(self):
+        commands = []
+
+        def fake_gh(args, timeout=60):
+            commands.append(args)
+            if args[:2] == ["issue", "list"] and "planner" in args:
+                return 0, "not-json", ""
+            return 0, json.dumps([]), ""
+
+        self.patch("gh", fake_gh)
+
+        self.assertEqual(autodispatch.replenish(1, {}), [])
+        self.assertEqual(len(commands), 1)
+        self.assertIn("planner query unreadable", self.log_text())
+        self.assertIn("skip planner creation", self.log_text())
 
 
 if __name__ == "__main__":
