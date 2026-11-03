@@ -66,6 +66,32 @@ FRESH_READ_BUDGET = int(os.environ.get("AD_FRESH_BUDGET", "60"))
 # Verify cards rejected for missing fields, per issue: the field set that was logged. An invalid card
 # must not repeat the same log line every tick, but a changed field set is logged again.
 VERIFY_REJECT_LOGGED = {}
+# Refs #1825: a lane that ends the same bad way three times in a row is paused automatically
+# (`PAUSE-<lane>`). Streak state: <state dir>/lane-streak.json. Nothing releases the pause:
+# the operator clears it by hand (rm PAUSE-<lane>) after fixing the lane.
+LANE_STREAK_FILE = "lane-streak.json"
+LANE_STREAK_LIMIT = int(os.environ.get("AD_LANE_STREAK_LIMIT", "3"))
+LANE_STREAK_RUNS_KEPT = 10
+# Terminations that are not the lane's fault: they clear the streak instead of counting.
+LANE_STREAK_RESET_CLASSES = {"budget_exceeded", "budget_exceeded_daily", "thin_gate", "thin-gate",
+                              "thin_card", "thin"}
+LANE_STREAK_RESET_STATUSES = {"budget_exceeded", "budget_exceeded_daily", "thin-gate", "thin_gate", "thin"}
+# Terminations that count as a lane failure (the breaker counts them).
+LANE_STREAK_FAILURE_CLASSES = {"exec_error"}
+LANE_STREAK_FAILURE_STATUSES = {"failed", "error", "none"}
+# Refs #1825: a lane whose runs keep ending `budget_exceeded` without a single event is stuck:
+# the run started (no queue wait) and the resident pi RPC waits for a sandbox that never makes
+# progress. The verdict is taken from the ledger of the lane host and from the real event counts
+# of the runs, never from the `running` state of the health snapshot. State: lane-stuck.json,
+# audit trail: lane-stuck-audit.jsonl.
+LANE_STUCK_FILE = "lane-stuck.json"
+LANE_STUCK_AUDIT_FILE = "lane-stuck-audit.jsonl"
+LANE_STUCK_LIMIT = int(os.environ.get("AD_LANE_STUCK_LIMIT", "3"))
+LANE_STUCK_RUNS_KEPT = 10
+LANE_STUCK_SAMPLE_S = float(os.environ.get("AD_LANE_STUCK_SAMPLE_S", "3"))
+# The symptom of a stuck lane: a run that ended because the budget ran out.
+LANE_STUCK_STATUSES = {"budget_exceeded", "budget_exceeded_daily"}
+LANE_STUCK_CLASSES = {"budget_exceeded", "budget_exceeded_daily"}
 
 # --- verify-card queue share (Refs #1794) ------------------------------------------------
 # The verification reservation is enabled explicitly for gradual rollout: with the switch off the
@@ -781,6 +807,546 @@ def handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures):
     log(f"{lane} #{n} harvest fetch failed ({classification}) {failures} consecutive failure(s) → labelled lane-failed")
     return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
+# --- lane failure circuit breaker (Refs #1825) ---------------------------------
+# The RSI report of 2026-11-03 lists lanes that lost five or six runs in a row
+# (`exec_error`: M19, CX11) and were only noticed by a human. The dispatcher counts the
+# consecutive bad endings of a lane and pauses the lane when the streak is exhausted.
+# Nothing releases the pause: recovery is manual (the operator removes `PAUSE-<lane>`).
+
+def lane_streak_path():
+    """Path of the per-lane failure streak state (Refs #1825)."""
+    return os.path.join(D, LANE_STREAK_FILE)
+
+def load_lane_streaks():
+    """Read the per-lane streaks; a missing or broken file counts as "no streak at all".
+
+    A corrupt state file must neither crash the dispatcher nor look like a streak of its
+    own (that would pause a healthy lane): it is treated as empty state."""
+    try:
+        with open(lane_streak_path()) as stream:
+            data = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict): return {}
+    return {lane: entry for lane, entry in data.items()
+            if isinstance(lane, str) and isinstance(entry, dict)
+            and type(entry.get("n")) is int and entry["n"] > 0
+            and isinstance(entry.get("runs"), list)
+            and len(entry["runs"]) == min(entry["n"], LANE_STREAK_RUNS_KEPT)
+            and all(isinstance(run, str) and run for run in entry["runs"])
+            and isinstance(entry.get("at"), str) and entry["at"]}
+
+def save_lane_streaks(streaks):
+    """Persist the per-lane streaks (atomic replace)."""
+    os.makedirs(D, exist_ok=True)
+    tmp = f"{lane_streak_path()}.tmp"
+    with open(tmp, "w") as stream:
+        json.dump(streaks, stream, indent=1, ensure_ascii=False)
+    os.replace(tmp, lane_streak_path())
+
+def streak_count(entry):
+    """The streak length of one entry; a broken value counts as 0."""
+    try: return max(0, int(entry.get("n", 0) or 0))
+    except (AttributeError, TypeError, ValueError): return 0
+
+def run_has_commit(info):
+    """True when a finished run produced both a branch and a commit."""
+    return bool(info.get("branch")) and info["branch"] != "None" and bool(info.get("commit"))
+
+def lane_termination_kind(info):
+    """Classify how one finished run counts towards the lane circuit breaker (Refs #1825).
+
+    "reset"   — the lane is not at fault: the run produced a commit (stopped/finished with
+                a commit), the budget ran out (`budget_exceeded`) or the thin-card gate
+                rejected the card.
+    "failure" — `exec_error`, or a `failed`/unknown run that ended without a commit.
+    "ignore"  — anything else (e.g. `stopped` without a commit): the streak is left alone."""
+    status = str(info.get("status") or "").strip().lower()
+    error_class = str(info.get("error_class") or "").strip().lower()
+    if run_has_commit(info): return "reset"
+    if error_class in LANE_STREAK_RESET_CLASSES or status in LANE_STREAK_RESET_STATUSES: return "reset"
+    if error_class in LANE_STREAK_FAILURE_CLASSES: return "failure"
+    if status in LANE_STREAK_FAILURE_STATUSES or not status: return "failure"
+    return "ignore"
+
+def write_health_alert(lane, entry, alert="lane_streak"):
+    """Append one line to the health alert file (Refs #1825).
+
+    `entry` carries the fields of the event (`n` = streak length, `runs` = the run ids);
+    a field the event does not have is left out, so the alert of the stuck-lane cleanup
+    never claims a streak it never had."""
+    fields = [f"lane={lane}"]
+    if entry.get("n") is not None: fields.append(f"streak={entry.get('n')}")
+    runs = [str(run) for run in (entry.get("runs") or [])]
+    if runs: fields.append(f"runs={','.join(runs)}")
+    for key in ("pid", "terminated"):
+        if entry.get(key) is not None: fields.append(f"{key}={entry.get(key)}")
+    line = f"{time.strftime('%F %T')} level=hard alert={alert} " + " ".join(fields)
+    try:
+        with open(f"{D}/health.alert", "a") as stream: stream.write(line + "\n")
+    except OSError as e:
+        log(f"health.alert write failed: {e}", brain=False)
+
+def trip_lane_streak(lane, entry):
+    """Pause a lane that lost the same way LANE_STREAK_LIMIT times in a row (Refs #1825).
+
+    The pause body records the streak so an operator sees why the lane is held. An
+    existing `PAUSE-<lane>` (manual hold or health-loop pause) is never overwritten, and
+    nothing removes the pause: recovery is manual."""
+    pause = f"{D}/PAUSE-{lane}"
+    runs = " ".join(entry.get("runs") or [])
+    if os.path.exists(pause):
+        log(f"{lane} streak {entry.get('n')} → PAUSE-{lane} already present; kept as is", brain=False)
+        return False
+    body = f"auto:streak {entry.get('at')} {entry.get('n')}次 {runs}".rstrip()
+    os.makedirs(D, exist_ok=True)
+    with open(pause, "w") as stream: stream.write(body + "\n")
+    log(f"{lane} lost {entry.get('n')} runs in a row ({runs}) → PAUSE-{lane} written; clear it by hand to resume", brain=True)
+    write_health_alert(lane, entry)
+    return True
+
+def lane_streak_note(lane, run, info):
+    """Record one finished run of `lane` in the streak state (Refs #1825).
+
+    Returns the new streak length (0 when the streak was cleared). The breaker trips at
+    LANE_STREAK_LIMIT consecutive failures: the lane is paused and the pause stays until
+    an operator removes it."""
+    streaks = load_lane_streaks()
+    entry = streaks.get(lane) or {}
+    kind = lane_termination_kind(info)
+    if kind == "reset":
+        if entry:
+            streaks.pop(lane, None); save_lane_streaks(streaks)
+        return 0
+    if kind == "ignore":
+        return streak_count(entry)
+    runs = [r for r in (entry.get("runs") or []) if isinstance(r, str)]
+    runs = (runs + [str(run)])[-LANE_STREAK_RUNS_KEPT:]
+    entry = {"n": streak_count(entry) + 1, "runs": runs, "at": time.strftime("%F %T")}
+    streaks[lane] = entry
+    save_lane_streaks(streaks)
+    if entry["n"] >= LANE_STREAK_LIMIT: trip_lane_streak(lane, entry)
+    return entry["n"]
+
+# --- stuck lane detection (Refs #1825) ------------------------------------------
+# A lane that ends `budget_exceeded` again and again without a single event is not a slow
+# lane but a stuck one: the run was admitted (no queue wait) and the resident pi RPC waits
+# for a sandbox child that never makes progress. The verdict is taken from the ledger of the
+# lane host and from the real event counts of the runs -- never from the `running` state of
+# the health snapshot. The repair is narrow: only the resident pi RPC process tree of that
+# lane is terminated (the lanes of the other hosts keep their own processes), and the card
+# that failed is not dispatched again.
+
+LANE_STUCK_PROBE = r'''
+# lane-stuck-probe: the recent runs of one lane and the state of its resident pi RPC.
+import json, os, sys, time
+
+lane = sys.argv[1] if len(sys.argv) > 1 else ""
+limit = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+current = sys.argv[3] if len(sys.argv) > 3 else ""
+home = os.path.expanduser(os.environ.get("OPENSWARM_HOME") or "~/.claude/openswarm-executor-candidate")
+runs_dir = os.path.join(home, "runs")
+ledger = os.path.join(home, "ledger.jsonl")
+
+
+def read_json(path):
+    try:
+        with open(path) as stream:
+            return json.load(stream)
+    except Exception:
+        return None
+
+
+def event_count(run_id):
+    """The number of events of a run (0 when the run has no event file, None when unknown)."""
+    directory = os.path.join(runs_dir, run_id)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    total, seen = 0, False
+    for name in names:
+        if not (name.startswith("events") and name.endswith(".jsonl")):
+            continue
+        seen = True
+        try:
+            with open(os.path.join(directory, name), errors="replace") as stream:
+                total += sum(1 for line in stream if line.strip())
+        except OSError:
+            return None
+    return total if seen else 0
+
+
+def lane_rows():
+    """The ledger rows of the lane, oldest first."""
+    rows = []
+    try:
+        with open(ledger, errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and str(row.get("lane") or "") == lane:
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def proc_cmdline(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as stream:
+            raw = stream.read()
+    except OSError:
+        return ""
+    return " ".join(part.decode("utf-8", "replace") for part in raw.split(b"\0") if part)
+
+
+def proc_stat(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as stream:
+            data = stream.read()
+    except OSError:
+        return {}
+    fields = data[data.rfind(")") + 2:].split()
+    return {"state": fields[0], "ppid": int(fields[1])} if len(fields) > 1 else {}
+
+
+def proc_wchan(pid):
+    try:
+        with open("/proc/%d/wchan" % pid) as stream:
+            return stream.read().strip()
+    except OSError:
+        return ""
+
+
+def proc_io(pid):
+    counters = {}
+    try:
+        with open("/proc/%d/io" % pid) as stream:
+            for line in stream:
+                key, _, value = line.partition(":")
+                try:
+                    counters[key.strip()] = int(value.strip())
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return counters
+
+
+def all_pids():
+    pids = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return pids
+    for name in names:
+        if name.isdigit():
+            pids.append(int(name))
+    return pids
+
+
+def parents_map():
+    parents = {}
+    for pid in all_pids():
+        stat = proc_stat(pid)
+        if stat:
+            parents[pid] = stat.get("ppid")
+    return parents
+
+
+def descendants(pid, parents):
+    found, queue = [], [pid]
+    while queue:
+        current = queue.pop(0)
+        for child in sorted(p for p, parent in parents.items() if parent == current):
+            if child not in found:
+                found.append(child)
+                queue.append(child)
+    return found
+
+
+def snapshot(pids):
+    return {pid: {"io": proc_io(pid), "state": proc_stat(pid).get("state")} for pid in pids}
+
+
+def rpc_process():
+    """The resident pi RPC of the lane: the process that owns the lane session directory."""
+    marker = "/lanes/%s/" % lane
+    for pid in all_pids():
+        cmdline = proc_cmdline(pid)
+        if not cmdline or marker not in cmdline or "--session-dir" not in cmdline:
+            continue
+        return pid, cmdline
+    return None, ""
+
+
+rpc_pid, rpc_cmdline = rpc_process()
+rpc = None
+if rpc_pid:
+    tree = descendants(rpc_pid, parents_map())
+    first = snapshot(tree)
+    time.sleep(float(os.environ.get("AD_LANE_STUCK_SAMPLE_S") or "3"))
+    second = snapshot(tree)
+    children = []
+    for pid in tree:
+        before = (first.get(pid) or {}).get("io") or {}
+        after = (second.get(pid) or {}).get("io") or {}
+        moved = any(before.get(key) != after.get(key) for key in set(before) | set(after))
+        children.append({"pid": pid, "cmdline": proc_cmdline(pid),
+                         "state": (second.get(pid) or {}).get("state") or "", "progress": moved,
+                         "frozen": bool(before and after and not moved and
+                                        (first.get(pid) or {}).get("state") in ("T", "t") and
+                                        (second.get(pid) or {}).get("state") in ("T", "t"))})
+    rpc = {"pid": rpc_pid, "cmdline": rpc_cmdline, "state": proc_stat(rpc_pid).get("state"),
+           "wchan": proc_wchan(rpc_pid), "children": children}
+
+runs = []
+for row in lane_rows()[-limit:]:
+    run_id = str(row.get("run_id") or row.get("id") or "")
+    status = read_json(os.path.join(runs_dir, run_id, "status.json"))
+    runs.append({"run_id": run_id, "status": row.get("status"), "error_class": row.get("error_class"),
+                 "at": row.get("ts"), "events": event_count(run_id),
+                 "queue_reason": status.get("queue_reason") if isinstance(status, dict) else None,
+                 "queue_known": isinstance(status, dict) and "queue_reason" in status})
+if current and not any(row["run_id"] == current for row in runs):
+    status = read_json(os.path.join(runs_dir, current, "status.json"))
+    status = status if isinstance(status, dict) else {}
+    runs.append({"run_id": current, "status": status.get("status"), "error_class": status.get("error_class"),
+                 "at": status.get("updated"), "events": event_count(current),
+                 "queue_reason": status.get("queue_reason"), "queue_known": "queue_reason" in status})
+print(json.dumps({"lane": lane, "home": home, "runs": runs, "rpc": rpc}))
+'''
+
+LANE_STUCK_KILL = r'''
+# lane-stuck-kill: terminate the resident pi RPC process tree of one lane only.
+import json, os, signal, sys
+
+lane = sys.argv[1] if len(sys.argv) > 1 else ""
+pid = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+marker = "/lanes/%s/" % lane
+
+
+def proc_cmdline(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as stream:
+            raw = stream.read()
+    except OSError:
+        return ""
+    return " ".join(part.decode("utf-8", "replace") for part in raw.split(b"\0") if part)
+
+
+def proc_ppid(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as stream:
+            data = stream.read()
+    except OSError:
+        return None
+    fields = data[data.rfind(")") + 2:].split()
+    return int(fields[1]) if len(fields) > 1 else None
+
+
+cmdline = proc_cmdline(pid)
+if not cmdline or marker not in cmdline or "--session-dir" not in cmdline:
+    print(json.dumps({"terminated": [], "skipped": pid, "reason": "not the lane's pi RPC"}))
+    raise SystemExit(0)
+
+parents = {}
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    parent = proc_ppid(int(name))
+    if parent is not None:
+        parents[int(name)] = parent
+
+tree, queue = [], [pid]
+while queue:
+    current = queue.pop(0)
+    for child in sorted(p for p, parent in parents.items() if parent == current):
+        if child not in tree:
+            tree.append(child)
+            queue.append(child)
+
+terminated = []
+for target in reversed(tree):          # the sandbox children first, the lane's pi RPC last
+    try:
+        os.kill(target, signal.SIGTERM)
+        terminated.append(target)
+    except OSError:
+        pass
+try:
+    os.kill(pid, signal.SIGTERM)
+    terminated.append(pid)
+except OSError:
+    pass
+print(json.dumps({"terminated": terminated, "skipped": None, "reason": "terminated"}))
+'''
+
+def lane_stuck_path():
+    """Path of the stuck-lane state (Refs #1825)."""
+    return os.path.join(D, LANE_STUCK_FILE)
+
+def load_lane_stuck():
+    """The stuck-lane state; a missing or broken file counts as empty state."""
+    try:
+        with open(lane_stuck_path()) as stream:
+            data = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict): return {}
+    return {lane: entry for lane, entry in data.items()
+            if isinstance(lane, str) and isinstance(entry, dict)}
+
+def save_lane_stuck(state):
+    """Persist the stuck-lane state (atomic replace)."""
+    os.makedirs(D, exist_ok=True)
+    tmp = f"{lane_stuck_path()}.tmp"
+    with open(tmp, "w") as stream:
+        json.dump(state, stream, indent=1, ensure_ascii=False)
+    os.replace(tmp, lane_stuck_path())
+
+def audit_lane_stuck(lane, cfg, row):
+    """Append one audit row to the audit trail of the stuck-lane detector (Refs #1825).
+
+    The trail is the record an operator reads after the fact: which lane was judged
+    stuck, which runs the verdict was taken from and which processes were terminated."""
+    entry = {"at": time.strftime("%F %T"), "lane": lane, "host": (cfg or {}).get("host"),
+             "backend": (cfg or {}).get("backend"), **(row or {})}
+    try:
+        with open(f"{D}/{LANE_STUCK_AUDIT_FILE}", "a") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log(f"{lane} stuck audit write failed: {e}", brain=False)
+    return entry
+
+def lane_stuck_verdict(runs, limit=LANE_STUCK_LIMIT):
+    """Whether the last `limit` runs of a lane are all stuck.
+
+    A stuck run ended `budget_exceeded`, produced no event at all and was not waiting in
+    the queue (`queue_reason` empty): the run really started and still did nothing. A run
+    that only waited for the provider concurrency limit (`queue_reason` set) does not
+    count: its budget ran out while the run was queued, which is not a stuck lane."""
+    rows = [row for row in (runs or []) if isinstance(row, dict)]
+    if len(rows) < limit: return False
+    for row in rows[-limit:]:
+        status = str(row.get("status") or "").strip().lower()
+        error_class = str(row.get("error_class") or "").strip().lower()
+        if status not in LANE_STUCK_STATUSES and error_class not in LANE_STUCK_CLASSES: return False
+        events = row.get("events")
+        if isinstance(events, bool) or not isinstance(events, int) or events != 0: return False
+        if row.get("queue_known") is not True or str(row.get("queue_reason") or "").strip(): return False
+    return True
+
+def rpc_tree_stuck(rpc):
+    """Whether the resident pi RPC waits for a sandbox child that makes no progress.
+
+    The lane's pi RPC sits in `do_wait` (it waits for its sandbox child) and that child
+    (`bwrap`) does not move: no counter of `/proc/<pid>/io` changed between the two
+    samples of the probe."""
+    if not isinstance(rpc, dict): return False
+    if "do_wait" not in str(rpc.get("wchan") or ""): return False
+    children = [child for child in (rpc.get("children") or []) if isinstance(child, dict)]
+    sandbox = [child for child in children if "bwrap" in str(child.get("cmdline") or "")]
+    if not sandbox: return False
+    # Only kernel-stopped descendants provide positive evidence of no CPU or
+    # network activity; unreadable counters or runnable/sleeping tasks fail closed.
+    return all(child.get("frozen") is True for child in children)
+
+def probe_lane_stuck(lane, cfg, run=""):
+    """Ask the lane host for the recent runs of the lane and the state of its pi RPC."""
+    try:
+        rc, out, err = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", lane,
+                                    str(LANE_STUCK_LIMIT), str(run or "")), timeout=120, inp=LANE_STUCK_PROBE)
+    except subprocess.TimeoutExpired:
+        log(f"{lane} stuck probe timed out", brain=False); return None
+    except Exception as e:
+        log(f"{lane} stuck probe failed: {e!r}", brain=False); return None
+    if rc:
+        log(f"{lane} stuck probe failed: {(err or out).strip()[-160:]}", brain=False); return None
+    try:
+        probe = json.loads(out.strip().splitlines()[-1])
+    except (TypeError, ValueError, IndexError):
+        log(f"{lane} stuck probe returned no usable answer", brain=False); return None
+    return probe if isinstance(probe, dict) else None
+
+def kill_lane_rpc(lane, cfg, pid):
+    """Terminate the resident pi RPC process tree of one lane (and of that lane only)."""
+    try:
+        rc, out, err = sh(ssh_argv(ssh_opts(cfg["host"]), cfg["host"], "python3", "-", lane, str(pid)),
+                          timeout=60, inp=LANE_STUCK_KILL)
+    except Exception as e:
+        log(f"{lane} stuck cleanup failed: {e!r}", brain=False); return None
+    if rc:
+        log(f"{lane} stuck cleanup failed: {(err or out).strip()[-160:]}", brain=False); return None
+    try:
+        result = json.loads(out.strip().splitlines()[-1])
+    except (TypeError, ValueError, IndexError):
+        log(f"{lane} stuck cleanup returned no usable answer", brain=False); return None
+    return result if isinstance(result, dict) else None
+
+def lane_stuck_clear(lane, cfg, reason=""):
+    """Forget the stuck episode of the lane (it produced events again)."""
+    state = load_lane_stuck()
+    if lane not in state: return False
+    state.pop(lane, None); save_lane_stuck(state)
+    audit_lane_stuck(lane, cfg, {"action": "recovered", "reason": reason})
+    return True
+
+def lane_stuck_note(lane, cfg, st, info):
+    """Judge whether the lane is stuck and clean it up when it is (Refs #1825).
+
+    The verdict comes from the ledger and the event counts of the lane host, the health
+    snapshot is not consulted. The repair is narrow: only the resident pi RPC process
+    tree of that lane is terminated; the card that failed is not dispatched again (it
+    carries the `lane-failed` label)."""
+    status = str(info.get("status") or "").strip().lower()
+    error_class = str(info.get("error_class") or "").strip().lower()
+    if status not in LANE_STUCK_STATUSES and error_class not in LANE_STUCK_CLASSES:
+        return False
+    run = str((st or {}).get("run") or "")
+    probe = probe_lane_stuck(lane, cfg, run)
+    if not probe: return False
+    runs = [row for row in (probe.get("runs") or []) if isinstance(row, dict)]
+    current = next((row for row in runs if row.get("run_id") == run), None)
+    if current is not None and isinstance(current.get("events"), int) and current["events"] > 0:
+        lane_stuck_clear(lane, cfg, f"run {run} produced {current['events']} event(s)")
+        return False
+    if not lane_stuck_verdict(runs): return False
+    rpc = probe.get("rpc")
+    if not rpc_tree_stuck(rpc):
+        audit_lane_stuck(lane, cfg, {"action": "suspect", "run": run,
+                                     "runs": [row.get("run_id") for row in runs],
+                                     "rpc": rpc})
+        return False
+    state = load_lane_stuck()
+    entry = state.get(lane) or {}
+    run_ids = [row.get("run_id") for row in runs[-LANE_STUCK_LIMIT:]]
+    if entry.get("cleaned") and entry.get("runs") == run_ids and entry.get("pid") == rpc.get("pid"):
+        return False  # the same stuck episode: one cleanup is enough
+    killed = kill_lane_rpc(lane, cfg, rpc.get("pid")) or {}
+    terminated = killed.get("terminated") or []
+    if rpc.get("pid") not in terminated:
+        audit_lane_stuck(lane, cfg, {"action": "cleanup_failed", "run": run, "runs": run_ids,
+                                     "pid": rpc.get("pid"), "terminated": terminated,
+                                     "reason": killed.get("reason") or "TERM not confirmed"})
+        return False
+    state[lane] = {"at": time.strftime("%F %T"), "runs": run_ids, "pid": rpc.get("pid"),
+                   "terminated": terminated, "cleaned": True}
+    save_lane_stuck(state)
+    audit_lane_stuck(lane, cfg, {"action": "cleanup", "run": run, "runs": run_ids, "pid": rpc.get("pid"),
+                                 "terminated": terminated, "reason": killed.get("reason")})
+    log(f"{lane} stuck: {len(run_ids)} runs in a row ended budget_exceeded without a single event "
+        f"(pi RPC pid {rpc.get('pid')} waits for a sandbox without progress) → terminated {terminated}; "
+        f"the failed card is not dispatched again", brain=True)
+    write_health_alert(lane, {"runs": run_ids, "pid": rpc.get("pid"), "terminated": terminated},
+                       alert="lane_stuck")
+    return True
+
 RUN_RECORD_SNIPPET = r'''
 import base64,json,os,sys
 run, payload = sys.argv[1], sys.argv[2]
@@ -843,6 +1409,8 @@ def finish(lane, cfg, st, info, state):
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+        lane_streak_note(lane, run, info)  # a commit was harvested: the lane works, the streak clears (Refs #1825)
+        lane_stuck_clear(lane, cfg, f"run {run} produced a commit")
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -872,6 +1440,8 @@ def finish(lane, cfg, st, info, state):
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
+        lane_streak_note(lane, run, info)  # circuit breaker: 3 failures in a row pause the lane (Refs #1825)
+        lane_stuck_note(lane, cfg, st, info)  # stuck lane: 3 empty budget runs in a row → clean the pi RPC tree (Refs #1825)
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 def tick(lanes, state, last_warn):
