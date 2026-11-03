@@ -8,6 +8,7 @@ State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/aut
 Pause: touch ~/phanes-ctl/autodispatch/PAUSE (whole loop) or PAUSE-<LANE> (one lane).
 """
 import json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import importlib.util
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -608,6 +609,133 @@ def handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures):
     log(f"{lane} #{n} harvest fetch failed ({classification}) {failures} consecutive failure(s) → labelled lane-failed")
     return True
 
+# Harvest self-check (Refs #1729): the gate refuses binary / build artefacts in a diff,
+# warns when no test file changed and when a control-plane change adds no failure test.
+SELF_CHECK_LABELS = {"no-tests": "Diff changes code but adds no test file",
+                      "missing-failure-tests": "Control-plane change without a failure-path test"}
+# The box copies `autodispatch.py` alone into `~/phanes-ctl/bin/`, so the self-check module
+# is looked up next to this file and in the repo mirror before falling back to `sys.path`.
+SELF_CHECK_PATHS = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "harvest_self_check.py"),
+                     os.path.join(LOCAL, "tools", "lane-autodispatch", "harvest_self_check.py"))
+
+def load_self_check():
+    """Load the harvest self-check module (None when it is unavailable).
+
+    A missing or broken module must never stop a harvest: the caller fails open.
+    """
+    for path in SELF_CHECK_PATHS:
+        if not os.path.isfile(path): continue
+        try:
+            spec = importlib.util.spec_from_file_location("harvest_self_check", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception:
+            continue
+    try:
+        import harvest_self_check
+        return harvest_self_check
+    except Exception:
+        return None
+
+def self_check_note(check):
+    """Render the self-check result for the harvest log, the issue and the PR comment.
+
+    The rejected files are listed with their reason (binary / dependency-dir / build-artefact),
+    so the lane can see what has to leave the diff.
+    """
+    rejected = check.get("rejected") or []
+    reasons = check.get("rejected_reasons") or {}
+    warnings = check.get("warnings") or []
+    status = "rejected" if rejected else ("warning" if warnings else "passed")
+    listed = ", ".join(f"{path} ({reasons[path]})" if reasons.get(path) else path for path in rejected)
+    parts = [f"Harvest self-check: {status}",
+             f"rejected files: {listed if rejected else 'none'}",
+             f"no-tests={bool(check.get('no_tests'))}",
+             f"missing-failure-tests={bool(check.get('missing_failure_tests'))}"]
+    parts.extend(warnings)
+    return "; ".join(parts) + "."
+
+def run_self_check(lane, n, base, head):
+    """Run the harvest self-check; it never raises — a broken self-check fails open."""
+    module = load_self_check()
+    if module is None:
+        warning = "the self-check module is unavailable, the harvest continued without the gate"
+    else:
+        try:
+            check = dict(module.inspect(LOCAL, base, head))
+        except Exception as error:
+            warning = f"failed open ({type(error).__name__}: {error}), the harvest continued without the gate"
+        else:
+            check.setdefault("warnings", [])
+            return check, self_check_note(check)
+    check = {"rejected": [], "no_tests": False, "missing_failure_tests": False,
+             "warnings": [f"Harvest self-check warning: {warning}."]}
+    return check, self_check_note(check)
+
+def self_check_labels(check):
+    """The PR labels the self-check asks for."""
+    return [name for name, enabled in (("no-tests", check.get("no_tests")),
+                                        ("missing-failure-tests", check.get("missing_failure_tests"))) if enabled]
+
+def json_list(out):
+    """Parse a gh JSON list payload (empty list when the payload is unusable)."""
+    try:
+        payload = json.loads(out)
+    except ValueError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+def apply_pr_labels(url, labels):
+    """Create the labels when they are missing, add them to the PR and verify they stuck.
+
+    A failing `label create` or `pr edit` is logged, and the labels are read back afterwards:
+    the returned list holds the labels that are not on the PR (empty when every label took effect).
+    """
+    if not labels: return []
+    failures = []
+    for name in labels:
+        rc, _, err = gh(["label", "create", name, "--force", "--description", SELF_CHECK_LABELS.get(name, name)])
+        if rc: failures.append(f"label create {name}: {err.strip()[-80:]}")
+    rc, _, err = gh(["pr", "edit", url, "--add-label", *labels])
+    if rc: failures.append(f"pr edit --add-label: {err.strip()[-80:]}")
+    rc, out, _ = gh(["pr", "view", url, "--json", "labels"])
+    applied = []
+    if not rc:
+        try:
+            applied = [label.get("name") if isinstance(label, dict) else label
+                       for label in json.loads(out).get("labels", [])]
+        except (ValueError, AttributeError, TypeError):
+            applied = []
+    if failures: log(f"self-check label operations failed: {'; '.join(failures)}", brain=False)
+    return [name for name in labels if name not in applied]
+
+def applicable_pr(n, branch=""):
+    """URL of the PR that applies to this harvest (empty when there is none)."""
+    if branch:
+        rc, out, _ = gh(["pr", "list", "--state", "all", "--head", branch, "--json", "number,url"])
+        prs = json_list(out) if not rc else []
+        if prs: return prs[0].get("url", "")
+    rc, out, _ = gh(["pr", "list", "--state", "all", "--limit", "100", "--json", "number,url,body"])
+    if rc: return ""
+    for pr in json_list(out):
+        if f"Closes #{n}" in (pr.get("body") or ""): return pr.get("url", "")
+    return ""
+
+def publish_self_check(lane, n, branch, note, pr_url="", issue_body="", labels=()):
+    """Publish the self-check result to the harvest log, the issue and the applicable PR."""
+    log(f"{lane} #{n} {note}")
+    if issue_body:
+        gh(["issue", "comment", str(n), "--body", issue_body])
+    url = pr_url or applicable_pr(n, branch)
+    if url:
+        missing = apply_pr_labels(url, labels)
+        if missing:
+            note += f" Labels not applied: {', '.join(missing)}."
+            log(f"{lane} #{n} self-check labels not applied: {', '.join(missing)}")
+        gh(["pr", "comment", url, "--body", note])
+    return url
+
 def finish(lane, cfg, st, info, state):
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
@@ -615,17 +743,30 @@ def finish(lane, cfg, st, info, state):
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
+        check, check_note = run_self_check(lane, n, st.get("base", "main"), f"refs/fleet/{lane}")
+        if check.get("rejected"):
+            # Refused before the push: no binary ever reaches the PR branch (Refs #1729).
+            publish_self_check(lane, n, b, check_note, issue_body=(f"{check_note}\n\nThe lane branch was not pushed: "
+                               f"drop the binary / build artefacts above and re-dispatch the issue."))
+            gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
+            log(f"{lane} #{n} harvest rejected by the self-check: {', '.join(check['rejected'])}")
+            mark_done(state, n)
+            return True
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"refs/fleet/{lane}:refs/heads/{b}"], timeout=180)
         if rc: return log(f"{lane} #{n} run {run}: push failed: {err.strip()[-200:]}") or False
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
+            publish_self_check(lane, n, b, check_note, labels=self_check_labels(check))
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n); return True
         _, subj, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%s", f"refs/fleet/{lane}"])
         body = (f"Closes #{n}\n\nAutodispatched to lane **{lane}** on **{cfg['host']}** ({info.get('backend')}/{info.get('model')}), run `{run}`, "
-                f"base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`.\n\nExecutor summary: {info.get('summary')}")
+                f"base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`.\n\nExecutor summary: {info.get('summary')}"
+                f"\n\n{check_note}")
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", (subj.strip() or f"#{n}")[:200], "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
+        if url.startswith("http"):
+            publish_self_check(lane, n, b, check_note, pr_url=url, labels=self_check_labels(check))
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
     else:
