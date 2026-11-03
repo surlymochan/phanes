@@ -1,4 +1,5 @@
 import contextlib
+import builtins
 import importlib.machinery
 import importlib.util
 import json
@@ -245,6 +246,332 @@ class PauseScopeTests(unittest.TestCase):
         self.assertEqual(rows[0]["source"], "store")
         self.assertEqual(rows[1]["source"], "marker")
         self.assertEqual(rows[1]["reason"], "legacy marker: PAUSE-MINT")
+
+
+class SwitchAuditTests(unittest.TestCase):
+    """Refs #1827: the AD audits who wrote the PAUSE*/EXCLUDE* switches.
+
+    The switch files of the autodispatch directory are written by unknown sources: the audit
+    records every change (created / deleted / changed) and flags the changes without an
+    authorization entry. It only audits: it never removes nor restores a switch.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-switch-audit-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.dir = self.root / "autodispatch"
+        self.dir.mkdir()
+        self.brain = self.root / "brain-log.md"
+        self.brain.write_text("")
+        environment = mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(self.root / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        marker_dir = mock.patch.object(autodispatch, "D", str(self.dir))
+        marker_dir.start()
+        self.addCleanup(marker_dir.stop)
+        brain_log = mock.patch.object(autodispatch, "BRAIN_LOG", str(self.brain))
+        brain_log.start()
+        self.addCleanup(brain_log.stop)
+
+    def audit(self):
+        return autodispatch.audit_switches()
+
+    def rows(self):
+        path = self.dir / "switch-audit.jsonl"
+        if not path.exists(): return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def alerts(self):
+        path = self.dir / "health.alert"
+        if not path.exists(): return []
+        return path.read_text(encoding="utf-8").splitlines()
+
+    def tick(self):
+        """One tick of the real loop, with the GitHub queue and the refill stubbed out."""
+        with mock.patch.object(autodispatch, "queue", return_value=[]), \
+                mock.patch.object(autodispatch, "replenish", return_value=[]):
+            autodispatch.tick({}, {}, 0)
+
+    def test_a_created_switch_writes_one_row(self):
+        (self.dir / "PAUSE-DISPATCH").touch()
+
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["file"], "PAUSE-DISPATCH")
+        self.assertEqual(rows[0]["action"], "created")
+        self.assertEqual(rows[0]["before"], "")
+        self.assertIn("owner", rows[0])
+        self.assertIsNotNone(rows[0]["mtime"])
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_a_deleted_switch_writes_one_row(self):
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+
+        (self.dir / "PAUSE-M19").unlink()
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "deleted")
+        self.assertEqual(rows[0]["before"], "manual hold")
+        self.assertEqual(rows[0]["after"], "")
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_a_changed_switch_writes_one_row(self):
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+
+        (self.dir / "PAUSE-M19").write_text("another hold\n")
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "changed")
+        self.assertEqual(rows[0]["before"], "manual hold")
+        self.assertEqual(rows[0]["after"], "another hold")
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_an_unchanged_switch_writes_no_row(self):
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+
+        self.assertEqual(self.audit(), [])
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_a_switch_with_auto_content_is_not_unattributed(self):
+        (self.dir / "PAUSE-HOST-ib1").write_text("auto:cooldown:until=123\n")
+
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["unattributed"])
+        self.assertEqual(rows[0]["authorization"], "auto:")
+        self.assertEqual(self.alerts(), [])
+
+    def test_a_brain_order_attributes_the_row(self):
+        self.brain.write_text("- 16:00 UTC+8 operator: 用户令：暂停 M19\n")
+        (self.dir / "PAUSE-M19").touch()
+
+        rows = self.audit()
+
+        self.assertFalse(rows[0]["unattributed"])
+        self.assertIn("用户令", rows[0]["authorization"])
+        self.assertEqual(self.alerts(), [])
+
+    def test_an_unattributed_switch_writes_the_health_alert(self):
+        (self.dir / "PAUSE-M19").touch()
+
+        rows = self.audit()
+
+        self.assertTrue(rows[0]["unattributed"])
+        alerts = self.alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("PAUSE-M19", alerts[0])
+        self.assertIn("unattributed", alerts[0])
+
+    def test_a_corrupt_baseline_rebuilds_without_faking_a_change(self):
+        (self.dir / "PAUSE-M19").touch()
+        (self.dir / "switch-audit-state.json").write_text("{not json")
+
+        self.assertEqual(self.audit(), [])
+        self.assertEqual(self.rows(), [])
+
+        (self.dir / "PAUSE-NEW").touch()
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["file"], "PAUSE-NEW")
+        self.assertEqual(rows[0]["action"], "created")
+
+    def test_a_broken_audit_file_does_not_stop_the_tick(self):
+        (self.dir / "switch-audit.jsonl").mkdir()
+        (self.dir / "PAUSE-M19").touch()
+
+        self.tick()
+
+        self.assertTrue((self.dir / "lanes-status.json").exists())
+
+    def test_an_unreadable_switch_directory_is_survivable(self):
+        broken = self.root / "not-a-directory"
+        broken.write_text("x")
+
+        self.assertEqual(autodispatch.audit_switches(directory=str(broken)), [])
+
+    def unreadable(self, name):
+        """An `open` that fails for one switch file: the switch exists but cannot be read."""
+        real_open = builtins.open
+
+        def guarded(path, *args, **kwargs):
+            if str(path).endswith(name): raise PermissionError(13, "Permission denied")
+            return real_open(path, *args, **kwargs)
+        return guarded
+
+    def counting_stat(self, name, fail_from=None):
+        """A counting `os.stat` for one switch file.
+
+        The calls of the switch file are recorded; from the `fail_from`-th one on the stat
+        fails (a permission error that must not be swallowed)."""
+        real_stat = os.stat
+        calls = []
+
+        def guarded(path, *args, **kwargs):
+            if str(path).endswith(name):
+                calls.append(str(path))
+                if fail_from is not None and len(calls) >= fail_from:
+                    raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+        return guarded, calls
+
+    def baseline(self):
+        path = self.dir / "switch-audit-state.json"
+        return json.loads(path.read_text(encoding="utf-8"))["switches"]
+
+    def test_a_read_failure_does_not_fake_a_deletion(self):
+        """Refs #1827: a switch that cannot be read is not a deleted switch."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()  # the baseline knows the switch
+        before = len(self.rows())
+        alerts = len(self.alerts())
+
+        with mock.patch("builtins.open", side_effect=self.unreadable("PAUSE-M19")):
+            self.assertEqual(self.audit(), [])
+
+        self.assertEqual(len(self.rows()), before)      # no fake `deleted` row
+        self.assertEqual(len(self.alerts()), alerts)    # and no health alert about a fake change
+        self.assertIn("PAUSE-M19", self.baseline())     # the baseline is kept as it was
+
+    def test_the_recovery_after_a_read_failure_does_not_fake_a_creation(self):
+        """Refs #1827: the recovery compares against the kept baseline, not against a gap."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+        before = len(self.rows())
+
+        with mock.patch("builtins.open", side_effect=self.unreadable("PAUSE-M19")):
+            self.audit()
+        self.assertEqual(len(self.rows()), before)
+
+        # the switch is readable again and it did not change: there is nothing to audit
+        self.assertEqual(self.audit(), [])
+        self.assertEqual(len(self.rows()), before)
+
+        # a real change after the recovery is audited against the preserved baseline
+        (self.dir / "PAUSE-M19").write_text("another hold\n")
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "changed")
+        self.assertEqual(rows[0]["before"], "manual hold")
+        self.assertEqual(rows[0]["after"], "another hold")
+
+    def test_a_deletion_during_a_read_failure_is_audited_after_the_recovery(self):
+        """Refs #1827: a real deletion is audited once, after the reads work again."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+
+        with mock.patch("builtins.open", side_effect=self.unreadable("PAUSE-M19")):
+            self.assertEqual(self.audit(), [])
+        (self.dir / "PAUSE-M19").unlink()
+
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["file"], "PAUSE-M19")
+        self.assertEqual(rows[0]["action"], "deleted")
+        self.assertEqual(rows[0]["before"], "manual hold")
+
+    def test_an_unreadable_directory_does_not_fake_a_deletion(self):
+        """Refs #1827: a directory that cannot be listed is not an empty switch set."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+        before = len(self.rows())
+        alerts = len(self.alerts())
+
+        with mock.patch("os.listdir", side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(self.audit(), [])
+
+        self.assertEqual(len(self.rows()), before)
+        self.assertEqual(len(self.alerts()), alerts)
+        self.assertIn("PAUSE-M19", self.baseline())
+
+    def test_the_audit_runs_even_when_the_loop_is_paused(self):
+        (self.dir / "PAUSE").touch()  # the `all` scope pauses the whole loop
+        (self.dir / "PAUSE-M19").touch()
+
+        self.tick()
+
+        self.assertEqual([row["file"] for row in self.rows()], ["PAUSE", "PAUSE-M19"])
+
+    def test_a_stat_failure_does_not_fake_a_deletion(self):
+        """Refs #1827: a switch whose stat fails is not a deleted switch."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()  # the baseline knows the switch
+        before = len(self.rows())
+        alerts = len(self.alerts())
+        guarded, calls = self.counting_stat("PAUSE-M19", fail_from=1)
+
+        with mock.patch("os.stat", side_effect=guarded):
+            self.assertEqual(self.audit(), [])
+
+        self.assertEqual(len(calls), 1)                   # the set is unknown after one failed stat
+        self.assertEqual(len(self.rows()), before)        # no fake `deleted` row
+        self.assertEqual(len(self.alerts()), alerts)      # and no health alert about a fake change
+        self.assertIn("PAUSE-M19", self.baseline())       # the baseline is kept as it was
+
+    def test_the_recovery_after_a_stat_failure_does_not_fake_a_creation(self):
+        """Refs #1827: the recovery compares against the kept baseline, not against a gap."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        self.audit()
+        before = len(self.rows())
+        guarded, _ = self.counting_stat("PAUSE-M19", fail_from=1)
+
+        with mock.patch("os.stat", side_effect=guarded):
+            self.audit()
+        self.assertEqual(len(self.rows()), before)
+
+        # the switch is stat-able again and it did not change: there is nothing to audit
+        self.assertEqual(self.audit(), [])
+        self.assertEqual(len(self.rows()), before)
+
+        # a real change after the recovery is audited against the preserved baseline
+        (self.dir / "PAUSE-M19").write_text("another hold\n")
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "changed")
+        self.assertEqual(rows[0]["before"], "manual hold")
+        self.assertEqual(rows[0]["after"], "another hold")
+
+    def test_a_switch_is_stat_ed_only_once_per_tick(self):
+        """Refs #1827: the file type comes from the stat that was already done.
+
+        A second stat (`os.path.isfile`) swallows its own OSError: the living switch would
+        drop out of the set, which fakes a deletion and breaks the baseline."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        guarded, calls = self.counting_stat("PAUSE-M19")
+
+        with mock.patch("os.stat", side_effect=guarded):
+            self.audit()
+
+        self.assertEqual(len(calls), 1)  # one stat per switch: there is no second one
+
+    def test_a_living_switch_is_audited_when_a_second_stat_would_fail(self):
+        """Refs #1827: a stat error of the second call must not drop the switch."""
+        (self.dir / "PAUSE-M19").write_text("manual hold\n")
+        guarded, calls = self.counting_stat("PAUSE-M19", fail_from=2)
+
+        with mock.patch("os.stat", side_effect=guarded):
+            rows = self.audit()
+
+        self.assertEqual(len(calls), 1)   # the failing second stat is never made
+        self.assertEqual(len(rows), 1)    # the switch is audited, not dropped
+        self.assertEqual(rows[0]["action"], "created")
+
+        (self.dir / "PAUSE-M19").write_text("another hold\n")
+        rows = self.audit()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "changed")
 
 
 class PauseCliListTests(unittest.TestCase):
