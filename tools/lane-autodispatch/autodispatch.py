@@ -9,7 +9,7 @@ Pause: the openswarm pause store ($OPENSWARM_HOME/pauses, written by `openswarm 
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
-import base64, json, os, re, shlex, subprocess, sys, time, concurrent.futures as cf
+import base64, json, os, re, shlex, subprocess, sys, threading, time, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -850,9 +850,81 @@ def finish(lane, cfg, st, info, state):
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
+# The queued diagnosis of the patrol (Refs #1687): every AD_QUEUED_DIAGNOSIS_TICKS
+# ticks the runs that wait longer than ten minutes are named with the layer that
+# blocks them.  The section lands in the health snapshot of the control plane and
+# in the brain log, so a queued run never stays silent.
+QUEUED_DIAGNOSIS_TICKS = max(1, int(os.environ.get("AD_QUEUED_DIAGNOSIS_TICKS", "5")))
+OPENSWARM_CLI_ENV = "AD_OPENSWARM_CLI"
+TICK_COUNT = 0
+DIAGNOSIS_RUNNING = threading.Event()
+
+def openswarm_cli():
+    """The openswarm CLI the patrol uses for the queued diagnosis.
+
+    The installed CLI of the box comes first (``~/.local/bin/openswarm``); a
+    checkout of this repository is the fallback, so a box without the install
+    still produces the diagnosis.  ``AD_OPENSWARM_CLI`` overrides both.
+    """
+    configured = os.environ.get(OPENSWARM_CLI_ENV)
+    if configured:
+        return configured
+    installed = os.path.expanduser("~/.local/bin/openswarm")
+    if os.path.exists(installed):
+        return installed
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    checkout = os.path.join(root, "openswarm", "bin", "openswarm")
+    if os.path.exists(checkout):
+        return checkout
+    return installed
+
+def queued_diagnosis():
+    """Ask the openswarm CLI for the queued diagnosis of the fleet (Refs #1687).
+
+    The command writes the section into the health snapshot of the control plane
+    and appends it to the brain log.  A missing CLI or an unreachable host never
+    breaks the patrol: the failure is logged and the next tick tries again.
+    """
+    cli = openswarm_cli()
+    try:
+        rc, out, err = sh([cli, "fleet", "queued-diagnosis", "--json"], timeout=180)
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"queued diagnosis failed: {error}", brain=False)
+        return None
+    if rc:
+        log(f"queued diagnosis failed rc={rc}: {(err or out).strip()[-200:]}", brain=False)
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        log("queued diagnosis returned no JSON", brain=False)
+        return None
+
+def queued_diagnosis_async():
+    """Produce the queued diagnosis in the background: the patrol never waits.
+
+    The diagnosis probes every host of the fleet over ssh, so it must not
+    delay the dispatch tick (a late tick would let the heartbeat of the patrol
+    go stale).  Only one diagnosis runs at a time.
+    """
+    if DIAGNOSIS_RUNNING.is_set(): return
+    DIAGNOSIS_RUNNING.set()
+    def run():
+        try:
+            queued_diagnosis()
+        except Exception as error:
+            log(f"queued diagnosis failed: {error!r}", brain=False)
+        finally:
+            DIAGNOSIS_RUNNING.clear()
+    threading.Thread(target=run, daemon=True).start()
+
 def tick(lanes, state, last_warn):
+    global TICK_COUNT
+    TICK_COUNT += 1
     scopes = paused_scopes()  # the openswarm pause store and the legacy PAUSE markers (Refs #1366)
     if "all" in scopes: return last_warn
+    if TICK_COUNT == 1 or TICK_COUNT % QUEUED_DIAGNOSIS_TICKS == 0:
+        queued_diagnosis_async()  # the patrol names the layer that blocks a waiting run
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     live = [L for L in lanes if host_ok(lanes[L]["host"])]

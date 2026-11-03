@@ -106,7 +106,11 @@ try:
     db.execute('BEGIN IMMEDIATE')
     if op == 'status':
         rows = db.execute('SELECT host,run_id,backend,provider,created FROM reservations ORDER BY created').fetchall()
-        out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created'), row)) for row in rows]}
+        # The limits and the hosts travel with the answer: the health check
+        # compares the reservations with the topology of the coordinator
+        # without reading topology.json on every host.
+        out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created'), row)) for row in rows],
+               'limits': dict(LIMITS), 'hosts': list(HOSTS)}
     elif op == 'recover':
         # The owner runs the local liveness check before requesting TTL recovery.
         # gocc retains the existing operator-recovery path for cross-host repair.

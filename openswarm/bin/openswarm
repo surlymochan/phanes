@@ -11781,20 +11781,32 @@ def fleet_snapshot():
         lanes = lane_status_rows() if os.path.exists(envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))) else []
     except ValueError as error:
         lanes, config_error = [], str(error)
-    runs = []
+    runs, ended = [], []
     for path in sorted(glob.glob(os.path.join(RUNS, "*", "status.json"))):
-        if capacity_only and (jload(path, {}) or {}).get("state") in ("finished", "unroutable", "dry-run"):
+        rid = os.path.basename(os.path.dirname(path))
+        status = jload(path, {}) or {}
+        if capacity_only and status.get("state") in ("finished", "unroutable", "dry-run"):
+            if fleet_run_may_hold_a_reservation(status):
+                ended.append(run_liveness(rid, status))
             continue
-        row = run_digest(os.path.basename(os.path.dirname(path)))
+        row = run_digest(rid)
         if row["state"] not in ("finished", "unroutable", "dry-run", "dead"):
             runs.append(row)
+        elif fleet_run_may_hold_a_reservation(status):
+            # The ended runs that may still hold a coordinator reservation travel
+            # with their liveness evidence: the queued diagnosis needs them to
+            # tell a ghost reservation from a slot that is still in use.
+            ended.append(run_liveness(rid, status))
     policy = load_policy()
     providers = {backend: execution_provider(backend, policy=policy)
                  for backend in ("codex", "cursor", "agy", "pi", "ocgo", "deepseek")}
     backends = {} if capacity_only else {"agy": agy_status(policy)}
-    return {"lanes": lanes, "active_runs": runs, "providers": providers,
+    return {"lanes": lanes, "active_runs": runs, "ended_runs": ended, "providers": providers,
             "backends": backends, "lane_config_valid": config_error is None,
-            "lane_config_error": config_error}
+            "lane_config_error": config_error,
+            # The local concurrency caps of this host: the queued diagnosis
+            # compares the running turns of the host with these limits.
+            "concurrency": dict(policy.get("concurrency") or {})}
 
 
 HARVEST_STDERR_TAIL_LINES = 5
@@ -12160,6 +12172,42 @@ def dispatch_pause_module():
     return module
 
 
+def dispatch_queued_module():
+    """The queued diagnosis module (lib/dispatch/queued.py), loaded by path."""
+    name = "openswarm_dispatch_queued"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "queued.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def control_plane_home():
+    """The control plane directory of the box (``~/phanes-ctl``).
+
+    The state directory of the control plane (``OPENSWARM_CTL_STATE_DIR``)
+    names it: its parent holds the health snapshot and the brain log of the
+    control plane.
+    """
+    state = os.environ.get("OPENSWARM_CTL_STATE_DIR")
+    if state:
+        return os.path.dirname(os.path.abspath(os.path.expanduser(state)))
+    return os.path.join(os.path.expanduser("~"), "phanes-ctl")
+
+
+def control_plane_health_json():
+    """The health snapshot of the control plane (``autodispatch/health.json``)."""
+    return envvar("HEALTH_JSON") or os.path.join(control_plane_home(), "autodispatch", "health.json")
+
+
+def control_plane_brain_log():
+    """The brain log of the control plane (``brain/log.md``)."""
+    return envvar("BRAIN_LOG") or os.path.join(control_plane_home(), "brain", "log.md")
+
+
 def fleet_health_lane_hosts(home=None):
     """The host names the lanes.json names, in the order they appear.
 
@@ -12312,7 +12360,87 @@ def fleet_health_failure_reasons(home=None, limit=20):
     return counts
 
 
-def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
+def fleet_health_queued(names, config, probe, policy, moment, home=None):
+    """The queued diagnosis of the fleet: which layer blocks a waiting run.
+
+    The runs of the box come from its own runs directory, the runs of the other
+    hosts from their snapshot (``fleet _snapshot``) and the reservations from
+    the capacity coordinator.  A host that cannot be reached is left out: the
+    section then reports what it knows and never guesses a reason.  A host
+    whose snapshot does not carry the liveness evidence of the ended runs
+    cannot prove a ghost either, so it is not a known host.
+    """
+    module = dispatch_queued_module()
+    records, known_hosts, policies = [], set(), {}
+    lane_host_map, lane_counts = {}, {}
+    lanes = jload(envvar("LANES_FILE", os.path.join(home or DATA, "lanes.json")), None)
+    if isinstance(lanes, dict):
+        lane_host_map, lane_counts = module.lane_hosts(lanes)
+    local_host = next((name for name, host in config.items() if host.get("kind") == "local"), "local")
+    states = module.load_run_states(os.path.join(home or DATA, "runs"))
+    if states:
+        known_hosts.add(local_host)
+        records.extend(module.records_from_states(states, host=local_host, lane_hosts_map=lane_host_map))
+    policies[local_host] = module.policy_caps(policy)
+    for name in names:
+        host = config.get(name)
+        if host is None or name == local_host:
+            continue
+        try:
+            payload = json.loads(probe(name, host_openswarm(host, ["fleet", "_snapshot"])))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # an unreachable host contributes no run, it never a reason
+        if not isinstance(payload, dict):
+            continue
+        records.extend(module.records_from_snapshot(name, payload, moment))
+        caps = module.policy_caps(payload)
+        if caps:
+            policies[name] = caps
+        if module.snapshot_has_liveness(payload):
+            known_hosts.add(name)
+    reservations, limits, error = [], {}, None
+    try:
+        command = fleet_guard_command()
+    except RuntimeError as failure:
+        command, error = None, str(failure)
+    if command:
+        try:
+            answer = fleet_guard_call(command, {"op": "status"}, timeout=5)
+        except RuntimeError as failure:
+            error = str(failure)
+        else:
+            reservations = module.load_reservations(answer)
+            limits = module.load_limits(answer)
+    elif error is None:
+        error = "fleet capacity coordinator is not configured"
+    return module.diagnose(records, reservations=reservations, limits=limits, policies=policies,
+                           known_hosts=known_hosts, lane_counts=lane_counts, now=moment,
+                           coordinator_error=error)
+
+
+def fleet_health_write_queued(section, args=None):
+    """Write the queued section into the control plane health.json and the brain log.
+
+    The paths default to the control plane of the box: ``autodispatch/health.json``
+    and ``brain/log.md``.  A failing write never breaks the health check: the
+    error is returned so the report can name it.
+    """
+    module = dispatch_queued_module()
+    health_json = getattr(args, "health_json", None) or control_plane_health_json()
+    brain_log = getattr(args, "brain_log", None) or control_plane_brain_log()
+    errors = []
+    for label, path, writer in (("health.json", health_json, module.write_health_section),
+                                ("brain log", brain_log, module.append_brain_log)):
+        if not path:
+            continue
+        try:
+            writer(path, section)
+        except OSError as error:
+            errors.append(f"{label}: {error}")
+    return errors
+
+
+def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None, queued=None):
     """Probe every fleet host and report its health; --apply pauses the sick ones.
 
     The hosts are the ones ``lanes.json`` names (or ``--hosts``); each one is
@@ -12320,6 +12448,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     (``resources.health``, else the built-in defaults).  ``--apply`` pauses a
     host that needs it and releases the host that recovered; a manual pause is
     never touched.
+
+    The report carries a ``queued`` section (see ``lib/dispatch/queued.py``):
+    every run that waits longer than ten minutes is named with the layer that
+    blocks it.  The section is written into the health snapshot of the control
+    plane and appended to its brain log.
     """
     policy = load_policy() if policy is None else policy
     health = dispatch_health_module()
@@ -12362,11 +12495,17 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                                                   row["status"], moment)
         rows.append(row)
     fleet_health_state_save(remembered, home)
+    if queued is None:
+        queued = fleet_health_queued(names, config, probe, policy, moment, home)
+    errors = fleet_health_write_queued(queued, args)
     report = {"ok": all(row["status"] == "ok" for row in rows),
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits, "recent_failure_reasons": recent_failures,
-              "hosts": rows}
+              "hosts": rows,
+              "queued": queued}
+    if errors:
+        report["queued_output_error"] = "; ".join(errors)
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -12382,7 +12521,39 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         print("recent failure reasons (last 20):")
         for reason, count in sorted(recent_failures.items(), key=lambda item: (-item[1], item[0])):
             print(f"  {reason}: {count}")
+    for row in queued.get("runs") or []:
+        print(f"queued {row['run_id']}  {row['reason']}  {row['detail']}")
+    if queued.get("note"):
+        print(f"queued {queued['note']}")
     return report
+
+
+def cmd_fleet_queued_diagnosis(args, policy=None, hosts=None, now=None, home=None):
+    """The queued diagnosis of the fleet: name the layer that blocks a waiting run.
+
+    The patrol of the control plane calls this command (``openswarm fleet
+    queued-diagnosis``): the section is written into the health snapshot of the
+    control plane and appended to its brain log, so a run that waits for hours
+    always says which layer blocks it.
+    """
+    policy = load_policy() if policy is None else policy
+    config = fleet_config() if hosts is None else hosts
+    names = fleet_health_hosts(args, config)
+    moment = NOW() if now is None else now
+    section = fleet_health_queued(names, config, fleet_health_runner(config), policy, moment, home)
+    errors = fleet_health_write_queued(section, args)
+    if errors:
+        section["output_error"] = "; ".join(errors)
+    if getattr(args, "json", False):
+        print(json.dumps(section, indent=2, ensure_ascii=False))
+        return section
+    for row in section["runs"]:
+        print(f"{row['run_id']}  {row['reason']}  {row['detail']}")
+    if section["note"]:
+        print(section["note"])
+    if not section["runs"]:
+        print("no queued run waits longer than %gs" % section["min_age_s"])
+    return section
 
 
 def cmd_fleet(args):
@@ -12394,6 +12565,9 @@ def cmd_fleet(args):
         return
     if args.fleet_cmd == "health":
         cmd_fleet_health(args)
+        return
+    if args.fleet_cmd == "queued-diagnosis":
+        cmd_fleet_queued_diagnosis(args)
         return
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
@@ -13196,6 +13370,40 @@ def run_digest(rid):
     if lane:
         out["lane"] = lane
     return out
+
+
+def fleet_run_may_hold_a_reservation(status):
+    """Whether the run may still hold a reservation of the capacity coordinator.
+
+    A released reservation clears its token, so only the runs that still carry
+    one (or a pending acquire or release) can block a new admission.
+    """
+    if not isinstance(status, dict):
+        return False
+    if isinstance(status.get("fleet_reservation_token"), str) and status["fleet_reservation_token"]:
+        return True
+    return status.get("fleet_reservation_pending") is True or isinstance(status.get("fleet_release_pending"), dict)
+
+
+def run_liveness(rid, status=None):
+    """The liveness evidence of a run: are its runner and its executors alive?
+
+    The queued diagnosis needs more than the state of a run: the recovery path
+    of the coordinator only frees a reservation when the runner and every
+    recorded executor of the run have stopped.  A run whose runner pid is gone
+    but whose executor still lives is not a ghost, so the snapshot reports the
+    two facts for the runs that are not active any more.
+    """
+    rdir = os.path.join(RUNS, rid)
+    if status is None:
+        status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    executor_alive = False
+    for record in recorded_executor_records(rdir):
+        if pid_alive(record.get("pid")) or process_group_alive(record.get("pgid")):
+            executor_alive = True
+            break
+    return {"id": rid, "state": status.get("state"), "runner_alive": pid_alive(status.get("runner_pid")),
+            "executor_alive": executor_alive}
 
 
 def cmd_runs(args, policy):
@@ -16175,6 +16383,18 @@ def main():
     fp.add_argument("--json", action="store_true", help="print the health report as JSON")
     fp.add_argument("--apply", action="store_true",
                     help="pause the unhealthy hosts and release the recovered ones")
+    fp.add_argument("--health-json", help="health.json to write the queued section into "
+                                          "(default: the control plane health.json)")
+    fp.add_argument("--brain-log", help="brain log to append the queued section to "
+                                        "(default: the control plane brain log)")
+    fp = fleet_sub.add_parser("queued-diagnosis",
+                               help="name the layer that blocks every queued run of the fleet")
+    fp.add_argument("--hosts", help="comma-separated fleet host names (default: the hosts lanes.json names)")
+    fp.add_argument("--json", action="store_true", help="print the queued diagnosis as JSON")
+    fp.add_argument("--health-json", help="health.json to write the queued section into "
+                                          "(default: the control plane health.json)")
+    fp.add_argument("--brain-log", help="brain log to append the queued section to "
+                                        "(default: the control plane brain log)")
     fp = fleet_sub.add_parser("ledger", help="collect ledgers from fleet hosts")
     fleet_ledger_sub = fp.add_subparsers(dest="fleet_ledger_cmd", required=True)
     fp = fleet_ledger_sub.add_parser("pull", help="merge host ledgers into one file")

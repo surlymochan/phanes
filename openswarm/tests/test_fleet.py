@@ -167,6 +167,34 @@ class FleetTests(unittest.TestCase):
         self.assertIn("providers", snapshot)
         self.assertEqual(snapshot["backends"], {})
 
+    def test_the_snapshot_reports_the_ended_runs_with_their_liveness(self):
+        """The queued diagnosis needs the executor evidence of the ended runs."""
+        runs = self.root / "runs"
+        (runs / "run-ghost").mkdir(parents=True)
+        (runs / "run-ghost" / "status.json").write_text(json.dumps(
+            {"id": "run-ghost", "state": "finished", "runner_pid": 999999999,
+             "fleet_reservation_token": "a" * 32}))
+        with mock.patch.dict(os.environ, {"OPENSWARM_FLEET_CAPACITY_ONLY": "1"}), \
+                mock.patch.object(xs, "RUNS", str(runs)), \
+                mock.patch.object(xs, "execution_provider", return_value="provider"), \
+                mock.patch.object(xs, "load_policy", return_value={}):
+            snapshot = xs.fleet_snapshot()
+        ended = snapshot["ended_runs"]
+        self.assertEqual([row["id"] for row in ended], ["run-ghost"])
+        self.assertFalse(ended[0]["runner_alive"])
+        self.assertFalse(ended[0]["executor_alive"])
+
+    def test_the_snapshot_omits_the_ended_runs_without_a_reservation(self):
+        runs = self.root / "runs"
+        (runs / "run-old").mkdir(parents=True)
+        (runs / "run-old" / "status.json").write_text(json.dumps({"id": "run-old", "state": "finished"}))
+        with mock.patch.dict(os.environ, {"OPENSWARM_FLEET_CAPACITY_ONLY": "1"}), \
+                mock.patch.object(xs, "RUNS", str(runs)), \
+                mock.patch.object(xs, "execution_provider", return_value="provider"), \
+                mock.patch.object(xs, "load_policy", return_value={}):
+            snapshot = xs.fleet_snapshot()
+        self.assertEqual(snapshot["ended_runs"], [])
+
     def test_capacity_snapshot_skips_completed_run_logs(self):
         runs = self.root / "runs"
         for name, state in (("done", "finished"), ("active", "running")):
