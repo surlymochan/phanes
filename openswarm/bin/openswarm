@@ -14710,6 +14710,7 @@ def cmd_doctor(args, policy):
 # injectable runner, so the gate is testable without network access.
 
 MERGE_GATE_REVIEW_FILE = "reviews.json"
+MERGE_GATE_TESTER_FILE = "tester-verdicts.json"
 MERGE_GATE_BLOCKING_LABEL = "needs-changes"
 MERGE_GATE_SHA_KEYS = ("sha", "head_sha", "head", "headRefOid", "commit", "commit_sha",
                        "reviewed_sha", "approved_sha")
@@ -14888,19 +14889,23 @@ def merge_gate_review_verdict(record):
     return None
 
 
+def merge_gate_tester_path():
+    """The tester final-verdict records: $OPENSWARM_HOME/tester-verdicts.json."""
+    return os.path.join(DATA, MERGE_GATE_TESTER_FILE)
+
+
 def merge_gate_tester_enabled():
     """Tester is authoritative only when the explicit opt-in marker exists."""
     return os.path.isfile(os.path.join(DATA, "MERGE-GATE-TESTER"))
 
 
 def merge_gate_tester_verdict(record):
-    """Read the tester's final verdict without falling back to the lane verdict."""
+    """The verdict of a tester-verdicts record, without any lane fallback."""
     if not isinstance(record, dict):
         return None
-    for key in ("tester_verdict", "tester_review_verdict"):
-        value = record.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    value = record.get("verdict")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 
@@ -15010,7 +15015,7 @@ def merge_gate_open_prs(runner, repo):
     return numbers
 
 
-def merge_gate_evaluate(pr_view, review, tester_enabled=False):
+def merge_gate_evaluate(pr_view, review, tester_enabled=False, tester_review=None):
     """Judge one PR: (status, details).
 
     The reasons are collected in the order the status names them: a missing
@@ -15018,10 +15023,10 @@ def merge_gate_evaluate(pr_view, review, tester_enabled=False):
     and the freshness of the reviewed sha.
     """
     head_sha = pr_view.get("head_sha") or ""
-    reviewed_sha = (merge_gate_reviewed_sha({"sha": review.get("tester_sha")})
-                    if tester_enabled and isinstance(review, dict)
+    reviewed_sha = (merge_gate_reviewed_sha(tester_review)
+                    if tester_enabled
                     else merge_gate_reviewed_sha(review))
-    verdict = (merge_gate_tester_verdict(review) if tester_enabled
+    verdict = (merge_gate_tester_verdict(tester_review) if tester_enabled
                else merge_gate_review_verdict(review))
     source = "tester" if tester_enabled else "lane"
     blocking_labels = [name for name in pr_view.get("labels") or []
@@ -15189,6 +15194,8 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
     hook_cmd = str(getattr(args, "post_merge_hook", None) or "").strip()
     ignore_re = merge_gate_ignore_re(args)
     records = jload(merge_gate_reviews_path(), {}) or {}
+    tester_records = (jload(merge_gate_tester_path(), {}) or {}
+                      if merge_gate_tester_enabled() else {})
     numbers = ([int(args.pr)] if getattr(args, "pr", None) else merge_gate_open_prs(runner, repo))
     results = []
     for number in numbers:
@@ -15201,7 +15208,9 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
                             "error": bus_redact(str(error))[:300]})
             continue
         review = merge_gate_find_review(records, repo, number)
-        status, detail = merge_gate_evaluate(pr_view, review, merge_gate_tester_enabled())
+        tester_review = merge_gate_find_review(tester_records, repo, number)
+        status, detail = merge_gate_evaluate(
+            pr_view, review, merge_gate_tester_enabled(), tester_review)
         record = {"pr": number, "repo": repo, "status": status, **detail}
         if status == "blocked:ci" and rerun_enabled:
             record.update(merge_gate_rerun_failed_once(runner, repo, number, pr_view, detail,
@@ -15232,6 +15241,7 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
             print(f"#{record['pr']}  {record['status']}  {record.get('action') or '-'}  "
                   f"head={(record.get('head_sha') or '-')[:12]}  "
                   f"reviewed={(record.get('reviewed_sha') or '-')[:12]}  "
+                  f"source={record.get('judgment_source') or 'lane'}  "
                   f"checks={checks.get('passed', 0)}/{total}  ignored={len(checks.get('ignored_names', []))}")
         if hook_record is not None:
             print(f"post-merge-hook  {hook_record['status']}  "

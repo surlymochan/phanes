@@ -93,6 +93,9 @@ class MergeGateTests(unittest.TestCase):
     def write_reviews(self, records):
         (self.home / "reviews.json").write_text(json.dumps(records))
 
+    def write_tester_verdicts(self, records):
+        (self.home / "tester-verdicts.json").write_text(json.dumps(records))
+
     def run_gate(self, gh, **flags):
         """Run the gate with the fake gh runner and return (exit code, results)."""
         args = argparse.Namespace(repo=REPO, pr=None, dry_run=False, json=True)
@@ -191,8 +194,10 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual(len(gh.merge_calls()), 1)
 
     def test_tester_switch_off_keeps_lane_verdict_authoritative(self):
-        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve",
-                                             "tester_sha": HEAD_SHA, "tester_verdict": "changes"}})
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        self.write_tester_verdicts({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "changes",
+                                                  "at": "2026-11-05T00:00:00Z",
+                                                  "source": "tester/divergence-log.md"}})
         gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
         code, results = self.run_gate(gh)
         self.assertEqual(code, 0)
@@ -201,10 +206,14 @@ class MergeGateTests(unittest.TestCase):
     def test_tester_switch_uses_tester_verdict_to_allow_and_block(self):
         (self.home / "MERGE-GATE-TESTER").touch()
         self.write_reviews({
-            f"{REPO}#7": {"sha": OTHER_SHA, "verdict": "changes", "tester_sha": HEAD_SHA,
-                         "tester_verdict": "approve"},
-            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "approve", "tester_sha": HEAD_SHA,
-                         "tester_verdict": "changes"},
+            f"{REPO}#7": {"sha": OTHER_SHA, "verdict": "changes"},
+            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "approve"},
+        })
+        self.write_tester_verdicts({
+            f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve",
+                          "at": "2026-11-05T00:00:00Z", "source": "tester/divergence-log.md"},
+            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "changes",
+                          "at": "2026-11-05T00:00:00Z", "source": "tester/divergence-log.md"},
         })
         gh = FakeGh({7: pr_payload(7, checks=[check("build")]),
                      8: pr_payload(8, checks=[check("build")])})
@@ -222,6 +231,29 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
         self.assertEqual(gh.merge_calls(), [])
+
+    def test_tester_switch_ignores_verdict_embedded_in_lane_record(self):
+        """Verdict fields inside the lane record are not a tester source."""
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "changes",
+                                          "tester_sha": HEAD_SHA,
+                                          "tester_verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_default_text_output_names_the_judgment_source(self):
+        """The plain log line carries the judgment source for later audit."""
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        args = argparse.Namespace(repo=REPO, pr=None, dry_run=True, json=False)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = xs.cmd_merge_gate(args, None, runner=gh)
+        self.assertEqual(code, 0)
+        self.assertIn("source=lane", buffer.getvalue())
 
     def test_the_review_of_another_repository_does_not_release_the_pr(self):
         """A record of another repository never releases this PR."""
