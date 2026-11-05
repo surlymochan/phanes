@@ -14711,6 +14711,8 @@ def cmd_doctor(args, policy):
 
 MERGE_GATE_REVIEW_FILE = "reviews.json"
 MERGE_GATE_TESTER_FILE = "tester-verdicts.json"
+# tester 最终判定三档枚举（对版确认 2026-11-05）：仅 APPROVE 通过。
+MERGE_GATE_TESTER_VERDICTS = ("APPROVE", "CHANGES", "TOOL_FAIL")
 MERGE_GATE_BLOCKING_LABEL = "needs-changes"
 MERGE_GATE_SHA_KEYS = ("sha", "head_sha", "head", "headRefOid", "commit", "commit_sha",
                        "reviewed_sha", "approved_sha")
@@ -14900,13 +14902,46 @@ def merge_gate_tester_enabled():
 
 
 def merge_gate_tester_verdict(record):
-    """The verdict of a tester-verdicts record, without any lane fallback."""
+    """The verdict of a tester-verdicts record, without any lane fallback.
+
+    Only the three ruled values count (APPROVE / CHANGES / TOOL_FAIL);
+    anything else is treated as missing, i.e. as insufficient evidence.
+    """
     if not isinstance(record, dict):
         return None
     value = record.get("verdict")
-    if isinstance(value, str) and value.strip():
+    if isinstance(value, str) and value.strip() in MERGE_GATE_TESTER_VERDICTS:
         return value.strip()
     return None
+
+
+def merge_gate_tester_approved(verdict):
+    """Only APPROVE passes the gate when the tester source is authoritative."""
+    return verdict == "APPROVE"
+
+
+def merge_gate_record_tester_verdict(path, repo, number, verdict, sha, source):
+    """Record one tester final verdict (the write side of the switch).
+
+    Values only ever come from the tester's settled conclusions; this
+    helper validates the ruled enum and writes atomically (temp file +
+    rename), newest final round wins per (repo, PR) key.
+    """
+    verdict = str(verdict or "").strip()
+    if verdict not in MERGE_GATE_TESTER_VERDICTS:
+        raise MergeGateError(f"invalid tester verdict: {verdict!r}")
+    sha = str(sha or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise MergeGateError(f"invalid head sha for tester verdict: {sha!r}")
+    records = jload(path, {}) or {}
+    if not isinstance(records, dict):
+        records = {}
+    entry = {"verdict": verdict, "sha": sha,
+             "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+             "source": str(source or "")}
+    records[f"{repo}#{number}"] = entry
+    jsave(path, records)
+    return entry
 
 
 def merge_gate_verdict_approved(verdict):
@@ -15056,7 +15091,9 @@ def merge_gate_evaluate(pr_view, review, tester_enabled=False, tester_review=Non
     if not reviewed_sha:
         reasons.append("no_review")
     else:
-        if verdict is not None and not merge_gate_verdict_approved(verdict):
+        approved = (merge_gate_tester_approved(verdict) if tester_enabled
+                    else merge_gate_verdict_approved(verdict))
+        if verdict is not None and not approved:
             reasons.append("verdict")
         if not merge_gate_sha_matches(reviewed_sha, head_sha):
             reasons.append("stale_review")
@@ -15242,6 +15279,8 @@ def cmd_merge_gate_once(args, policy=None, runner=None, results_out=None):
                   f"head={(record.get('head_sha') or '-')[:12]}  "
                   f"reviewed={(record.get('reviewed_sha') or '-')[:12]}  "
                   f"source={record.get('judgment_source') or 'lane'}  "
+                  f"verdict={record.get('review_verdict') or '-'}  "
+                  f"bound={(record.get('reviewed_sha') or '-')[:8]}  "
                   f"checks={checks.get('passed', 0)}/{total}  ignored={len(checks.get('ignored_names', []))}")
         if hook_record is not None:
             print(f"post-merge-hook  {hook_record['status']}  "

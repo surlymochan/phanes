@@ -195,7 +195,7 @@ class MergeGateTests(unittest.TestCase):
 
     def test_tester_switch_off_keeps_lane_verdict_authoritative(self):
         self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
-        self.write_tester_verdicts({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "changes",
+        self.write_tester_verdicts({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "CHANGES",
                                                   "at": "2026-11-05T00:00:00Z",
                                                   "source": "tester/divergence-log.md"}})
         gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
@@ -210,9 +210,9 @@ class MergeGateTests(unittest.TestCase):
             f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "approve"},
         })
         self.write_tester_verdicts({
-            f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve",
+            f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "APPROVE",
                           "at": "2026-11-05T00:00:00Z", "source": "tester/divergence-log.md"},
-            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "changes",
+            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "CHANGES",
                           "at": "2026-11-05T00:00:00Z", "source": "tester/divergence-log.md"},
         })
         gh = FakeGh({7: pr_payload(7, checks=[check("build")]),
@@ -253,7 +253,56 @@ class MergeGateTests(unittest.TestCase):
         with contextlib.redirect_stdout(buffer):
             code = xs.cmd_merge_gate(args, None, runner=gh)
         self.assertEqual(code, 0)
-        self.assertIn("source=lane", buffer.getvalue())
+        out = buffer.getvalue()
+        self.assertIn("source=lane", out)
+        self.assertIn("verdict=approve", out)
+        self.assertIn(f"bound={HEAD_SHA[:8]}", out)
+
+    def test_tester_switch_corrupt_verdict_file_blocks(self):
+        """An unreadable tester-verdicts file is insufficient evidence."""
+        (self.home / "MERGE-GATE-TESTER").touch()
+        (self.home / "tester-verdicts.json").write_text("{not json")
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_tester_switch_rejects_verdict_outside_the_ruled_enum(self):
+        """A verdict outside APPROVE/CHANGES/TOOL_FAIL counts as missing."""
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        self.write_tester_verdicts({f"{REPO}#7": {"sha": HEAD_SHA,
+                                                  "verdict": "approve",
+                                                  "at": "2026-11-05T00:00:00Z",
+                                                  "source": "tester/x.md"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_tester_verdict_write_helper_roundtrip(self):
+        """The write helper validates the enum and the gate reads it back."""
+        path = str(self.home / "tester-verdicts.json")
+        entry = xs.merge_gate_record_tester_verdict(
+            path, REPO, 7, "APPROVE", HEAD_SHA, "tester/divergence-log.md")
+        self.assertEqual(entry["verdict"], "APPROVE")
+        self.assertIn("+", entry["at"])  # timezone-aware ISO timestamp
+        with self.assertRaises(Exception):
+            xs.merge_gate_record_tester_verdict(
+                path, REPO, 7, "PASS", HEAD_SHA, "tester/divergence-log.md")
+        with self.assertRaises(Exception):
+            xs.merge_gate_record_tester_verdict(
+                path, REPO, 7, "APPROVE", "abc123", "tester/divergence-log.md")
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": OTHER_SHA, "verdict": "changes"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 0)
+        self.assertEqual(results[0]["status"], "mergeable")
+        self.assertEqual(results[0]["judgment_source"], "tester")
 
     def test_the_review_of_another_repository_does_not_release_the_pr(self):
         """A record of another repository never releases this PR."""
