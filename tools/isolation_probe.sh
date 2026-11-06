@@ -5,7 +5,7 @@ if ! command -v python3 >/dev/null 2>&1; then
         printf '{"check":"%s","status":"SKIP","detail":"python3 unavailable"}\n' "$check"
     done
     printf '%s\n' '{"check":"summary","status":"SKIP","detail":"python3 unavailable"}'
-    exit 0
+    exit 2
 fi
 exec python3 - "$@" <<'PY'
 import argparse
@@ -26,8 +26,11 @@ parser.add_argument('--no-network', action='store_true')
 args = parser.parse_args()
 roots = args.search_root or ['/home', '/opt', '/root', '/srv', '/tmp', '/etc', '/run', '/workspace']
 results = []
+summary_results = []
 def emit(check, status, detail):
     results.append(status)
+    if not (args.no_network and check in ('deny-host', 'allow-host', 'net-iface') and status == 'SKIP'):
+        summary_results.append(status)
     print(json.dumps({'check': check, 'status': status, 'detail': detail}, ensure_ascii=True))
 
 def excluded(path):
@@ -39,7 +42,10 @@ def walk(roots):
     def error(exc):
         errors.append(exc)
     for root in roots:
-        if excluded(root) or not os.path.lexists(root):
+        if excluded(root):
+            continue
+        if not os.path.lexists(root):
+            errors.append(('missing search root: ' if root in args.search_root else 'skipped missing default root: ') + root)
             continue
         if not os.path.isdir(root) or os.path.islink(root):
             yield root, errors
@@ -83,8 +89,9 @@ try:
                     tail = data[-overlap:] if overlap else b''
         except OSError as exc:
             errors.append(exc)
-    emit('identifiers', 'FAIL' if matches else 'SKIP' if errors else 'PASS',
-         'matches: %d; unreadable entries: %d' % (matches, len(errors)))
+    failures = [e for e in errors if not str(e).startswith('skipped missing default root: ')]
+    emit('identifiers', 'FAIL' if matches or failures else 'PASS',
+         'matches: %d; traversal details: %s' % (matches, '; '.join(map(str, errors)) or 'none'))
 except (OSError, ValueError) as exc:
     emit('identifiers', 'SKIP', 'identifier input unavailable or empty')
 
@@ -141,8 +148,9 @@ for path, errors in walk(['/run'] + roots):
                 s.close()
     except OSError as exc:
         errors.append(exc)
-emit('unix-socket', 'FAIL' if connected else 'SKIP' if errors else 'PASS',
-     'connectable sockets: %d; unreadable entries: %d' % (connected, len(errors)))
+failures = [e for e in errors if not str(e).startswith('skipped missing default root: ')]
+emit('unix-socket', 'FAIL' if connected or failures else 'PASS',
+     'connectable sockets: %d; traversal details: %s' % (connected, '; '.join(map(str, errors)) or 'none'))
 
 def host_check(host, proxy, deny=False):
     if not re.fullmatch(r'[A-Za-z0-9.-]+', host) or not host.strip('.'):
@@ -163,9 +171,17 @@ def host_check(host, proxy, deny=False):
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True)
         parts = result.stdout.split()
         code, connect = (int(parts[-2]), int(parts[-1])) if len(parts) >= 2 else (0, 0)
-        if proxy and connect != 200:
+        if deny:
+            if result.returncode == 28:
+                return None
+            if connect == 403 or result.returncode in (5, 6, 7):
+                return False
+            if result.returncode != 0:
+                return None
+            return True if code > 0 else None
+        if result.returncode != 0 or (proxy and connect != 200):
             return False
-        return code > 0 and (not deny or code != 403)
+        return code > 0
     except (OSError, ValueError):
         return None
 
@@ -176,7 +192,9 @@ for check, hosts in (('deny-host', args.deny_host), ('allow-host', args.allow_ho
     for host in hosts:
         if check == 'deny-host':
             direct, proxied = host_check(host, False, True), host_check(host, True, True)
-            status = 'FAIL' if direct is True or proxied is True else 'SKIP' if direct is None or proxied is None else 'PASS'
+            proxy_configured = any(os.environ.get(k) for k in ('https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY'))
+            outcomes = [direct] + ([proxied] if proxy_configured else [])
+            status = 'PASS' if all(value is False for value in outcomes) else 'FAIL'
         else:
             proxied = host_check(host, True)
             status = 'SKIP' if proxied is None else 'PASS' if proxied else 'FAIL'
@@ -199,7 +217,7 @@ else:
     present = [name for name in ('.ssh', '.aws') if os.path.lexists(os.path.join(home, name))]
     emit('secrets', 'FAIL' if present else 'PASS', 'present: %s; environment names: %s' % (', '.join(present) or 'none', ', '.join(secret_names) or 'none'))
 
-status = 'FAIL' if 'FAIL' in results else 'SKIP' if 'SKIP' in results else 'PASS'
+status = 'FAIL' if 'FAIL' in summary_results else 'SKIP' if 'SKIP' in summary_results else 'PASS'
 print(json.dumps({'check': 'summary', 'status': status, 'detail': 'PASS=%d FAIL=%d SKIP=%d' % tuple(results.count(s) for s in ('PASS', 'FAIL', 'SKIP'))}))
-sys.exit(1 if status == 'FAIL' else 0)
+sys.exit(1 if status == 'FAIL' else 2 if status == 'SKIP' else 0)
 PY
