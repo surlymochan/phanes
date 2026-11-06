@@ -16,7 +16,7 @@ git clone -b handoff-framework https://github.com/surlymochan/phanes ~/workspace
 1. 取得私仓：`git clone https://github.com/surlymochan/phanes-handoff ~/workspace/phanes-handoff`（需要该账号的 gh 登录；没有权限就向用户索取）。
 2. 在本仓运行 `bash tools/ingest.sh`：打印实时体检 + 私仓入口摘要 + 未完成队列。以实时输出为准。
 3. 读私仓 `HANDOFF-PRIVATE.md` → `STATE.md` → `QUEUE.md`（目标、事实、下一步）。
-4. 读 `handoff/ROLES.md` 自己拉起子会话（builder/tester/ops/rsi），读 `handoff/PROTOCOL.md` 了解协作、事件触发和授权规则。
+4. 读 `handoff/ROLES.md` 和 `handoff/PROTOCOL.md`。Boss 兼任 RSI，按任务需要派出并复用 builder/tester/ops 等 subagent；不再调用平级角色聊天。
 5. 从队列第一个未完成项开始推进，不等批准（授权边界见 PROTOCOL §5）。
 
 ## 文件

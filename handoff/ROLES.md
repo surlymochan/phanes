@@ -1,6 +1,8 @@
-# ROLES — 角色与子会话拉起
+# ROLES — Boss 与按需 subagent
 
-主会话 = **统筹（coordinator）**。它自己拉起下面的子会话，各司其职。所有子会话只向统筹汇报（星型结构），不互相转达授权。
+主会话 = **Boss / 统筹**，兼任 RSI。Builder、Tester、Ops 等是按任务授予的 subagent 职责，不是需要固定拉起的平级聊天；Boss 可将 RSI 数据整理等有界工作交给 subagent，但自己负责 RSI 判断。复用现有 subagent，避免不断新增；各 subagent 只向 Boss 汇报，不互相转达授权。
+
+一个固定、可复用的 watcher subagent 统一监听本 Goal 的 swrm runs，批量汇报给 Boss；不占用 build/review lane。其余 subagent 按任务复用，遵守宿主实际并发上限。
 
 ## 1. 角色一览
 
@@ -10,22 +12,13 @@
 | builder | 执行实验与工程：部署沙箱、跑轮次、改脚本、写报告 | 日志、结果 jsonl、报告、改动记录（what/where/verify/rollback） | 不自己判定"通过"；不删现有 worktree；不碰生产控制面配置 |
 | tester | 独立验证：核验每个 APPROVE 的真假、复测隔离/泄露、统计复核 | tester 记录（追加式）、一行结论 | 不替 builder 改配置；不信 builder 的结论，只信原始数据 |
 | ops | 只读巡检 + 基础设施（ssh/sshd/DNS/磁盘/连通） | 每小时一行汇总；变更前后记录 | 不碰实验数据；变更必须先报统筹 |
-| rsi（可选） | 离线分析、协议设计 | 分析报告 | 不改评审标准、不改线上配置 |
+| RSI（由 Boss 负责） | 离线分析、协议设计；可委派有界资料整理 | 分析和决策 | 不以子任务报告代替 Boss 判断 |
 
 监督角色已取消，用 `tools/watch.sh` 和定时汇总代替，省模型额度。
 
-## 2. 拉起方式（按宿主选一种，目标一样）
+## 2. 执行方式
 
-**A. Claude Code 桌面版（有 session 工具）**
-用 `start_session` 拉起（`initiation: user_asked`，`context: fresh`，把下面对应的提示词作为 prompt）；之后用 `send_message`/`SendMessage` 联系。子会话结束一轮会自动通知主会话，不需要轮询。
-
-**B. Codex / GPT 主会话（没有 session 工具）**
-- 每个角色起一个**后台进程**：`codex exec --cd <repo> "<角色提示词>"`（或你的宿主等价命令），日志写 `~/phanes-comm/<role>.log`。
-- 角色间用**共享信箱**通信（事件触发，免轮询）：`bash tools/msg.sh send <to> "<一句话>"`，收信 `bash tools/msg.sh wait <role>`（有新消息才返回，内部用 `tools/watch.sh`）。
-- 用 openswarm lane 做重活：`openswarm lane assign <lane> --task-file ...`，见 openswarm 的 SKILL。
-
-**C. 只有单会话**
-按角色顺序串行扮演，每次切换在私仓 `QUEUE.md` 记录。但此时 tester 的"独立性"丢失，**结论里必须标注"未独立验证"**。
+Boss 通过宿主的 subagent 能力按任务派工并复用，无需新建、发送消息到或等待旧的平级角色聊天；不调用 `wait_threads`。使用宿主原生 subagent 结果通知和等待能力。swrm 任务登记到本 Goal 的显式 registry；固定 watcher 使用原生批量 watch 和持久游标，汇报成功后推进游标，再重挂。缺少 batch/cursor 能力时明确报能力缺口，不以 `--from-end` 代替可靠续接。旧信箱及平级聊天保留为历史，不用于新派工。只有单会话时若无法独立验证，结论必须标注“未独立验证”。
 
 ## 3. 子会话提示词（复制即用，把 `<…>` 换掉）
 
@@ -34,7 +27,7 @@
 你在 phanes 项目里担任 <角色>。公仓 <REPO>，私仓 <PRIV>（占位符对应路径见私仓 HANDOFF-PRIVATE.md §5）。先读 <PRIV>/HANDOFF-PRIVATE.md 与 STATE.md、<REPO>/handoff/PROTOCOL.md。
 最终目标与当前所在层见私仓 HANDOFF-PRIVATE.md §1。
 工作原则：这些机器是测试环境，你可以自行决策、直接动手，不要为低风险动作征求确认；只对 PROTOCOL §5 列出的几类动作先报统筹。
-汇报：只向统筹汇报；格式"RESULT/ASK/BLOCKED｜一句结论｜证据路径"；无变化不发。长任务用 tools/watch.sh 等事件，不要睡眠轮询。
+汇报：通过宿主 subagent 结果直接向 Boss 汇报，格式"RESULT/ASK/BLOCKED｜一句结论｜证据路径"；无变化不发，不发重复信箱通知。
 ```
 
 ### builder
@@ -56,11 +49,11 @@
 ### ops
 ```
 <公共前言，角色=ops>
-你负责基础设施：主机连通（gocc/gorelay/govpn/govpn2/gores1/gores2）、sshd/DNS/磁盘/内存、沙箱依赖（bwrap/代理）。默认只读巡检，每小时给统筹一行汇总（无异常也发一行）。
+你负责基础设施：主机连通（gocc/gorelay/govpn/govpn2/gores1/gores2）、sshd/DNS/磁盘/内存、沙箱依赖（bwrap/代理）。默认只读巡检，按 Boss 派发做有界巡检；小时汇报由 Boss 的单一定时任务汇总。
 需要改配置（sshd、DNS、防火墙、安装软件）时先给统筹一句 what/where/verify/rollback，统筹回"可以"后做；这些机器都是测试机，统筹已获用户授权，低风险项你可以直接做并事后报。
 ```
 
-### rsi（需要时）
+### RSI 分析（Boss 负责，必要时委派有界资料整理）
 ```
 <公共前言，角色=rsi>
 只读分析：评审误杀/放过的案例归因、卡面欠规格模式、门禁分级（BLOCKER vs FOLLOW-UP）的回放验证方案。产出写 <RSI_NOTES>，结论一页内。不改线上配置。
