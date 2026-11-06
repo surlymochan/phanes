@@ -34,9 +34,10 @@ def head(root):
 def clean(root, change):
     r = run(['git','status','--porcelain=v1','--untracked-files=all','-z'], root)
     if r.returncode: raise ValueError('git_status_failed')
-    prefix = f'specs/changes/{change}/tdd/'
+    base = change.rsplit('-', 1)[0] if change.endswith(('-visible', '-holdout')) else change
+    prefixes = tuple(f'specs/changes/{base}-{label}/tdd/' for label in ('visible', 'holdout')) if base != change else (f'specs/changes/{change}/tdd/',)
     for e in r.stdout.split('\0'):
-        if e and not (e.startswith('?? ') and e[3:].startswith(prefix)): raise ValueError('dirty_worktree')
+        if e and not (e.startswith('?? ') and e[3:].startswith(prefixes)): raise ValueError('dirty_worktree')
 
 def tree_hashes(root):
     return {p.relative_to(root).as_posix():digest(p) for p in sorted(root.rglob('*')) if p.is_file() and not p.is_symlink()}

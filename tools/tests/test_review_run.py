@@ -50,14 +50,16 @@ print(json.dumps({'ok': (r.returncode != 0) if a.phase=='red' else (r.returncode
         (atoms / 'i6b_tdd_proof_validate.py').write_text("import json,os,pathlib,sys\np=os.environ.get('FAKE_REPLAY_FAIL')\nfail=bool(p and pathlib.Path(p).exists())\nif p: pathlib.Path(p).touch()\nprint(json.dumps({'ok': not fail}))\nsys.exit(fail)\n")
         run('git', 'add', '.', cwd=self.ev)
         run('git', 'commit', '-qm', 'fixture', cwd=self.ev)
-        self.holdout = self.base / 'holdout.py'
+        self.holdout_dir = self.base / 'holdout'
+        self.holdout_dir.mkdir()
+        self.holdout = self.holdout_dir / 'holdout.py'
         self.holdout.write_text('import sys\nsys.exit(0)\n')
         self.out = self.base / 'evidence'
 
     def invoke(self, phase, env=None, ev=None):
         cmd = [sys.executable, str(RUNNER), '--project', str(self.project), '--evalid', str(ev or self.ev),
                '--evidence', str(self.out), '--change-id', 'sample', '--cmd-visible', 'python3 -m unittest test_visible',
-               '--cmd-holdout', 'python3 ' + str(self.holdout), '--phase', phase, '--timeout', '30']
+               '--cmd-holdout', 'python3 ' + str(self.holdout), '--holdout-dir', str(self.holdout_dir), '--phase', phase, '--timeout', '30']
         r = subprocess.run(cmd, text=True, capture_output=True, env=env)
         return r, json.loads(r.stdout)
 
@@ -85,11 +87,39 @@ print(json.dumps({'ok': (r.returncode != 0) if a.phase=='red' else (r.returncode
     def test_replay_failure(self):
         self.green()
         env = dict(os.environ, FAKE_REPLAY_FAIL=str(self.base / 'replay-marker'))
-        _, data = self.invoke('posthoc', env); self.assertEqual(data['verdict'], 'INFRA'); self.assertFalse(data['replay']['ok'])
+        _, data = self.invoke('posthoc', env); self.assertEqual(data['verdict'], 'FAIL'); self.assertFalse(data['replay']['ok'])
+
+    def test_holdout_replay_failure(self):
+        self.green()
+        atom = self.ev / 'xflow' / 'atoms' / 'i6b_tdd_proof_validate.py'
+        atom.write_text("import json,sys\nfail='sample-holdout' in sys.argv\nprint(json.dumps({'ok': not fail}))\nsys.exit(fail)\n")
+        run('git', 'add', '.', cwd=self.ev)
+        run('git', 'commit', '-qm', 'fail holdout replay', cwd=self.ev)
+        _, data = self.invoke('posthoc')
+        self.assertEqual(data['verdict'], 'FAIL')
+        self.assertFalse(data['replay']['ok'])
+        self.assertIn('holdout', data['error'])
+
+    def test_holdout_changed_during_run(self):
+        self.green()
+        self.holdout.write_text("from pathlib import Path\nPath(__file__).write_text('changed')\n")
+        _, data = self.invoke('posthoc')
+        self.assertEqual((data['verdict'], data['error']), ('INFRA', 'holdout_changed'))
+        self.assertIn('holdout.py', data['holdout']['files_sha256'])
+
+    def test_holdout_inside_project_rejected(self):
+        self.holdout_dir = self.project
+        _, data = self.invoke('red')
+        self.assertEqual(data['verdict'], 'INFRA')
+        self.assertIn('outside project', data['error'])
 
     def test_posthoc(self):
         self.green()
         _, data = self.invoke('posthoc'); self.assertEqual((data['verdict'], data['classification']), ('PASS', 'posthoc'))
+        self.assertIn('holdout.py', data['holdout']['files_sha256'])
+        self.assertTrue((self.out / 'sample-visible' / 'record.json').is_file())
+        self.assertTrue((self.out / 'sample-holdout' / 'record.json').is_file())
+        self.assertEqual((self.out / 'sample-holdout' / 'holdout-files' / 'holdout.py').read_bytes(), self.holdout.read_bytes())
 
     def test_missing_evalid(self):
         _, data = self.invoke('red', ev=self.base / 'missing'); self.assertEqual(data['verdict'], 'INFRA')

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Run review tests and capture replayable evidence for a fixed checkout."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -38,24 +40,49 @@ def git(root, *args):
     return result.stdout.strip()
 
 
+def holdout_hashes(root):
+    if not root.is_dir():
+        raise ValueError('holdout directory missing')
+    result = {}
+    for path in sorted(root.rglob('*')):
+        if path.is_symlink():
+            raise ValueError('holdout symlink not supported')
+        if path.is_file():
+            result[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
 def main():
     p = argparse.ArgumentParser()
-    for name in ('project', 'evalid', 'evidence', 'change-id', 'cmd-visible', 'cmd-holdout'):
+    for name in ('project', 'evalid', 'evidence', 'change-id', 'cmd-visible', 'cmd-holdout', 'holdout-dir'):
         p.add_argument('--' + name, required=True)
     p.add_argument('--phase', required=True, choices=('red', 'green', 'posthoc'))
     p.add_argument('--timeout', type=float, default=600)
     a = p.parse_args()
     root, ev, out = (Path(x).resolve() for x in (a.project, a.evalid, a.evidence))
     result = {'change_id': a.change_id, 'commit': None, 'evalid_commit': None,
-              'visible': {'exit': None, 'log_path': None}, 'holdout': {'exit': None, 'log_path': None},
+              'visible': {'exit': None, 'log_path': None}, 'holdout': {'exit': None, 'log_path': None, 'files_sha256': None},
               'replay': {'ok': False}, 'classification': 'posthoc' if a.phase == 'posthoc' else 'tdd',
               'verdict': 'INFRA'}
+    holdout = Path(a.holdout_dir).resolve()
+    holdout_before = None
     try:
+        if holdout == root or root in holdout.parents:
+            raise ValueError('holdout directory must be outside project')
+        if holdout == out or out in holdout.parents or holdout in out.parents:
+            raise ValueError('holdout and evidence must be separate')
+        holdout_before = holdout_hashes(holdout)
+        result['holdout']['files_sha256'] = holdout_before
         if a.timeout <= 0 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', a.change_id):
             raise ValueError('invalid timeout or change id')
         if out == root or root in out.parents or out == ev or ev in out.parents:
             raise ValueError('evidence must be outside project and evalid')
         out.mkdir(parents=True, exist_ok=True)
+        if a.phase != 'red':
+            archived_holdout = out / (a.change_id + '-holdout') / 'holdout-files'
+            shutil.copytree(holdout, archived_holdout)
+            if holdout_hashes(archived_holdout) != holdout_before:
+                raise ValueError('holdout_changed')
         result['commit'] = git(root, 'rev-parse', '--verify', 'HEAD^{commit}')
         result['evalid_commit'] = git(ev, 'rev-parse', '--verify', 'HEAD^{commit}')
         if git(ev, 'status', '--porcelain=v1', '--untracked-files=all'):
@@ -64,16 +91,14 @@ def main():
             if not (ev / 'xflow' / 'atoms' / atom).is_file():
                 raise ValueError('evalid atom missing')
         status = git(root, 'status', '--porcelain=v1', '--untracked-files=all')
-        prefix = f'specs/changes/{a.change_id}/tdd/'
+        prefixes = tuple(f'specs/changes/{a.change_id}-{label}/tdd/' for label in ('visible', 'holdout'))
         for line in status.splitlines():
-            if not (a.phase == 'green' and line.startswith('?? ' + prefix)):
+            if not (a.phase == 'green' and any(line.startswith('?? ' + prefix) for prefix in prefixes)):
                 raise ValueError('dirty project checkout')
-        # Require a concrete external file in the command; isolation and permissions
-        # of that file and the evidence directory are supplied by the caller.
+        # The hash comparison detects changes; it does not prove the author lacks write access.
         if a.phase != 'red':
             paths = [Path(s) for s in shlex.split(a.cmd_holdout) if Path(s).is_absolute()]
-            if not paths or not any(p.is_file() and root not in p.resolve().parents and p.resolve() != root
-                                    and out not in p.resolve().parents for p in paths):
+            if not paths or not any(p.is_file() and holdout in p.resolve().parents for p in paths):
                 raise ValueError('holdout command must reference an external file')
         def test(label, command):
             log = out / (a.phase + '-' + label + '.log')
@@ -90,26 +115,45 @@ def main():
         if a.phase != 'red' and test('holdout', a.cmd_holdout) != 0:
             result['verdict'] = 'FAIL'
             return result
-        base = [sys.executable, str(EVIDENCE), '--project', str(root), '--evalid', str(ev),
-                '--evidence', str(out), '--change-id', a.change_id, '--command', a.cmd_visible]
-        def evidence(action, phase=None):
-            log = out / (a.phase + '-' + action + '.log')
-            args = base[:2] + [action] + base[2:]
+        def evidence(label, action, phase=None):
+            change = a.change_id + '-' + label
+            log = out / (a.phase + '-' + label + '-' + action + '.log')
+            command = a.cmd_visible if label == 'visible' else a.cmd_holdout
+            args = [sys.executable, str(EVIDENCE), action, '--project', str(root),
+                    '--evalid', str(ev), '--evidence', str(out / change),
+                    '--change-id', change, '--command', command]
             if phase:
                 args += ['--phase', phase]
             code = execute(args, root, a.timeout, log)
             if code is None:
                 raise RuntimeError('evidence command timed out or could not start')
             if code:
-                raise ValueError('evidence ' + action + ' failed; see ' + log.name)
-        evidence('capture', a.phase)
+                result['verdict'] = 'FAIL'
+                result['error'] = 'evidence ' + label + ' ' + action + ' failed; see ' + log.name
+                return False
+            return True
+        if not evidence('visible', 'capture', a.phase):
+            return result
         if a.phase != 'red':
-            evidence('verify')
+            if not evidence('holdout', 'capture', 'posthoc'):
+                return result
+            if not evidence('visible', 'verify') or not evidence('holdout', 'verify'):
+                return result
             result['replay']['ok'] = True
         result['verdict'] = 'PASS'
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         result['error'] = str(exc)
     finally:
+        if holdout_before is not None:
+            try:
+                if holdout_hashes(holdout) != holdout_before:
+                    result['verdict'] = 'INFRA'
+                    result['replay']['ok'] = False
+                    result['error'] = 'holdout_changed'
+            except (OSError, ValueError):
+                result['verdict'] = 'INFRA'
+                result['replay']['ok'] = False
+                result['error'] = 'holdout_changed'
         try:
             # Never write into the project even when validation fails.
             if out != root and root not in out.parents and out != ev and ev not in out.parents:
