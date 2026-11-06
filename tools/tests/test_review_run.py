@@ -53,13 +53,13 @@ print(json.dumps({'ok': (r.returncode != 0) if a.phase=='red' else (r.returncode
         self.holdout_dir = self.base / 'holdout'
         self.holdout_dir.mkdir()
         self.holdout = self.holdout_dir / 'holdout.py'
-        self.holdout.write_text('import sys\nsys.exit(0)\n')
+        self.holdout.write_text('import unittest\nclass Holdout(unittest.TestCase):\n def test_ok(self): self.assertTrue(True)\nunittest.main()\n')
         self.out = self.base / 'evidence'
 
-    def invoke(self, phase, env=None, ev=None):
+    def invoke(self, phase, env=None, ev=None, visible=None, holdout=None, extra=()):
         cmd = [sys.executable, str(RUNNER), '--project', str(self.project), '--evalid', str(ev or self.ev),
-               '--evidence', str(self.out), '--change-id', 'sample', '--cmd-visible', 'python3 -m unittest test_visible',
-               '--cmd-holdout', 'python3 ' + str(self.holdout), '--holdout-dir', str(self.holdout_dir), '--phase', phase, '--timeout', '30']
+               '--evidence', str(self.out), '--change-id', 'sample', '--cmd-visible', visible or 'python3 -m unittest test_visible',
+               '--cmd-holdout', holdout or 'python3 {holdout}/holdout.py', '--holdout-dir', str(self.holdout_dir), '--phase', phase, '--timeout', '30', *extra]
         r = subprocess.run(cmd, text=True, capture_output=True, env=env)
         return r, json.loads(r.stdout)
 
@@ -77,8 +77,35 @@ print(json.dumps({'ok': (r.returncode != 0) if a.phase=='red' else (r.returncode
         r, data = self.invoke('red'); self.assertNotEqual(r.returncode, 0); self.assertEqual(data['verdict'], 'FAIL')
 
     def test_holdout_failure(self):
-        self.invoke('red'); self.green(); self.holdout.write_text('raise SystemExit(1)\n')
+        self.invoke('red'); self.green(); self.holdout.write_text('import unittest\nclass Holdout(unittest.TestCase):\n def test_fail(self): self.fail()\nunittest.main()\n')
         _, data = self.invoke('green'); self.assertEqual(data['verdict'], 'FAIL'); self.assertEqual(data['holdout']['exit'], 1)
+
+    def test_no_tests_detected(self):
+        self.green()
+        self.holdout.write_text('import unittest\nunittest.main()\n')
+        _, data = self.invoke('posthoc')
+        self.assertEqual((data['verdict'], data['error']), ('INFRA', 'no_tests_detected'))
+
+    def test_visible_no_tests_detected(self):
+        _, data = self.invoke('red', visible="python3 -c 'import unittest; unittest.main()'")
+        self.assertEqual((data['verdict'], data['error']), ('INFRA', 'no_tests_detected'))
+
+    def test_holdout_placeholder_required(self):
+        _, data = self.invoke('red', holdout='python3 ' + str(self.holdout))
+        self.assertEqual(data['verdict'], 'INFRA')
+        self.assertIn('{holdout}', data['error'])
+
+    def test_min_holdout_tests(self):
+        self.green()
+        _, data = self.invoke('posthoc', extra=('--min-holdout-tests', '2'))
+        self.assertEqual((data['verdict'], data['error']), ('INFRA', 'no_tests_detected'))
+
+    def test_original_swap_does_not_change_executed_copy(self):
+        self.green()
+        original = str(self.holdout)
+        self.holdout.write_text("import unittest\nfrom pathlib import Path\np=Path(" + repr(original) + ")\nold=p.read_text()\np.write_text('raise SystemExit(1)')\np.write_text(old)\nclass Holdout(unittest.TestCase):\n def test_ok(self): self.assertTrue(True)\nunittest.main()\n")
+        _, data = self.invoke('posthoc')
+        self.assertEqual(data['verdict'], 'PASS', data)
 
     def test_dirty(self):
         (self.project / 'implementation.py').write_text('value = 1\n')
@@ -102,7 +129,7 @@ print(json.dumps({'ok': (r.returncode != 0) if a.phase=='red' else (r.returncode
 
     def test_holdout_changed_during_run(self):
         self.green()
-        self.holdout.write_text("from pathlib import Path\nPath(__file__).write_text('changed')\n")
+        self.holdout.write_text("import unittest\nfrom pathlib import Path\nPath(__file__).write_text('changed')\nclass Holdout(unittest.TestCase):\n def test_ok(self): pass\nunittest.main()\n")
         _, data = self.invoke('posthoc')
         self.assertEqual((data['verdict'], data['error']), ('INFRA', 'holdout_changed'))
         self.assertIn('holdout.py', data['holdout']['files_sha256'])

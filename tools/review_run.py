@@ -58,6 +58,7 @@ def main():
         p.add_argument('--' + name, required=True)
     p.add_argument('--phase', required=True, choices=('red', 'green', 'posthoc'))
     p.add_argument('--timeout', type=float, default=600)
+    p.add_argument('--min-holdout-tests', type=int, default=1)
     a = p.parse_args()
     root, ev, out = (Path(x).resolve() for x in (a.project, a.evalid, a.evidence))
     result = {'change_id': a.change_id, 'commit': None, 'evalid_commit': None,
@@ -66,6 +67,7 @@ def main():
               'verdict': 'INFRA'}
     holdout = Path(a.holdout_dir).resolve()
     holdout_before = None
+    archived_holdout = None
     try:
         if holdout == root or root in holdout.parents:
             raise ValueError('holdout directory must be outside project')
@@ -73,16 +75,20 @@ def main():
             raise ValueError('holdout and evidence must be separate')
         holdout_before = holdout_hashes(holdout)
         result['holdout']['files_sha256'] = holdout_before
-        if a.timeout <= 0 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', a.change_id):
+        if a.timeout <= 0 or a.min_holdout_tests < 1 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', a.change_id):
             raise ValueError('invalid timeout or change id')
         if out == root or root in out.parents or out == ev or ev in out.parents:
             raise ValueError('evidence must be outside project and evalid')
         out.mkdir(parents=True, exist_ok=True)
+        if '{holdout}' not in a.cmd_holdout:
+            raise ValueError('holdout command must contain {holdout}')
+        holdout_command = a.cmd_holdout
         if a.phase != 'red':
             archived_holdout = out / (a.change_id + '-holdout') / 'holdout-files'
             shutil.copytree(holdout, archived_holdout)
             if holdout_hashes(archived_holdout) != holdout_before:
                 raise ValueError('holdout_changed')
+            holdout_command = a.cmd_holdout.replace('{holdout}', shlex.quote(str(archived_holdout)))
         result['commit'] = git(root, 'rev-parse', '--verify', 'HEAD^{commit}')
         result['evalid_commit'] = git(ev, 'rev-parse', '--verify', 'HEAD^{commit}')
         if git(ev, 'status', '--porcelain=v1', '--untracked-files=all'):
@@ -95,36 +101,47 @@ def main():
         for line in status.splitlines():
             if not (a.phase == 'green' and any(line.startswith('?? ' + prefix) for prefix in prefixes)):
                 raise ValueError('dirty project checkout')
-        # The hash comparison detects changes; it does not prove the author lacks write access.
-        if a.phase != 'red':
-            paths = [Path(s) for s in shlex.split(a.cmd_holdout) if Path(s).is_absolute()]
-            if not paths or not any(p.is_file() and holdout in p.resolve().parents for p in paths):
-                raise ValueError('holdout command must reference an external file')
+        def check_copy():
+            if archived_holdout is not None and holdout_hashes(archived_holdout) != holdout_before:
+                raise ValueError('holdout_changed')
+
         def test(label, command):
+            check_copy()
             log = out / (a.phase + '-' + label + '.log')
             result[label]['log_path'] = str(log)
             code = execute(['/bin/sh', '-c', command], root, a.timeout, log)
             result[label]['exit'] = code
+            check_copy()
             if code is None or code in (126, 127) or code < 0:
                 raise RuntimeError('test command failed to start or timed out')
+            output = log.read_text(errors='replace')
+            counts = [int(n) for n in re.findall(r'\bRan (\d+) tests?\b', output)]
+            counts += [sum(int(n) for n in re.findall(r'(\d+) (?:passed|failed|xfailed|xpassed)\b', line))
+                       for line in output.splitlines() if re.search(r'\d+ (?:passed|failed|xfailed|xpassed)\b', line)]
+            count = max(counts, default=0)
+            result[label]['test_count'] = count
+            if count < (a.min_holdout_tests if label == 'holdout' else 1):
+                raise RuntimeError('no_tests_detected')
             return code
         visible = test('visible', a.cmd_visible)
         if (a.phase == 'red' and visible == 0) or (a.phase != 'red' and visible != 0):
             result['verdict'] = 'FAIL'
             return result
-        if a.phase != 'red' and test('holdout', a.cmd_holdout) != 0:
+        if a.phase != 'red' and test('holdout', holdout_command) != 0:
             result['verdict'] = 'FAIL'
             return result
         def evidence(label, action, phase=None):
+            check_copy()
             change = a.change_id + '-' + label
             log = out / (a.phase + '-' + label + '-' + action + '.log')
-            command = a.cmd_visible if label == 'visible' else a.cmd_holdout
+            command = a.cmd_visible if label == 'visible' else holdout_command
             args = [sys.executable, str(EVIDENCE), action, '--project', str(root),
                     '--evalid', str(ev), '--evidence', str(out / change),
                     '--change-id', change, '--command', command]
             if phase:
                 args += ['--phase', phase]
             code = execute(args, root, a.timeout, log)
+            check_copy()
             if code is None:
                 raise RuntimeError('evidence command timed out or could not start')
             if code:
@@ -144,6 +161,14 @@ def main():
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         result['error'] = str(exc)
     finally:
+        if archived_holdout is not None and holdout_before is not None:
+            try:
+                if holdout_hashes(archived_holdout) != holdout_before:
+                    raise ValueError('holdout_changed')
+            except (OSError, ValueError):
+                result['verdict'] = 'INFRA'
+                result['replay']['ok'] = False
+                result['error'] = 'holdout_changed'
         if holdout_before is not None:
             try:
                 if holdout_hashes(holdout) != holdout_before:
