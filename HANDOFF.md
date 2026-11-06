@@ -9,7 +9,7 @@
 git clone -b handoff-framework https://github.com/surlymochan/phanes ~/workspace/phanes 2>/dev/null; cd ~/workspace/phanes && git pull -q --ff-only; bash tools/ingest.sh
 ```
 
-它会体检、自动取得私仓并打印入口。之后按下面的流程走。
+它会体检、自动取得私仓，并在末尾打印完整的**接手指令**，照着做即可。对新会话你只需说一句："执行 HANDOFF.md 里的那条命令，然后照输出的接手指令做。"
 
 ## 接手流程（新 AI 会话 = 主会话/统筹）
 

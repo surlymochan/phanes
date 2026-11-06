@@ -24,7 +24,16 @@ fi
 if [ -d "$PRIV/.git" ]; then
   (cd "$PRIV" && git pull -q --ff-only 2>/dev/null; echo "私仓：$PRIV  ($(git log --oneline -1))")
   echo; echo "== 工作队列（私仓 QUEUE.md 未完成项）=="; grep -n '^- \[ \]' "$PRIV/QUEUE.md" 2>/dev/null | head -10
-  echo; echo "接下来：读 $PRIV/HANDOFF-PRIVATE.md → STATE.md → QUEUE.md，再读 handoff/ROLES.md 拉起子会话、handoff/PROTOCOL.md"
+  R="$(cd "$(dirname "$0")/.." && pwd)"
+  cat <<EOF2
+
+================ 接手指令（你现在是新统筹/主会话，照做，不要等批准）================
+1. 依次读：$PRIV/HANDOFF-PRIVATE.md → STATE.md → QUEUE.md；再读 $R/handoff/ROLES.md、PROTOCOL.md。
+2. 按 ROLES.md 自己拉起 builder / tester / ops 子会话（占位符对应路径见 HANDOFF-PRIVATE.md §5），然后从上面队列第一个未完成项开始推进。
+3. 只有 PROTOCOL §5 的事（含队列 Q0：MiniMax 密钥转发）先问用户，其余自己决定、事后一句话汇报。
+4. 等待用事件（tools/watch.sh、tools/msg.sh、openswarm watch），不要睡眠轮询。
+=====================================================================================
+EOF2
 else
   echo "无法获取私仓：请向用户索取访问（surlymochan/phanes-handoff），先只按公仓框架工作。"
 fi
