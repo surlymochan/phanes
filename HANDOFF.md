@@ -5,7 +5,8 @@
 ## 一条命令起步（新机器/新会话）
 
 ```bash
-git clone https://github.com/surlymochan/phanes ~/workspace/phanes 2>/dev/null; cd ~/workspace/phanes && git pull -q --ff-only; bash tools/ingest.sh
+# 本框架尚在 PR #1876（分支 handoff-framework），合入 main 前用带分支的版本；合入后去掉 -b
+git clone -b handoff-framework https://github.com/surlymochan/phanes ~/workspace/phanes 2>/dev/null; cd ~/workspace/phanes && git pull -q --ff-only; bash tools/ingest.sh
 ```
 
 它会体检、自动取得私仓并打印入口。之后按下面的流程走。
