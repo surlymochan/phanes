@@ -1,0 +1,107 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+RUNNER = Path(__file__).resolve().parents[1] / 'review_run.py'
+
+
+def run(*args, cwd=None):
+    return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=True)
+
+
+def repo(path):
+    path.mkdir()
+    run('git', 'init', '-q', str(path))
+    run('git', 'config', 'user.email', 'test@example.invalid', cwd=path)
+    run('git', 'config', 'user.name', 'Test', cwd=path)
+
+
+def commit(path):
+    run('git', 'add', 'test_visible.py', 'implementation.py', cwd=path)
+    run('git', 'commit', '-qm', 'fixture', cwd=path)
+
+
+class ReviewRunTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.project = self.base / 'project'
+        repo(self.project)
+        (self.project / 'test_visible.py').write_text('import unittest\nfrom implementation import value\nclass TestValue(unittest.TestCase):\n def test_value(self): self.assertEqual(value, 1)\n')
+        (self.project / 'implementation.py').write_text('value = 0\n')
+        commit(self.project)
+        self.ev = self.base / 'evalid'
+        repo(self.ev)
+        atoms = self.ev / 'xflow' / 'atoms'
+        atoms.mkdir(parents=True)
+        (atoms / 'i6a_tdd_run.py').write_text('''import argparse,json,pathlib,subprocess,sys
+p=argparse.ArgumentParser()
+for x in ('project-root','change-id','phase','test-command'): p.add_argument('--'+x,required=True)
+a=p.parse_args(); root=pathlib.Path(a.project_root); r=subprocess.run(a.test_command,shell=True,cwd=root,capture_output=True)
+d=root/'specs'/'changes'/a.change_id/'tdd'; (d/'snapshots'/(a.phase+'-0')).mkdir(parents=True,exist_ok=True)
+(d/(a.phase+'-0.json')).write_text(json.dumps({'failure_kind':'assertion' if r.returncode else 'pass'}))
+print(json.dumps({'ok': (r.returncode != 0) if a.phase=='red' else (r.returncode == 0)}))
+''')
+        (atoms / 'i6b_tdd_proof_validate.py').write_text("import json,os,pathlib,sys\np=os.environ.get('FAKE_REPLAY_FAIL')\nfail=bool(p and pathlib.Path(p).exists())\nif p: pathlib.Path(p).touch()\nprint(json.dumps({'ok': not fail}))\nsys.exit(fail)\n")
+        run('git', 'add', '.', cwd=self.ev)
+        run('git', 'commit', '-qm', 'fixture', cwd=self.ev)
+        self.holdout = self.base / 'holdout.py'
+        self.holdout.write_text('import sys\nsys.exit(0)\n')
+        self.out = self.base / 'evidence'
+
+    def invoke(self, phase, env=None, ev=None):
+        cmd = [sys.executable, str(RUNNER), '--project', str(self.project), '--evalid', str(ev or self.ev),
+               '--evidence', str(self.out), '--change-id', 'sample', '--cmd-visible', 'python3 -m unittest test_visible',
+               '--cmd-holdout', 'python3 ' + str(self.holdout), '--phase', phase, '--timeout', '30']
+        r = subprocess.run(cmd, text=True, capture_output=True, env=env)
+        return r, json.loads(r.stdout)
+
+    def green(self):
+        (self.project / 'implementation.py').write_text('value = 1\n')
+        commit(self.project)
+
+    def test_red_green(self):
+        r, data = self.invoke('red'); self.assertEqual((r.returncode, data['verdict']), (0, 'PASS'))
+        self.green()
+        r, data = self.invoke('green'); self.assertEqual((r.returncode, data['verdict'], data['classification'], data['replay']['ok']), (0, 'PASS', 'tdd', True))
+
+    def test_red_unexpected_pass(self):
+        self.green()
+        r, data = self.invoke('red'); self.assertNotEqual(r.returncode, 0); self.assertEqual(data['verdict'], 'FAIL')
+
+    def test_holdout_failure(self):
+        self.invoke('red'); self.green(); self.holdout.write_text('raise SystemExit(1)\n')
+        _, data = self.invoke('green'); self.assertEqual(data['verdict'], 'FAIL'); self.assertEqual(data['holdout']['exit'], 1)
+
+    def test_dirty(self):
+        (self.project / 'implementation.py').write_text('value = 1\n')
+        _, data = self.invoke('red'); self.assertEqual(data['verdict'], 'INFRA')
+
+    def test_replay_failure(self):
+        self.green()
+        env = dict(os.environ, FAKE_REPLAY_FAIL=str(self.base / 'replay-marker'))
+        _, data = self.invoke('posthoc', env); self.assertEqual(data['verdict'], 'INFRA'); self.assertFalse(data['replay']['ok'])
+
+    def test_posthoc(self):
+        self.green()
+        _, data = self.invoke('posthoc'); self.assertEqual((data['verdict'], data['classification']), ('PASS', 'posthoc'))
+
+    def test_missing_evalid(self):
+        _, data = self.invoke('red', ev=self.base / 'missing'); self.assertEqual(data['verdict'], 'INFRA')
+
+    @unittest.skipUnless(os.environ.get('EVALID_CHECKOUT'), 'EVALID_CHECKOUT not set')
+    def test_real_evalid(self):
+        ev = Path(os.environ['EVALID_CHECKOUT'])
+        r, data = self.invoke('red', ev=ev); self.assertEqual(r.returncode, 0, data)
+        self.green()
+        r, data = self.invoke('green', ev=ev); self.assertEqual(r.returncode, 0, data)
+        self.assertEqual((data['classification'], data['replay']['ok']), ('tdd', True))
+
+
+if __name__ == '__main__':
+    unittest.main()
