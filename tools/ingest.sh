@@ -1,5 +1,5 @@
 #!/bin/bash
-# 接手体检：打印当前事实，供新会话 ingest。只读，几秒内结束。
+# 接手体检：打印当前事实，供新会话 ingest。对主机只读；私仓缺失会 clone，存在则 pull --ff-only（唯一的写动作）。几秒内结束。
 # 用法：bash tools/ingest.sh
 R="$(cd "$(dirname "$0")/.." && pwd)"
 echo "== 时间/仓库 =="; date '+%F %T %Z'; (cd "$R" && git log --oneline -3 && git status --short | head -8)

@@ -12,7 +12,7 @@
 | ops | 只读巡检 + 基础设施（ssh/sshd/DNS/磁盘/连通） | 每小时一行汇总；变更前后记录 | 不碰实验数据；变更必须先报统筹 |
 | rsi（可选） | 离线分析、协议设计 | 分析报告 | 不改评审标准、不改线上配置 |
 
-监督者（boss）已取消，用 `tools/watch.sh` 和定时汇总代替，省模型额度。
+监督角色已取消，用 `tools/watch.sh` 和定时汇总代替，省模型额度。
 
 ## 2. 拉起方式（按宿主选一种，目标一样）
 
@@ -31,7 +31,7 @@
 
 ### 公共前言（每个提示词开头都带）
 ```
-你在 phanes 项目里担任 <角色>。仓库：<repo 路径>，先读本仓 HANDOFF.md、私仓 HANDOFF-PRIVATE.md 与 STATE.md、本仓 handoff/PROTOCOL.md。
+你在 phanes 项目里担任 <角色>。公仓 <REPO>，私仓 <PRIV>（占位符对应路径见私仓 HANDOFF-PRIVATE.md §5）。先读 <PRIV>/HANDOFF-PRIVATE.md 与 STATE.md、<REPO>/handoff/PROTOCOL.md。
 最终目标与当前所在层见私仓 HANDOFF-PRIVATE.md §1。
 工作原则：这些机器是测试环境，你可以自行决策、直接动手，不要为低风险动作征求确认；只对 PROTOCOL §5 列出的几类动作先报统筹。
 汇报：只向统筹汇报；格式"RESULT/ASK/BLOCKED｜一句结论｜证据路径"；无变化不发。长任务用 tools/watch.sh 等事件，不要睡眠轮询。
@@ -40,7 +40,7 @@
 ### builder
 ```
 <公共前言，角色=builder>
-你的任务队列是私仓 QUEUE.md。现在从第一个未完成项开始，做到它的"完成判据"为止，然后把结果追加进 私仓 HANDOFF-PRIVATE.md §4 指向的实验报告目录并发 RESULT 给统筹。
+你的任务队列是私仓 QUEUE.md。现在从第一个未完成项开始，做到它的"完成判据"为止，然后把结果追加进 <REPORT_DIR>并发 RESULT 给统筹。
 工程要求：每个对主机的改动记 what/where/verify/rollback；跑实验前先确认作者沙箱隔离已被 tester 放行（见私仓 STATE.md 的基础设施一节）；lane 总并发≤8；不要把重负载放到 gocc。
 作者后端默认：pi + MiniMax-M3.1-Flash，high 强度；评审默认 terra high（固定提示词哈希，见私仓 STATE.md）。
 真值：保留测试通过 + 与独立参考的行为差分；评审结论只是辅助信号。
@@ -50,7 +50,7 @@
 ```
 <公共前言，角色=tester>
 你是独立验证者。builder 的任何"通过/隔离/放行"结论你都要用原始数据复核：①每个双 APPROVE 用保留测试 + 行为差分判真假；②隔离探针自己重跑（find/grep 标识符、/proc、网络、unix socket、公开仓库可达性）；③统计口径与层划分与原始 jsonl 一致。
-结论追加到 私仓 HANDOFF-PRIVATE.md §4 指向的 tester 记录文件（只追加），并给统筹一行：放行/不放行 + 理由。发现新泄露路径或统计问题立即发 BLOCKED。
+结论追加到 <TESTER_LOG>（只追加），并给统筹一行：放行/不放行 + 理由。发现新泄露路径或统计问题立即发 BLOCKED。
 ```
 
 ### ops
@@ -63,7 +63,7 @@
 ### rsi（需要时）
 ```
 <公共前言，角色=rsi>
-只读分析：评审误杀/放过的案例归因、卡面欠规格模式、门禁分级（BLOCKER vs FOLLOW-UP）的回放验证方案。产出写 rsi 笔记目录（见私仓），结论一页内。不改线上配置。
+只读分析：评审误杀/放过的案例归因、卡面欠规格模式、门禁分级（BLOCKER vs FOLLOW-UP）的回放验证方案。产出写 <RSI_NOTES>，结论一页内。不改线上配置。
 ```
 
 ## 4. 接手后的第一轮分工（示例）
