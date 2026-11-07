@@ -93,6 +93,9 @@ class MergeGateTests(unittest.TestCase):
     def write_reviews(self, records):
         (self.home / "reviews.json").write_text(json.dumps(records))
 
+    def write_tester_verdicts(self, records):
+        (self.home / "tester-verdicts.json").write_text(json.dumps(records))
+
     def run_gate(self, gh, **flags):
         """Run the gate with the fake gh runner and return (exit code, results)."""
         args = argparse.Namespace(repo=REPO, pr=None, dry_run=False, json=True)
@@ -189,6 +192,117 @@ class MergeGateTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(results[0]["status"], "mergeable")
         self.assertEqual(len(gh.merge_calls()), 1)
+
+    def test_tester_switch_off_keeps_lane_verdict_authoritative(self):
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        self.write_tester_verdicts({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "CHANGES",
+                                                  "at": "2026-11-05T00:00:00Z",
+                                                  "source": "tester/divergence-log.md"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 0)
+        self.assertEqual(results[0]["judgment_source"], "lane")
+
+    def test_tester_switch_uses_tester_verdict_to_allow_and_block(self):
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({
+            f"{REPO}#7": {"sha": OTHER_SHA, "verdict": "changes"},
+            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "approve"},
+        })
+        self.write_tester_verdicts({
+            f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "APPROVE",
+                          "at": "2026-11-05T00:00:00Z", "source": "tester/divergence-log.md"},
+            f"{REPO}#8": {"sha": HEAD_SHA, "verdict": "CHANGES",
+                          "at": "2026-11-05T00:00:00Z", "source": "tester/divergence-log.md"},
+        })
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")]),
+                     8: pr_payload(8, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual([item["judgment_source"] for item in results], ["tester", "tester"])
+        self.assertEqual(results[0]["status"], "mergeable")
+        self.assertEqual(results[1]["status"], "blocked:verdict")
+
+    def test_tester_switch_without_tester_verdict_blocks(self):
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_tester_switch_ignores_verdict_embedded_in_lane_record(self):
+        """Verdict fields inside the lane record are not a tester source."""
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "changes",
+                                          "tester_sha": HEAD_SHA,
+                                          "tester_verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_default_text_output_names_the_judgment_source(self):
+        """The plain log line carries the judgment source for later audit."""
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        args = argparse.Namespace(repo=REPO, pr=None, dry_run=True, json=False)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = xs.cmd_merge_gate(args, None, runner=gh)
+        self.assertEqual(code, 0)
+        out = buffer.getvalue()
+        self.assertIn("source=lane", out)
+        self.assertIn("verdict=approve", out)
+        self.assertIn(f"bound={HEAD_SHA[:8]}", out)
+
+    def test_tester_switch_corrupt_verdict_file_blocks(self):
+        """An unreadable tester-verdicts file is insufficient evidence."""
+        (self.home / "MERGE-GATE-TESTER").touch()
+        (self.home / "tester-verdicts.json").write_text("{not json")
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_tester_switch_rejects_verdict_outside_the_ruled_enum(self):
+        """A verdict outside APPROVE/CHANGES/TOOL_FAIL counts as missing."""
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": HEAD_SHA, "verdict": "approve"}})
+        self.write_tester_verdicts({f"{REPO}#7": {"sha": HEAD_SHA,
+                                                  "verdict": "approve",
+                                                  "at": "2026-11-05T00:00:00Z",
+                                                  "source": "tester/x.md"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(results[0]["status"], "blocked:no_tester_verdict")
+        self.assertEqual(gh.merge_calls(), [])
+
+    def test_tester_verdict_write_helper_roundtrip(self):
+        """The write helper validates the enum and the gate reads it back."""
+        path = str(self.home / "tester-verdicts.json")
+        entry = xs.merge_gate_record_tester_verdict(
+            path, REPO, 7, "APPROVE", HEAD_SHA, "tester/divergence-log.md")
+        self.assertEqual(entry["verdict"], "APPROVE")
+        self.assertIn("+", entry["at"])  # timezone-aware ISO timestamp
+        with self.assertRaises(Exception):
+            xs.merge_gate_record_tester_verdict(
+                path, REPO, 7, "PASS", HEAD_SHA, "tester/divergence-log.md")
+        with self.assertRaises(Exception):
+            xs.merge_gate_record_tester_verdict(
+                path, REPO, 7, "APPROVE", "abc123", "tester/divergence-log.md")
+        (self.home / "MERGE-GATE-TESTER").touch()
+        self.write_reviews({f"{REPO}#7": {"sha": OTHER_SHA, "verdict": "changes"}})
+        gh = FakeGh({7: pr_payload(7, checks=[check("build")])})
+        code, results = self.run_gate(gh)
+        self.assertEqual(code, 0)
+        self.assertEqual(results[0]["status"], "mergeable")
+        self.assertEqual(results[0]["judgment_source"], "tester")
 
     def test_the_review_of_another_repository_does_not_release_the_pr(self):
         """A record of another repository never releases this PR."""
