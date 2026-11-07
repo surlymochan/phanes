@@ -45,7 +45,7 @@ def run_tick(module, temp_dir, gh, shell, replenish=None):
 def main():
     module = load_module()
     ready_target = load_ready_target_contract()
-    scratch_root = ROOT / ".openswarm-tmp"
+    scratch_root = ROOT / ".swrm-tmp"
     scratch_root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=scratch_root) as raw_dir:
         temp_dir = pathlib.Path(raw_dir)

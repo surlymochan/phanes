@@ -11,14 +11,14 @@ def task_digest(task):
 
 
 def digest_comment(task):
-    return f"openswarm-task-digest: sha256:{task_digest(task)}"
+    return f"swrm-task-digest: sha256:{task_digest(task)}"
 
 
 def trusted_digest(comments, task, allowed_planners):
     """The first digest from a trusted planner is authoritative."""
     digests = [comment for comment in comments
                if comment["author"] in allowed_planners
-               and comment["body"].startswith("openswarm-task-digest: sha256:")]
+               and comment["body"].startswith("swrm-task-digest: sha256:")]
     return bool(digests) and digests[0]["body"] == digest_comment(task)
 
 

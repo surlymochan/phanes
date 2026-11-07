@@ -41,9 +41,9 @@ Surfaces: {d['surfaces']}
 
 {d['risk']}
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: {d['runs']}
+swrm-run: {d['runs']}
 """
 open(f"{S}/{d['key']}.body", "w").write(body)
 print(d["key"], "ok")

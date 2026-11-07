@@ -18,7 +18,7 @@ Refs #6, Refs #156。
 
 ```bash
 python3 examples/org-health-local/run_e2e.py \
-  --workdir .openswarm-tmp/demo-run \
+  --workdir .swrm-tmp/demo-run \
   --bundle examples/org-health-local/demo/vendor/app.bundle.js
 ```
 

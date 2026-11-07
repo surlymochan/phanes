@@ -17,23 +17,23 @@ DOC_RANGES = {
     "docs/dual-mode-issue-bus.md": (49, 81),
 }
 LOCAL_ENTRIES = {
-    "openswarm": "openswarm/bin/openswarm",
-    "openswarm-fleet": "openswarm/bin/openswarm-fleet",
+    "swrm": "swrm/bin/swrm",
+    "swrm-fleet": "swrm/bin/swrm-fleet",
 }
 REQUIRED_OPTIONS = {
-    ("openswarm", "bus", "status"): {"--repo"},
-    ("openswarm", "bus", "init"): set(),
-    ("openswarm", "bus-worker"): {"--bus", "--name", "--backend"},
-    ("openswarm", "run"): {"--backend", "--cwd", "--base", "--budget-minutes", "--verify", "--task-file"},
-    ("openswarm", "watch"): set(),
-    ("openswarm-fleet", "fleet", "status"): set(),
-    ("openswarm-fleet", "fleet", "exec"): set(),
-    ("openswarm-fleet", "lane", "assign"): {"--task-file", "--title", "--budget-minutes"},
-    ("openswarm-fleet", "runs"): set(),
+    ("swrm", "bus", "status"): {"--repo"},
+    ("swrm", "bus", "init"): set(),
+    ("swrm", "bus-worker"): {"--bus", "--name", "--backend"},
+    ("swrm", "run"): {"--backend", "--cwd", "--base", "--budget-minutes", "--verify", "--task-file"},
+    ("swrm", "watch"): set(),
+    ("swrm-fleet", "fleet", "status"): set(),
+    ("swrm-fleet", "fleet", "exec"): set(),
+    ("swrm-fleet", "lane", "assign"): {"--task-file", "--title", "--budget-minutes"},
+    ("swrm-fleet", "runs"): set(),
 }
 BUS_STATES = {"queued", "claimed", "done", "failed", "cancelled"}
 BUS_LABEL_RE = re.compile(r"\b([A-Za-z0-9_.-]+):(queued|claimed|done|failed|cancelled)\b")
-COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_-])(openswarm(?:-fleet)?)(?=\s|$)")
+COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_-])(swrm(?:-fleet)?)(?=\s|$)")
 
 
 def _source_lines(path: Path, start: int, end: int):
@@ -72,7 +72,7 @@ def _commands(path: Path, start: int, end: int):
 
 def _help_text(root: Path, executable: str, argv: list[str]) -> str:
     command = [str(root / LOCAL_ENTRIES[executable]), *argv, "--help"]
-    if executable == "openswarm":
+    if executable == "swrm":
         command.insert(0, sys.executable)
     result = subprocess.run(
         command,
@@ -104,8 +104,8 @@ def check(root: Path, docs_dir: Path) -> list[str]:
             if not (root / LOCAL_ENTRIES[executable]).is_file():
                 errors.append(f"{relative}:{line}: missing local CLI entry {LOCAL_ENTRIES[executable]}")
                 continue
-            if executable == "openswarm-fleet":
-                # The wrapper delegates to openswarm; its first two words are the
+            if executable == "swrm-fleet":
+                # The wrapper delegates to swrm; its first two words are the
                 # actual command path (fleet exec, lane assign, or runs).
                 key = (executable, *argv[:2])
             required = REQUIRED_OPTIONS.get(key)
@@ -127,7 +127,7 @@ def check(root: Path, docs_dir: Path) -> list[str]:
     unknown_labels = sorted(label for label in labels if label.split(":", 1)[1] not in BUS_STATES)
     if unknown_labels:
         errors.append(f"unknown bus status label(s): {', '.join(unknown_labels)}")
-    required_labels = {"openswarm:queued", "openswarm:claimed", "openswarm:done"}
+    required_labels = {"swrm:queued", "swrm:claimed", "swrm:done"}
     if not required_labels.issubset(labels):
         errors.append("missing bus status label(s): " + ", ".join(sorted(required_labels - labels)))
     return errors

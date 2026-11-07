@@ -96,7 +96,7 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
 
 4. **`bus-worker-loop`** (GitHub issue bus executor loop):
    - **Startup command**: `~/phanes-ctl/bin/bus-worker-loop`  
-     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &`; CLI: `openswarm bus-worker --bus <bus-repo> --name <worker-name> --backend <backend>`)
+     (or background one-shot: `setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &`; CLI: `swrm bus-worker --bus <bus-repo> --name <worker-name> --backend <backend>`)
    - **Heartbeat path**: `~/phanes-ctl/bus-worker/heartbeat`
    - **Status / work directory**: `~/phanes-ctl/bus-worker/`
 
@@ -108,8 +108,8 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
 
 ### Reboot pid-state helper scope (Refs #887)
 
-The functions `start_bus_worker` in `openswarm/bin/hub-openswarm-bridge` and
-`start_autodispatch` in `openswarm/bin/openswarm-auto` and
+The functions `start_bus_worker` in `swrm/bin/hub-swrm-bridge` and
+`start_autodispatch` in `swrm/bin/swrm-auto` and
 `tools/lane-autodispatch/autodispatch.py` persist JSON `{pid, started_at}` state
 under `OPENSWARM_CTL_STATE_DIR` (default `~/phanes-ctl/state`). They clear
 malformed, non-positive, exited, or PID-reused records; a matching live process
@@ -190,7 +190,7 @@ Enable the probe in the fleet config (`~/phanes-ctl/fleet.json`) or on the comma
 ```json
 {
   "need_ok": 3,
-  "ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/openswarm-hub/config"},
+  "ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/swrm-hub/config"},
   "hosts": [{"name": "ib1", "cert": "certs/ib1.crt"}]
 }
 ```
@@ -198,7 +198,7 @@ Enable the probe in the fleet config (`~/phanes-ctl/fleet.json`) or on the comma
 ```bash
 python3 tools/ib-refresh.py --fleet-config ~/phanes-ctl/fleet.json \
   --renew-command ~/phanes-ctl/bin/renew-cert --ssh-probe \
-  --ssh-config ~/.ssh/openswarm-hub/config
+  --ssh-config ~/.ssh/swrm-hub/config
 ```
 
 The offline contract check drives the same production refresh path with a fake probe
@@ -311,7 +311,7 @@ Check scripts (no SSH):
 - `python3 tools/check-health-hosts-ok-pause.py` — offline #948 contract check. It asserts that a host held by a `PAUSE-HOST-<host>` file is never counted in the `hosts_ok` summary, that it is reported in `skipped_cooldown`, that an expired automatic pause is released, and that a pause that has not expired yet — or a manual one — is never cleared.
 - `python3 tools/check-dual-hosts-ok.py` — offline #1637 dual-mode contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner and a fake `lanes.json`: the reachable lanes are exactly the lanes whose host is in the `ib-refresh.status` `hosts_ok` set and which are not drained, while lanes on probe-failed, cooldown, or topology-unknown hosts (and lanes with no host) are never reachable; with `hosts_ok=0` no lane is reachable and the boot gate is closed. It opens no SSH connection and touches no live `~/phanes-ctl` state.
 - `python3 tools/check-ad-review-pause-uncounted.py` — offline #1607 contract check. It drives the hotfixed AD's `box_pause_during(cfg, st, path)` and its `finish_review` no-verdict branch: a review failure that happened while the box VM was paused is not counted, a failure outside the pause window is counted. It reads and writes only a temporary tree, never the live `~/phanes-ctl/autodispatch` state.
-- `python3 tools/check-review-evidence-pack.py <pack.md>` — offline #1788 evidence-pack reader. It parses the raw evidence pack of a lane review (`openswarm/lib/review/evidence.py`) into structured fields (CI conclusions, test logs, diff statistics, acceptance checks, preliminary opinion) and exits 1 when a required section is missing or the format is broken — the same verdict the dispatcher records in `reviews.json` (`evidence.complete`). It reads one file and never touches GitHub.
+- `python3 tools/check-review-evidence-pack.py <pack.md>` — offline #1788 evidence-pack reader. It parses the raw evidence pack of a lane review (`swrm/lib/review/evidence.py`) into structured fields (CI conclusions, test logs, diff statistics, acceptance checks, preliminary opinion) and exits 1 when a required section is missing or the format is broken — the same verdict the dispatcher records in `reviews.json` (`evidence.complete`). It reads one file and never touches GitHub.
 - `python3 tools/check-ad-harvest-backoff.py` — offline #947 contract check. It replays a fake harvest fetch failure sequence and asserts the transient/fatal classification, the exponential backoff ladder, and that the first N transient failures only log and back off — the (N+1)-th failure is the one labelled `lane-failed`. It never touches the live lane state.
 - `python3 tools/check-merge-idle-heartbeat.py` — offline #955 contract check. Replays the real `merge-loop.sh` in a fake directory fixture with a fake `gh` stub: when idle with no open PR the merge step is skipped (no `gh pr merge` call) while `merge-heartbeat` is still refreshed, so an idle period never looks like a false-positive stall.
 
@@ -654,7 +654,7 @@ generated lane unit instead of editing an installed unit:
 - per lane: `"memory_max": "700M"` in that host's `$OPENSWARM_HOME/lanes.json`
 - per host: `{"lane": {"memory_max": "700M"}}` in that host's `$OPENSWARM_HOME/policy.local.json`
 
-`openswarm lane systemd-unit <lane>` then prints `MemoryMax=700M`; without either setting the
+`swrm lane systemd-unit <lane>` then prints `MemoryMax=700M`; without either setting the
 default stays `900M`, so higher-memory hosts are unaffected. The recommended values and the
 launchd equivalent are documented in [`docs/fleet-govpn-cx5.md`](fleet-govpn-cx5.md).
 
@@ -663,7 +663,7 @@ launchd equivalent are documented in [`docs/fleet-govpn-cx5.md`](fleet-govpn-cx5
 Give one lane its own proxy or token in `lanes.json` instead of a unit drop-in, a wrapper
 script or a global `/etc/environment` proxy:
 
-- `"env_file": "/root/.config/openswarm-secrets/<lane>.env"` (absolute path or list, `KEY=value` lines, mode `600`)
+- `"env_file": "/root/.config/swrm-secrets/<lane>.env"` (absolute path or list, `KEY=value` lines, mode `600`)
 - `"env": {"NO_PROXY": "localhost,127.0.0.1"}` (string map; overrides `env_file`)
 
 The lane supervisor applies both on systemd and launchd hosts alike; the generated unit or plist
@@ -819,7 +819,7 @@ python3 tools/check-ad-review-pause-uncounted.py
 `reviews.json` 里该 PR 的 fails 不变、日志含暂停专有标记与 `not counted`；未命中时 fails+1。
 夹具用 AD 真实的 `at` 派发时间（`%F %T` 墙钟串，`tools/lane-autodispatch/autodispatch.py:837`）
 与生产格式的暂停记录（`{"from": "%Y-%m-%d %H:%M:%S", "to": …, "gap_s": N}`，样本见
-`openswarm/tests/test_dispatch_pause_window.py`）。
+`swrm/tests/test_dispatch_pause_window.py`）。
 
 隔离：脚本在 import 之前把 `HOME` 与 `OPENSWARM_CTL_STATE_DIR` 指向临时目录（AD 在 import
 期就绑定 `D = f"{HOME}/phanes-ctl/autodispatch"`），再断言 AD 的 reviews.json /

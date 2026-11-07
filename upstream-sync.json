@@ -9,9 +9,9 @@
         "packages/i18n/src/messages/zh/orgHealthDemo.ts"
       ]
     },
-    "openswarm": {
-      "upstream_repo": "https://github.com/surlymochan/openswarm.git",
-      "base_sha": "6d5c3c555c2b2275924dacf9dd35c5e3c770b58a",
+    "swrm": {
+      "upstream_repo": "https://github.com/surlymochan/swrm.git",
+      "base_sha": "b9c0b5831ea9f58aefed479f649d2673429c3fc5",
       "phanes_only": [
         "lib/dispatch/burn.py",
         "lib/dispatch/fallback.py",
@@ -24,7 +24,8 @@
         "tests/test_dispatch_issue_meta.py",
         "tests/test_dispatch_retry.py",
         "tests/test_procboundary.py"
-      ]
+      ],
+      "source_of_truth": "phanes"
     }
   }
 }

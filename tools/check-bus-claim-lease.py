@@ -187,11 +187,11 @@ def main() -> None:
     assert winner_check_auth is not None
     assert bus_claim(winner_check_auth) == "worker-c", "unauthorized worker claim must be ignored"
 
-    # 8. 可选：若在主仓库树中，交叉比对 openswarm 模块内置 bus_winning_claim 实现
+    # 8. 可选：若在主仓库树中，交叉比对 swrm 模块内置 bus_winning_claim 实现
     try:
         root_dir = pathlib.Path(__file__).resolve().parents[1]
         sys.path.insert(0, str(root_dir))
-        from openswarm.tests import _load
+        from swrm.tests import _load
 
         xs = _load.load()
         xs_winner = xs.bus_winning_claim(comments, allowed_executors, lease_seconds, clock.now())

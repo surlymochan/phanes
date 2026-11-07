@@ -22,4 +22,4 @@ Surfaces: scripts only. No product code, IPC, or migration change.
 
 None: test script only.
 
-Model and harness: Cursor composer-2.5 through openswarm; planner Claude Code.
+Model and harness: Cursor composer-2.5 through swrm; planner Claude Code.

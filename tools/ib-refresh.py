@@ -18,7 +18,7 @@ BATCHMODE_OPTION = "BatchMode=yes"
 CONNECT_TIMEOUT_OPTION = "ConnectTimeout=5"
 PROBE_COMMAND = "true"
 PROBE_TIMEOUT_SECONDS = 15
-DEFAULT_SSH_CONFIG = "~/.ssh/openswarm-hub/config"
+DEFAULT_SSH_CONFIG = "~/.ssh/swrm-hub/config"
 
 
 def _status_line(ok, hosts_ok, skipped_cooldown, min_ttl, min_exp):

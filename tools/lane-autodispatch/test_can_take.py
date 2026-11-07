@@ -13,7 +13,7 @@ SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).wit
 AUTODISPATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTODISPATCH)
 
-SCRATCH = Path(__file__).resolve().parents[2] / ".openswarm-tmp"  # gitignored scratch root
+SCRATCH = Path(__file__).resolve().parents[2] / ".swrm-tmp"  # gitignored scratch root
 
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
 

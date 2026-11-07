@@ -34,6 +34,6 @@ Surfaces: Backend, main (IPC handlers, remote server status), preload (one decod
 
 **Trust boundary:** `src/preload/team-decoding.ts` gains one value, `request_failed`, in the list of server issue codes. Main already sends it; without it the preload decoder would reject the status. Sender validation and the other decoders are unchanged. **Data:** new queue failures add two optional fields (`errorDetail`, `reference`) to the stored delivery JSON; old rows are read unchanged and a downgrade still reads `error`. Secrets stay redacted before they are stored.
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-115917-801034 20261028-114456-884204 20261028-114925-58beba 20261028-113650-f2f582 20261028-120115-4114e4 20261028-121011-330a13 20261028-114020-c133f8
+swrm-run: 20261028-115917-801034 20261028-114456-884204 20261028-114925-58beba 20261028-113650-f2f582 20261028-120115-4114e4 20261028-121011-330a13 20261028-114020-c133f8

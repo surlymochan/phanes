@@ -74,9 +74,9 @@ def wall(stamp):
     """The AD's wall clock format: `time.strftime("%F %T")`.
 
     The dispatch time is stored that way (`tools/lane-autodispatch/autodispatch.py:837`,
-    `openswarm/lib/dispatch/engine.py:1814`) and the AD-parity dispatcher reads it back
+    `swrm/lib/dispatch/engine.py:1814`) and the AD-parity dispatcher reads it back
     as the run start when the run info carries no timestamps
-    (`openswarm/lib/dispatch/engine.py:1244`).
+    (`swrm/lib/dispatch/engine.py:1244`).
     """
     return time.strftime("%F %T", time.localtime(stamp))
 
@@ -134,7 +134,7 @@ def pause_row(start, gap_s):
     """One production `box-pauses.jsonl` row.
 
     The real log stores local wall clock strings plus the explicit gap
-    (`openswarm/tests/test_dispatch_pause_window.py:29-32`:
+    (`swrm/tests/test_dispatch_pause_window.py:29-32`:
     `{"from": "2026-11-02 07:31:44", "to": "2026-11-02 07:49:46", "gap_s": 1082}`),
     so `to - from` equals `gap_s` here as well.
     """
@@ -145,9 +145,9 @@ def lane_state(host, dispatch, run="review-run-1"):
     """The AD lane record of a dispatched review run.
 
     `at` is the AD's dispatch wall clock (`tools/lane-autodispatch/autodispatch.py:837`,
-    `openswarm/lib/dispatch/engine.py:1814`); `review_pr`/`review_sha` identify the
-    reviewed PR (`openswarm/lib/dispatch/engine.py:1814`,
-    `openswarm/tests/test_dispatch_engine.py:497`). `started_at`/`dispatched_at` are
+    `swrm/lib/dispatch/engine.py:1814`); `review_pr`/`review_sha` identify the
+    reviewed PR (`swrm/lib/dispatch/engine.py:1814`,
+    `swrm/tests/test_dispatch_engine.py:497`). `started_at`/`dispatched_at` are
     epoch aliases of the same instant so the dispatch time is found under either name.
     """
     return {

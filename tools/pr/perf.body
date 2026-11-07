@@ -34,6 +34,6 @@ Surfaces: Desktop renderer and `packages/ui`. Output and behavior are unchanged.
 
 UI performance only. Virtualization changes which rows exist in the DOM: review scrolling, keyboard focus and find-in-chat on long chats.
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-193635-0604db 20261028-194826-08f05a 20261028-195845-7bdf37 20261028-200459-d22e8d 20261028-201150-4885ea 20261028-120417-2ba5cf 20261028-121702-d42898 20261028-121705-0f2bbe
+swrm-run: 20261028-193635-0604db 20261028-194826-08f05a 20261028-195845-7bdf37 20261028-200459-d22e8d 20261028-201150-4885ea 20261028-120417-2ba5cf 20261028-121702-d42898 20261028-121705-0f2bbe

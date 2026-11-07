@@ -1,0 +1,28 @@
+usage: openswarm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
+                             [--title TITLE] [--verify VERIFY]
+                             [--verify-baseline]
+                             [--budget-minutes BUDGET_MINUTES] [--base BASE]
+                             [--card-type CARD_TYPE] [--rework-of REWORK_OF]
+                             [--paths PATHS [PATHS ...]] [--read-only]
+                             name
+
+positional arguments:
+  name
+
+options:
+  -h, --help            show this help message and exit
+  --task-file TASK_FILE
+  --prompt PROMPT
+  --title TITLE
+  --verify VERIFY
+  --verify-baseline
+  --budget-minutes BUDGET_MINUTES
+  --base BASE
+  --card-type CARD_TYPE
+                        optional task card type from knowledge/card-types.yaml
+  --rework-of REWORK_OF
+                        run id this task is reworking
+  --paths PATHS [PATHS ...]
+                        path hints for matching applicable lessons
+  --read-only           review task: allow status=done without repo changes or
+                        commits

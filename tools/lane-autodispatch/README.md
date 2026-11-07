@@ -9,11 +9,11 @@ box is the deployed runtime the control plane syncs from it (sync steps:
 only live on the box after that sync.
 
 **审查派发不在这个镜像里**：带 PR 审查派发（`review_item` / `finish_review` / `reviews.json`）的那份
-AD 在仓内是 [`openswarm/lib/dispatch/engine.py`](../../openswarm/lib/dispatch/engine.py)（box 运行副本
+AD 在仓内是 [`swrm/lib/dispatch/engine.py`](../../swrm/lib/dispatch/engine.py)（box 运行副本
 `~/phanes-ctl/bin/autodispatch.py` 是它加上控制面热修的运行版）；本镜像没有审查派发，
 `tools/check-ad-review-pause-uncounted.py` 的契约对它不成立。#1828（审查任务不嵌 diff、沙箱本地读全量、
 TOOL_FAIL 证据不足不放行）因此改在 engine 上，详见
-[`openswarm/docs/review-evidence-pack.md`](../../openswarm/docs/review-evidence-pack.md)。
+[`swrm/docs/review-evidence-pack.md`](../../swrm/docs/review-evidence-pack.md)。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
 (`git -C <repo> cat-file -e <base>^{commit}`). A missing base is fetched into the target repo and
@@ -112,15 +112,15 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 ## 收割前的越界产物过滤（Refs #1835）
 
 收割 fix/rebase/impl 的结果、推送回 PR 分支之前，AD 对待推送分支的变更文件做机械过滤：
-匹配到隐藏二进制（以 `.` 开头的 `.so`，如 `openswarm/tests/.dde4*-00000000.so`）或
+匹配到隐藏二进制（以 `.` 开头的 `.so`，如 `swrm/tests/.dde4*-00000000.so`）或
 `.lane-review/` 目录下的文件（评审产物）时，把这些路径从提交中剔除（保留其余改动、
 重新提交），剔除清单写 brain 日志一行。剔除后若有效改动为空（比较最终树与基线树，
 不是比较 head），按空结果处理、不推送；过滤本身失败（git 命令报错）时 fail closed、
 不推送并记因。规则是列表常量（`HARVEST_EXCLUDE_PATTERNS`），可配置。
 
 对应关系：本文件是仓内版 AD；派发引擎里的同一套过滤在
-`openswarm/lib/dispatch/harvest_filter.py`（fix/rebase 与新 PR 两条收割路径都接入，
-见 `openswarm/docs/harvest-artifact-filter.md`）。两份规则必须同步；部署版另行同步
+`swrm/lib/dispatch/harvest_filter.py`（fix/rebase 与新 PR 两条收割路径都接入，
+见 `swrm/docs/harvest-artifact-filter.md`）。两份规则必须同步；部署版另行同步
 （sync steps 见 [`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)）。
 
 离线回放某个 PR 头会被剔掉哪些产物：
@@ -171,12 +171,12 @@ python3 tools/check-harvest-filter.py 1768 1677
 
 ```bash
 python3 tools/check-ad-switch-audit.py                    # 临时目录里 touch 一个 PAUSE-DISPATCH，下一轮 tick 出审计行
-cd openswarm && python3 -m unittest tests.test_autodispatch.SwitchAuditTests -v
+cd swrm && python3 -m unittest tests.test_autodispatch.SwitchAuditTests -v
 ```
 
 ### 修复交付对照（review 意见 → 改动 → 测试）
 
-测试都在 `openswarm/tests/test_autodispatch.py::SwitchAuditTests`。
+测试都在 `swrm/tests/test_autodispatch.py::SwitchAuditTests`。
 
 | 轮次 | 意见（BLOCKER） | 对应改动 | 测试 |
 | --- | --- | --- | --- |

@@ -25,7 +25,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 MERGE_LOOP = ROOT / "bin" / "merge-loop.sh"
-SCRATCH_ROOT = ROOT / ".openswarm-tmp"
+SCRATCH_ROOT = ROOT / ".swrm-tmp"
 DOC = ROOT / "docs" / "ctl-boot.md"
 REQUIRED_DOC_TERMS = ("merge-heartbeat", "no PR", "skip", "idle")
 

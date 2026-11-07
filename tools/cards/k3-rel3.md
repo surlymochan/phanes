@@ -22,7 +22,7 @@ Evidence:
 - `src/backend/dispatch/dispatch-service.ts:240` — `for (const record of this.#runs) if (!record.delivered) yield* this.#watch(record.host, record.runId);`
 
 Why it matters: a run that never reaches a terminal state keeps a poll loop for the life of the
-app. Every poll spawns an `openswarm` process. A restart of the app watches every record that was
+app. Every poll spawns an `swrm` process. A restart of the app watches every record that was
 not delivered again. The remote host then sees one process every two seconds, for as long as the
 app runs. The row of the run in the interface also stays "running" for ever.
 

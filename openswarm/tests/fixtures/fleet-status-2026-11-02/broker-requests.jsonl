@@ -1,6 +1,0 @@
-{"ts": "2026-11-02T13:04:00Z", "id": 41, "lane": "M1", "status": 200, "in_tok": 4210, "out_tok": 1180, "ms": 8421}
-{"ts": "2026-11-02T13:04:12Z", "id": 42, "lane": "M2", "status": 200, "in_tok": 3980, "out_tok": 940, "ms": 7903}
-{"ts": "2026-11-02T13:04:31Z", "id": 43, "lane": "M3", "status": 200, "in_tok": 5120, "out_tok": 1430, "ms": 9120}
-{"ts": "2026-11-02T13:04:44Z", "id": 44, "lane": "M3", "status": 429, "in_tok": 0, "out_tok": 0, "ms": 210, "err": "Token Plan 用量上限"}
-{"ts": "2026-11-02T13:04:58Z", "id": 45, "lane": "M1", "status": 200, "in_tok": 2870, "out_tok": 760, "ms": 6880}
-{"ts": "2026-11-02T13:02:10Z", "id": 40, "lane": "M2", "status": 200, "in_tok": 3010, "out_tok": 820, "ms": 7010}
