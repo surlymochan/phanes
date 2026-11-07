@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_LOG = Path.home() / '.claude/openswarm-executor-candidate/events-all.log'
+DEFAULT_RUNS = Path.home() / '.claude/openswarm-executor-candidate/runs'
 DEFAULT_DATA = Path.home() / '.local/share/eventd'
 DEFAULT_MODEL = 'gpt-6-luna'
 DEFAULT_EFFORT = 'high'
@@ -82,14 +83,21 @@ def progress(db, groups, upto):
 def classify(text, before, after):
     if text.startswith('[eventd]'):
         return 'wake', text
+    kind = re.match(r'^\[[^]]+\]\s+(MSG|START|RESUME|HEARTBEAT)\b', text, re.I)
+    if kind:
+        return 'ignore', 'routine event'
+    if any(v['done'] >= v['expect'] and before.get(k, {}).get('done', 0) < v['expect'] for k, v in after.items()):
+        if re.search(r'\bstatus=(failed|budget_exceeded)\b', text, re.I):
+            return 'wake', 'failure or process error'
+        return 'wake', 'group complete'
+    if re.search(r'\b(RISK|STALL|status=partial)\b', text, re.I):
+        return None, 'ambiguous event'
+    if re.search(r'\bstatus=done\b', text, re.I):
+        return ('wake', 'group complete') if any(v['done'] >= v['expect'] and before.get(k, {}).get('done', 0) < v['expect'] for k, v in after.items()) else ('ignore', 'routine event')
     if re.search(r'\bstatus=(failed|budget_exceeded)\b|\b(error|fatal|process exited|进程退出|错误)\b', text, re.I):
         return 'wake', 'failure or process error'
     if any(v['done'] >= v['expect'] and before.get(k, {}).get('done', 0) < v['expect'] for k, v in after.items()):
         return 'wake', 'group complete'
-    if re.search(r'\b(RISK|STALL|status=partial)\b', text, re.I):
-        return None, 'ambiguous event'
-    if re.search(r'\bSTART\b|\bstatus=done\b', text, re.I):
-        return 'ignore', 'routine event'
     return None, 'unclassified event'
 
 
@@ -300,6 +308,8 @@ def consumer_name(value):
 def main(argv=None):
     p = argparse.ArgumentParser(prog='eventd')
     p.add_argument('--data-dir', type=Path, default=Path(os.environ.get('EVENTD_DATA_DIR', DEFAULT_DATA)))
+    p.add_argument('--runs-dir', type=Path, default=Path(os.environ.get('EVENTD_RUNS_DIR', DEFAULT_RUNS)))
+    p.add_argument('--watch-command', default='swrm', help='swrm executable for run watchers')
     p.add_argument('--log', type=Path, default=Path(os.environ.get('EVENTD_LOG', DEFAULT_LOG)))
     p.add_argument('--backend', choices=['codex', 'openai', 'decisions', 'fake'], default=os.environ.get('EVENTD_BACKEND', 'decisions'))
     p.add_argument('--env-file', type=Path, help='load OPENAI_API_KEY without executing the file')
@@ -311,6 +321,7 @@ def main(argv=None):
     p.add_argument('--health-timeout', type=float, default=15)
     sub = p.add_subparsers(dest='command', required=True)
     sub.add_parser('serve')
+    sub.add_parser('ingest-runs')
     w = sub.add_parser('wait'); w.add_argument('--consumer', required=True, type=consumer_name); w.add_argument('--timeout', type=float)
     g = sub.add_parser('group'); gs = g.add_subparsers(dest='group_command', required=True)
     ga = gs.add_parser('add'); ga.add_argument('name', type=consumer_name); ga.add_argument('--pattern', required=True); ga.add_argument('--expect', type=int, required=True)
@@ -337,6 +348,9 @@ def main(argv=None):
             while True:
                 ingest(db, args.log)
                 time.sleep(1)
+        elif args.command == 'ingest-runs':
+            from run_ingest import follow_runs
+            follow_runs(args.runs_dir, args.log, args.watch_command)
         elif args.command == 'wait':
             start = time.monotonic()
             while True:
@@ -351,8 +365,9 @@ def main(argv=None):
                 time.sleep(.2)
         else:
             # Isolated in-memory database: replay never changes live cursors.
+            db.close()
             db = sqlite3.connect(':memory:'); db.executescript(SCHEMA)
-            args.backend = 'fake'; args.health_timeout = float('inf'); args.max_silence = float('inf')
+            args.backend = 'fake'; args.health_timeout = float('inf'); args.max_silence = float('inf'); args.hourly_limit = 2**63 - 1
             for number, text in enumerate(args.file.read_text().splitlines(), 1): db.execute('INSERT INTO events(line,text) VALUES (?,?)', (number, text))
             db.commit(); wakes = []
             while True:
@@ -360,7 +375,8 @@ def main(argv=None):
                 if not result: break
                 wakes.append(result)
                 with db: db.execute('UPDATE consumers SET cursor=?,last_wake=? WHERE name=?', (result['cursor'], time.time(), '__replay__'))
-            print(json.dumps({'wake_count': len(wakes), 'wakes': wakes}, ensure_ascii=False))
+            decisions = db.execute("SELECT count(*) FROM calls").fetchone()[0]
+            print(json.dumps({'summary': {'wake_count': len(wakes), 'decision_count': decisions, 'event_count': number if 'number' in locals() else 0}, 'wake_count': len(wakes), 'wakes': wakes}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, sqlite3.Error, re.error, json.JSONDecodeError) as exc:
         print('eventd: ' + str(exc), file=sys.stderr); return 2

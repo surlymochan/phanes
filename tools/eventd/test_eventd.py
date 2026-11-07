@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import eventd
+import run_ingest
 
 
 class EventdTest(unittest.TestCase):
@@ -44,6 +45,39 @@ class EventdTest(unittest.TestCase):
         self.add('[lane-b] status=done')
         result = eventd.wait_once(self.db, self.data, 'one', self.args)
         self.assertEqual(result['reason'], 'group complete')
+
+    def test_routine_and_ambiguous_rules(self):
+        for kind in ('MSG', 'START', 'RESUME', 'HEARTBEAT'):
+            self.assertEqual(eventd.classify(f'[lane] {kind}: error RISK', {}, {})[0], 'ignore')
+        self.assertEqual(eventd.classify('[lane] DONE: status=done error', {}, {})[0], 'ignore')
+        for text in ('[lane] RISK: error', '[lane] STALL: error', '[lane] status=partial error', 'unknown format'):
+            self.assertIsNone(eventd.classify(text, {}, {})[0])
+
+    def test_recover_done_and_new_run(self):
+        runs = self.data / 'runs'
+        runs.mkdir()
+        log = self.data / 'aggregate.log'
+        log.write_text('[existing 12:34] DONE: status=done\n')
+        for name in ('existing', 'missing'):
+            run = runs / name
+            run.mkdir()
+            (run / 'result.json').write_text(json.dumps({'status': 'done'}))
+        run_ingest.recover(runs, log)
+        run_ingest.recover(runs, log)
+        self.assertEqual(log.read_text().count('DONE:'), 2)
+        self.assertIn('[missing] DONE: status=done', log.read_text())
+        run = runs / 'later'
+        run.mkdir()
+        (run / 'result.json').write_text(json.dumps({'status': 'partial'}))
+        run_ingest.recover(runs, log)
+        self.assertIn('[later] DONE: status=partial', log.read_text())
+
+    def test_replay_summary_counts(self):
+        log = self.data / 'replay.log'
+        log.write_text('[a] MSG: hello\n[a] RISK: review\n[a] status=failed\n')
+        with mock.patch('sys.stdout', new_callable=__import__('io').StringIO) as out:
+            self.assertEqual(eventd.main(['--data-dir', str(self.data), 'replay', str(log)]), 0)
+        self.assertEqual(json.loads(out.getvalue())['summary'], {'wake_count': 1, 'decision_count': 1, 'event_count': 3})
 
     def test_decision_fallback_and_limit(self):
         self.add('[lane] RISK: something')

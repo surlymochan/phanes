@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Render EVAL.md using only recorded evaluation data."""
+import argparse
 import json
+import eventd
 import statistics
 from pathlib import Path
 
@@ -8,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 PRICES = {'gpt-6-luna': (0.10, 0.50), 'gpt-6.1-terra': (1.00, 5.00)}
 
 
-def render(records):
+def render(records, log=None):
     meta = next(r for r in records if r.get('kind') == 'log_summary')
     decisions = [r for r in records if 'case_id' in r]
     models = [('openai', 'gpt-6-luna', 'high'), ('openai', 'gpt-6.1-terra', 'medium'), ('decisions', 'gpt-6-luna', None)]
@@ -20,7 +22,7 @@ def render(records):
              '基线：`' + meta['baseline'] + '`。先固定案例及期望，再调用当前 `eventd.decide`；Responses 请求限制最多 2048 输出 token；按预算预留控制花费。',
              f'案例：手工构造 {synthetic} 条，脱敏真实事件 {real} 条。',
              '案例标签为人工判断；非唤醒的 defer 与 ignore 合并计为正确，漏唤醒和误唤醒均按该二分类统计。脱敏真实案例主要是空消息和进程退出，不能代表生产分布。', '',
-             f"真实日志：{meta['total']} 条记录，其中 {meta['decision']} 条按默认空分组、无消费者覆盖的 `classify` 进入决策层（{meta['decision'] / meta['total'] * 100:.2f}%）；实际配置的分组、覆盖、缓存和限流可能改变比例。", '',
+             (f"当前规则真实日志：{len(log)} 条，{sum(eventd.classify(line, {}, {})[0] is None for line in log)} 条进入决策层（{100 * sum(eventd.classify(line, {}, {})[0] is None for line in log) / len(log):.2f}%）；空分组、无消费者覆盖。" if log else f"历史基线真实日志：{meta['total']} 条，{meta['decision']} 条进入决策层（{meta['decision'] / meta['total'] * 100:.2f}%）。当前规则的真实日志比例尚未测量；用 --log 指定日志重算。"), '',
              '| 模型 / effort | 有效 / 总数 | 唤醒准确率 | 精确动作 | 漏唤醒 | 误唤醒 | 延迟均值 / 中位数（ms） | 费用（美元） |',
              '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
     total_cost = 0.0
@@ -58,5 +60,8 @@ def render(records):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--log', type=Path)
+    args = parser.parse_args()
     records = [json.loads(line) for line in (HERE / 'eval-raw.jsonl').read_text().splitlines()]
-    print(render(records), end='')
+    print(render(records, args.log.read_text().splitlines() if args.log else None), end='')
