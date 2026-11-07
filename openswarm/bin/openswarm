@@ -12160,6 +12160,19 @@ def dispatch_pause_module():
     return module
 
 
+def dispatch_capacity_reconcile_module():
+    """The capacity reconciliation module (lib/dispatch/capacity_reconcile.py), loaded by path."""
+    name = "openswarm_dispatch_capacity_reconcile"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "capacity_reconcile.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
 def fleet_health_lane_hosts(home=None):
     """The host names the lanes.json names, in the order they appear.
 
@@ -12216,8 +12229,140 @@ def fleet_health_state_load(home=None):
     return hosts if isinstance(hosts, dict) else {}
 
 
-def fleet_health_state_save(hosts, home=None):
-    jsave(fleet_health_state_path(home), {"hosts": hosts, "updated_at": NOW()})
+def fleet_health_capacity_state_load(home=None):
+    """The remembered capacity reconciliation: the alert signature of the last run."""
+    state = jload(fleet_health_state_path(home), {}) or {}
+    capacity = state.get("capacity") if isinstance(state, dict) else None
+    return capacity if isinstance(capacity, dict) else {}
+
+
+def fleet_health_state_save(hosts, home=None, capacity=None):
+    payload = {"hosts": hosts, "updated_at": NOW()}
+    if capacity is not None:
+        payload["capacity"] = capacity
+    jsave(fleet_health_state_path(home), payload)
+
+
+def fleet_health_host_lanes_path(host, control_lanes_path):
+    """The lanes.json of one fleet host: its own file, else the default of its kind.
+
+    A local host without its own file runs the control plane lanes; a remote
+    host keeps its lanes in the openswarm home of that host.
+    """
+    path = host.get("lanes_file")
+    if isinstance(path, str) and path:
+        return os.path.expanduser(path)
+    if host.get("kind") == "local":
+        return control_lanes_path
+    return FLEET_INVENTORY_REMOTE_LANES_FILE
+
+
+def fleet_health_read_host_lanes(host, path):
+    """Read the lanes.json of one fleet host: the local file, or `cat` over its transport.
+
+    A host whose lanes cannot be read raises: the fleet is then not completely
+    known, and the reconciliation reports ``unverified`` instead of a partial
+    lane count.
+    """
+    if host.get("kind") == "local":
+        with open(os.path.expanduser(path), encoding="utf-8") as stream:
+            raw = stream.read()
+    else:
+        rc, out, err = host_run(host, "cat " + shell_path(path), timeout=30)
+        if rc:
+            raise OSError("the host transport failed (rc=%s)" % rc)
+        raw = out.decode("utf-8", errors="replace")
+    try:
+        config = json.loads(raw)
+    except (ValueError, UnicodeError) as error:
+        raise OSError("invalid lanes JSON: %s" % error) from error
+    lanes = config.get("lanes") if isinstance(config, dict) else None
+    if not isinstance(lanes, list):
+        raise OSError("no lanes list")
+    return lanes
+
+
+def fleet_health_capacity(home=None, hosts=None):
+    """Reconcile the fleet capacity limits with the lanes of every fleet host.
+
+    The topology is the one the capacity coordinator admits turns against; the
+    lanes are the control plane lane configuration plus the lane configuration
+    of every host the fleet knows.  The read scope is the lane configuration
+    and the configured hosts, not the hosts of the topology: a lane that moved
+    to a host the topology does not list yet is counted all the same, so a
+    limit that fell behind the lane count cannot hide behind a stale topology.
+    A host whose lanes cannot be read makes the report ``unverified``: a
+    partial lane count is never presented as a verified fleet.
+    """
+    module = dispatch_capacity_reconcile_module()
+    topology = module.topology_path(envvar("FLEET_CAPACITY_DIR"))
+    lanes_path = os.path.expanduser(envvar("LANES_FILE", os.path.join(home or DATA, "lanes.json")))
+    try:
+        topology_data = module.load_topology(topology)
+        control_lanes = module.load_lanes(lanes_path)
+    except module.CapacityConfigError:
+        return module.reconcile_paths(topology, lanes_path)
+    try:
+        config = fleet_config() if hosts is None else hosts
+    except ValueError as error:
+        return module.unverified("invalid fleet config: %s" % error, topology, lanes_path)
+    scope = []
+    for name in list(topology_data["hosts"]) + list(config):
+        if name not in scope:
+            scope.append(name)
+    for lane in control_lanes:
+        host = lane.get("host") if isinstance(lane, dict) else None
+        if isinstance(host, str) and host.strip() and host.strip() not in scope:
+            scope.append(host.strip())
+    host_lanes, incomplete, control_host = {}, [], None
+    for name in scope:
+        host = config.get(name)
+        if host is None:
+            incomplete.append("host %s is not a configured fleet host" % name)
+            continue
+        path = fleet_health_host_lanes_path(host, lanes_path)
+        if os.path.abspath(path) == os.path.abspath(lanes_path):
+            # the control plane lane file is this host's lane file: it was read already
+            if control_host is None:
+                control_host = name
+            continue
+        try:
+            host_lanes[name] = fleet_health_read_host_lanes(host, path)
+        except (OSError, ValueError, UnicodeError) as error:
+            incomplete.append("cannot read the lanes of %s: %s" % (name, error))
+    lanes, missing = module.merge_lanes(control_lanes, host_lanes, control_host)
+    incomplete.extend(missing)
+    report = module.reconcile(topology_data["limits"], lanes)
+    report.update(topology=topology, lanes=lanes_path, hosts=topology_data["hosts"],
+                  scope=scope, source="fleet")
+    if incomplete:
+        report = module.mark_unverified(report, "; ".join(incomplete))
+    return report
+
+
+def fleet_health_brain_log(capacity, home=None):
+    """Write a capacity alert to the brain log; the last alert signature is remembered.
+
+    The alert is written once per change: a health loop that runs every minute
+    must not fill the brain log with the same line.  A brain log that is not
+    configured or not writable returns False: the caller keeps the alert
+    pending and retries, so an alert is never lost because the log was down.
+    """
+    module = dispatch_capacity_reconcile_module()
+    if capacity.get("status") not in (module.STATUS_ALERT, module.STATUS_UNVERIFIED):
+        return True                     # nothing to say: the limits are sufficient
+    message = capacity.get("message") or ""
+    if not message:
+        return True
+    path = envvar("BRAIN_LOG", "")
+    if not path:
+        return False
+    try:
+        with open(os.path.expanduser(path), "a", encoding="utf-8") as stream:
+            stream.write("- %s UTC+8 fleet-health: %s\n" % (time.strftime("%H:%M"), message))
+    except OSError:
+        return False
+    return True
 
 
 def fleet_health_apply(store, row, active, moment):
@@ -12320,6 +12465,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     (``resources.health``, else the built-in defaults).  ``--apply`` pauses a
     host that needs it and releases the host that recovered; a manual pause is
     never touched.
+
+    The report carries a ``capacity`` section as well: the fleet capacity limits
+    (``topology.json``) reconciled with the configured lanes (Refs #1693).  A
+    limit that is behind the lane count makes ``ok`` false and is written to the
+    brain log once per change; the limits themselves are never changed here.
     """
     policy = load_policy() if policy is None else policy
     health = dispatch_health_module()
@@ -12361,12 +12511,25 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         remembered[name] = health.ssh_fail_record(row["metrics"].get("ssh_fail_streak", 0),
                                                   row["status"], moment)
         rows.append(row)
-    fleet_health_state_save(remembered, home)
-    report = {"ok": all(row["status"] == "ok" for row in rows),
+    capacity = fleet_health_capacity(home, config)
+    remembered_capacity = fleet_health_capacity_state_load(home)
+    logged_key = "%s|%s" % (capacity.get("status", ""), capacity.get("signature", ""))
+    if logged_key != remembered_capacity.get("logged", "") and fleet_health_brain_log(capacity):
+        # the alert reached the brain log: it is not repeated every run
+        remembered_capacity = dict(remembered_capacity, signature=capacity.get("signature", ""),
+                                   logged=logged_key)
+    fleet_health_state_save(remembered, home,
+                            capacity={"signature": capacity.get("signature", ""),
+                                      "logged": remembered_capacity.get("logged", ""),
+                                      "status": capacity.get("status"),
+                                      "at": moment,
+                                      "report": capacity})
+    report = {"ok": all(row["status"] == "ok" for row in rows) and capacity.get("status") != "alert",
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits, "recent_failure_reasons": recent_failures,
-              "hosts": rows}
+              "hosts": rows,
+              "capacity": capacity}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -12377,6 +12540,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
             print(f"  metrics: {metrics}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
+    for row in capacity.get("alerts") or []:
+        print(f"capacity  {row['limit']}  limit {row['limit_value']}  lanes {row['lanes']}  "
+              f"deficit {row['deficit']}  suggested {row['suggested']}")
+    if capacity.get("status") == "unverified":
+        print(f"capacity  {capacity.get('message')}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")
     if recent_failures:
         print("recent failure reasons (last 20):")

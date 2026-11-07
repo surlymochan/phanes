@@ -79,6 +79,31 @@ class FleetHealthCliTests(unittest.TestCase):
         else:
             os.environ["OPENSWARM_LANES_FILE"] = previous
 
+    def topology(self, limits, hosts=("worker-a",)):
+        """Write the capacity topology the coordinator admits turns against."""
+        directory = self.root / "capacity"
+        directory.mkdir(exist_ok=True)
+        (directory / "topology.json").write_text(json.dumps({"hosts": list(hosts), "limits": limits}),
+                                                 encoding="utf-8")
+        previous = os.environ.get("OPENSWARM_FLEET_CAPACITY_DIR")
+        os.environ["OPENSWARM_FLEET_CAPACITY_DIR"] = str(directory)
+        self.addCleanup(self.restore_env, "OPENSWARM_FLEET_CAPACITY_DIR", previous)
+        return directory
+
+    def brain_log(self):
+        """Point the brain log at a file inside the temporary home."""
+        path = self.home / "brain.log"
+        previous = os.environ.get("OPENSWARM_BRAIN_LOG")
+        os.environ["OPENSWARM_BRAIN_LOG"] = str(path)
+        self.addCleanup(self.restore_env, "OPENSWARM_BRAIN_LOG", previous)
+        return path
+
+    def restore_env(self, name, previous):
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
     def health(self, runner=None, hosts=("worker-a",), apply=False, json_out=True,
                policy=None, lanes=("worker-a",)):
         """Run `fleet health` against the fake runner and return its report."""
@@ -184,7 +209,8 @@ class FleetHealthCliTests(unittest.TestCase):
 
     def test_json_report_structure(self):
         report = self.health(runner=self.runner(inode=96))
-        self.assertEqual(sorted(report), ["applied", "hosts", "ok", "recent_failure_reasons", "status", "thresholds"])
+        self.assertEqual(sorted(report), ["applied", "capacity", "hosts", "ok",
+                                          "recent_failure_reasons", "status", "thresholds"])
         self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
         self.assertFalse(report["applied"])
         self.assertEqual(report["status"], "hard")
@@ -243,6 +269,159 @@ class FleetHealthCliTests(unittest.TestCase):
             json.dumps({"status": "done", "branch": "lane/x", "commit": "c"}), encoding="utf-8")
         report = self.health(runner=self.runner())
         self.assertEqual(report["recent_failure_reasons"], {"spawn-failed": 1})
+
+    def test_the_capacity_section_flags_a_limit_behind_the_lane_count(self):
+        """The lane count of the lanes.json is compared with the fleet limits."""
+        self.topology({"total": 4, "pi": 11, "minimax-cn": 11, "codex": 1, "host:worker-a": 2},
+                      hosts=("worker-a", "worker-b"))
+        report = self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        capacity = report["capacity"]
+        self.assertEqual(capacity["status"], "alert")
+        self.assertFalse(report["ok"])
+        rows = {row["limit"]: row for row in capacity["alerts"]}
+        self.assertEqual(sorted(rows), ["codex"])
+        self.assertEqual(rows["codex"]["limit_value"], 1)
+        self.assertEqual(rows["codex"]["lanes"], 2)
+        self.assertEqual(rows["codex"]["deficit"], 1)
+        self.assertEqual(rows["codex"]["suggested"], 3)
+        self.assertEqual(capacity["lane_total"], 2)
+        self.assertEqual(capacity["by_backend"], {"codex": 2})
+        self.assertEqual(capacity["by_host"], {"worker-a": 1, "worker-b": 1})
+
+    def test_capacity_counts_control_plane_and_all_host_lane_files_once(self):
+        control = self.home / "lanes.json"
+        control.write_text(json.dumps({"lanes": [
+            {"name": "box-pi-%d" % i, "backend": "pi", "provider": "minimax-cn", "host": "box"}
+            for i in range(7)]}), encoding="utf-8")
+        fleet_hosts = {"box": {"name": "box", "kind": "local", "lanes_file": str(control)}}
+        topology_hosts = ["box"]
+        for host in ("ib1", "ib2", "ib3", "ib4"):
+            path = self.home / (host + "-lanes.json")
+            path.write_text(json.dumps({"lanes": [
+                {"name": "%s-pi-%d" % (host, i), "backend": "pi", "provider": "minimax-cn"}
+                for i in range(2)]}), encoding="utf-8")
+            fleet_hosts[host] = {"name": host, "kind": "local", "lanes_file": str(path)}
+            topology_hosts.append(host)
+        self.topology({"total": 20, "pi": 11, "minimax-cn": 11}, hosts=topology_hosts)
+        capacity = xs.fleet_health_capacity(self.home, fleet_hosts)
+        self.assertEqual(capacity["status"], "alert")
+        self.assertEqual(capacity["lane_total"], 15)
+        rows = {row["limit"]: row for row in capacity["alerts"]}
+        self.assertEqual(sorted(rows), ["minimax-cn", "pi"])
+        self.assertEqual((rows["pi"]["limit_value"], rows["pi"]["lanes"], rows["pi"]["deficit"]),
+                         (11, 15, 4))
+        self.assertEqual((rows["minimax-cn"]["limit_value"], rows["minimax-cn"]["lanes"],
+                          rows["minimax-cn"]["deficit"]), (11, 15, 4))
+
+    def test_a_host_that_is_not_in_the_topology_is_still_counted(self):
+        """A lane that moved to a host the topology does not list yet is counted all the same."""
+        control = self.home / "lanes.json"
+        control.write_text(json.dumps({"lanes": [
+            {"name": "box-pi-%d" % i, "backend": "pi", "provider": "minimax-cn", "host": "box"}
+            for i in range(7)]}), encoding="utf-8")
+        previous = os.environ.get("OPENSWARM_LANES_FILE")
+        os.environ["OPENSWARM_LANES_FILE"] = str(control)
+        self.addCleanup(self.restore_lanes, previous)
+        new_host = self.home / "ib5-lanes.json"
+        new_host.write_text(json.dumps({"lanes": [
+            {"name": "ib5-pi-%d" % i, "backend": "pi", "provider": "minimax-cn"}
+            for i in range(8)]}), encoding="utf-8")
+        fleet_hosts = {"box": {"name": "box", "kind": "local", "lanes_file": str(control)},
+                       "ib5": {"name": "ib5", "kind": "local", "lanes_file": str(new_host)}}
+        self.topology({"total": 20, "pi": 11, "minimax-cn": 11}, hosts=["box"])
+        capacity = xs.fleet_health_capacity(self.home, fleet_hosts)
+        self.assertEqual(capacity["status"], "alert")
+        self.assertEqual(capacity["lane_total"], 15)
+        self.assertEqual(capacity["by_host"], {"box": 7, "ib5": 8})
+        rows = {row["limit"]: row for row in capacity["alerts"]}
+        self.assertEqual(sorted(rows), ["minimax-cn", "pi"])
+        self.assertEqual((rows["pi"]["limit_value"], rows["pi"]["lanes"], rows["pi"]["deficit"]),
+                         (11, 15, 4))
+        self.assertEqual((rows["minimax-cn"]["limit_value"], rows["minimax-cn"]["lanes"],
+                          rows["minimax-cn"]["deficit"]), (11, 15, 4))
+
+    def test_a_host_whose_lanes_cannot_be_read_is_reported_as_unverified(self):
+        """A partial lane count is never presented as a verified fleet."""
+        control = self.home / "lanes.json"
+        control.write_text(json.dumps({"lanes": [
+            {"name": "box-pi-%d" % i, "backend": "pi", "provider": "minimax-cn", "host": "box"}
+            for i in range(7)]}), encoding="utf-8")
+        previous = os.environ.get("OPENSWARM_LANES_FILE")
+        os.environ["OPENSWARM_LANES_FILE"] = str(control)
+        self.addCleanup(self.restore_lanes, previous)
+        fleet_hosts = {"box": {"name": "box", "kind": "local", "lanes_file": str(control)},
+                       "ib5": {"name": "ib5", "kind": "local",
+                               "lanes_file": str(self.home / "missing-lanes.json")}}
+        self.topology({"total": 20, "pi": 11, "minimax-cn": 11}, hosts=["box"])
+        capacity = xs.fleet_health_capacity(self.home, fleet_hosts)
+        self.assertEqual(capacity["status"], "unverified")
+        self.assertFalse(capacity["verified"])
+        self.assertEqual(capacity["alerts"], [])
+        self.assertIn("未核实", capacity["message"])
+        self.assertIn("ib5", capacity["error"])
+
+    def test_the_state_file_carries_the_capacity_reconciliation(self):
+        """The dispatcher reads the fleet-wide result from the health state file."""
+        self.topology({"total": 4, "codex": 1, "host:worker-a": 2}, hosts=("worker-a", "worker-b"))
+        self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        state = json.loads((self.home / "fleet-health.json").read_text(encoding="utf-8"))
+        capacity = state["capacity"]
+        self.assertEqual(capacity["status"], "alert")
+        self.assertEqual(capacity["signature"], "codex:1/2")
+        self.assertEqual(capacity["report"]["lane_total"], 2)
+        self.assertEqual(capacity["report"]["by_host"], {"worker-a": 1, "worker-b": 1})
+
+    def test_a_host_limit_below_its_lane_count_is_flagged(self):
+        self.topology({"total": 4, "codex": 4, "host:worker-a": 0}, hosts=("worker-a",))
+        report = self.health(hosts=("worker-a",))
+        rows = {row["limit"]: row for row in report["capacity"]["alerts"]}
+        self.assertEqual(sorted(rows), ["host:worker-a"])
+        self.assertEqual(rows["host:worker-a"]["lanes"], 1)
+        self.assertEqual(rows["host:worker-a"]["deficit"], 1)
+        self.assertEqual(rows["host:worker-a"]["suggested"], 2)
+
+    def test_sufficient_limits_report_no_capacity_alert(self):
+        self.topology({"total": 4, "codex": 2, "host:worker-a": 1}, hosts=("worker-a",))
+        report = self.health(hosts=("worker-a",))
+        self.assertEqual(report["capacity"]["status"], "ok")
+        self.assertEqual(report["capacity"]["alerts"], [])
+        self.assertTrue(report["ok"])
+
+    def test_a_missing_topology_is_reported_as_unverified(self):
+        self.lanes(("worker-a",))
+        report = self.health(hosts=("worker-a",))
+        capacity = report["capacity"]
+        self.assertEqual(capacity["status"], "unverified")
+        self.assertFalse(capacity["verified"])
+        self.assertEqual(capacity["alerts"], [])
+        self.assertIn("未核实", capacity["message"])
+
+    def test_the_capacity_alert_is_written_to_the_brain_log(self):
+        log = self.brain_log()
+        self.topology({"total": 4, "codex": 1, "host:worker-a": 2}, hosts=("worker-a", "worker-b"))
+        self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("fleet-health", text)
+        self.assertIn("codex", text)
+        self.assertIn("deficit 1", text)
+
+    def test_the_brain_log_is_not_filled_with_the_same_alert(self):
+        log = self.brain_log()
+        self.topology({"total": 4, "codex": 1, "host:worker-a": 2}, hosts=("worker-a", "worker-b"))
+        self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_brain_log_failure_does_not_suppress_retry(self):
+        log = self.brain_log()
+        missing = self.home / "missing" / "brain.log"
+        os.environ["OPENSWARM_BRAIN_LOG"] = str(missing)
+        self.topology({"total": 4, "codex": 1, "host:worker-a": 2}, hosts=("worker-a", "worker-b"))
+        self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        self.assertFalse(missing.exists())
+        os.environ["OPENSWARM_BRAIN_LOG"] = str(log)
+        self.health(hosts=("worker-a", "worker-b"), lanes=("worker-a", "worker-b"))
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
 
     def test_policy_thresholds_override_the_defaults(self):
         policy = {"resources": {"health": {"inode_pause_pct": 50, "inode_resume_pct": 40}}}
