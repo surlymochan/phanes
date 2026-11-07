@@ -8,11 +8,11 @@
 * a line from before the current quota window never counts either;
 * for MiniMax the ``coding_plan/remains`` API is authoritative: an exhausted
   plan yields ``mm_remains:until=<reset>`` for the backend that consumes the
-  provider (``pi`` in ``openswarm/policy.json``), while a plan that still has
+  provider (``pi`` in ``swrm/policy.json``), while a plan that still has
   quota lets an automatic quota pause be released early.
 
 The gate names follow the repository convention ``PAUSE-BACKEND-<backend>``
-(``openswarm/lib/dispatch/engine.py``, ``docs/ctl-boot.md``): the backend is
+(``swrm/lib/dispatch/engine.py``, ``docs/ctl-boot.md``): the backend is
 resolved from the caller's lane->backend mapping, never from the lane name.
 
 Everything below is offline: no file is read and no state directory is
@@ -189,7 +189,7 @@ def main() -> None:
     # The two remains samples of the coding_plan API: the exhausted one and the
     # one that still has quota left.  The backend is the one that consumes the
     # MiniMax provider: ``pi`` runs on ``provider: minimax-cn`` with
-    # ``default_model: MiniMax-M3.1-Flash`` (openswarm/policy.json), so the
+    # ``default_model: MiniMax-M3.1-Flash`` (swrm/policy.json), so the
     # remains conclusion gates ``PAUSE-BACKEND-pi`` -- not a backend name the
     # repository does not know.
     mm_exhausted = {

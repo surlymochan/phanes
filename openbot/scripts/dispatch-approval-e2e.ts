@@ -35,7 +35,7 @@ class Provider extends EventEmitter implements AgentClient {
 const out = resolve(import.meta.dirname, "../.openbot-build/dispatch-approval-e2e.json");
 await mkdir(resolve(out, ".."), { recursive: true });
 const root = await mkdtemp(resolve(out, "../dispatch-approval-"));
-const binary = join(root, "openswarm");
+const binary = join(root, "swrm");
 const launches = join(root, "launches.txt");
 const report: { passed: boolean; checks: string[]; error?: string } = { passed: false, checks: [] };
 const caller = {
@@ -276,13 +276,13 @@ esac
         { name: "--title", value: "Fix heading" },
         { name: "--cwd", value: "C:\\Users\\Jane Doe\\OpenBot Dev" },
       ],
-      "C:\\Users\\Jane Doe\\openswarm.cmd",
+      "C:\\Users\\Jane Doe\\swrm.cmd",
       "win32",
     ),
   );
   assert.doesNotThrow(() =>
     assertDispatchArgs(
-      "C:\\Users\\Jane Doe\\openswarm.cmd",
+      "C:\\Users\\Jane Doe\\swrm.cmd",
       [
         "run",
         "--cwd",
@@ -297,20 +297,20 @@ esac
   );
   assert.throws(
     () =>
-      assertDispatchInputValues([{ name: "--title", value: "normal&whoami>file&normal" }], "openswarm.cmd", "win32"),
+      assertDispatchInputValues([{ name: "--title", value: "normal&whoami>file&normal" }], "swrm.cmd", "win32"),
     /--title/,
   );
   assert.throws(
     () =>
       assertDispatchArgs(
-        "openswarm.cmd",
+        "swrm.cmd",
         ["run", "--task-file", "C:\\tmp\\card.md", "--title", "normal&whoami>file&normal"],
         "win32",
       ),
     /--title/,
   );
   assert.throws(
-    () => assertDispatchInputValues([{ name: "--card", value: "bad\0card" }], "openswarm", "linux"),
+    () => assertDispatchInputValues([{ name: "--card", value: "bad\0card" }], "swrm", "linux"),
     /--card/,
   );
   report.checks.push("Windows wrappers accept spaces and name unsafe dispatch arguments");

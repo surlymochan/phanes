@@ -3,7 +3,7 @@ import type { messages as source } from "../../en/error/backend";
 
 export const messages = {
   "error.backend.dispatchCommand":
-    "openswarm のリクエストを完了できませんでした。再試行する前に、実行エグゼキューターの設定と実行状態を確認してください。",
+    "swrm のリクエストを完了できませんでした。再試行する前に、実行エグゼキューターの設定と実行状態を確認してください。",
   "error.backend.dispatchOwnChat": "コーディング作業は自分のチャットからだけ送ってください。",
   "error.backend.dispatchLaneOptions":
     "lane は設定されたバックエンドとモデルを使います。lane を選ぶときは、バックエンドとモデルを指定しないでください。",
@@ -15,13 +15,13 @@ export const messages = {
   "error.backend.dispatchExecutorWorkspace":
     "「ワークスペースのみ」のエージェントは Codex 実行エグゼキューターしか使えません。他の実行エグゼキューターは書き込み先を制限しないためです。lane と backend は指定しないでください。",
   "error.backend.dispatchRepository":
-    "openswarm fleet.json に、ローカルと実行エグゼキューターの同じリポジトリパスを設定してください。",
-  "error.backend.dispatchSpawnFailed": "openswarm を起動できませんでした。",
-  "error.backend.dispatchExitCode": "openswarm はコード {code} で終了しました。",
-  "error.backend.dispatchExited": "openswarm は結果を返す前に停止しました。",
-  "error.backend.dispatchTimeout": "openswarm は制限時間内に応答しませんでした。",
-  "error.backend.dispatchOutputUnreadable": "openswarm の出力を読み取れませんでした。",
-  "error.backend.dispatchSaveFailed": "openswarm の依頼を保存できませんでした。",
+    "swrm fleet.json に、ローカルと実行エグゼキューターの同じリポジトリパスを設定してください。",
+  "error.backend.dispatchSpawnFailed": "swrm を起動できませんでした。",
+  "error.backend.dispatchExitCode": "swrm はコード {code} で終了しました。",
+  "error.backend.dispatchExited": "swrm は結果を返す前に停止しました。",
+  "error.backend.dispatchTimeout": "swrm は制限時間内に応答しませんでした。",
+  "error.backend.dispatchOutputUnreadable": "swrm の出力を読み取れませんでした。",
+  "error.backend.dispatchSaveFailed": "swrm の依頼を保存できませんでした。",
   "error.backend.dispatchApprovalDenied": "このコード送信は却被されました。何も開始されていません。",
   "error.backend.dispatchApprovalMissing": "このコード送信には承認がありません。何も開始されていません。",
   "error.backend.eventsUnavailable": "このホストではイベントを利用できません。",

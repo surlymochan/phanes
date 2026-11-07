@@ -22,7 +22,7 @@ def load_module():
 
 def main():
     module = load_module()
-    scratch_root = ROOT / ".openswarm-tmp"
+    scratch_root = ROOT / ".swrm-tmp"
     scratch_root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=scratch_root) as raw_dir:
         module.D = raw_dir

@@ -249,8 +249,8 @@ def run_self_test() -> int:
     stale = iso(now - 3600)  # one hour old: the label is stale enough to be a ghost
     fresh = iso(now - 120)  # dispatch() may still be running: in-flight, not a ghost
     fake_state = {
-        "L1": {"issue": 101, "run": "run-001", "host": "ib1"},
-        "L2": {"issue": 102, "run": "run-002", "host": "ib2"},
+        "L1": {"issue": 101, "run": "run-001", "host": "node-1.example.invalid"},
+        "L2": {"issue": 102, "run": "run-002", "host": "node-2.example.invalid"},
         "_done": [98, 99, 100],
     }
     idle_state = {"_done": [98, 99, 100]}

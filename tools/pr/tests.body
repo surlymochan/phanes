@@ -21,7 +21,7 @@ Surfaces: E2E scripts only, plus one helper for the host publish fake account se
 
 ## Verification
 
-- [x] Each script passed on its executor host with `bun scripts/<name>.ts` (openswarm runs below, verify rc 0), and `bun run typecheck:node` passed.
+- [x] Each script passed on its executor host with `bun scripts/<name>.ts` (swrm runs below, verify rc 0), and `bun run typecheck:node` passed.
 - [x] The CI workflow wiring of these scripts is not in this PR: the token that pushed it has no `workflow` scope. The patch is kept for a separate change.
 - [x] The pre-commit hook passed.
 - [x] No credentials, private data, generated output, or real user files are included.
@@ -30,6 +30,6 @@ Surfaces: E2E scripts only, plus one helper for the host publish fake account se
 
 None for users: test scripts only. Each script starts local processes and binds loopback ports.
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-122437-012415 20261028-120115-4114e4 20261028-123200-6d7887 20261028-114847-39230c 20261028-120827-c9aced 20261028-122514-ccbc10 20261028-120309-3bba55 20261028-123611-460fbf 20261028-124246-652fc7 20261028-155111-ba18da 20261028-155241-56d991
+swrm-run: 20261028-122437-012415 20261028-120115-4114e4 20261028-123200-6d7887 20261028-114847-39230c 20261028-120827-c9aced 20261028-122514-ccbc10 20261028-120309-3bba55 20261028-123611-460fbf 20261028-124246-652fc7 20261028-155111-ba18da 20261028-155241-56d991

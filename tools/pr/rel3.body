@@ -21,7 +21,7 @@ Surfaces: `src/backend/dispatch` and one E2E script. No migration, no IPC or Tea
 
 ## Verification
 
-- [x] The E2E case and `bun run typecheck:node` passed on the executor host (openswarm run `20261028-160140-fe3aea`, verify rc 0).
+- [x] The E2E case and `bun run typecheck:node` passed on the executor host (swrm run `20261028-160140-fe3aea`, verify rc 0).
 - [x] Broad checks run in CI.
 - [x] The pre-commit hook passed.
 - [x] No credentials, private data, generated output, or real user files are included.
@@ -30,6 +30,6 @@ Surfaces: `src/backend/dispatch` and one E2E script. No migration, no IPC or Tea
 
 Changes how long a dispatch run is watched. The 4 hour limit is a named constant; a run that finishes later is shown as unknown, not lost.
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-160140-fe3aea
+swrm-run: 20261028-160140-fe3aea

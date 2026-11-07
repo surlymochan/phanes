@@ -7,7 +7,7 @@ export const messages = {
   "status.agent.dispatchStarted": "Trabajo de programación iniciado: {title}. Host: {host}. Ejecución: {runId}.",
   "status.agent.dispatchFinished":
     "Trabajo de programación finalizado: {title}. Host: {host}. Resultado: {status}. Revisa el resultado antes de informar de un éxito.",
-  "status.agent.dispatchNoResult": "El ejecutor de openswarm terminó sin archivo de resultado.",
+  "status.agent.dispatchNoResult": "El ejecutor de swrm terminó sin archivo de resultado.",
   "status.agent.claudeWriteOutside":
     "Escribir en {path}, fuera del espacio de trabajo del agente, la carpeta compartida y las carpetas temporales.",
   "status.agent.contextCleared": "Contexto borrado. Aquí empieza un nuevo chat.",

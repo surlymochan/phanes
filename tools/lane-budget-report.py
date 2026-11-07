@@ -15,8 +15,8 @@ Usage:
 copies pulled back from the remote hosts.  The same run found in two
 directories is counted once.
 
---lanes is an operations-owned lane -> (host, backend) mapping.  openswarm's
-own ~/.claude/openswarm/lanes.json carries no host field (the host lives in
+--lanes is an operations-owned lane -> (host, backend) mapping.  swrm's
+own ~/.claude/swrm/lanes.json carries no host field (the host lives in
 the fleet inventory), so it cannot be used as-is.  Three shapes are accepted:
   {"CX9": {"host": "gores2", "backend": "codex"}}
   [{"lane": "CX9", "host": "gores2", "backend": "codex"}]
@@ -26,7 +26,7 @@ the fleet inventory), so it cannot be used as-is.  Three shapes are accepted:
 
 RESCUABLE counts the timed-out runs that still carry a real diff: a diffstat,
 a non-empty patch or the files the run reported as changed.  The worktree
-path openswarm records for every lane run is not evidence (finalize_workspace
+path swrm records for every lane run is not evidence (finalize_workspace
 writes it whatever happened), and review cards run read-only, so their
 changes are dropped by design and are never counted.
 """
@@ -45,7 +45,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# openswarm run ids are "%Y%m%d-%H%M%S-<hex>" (new_run_id), so the directory
+# swrm run ids are "%Y%m%d-%H%M%S-<hex>" (new_run_id), so the directory
 # name itself carries the creation time.
 RUN_ID_RE = re.compile(r"(\d{8})-(\d{6})")
 DIFFSTAT_RE = re.compile(r"(\d+)\s+insertions?\(\+\).*?(\d+)\s+deletions?\(-\)", re.S)
@@ -218,7 +218,7 @@ def patch_evidence(item):
 def worktree_residual(item):
     """True when the leftover worktree still carries uncommitted changes.
 
-    openswarm records the worktree root for every lane run (the read-only
+    swrm records the worktree root for every lane run (the read-only
     branch writes the literal path, finalize_workspace returns it whenever
     ``keep`` is set), so the mere presence of the path proves nothing.  Only
     a dirty worktree counts, and only when it is the root of a git worktree
@@ -256,7 +256,7 @@ def worktree_residual(item):
 def has_diff_evidence(item, kind=None, check_worktree=True):
     """True when a run left a diff a human can salvage.
 
-    The worktree path is not evidence: openswarm writes it for every lane
+    The worktree path is not evidence: swrm writes it for every lane
     run, so trusting it would mark every timed-out run as rescuable.  A diff
     is a diffstat, a non-empty patch or the files the run reported as
     changed; a leftover worktree only counts when it is really dirty.  Review
@@ -279,7 +279,7 @@ def has_diff_evidence(item, kind=None, check_worktree=True):
 def run_timestamp(run_dir, item, status):
     """Wall-clock time of a run.
 
-    openswarm's result.json carries no timestamp field; the real times live in
+    swrm's result.json carries no timestamp field; the real times live in
     the sibling status.json (started/finished/updated, epoch seconds), in the
     run id and, as a last resort, in the result.json mtime.
     """
@@ -484,7 +484,7 @@ def self_test():
         assert has_diff_evidence({"result": {"files_changed": ["a.py"]}})
         assert not has_diff_evidence({"diffstat": "", "result": {"files_changed": []}})
 
-        # A worktree path alone is not a diff: openswarm records it for every
+        # A worktree path alone is not a diff: swrm records it for every
         # lane run, so trusting it would mark every timeout as rescuable.
         stale_worktree = root / "worktree"
         stale_worktree.mkdir()

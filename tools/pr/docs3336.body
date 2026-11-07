@@ -24,6 +24,6 @@ Surfaces: documentation. `PRIVACY.md` changes because outbound data is described
 
 None. Documentation only. The PRIVACY note must match the code: it says that a dispatched card, its files and the executor result go to the executor host and its model provider.
 
-Model and harness: pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-155841-97e0b8
+swrm-run: 20261028-155841-97e0b8

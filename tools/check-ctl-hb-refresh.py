@@ -294,7 +294,7 @@ def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
         p = Path(arg).expanduser()
         if p.is_file():
             return p
-        for alt in [Path("bin/ctl-loop"), Path.home() / "phanes-ctl/bin/ctl-loop", Path("/root/phanes-ctl/bin/ctl-loop")]:
+        for alt in [Path("bin/ctl-loop"), Path.home() / "phanes-ctl/bin/ctl-loop"]:
             if alt.is_file():
                 return alt
         print(f"Notice: specified target ctl-loop {p} not found; falling back to fixtures", file=sys.stderr)
@@ -302,7 +302,6 @@ def resolve_ctl_loop_path(arg: str | None = None) -> Path | None:
     candidates = [
         Path("bin/ctl-loop"),
         Path.home() / "phanes-ctl/bin/ctl-loop",
-        Path("/root/phanes-ctl/bin/ctl-loop"),
     ]
     for c in candidates:
         if c.is_file():

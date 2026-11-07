@@ -31,7 +31,7 @@ Refs #6、#179。
 
 ### 1.1 指标数据盘点（Metrics）
 
-文件路径：[`openbot/examples/org-health-local/data/diagnosis.json`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openbot/examples/org-health-local/data/diagnosis.json#L16-L80)
+文件路径：[`openbot/examples/org-health-local/data/diagnosis.json`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openbot/examples/org-health-local/data/diagnosis.json#L16-L80)
 
 | 指标标题 | 2026-01实际 | 2026-05H1参考 | 2026-09实际 | 年末测算 | 年末目标 | 单位（口径说明） |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -77,7 +77,7 @@ Refs #6、#179。
 
 ### 2.1 指标数据盘点（Metrics）
 
-文件路径：[`openbot/examples/org-health-local/demo/diagnosis.json`](file:///Users/surlymo/.claude/openswarm-executor-candidate/lanes/A1/wt/openbot/examples/org-health-local/demo/diagnosis.json#L22-L88)
+文件路径：[`openbot/examples/org-health-local/demo/diagnosis.json`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A1/wt/openbot/examples/org-health-local/demo/diagnosis.json#L22-L88)
 汇率说明：7.2 人民币/美元；数据截止：2026-09-30。
 
 | 指标标题 | 2026-01实际 | 2026-05H1参考 | 2026-09实际 | 年末测算 | 年末目标 | 基础单位 |

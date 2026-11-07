@@ -10,7 +10,7 @@ if [[ ! -f "$doc" ]]; then
   exit 1
 fi
 
-for required in phanes_ctl ib1 govpn2 gocc; do
+for required in fleet_operator node-1.example.invalid worker-b.example.invalid broker; do
   if grep -Fq -- "$required" "$doc"; then
     echo "OK $required"
   else

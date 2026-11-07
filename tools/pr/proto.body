@@ -1,6 +1,6 @@
 ## Linked issue
 
-Refs nibiru-labs/openbot-roadmap#65 (M10 mobile parity, findings 2, 3 and 12). A Codex protocol review (openswarm run `20261028-202427-18bfcd`) found authorization and codec problems in the first versions; this PR has the fixes.
+Refs nibiru-labs/openbot-roadmap#65 (M10 mobile parity, findings 2, 3 and 12). A Codex protocol review (swrm run `20261028-202427-18bfcd`) found authorization and codec problems in the first versions; this PR has the fixes.
 
 ## Type of change
 
@@ -29,6 +29,6 @@ Surfaces: `packages/contracts` (two frozen optional capabilities), `packages/tea
 
 **Released wire contract:** a shipped capability is permanent. Both are additive and gated by a capability that older hosts do not advertise. **Authorization:** pause/continue needs chat access (the review found view access reached it in the first version). Context usage needs chat access; it returns counts, category labels and compaction metadata, no provider text. This PR touches `src/main/team-api` and `packages/contracts`, so it should get the security review of CONTRIBUTING.md.
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-115937-5af2d3 20261028-203141-2bc457 20261028-203604-07770a 20261028-120417-2ba5cf 20261028-123145-2ab61b
+swrm-run: 20261028-115937-5af2d3 20261028-203141-2bc457 20261028-203604-07770a 20261028-120417-2ba5cf 20261028-123145-2ab61b

@@ -3,7 +3,7 @@ import type { messages as source } from "../../en/error/backend";
 
 export const messages = {
   "error.backend.dispatchCommand":
-    "Не удалось выполнить запрос openswarm. Проверьте настройки исполнителя и состояние запуска перед повторной попыткой.",
+    "Не удалось выполнить запрос swrm. Проверьте настройки исполнителя и состояние запуска перед повторной попыткой.",
   "error.backend.dispatchOwnChat": "Отправляйте работу над кодом только из своего чата.",
   "error.backend.dispatchLaneOptions":
     "Lane использует настроенные для неё backend и модель. Не указывайте backend и модель, когда выбираете lane.",
@@ -15,13 +15,13 @@ export const messages = {
   "error.backend.dispatchExecutorWorkspace":
     "Агент в режиме «Только рабочее пространство» может использовать только исполнитель Codex, потому что другие исполнители не ограничивают, куда они пишут. Не указывайте lane и backend.",
   "error.backend.dispatchRepository":
-    "Укажите в openswarm fleet.json совпадающие пути к репозиториям локально и на исполнителе.",
-  "error.backend.dispatchSpawnFailed": "Не удалось запустить openswarm.",
-  "error.backend.dispatchExitCode": "openswarm завершился с кодом {code}.",
-  "error.backend.dispatchExited": "openswarm остановился до возврата результата.",
-  "error.backend.dispatchTimeout": "openswarm не ответил за отведённое время.",
-  "error.backend.dispatchOutputUnreadable": "Не удалось прочитать вывод openswarm.",
-  "error.backend.dispatchSaveFailed": "Не удалось сохранить запрос openswarm.",
+    "Укажите в swrm fleet.json совпадающие пути к репозиториям локально и на исполнителе.",
+  "error.backend.dispatchSpawnFailed": "Не удалось запустить swrm.",
+  "error.backend.dispatchExitCode": "swrm завершился с кодом {code}.",
+  "error.backend.dispatchExited": "swrm остановился до возврата результата.",
+  "error.backend.dispatchTimeout": "swrm не ответил за отведённое время.",
+  "error.backend.dispatchOutputUnreadable": "Не удалось прочитать вывод swrm.",
+  "error.backend.dispatchSaveFailed": "Не удалось сохранить запрос swrm.",
   "error.backend.dispatchApprovalDenied": "Человек отклонил эту отправку кода. Ничего не запущено.",
   "error.backend.dispatchApprovalMissing": "У этой отправки кода нет подтверждения. Ничего не запущено.",
   "error.backend.eventsUnavailable": "События недоступны на этом хосте.",

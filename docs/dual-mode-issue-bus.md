@@ -11,10 +11,10 @@
 
 ```sh
 gh repo create surlymochan/phanes-bus --private
-openswarm bus init surlymochan/phanes-bus
+swrm bus init surlymochan/phanes-bus
 ```
 
-也可以直接复用 `surlymochan/phanes`；此时把下面配置中的 `bus.repo` 和 `openswarm bus init` 参数都改成
+也可以直接复用 `surlymochan/phanes`；此时把下面配置中的 `bus.repo` 和 `swrm bus init` 参数都改成
 `surlymochan/phanes`，并确保参与者对 issue、评论和代码分支拥有所需权限。
 
 两台主机都需要已登录 GitHub CLI（不要把 token 写进 issue、配置文件或本文）：
@@ -37,14 +37,14 @@ gh auth status
     "worker_repos": ["surlymochan/phanes"],
     "worker_verify_allow": ["true"],
     "poll_seconds": 10,
-    "labels_prefix": "openswarm",
+    "labels_prefix": "swrm",
     "open_pr": false
   }
 }
 ```
 
 `worker_verify_allow` 中的 `true` 仅用于本次协议冒烟；实际任务应替换为目标仓库明确允许的、精确匹配的验证命令。
-`open_pr: false` 表示 worker 只推送 `openswarm/<run-id>` 分支，不自动开 PR。
+`open_pr: false` 表示 worker 只推送 `swrm/<run-id>` 分支，不自动开 PR。
 
 ## 最小冒烟序列
 
@@ -54,14 +54,14 @@ gh auth status
 cd /path/to/phanes
 git status --short
 git push origin HEAD
-openswarm run --backend github-issue --cwd "$PWD" --base "$(git rev-parse HEAD)" \
+swrm run --backend github-issue --cwd "$PWD" --base "$(git rev-parse HEAD)" \
   --budget-minutes 10 --verify 'true' --task-file /path/to/task.md
 ```
 
 在允许执行的 worker 主机上运行一次：
 
 ```sh
-openswarm bus-worker --bus surlymochan/phanes-bus --name surlymochan-phanes-smoke \
+swrm bus-worker --bus surlymochan/phanes-bus --name surlymochan-phanes-smoke \
   --backend codex --once
 ```
 
@@ -70,17 +70,17 @@ openswarm bus-worker --bus surlymochan/phanes-bus --name surlymochan-phanes-smok
 检查 bus 状态并观察结果：
 
 ```sh
-openswarm bus status --repo surlymochan/phanes-bus
-openswarm watch <run-id>
+swrm bus status --repo surlymochan/phanes-bus
+swrm watch <run-id>
 ```
 
-成功的最小协议闭环是：issue 从 `openswarm:queued` 被 worker claim，worker 推送
-`openswarm/<run-id>`，并在 issue 评论中写入 `openswarm-result`；planner 随后取得该结果并写入本地 run 记录。不要把
+成功的最小协议闭环是：issue 从 `swrm:queued` 被 worker claim，worker 推送
+`swrm/<run-id>`，并在 issue 评论中写入 `swrm-result`；planner 随后取得该结果并写入本地 run 记录。不要把
 真实 token、私密环境变量或其他凭据放进任务文件、issue body 或评论。
 
 ### 结果评论的机读契约
 
-`bus-worker` 的结果评论必须包含一个 fenced `openswarm-result` JSON 块。除展示用摘要外，块内必须有以下机读字段：
+`bus-worker` 的结果评论必须包含一个 fenced `swrm-result` JSON 块。除展示用摘要外，块内必须有以下机读字段：
 `status` 只能是 `ok` 或 `error`，`run_id` 必须是本次任务的运行 ID；成功结果必须提供 `pr_url`（没有 PR 时为 `null`），失败结果必须提供非空的 `error_class`。
 解析评论时应按 JSON 解析，不要依赖自然语言摘要或 issue label：
 

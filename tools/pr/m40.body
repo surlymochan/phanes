@@ -16,7 +16,7 @@ Re-applied on `fd5719fc7f` (main after the upstream sync). Surfaces: `apps/auth-
 
 ## Verification
 
-- [x] `bun run test:auth-claim` passes on gocc with every case, including the full claim flow and the new cleanup cases (openswarm run `20261028-235008-936266`).
+- [x] `bun run test:auth-claim` passes on broker with every case, including the full claim flow and the new cleanup cases (openswarm run `20261028-235008-936266`).
 - [x] The pre-commit hook passed.
 - [x] No credentials, private data, generated output, or real user files are included.
 

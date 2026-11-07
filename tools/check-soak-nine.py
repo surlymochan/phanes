@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline #1642 contract for busy lanes during ib1/ib2 cooldown."""
+"""Offline #1642 contract for busy lanes during node-1.example.invalid/node-2.example.invalid cooldown."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from typing import Any
 
 
 PAUSED_LANES = frozenset({"M1", "M2"})
-PAUSED_HOSTS = frozenset({"ib1", "ib2"})
+PAUSED_HOSTS = frozenset({"node-1.example.invalid", "node-2.example.invalid"})
 ALLOWED_PAUSES = frozenset(
-    {"PAUSE-HOST-ib1", "PAUSE-HOST-ib2", "PAUSE-M1", "PAUSE-M2"}
+    {"PAUSE-HOST-node-1.example.invalid", "PAUSE-HOST-node-2.example.invalid", "PAUSE-M1", "PAUSE-M2"}
 )
 BUSY_LIMIT = 9
 
@@ -62,7 +62,7 @@ def main() -> None:
             "_busy": 9,
         }
         check(state_dir, status)
-        print("OK: ib1/ib2 cooldown pauses M1/M2; nine other lanes may be busy")
+        print("OK: node-1.example.invalid/node-2.example.invalid cooldown pauses M1/M2; nine other lanes may be busy")
 
         invalid = {**status, "L10": "busy #1642", "_busy": 10}
         try:

@@ -77,7 +77,7 @@ export const DISPATCH_TOOL_DEFINITIONS = [
   {
     name: "dispatch_work",
     description:
-      "Delegate a coding card to an openswarm executor. Acceptance returns runId and host; the result wakes this chat. Review branch, commit, and verify evidence before reporting success. Code and card go to the host and model provider.",
+      "Delegate a coding card to a swrm executor. Acceptance returns runId and host; the result wakes this chat. Review branch, commit, and verify evidence before reporting success. Code and card go to the host and model provider.",
     shape: dispatchWorkSchema.shape,
   },
   {

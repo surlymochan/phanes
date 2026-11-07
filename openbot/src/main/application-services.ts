@@ -1613,7 +1613,7 @@ export async function createApplicationServices({
   let workflowTriggers: WorkflowTriggers | null = null;
   const service: AgentService = new AgentService({
     openswarmSettings: () =>
-      providerDetectionSettings.get().openswarm ?? { binaryPath: "openswarm", defaultLane: "", defaultHost: "local" },
+      providerDetectionSettings.get().openswarm ?? { binaryPath: "swrm", defaultLane: "", defaultHost: "local" },
     store,
     mailbox,
     browser,

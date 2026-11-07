@@ -7,7 +7,7 @@ export const messages = {
   "status.agent.dispatchStarted": "Kodlama işi başladı: {title}. Ana makine: {host}. Çalıştırma: {runId}.",
   "status.agent.dispatchFinished":
     "Kodlama işi bitti: {title}. Ana makine: {host}. Sonuç: {status}. Başarı bildirmeden önce sonucu inceleyin.",
-  "status.agent.dispatchNoResult": "openswarm yürütücüsü sonuç dosyası olmadan bitti.",
+  "status.agent.dispatchNoResult": "swrm yürütücüsü sonuç dosyası olmadan bitti.",
   "status.agent.claudeWriteOutside":
     "Ajanın çalışma alanı, paylaşılan klasör ve geçici klasörler dışındaki {path} konumuna yaz.",
   "status.agent.contextCleared": "Bağlam temizlendi. Yeni bir sohbet burada başlıyor.",

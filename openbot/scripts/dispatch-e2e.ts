@@ -1,4 +1,4 @@
-// Drives dispatch_work through a real dev app and a signed-in agent. The stub openswarm command
+// Drives dispatch_work through a real dev app and a signed-in agent. The stub swrm command
 // accepts the run only after approval, then returns a terminal result. Start one worktree dev app first:
 // `bun run dev`; then run `bun scripts/dispatch-e2e.ts --agent=<agent id> --allow-mutations`.
 // This adds one test message to the agent's chat. It writes .openbot-build/dispatch-e2e.json.
@@ -28,7 +28,7 @@ const messageKey = createHash("sha256").update(`local:${runId}`).digest("hex").s
 const marker = `DISPATCH_E2E_${runId.replaceAll("-", "_")}`;
 const agentId = process.argv.find((argument) => argument.startsWith("--agent="))?.slice("--agent=".length) ?? "";
 const stubDirectory = resolve(import.meta.dirname, `../.openbot-build/${runId}`);
-const stubBinary = join(stubDirectory, "openswarm");
+const stubBinary = join(stubDirectory, "swrm");
 interface DispatchE2EReport {
   runId: string;
   agentId: string;
@@ -56,7 +56,7 @@ function stubSource(): string {
     {
       id: runId,
       status: "done",
-      branch: `openswarm/${runId}`,
+      branch: `swrm/${runId}`,
       commit: "d15ca11d15ca11d15ca11d15ca11d15ca11d15ca11d",
       result: { summary: marker },
       verify: { rc: 0, cmd: "bun run test:dispatch", tail: "DISPATCH_E2E_VERIFY_OK", seconds: 1, failing: [] },
@@ -70,7 +70,7 @@ function stubSource(): string {
       id: runId,
       state: "queued",
       lane: "M1",
-      watch: `openswarm watch ${runId}`,
+      watch: `swrm watch ${runId}`,
       result: `${stubDirectory}/runs/${runId}/result.json`,
     },
     null,
@@ -280,7 +280,7 @@ try {
       (message) => message.author === "assistant" && message.status === "completed" && message.text.includes(marker),
     );
   const args = await readFile(join(stubDirectory, "arguments.txt"), "utf8");
-  check("openswarm accepted the detached run", args.includes("run") && args.includes("--task-file"), args);
+  check("swrm accepted the detached run", args.includes("run") && args.includes("--task-file"), args);
   check("risky work starts after approval", existsSync(join(stubDirectory, "arguments.txt")));
   check("the start card is in the chat", startedCard);
   check("the terminal status card is in the same chat", resultCard !== undefined, resultCard?.text);
@@ -288,7 +288,7 @@ try {
   const reviewText = review?.text ?? "";
   const reviewedFields = [
     "done",
-    `openswarm/${runId}`,
+    `swrm/${runId}`,
     "d15ca11d15ca11d15ca11d15ca11d15ca11d15ca11d",
     marker,
     "DISPATCH_E2E_VERIFY_OK",

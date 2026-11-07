@@ -4,7 +4,7 @@
 Heartbeat stuck 30–40 minutes while hosts were reachable with `ControlPath=none`.
 
 ## Root causes
-1. GNU `timeout` did not always kill wedged `ssh` / `ProxyCommand` (`ssh -W gorelay-root`) trees; orphans held ControlMaster.
+1. GNU `timeout` did not always kill wedged `ssh` / `ProxyCommand` (`ssh -W relay.example.invalid-root`) trees; orphans held ControlMaster.
 2. Serial SSH probes: one wedged host blocked the whole refresh/tick.
 3. `ThreadPoolExecutor` used as context manager (`wait=True` on exit) froze the tick after a hung future.
 4. Heartbeat written only at end of tick → long harvest looked like a dead supervisor.

@@ -4,8 +4,8 @@ import type { messages as source } from "../en/customProvider";
 export const messages = {
   "customProvider.dispatch.title": "Kod yürütücüleri",
   "customProvider.dispatch.description":
-    "Ajanlar kodlama işini openswarm'a gönderebilir. Görev kartları ve kod, yürütücü ana makineye ve onun model sağlayıcısına gider. Ayrı bir çalıştırma için lane alanını boş bırakın.",
-  "customProvider.dispatch.binary": "openswarm komutu veya yolu",
+    "Ajanlar kodlama işini swrm'a gönderebilir. Görev kartları ve kod, yürütücü ana makineye ve onun model sağlayıcısına gider. Ayrı bir çalıştırma için lane alanını boş bırakın.",
+  "customProvider.dispatch.binary": "swrm komutu veya yolu",
   "customProvider.dispatch.host": "Varsayılan filo ana makinesi",
   "customProvider.dispatch.lane": "Varsayılan lane (isteğe bağlı)",
   "customProvider.registry.title": "ACP kayıt defteri",

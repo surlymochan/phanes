@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "lane-autodispatch" / "autodispatch.py"
 SPEC = importlib.util.spec_from_file_location("autodispatch", SCRIPT)
@@ -34,7 +35,7 @@ def run_remote_status(home, payload, run=RUN, lane="codex"):
     This is the real read path of the run info (the snippet the AD sends to the lane
     host), not a hand written stand-in: the fields the submit path relies on are read
     exactly as production reads them."""
-    root = Path(home) / ".claude" / "openswarm-executor-candidate"
+    root = Path(home) / ".claude" / "swrm-executor-candidate"
     (root / "runs" / run).mkdir(parents=True, exist_ok=True)
     (root / "runs" / run / "result.json").write_text(json.dumps(payload), encoding="utf-8")
     old_home, old_argv = os.environ.get("HOME"), sys.argv
@@ -42,7 +43,8 @@ def run_remote_status(home, payload, run=RUN, lane="codex"):
     sys.argv = ["status", lane, run]
     try:
         buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(root)}), \
+                contextlib.redirect_stdout(buffer):
             exec(compile(MODULE.REMOTE_STATUS, "<remote_status>", "exec"), {"__name__": "__main__"})
     finally:
         sys.argv = old_argv
