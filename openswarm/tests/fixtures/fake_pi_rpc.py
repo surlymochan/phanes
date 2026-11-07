@@ -12,8 +12,13 @@ def send(obj):
     sys.stdout.flush()
 
 
-def response(req, command, success=True):
-    send({"id": req.get("id"), "type": "response", "command": command, "success": success})
+def response(req, command, success=True, data=None, error=None):
+    answer = {"id": req.get("id"), "type": "response", "command": command, "success": success}
+    if data is not None:
+        answer["data"] = data
+    if error is not None:
+        answer["error"] = error
+    send(answer)
 
 
 def record(event):
@@ -23,8 +28,29 @@ def record(event):
             stream.write(json.dumps(event) + "\n")
 
 
+def session_append(path, entry):
+    """Append one line to the session file, so a restarted lane can switch back into it."""
+    if not path:
+        return
+    try:
+        with open(path, "a") as stream:
+            stream.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
+def session_contains(path, marker):
+    try:
+        with open(path) as stream:
+            return marker in stream.read()
+    except OSError:
+        return False
+
+
 prompt_count = 0
 rate_mode = None
+session_file = None
+session_number = 0
 for line in sys.stdin:
     try:
         req = json.loads(line)
@@ -38,10 +64,23 @@ for line in sys.stdin:
         sessions = sys.argv[sys.argv.index("--session-dir") + 1]
         if os.path.commonpath([os.path.realpath(sessions), os.getcwd()]) == os.getcwd():
             raise RuntimeError("session directory inside worktree")
-        response(req, kind)
+        session_number += 1
+        session_file = os.path.join(sessions, "fake-session-%d.jsonl" % session_number)
+        session_append(session_file, {"type": "session_start"})
+        response(req, kind, data={"sessionId": "fake-session-%d" % session_number, "sessionFile": session_file})
+    elif kind == "get_state":
+        response(req, kind, data={"sessionId": "fake-session", "sessionFile": session_file})
+    elif kind == "switch_session":
+        path = req.get("sessionPath")
+        if not path or not os.path.isfile(path):
+            response(req, kind, success=False, error="session file not found")
+        else:
+            session_file = path
+            response(req, kind, data={"sessionId": "fake-session", "sessionFile": session_file})
     elif kind == "prompt":
         prompt = req.get("message", "")
         prompt_count += 1
+        session_append(session_file, {"type": "prompt", "count": prompt_count})
         if "LANE_TEST_RATE_LIMIT_ONCE" in prompt:
             rate_mode = "once"
         elif "LANE_TEST_RATE_LIMIT_ALWAYS" in prompt:
@@ -97,7 +136,16 @@ for line in sys.stdin:
             partial = {"role": "assistant", "content": [{"type": "text", "text": "x" * 4000}]}
             send({"type": "message_update", "message": partial,
                   "assistantMessageEvent": {"type": "text_delta", "delta": "x", "partial": partial}})
-        wait_seconds = 1 if "LANE_TEST_WAIT_SHORT" in prompt else 20 if "LANE_TEST_WAIT" in prompt else 0.1
+        always = "LANE_TEST_WAIT_ALWAYS" in prompt
+        wait_seconds = 3 if always else 1 if "LANE_TEST_WAIT_SHORT" in prompt else 20 if "LANE_TEST_WAIT" in prompt else 0.1
+        if always:
+            pass
+        elif wait_seconds > 0.1 and session_contains(session_file, "waited"):
+            # This session already waited once: a restarted lane continues the session without
+            # waiting a second time.
+            wait_seconds = 0.1
+        else:
+            session_append(session_file, {"type": "waited"})
         wait_until = time.time() + wait_seconds
         while time.time() < wait_until:
             ready, _, _ = select.select([sys.stdin], [], [], 0.1)
