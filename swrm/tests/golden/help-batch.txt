@@ -2,9 +2,9 @@ usage: swrm batch [-h] [--repo REPO] [--cards CARDS] [--hosts HOSTS]
                   [--per-host PER_HOST]
                   [--backend {codex,ocgo,deepseek,cursor,agy,pi,hermes,copilot}]
                   [--model MODEL] [--effort EFFORT] [--verify VERIFY]
-                  [--budget-minutes BUDGET_MINUTES] [--base BASE] [--detach]
-                  [--card-type CARD_TYPE] [--rework-of REWORK_OF]
-                  [--paths PATHS [PATHS ...]]
+                  [--budget-minutes BUDGET_MINUTES] [--base BASE]
+                  [--scope {repo,host}] [--detach] [--card-type CARD_TYPE]
+                  [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
                   [{status}] [id]
 
 positional arguments:
@@ -23,6 +23,8 @@ options:
   --verify VERIFY
   --budget-minutes BUDGET_MINUTES
   --base BASE
+  --scope {repo,host}   task scope (repo by default; host for authorized host
+                        operations)
   --detach
   --card-type CARD_TYPE
                         optional task card type from knowledge/card-types.yaml

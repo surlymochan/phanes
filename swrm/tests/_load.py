@@ -11,6 +11,10 @@ os.environ["OPENSWARM_HOME"] = _home
 for _k in list(os.environ):
     if _k.startswith(("OPENSWARM_", "XSWARM_")) and _k != "OPENSWARM_HOME":
         os.environ.pop(_k)
+# Keep both in-process calls and CLI children away from the host coordinator.
+# Tests exercising fleet admission explicitly replace these paths with fixtures.
+os.environ["OPENSWARM_FLEET_GUARD_CONFIG"] = os.path.join(_home, "fleet-guard.json")
+os.environ["OPENSWARM_FLEET_CAPACITY_DIR"] = os.path.join(_home, "fleet-capacity")
 
 # Never fall back to the machine-wide fleet coordinator during tests.
 os.environ["OPENSWARM_FLEET_GUARD_CONFIG"] = os.path.join(_home, "fleet-guard.disabled.json")

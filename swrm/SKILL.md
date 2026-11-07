@@ -79,6 +79,15 @@ attempts and heartbeats. Pi messages merge at `message_end`; Cursor chunks merge
 Heartbeats show elapsed time, commands, the worktree git diff summary (lanes too), and the last message (≤200 chars).
 Quiet watches still expire after their watch window, without printing `WATCH-EXPIRED`.
 
+For a Bash background job that should block indefinitely and wake only when something needs attention, use
+`--wake` (equivalently `--max-minutes 0`). It emits the actionable event and exits with status 0; a named consumer or cursor file resumes at
+the next unread byte on the following invocation. `--all` also discovers runs created while it is waiting:
+```bash
+swrm watch --all --wake --consumer planner &
+wait $!
+```
+Use `--cursor-file "$OPENSWARM_HOME/cursors/planner.json"` instead when you want to choose the cursor path.
+
 How to react:
 - `MSG`: check it against the task scope. If the executor is drifting, `$XS stop <id>`, tighten the prompt, and re-dispatch.
 - `RISK`: check it now. If it is out of bounds, stop the run. Codex reports commands before they run; opencode reports them only after they finish.
@@ -166,7 +175,7 @@ Use `swrm report --daily [--date YYYY-MM-DD] --html report.html --json` for a
 local, self-contained daily report (policy timezone). It includes backend/lane outcomes,
 executor minutes/tokens, budget use, risk blocks, slowest runs and failed summaries.
 
-- Every run has a hard `--budget-minutes`. Every watch has `--max-minutes`. Nothing runs open-ended.
+- Every run has a hard `--budget-minutes`. Default watches expire after `--max-minutes`; `--wake` or `--max-minutes 0` waits indefinitely for an actionable event.
 - For multi-hour batches, check in on a schedule instead of polling. Use **ScheduleWakeup** (inside `/loop`) or a cron-style scheduled task that runs:
   ```bash
   $XS report --since-minutes 60
@@ -184,6 +193,18 @@ or reduce the task budget. Timezone is `budget.timezone` (local by default).
 `risk.enforce` stops matching executor commands automatically (default: push, publish,
 secret print, rm outside worktree, sudo). Review redacted `risk_blocks` for stopped runs;
 post-execution command events cannot prevent initial side effects.
+
+Use `--scope host` for task-card-authorized host maintenance with `run`, `lane assign`, or `batch`.
+The default `--scope repo` keeps the existing worktree-only prompt. Host scope permits listed
+outside-worktree paths and remote hosts; both must be explicitly listed in the task card.
+Unlisted paths and hosts are forbidden. Repository edits stay in the worktree
+for swrm to commit. `rm outside worktree` and `sudo` become recorded RISK warnings; push, publish,
+and secret-print enforcement still stops the run, including later fragments and inner commands
+wrapped by `sudo`, `env`, `nohup`, or `timeout` (e.g. `sudo cat .env`). Warning-only Codex lane command
+approvals are accepted once, including legacy exec approvals; other unexpected Codex approvals
+remain denied. Run/lane ledger records, compact reports,
+and daily HTML/JSON task rows include scope
+(legacy entries default to `repo`). `fleet exec` forwards this option to `run`.
 
 A finished run gives you `status`, `result` (`summary`, `files_changed`, `tests`, `followups`), `branch` (`swrm/<id>`), `commit`, `diffstat`, `patch`, and `attempts` (backend, model, effort, seconds, error class, quota before and after).
 - The executor worked in `~/.claude/swrm/worktrees/...` based on `HEAD`. **Uncommitted changes in the main tree are not visible to it**, and `workspace.note` warns about this. Commit or stash before dispatching.
@@ -256,12 +277,12 @@ Grouped by what the command does. `swrm <command> --help` lists every flag.
 | Command | Purpose | Example |
 |---|---|---|
 | `route` | Pick backend, model, and effort for a task profile without running anything. | `$XS route --type impl --difficulty 3 --card-type fix` |
-| `run` | Route, execute in an isolated worktree, verify on the host, record the ledger entry. | `$XS run --cwd ~/code/myrepo --type impl --difficulty 2 --budget-minutes 15 --verify 'pytest -q' --task-file /tmp/task.md` |
+| `run` | Route, execute in an isolated worktree, verify on the host, record the ledger entry. Add `--scope host` for host operations. | `$XS run --scope host --cwd ~/code/myrepo --task-file /tmp/task.md` |
 | `run --detach` | Run in the background and print the run id to watch. | `$XS run --detach --cwd ~/code/myrepo --verify 'pytest -q' --task-file /tmp/task.md` |
 | `run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `$XS run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
 | `stop` | Kill a running executor; partial work stays on its branch. | `$XS stop <run-id>` |
 | `lane up` | Start the configured lane supervisors. | `$XS lane up C1 K1` |
-| `lane assign` | Give one task to an idle lane; returns the run id. | `$XS lane assign C1 --task-file /tmp/task.md --title "Parser fix" --verify 'pytest -q' --budget-minutes 30` |
+| `lane assign` | Give one task to an idle lane; returns the run id. Supports `--scope repo|host`. | `$XS lane assign C1 --scope host --task-file /tmp/task.md` |
 | `lane steer` | Send a correction to the lane's active turn. | `$XS lane steer C1 --text "Add a regression test before finishing"` |
 | `lane abort` | Abort the lane's active turn. | `$XS lane abort C1` |
 | `lane status` | Show the configured lane state. | `$XS lane status` |

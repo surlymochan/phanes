@@ -3472,6 +3472,18 @@ TASK:
 
 """ + REPORT_INSTRUCTION
 
+HOST_SCOPE_PROMPT = """This is a host operations task. You may operate on paths outside the current worktree and on remote hosts. Both outside-worktree paths and remote hosts must be explicitly listed in the task card. Do NOT operate on unlisted paths or hosts. Keep repository changes inside the worktree; swrm will commit them. Do NOT push, switch branches, or print secrets.
+"""
+
+
+def execution_prompt(wd, task, scope="repo"):
+    if scope == "host":
+        return PROMPT_TMPL.replace(
+            "- Work only inside the current directory ({wd}). It is a dedicated git worktree; do NOT commit, push, or switch branches.",
+            HOST_SCOPE_PROMPT.strip(),
+        ).format(wd=wd, task=task)
+    return PROMPT_TMPL.format(wd=wd, task=task)
+
 MODEL_UNAVAILABLE_RE = re.compile(r"(at capacity|server.?overloaded|overloaded|try a different model|model is not supported|not supported when using|model .{0,40}not (found|available))", re.I)
 OPENCODE_ABORT_RE = re.compile(r"stream error.*(usage limit exceeded|insufficient balance|quota exceeded|rate.?limit)", re.I)
 RATE_LIMIT_RE = re.compile(r"(\b429\b|resource[_ -]?exhausted|rate.?limit|usage limit|quota|too many requests|insufficient balance|spend.?control)", re.I)
@@ -3880,6 +3892,63 @@ def event_commands(event):
     return list(dict.fromkeys(commands))
 
 
+def shell_wrapper_command(words, cwd):
+    """Return a known launcher's command, retaining option operands as data."""
+    op = os.path.basename(words[0])
+    options = {
+        "sudo": ("ugphCDRrtT", {"user", "group", "host", "prompt", "close-from", "chdir", "chroot",
+                                "role", "type", "command-timeout", "other-user"}),
+        "env": ("uCaS", {"unset", "chdir", "argv0", "split-string"}),
+        "timeout": ("ks", {"kill-after", "signal"}),
+        "nice": ("n", {"adjustment"}),
+        "exec": ("a", set()),
+        "command": ("", set()),
+        "nohup": ("", set()),
+        "!": ("", set()),
+    }
+    if op not in options:
+        return None
+    short_options, long_options = options[op]
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word == "--":
+            i += 1
+            break
+        if not word.startswith("-") or word == "-":
+            if op == "env" and word == "-":
+                i += 1
+                continue
+            break
+        option, value = word, None
+        if word.startswith("--"):
+            option, sep, value = word.partition("=")
+            if option[2:] in long_options and not sep:
+                i += 1
+                value = words[i] if i < len(words) else None
+        else:
+            for offset, flag in enumerate(word[1:], 2):
+                if flag in short_options:
+                    option = "-" + flag
+                    value = word[offset:]
+                    if not value:
+                        i += 1
+                        value = words[i] if i < len(words) else None
+                    break
+        if value is not None:
+            if (op == "env" and option in ("-C", "--chdir")) or (op == "sudo" and option in ("-D", "--chdir")):
+                cwd = os.path.realpath(os.path.join(cwd, os.path.expandvars(os.path.expanduser(value))))
+            if op == "env" and option in ("-S", "--split-string"):
+                try:
+                    return shlex.split(value) + words[i + 1:], cwd
+                except ValueError:
+                    return [], cwd
+        i += 1
+    if op == "timeout":
+        i += 1  # duration, not an executable
+    return words[i:], cwd
+
+
 def shell_invocations(command, cwd, depth=0):
     """Identify command positions and shell -c bodies; quoted prose stays an operand."""
     if depth > 16:
@@ -3900,19 +3969,28 @@ def shell_invocations(command, cwd, depth=0):
         else:
             segment.append(token)
     for words in segments:
-        while words and (re.match(r"^[A-Za-z_]\w*=", words[0]) or words[0] in ("env", "command", "exec", "nohup", "!")):
-            words = words[1:]
+        command_cwd = cwd
+        wrapped = False
+        while words:
+            if re.match(r"^[A-Za-z_]\w*=", words[0]):
+                words = words[1:]
+                continue
+            yield words, command_cwd
+            inner = shell_wrapper_command(words, command_cwd)
+            if inner is None:
+                break
+            wrapped = wrapped or os.path.basename(words[0]) not in ("command", "!")
+            words, command_cwd = inner
         if not words:
             continue
         op = os.path.basename(words[0])
-        yield words, cwd
-        if op == "cd":
+        if op == "cd" and not wrapped:
             dest = words[1] if len(words) > 1 else HOME
             cwd = os.path.realpath(os.path.join(cwd, os.path.expandvars(os.path.expanduser(dest))))
         if op in ("sh", "bash", "zsh", "dash", "ksh", "fish"):
             for i, word in enumerate(words[1:], 1):
                 if (word == "--command" or re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word)) and i + 1 < len(words):
-                    yield from shell_invocations(words[i + 1], cwd, depth + 1)
+                    yield from shell_invocations(words[i + 1], command_cwd, depth + 1)
                     break
 
 
@@ -3998,7 +4076,9 @@ def rm_target_path_class(target, cwd, root):
 
 def rm_outside_worktree_class(command, worktree):
     workdir = os.path.realpath(worktree)
-    root = executor_worktree_root(workdir)
+    # Keep the classification root in the same canonical form as shell CWDs.
+    # On macOS tempfile paths can use /var while realpath returns /private/var.
+    root = os.path.realpath(executor_worktree_root(workdir))
     for words, cwd in shell_invocations(command, workdir):
         if os.path.basename(words[0]) != "rm":
             continue
@@ -4118,7 +4198,7 @@ def codex_track_io_lost(streak, event, limit=CODEX_IO_LOST_STREAK):
     return streak, None
 
 
-def enforced_risk(event, policy, worktree):
+def enforced_risk(event, policy, worktree, scope="repo"):
     enforced = (policy.get("risk") or {}).get("enforce", ENFORCED_RISKS)
     aliases = {"git destructive/push": "push", "publish/release": "publish",
                "possible secret print": "secret print", "rm -r outside worktree": "rm outside worktree",
@@ -4136,19 +4216,31 @@ def enforced_risk(event, policy, worktree):
     operations = {"push": {"git"}, "publish": {"npm", "pnpm", "yarn", "twine", "gh"},
                   "secret print": {"cat", "less", "more", "head", "tail", "bat", "printenv", "echo", "printf"},
                   "sudo": {"sudo"}}
+    # Defer host warnings until every command has been checked for enforced risks.
+    warning = None
     for command in event_commands(event):
         for words, _ in shell_invocations(command, worktree):
             op = os.path.basename(words[0])
             shell_text = " ".join(words)
             for regex, name in rules:
                 if name in enabled and (name not in operations or op in operations[name]) and re.search(regex, shell_text, re.I):
-                    return {"risk": name, "command": redact_command(command)}
+                    finding = {"risk": name, "command": redact_command(command)}
+                    if scope == "host" and name in ("rm outside worktree", "sudo"):
+                        finding["enforced"] = False
+                        warning = warning or finding
+                        continue
+                    return finding
         if "rm outside worktree" in enabled:
             path_class = rm_outside_worktree_class(command, worktree)
             if path_class:
-                return {"risk": "rm outside worktree", "path_class": path_class,
-                        "command": redact_command(command)}
-    return None
+                finding = {"risk": "rm outside worktree", "path_class": path_class,
+                           "command": redact_command(command)}
+                if scope == "host":
+                    finding["enforced"] = False
+                    warning = warning or finding
+                    continue
+                return finding
+    return warning
 
 
 def run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
@@ -4185,7 +4277,8 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
             for line in lines:
                 try:
                     event = json.loads(line)
-                    block = enforced_risk(event, policy, cwd) if isinstance(event, dict) else None
+                    scope = (jload(os.path.join(rdir, "status.json"), {}) or {}).get("scope", "repo")
+                    block = enforced_risk(event, policy, cwd, scope=scope) if isinstance(event, dict) else None
                 except ValueError:
                     continue
                 if isinstance(event, dict):
@@ -4198,7 +4291,10 @@ def _run_proc(cmd, cwd, env, timeout, out_path, abort_re=None):
                         kill_tree(p.pid, grace=0.1)
                         p.wait()
                         return 134
-                if block:
+                if block and block.get("enforced") is False:
+                    with open(out_path, "a") as ev:
+                        ev.write(json.dumps({"type": "risk_warning", **block}, ensure_ascii=False) + "\n")
+                elif block:
                     set_status(rdir, risk_blocks=[block], stop_requested=True)
                     kill_tree(p.pid, grace=0.1)
                     p.wait()
@@ -5022,6 +5118,7 @@ def new_run_id():
 
 
 def cmd_run(args, policy):
+    scope = getattr(args, "scope", "repo")
     card_type = getattr(args, "card_type", None)
     rework_of = getattr(args, "rework_of", None)
     validate_card_type(policy, card_type)
@@ -5046,6 +5143,7 @@ def cmd_run(args, policy):
         with open(f"{rdir}/task.md", "w") as f:
             f.write(task)
     title = args.title or task.strip().splitlines()[0][:72]
+    set_status(rdir, scope=scope)
     prof = profile_from_args(args)
     prof["read_only"] = (getattr(args, "read_only", False) or
                          prof.get("type") in READ_ONLY_CARD_TYPES or card_type in READ_ONLY_CARD_TYPES)
@@ -5062,11 +5160,12 @@ def cmd_run(args, policy):
                 except Exception:
                     pass
             output = {"id": rid, "status": "failed", "error_class": "bus_error", "error": bus_redact(str(error)),
+                      "scope": scope,
                       "title": title, "backend": "github-issue", "result": None, "branch": None,
                       "commit": None, "bus": {"issue_url": state.get("bus_issue_url"), "executor": None,
                                                 "pr_url": None}, "run_dir": rdir}
             jsave(f"{rdir}/result.json", output)
-            append_ledger({"id": rid, "ts": NOW(), "title": title, "status": "failed",
+            append_ledger({"id": rid, "ts": NOW(), "title": title, "status": "failed", "scope": scope,
                            "backend": "github-issue", "error_class": "bus_error", "summary": bus_redact(str(error))[:300],
                            "card_type": card_type, "rework_of": rework_of,
                            **exec_pass_fields(False, False, bool(args.verify), None)})
@@ -5077,9 +5176,9 @@ def cmd_run(args, policy):
     st = get_state(policy)
     decision = route(prof, st, policy)
     if not decision["ok"]:
-        out = {"id": rid, "status": "unroutable", "decision": decision}
-        set_status(rdir, state="unroutable")
-        append_ledger({"id": rid, "ts": NOW(), "title": title, "status": "unroutable", "decision": decision,
+        out = {"id": rid, "status": "unroutable", "decision": decision, "scope": scope}
+        set_status(rdir, state="unroutable", scope=scope)
+        append_ledger({"id": rid, "ts": NOW(), "title": title, "status": "unroutable", "decision": decision, "scope": scope,
                        "card_type": card_type, "rework_of": rework_of,
                        **exec_pass_fields(False, False, bool(args.verify), None)})
         jsave(f"{rdir}/result.json", out)
@@ -5088,8 +5187,8 @@ def cmd_run(args, policy):
     advice = routing_advice(prof, card_type, st, policy, decision)
     routing_fields = {"routing_advice": advice} if advice is not None else {}
     if args.dry_run:
-        set_status(rdir, state="dry-run")
-        print(json.dumps({"id": rid, "dry_run": True, "decision": decision,
+        set_status(rdir, state="dry-run", scope=scope)
+        print(json.dumps({"id": rid, "dry_run": True, "decision": decision, "scope": scope,
                           **routing_fields}, indent=2, ensure_ascii=False))
         return
     queued_at = (jload(f"{rdir}/status.json", {}) or {}).get("queued_at", NOW())
@@ -5100,10 +5199,11 @@ def cmd_run(args, policy):
         set_status(rdir, state="budget_rejected")
         budget_error(error)
     if args.detach and not args.run_id:
-        set_status(rdir, id=rid, state="queued", title=title, profile=prof, started=NOW(),
+        set_status(rdir, id=rid, state="queued", title=title, profile=prof, started=NOW(), scope=scope,
                    budget_minutes=budget_min, cwd=os.path.abspath(args.cwd))
         child = [sys.executable, os.path.realpath(__file__), "run", "--run-id", rid,
-                 "--cwd", os.path.abspath(args.cwd), "--title", title, "--budget-minutes", str(budget_min)]
+                 "--cwd", os.path.abspath(args.cwd), "--title", title, "--budget-minutes", str(budget_min),
+                 "--scope", scope]
         for flag in ("type", "difficulty", "context_tokens", "backend", "model", "effort"):
             v = getattr(args, flag, None)
             if v:
@@ -5132,7 +5232,7 @@ def cmd_run(args, policy):
         print(json.dumps({"id": rid, "state": "started", "runner_pid": p.pid, "run_dir": rdir,
                           "watch": f"swrm watch {rid}", "result": f"{rdir}/result.json"}, indent=2))
         return
-    set_status(rdir, id=rid, state="routing", title=title, profile=prof, started=NOW(),
+    set_status(rdir, id=rid, state="routing", title=title, profile=prof, started=NOW(), scope=scope,
                budget_minutes=budget_min, runner_pid=os.getpid(), cwd=os.path.abspath(args.cwd))
     ws = prepare_workspace(os.path.abspath(args.cwd), rid, not args.no_worktree or prof["read_only"], getattr(args, "base", None))
     if prof["read_only"] and ws["mode"] != "worktree":
@@ -5152,7 +5252,7 @@ def cmd_run(args, policy):
                    "worktree": ws.get("root") if args.keep_worktree else None, "merge_hint": None}
             if not args.keep_worktree:
                 cleanup_worktree(ws, None)
-            out = {"id": rid, "status": "failed", "error_class": "prepare_failed", "title": title,
+            out = {"id": rid, "status": "failed", "error_class": "prepare_failed", "title": title, "scope": scope,
                    "prepare": prepare, "workspace_note": note, "backend": decision["backend"],
                    "model": decision["model"], "effort": decision.get("effort"), "usage": None,
                    "seconds": prepared["seconds"], "result": None,
@@ -5160,7 +5260,7 @@ def cmd_run(args, policy):
                    **fin, "attempts": [], "claude_review": decision.get("claude_review"),
                    "decision_reasons": decision.get("reasons"), "run_dir": rdir}
             jsave(f"{rdir}/result.json", out)
-            append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": "failed",
+            append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": "failed", "scope": scope,
                            "backend": decision["backend"], "model": decision["model"],
                            "error_class": "prepare_failed", "seconds": prepared["seconds"],
                            "card_type": card_type, "rework_of": rework_of, **routing_fields,
@@ -5175,7 +5275,7 @@ def cmd_run(args, policy):
         if rewritten != args.verify:
             set_status(rdir, verify_note="verify paths rewritten from base repo to worktree")
             args.verify = rewritten
-    prompt = PROMPT_TMPL.format(wd=ws["path"], task=task)
+    prompt = execution_prompt(ws["path"], task, scope)
     if args.verify:
         prompt += (f"\nAfter you finish, the planner runs this acceptance command on the host, outside your sandbox: "
                    f"`{args.verify}`. If your sandbox blocks running it (ports, network, missing deps), say so in "
@@ -5300,7 +5400,7 @@ def cmd_run(args, policy):
     out = {
         "id": rid, "status": status, "error_class": "budget_exceeded_daily" if budget_denial else "prepare_failed" if prepare_error else attempts[-1]["error_class"],
         **({"budget_error": budget_denial, "error": "budget_exceeded_daily"} if budget_denial else {}),
-        "title": title, "prepare": prepare, "workspace_note": note, "verify": verify, "verify_note": verify_note,
+        "title": title, "scope": scope, "prepare": prepare, "workspace_note": note, "verify": verify, "verify_note": verify_note,
         "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
         "usage": usage, "seconds": wall_seconds,
         "queued_seconds": (jload(f"{rdir}/status.json", {}) or {}).get("queued_seconds", 0),
@@ -5310,7 +5410,7 @@ def cmd_run(args, policy):
         "decision_reasons": decision.get("reasons"), "run_dir": rdir, **routing_fields,
     }
     jsave(f"{rdir}/result.json", out)
-    append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": status,
+    append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": status, "scope": scope,
                    "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
                    "tier": decision.get("tier"), "attempts": [{k: a[k] for k in a if k != "error_tail"} for a in attempts],
                    "error_class": out["error_class"],
@@ -7256,7 +7356,8 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         with open(os.path.join(rdir, "task.md"), "w") as f:
                             f.write(task)
                         spec = {k: req.get(k) for k in ("title", "verify", "verify_baseline", "budget_minutes", "base",
-                                                        "card_type", "rework_of", "paths", "regress_label", "read_only")}
+                                                        "card_type", "rework_of", "paths", "regress_label", "read_only", "scope")}
+                        spec["scope"] = spec.get("scope") or "repo"
                         spec["budget_minutes"] = budget
                         provider = execution_provider(lane["backend"], policy=load_policy(), lane=lane)
                         spec.update({"run_id": rid, "task": task, "started": NOW(), "provider": provider})
@@ -7269,7 +7370,7 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         set_status(rdir, id=rid, state="queued", title=spec.get("title") or task.strip().splitlines()[0][:72],
                                    backend=lane["backend"], model=lane["model"], effort=lane.get("effort"), lane=lane["name"],
                                    provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
-                                   started=spec["started"], budget_minutes=spec.get("budget_minutes"),
+                                   started=spec["started"], budget_minutes=spec.get("budget_minutes"), scope=spec["scope"],
                                    cwd=lane["repo"], runner_pid=os.getpid(), events=spec["_event_file"])
                         answer = {"ok": True, "id": rid, "state": "queued"}
             elif op in ("steer", "abort", "down"):
@@ -7525,12 +7626,17 @@ def lane_acp_request(child, msg, event_file):
     return True
 
 
-def lane_approval_response(child, msg, event_file):
+def lane_approval_response(child, msg, event_file, host_warning=False):
     method = msg.get("method", "")
     req_id = msg.get("id")
     if method not in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval",
                       "item/permissions/requestApproval", "execCommandApproval", "applyPatchApproval"):
         return False
+    if host_warning and method in ("item/commandExecution/requestApproval", "execCommandApproval"):
+        # Only command requests already classified as host warnings may proceed, once.
+        decision = "approved" if method == "execCommandApproval" else "accept"
+        child.send({"jsonrpc": "2.0", "id": req_id, "result": {"decision": decision}})
+        return True
     lane_record_event(event_file, {"type": "error", "error": f"declined unexpected approval request: {method}"})
     result = {"decision": "decline"}
     if method == "item/permissions/requestApproval":
@@ -7654,8 +7760,10 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 error_class, detail = lane_failure("resident executor stdout closed")
                 return None, usage, error_class, 1, event_file, detail
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor stdout closed"
-        block = enforced_risk(msg, risk_policy, ws["path"])
-        if block:
+        block = enforced_risk(msg, risk_policy, ws["path"], scope=spec.get("scope", "repo"))
+        if block and block.get("enforced") is False:
+            lane_record_event(event_file, {"type": "risk_warning", **block})
+        elif block:
             spec.setdefault("risk_blocks", []).append(block)
             spec["abort_requested"] = True
             set_status(rdir, risk_blocks=spec["risk_blocks"])
@@ -7669,7 +7777,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             continue
         if lane["backend"] == "codex":
             if "method" in msg and "id" in msg:
-                if lane_approval_response(child, msg, event_file):
+                if lane_approval_response(child, msg, event_file,
+                                          host_warning=bool(block and block.get("enforced") is False)):
                     continue
             lane_record_event(event_file, msg)
             method = msg.get("method")
@@ -7905,6 +8014,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
            "prepare": ws.get("prepare", []), "workspace_note": ws.get("workspace_note"), "verify": verify,
+           "scope": spec.get("scope", "repo"),
            "verify_note": verify_note, "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
            **({"resolved_model": model} if lane["backend"] in ("cursor", "copilot") else {}),
            "risk_blocks": spec.get("risk_blocks", []), "review_changes_discarded": bool(read_only and changed),
@@ -7920,6 +8030,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     pass_fields = exec_pass_fields(bool(fin.get("commit") or (changed and not read_only)), read_only_output,
                                    bool(spec.get("verify")), verify)
     append_ledger({"id": rid, "ts": NOW(), "title": title, "status": status, "lane": lane["name"],
+                   "scope": spec.get("scope", "repo"),
                    "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
                    "attempts": attempts, "error_class": error_class,
                    "seconds": round(sum(attempt["seconds"] for attempt in attempts), 3),
@@ -7933,7 +8044,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
-    set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"])
+    set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
+               scope=spec.get("scope", "repo"))
     cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -7971,7 +8083,7 @@ def lane_do_run(lane, spec, child, server, current):
                 spec["verify"] = rewritten
                 set_status(rdir, verify_note="verify paths rewritten from base repo to lane worktree")
         task = spec["task"]
-        prompt = PROMPT_TMPL.format(wd=ws["path"], task=task)
+        prompt = execution_prompt(ws["path"], task, spec.get("scope", "repo"))
         if spec.get("verify"):
             prompt += (f"\nAfter you finish, the planner runs this acceptance command on the host, outside your sandbox: "
                        f"`{spec['verify']}`. If your sandbox blocks running it (ports, network, missing deps), say so in "
@@ -8117,6 +8229,7 @@ def lane_do_run(lane, spec, child, server, current):
         if ws is None:
             # Preserve a visible failed run even if lane worktree preparation was rejected.
             status = {"id": rid, "status": "failed", "title": spec.get("title"), "lane": lane["name"],
+                      "scope": spec.get("scope", "repo"),
                       "backend": lane["backend"], "model": lane["model"], "result": None,
                       "attempts": [{"backend": lane["backend"], "model": lane["model"], "rc": 1,
                                     "error_class": error_class, "error_tail": short(e, 500)}], "run_dir": rdir}
@@ -8124,6 +8237,7 @@ def lane_do_run(lane, spec, child, server, current):
             set_status(rdir, state="finished", status="failed", finished=NOW(), error_class=error_class,
                        last_error=short(e, 500))
             append_ledger({"id": rid, "ts": NOW(), "title": spec.get("title"), "status": "failed",
+                           "scope": spec.get("scope", "repo"),
                            "lane": lane["name"], "backend": lane["backend"], "model": lane["model"],
                            "error_class": error_class, "card_type": spec.get("card_type"),
                            "rework_of": spec.get("rework_of"),
@@ -8426,7 +8540,8 @@ def cmd_lane_assign(args):
                                          "card_type": getattr(args, "card_type", None),
                                          "rework_of": getattr(args, "rework_of", None),
                                          "paths": getattr(args, "paths", None) or [],
-                                         "read_only": getattr(args, "read_only", False)})
+                                         "read_only": getattr(args, "read_only", False),
+                                         "scope": getattr(args, "scope", "repo")})
     if response.get("ok"):
         response.update({"lane": lane["name"], "watch": f"swrm watch {rid}",
                          "result": os.path.join(RUNS, rid, "result.json")})
@@ -9376,7 +9491,8 @@ def batch_launch(spec, row):
               "stream = os.fdopen(fd, 'wb'); stream.write(sys.stdin.buffer.read()); stream.close(); print(path)")
     path = host_require(host, host_python(host, source, input=card), "card copy").decode().strip()
     try:
-        args = ["run", "--detach", "--cwd", spec["repos"][row["host"]], "--task-file", path, "--base", spec["base"]]
+        args = ["run", "--detach", "--cwd", spec["repos"][row["host"]], "--task-file", path, "--base", spec["base"],
+                "--scope", spec.get("scope", "repo")]
         for key in ("backend", "model", "effort", "verify", "budget_minutes", "card_type", "rework_of"):
             if spec.get(key) is not None:
                 args += ["--" + key.replace("_", "-"), str(spec[key])]
@@ -9575,9 +9691,11 @@ def cmd_batch(args, policy):
             "concurrency": concurrency_caps, "model": args.model, "effort": args.effort,
             "card_type": getattr(args, "card_type", None), "rework_of": getattr(args, "rework_of", None),
             "paths": getattr(args, "paths", None) or [],
-            "verify": args.verify, "budget_minutes": args.budget_minutes or round(policy["run"]["timeout_seconds"] / 60),
+            "verify": args.verify, "scope": getattr(args, "scope", "repo"),
+            "budget_minutes": args.budget_minutes or round(policy["run"]["timeout_seconds"] / 60),
             "poll_seconds": args.poll_seconds}
-    summary = {"id": bid, "repo": args.repo, "base": base, "state": "queued", "started": NOW(), "cards": [
+    summary = {"id": bid, "repo": args.repo, "base": base, "scope": getattr(args, "scope", "repo"),
+               "state": "queued", "started": NOW(), "cards": [
         {"card": os.path.basename(path), "path": path, "host": names[i % len(names)], "state": "queued", "status": "queued",
          "verify_rc": None, "branch": None, "commit": None, "seconds": None, "summary": ""} for i, path in enumerate(paths)]}
     directory = os.path.join(DATA, "batches", bid)
@@ -9778,6 +9896,8 @@ def summarize_event(o):
     if t == "tool_execution_start":
         args = o.get("args") or {}
         return "cmd", args.get("command") or f"{o.get('toolName', 'tool')}"
+    if t == "tool_call":  # Cursor one-shot stream-json
+        return "cmd", o.get("command") or (o.get("tool_call") or {}).get("command") or o.get("subtype") or "tool"
     if t == "agent_end":
         return "end", ""
     if t in ("extension_error", "auto_retry_end") and o.get("success") is False:
@@ -9832,9 +9952,6 @@ class WatchMessages:
                 return rows
             if tool_id:
                 self.tools.add(tool_id)
-        if event.get("type") == "tool_call":
-            return rows + [("cmd", event.get("command") or event.get("tool_call", {}).get("command")
-                            or event.get("subtype") or "tool")]
         kind, text = summarize_event(event)
         return rows + ([(kind, text)] if kind else [])
 
@@ -9849,9 +9966,265 @@ def watch_diffstat(state):
     return text.strip().splitlines()[-1].strip() if rc == 0 and text.strip() else "0 files changed"
 
 
+def watch_wait_for_change(path):
+    # kqueue provides an event-driven wait on macOS. Other platforms use a
+    # one-second floor so idle watches never spin or repeatedly reread logs.
+    if hasattr(select, "kqueue") and path and os.path.exists(path):
+        try:
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                kq = select.kqueue()
+                try:
+                    ev = select.kevent(fd, filter=select.KQ_FILTER_VNODE,
+                                       flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                                       fflags=select.KQ_NOTE_WRITE | select.KQ_NOTE_RENAME | select.KQ_NOTE_DELETE)
+                    kq.control([ev], 1, 1.0)
+                finally:
+                    kq.close()
+            finally:
+                os.close(fd)
+        except OSError:
+            # Rotation can remove the path between exists/open or invalidate
+            # vnode registration. Retry discovery after a bounded idle wait.
+            time.sleep(1.0)
+    elif sys.platform.startswith("linux") and path:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        init = getattr(libc, "inotify_init1", None)
+        add = getattr(libc, "inotify_add_watch", None)
+        if init and add:
+            fd = init(os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+            if fd >= 0:
+                try:
+                    mask = 0x00000002 | 0x00000004 | 0x00000008 | 0x00000080 | 0x00000100
+                    if add(fd, os.fsencode(os.path.dirname(path) or "."), mask) >= 0:
+                        select.select([fd], [], [], 1.0)
+                    else:
+                        time.sleep(1.0)
+                finally:
+                    os.close(fd)
+            else:
+                time.sleep(1.0)
+        else:
+            time.sleep(1.0)
+    else:
+        time.sleep(1.0)
+
+
+def cmd_watch_wake(args):
+    """Block on appended run events and return after the first actionable line."""
+    run_ids = list(args.run_id or [])
+    if args.all and run_ids:
+        sys.exit("watch --all cannot be combined with run ids")
+    if not args.all and not run_ids:
+        sys.exit("watch requires run ids or --all")
+    if args.consumer and args.cursor_file:
+        sys.exit("use only one of --consumer and --cursor-file")
+    cursor_path = args.cursor_file
+    if args.consumer:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.consumer) or args.consumer in (".", ".."):
+            sys.exit("invalid consumer name")
+        cursor_path = os.path.join(DATA, "cursors", args.consumer)
+    if cursor_path:
+        cursor_path = os.path.realpath(cursor_path)
+        os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+        # Hold ownership through load, wait, output and checkpoint. A contender
+        # loads the latest cursor only after the previous watcher has exited.
+        with open(cursor_path + ".lock", "a+b") as lock:
+            _flock(lock, LOCK_EX)
+            return watch_wake_locked(args, run_ids, cursor_path)
+    return watch_wake_locked(args, run_ids, None)
+
+
+def watch_wake_locked(args, run_ids, cursor_path):
+    cursors = {}
+    notifications = {}
+    if cursor_path:
+        try:
+            with open(cursor_path, encoding="utf-8") as f:
+                saved = json.load(f)
+                cursors = saved.get("files", {})
+                notifications = saved.get("notifications", {})
+                if not isinstance(cursors, dict) or not isinstance(notifications, dict):
+                    raise ValueError("invalid cursor maps")
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, AttributeError):
+            sys.exit(f"invalid watch cursor: {cursor_path}")
+    risks = [(re.compile(rx, re.I), name) for rx, name in DEFAULT_RISKS]
+    risks += [(re.compile(rx, re.I), "custom") for rx in (args.risk or [])]
+    last_activity = {}
+
+    def save_cursor():
+        if not cursor_path:
+            return
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(cursor_path),
+                                             prefix=".watch-cursor-", delete=False) as f:
+                tmp = f.name
+                json.dump({"version": 1, "files": cursors, "notifications": notifications}, f, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, cursor_path)
+        except OSError as exc:
+            # Do not swallow checkpoint errors in the event-file read handler.
+            raise RuntimeError(f"cannot save watch cursor: {cursor_path}") from exc
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+
+    def event_id(*parts):
+        return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def emit(rid, kind, text, delivery_id=None):
+        label = args.label or rid[-6:]
+        delivery_id = delivery_id or event_id(rid, kind, text)
+        try:
+            print(f"[{label} {time.strftime('%H:%M')} id={delivery_id}] {kind}: {text}", flush=True)
+        except OSError as exc:
+            # Escape the event-file OSError handler without committing progress.
+            raise RuntimeError("cannot write watch event to stdout") from exc
+        # At-least-once: a crash or checkpoint failure here replays the same id.
+        save_cursor()
+
+    def notify(rid, kind, text):
+        key = f"{rid}:{kind}"
+        if notifications.get(key) == text:
+            return False
+        notifications[key] = text
+        # A new activity episode must also have a new consumer deduplication ID.
+        progress = sorted((key, value.get("generation"), value.get("offset"))
+                          for key, value in cursors.items() if key.startswith(f"{rid}:"))
+        emit(rid, kind, text, event_id(rid, kind, text, progress) if kind == "STALL" else None)
+        return True
+
+    def active_runs():
+        if args.all:
+            return sorted((name for name in os.listdir(RUNS) if os.path.isdir(os.path.join(RUNS, name))), reverse=True) if os.path.isdir(RUNS) else []
+        return run_ids
+
+    def anchor(f, offset):
+        f.seek(max(0, offset - 64))
+        return hashlib.sha256(f.read(min(offset, 64))).hexdigest()
+
+    while True:
+        watch_path = None
+        for rid in active_runs():
+            rdir = os.path.join(RUNS, rid)
+            st = jload(os.path.join(rdir, "status.json"), {}) or {}
+            now = NOW()
+            last_activity.setdefault(rid, now)
+            event_paths = []
+            if st.get("events") and os.path.isfile(st["events"]):
+                event_paths.append(st["events"])
+            event_paths.extend(sorted(glob.glob(os.path.join(rdir, "events.*.jsonl"))))
+            for path in dict.fromkeys(event_paths):
+                watch_path = path
+                try:
+                    with open(path, "rb") as f:
+                        stat = os.fstat(f.fileno())
+                        identity = f"{stat.st_dev}:{stat.st_ino}"
+                        # Follow renamed files without replaying their old lines.
+                        # Path-based v1 cursors remain readable during migration.
+                        key = f"{rid}:inode:{identity}"
+                        saved = cursors.get(key, cursors.get(f"{rid}:{os.path.abspath(path)}", {}))
+                        known = saved.get("identity") == identity
+                        offset = int(saved.get("offset", 0)) if saved.get("identity") == identity else 0
+                        generation = saved.get("generation", identity)
+                        # Equal bytes can still belong to a new copytruncate
+                        # generation. Metadata changes without growth replay
+                        # conservatively; ordinary appends retain the cursor.
+                        rewritten = (known and saved.get("size") is not None
+                                     and stat.st_size <= saved["size"]
+                                     and stat.st_mtime_ns != saved.get("mtime_ns"))
+                        reset = (offset > stat.st_size or rewritten
+                                 or (saved.get("anchor") and anchor(f, offset) != saved["anchor"]))
+                        if reset:
+                            offset = 0
+                            generation = event_id(identity, generation, stat.st_mtime_ns, stat.st_size)
+
+                        def checkpoint(position):
+                            return {"identity": identity, "offset": position, "anchor": anchor(f, position),
+                                    "generation": generation, "size": max(stat.st_size, position),
+                                    "mtime_ns": stat.st_mtime_ns}
+
+                        if reset:
+                            # Persist only the rewind, never an undelivered event.
+                            # This keeps the generation/id stable if output fails.
+                            cursors[key] = checkpoint(0)
+                            save_cursor()
+                        if not known and getattr(args, "from_end", False):
+                            offset = stat.st_size
+                            cursors[key] = checkpoint(offset)
+                            save_cursor()
+                        elif known and (key not in cursors or "size" not in saved):
+                            cursors[key] = checkpoint(offset)
+                            save_cursor()
+                        f.seek(offset)
+                        while True:
+                            raw = f.readline()
+                            if not raw or not raw.endswith(b"\n"):
+                                break
+                            delivery_id = event_id(rid, identity, generation, offset, hashlib.sha256(raw).hexdigest())
+                            offset = f.tell()
+                            cursors[key] = checkpoint(offset)
+                            f.seek(offset)
+                            last_activity[rid] = NOW()
+                            notifications.pop(f"{rid}:STALL", None)
+                            try:
+                                event = json.loads(raw.decode("utf-8", errors="replace"))
+                            except ValueError:
+                                save_cursor()
+                                continue
+                            if not isinstance(event, dict):
+                                save_cursor()
+                                continue
+                            typ = event.get("type")
+                            if typ == "risk_blocked":
+                                emit(rid, "RISK[{}]".format(event.get("risk")), short(event.get("command"), 220) + " (blocked)", delivery_id)
+                                return 0
+                            if ((typ in ("extension_error", "auto_retry_end") and event.get("success") is False)
+                                    or typ in ("error", "turn.failed")):
+                                emit(rid, "ERROR", short(event.get("error") or event, 300), delivery_id)
+                                return 0
+                            kind, text = summarize_event(event)
+                            if kind == "error":
+                                emit(rid, "ERROR", short(text, 300), delivery_id)
+                                return 0
+                            if kind == "cmd":
+                                for rx, name in risks:
+                                    if rx.search(text):
+                                        emit(rid, f"RISK[{name}]", short(text, 220), delivery_id)
+                                        return 0
+                            save_cursor()
+                except OSError:
+                    continue
+            if st.get("state") in ("finished", "unroutable"):
+                result = jload(os.path.join(rdir, "result.json"), {}) or {}
+                if notify(rid, "DONE", f"status={result.get('status') or st.get('state')} backend={result.get('backend') or st.get('backend')}"):
+                    return 0
+                continue
+            if st.get("runner_pid") and not pid_alive(st["runner_pid"]):
+                if notify(rid, "EXITED", f"runner process gone in state={st.get('state')}"):
+                    return 0
+            if st.get("queue_reason") != "provider concurrency limit" and st.get("deadline") and now > st["deadline"] + 90:
+                if notify(rid, "BUDGET", f"past budget ({st.get('budget_minutes')}m) and still {st.get('state')}"):
+                    return 0
+            if getattr(args, "stall_minutes", 10) > 0 and now - last_activity[rid] > getattr(args, "stall_minutes", 10) * 60:
+                if notify(rid, "STALL", f"no events for >{getattr(args, 'stall_minutes', 10):g}m"):
+                    return 0
+        watch_wait_for_change(watch_path)
+
+
 def cmd_watch(args, policy):
     """Stream one line per actionable event for a run; designed to be wrapped by Claude's Monitor tool.
     Exits on run completion, budget expiry, or after --max-minutes (re-arm to keep watching)."""
+    if getattr(args, "wake", False) or args.max_minutes == 0:
+        return cmd_watch_wake(args)
+    if not args.run_id:
+        sys.exit("watch requires at least one run id")
     if len(args.run_id) > 1:  # one Monitor for a whole batch: fan out one child watcher per run
         procs = []
         for rid in args.run_id:
@@ -9911,6 +10284,9 @@ def cmd_watch(args, policy):
                     out("RATELIMIT", f"retry {o.get('retry')}/{o.get('max_retries')} after {o.get('wait_seconds')}s")
                     seen_rate_limits.add(key)
                 continue
+            if o.get("type") == "risk_warning":
+                out(f"RISK[{o.get('risk')}]", short(o.get("command"), 220) + " (warning; host scope)")
+                continue
             for kind, text in messages.feed(o):
                 if kind == "msg":
                     last_msg = text
@@ -9950,7 +10326,7 @@ def cmd_watch(args, policy):
                             out("RATELIMIT", f"retry {event.get('retry')}/{event.get('max_retries')} after {event.get('wait_seconds')}s")
                             seen_rate_limits.add(key)
             r = jload(f"{rdir}/result.json", {}) or {}
-            out("DONE", f"status={r.get('status')} backend={r.get('backend')}/{r.get('model')} "
+            out("DONE", f"scope={r.get('scope', st.get('scope', 'repo'))} status={r.get('status')} backend={r.get('backend')}/{r.get('model')} "
                         f"commit={(r.get('commit') or '-')[:10]} files={len((r.get('result') or {}).get('files_changed') or [])} "
                         f"summary={short((r.get('result') or {}).get('summary'), 240)}")
             return
@@ -9972,7 +10348,7 @@ def cmd_watch(args, policy):
             last_evt = now
         if now - last_beat > args.heartbeat_minutes * 60:
             el = int((now - st.get("started", now)) / 60)
-            out("HEARTBEAT", f"{st.get('state')} {st.get('backend')}/{st.get('model')} {el}m/{st.get('budget_minutes')}m "
+            out("HEARTBEAT", f"scope={st.get('scope', 'repo')} {st.get('state')} {st.get('backend')}/{st.get('model')} {el}m/{st.get('budget_minutes')}m "
                              f"cmds={cmds} files={watch_diffstat(st)} last: {short(last_msg, 200)}")
             last_beat = now
         if args.max_minutes and now - t_start > args.max_minutes * 60:
@@ -10007,6 +10383,7 @@ def run_digest(rid):
                         last = text
     end = st.get("finished") or now
     out = {"id": rid, "state": state, "status": st.get("status") or r.get("status"), "title": st.get("title"),
+           "scope": st.get("scope", r.get("scope", "repo")),
            "backend": st.get("backend"), "model": st.get("model"), "effort": st.get("effort"),
            "provider": st.get("provider"), "concurrency_keys": st.get("concurrency_keys") or [],
            "elapsed_min": round((end - st.get("started", end)) / 60, 1), "budget_min": st.get("budget_minutes"),
@@ -10168,6 +10545,7 @@ def daily_report(policy, date=None):
             saved = jload(os.path.join(RUNS, rid, "result.json"), {}) or {}
             summary = (saved.get("result") or {}).get("summary") or saved.get("summary")
         rows.append({"id": rid, "backend": entry.get("backend"), "lane": lane, "status": entry.get("status"),
+                     "scope": entry.get("scope", "repo"),
                      "executor_minutes": seconds / 60, "summary": short(summary or entry.get("title"), 220)})
     return {"date": day, "timezone": timezone, "totals": totals, "per_backend": per_backend, "per_lane": per_lane,
             "budget": budget_status(policy, day, entries), "risks": risks,
@@ -10192,8 +10570,8 @@ def daily_report_html(report):
             ["Name", "Runs", "Done", "Partial", "Failed", "Stopped", "Executor min", "Tokens", "Risk blocks"], rows) + "</section>"
 
     def runs(title, rows):
-        return f"<section><h2>{title}</h2>" + table(["Run", "Backend", "Lane", "Status", "Executor min", "Summary"],
-               [[r["id"], r["backend"], r["lane"], r["status"], f"{r['executor_minutes']:.2f}", r["summary"]] for r in rows]) + "</section>"
+        return f"<section><h2>{title}</h2>" + table(["Run", "Backend", "Lane", "Scope", "Status", "Executor min", "Summary"],
+               [[r["id"], r["backend"], r["lane"], r.get("scope", "repo"), r["status"], f"{r['executor_minutes']:.2f}", r["summary"]] for r in rows]) + "</section>"
 
     budget = report["budget"]
     cap = lambda value: "unlimited" if value is None else f"{value:g}"
@@ -10281,7 +10659,7 @@ def cmd_report(args, policy):
         if r["state"] == "running" and r["budget_min"] and r["elapsed_min"] > r["budget_min"]:
             warn.append("over budget")
         print(f"  {r['id']} {r['backend']}/{r['model']}"
-              f"{' lane=' + r['lane'] if r.get('lane') else ''} {r['elapsed_min']}m/{r['budget_min']}m cmds={r['cmds']} "
+              f"{' lane=' + r['lane'] if r.get('lane') else ''} scope={r.get('scope', 'repo')} {r['elapsed_min']}m/{r['budget_min']}m cmds={r['cmds']} "
               f"{'⚠ ' + ', '.join(warn) if warn else ''}\n    {r['title']} — {r['last_msg'][:140]}")
     tally = {}
     for r in recent:
@@ -10289,7 +10667,7 @@ def cmd_report(args, policy):
     print(f"finished in last {args.since_minutes}m: {len(recent)} {tally if tally else ''}")
     for r in recent:
         print(f"  {r['status']:<15} {r['backend']}/{r['model']}"
-              f"{' lane=' + r['lane'] if r.get('lane') else ''} {r['elapsed_min']}m  {r['title']}"
+              f"{' lane=' + r['lane'] if r.get('lane') else ''} scope={r.get('scope', 'repo')} {r['elapsed_min']}m  {r['title']}"
               f"{'  commit ' + r['commit'][:10] if r.get('commit') else ''}")
     needs = [r for r in active if r["state"] == "dead" or (r["state"] == "running" and r["budget_min"] and r["elapsed_min"] > r["budget_min"])]
     needs += [r for r in recent if r["status"] not in ("done",)]
@@ -11439,6 +11817,7 @@ def main():
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")
     sp.add_argument("--cwd", default=os.getcwd())
+    sp.add_argument("--scope", choices=("repo", "host"), default="repo", help="task scope (repo by default; host for authorized host operations)")
     sp.add_argument("--base", help="base commit for an isolated worktree; defaults to HEAD")
     sp.add_argument("--no-worktree", action="store_true")
     add_dispatch_arguments(sp, "verify-baseline", "verify",
@@ -11496,13 +11875,17 @@ def main():
     rp.add_argument("--fleet", action="store_true", help="read the merged fleet ledger")
 
     sp = sub.add_parser("watch", help="stream actionable events of a run (for Claude's Monitor tool)")
-    sp.add_argument("run_id", nargs="+", help="one or more run ids; several ids are watched together")
+    sp.add_argument("run_id", nargs="*", help="one or more run ids; several ids are watched together")
+    sp.add_argument("--all", action="store_true", help="watch all runs, including runs created later")
+    sp.add_argument("--wake", action="store_true", help="block indefinitely (equivalent to --max-minutes 0); exit on an actionable event")
+    sp.add_argument("--cursor-file", help="persist consumed event offsets in this file")
+    sp.add_argument("--consumer", help="persist offsets under $OPENSWARM_HOME/cursors/NAME")
     sp.add_argument("--label")
     sp.add_argument("--from-end", action="store_true", help="skip events already written (use when re-arming)")
     sp.add_argument("--quiet", action="store_true", help="only terminal, risk, stall, error, budget, attempt and heartbeat events")
     sp.add_argument("--stall-minutes", type=float, default=10)
     sp.add_argument("--heartbeat-minutes", type=float, default=15)
-    sp.add_argument("--max-minutes", type=float, default=28, help="watch window; exits so the caller re-arms")
+    sp.add_argument("--max-minutes", type=float, default=28, help="watch window; 0 is equivalent to --wake")
     sp.add_argument("--risk", action="append", help="extra regex to flag in executor shell commands")
 
     sp = sub.add_parser("runs", help="report recent/active runs (for scheduled check-ins)")
@@ -11567,6 +11950,7 @@ def main():
     add_dispatch_arguments(sp, "backend", "model", "effort", "verify", "budget",
                            backend_choices=list(PLANNERS), budget_type=int)
     sp.add_argument("--base")
+    sp.add_argument("--scope", choices=("repo", "host"), default="repo", help="task scope (repo by default; host for authorized host operations)")
     sp.add_argument("--detach", action="store_true")
     add_dispatch_arguments(sp, "card-type", "rework-of", "paths",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
@@ -11613,6 +11997,7 @@ def main():
     add_dispatch_arguments(lp, "task-source", "title", "verify", "verify-baseline", "budget",
                            task_source_required=True)
     lp.add_argument("--base")
+    lp.add_argument("--scope", choices=("repo", "host"), default="repo", help="task scope (repo by default; host for authorized host operations)")
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")

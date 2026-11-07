@@ -174,6 +174,10 @@ For longer work, detach and watch:
 swrm run --detach --cwd ~/code/myrepo --verify 'pytest -q' --task-file /tmp/task.md   # prints {"id": ...}
 swrm watch <id1> <id2>          # one line per actionable event; exits on DONE or after 28 min
 swrm watch <id1> <id2> --quiet  # alerts, heartbeats and terminal events only
+swrm watch <id1> <id2> --wake --consumer planner
+                                      # Bash-friendly blocking wait; exits on next actionable event
+swrm watch --all --wake --cursor-file "$OPENSWARM_HOME/cursors/all.json"
+                                      # include runs created later and resume from saved offsets
 swrm resume                     # recover live runs, busy lanes and recent results after planner restart
 swrm resume --since-hours 12 --json
 swrm report --since-minutes 60  # one-screen digest for scheduled check-ins
@@ -181,6 +185,18 @@ swrm stop <id>                  # kill the executor; partial work is still commi
 ```
 
 Pi messages appear once at `message_end`; Cursor chunks are merged until a prompt turn ends or a tool call starts.
+With `--wake` (equivalently `--max-minutes 0`), a cursor records event offsets and reported terminal states, so re-arming `--all` advances
+past completed runs. Watchers sharing a consumer or cursor file serialize under an exclusive lock.
+Each wake line includes a stable `id=<sha256>` for consumer deduplication. Progress is saved atomically
+only after stdout has been written and flushed (at-least-once delivery). Output failure leaves the event
+pending; interruption or checkpoint failure after flushing can replay the same ID on restart.
+`--from-end` skips existing bytes only for files without a saved cursor; saved progress takes precedence.
+Replaced or detected truncated event files restart at byte zero with a new generation ID. Size, a cursor
+anchor and nanosecond mtime detect truncation, including identical same-size rewrites; metadata changes
+without growth conservatively replay. Ordinary appends and renamed files retain their progress.
+Copytruncate followed by growth with an identical consumed prefix cannot be distinguished from an append;
+use rename/create rotation (a new inode) to preserve delivery across generations. STALL notifications re-arm
+after new log activity and carry a new delivery ID for the new episode.
 Codex events keep their existing behavior. `--quiet` keeps only `DONE`, `EXITED`, `RISK`, `STALL`, `ERROR`,
 `BUDGET`, `ATTEMPT`, and `HEARTBEAT`. Heartbeats include elapsed time, command count, the worktree's git diff
 summary (including lane worktrees), and the last completed message truncated to 200 characters. The watch window
@@ -712,6 +728,18 @@ without requiring `watch`. Results include `status: stopped`, `error_class: risk
 and `risk_blocks` with redacted commands. An empty list disables enforcement.
 This is event-based containment: backends that emit commands after execution cannot
 prevent the command's initial side effects. Executor sandbox restrictions still matter.
+
+Use `--scope host` for explicitly authorized host operations with `run`, `lane assign`, or `batch`.
+The default `--scope repo` keeps the executor inside its worktree. Host scope allows task-card-listed
+paths outside the worktree and remote hosts. Both must be explicitly listed in the task card;
+unlisted paths and hosts are forbidden. Repository edits still stay in the worktree
+and are committed by swrm. `rm outside worktree` and `sudo` are recorded as RISK warnings in host
+scope; all command fragments and commands wrapped by `sudo`, `env`, `nohup`, or `timeout` are checked.
+`sudo git push origin main`, `sudo cat .env`, and `sudo npm publish` still block the run.
+Warning-only Codex lane command approvals are accepted once (including legacy exec approvals).
+Other unexpected Codex approvals remain denied. Push, publish, and
+secret-print enforcement remains active. The ledger, `status.json`, `result.json`,
+`report`, and `watch` include the selected scope. `fleet exec` passes `--scope` through to `run`.
 
 `swrm report --daily --date YYYY-MM-DD --html report.html --json` writes one
 self-contained HTML page with light/dark styling and emits the same day's JSON.

@@ -1,6 +1,6 @@
 # Contributing to swrm
 
-Thanks for helping. swrm is a single-file, standard-library-only Python CLI plus a Claude Code skill
+Thanks for helping. swrm is a standard-library-only Python CLI plus a Claude Code skill
 (`SKILL.md`). Please keep it that way: no third-party runtime dependencies.
 
 ## Dev setup
@@ -8,8 +8,13 @@ Thanks for helping. swrm is a single-file, standard-library-only Python CLI plus
 ```bash
 git clone https://github.com/surlymochan/swrm.git
 cd swrm
+mkdir -p .tmp/test-tmp
+export TMPDIR="$PWD/.tmp/test-tmp" TMP="$PWD/.tmp/test-tmp" TEMP="$PWD/.tmp/test-tmp"
 python3 -m unittest discover -s tests -v     # Python 3.9+; no Codex/OpenCode/network needed
 ```
+
+The stable test temp directory must be separate from `.swrm-tmp`, which executor cleanup removes.
+The test loader isolates `OPENSWARM_HOME` and fleet-capacity paths; admission tests use explicit fixture coordinators.
 
 Try the CLI without any backend installed:
 
@@ -28,7 +33,7 @@ bin/swrm route --type review --difficulty 3
 - Keep `SKILL.md` in sync when behaviour or flags change. It is what the planning agent reads.
 - Never add code that reads another tool's credentials by default. New local data sources go behind a
   `local_sources.*` switch in `policy.json` and must be listed in the README table.
-- Run the suite before pushing; CI runs it on Linux and macOS, Python 3.9 / 3.11 / 3.13, plus gitleaks.
+- Run the suite before pushing; CI runs it on Linux, macOS and Windows, Python 3.9 / 3.11 / 3.13, plus gitleaks.
 
 ## Adding a backend
 

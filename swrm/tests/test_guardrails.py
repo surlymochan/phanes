@@ -61,6 +61,64 @@ class GuardrailsTests(unittest.TestCase):
             xs.check_budget(self.policy, [("codex", 6)])
         self.assertEqual(e.exception.detail["scope"], "per_run")
 
+    def test_host_scope_prompt_and_risk_softening(self):
+        repo_prompt = xs.execution_prompt("/tmp/wt", "task")
+        self.assertEqual(repo_prompt, xs.PROMPT_TMPL.format(wd="/tmp/wt", task="task"))
+        self.assertIn("Work only inside the current directory (/tmp/wt)", repo_prompt)
+        host_prompt = xs.execution_prompt("/tmp/wt", "task", "host")
+        self.assertIn("This is a host operations task", host_prompt)
+        self.assertIn("Both outside-worktree paths and remote hosts must be explicitly listed in the task card", host_prompt)
+        self.assertIn("Do NOT operate on unlisted paths or hosts", host_prompt)
+        self.assertIn("Keep repository changes inside the worktree", host_prompt)
+        self.assertNotIn("Work only inside the current directory", host_prompt)
+
+        sudo_event = {"type": "tool_use", "part": {"tool": "bash", "state": {
+            "input": {"command": "sudo launchctl kickstart system/example"}}}}
+        host_finding = xs.enforced_risk(sudo_event, {}, "/tmp/wt", scope="host")
+        self.assertEqual(host_finding["risk"], "sudo")
+        self.assertFalse(host_finding["enforced"])
+        repo_finding = xs.enforced_risk(sudo_event, {}, "/tmp/wt")
+        self.assertEqual(repo_finding["risk"], "sudo")
+        self.assertNotIn("enforced", repo_finding)
+
+    def test_host_warnings_do_not_hide_enforced_risks(self):
+        for warning in ("sudo true", "rm -rf /outside/private"):
+            for command, risk in (("git push origin main", "push"),
+                                  ("cat .env", "secret print"),
+                                  ("npm publish", "publish")):
+                for combined in (f"{warning}; {command}", f"{command}; {warning}",
+                                 f"bash -lc '{warning} && {command}'"):
+                    with self.subTest(command=combined):
+                        event = {"type": "tool_execution_start", "args": {"command": combined}}
+                        finding = xs.enforced_risk(event, {}, str(self.root), scope="host")
+                        self.assertEqual(finding["risk"], risk)
+                        self.assertIsNot(finding.get("enforced"), False)
+            event = {"type": "tool_execution_start", "args": {"command": warning}}
+            self.assertFalse(xs.enforced_risk(event, {}, str(self.root), scope="host")["enforced"])
+            self.assertNotIn("enforced", xs.enforced_risk(event, {}, str(self.root)))
+        event = {"type": "tool_call", "input": [{"command": "sudo true"},
+                                                {"command": "git push origin main"}]}
+        self.assertEqual(xs.enforced_risk(event, {}, str(self.root), scope="host")["risk"], "push")
+
+    def test_compact_report_displays_active_and_finished_scopes(self):
+        state = json.loads(Path(_load.FIXTURE_STATE).read_text())
+        rows = []
+        for rid, scope, phase in (("active", "host", "running"), ("recent", "host", "finished"),
+                                  ("legacy", "repo", "finished")):
+            rdir = self.root / "runs" / rid
+            rdir.mkdir(parents=True)
+            (rdir / "status.json").write_text(json.dumps({"finished": self.now}))
+            rows.append({"id": rid, "scope": scope, "state": phase, "backend": "codex", "model": "test",
+                         "status": "done", "elapsed_min": 1, "budget_min": 5, "idle_min": 0,
+                         "cmds": 0, "title": rid, "last_msg": ""})
+        output = io.StringIO()
+        with mock.patch.object(xs, "get_state", return_value=state), \
+                mock.patch.object(xs, "run_digest", side_effect=lambda rid: next(r for r in rows if r["id"] == rid)), \
+                contextlib.redirect_stdout(output):
+            xs.cmd_report(argparse.Namespace(since_minutes=60), self.policy)
+        self.assertEqual(output.getvalue().count("scope=host"), 2)
+        self.assertEqual(output.getvalue().count("scope=repo"), 1)
+
     def test_budget_reserves_concurrent_admissions_and_releases_finished(self):
         import os
         xs.admit_budget(self.policy, "pi", 5, str(self.root / "runs" / "first"),
@@ -232,7 +290,7 @@ class GuardrailsTests(unittest.TestCase):
              "usage": {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 20}, "summary": "first done"},
             {"id": "b", "ts": self.now, "status": "partial", "backend": "pi", "lane": "M1", "seconds": 120,
              "usage": {"input": 3, "output": 2, "cacheRead": 7, "cacheWrite": 1, "totalTokens": 13}, "summary": "partial change"},
-            {"id": "c", "ts": self.now, "status": "failed", "backend": "cursor", "seconds": 180,
+            {"id": "c", "scope": "host", "ts": self.now, "status": "failed", "backend": "cursor", "seconds": 180,
              "usage": {"inputTokens": 4, "outputTokens": 6, "cacheReadTokens": 2, "cacheWriteTokens": 1},
              "summary": "<script>alert('unsafe')</script>\nfailed"},
             {"id": "d", "ts": self.now, "status": "stopped", "backend": "pi", "lane": "M1", "seconds": 30,
@@ -258,6 +316,8 @@ class GuardrailsTests(unittest.TestCase):
         self.assertEqual(report["slowest_runs"][0]["id"], "c")
         self.assertEqual([r["id"] for r in report["failed_runs"]], ["c"])
         self.assertIn("old ledger summary", json.dumps(report))
+        self.assertEqual(report["failed_runs"][0]["scope"], "host")
+        self.assertEqual(next(r for r in report["slowest_runs"] if r["id"] == "a")["scope"], "repo")
 
     def test_daily_cli_html_and_json_are_offline_and_escape_summaries(self):
         self.report_fixture()
@@ -274,6 +334,9 @@ class GuardrailsTests(unittest.TestCase):
         self.assertIn("prefers-color-scheme:dark", html)
         self.assertIn("Runs by backend", html)
         self.assertIn("Budget use", html)
+        self.assertIn("<th scope='col'>Scope</th>", html)
+        self.assertIn("<td>host</td>", html)
+        self.assertIn("<td>repo</td>", html)
         self.assertNotIn('src="http', html)
         self.assertNotIn('href="http', html)
 
