@@ -20,7 +20,10 @@ xs = _load.load()
 
 class GuardrailsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir=tempfile.gettempdir())
+        # Keep policy fixtures outside the checkout even when CI points TMPDIR
+        # into the workspace. Risk checks resolve the enclosing Git worktree,
+        # which can be the phanes root when swrm is nested in that repository.
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         for name, value in (("DATA", str(self.root)), ("RUNS", str(self.root / "runs")),
@@ -180,7 +183,7 @@ class GuardrailsTests(unittest.TestCase):
         self.assertEqual(xs.rm_target_path_class("/outside/file", root, root), "outside")
 
     def test_rm_block_records_only_path_class(self):
-        outside = Path(tempfile.mkdtemp(prefix="outside-wt-"))
+        outside = Path(tempfile.mkdtemp(prefix="outside-wt-", dir="/tmp"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         target = outside / "private-file"
         target.write_text("keep private path out of run result\n")
