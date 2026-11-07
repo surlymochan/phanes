@@ -407,6 +407,127 @@ class HealthProbeGate(Base):
         self.assertEqual(self.assign(d)["P0"]["issue"], 1)
 
 
+class ClockGate(Base):
+    """The clock gate of the health probe (Refs #1703).
+
+    The health probe measures every host against the clock of the control plane
+    and remembers the offset in the fleet-health state (the same file the SSH
+    failure gate reads).  A host whose clock is off cannot be judged by time:
+    the quota signal of its run carries a stamp of that host, so the freshness
+    of the signal is not decided by that stamp.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "openswarm-home")
+        os.makedirs(self.home, exist_ok=True)
+
+    def write_health(self, hosts):
+        """Write the fleet-health.json the health probe leaves behind (its real format)."""
+        path = os.path.join(self.home, "fleet-health.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump({"hosts": hosts, "updated_at": 1700000000.0}, stream)
+        return path
+
+    def dispatcher(self):
+        d = self.make()
+        d.clock = lambda: 1000.0
+        return d
+
+    def log_text(self, d):
+        try:
+            with open(d.path(d.cfg["log_file"]), encoding="utf-8") as stream:
+                return stream.read()
+        except OSError:
+            return ""
+
+    def quota_signal(self):
+        """A quota error whose stamp is five minutes old: fresh enough to pause."""
+        return {"status": "error", "error_class": "exec_error", "timestamp": 700,
+                "summary": "HTTP 402 Payment Required: monthly quota exceeded"}
+
+    def test_the_quota_signal_of_a_host_with_a_skewed_clock_is_not_judged(self):
+        # the host is five minutes slow: its stamp looks recent enough to pause
+        self.write_health({"box": {"ssh_fail_streak": 0, "status": "soft",
+                                   "updated_at": 1700000000.0,
+                                   "clock_offset_s": -300.0, "clock_unreliable": True}})
+        d = self.dispatcher()
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"}, self.quota_signal())
+        self.assertFalse(os.path.exists(d.path("PAUSE-M5")))
+
+    def test_the_quota_signal_of_a_host_with_a_good_clock_is_judged(self):
+        self.write_health({"box": {"ssh_fail_streak": 0, "status": "ok",
+                                   "updated_at": 1700000000.0,
+                                   "clock_offset_s": 1.0, "clock_unreliable": False}})
+        d = self.dispatcher()
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"}, self.quota_signal())
+        self.assertTrue(os.path.exists(d.path("PAUSE-M5")))
+
+    def test_a_host_without_a_clock_state_is_judged_as_before(self):
+        d = self.dispatcher()
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            d.quota_lane_guard("M5", {"host": "box", "backend": "copilot"}, self.quota_signal())
+        self.assertTrue(os.path.exists(d.path("PAUSE-M5")))
+
+    def test_the_run_of_a_host_with_a_skewed_clock_is_marked(self):
+        """The run's own timestamps are not trusted: the record says so."""
+        self.write_health({"box": {"ssh_fail_streak": 0, "status": "soft",
+                                   "updated_at": 1700000000.0,
+                                   "clock_offset_s": 300.0, "clock_unreliable": True}})
+        d = self.dispatcher()
+        st = {"issue": 7, "run": "r1", "base": SHA}
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            info = d.run_clock_state("M5", {"host": "box", "backend": "pi"}, st, {"status": "done"})
+        self.assertTrue(st["clock_unreliable"])
+        self.assertTrue(info["clock_unreliable"])
+        self.assertIn("the clock of box is off", self.log_text(d))
+
+    def test_the_run_of_a_host_with_a_good_clock_is_not_marked(self):
+        self.write_health({"box": {"ssh_fail_streak": 0, "status": "ok",
+                                   "updated_at": 1700000000.0,
+                                   "clock_offset_s": 2.0, "clock_unreliable": False}})
+        d = self.dispatcher()
+        st = {"issue": 7, "run": "r1", "base": SHA}
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            info = d.run_clock_state("M5", {"host": "box", "backend": "pi"}, st, {"status": "done"})
+        self.assertNotIn("clock_unreliable", st)
+        self.assertNotIn("clock_unreliable", info)
+
+    def tick(self, health_hosts):
+        """Run one tick of a lane whose run ended with a quota error."""
+        self.write_health(health_hosts)
+        os.makedirs(self.cfg["state_dir"], exist_ok=True)
+        status = {"lane": "busy", "current_run": "r1",
+                  "run": {"status": "error", "error_class": "exec_error", "timestamp": 900,
+                          "summary": "HTTP 402 Payment Required: monthly quota exceeded"}}
+        d = self.make([("python3 -", (0, json.dumps(status), "")),
+                       ("issue list --state open --label lane-ready", (0, "[]", "")),
+                       ("issue list", (0, "[]", "")),
+                       ("pr list", (0, "[]", ""))])
+        d.clock = lambda: 1000.0
+        state = {"M5": {"issue": 7, "run": "r1", "base": SHA}}
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": self.home}, clear=False):
+            d.tick({"M5": {"host": "box", "backend": "copilot"}}, state)
+        return d, state
+
+    def test_the_tick_does_not_pause_on_the_quota_signal_of_a_skewed_host(self):
+        """The tick does not judge a quota signal with the stamp of a skewed host."""
+        d, state = self.tick({"box": {"ssh_fail_streak": 0, "status": "soft",
+                                      "updated_at": 1700000000.0,
+                                      "clock_offset_s": -300.0, "clock_unreliable": True}})
+        self.assertFalse(os.path.exists(d.path("PAUSE-M5")))
+        self.assertIn("the clock of box is off", self.log_text(d))
+
+    def test_the_tick_pauses_on_the_quota_signal_of_a_host_with_a_good_clock(self):
+        d, state = self.tick({"box": {"ssh_fail_streak": 0, "status": "ok",
+                                      "updated_at": 1700000000.0,
+                                      "clock_offset_s": 1.0, "clock_unreliable": False}})
+        self.assertTrue(os.path.exists(d.path("PAUSE-M5")))
+        self.assertNotIn("the clock of box is off", self.log_text(d))
+
+
 class QuotaGuards(Base):
     """The quota guards classify with the pure module lib/dispatch/quota.py (Refs #1499)."""
 

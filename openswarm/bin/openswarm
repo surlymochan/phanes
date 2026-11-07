@@ -12220,6 +12220,54 @@ def fleet_health_state_save(hosts, home=None):
     jsave(fleet_health_state_path(home), {"hosts": hosts, "updated_at": NOW()})
 
 
+def dispatch_brain_log():
+    """The brain log the dispatcher writes its short lines to.
+
+    The dispatch configuration owns it (``brain_log``); the health probe writes
+    its clock alerts to the same file, so the operator reads one log.  Without a
+    configured brain log there is nowhere to write to.
+    """
+    candidates = []
+    config = envvar("DISPATCH_CONFIG")
+    if config:
+        candidates.append(config)
+    candidates.append(os.path.join(dispatch_state_dir(), "config.json"))
+    for candidate in candidates:
+        try:
+            with open(os.path.expanduser(candidate), encoding="utf-8") as stream:
+                raw = json.load(stream)
+        except (OSError, ValueError, UnicodeError):
+            continue
+        path = raw.get("brain_log") if isinstance(raw, dict) else None
+        if isinstance(path, str) and path.strip():
+            return os.path.expanduser(path.strip())
+    return ""
+
+
+def fleet_health_clock_alert(host, alert, brain_log=None):
+    """Write the clock skew of a host into the brain log.
+
+    Only a first skew and a growing one are written, so a host whose clock
+    stays off does not fill the log with the same line.  The line carries the
+    direction, the seconds and the repair hint (NTP), because the operator has
+    to sync the host before the time-based decisions of that host can be
+    trusted again.
+    """
+    path = brain_log if brain_log is not None else dispatch_brain_log()
+    if not path:
+        return None
+    direction = alert.get("direction") or "off"
+    line = (f"- {time.strftime('%H:%M')} UTC+8 fleet-health: {host} clock {direction} by "
+            f"{alert['offset_s']:.1f}s (> {alert.get('threshold_s', 60):g}s); "
+            f"{dispatch_health_module().CLOCK_NTP_HINT}")
+    try:
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except OSError:
+        return None
+    return line
+
+
 def fleet_health_apply(store, row, active, moment):
     """Pause or resume one host from its health decision.
 
@@ -12312,7 +12360,8 @@ def fleet_health_failure_reasons(home=None, limit=20):
     return counts
 
 
-def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None):
+def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=None,
+                    brain_log=None):
     """Probe every fleet host and report its health; --apply pauses the sick ones.
 
     The hosts are the ones ``lanes.json`` names (or ``--hosts``); each one is
@@ -12320,6 +12369,12 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     (``resources.health``, else the built-in defaults).  ``--apply`` pauses a
     host that needs it and releases the host that recovered; a manual pause is
     never touched.
+
+    The probe also measures the clock of every host against the clock of the
+    control plane (Refs #1703).  A host whose clock is off is reported with the
+    direction and the seconds of the skew, the skew is remembered per host, and
+    a first (or growing) skew is written into the brain log with the repair
+    hint.
     """
     policy = load_policy() if policy is None else policy
     health = dispatch_health_module()
@@ -12332,6 +12387,7 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
     moment = NOW() if now is None else now
     active = {record["scope"]: record for record in store.active(moment)}
     previous = fleet_health_state_load(home)
+    clocks = health.clock_states({"hosts": previous})
     probe = runner if runner is not None else fleet_health_runner(config)
     rows, remembered = [], {}
     recent_failures = fleet_health_failure_reasons(home)
@@ -12345,7 +12401,12 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                    "metrics": {}, "triggers": []}
         else:
             row = health.check_host(name, probe, limits, paused=record is not None,
-                                    ssh_fail_streak=streak)
+                                    ssh_fail_streak=streak, control_epoch=now)
+        if "clock" not in row:
+            row["clock"] = health.clock_status(None)
+        alert = health.clock_alert(clocks.get(name), row["clock"])
+        if alert:
+            fleet_health_clock_alert(name, alert, brain_log)
         row["paused"] = scope in active
         row.setdefault("error", None)
         row["action"] = "none"
@@ -12357,9 +12418,10 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                 active[scope] = {"scope": scope, "reason": FLEET_HEALTH_REASON + " " + row["reason"]}
             row["paused"] = scope in active
         # the remembered shape of a host record lives in lib/dispatch/health.py:
-        # the dispatch gate reads the same field (Refs #1674)
+        # the dispatch gate reads the same field (Refs #1674), and the measured
+        # clock of the host is remembered with it (Refs #1703)
         remembered[name] = health.ssh_fail_record(row["metrics"].get("ssh_fail_streak", 0),
-                                                  row["status"], moment)
+                                                  row["status"], moment, clock=row["clock"])
         rows.append(row)
     fleet_health_state_save(remembered, home)
     report = {"ok": all(row["status"] == "ok" for row in rows),
@@ -12375,6 +12437,8 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         metrics = " ".join(f"{key}={value}" for key, value in row["metrics"].items())
         if metrics:
             print(f"  metrics: {metrics}")
+        if row["clock"].get("warning"):
+            print(f"  clock: {row['clock']['warning']}")
         if row["action"] != "none":
             print(f"  action: {row['action']}")
     print(f"{len(rows)} host(s) probed, status={report['status']}")

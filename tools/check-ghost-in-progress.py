@@ -16,11 +16,20 @@ Two guards keep the detection honest:
   protected, and a `lane-failed` issue may only be re-labelled `lane-ready` when
   `state.json` has no lane occupancy and the issue body still carries the
   acceptance command (#960).
+
+The age of a label is the difference between the clock of this machine and the
+clock of GitHub, so a machine whose clock is off judges every label as older
+(or newer) than it is.  The measured offset of the clock (the health probe
+compares every host with the control plane, see `openswarm fleet health`) is
+therefore taken into account: with an offset beyond the threshold the tool does
+not judge a label stale at all -- it says that the staleness cannot be proven
+and treats the label as in-flight (Refs #1703).
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -30,12 +39,53 @@ from pathlib import Path
 from typing import Any
 
 
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+HEALTH_PATH = ROOT / "openswarm" / "lib" / "dispatch" / "health.py"
+
+_spec = importlib.util.spec_from_file_location("openswarm_dispatch_health", HEALTH_PATH)
+health = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(health)
+
+
 # `dispatch()` adds `in-progress` before it writes the lane into `state.json`; the
 # window is one SSH task upload (timeout 60s) plus one `lane assign` (timeout 180s),
 # so ~240s worst case. Only a label older than 600s is treated as stale.
 GHOST_MIN_AGE_S = 600
 
+# A clock further away than this from the clock of the control plane cannot
+# judge the age of a label (Refs #1703).
+CLOCK_SKEW_THRESHOLD_S = health.CLOCK_SKEW_THRESHOLD_S
+
 ACCEPTANCE_RE = re.compile(r"^\s*(?:验收|Acceptance|Verify|verify)\s*[:：].*`[^`]+`", re.MULTILINE)
+
+
+def clock_unreliable(offset_s: Any) -> bool:
+    """Whether the clock of this machine is too far off to judge an age."""
+    if isinstance(offset_s, bool) or not isinstance(offset_s, (int, float)):
+        return False
+    return abs(float(offset_s)) > CLOCK_SKEW_THRESHOLD_S
+
+
+def clock_offset_from_state(path: Any, host: Any = None) -> float | None:
+    """The measured clock offset of a host, read from the fleet-health state.
+
+    The state is the file `openswarm fleet health` writes: every host keeps the
+    offset of its own clock against the clock of the control plane.
+    """
+    try:
+        with open(Path(path), encoding="utf-8") as stream:
+            state = json.load(stream)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    states = health.clock_states(state)
+    if host:
+        row = states.get(str(host))
+        return row.get("offset_s") if isinstance(row, dict) else None
+    if len(states) == 1:
+        row = next(iter(states.values()))
+        return row.get("offset_s") if isinstance(row, dict) else None
+    return None
 
 
 def normalize_labels(labels_field: Any) -> set[str]:
@@ -126,8 +176,15 @@ def classify_issue(
     now: float,
     min_age_s: float,
     repo: str | None,
+    clock_offset_s: float | None = None,
 ) -> dict[str, Any] | None:
-    """Classify one issue row; returns None for issues that cannot be ghost candidates."""
+    """Classify one issue row; returns None for issues that cannot be ghost candidates.
+
+    ``clock_offset_s`` is the measured offset of the clock of this machine
+    against the clock of the control plane (Refs #1703).  With an offset beyond
+    the threshold the age of the label cannot be believed, so no label is
+    judged stale.
+    """
     state = issue.get("state", "OPEN")
     if isinstance(state, str) and state.upper() not in ("OPEN", ""):
         return None
@@ -164,6 +221,14 @@ def classify_issue(
     if updated is None:
         row["status"] = "unknown"
         row["note"] = "no usable updatedAt: staleness cannot be proven, treated as in-flight"
+        return row
+    if clock_unreliable(clock_offset_s):
+        # The age is the difference between the clock of this machine and the
+        # clock of GitHub: with a clock that is off, every label looks older
+        # (or newer) than it is, so nothing is judged stale here.
+        row["status"] = "unknown"
+        row["note"] = (f"the clock of this machine is off by {float(clock_offset_s):+.0f}s: "
+                       "the staleness cannot be proven, treated as in-flight")
         return row
     if age < min_age_s:
         row["status"] = "in-flight"
@@ -207,6 +272,7 @@ def scan_issues(
     repo: str | None = None,
     now: float | None = None,
     min_age_s: float = GHOST_MIN_AGE_S,
+    clock_offset_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Classify every `in-progress` issue row against the state fixture."""
     now = time.time() if now is None else now
@@ -215,7 +281,7 @@ def scan_issues(
     for issue in issues:
         if not isinstance(issue, dict):
             continue
-        row = classify_issue(issue, active_issues, state_data, now, min_age_s, repo)
+        row = classify_issue(issue, active_issues, state_data, now, min_age_s, repo, clock_offset_s)
         if row:
             rows.append(row)
     return rows
@@ -310,6 +376,17 @@ def run_self_test() -> int:
         if r["status"].startswith("ghost"):
             assert "--remove-label in-progress" in r["remediation"], r
 
+    # A clock that is off judges every label as older than it is: without the
+    # measured offset a stale label would be declared a ghost (Refs #1703).
+    skewed = {r["number"]: r for r in scan_issues(idle_state, fake_issues, now=now, clock_offset_s=300.0)}
+    assert skewed[104]["status"] == "unknown", skewed[104]
+    assert skewed[104]["remediation"] is None, skewed[104]
+    assert "off by +300s" in skewed[104]["note"], skewed[104]
+    assert not [r for r in skewed.values() if r["status"].startswith("ghost")], skewed
+    # A clock within the threshold still judges the labels.
+    in_range = {r["number"]: r for r in scan_issues(idle_state, fake_issues, now=now, clock_offset_s=30.0)}
+    assert in_range[104]["status"] == "ghost", in_range[104]
+
     report(rows, active)
     print("ghost in-progress detection: OK")
     return 0
@@ -348,6 +425,26 @@ def main() -> int:
         help="Override 'now' (epoch seconds) so the staleness check is reproducible offline",
     )
     parser.add_argument(
+        "--clock-offset-seconds",
+        type=float,
+        default=None,
+        help=("The measured offset of the clock of this machine against the clock of the "
+              f"control plane (host minus control plane, from `openswarm fleet health`). "
+              f"Beyond +/-{CLOCK_SKEW_THRESHOLD_S}s no label is judged stale."),
+    )
+    parser.add_argument(
+        "--clock-state",
+        type=Path,
+        default=None,
+        help="The fleet-health state the health probe writes; its clock offset is read from it",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="The host whose clock offset is read from --clock-state (the only host without it)",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Run offline self-test with fake state.json and fake labels",
@@ -359,6 +456,10 @@ def main() -> int:
 
     if args.state_file is None or args.issues_file is None:
         parser.error("Both --state-file and --issues-file must be provided together, or use --self-test")
+
+    clock_offset = args.clock_offset_seconds
+    if clock_offset is None and args.clock_state is not None:
+        clock_offset = clock_offset_from_state(args.clock_state, args.host)
 
     try:
         state_data = json.loads(args.state_file.read_text(encoding="utf-8"))
@@ -386,6 +487,7 @@ def main() -> int:
         repo=args.repo,
         now=args.now,
         min_age_s=args.min_age_seconds,
+        clock_offset_s=clock_offset,
     )
     report(rows, extract_active_issues(state_data))
     return 0

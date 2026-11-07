@@ -483,6 +483,7 @@ class Dispatcher:
         self.inode = {"t": 0.0, "low": False}
         self.last_leak_sweep = 0.0
         self.last_warn = 0.0
+        self._clock_unreliable = None      # the hosts with an untrusted clock (per tick)
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
@@ -768,6 +769,27 @@ class Dispatcher:
     def ssh_health_blocked(self, host):
         """Skip hosts whose fleet health probe still reports an SSH failure streak."""
         return host in self.ssh_fail_gate()[1]
+
+    # ------------------------------------------------------------ clock gate
+    def clock_unreliable_hosts(self):
+        """The hosts whose clock the health probe found unreliable.
+
+        The health probe measures every host against the clock of the control
+        plane and remembers the result in the fleet-health state (the same file
+        the SSH failure gate reads).  A host whose clock is off cannot be
+        judged by time: an age read from its own stamps is wrong by the skew
+        (Refs #1703).
+        """
+        if self._clock_unreliable is None:
+            health = dispatch_module("health")
+            self._clock_unreliable = health.clock_unreliable_hosts(self.fleet_health_state())
+        return self._clock_unreliable
+
+    def clock_unreliable(self, host):
+        """Whether the clock of ``host`` is too far off to decide anything by time."""
+        if not host:
+            return False
+        return str(host) in self.clock_unreliable_hosts()
 
     # ------------------------------------------------------------ host health gate
     def openswarm_home(self):
@@ -1469,8 +1491,18 @@ class Dispatcher:
             except OSError:
                 continue
 
-    def quota_signal_fresh(self, info):
+    def quota_signal_fresh(self, info, host=None):
+        """Whether the quota signal of a run is recent enough to act on.
+
+        The stamp of the signal was written by the host that ran the card, so
+        it is compared with the clock of the control plane.  A host whose clock
+        is off cannot say when it ran: the signal is then not judged by that
+        stamp at all, because a pause decided on a wrong time is worse than no
+        pause (Refs #1703).
+        """
         info = info or {}
+        if host and self.clock_unreliable(host):
+            return False
         stamp = next((info.get(k) for k in ("timestamp", "updated_at", "finished_at", "ended_at") if info.get(k)), None)
         parsed = self.quota_until(stamp)
         q = self.cfg.get("quota") or {}
@@ -1483,7 +1515,7 @@ class Dispatcher:
 
     def quota_lane_guard(self, lane, lc, info):
         """Pause the lane when the run text shows a lane-scoped quota error."""
-        if not self.quota_signal_fresh(info):
+        if not self.quota_signal_fresh(info, (lc or {}).get("host")):
             return
         hit = self.quota_hit(lane, lc, info)
         if not hit or hit["scope"] != "lane":
@@ -1494,7 +1526,7 @@ class Dispatcher:
         """Pause the backend when the run text shows a backend-scoped quota error."""
         if not (self.cfg.get("quota") or {}).get("backend_pause"):
             return
-        if not self.quota_signal_fresh(info):
+        if not self.quota_signal_fresh(info, (lc or {}).get("host")):
             return
         hit = self.quota_hit(lane, lc, info)
         if not hit or hit["scope"] != "backend":
@@ -1697,11 +1729,28 @@ class Dispatcher:
         self.record_failure(lane, lc, run, reason, tail)
         return reason, tail
 
+    def run_clock_state(self, lane, lc, st, info):
+        """Mark a run whose host clock cannot be trusted.
+
+        The run's own timestamps (its start, its end and its duration) were
+        written by the host.  With a skewed clock they cannot be compared with
+        the log of the control plane, so the record says so instead of
+        pretending that the two clocks agree (Refs #1703).
+        """
+        host = (lc or {}).get("host")
+        if not self.clock_unreliable(host):
+            return info
+        st["clock_unreliable"] = True
+        self.log(f"{lane} run {st.get('run')}: the clock of {host} is off; "
+                 "the run's own timestamps are not trusted", brain=False)
+        return {**info, "clock_unreliable": True}
+
     def finish(self, lane, lc, st, info, state):
         if self.dry_run:
             self.plan.append({"would": "harvest", "lane": lane, "issue": st.get("issue"), "status": info.get("status")})
             return False
         n, run = st["issue"], st["run"]
+        info = self.run_clock_state(lane, lc, st, info)
         model_unavailable = (info.get("error_class") == "model_unavailable")
         if model_unavailable:
             model = info.get("model") or "unknown"
@@ -2465,6 +2514,7 @@ class Dispatcher:
         return "\n\n### Raw evidence pack (原始证据包)\n\n%s" % text[:24000]
 
     def finish_review(self, lane, lc, st, info, state):
+        info = self.run_clock_state(lane, lc, st, info)
         info = self.pause_info(lane, lc, st, info)
         if info.get("error_class") != "vm_paused":
             self.quota_lane_guard(lane, lc, info)
@@ -2926,6 +2976,7 @@ class Dispatcher:
 
     def tick(self, lanes, state):
         self._quota_probe_cache = None
+        self._clock_unreliable = None      # the clock state is read once per tick
         self.reap_quota_pauses()
         # The `all` scope of the pause store stops the whole loop, exactly like the legacy
         # PAUSE marker (Refs #1366).
