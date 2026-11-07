@@ -1,5 +1,6 @@
 """Integration tests for union conflict merges using disposable Git repos."""
 import importlib.util
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -11,12 +12,31 @@ union = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(union)
 
 
+def _real(path):
+    """The physical path of ``path``.
+
+    Git reports the worktrees physically and the temporary directories of macOS live under /var, a
+    link to /private/var: the path of the repository and the path git reports are two names of the
+    same directory (Refs #1815).
+    """
+    return os.path.realpath(str(path))
+
+
+def _worktree_paths(git):
+    """The worktree paths of git, normalized to their physical form (Refs #1815)."""
+    output = git("worktree", "list", "--porcelain").stdout
+    return [_real(line.split(" ", 1)[1]) for line in output.splitlines() if line.startswith("worktree ")]
+
+
 class UnionMergeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="merge-union-")
         self.addCleanup(self.tmp.cleanup)
         self.repo = pathlib.Path(self.tmp.name) / "repo"
         self.repo.mkdir()
+        self.init_repo()
+
+    def init_repo(self):
         self.git("init", "-q")
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.invalid")
@@ -42,8 +62,7 @@ class UnionMergeTests(unittest.TestCase):
         self.git("checkout", "-q", "feature")
 
     def worktree_paths(self):
-        output = self.git("worktree", "list", "--porcelain").stdout
-        return [line.split(" ", 1)[1] for line in output.splitlines() if line.startswith("worktree ")]
+        return _worktree_paths(self.git)
 
     def test_union_conflict_preserves_both_lines_and_cleans_worktree(self):
         self.branch_change("base", "from-base")
@@ -81,7 +100,7 @@ class UnionMergeTests(unittest.TestCase):
     def test_base_already_ancestor_is_noop(self):
         result = union.union_merge(str(self.repo), "feature", "base", ["docs/*.md"])
         self.assertEqual(result, {"status": "noop"})
-        self.assertEqual(self.worktree_paths(), [str(self.repo)])
+        self.assertEqual(self.worktree_paths(), [_real(self.repo)])
 
     def test_fast_forward_base_reports_merged_with_new_head(self):
         self.branch_change("base", "from-base")
@@ -125,6 +144,35 @@ class UnionMergeTests(unittest.TestCase):
         parents = self.git("rev-list", "--parents", "-n", "1", result["sha"]).stdout.split()
         self.assertEqual(len(parents), 3)
         self.assertEqual(set(self.worktree_paths()), before)
+
+
+class UnionLinkedRepoTests(UnionMergeTests):
+    """The same suite with the repository behind a symlink (Refs #1815).
+
+    macOS keeps the temporary directories under /var, a link to /private/var, so the repository and
+    the worktree path git reports are two names of the same directory. This subclass builds that
+    layout explicitly, so the suite fails on every platform when the paths are compared as they are
+    given instead of physically.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="merge-union-")
+        self.addCleanup(self.tmp.cleanup)
+        physical = pathlib.Path(self.tmp.name) / "physical"
+        physical.mkdir()
+        linked = pathlib.Path(self.tmp.name) / "linked"
+        os.symlink(physical, linked)
+        self.repo = linked / "repo"
+        self.repo.mkdir()
+        self.init_repo()
+
+    def test_the_worktree_of_a_linked_repository_is_its_physical_path(self):
+        # git names the worktree physically, the repository is reached through the link
+        reported = [line.split(" ", 1)[1] for line in
+                    self.git("worktree", "list", "--porcelain").stdout.splitlines()
+                    if line.startswith("worktree ")]
+        self.assertTrue(os.path.samefile(reported[0], str(self.repo)))
+        self.assertEqual(self.worktree_paths(), [_real(self.repo)])
 
 
 class UnionCandidatesTests(unittest.TestCase):

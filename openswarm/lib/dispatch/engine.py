@@ -23,10 +23,34 @@ State, pause markers and logs live in `state_dir`:
 import os
 import sys
 
+
+def _drop_script_dir_from_sys_path(path=None, script=None):
+    """Drop the directory of this script from ``sys.path`` when Python put it there.
+
+    Run as a script, Python puts the directory of the script first on sys.path, where sibling modules
+    (queue.py, ...) would shadow the standard library (concurrent.futures needs the real `queue`).
+    Drop it before any other import.
+
+    The comparison is done on the physical paths: Python computes sys.path[0] with realpath() while
+    __file__ keeps the path as it was given, so the two only match after a realpath. macOS keeps its
+    temporary directories under /var, a link to /private/var, and fails without it (Refs #1815).
+
+    Returns True when an entry was dropped.
+    """
+    entries = sys.path if path is None else path
+    script = __file__ if script is None else script
+    if not entries:
+        return False
+    script_dir = os.path.dirname(os.path.realpath(script))
+    if os.path.realpath(entries[0] or ".") == script_dir:
+        del entries[0]
+        return True
+    return False
+
+
 # Run as a script, Python puts this directory first on sys.path, where sibling modules (queue.py, ...) would
 # shadow the standard library (concurrent.futures needs the real `queue`). Drop it before any other import.
-if sys.path and os.path.abspath(sys.path[0] or ".") == os.path.dirname(os.path.abspath(__file__)):
-    del sys.path[0]
+_drop_script_dir_from_sys_path()
 
 import argparse  # noqa: E402
 import base64
