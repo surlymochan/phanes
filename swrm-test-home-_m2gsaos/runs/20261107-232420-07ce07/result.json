@@ -1,0 +1,68 @@
+{
+  "id": "20261107-232420-07ce07",
+  "status": "done",
+  "error_class": null,
+  "title": "cursor test",
+  "scope": "repo",
+  "prepare": [],
+  "workspace_note": null,
+  "verify": null,
+  "verify_note": null,
+  "backend": "cursor",
+  "model": "composer-2.5[fast=false]",
+  "effort": null,
+  "usage": {
+    "inputTokens": 120,
+    "outputTokens": 45,
+    "cacheReadTokens": 8,
+    "cacheWriteTokens": 2
+  },
+  "seconds": 0.056,
+  "queued_seconds": 0.004,
+  "risk_blocks": [],
+  "result": {
+    "status": "done",
+    "summary": "added add",
+    "files_changed": [
+      "add.py"
+    ],
+    "tests": "not run: host verify",
+    "followups": []
+  },
+  "workspace": {
+    "mode": "in-place",
+    "path": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-cursor-nf5limy4/work",
+    "repo": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt"
+  },
+  "diffstat": "swrm/README.md           |  16 ++++\n swrm/backends/codex.json |   5 +-\n swrm/bin/swrm            | 213 ++++++++++++++++++++++++++++++++++++++++++++---\n swrm/policy.json         |   3 +-\n tools/ci-swrm.sh         |  15 +++-\n 5 files changed, 236 insertions(+), 16 deletions(-)",
+  "excluded_files": [],
+  "worktree": null,
+  "attempts": [
+    {
+      "backend": "cursor",
+      "model": "composer-2.5[fast=false]",
+      "effort": null,
+      "rc": 0,
+      "seconds": 0.056,
+      "error_class": null,
+      "meta": {
+        "usage": {
+          "inputTokens": 120,
+          "outputTokens": 45,
+          "cacheReadTokens": 8,
+          "cacheWriteTokens": 2
+        }
+      },
+      "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232420-07ce07/events.1.cursor.jsonl",
+      "error_tail": null,
+      "quota_before": null,
+      "quota_after": null
+    }
+  ],
+  "claude_review": "light",
+  "decision_reasons": [
+    "cursor quota unknown (opt-in backend; not metered by swrm)",
+    "claude pro quota unknown/stale; default to light review"
+  ],
+  "run_dir": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232420-07ce07"
+}

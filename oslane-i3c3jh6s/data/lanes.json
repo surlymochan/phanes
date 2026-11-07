@@ -1,0 +1,1 @@
+{"lanes": [{"name": "L1", "backend": "cursor", "model": "composer-2.5", "repo": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/repo", "binary": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm/tests/fixtures/fake_cursor_acp.py"}]}

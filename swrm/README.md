@@ -708,6 +708,22 @@ Prompts and diffs go to the executor's model provider. Each backend's data bound
 - If a worktree can't be created, the run fails. It never falls back to editing your checkout in place.
 - Codex `ultra` effort is never used, because it self-delegates and blows budgets.
 
+### Codex sandbox and the git metadata of a worktree
+
+A `workspace-write` Codex sandbox mounts the git metadata of a worktree read-only, so a lane can
+only commit inside the sandbox when the sandbox's writable roots contain that worktree's *exact*
+git admin dir. swrm recomputes the roots on every thread (`git rev-parse --git-dir
+--git-common-dir`): the worktree root, the worktree's own gitdir (`.git/worktrees/<name>`) and the
+shared `objects`, `refs` and `logs` of the common dir. Lanes pass them in the `thread/start`
+config, the resident `codex app-server` is started with the same roots, and `codex exec` appends
+them with `--add-dir` (a build without `--add-dir` gets a merged `-c` override that keeps the
+roots configured in `~/.codex/config.toml`).
+
+`codex.worktree_gitdir_writable` (default `true`) turns the behaviour off; set it to `false` in
+`policy.local.json` to keep the git metadata read-only. Every lane also owns its git admin dir
+(`.git/worktrees/wt-<lane>` instead of the numbered `wt`, `wt1`, ...), so two lanes on one host
+never share a gitdir and a pinned root cannot cover the wrong lane (Refs #1832).
+
 ## Executor guardrails
 
 Executor sessions stay outside worktrees: Pi uses each run's `pi-sessions/` or

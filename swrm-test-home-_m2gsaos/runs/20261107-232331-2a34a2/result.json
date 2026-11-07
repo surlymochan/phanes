@@ -1,0 +1,64 @@
+{
+  "id": "20261107-232331-2a34a2",
+  "status": "failed",
+  "error_class": "auth",
+  "title": "agy test",
+  "scope": "repo",
+  "prepare": [],
+  "workspace_note": null,
+  "verify": null,
+  "verify_note": null,
+  "backend": "agy",
+  "model": "gemini-3.8-flash-medium",
+  "effort": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "thinking_tokens": 0,
+    "cache_read_tokens": 0,
+    "total_tokens": 0
+  },
+  "seconds": 0.056,
+  "queued_seconds": 0.003,
+  "risk_blocks": [],
+  "result": null,
+  "workspace": {
+    "mode": "in-place",
+    "path": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-agy-26yphn93/work",
+    "repo": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt"
+  },
+  "diffstat": "swrm/README.md           |  16 ++++\n swrm/backends/codex.json |   5 +-\n swrm/bin/swrm            | 213 ++++++++++++++++++++++++++++++++++++++++++++---\n swrm/policy.json         |   3 +-\n tools/ci-swrm.sh         |  15 +++-\n 5 files changed, 236 insertions(+), 16 deletions(-)",
+  "excluded_files": [],
+  "worktree": null,
+  "attempts": [
+    {
+      "backend": "agy",
+      "model": "gemini-3.8-flash-medium",
+      "effort": null,
+      "rc": 1,
+      "seconds": 0.056,
+      "error_class": "auth",
+      "meta": {
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "thinking_tokens": 0,
+          "cache_read_tokens": 0,
+          "total_tokens": 0
+        },
+        "conversation_id": null,
+        "finished_reason": null
+      },
+      "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232331-2a34a2/events.1.agy.jsonl",
+      "error_tail": "FatalAuthenticationError: authentication required\n",
+      "quota_before": null,
+      "quota_after": null
+    }
+  ],
+  "claude_review": "light",
+  "decision_reasons": [
+    "agy quota unknown (opt-in backend; not metered by swrm)",
+    "claude pro quota unknown/stale; default to light review"
+  ],
+  "run_dir": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232331-2a34a2"
+}

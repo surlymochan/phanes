@@ -1,0 +1,1 @@
+{"type": "result", "subtype": "success", "is_error": false, "result": "{\"status\": \"done\", \"summary\": \"added add\", \"files_changed\": [\"add.py\"], \"tests\": \"not run: host verify\", \"followups\": []}", "usage": {"inputTokens": 120, "outputTokens": 45, "cacheReadTokens": 8, "cacheWriteTokens": 2}}

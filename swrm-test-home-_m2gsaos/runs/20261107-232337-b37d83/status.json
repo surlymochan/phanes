@@ -1,0 +1,42 @@
+{
+  "scope": "repo",
+  "updated": 1794093817.626297,
+  "backend": "agy",
+  "budget_minutes": 5,
+  "budget_requests": [
+    [
+      "agy",
+      5
+    ]
+  ],
+  "id": "20261107-232337-b37d83",
+  "state": "finished",
+  "title": "agy test",
+  "profile": {
+    "type": "impl",
+    "difficulty": 3,
+    "backend": "agy",
+    "read_only": false
+  },
+  "started": 1794093817.4756796,
+  "queued_at": 1794093817.4715118,
+  "runner_pid": 165087,
+  "cwd": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-agy-y9ijis2l/work",
+  "provider": null,
+  "concurrency_keys": [],
+  "fleet_reservation_error": null,
+  "queue_reason": null,
+  "model": "gemini-3.8-flash-medium",
+  "effort": null,
+  "attempt": 2,
+  "deadline": 1794094117.4756796,
+  "queued_seconds": 0.004,
+  "execution_started": 1794093817.474709,
+  "workspace": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-agy-y9ijis2l/work",
+  "executor_pid": 165172,
+  "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232337-b37d83/events.2.agy.jsonl",
+  "attempt_started": 1794093817.5367815,
+  "status": "done",
+  "finished": 1794093817.626258,
+  "commit": null
+}

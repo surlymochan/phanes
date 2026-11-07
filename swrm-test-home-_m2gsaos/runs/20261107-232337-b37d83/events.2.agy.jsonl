@@ -1,0 +1,3 @@
+{"type": "init", "conversation_id": "conv-1"}
+{"type": "step_update", "text": "writing the report"}
+{"type": "result", "conversation_id": "conv-1", "status": "SUCCESS", "response": "{\"status\": \"done\", \"summary\": \"added add\", \"files_changed\": [\"add.py\"], \"tests\": \"not run: host verify\", \"followups\": []}", "duration_seconds": 1.5, "num_turns": 2, "usage": {"input_tokens": 120, "output_tokens": 45, "thinking_tokens": 3, "cache_read_tokens": 8, "total_tokens": 176}}

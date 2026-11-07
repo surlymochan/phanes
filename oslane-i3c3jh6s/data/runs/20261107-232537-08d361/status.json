@@ -1,0 +1,39 @@
+{
+  "backend": "cursor",
+  "budget_minutes": 40.0,
+  "budget_requests": [
+    [
+      "cursor",
+      40.0
+    ]
+  ],
+  "id": "20261107-232537-08d361",
+  "state": "finished",
+  "started": 1794093937.2063143,
+  "runner_pid": 169840,
+  "lane": "L1",
+  "updated": 1794093937.222494,
+  "title": "LANE_TEST_CRASH",
+  "model": "composer-2.5",
+  "effort": null,
+  "provider": null,
+  "concurrency_keys": [
+    "cursor",
+    "total"
+  ],
+  "scope": "repo",
+  "cwd": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/repo",
+  "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/data/runs/20261107-232537-08d361/events.1.cursor.jsonl",
+  "fleet_reservation_error": null,
+  "queue_reason": null,
+  "execution_started": 1794093937.2063143,
+  "queued_seconds": 0.036,
+  "deadline": 1794096337.2063143,
+  "workspace": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/data/lanes/L1/wt",
+  "attempt": 1,
+  "executor_pid": 169850,
+  "resolved_model": "composer-2.5",
+  "status": "failed",
+  "finished": 1794093937.2224438,
+  "commit": null
+}

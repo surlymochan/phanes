@@ -53,8 +53,19 @@ if [[ "${1:-}" == "--print-changed-paths" ]]; then
 fi
 
 # Keep tests and offline probes away from the operator's control plane.
-mkdir -p "$root/.tmp/test-tmp"
-export TMPDIR="$root/.tmp/test-tmp"
+#
+# The temp dir stays inside the checkout, but it also has to stay short: a lane's control
+# socket path is <TMPDIR>/<lane-run>/data/lanes/<lane>/ctl.sock and sockaddr_un.sun_path holds
+# 107 bytes, so in a long checkout path (e.g. the executor sandbox, whose root is 55 bytes)
+# every lane test fails with "lane control socket path exceeds the 108-byte AF_UNIX limit"
+# before it runs. Walk the path up until the socket path fits; a checkout that is short
+# enough keeps the documented .tmp/test-tmp unchanged (Refs #1832).
+gate_tmp="$root/.tmp/test-tmp"
+while (( ${#gate_tmp} + 48 > 107 )) && [[ "$gate_tmp" != "$root" ]]; do
+  gate_tmp="$(dirname "$gate_tmp")"
+done
+mkdir -p "$gate_tmp"
+export TMPDIR="$gate_tmp"
 test_home="$(mktemp -d "$TMPDIR/ci.XXXXXX")"
 while IFS= read -r name; do
   unset "$name"

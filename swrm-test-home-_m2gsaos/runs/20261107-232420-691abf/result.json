@@ -1,0 +1,60 @@
+{
+  "id": "20261107-232420-691abf",
+  "status": "failed",
+  "error_class": "rate_limit",
+  "title": "cursor test",
+  "scope": "repo",
+  "prepare": [],
+  "workspace_note": null,
+  "verify": null,
+  "verify_note": "rate limited",
+  "backend": "cursor",
+  "model": "composer-2.5[fast=false]",
+  "effort": null,
+  "usage": {
+    "inputTokens": 1,
+    "outputTokens": 0,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0
+  },
+  "seconds": 0.056,
+  "queued_seconds": 0.004,
+  "risk_blocks": [],
+  "result": null,
+  "workspace": {
+    "mode": "in-place",
+    "path": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-cursor-_6na_gmg/work",
+    "repo": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt"
+  },
+  "diffstat": "swrm/README.md           |  16 ++++\n swrm/backends/codex.json |   5 +-\n swrm/bin/swrm            | 213 ++++++++++++++++++++++++++++++++++++++++++++---\n swrm/policy.json         |   3 +-\n tools/ci-swrm.sh         |  15 +++-\n 5 files changed, 236 insertions(+), 16 deletions(-)",
+  "excluded_files": [],
+  "worktree": null,
+  "attempts": [
+    {
+      "backend": "cursor",
+      "model": "composer-2.5[fast=false]",
+      "effort": null,
+      "rc": 1,
+      "seconds": 0.056,
+      "error_class": "rate_limit",
+      "meta": {
+        "usage": {
+          "inputTokens": 1,
+          "outputTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        }
+      },
+      "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232420-691abf/events.1.cursor.jsonl",
+      "error_tail": "429 rate limit exceededrate limit: too many requests\n",
+      "quota_before": null,
+      "quota_after": null
+    }
+  ],
+  "claude_review": "light",
+  "decision_reasons": [
+    "cursor quota unknown (opt-in backend; not metered by swrm)",
+    "claude pro quota unknown/stale; default to light review"
+  ],
+  "run_dir": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232420-691abf"
+}

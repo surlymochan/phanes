@@ -1,0 +1,52 @@
+{
+  "id": "20261107-232537-08d361",
+  "status": "failed",
+  "error_class": "exec_error",
+  "title": "LANE_TEST_CRASH",
+  "lane": "L1",
+  "prepare": [],
+  "workspace_note": null,
+  "verify": null,
+  "scope": "repo",
+  "verify_note": null,
+  "backend": "cursor",
+  "model": "composer-2.5",
+  "effort": null,
+  "resolved_model": "composer-2.5",
+  "risk_blocks": [],
+  "review_changes_discarded": false,
+  "usage": {},
+  "seconds": 0.003,
+  "queued_seconds": 0.036,
+  "result": null,
+  "workspace": {
+    "mode": "worktree",
+    "path": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/data/lanes/L1/wt",
+    "repo": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/repo",
+    "base": "9d7db7f64d785ab9a0f8f7b4f60e617c2636d322",
+    "lane": "L1"
+  },
+  "branch": null,
+  "commit": null,
+  "diffstat": "",
+  "excluded_files": [],
+  "patch": null,
+  "worktree": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/data/lanes/L1/wt",
+  "merge_hint": null,
+  "attempts": [
+    {
+      "backend": "cursor",
+      "model": "composer-2.5",
+      "effort": null,
+      "rc": 1,
+      "seconds": 0.003,
+      "error_class": "exec_error",
+      "meta": {
+        "usage": {}
+      },
+      "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/data/runs/20261107-232537-08d361/events.1.cursor.jsonl",
+      "error_tail": "resident executor stdout closed"
+    }
+  ],
+  "run_dir": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/oslane-i3c3jh6s/data/runs/20261107-232537-08d361"
+}

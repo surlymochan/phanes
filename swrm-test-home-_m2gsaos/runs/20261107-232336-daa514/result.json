@@ -1,0 +1,72 @@
+{
+  "id": "20261107-232336-daa514",
+  "status": "done",
+  "error_class": null,
+  "title": "agy test",
+  "scope": "repo",
+  "prepare": [],
+  "workspace_note": null,
+  "verify": null,
+  "verify_note": null,
+  "backend": "agy",
+  "model": "gemini-3.8-flash-medium",
+  "effort": null,
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 45,
+    "thinking_tokens": 3,
+    "cache_read_tokens": 8,
+    "total_tokens": 176
+  },
+  "seconds": 0.058,
+  "queued_seconds": 0.003,
+  "risk_blocks": [],
+  "result": {
+    "status": "done",
+    "summary": "added add",
+    "files_changed": [
+      "add.py"
+    ],
+    "tests": "not run: host verify",
+    "followups": []
+  },
+  "workspace": {
+    "mode": "in-place",
+    "path": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-agy-384izmc3/work",
+    "repo": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt"
+  },
+  "diffstat": "swrm/README.md           |  16 ++++\n swrm/backends/codex.json |   5 +-\n swrm/bin/swrm            | 213 ++++++++++++++++++++++++++++++++++++++++++++---\n swrm/policy.json         |   3 +-\n tools/ci-swrm.sh         |  15 +++-\n 5 files changed, 236 insertions(+), 16 deletions(-)",
+  "excluded_files": [],
+  "worktree": null,
+  "attempts": [
+    {
+      "backend": "agy",
+      "model": "gemini-3.8-flash-medium",
+      "effort": null,
+      "rc": 0,
+      "seconds": 0.058,
+      "error_class": null,
+      "meta": {
+        "usage": {
+          "input_tokens": 120,
+          "output_tokens": 45,
+          "thinking_tokens": 3,
+          "cache_read_tokens": 8,
+          "total_tokens": 176
+        },
+        "conversation_id": "conv-1",
+        "finished_reason": null
+      },
+      "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232336-daa514/events.1.agy.jsonl",
+      "error_tail": null,
+      "quota_before": null,
+      "quota_after": null
+    }
+  ],
+  "claude_review": "light",
+  "decision_reasons": [
+    "agy quota unknown (opt-in backend; not metered by swrm)",
+    "claude pro quota unknown/stale; default to light review"
+  ],
+  "run_dir": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232336-daa514"
+}

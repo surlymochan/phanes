@@ -1,0 +1,16 @@
+{
+  "name": "L1",
+  "backend": "cursor",
+  "model": "composer-2.5",
+  "effort": null,
+  "state": "idle",
+  "supervisor_pid": 169840,
+  "child_pid": 169876,
+  "current_run": null,
+  "started": 1794093936.8638735,
+  "last_error": null,
+  "resolved_model": "composer-2.5",
+  "updated": 1794093938.2536373,
+  "turn_state": null,
+  "concurrency_keys": []
+}

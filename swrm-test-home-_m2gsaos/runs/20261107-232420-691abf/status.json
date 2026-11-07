@@ -1,0 +1,42 @@
+{
+  "scope": "repo",
+  "updated": 1794093860.7545035,
+  "backend": "cursor",
+  "budget_minutes": 5,
+  "budget_requests": [
+    [
+      "cursor",
+      5
+    ]
+  ],
+  "id": "20261107-232420-691abf",
+  "state": "finished",
+  "title": "cursor test",
+  "profile": {
+    "type": "impl",
+    "difficulty": 3,
+    "backend": "cursor",
+    "read_only": false
+  },
+  "started": 1794093860.6613097,
+  "queued_at": 1794093860.657533,
+  "runner_pid": 165087,
+  "cwd": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-cursor-_6na_gmg/work",
+  "provider": null,
+  "concurrency_keys": [],
+  "fleet_reservation_error": null,
+  "queue_reason": null,
+  "model": "composer-2.5[fast=false]",
+  "effort": null,
+  "attempt": 1,
+  "deadline": 1794094160.6613097,
+  "queued_seconds": 0.004,
+  "execution_started": 1794093860.6613097,
+  "workspace": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-cursor-_6na_gmg/work",
+  "executor_pid": 168146,
+  "events": "/root/.claude/openswarm-executor-candidate/lanes/M19/wt/swrm-test-home-_m2gsaos/runs/20261107-232420-691abf/events.1.cursor.jsonl",
+  "attempt_started": 1794093860.664539,
+  "status": "failed",
+  "finished": 1794093860.7544641,
+  "commit": null
+}

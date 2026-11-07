@@ -1,0 +1,2 @@
+{"type": "lane_start", "lane": "L1"}
+{"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": "initialize"}}
