@@ -24,4 +24,3 @@ __pycache__/
 
 # Private deployment settings stay on the operator machine.
 .deployment.env
-openswarm/tests/.*.so

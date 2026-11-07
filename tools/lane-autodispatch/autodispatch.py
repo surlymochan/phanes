@@ -604,9 +604,22 @@ def dispatchable_issue(issue):
     return (issue.get("state", "OPEN") == "OPEN" and "lane-ready" in labels
             and not labels & DISPATCH_EXCLUDING_LABELS)
 
-REMOTE_STATUS = r'''
-import json,os,sys
-O=os.path.expanduser("~/.claude/swrm-executor-candidate"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
+# Shared by the remote reader and writer: resolve on the executor, not on the AD host.
+# Legacy state homes remain readable without moving or merging control-plane data.
+REMOTE_STATE_HOME = r'''
+import os
+O = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+if O:
+    O = os.path.expanduser(O)
+else:
+    homes = [os.path.expanduser("~/.claude/" + name) for name in
+             ("swrm-executor-candidate", "openswarm-executor-candidate", "swrm", "openswarm")]
+    O = next((home for home in homes if os.path.isdir(home)), homes[0])
+'''
+
+REMOTE_STATUS = REMOTE_STATE_HOME + r'''
+import json,sys
+L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
 try:
   ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
@@ -1006,10 +1019,10 @@ def handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures):
     log(f"{lane} #{n} harvest fetch failed ({classification}) {failures} consecutive failure(s) → labelled lane-failed")
     return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
-RUN_RECORD_SNIPPET = r'''
+RUN_RECORD_SNIPPET = REMOTE_STATE_HOME + r'''
 import base64,json,os,sys
 run, payload = sys.argv[1], sys.argv[2]
-d = os.path.expanduser("~/.claude/swrm-executor-candidate/runs") + "/" + run
+d = os.path.join(O, "runs", run)
 os.makedirs(d, exist_ok=True)
 rec = json.loads(base64.b64decode(payload).decode("utf-8"))
 with open(d + "/pr-validation.json", "w") as f: json.dump(rec, f, ensure_ascii=False, indent=1)

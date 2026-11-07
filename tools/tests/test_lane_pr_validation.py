@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "lane-autodispatch" / "autodispatch.py"
 SPEC = importlib.util.spec_from_file_location("autodispatch", SCRIPT)
@@ -42,7 +43,8 @@ def run_remote_status(home, payload, run=RUN, lane="codex"):
     sys.argv = ["status", lane, run]
     try:
         buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
+        with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(root)}), \
+                contextlib.redirect_stdout(buffer):
             exec(compile(MODULE.REMOTE_STATUS, "<remote_status>", "exec"), {"__name__": "__main__"})
     finally:
         sys.argv = old_argv

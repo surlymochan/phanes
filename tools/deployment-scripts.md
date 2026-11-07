@@ -50,3 +50,14 @@ SSH forced-command 部署必须将身份映射到这些角色，不把机器名�
 已有部署应继续显式设置 `OPENSWARM_HOME` 指向原目录；兼容环境键保留。
 要迁移默认目录，先停止对应控制面并备份旧目录，再由运维复制到新目录、核对数据并切换。
 本轮仅用隔离目录验证显式覆盖，不操作真实旧状态；真实存量迁移仍需部署侧验收。
+
+`lane-autodispatch` 在远端 executor 上解析状态目录，读取 lane/run 和写入
+`pr-validation.*` 使用同一规则：优先 `OPENSWARM_HOME`，其次兼容键 `XSWARM_HOME`。
+未设置时，依次选择已有的 `~/.claude/swrm-executor-candidate`、
+`~/.claude/openswarm-executor-candidate`、`~/.claude/swrm`、`~/.claude/openswarm`；
+都不存在时使用 `~/.claude/swrm-executor-candidate`。旧目录名仅用于存量兼容。
+多个目录并存时应显式设置远端环境变量，避免选择错误部署；设置在 AD 本机不会传到 SSH 远端。
+该解析不会迁移或合并目录；显式指定的目录不存在时也不会回退到其他部署。
+
+离线回归：`python3 -m unittest discover -s tools/tests -p test_autodispatch_state_home.py -v`，
+覆盖自定义目录（含空格）、兼容环境键、新旧默认目录及验证记录写入一致性。
