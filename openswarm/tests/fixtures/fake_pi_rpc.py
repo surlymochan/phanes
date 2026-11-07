@@ -42,6 +42,12 @@ for line in sys.stdin:
     elif kind == "prompt":
         prompt = req.get("message", "")
         prompt_count += 1
+        if "LANE_TEST_EXIT_WITH_STDERR" in prompt:
+            # A spawn failure before the session exists: the executor explains itself on
+            # stderr and exits, exactly like pi-isolated's spawn guards do.
+            sys.stderr.write("isolated Pi broker socket unavailable: OPENSWARM_PI_BROKER_SOCKET is not set\n")
+            sys.stderr.flush()
+            sys.exit(3)
         if "LANE_TEST_RATE_LIMIT_ONCE" in prompt:
             rate_mode = "once"
         elif "LANE_TEST_RATE_LIMIT_ALWAYS" in prompt:

@@ -144,5 +144,83 @@ class PiIsolationTests(unittest.TestCase):
                 sock.close()
 
 
+class PiPreflightTests(unittest.TestCase):
+    """The wrapper reports its spawn preconditions without starting pi (Refs #1747)."""
+
+    def environment(self, root):
+        """An environment whose sandbox dependencies exist, so one guard can be tested at a time."""
+        stubs = root / 'bin'
+        stubs.mkdir(exist_ok=True)
+        for name in ('bwrap', 'socat'):
+            stub = stubs / name
+            stub.write_text('#!/bin/sh\nexit 0\n')
+            stub.chmod(0o755)
+        runtime = root / 'runtime'
+        binary = runtime / 'node_modules' / '.bin' / 'pi'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text('#!/bin/sh\nexit 0\n')
+        binary.chmod(0o755)
+        env = dict(os.environ, PATH=f"{stubs}{os.pathsep}{os.environ.get('PATH', '')}",
+                   OPENSWARM_PI_RUNTIME=str(runtime))
+        env.pop('OPENSWARM_PI_BROKER_SOCKET', None)
+        return env
+
+    def preflight(self, env, cwd, model='MiniMax-M3.1-Flash'):
+        command = [str(WRAPPER), '--preflight', '--mode', 'rpc', '--provider', 'minimax-cn',
+                   '--model', model]
+        result = subprocess.run(command, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=30)
+        return result, json.loads(result.stdout)
+
+    def test_unset_broker_socket_is_reported_as_the_failing_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env = self.environment(root)
+            result, report = self.preflight(env, root)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report['guard'], 'broker_socket')
+            self.assertIn('OPENSWARM_PI_BROKER_SOCKET', report['error'])
+            self.assertIsNone(report['broker']['path'])
+
+    def test_a_model_the_broker_does_not_serve_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env = self.environment(root)
+            result, report = self.preflight(env, root, model='another-model')
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report['guard'], 'configuration')
+            self.assertIn('another-model', report['error'])
+
+    def test_a_live_broker_socket_and_runtime_pass_the_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env = self.environment(root)
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                path = str(root / 'broker.sock')
+                sock.bind(path)
+                sock.listen()
+                env['OPENSWARM_PI_BROKER_SOCKET'] = path
+                result, report = self.preflight(env, root)
+                self.assertEqual(result.returncode, 0, report)
+                self.assertIsNone(report['guard'])
+                self.assertTrue(report['broker']['live'])
+            finally:
+                sock.close()
+
+    def test_a_stale_broker_socket_is_reported_as_not_live(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env = self.environment(root)
+            path = root / 'broker.sock'
+            sock = socket.socket(socket.AF_UNIX)
+            sock.bind(str(path))
+            sock.close()  # the file outlives the broker that owned it
+            env['OPENSWARM_PI_BROKER_SOCKET'] = str(path)
+            result, report = self.preflight(env, root)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report['guard'], 'broker_socket')
+            self.assertIn('not live', report['error'])
+
+
 if __name__ == '__main__':
     unittest.main()
