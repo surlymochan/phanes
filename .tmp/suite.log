@@ -1,0 +1,7 @@
+test_agy => rc=0 
+test_agy_keychain_runtime => rc=0 Ran 2 tests in 0.001s OK 
+test_autodispatch => rc=0 Ran 61 tests in 2.247s OK 
+test_batch => rc=0 Ran 12 tests in 24.090s OK 
+test_bench => rc=0 Ran 4 tests in 0.044s OK 
+test_bench_aggregate => rc=0 Ran 2 tests in 0.001s OK 
+test_bench_report => rc=0 Ran 9 tests in 0.337s OK 

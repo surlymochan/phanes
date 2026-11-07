@@ -789,7 +789,9 @@ class PauseDispatchTickTests(unittest.TestCase):
                                 capture_output=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((home / ".claude" / "openswarm" / "pauses" / "lane_L1.json").exists())
+        # the file name of a record is the injective name of its scope (Refs #1829)
+        name = cli.dispatch_pause_module()._scope_key("lane:L1") + ".json"
+        self.assertTrue((home / ".claude" / "openswarm" / "pauses" / name).exists())
         runner = self.runner()
 
         state = self.tick(runner)

@@ -7,6 +7,15 @@ when a matching pause should affect scheduling.
 ``$OPENSWARM_HOME`` is the canonical home of the pause store (see
 ``default_home()``); the dispatcher keeps its own copy under its state
 directory, so both are read.
+
+The file name of a record is derived from its scope, and the derivation is
+injective: two different scopes never share a file (Refs #1829).  A scope that
+only uses letters, digits, ``_``, ``.`` and ``-`` keeps its name; every other
+byte is escaped reversibly (``lane:C1`` lives in ``lane~3aC1.json``).  A record
+is read by the scope it carries, so a file whose ``scope`` field is another
+scope is not that scope's record.  The records written before #1829 keep their
+pause: they are read by their recorded scope, and the next write of that scope
+moves the record to the current name.
 """
 from __future__ import annotations
 
@@ -56,7 +65,36 @@ def _scope(value: Any) -> str:
     return "{}:{}".format(match.group(1), match.group(2).strip())
 
 
+# The bytes a scope file name may carry verbatim; every other byte of a scope
+# is escaped, so the scope -> file name mapping stays injective (Refs #1829).
+_SAFE_NAME_BYTES = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+
+
 def _scope_key(scope: str) -> str:
+    """The file name stem of one scope; the mapping is injective (Refs #1829).
+
+    A scope that only uses letters, digits, ``_``, ``.`` and ``-`` keeps its
+    name, so its record stays where it is.  Every other byte is escaped
+    reversibly as ``~`` plus two hex digits (``~`` itself as ``~7e``), so
+    ``lane:X`` and ``lane_X`` no longer land on the same file.
+    """
+    name = []
+    for byte in scope.encode("utf-8"):
+        if byte in _SAFE_NAME_BYTES:
+            name.append(chr(byte))
+        else:
+            name.append("~{:02x}".format(byte))
+    return "".join(name)
+
+
+def _legacy_scope_key(scope: str) -> str:
+    """The file name stem the store used before #1829 (every unsafe char ``_``).
+
+    That mapping was not injective (``lane:X`` and ``lane_X`` shared a file),
+    so a record written before the upgrade may still live under this name; the
+    store reads it by the scope it carries.
+    """
     return re.sub(r"[^A-Za-z0-9_.-]", "_", scope)
 
 
@@ -68,6 +106,9 @@ class PauseStore:
 
     def _path(self, scope: str) -> Path:
         return self.dir / (_scope_key(scope) + ".json")
+
+    def _legacy_path(self, scope: str) -> Path:
+        return self.dir / (_legacy_scope_key(scope) + ".json")
 
     def _read(self, path: Path) -> Optional[Dict[str, Any]]:
         try:
@@ -86,6 +127,41 @@ class PauseStore:
             return None
         record["reason"] = str(record.get("reason", ""))
         return record
+
+    def _read_scope(self, path: Path, scope: str) -> Optional[Dict[str, Any]]:
+        """The record of one scope stored at ``path``.
+
+        A record whose ``scope`` field names another scope is not the record of
+        ``scope``: for that scope the file does not exist (Refs #1829).
+        """
+        record = self._read(path)
+        if record is None or record["scope"] != scope:
+            return None
+        return record
+
+    def _record_paths(self) -> List[Path]:
+        """Every pause file of the store."""
+        try:
+            return sorted(self.dir.glob("*.json"))
+        except OSError:
+            return []
+
+    def _drop_legacy(self, scope: str) -> None:
+        """Remove the pre-#1829 copy of one scope's record.
+
+        The old file name mapped several scopes onto one file, so the record
+        that survived under it belongs to the scope it carries: only that copy
+        is dropped when the scope is written again (Refs #1829).
+        """
+        legacy = self._legacy_path(scope)
+        if legacy == self._path(scope):
+            return
+        if self._read_scope(legacy, scope) is None:
+            return
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
 
     def pause(self, scope: str, ttl_s: Any = None, reason: str = "", now: Any = None) -> Dict[str, Any]:
         """Create or replace a pause. ``now`` is required for deterministic expiry."""
@@ -112,33 +188,49 @@ class PauseStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+        self._drop_legacy(normalized)
         return dict(record)
 
     def resume(self, scope: str) -> bool:
         """Remove one scope's pause; return whether a record existed."""
-        try:
-            self._path(_scope(scope)).unlink()
+        normalized = _scope(scope)
+        for path in (self._path(normalized), self._legacy_path(normalized)):
+            if self._read_scope(path, normalized) is None:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return False
             return True
-        except FileNotFoundError:
-            return False
+        # a record under a name neither the current nor the old mapping gives:
+        # find it by the scope it carries
+        for path in self._record_paths():
+            if self._read_scope(path, normalized) is None:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            return True
+        return False
 
     def active(self, now: Any) -> List[Dict[str, Any]]:
         """Return unexpired pauses, sorted lexically by scope."""
         moment = _time(now, "now")
-        records = []
-        try:
-            paths = self.dir.glob("*.json")
-            for path in paths:
-                record = self._read(path)
-                if record is None:
-                    continue
-                expiry = record["expires_at"]
-                if expiry is not None and moment >= expiry:
-                    continue
-                records.append(record)
-        except OSError:
-            return []
-        return sorted(records, key=lambda row: row["scope"])
+        records: Dict[str, Dict[str, Any]] = {}
+        for path in self._record_paths():
+            record = self._read(path)
+            if record is None:
+                continue
+            expiry = record["expires_at"]
+            if expiry is not None and moment >= expiry:
+                continue
+            scope = record["scope"]
+            # one record per scope: the file of the current mapping wins over a
+            # leftover of the old one (Refs #1829)
+            if scope not in records or path == self._path(scope):
+                records[scope] = record
+        return sorted(records.values(), key=lambda row: row["scope"])
 
     def is_paused(self, lane: Any = None, host: Any = None, backend: Any = None, now: Any = None) -> bool:
         """Whether any active pause applies to the supplied dispatch target."""
