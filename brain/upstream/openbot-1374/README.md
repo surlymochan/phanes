@@ -23,3 +23,21 @@ org-health 等 phanes 专用内容、docs 漂移修正（留到后续）。
 
 审查要点：补丁是否正确、是否只含通用改动（无 phanes 路径/密钥/主机名）、是否会让上游现有行为回归、
 每个补丁是否自洽可单独合入。
+
+## phanes 侧对齐（2026-11-07，本批）
+
+上游 PR #4382 的通用 hook 已在 phanes 的 `openbot/` 副本里落地，副本内容与上游 PR 一致：
+
+- `openbot/.githooks/pre-commit` 改成按 hook 自身位置找项目目录（不再写死 `openbot/`），项目在仓库根、
+  任意子目录或 linked worktree 里都能跑；phanes 根的 `.githooks/pre-commit` 仍然转交给它。
+- 新增 `openbot/scripts/pre-commit-subdirectory-e2e.sh`（上游 4 种布局的 e2e）和 `bun run test:pre-commit-subdirectory`。
+  改之前这份副本在 `vendor/openbot` 布局下会失败（"the hook did not see the staged file"）。
+- `openbot/scripts/test-pre-commit-worktree.sh` 补了 formatter 覆盖：完全暂存的文件按改写后的内容进提交，
+  只暂存一部分的文件会拦下提交，并报告 "Biome fixed files that also have unstaged changes"。
+- `openbot/changelog.d/fix-dev-checks-in-subdirectory.md` 是这次改动的发布说明。
+
+`scripts/dev-services.ts` 的 `--lan` 改动和 README 说明副本里已经是上游 PR #4381 的内容（逐函数对比无差异），
+`apps/mobile/eas.json` 与上游 main 同一份 blob、没有工具读它，这两处本批不需要改。
+
+验证：
+`cd openbot && bash scripts/test-pre-commit-worktree.sh && bash scripts/pre-commit-subdirectory-e2e.sh && python3 apps/auth-api/scripts/test_check_migration_numbers.py`

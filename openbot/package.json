@@ -274,6 +274,7 @@
     "test:workspace-only": "bun scripts/filesystem-smoke.ts --workspace-only",
     "test:provider-detection": "bun scripts/provider-detection-e2e.ts",
     "test:dev-lan-guard": "bun scripts/dev-lan-guard-smoke.ts",
+    "test:pre-commit-subdirectory": "bash scripts/pre-commit-subdirectory-e2e.sh",
     "test:storage-live": "bun scripts/provider-storage-smoke.ts",
     "test:grok-live": "bun scripts/provider-storage-smoke.ts --grok-only",
     "test:team-live": "electron scripts/team-webrtc-live-smoke-app",
