@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -77,6 +78,39 @@ class EventdTest(unittest.TestCase):
         log.write_text('new\n')
         eventd.ingest(self.db, log)
         self.assertIn('truncated', self.db.execute('SELECT text FROM events WHERE id=2').fetchone()[0])
+
+    def test_copytruncate_regrows_past_offset(self):
+        log = self.data / 'events.log'
+        log.write_text('[lane-a] START 1\n')
+        eventd.ingest(self.db, log)
+        log.write_text('[lane-x] status=failed\n')
+        eventd.ingest(self.db, log)
+        rows = [row[0] for row in self.db.execute('SELECT text FROM events ORDER BY id')]
+        self.assertEqual(rows[1:], ['[eventd] log rotated or truncated', '[lane-x] status=failed'])
+        result = eventd.wait_once(self.db, self.data, 'one', self.args)
+        self.assertIn('truncated', result['reason'])
+        with self.db:
+            self.db.execute('UPDATE consumers SET cursor=? WHERE name=?', (result['cursor'], 'one'))
+        self.assertEqual(eventd.wait_once(self.db, self.data, 'one', self.args)['reason'], 'failure or process error')
+
+    def test_codex_backend_is_unavailable_without_tool_free_guarantee(self):
+        with mock.patch('eventd.urllib.request.urlopen') as request:
+            action, reason, _, _ = eventd.decide('codex', '[lane] RISK: review', [], 1, 'model')
+        self.assertEqual(action, 'wake')
+        self.assertIn('decision unavailable', reason)
+        request.assert_not_called()
+
+    def test_default_openai_requires_key(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch('sys.stderr'):
+            self.assertEqual(eventd.main(['--data-dir', str(self.data), '--model', 'model', 'serve']), 2)
+
+    def test_env_file_loads_only_key_without_shell_execution(self):
+        env = self.data / 'settings.env'
+        env.write_text("export OPENAI_API_KEY='test value'\nOTHER=ignored\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            eventd.load_env_file(env)
+            self.assertEqual(os.environ['OPENAI_API_KEY'], 'test value')
+            self.assertNotIn('OTHER', os.environ)
 
     def test_rules_hot_reload(self):
         rules = self.data / 'consumers' / 'one.json'

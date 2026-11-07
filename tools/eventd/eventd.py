@@ -2,9 +2,11 @@
 """Durable, consumer-independent event wake-up queue."""
 import argparse
 import collections
+import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import sys
 import time
@@ -122,26 +124,38 @@ def decide(backend, text, context, timeout, model):
 def ingest(db, log):
     """Append complete lines atomically with the source identity and byte offset."""
     try:
-        stat = log.stat()
-        identity = f'{stat.st_dev}:{stat.st_ino}'
         old = getmeta(db, 'identity')
         offset = int(getmeta(db, 'offset', '0'))
         line = int(getmeta(db, 'line', '0'))
-        with db:
-            if old and (old != identity or stat.st_size < offset):
+        with log.open('rb') as f, db:
+            stat = os.fstat(f.fileno())
+            identity = f'{stat.st_dev}:{stat.st_ino}'
+            previous = getmeta(db, 'prefix_hash')
+            digest = hashlib.sha256()
+            remaining = offset
+            while remaining:
+                chunk = f.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if old and (old != identity or remaining or
+                        (previous and digest.hexdigest() != previous)):
                 db.execute('INSERT INTO events(line,text) VALUES (?,?)', (line, '[eventd] log rotated or truncated'))
                 offset, line = 0, 0
-            with log.open('rb') as f:
-                f.seek(offset)
-                while True:
-                    raw = f.readline()
-                    if not raw or not raw.endswith(b'\n'):
-                        break
-                    line += 1
-                    db.execute('INSERT INTO events(line,text) VALUES (?,?)', (line, raw.decode('utf-8', errors='replace').rstrip('\r\n')))
-                    offset = f.tell()
+                digest = hashlib.sha256()
+            f.seek(offset)
+            while True:
+                raw = f.readline()
+                if not raw or not raw.endswith(b'\n'):
+                    break
+                digest.update(raw)
+                line += 1
+                db.execute('INSERT INTO events(line,text) VALUES (?,?)', (line, raw.decode('utf-8', errors='replace').rstrip('\r\n')))
+                offset = f.tell()
             setmeta(db, 'identity', identity)
             setmeta(db, 'offset', offset)
+            setmeta(db, 'prefix_hash', digest.hexdigest())
             setmeta(db, 'line', line)
             setmeta(db, 'source_error', '')
             setmeta(db, 'heartbeat', time.time())
@@ -161,6 +175,23 @@ def audit(data, item):
 def check_config(args):
     if args.backend == 'openai' and (not os.environ.get('OPENAI_API_KEY') or not args.model):
         raise ValueError('openai backend requires OPENAI_API_KEY and --model')
+
+
+def load_env_file(path):
+    """Load only the API key; never evaluate shell code or expose file contents."""
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith('export '):
+            line = line[7:].lstrip()
+        name, sep, value = line.partition('=')
+        if sep and name.strip() == 'OPENAI_API_KEY':
+            try:
+                parts = shlex.split(value, comments=True)
+            except ValueError:
+                raise ValueError('invalid OPENAI_API_KEY in env file') from None
+            if len(parts) != 1:
+                raise ValueError('invalid OPENAI_API_KEY in env file')
+            os.environ.setdefault('OPENAI_API_KEY', parts[0])
 
 
 def wait_once(db, data, name, args):
@@ -241,7 +272,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog='eventd')
     p.add_argument('--data-dir', type=Path, default=Path(os.environ.get('EVENTD_DATA_DIR', DEFAULT_DATA)))
     p.add_argument('--log', type=Path, default=Path(os.environ.get('EVENTD_LOG', DEFAULT_LOG)))
-    p.add_argument('--backend', choices=['codex', 'openai', 'fake'], default=os.environ.get('EVENTD_BACKEND', 'codex'))
+    p.add_argument('--backend', choices=['codex', 'openai', 'fake'], default=os.environ.get('EVENTD_BACKEND', 'openai'))
+    p.add_argument('--env-file', type=Path, help='load OPENAI_API_KEY without executing the file')
     p.add_argument('--model', default=os.environ.get('EVENTD_MODEL'))
     p.add_argument('--decision-timeout', type=float, default=30)
     p.add_argument('--hourly-limit', type=int, default=60)
@@ -256,7 +288,10 @@ def main(argv=None):
     replay = sub.add_parser('replay'); replay.add_argument('file', type=Path)
     args = p.parse_args(argv)
     try:
-        check_config(args)
+        if args.env_file:
+            load_env_file(args.env_file)
+        if args.command in ('serve', 'wait'):
+            check_config(args)
         if args.decision_timeout <= 0 or args.hourly_limit < 0 or args.max_silence <= 0 or args.health_timeout <= 0:
             raise ValueError('timeouts must be positive and hourly limit nonnegative')
         db = connect(args.data_dir)
