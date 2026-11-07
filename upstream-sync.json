@@ -19,6 +19,27 @@
         "pypi-stub/swrm/__init__.py"
       ],
       "source_of_truth": "phanes"
+    },
+    "evalid": {
+      "upstream_repo": "https://github.com/surlymochan/evalid.git",
+      "base_sha": "020af4fb37660a86cb8d2fcf57ea098fde778b72",
+      "source_of_truth": "phanes",
+      "phanes_only": ["scripts/redact-home-paths.py", "scripts/redact-ip-addresses.py", "test/privacy-scans.test.js"],
+      "excluded_paths": [
+        "bench/**/results/raw*/**",
+        "bench/e2e/results/e2e-2026-10-17*.jsonl",
+        "bench/e2e/results/usage/**",
+        "bench/results/llm-*.jsonl"
+      ],
+      "excluded_paths_reason": "公开仓库隐私：不导入原始运行产物（包括压缩补丁、提示词、日志和 grader 输出）；仅保留汇总结果与复现脚本，原始记录从上游 evalid 仓库获取。",
+      "redactions": {
+        "description": "隐私优先于上游逐字一致：用户主目录路径统一替换为 ~/；保留 base_sha 作为来源基线，导入文件树不再与上游逐字一致。",
+        "script": "phanes/evalid/scripts/redact-home-paths.py",
+        "check": "python3 phanes/evalid/scripts/redact-home-paths.py --check",
+        "ip_description": "非回环 IP 字面量替换为文档保留地址，保持 CIDR 场景的前缀长度及主机位；按裁定允许 127.0.0.1、localhost 和 ::1。版本号和源码双冒号分隔符不是 IP，扫描时明确分类排除。",
+        "ip_script": "phanes/evalid/scripts/redact-ip-addresses.py",
+        "ip_check": "python3 phanes/evalid/scripts/redact-ip-addresses.py --check"
+      }
     }
   }
 }

@@ -1,0 +1,1 @@
+{"all":true,"exclude":["test/**","node_modules/**"],"include":["src/**/*.js","bin/**/*.js"],"reporter":["text","lcov"],"reports-dir":"./coverage","temp-directory":"./coverage/.tmp"}
