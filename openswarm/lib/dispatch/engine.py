@@ -482,6 +482,7 @@ class Dispatcher:
         self.rev_lock = threading.RLock()
         self.inode = {"t": 0.0, "low": False}
         self.last_leak_sweep = 0.0
+        self.lease_store = dispatch_module("lease").LeaseStore(self.D)
         self.last_warn = 0.0
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
@@ -1112,29 +1113,33 @@ class Dispatcher:
         skips.pop(key, None)
         self.save_state(state)
 
-    def sweep_leaked_inprogress(self, state):
-        """`in-progress` with no lane holding the issue: drop the stale label after leak_grace_s."""
+    def sweep_leaked_inprogress(self, state, res=None):
+        """Reclaim expired leases only after their recorded lane run has disappeared."""
         if self.clock() - self.last_leak_sweep < 300:
             return
         self.last_leak_sweep = self.clock()
-        held = {st.get("issue") for L, st in state.items() if not L.startswith("_") and isinstance(st, dict)}
-        held.update(int(n) if str(n).isdigit() else n for n in (state.get("_label_debt") or {}))
+        running = set()
+        for lane, status in (res or {}).items():
+            record = state.get(lane) or {}
+            if status.get("lane") == "busy" and status.get("current_run") == record.get("run"):
+                if self.lease_store.get(record.get("issue")):
+                    self.lease_store.renew(record["issue"], record["run"], self.clock())
+                running.add(record.get("run"))
+        held = {int(n) if str(n).isdigit() else n for n in (state.get("_label_debt") or {})}
+        reclaimable = set(self.lease_store.expired(self.clock(), running))
         rc, out, _ = self.gh(["issue", "list", "--state", "open", "--label", self.L["in_progress"], "--limit", "100",
                               "--json", "number,updatedAt"])
         if rc:
             return
         for i in json.loads(out):
             n = i["number"]
+            if n not in reclaimable:
+                continue
             if n in held:
                 continue
-            try:
-                age = self.clock() - calendar.timegm(time.strptime(i["updatedAt"], "%Y-%m-%dT%H:%M:%SZ"))
-            except Exception:
-                continue
-            if age < int(self.cfg["leak_grace_s"]):
-                continue
             self.gh_write(["issue", "edit", str(n), "--remove-label", self.L["in_progress"]])
-            self.log(f"leak-sweep: #{n} had {self.L['in_progress']} but no lane holds it (idle {int(age)}s) → removed")
+            self.lease_store.release(n)
+            self.log(f"leak-sweep: #{n} lease expired and its run is absent → removed")
 
     # ------------------------------------------------------------ LRU
     def lru_picker(self):
@@ -2797,6 +2802,9 @@ class Dispatcher:
                         continue
                     if ok:
                         self.hot_lock.release((state.get(L) or {}).get("hot") or [])
+                        issue = (state.get(L) or {}).get("issue")
+                        if issue is not None:
+                            self.lease_store.release(issue)
                         state.pop(L, None)
                         self.save_state(state)
             except cf.TimeoutError:
@@ -2887,6 +2895,7 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+            self.lease_store.grant(pick["n"], run, L, self.cfg["leak_grace_s"], self.clock())
             self.lru_picker().touch(L)
             rb = self.rebase_of(pick["body"])
             if hot:
@@ -2955,7 +2964,7 @@ class Dispatcher:
         res = self.probe(lanes, state)
         self.harvest(lanes, res, state)
         try:
-            self.sweep_leaked_inprogress(state)
+            self.sweep_leaked_inprogress(state, res)
         except Exception as e:
             self.log(f"leak-sweep exc: {e!r}", brain=False)
         try:
