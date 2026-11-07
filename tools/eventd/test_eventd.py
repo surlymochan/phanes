@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import selectors
 import tempfile
 import time
 import unittest
@@ -46,12 +47,22 @@ class EventdTest(unittest.TestCase):
         result = eventd.wait_once(self.db, self.data, 'one', self.args)
         self.assertEqual(result['reason'], 'group complete')
 
+    def test_untrusted_status_does_not_complete_group(self):
+        self.add('[lane-a] MSG: status=failed')
+        self.add('[lane-b] RISK: status=failed')
+        groups = {'g': {'pattern': 'lane-', 'expect': 1}}
+        self.assertEqual(eventd.progress(self.db, groups, 2)['g']['done'], 0)
+
     def test_routine_and_ambiguous_rules(self):
         for kind in ('MSG', 'START', 'RESUME', 'HEARTBEAT'):
             self.assertEqual(eventd.classify(f'[lane] {kind}: error RISK', {}, {})[0], 'ignore')
         self.assertEqual(eventd.classify('[lane] DONE: status=done error', {}, {})[0], 'ignore')
         for text in ('[lane] RISK: error', '[lane] STALL: error', '[lane] status=partial error', 'unknown format'):
             self.assertIsNone(eventd.classify(text, {}, {})[0])
+        for prefix in ('', '15:43:39 '):
+            self.assertEqual(eventd.classify(prefix + '[lane 15:43] MSG: process exited with fatal error', {}, {})[0], 'ignore')
+            self.assertIsNone(eventd.classify(prefix + '[lane 15:43] RISK: status=failed process exited', {}, {})[0])
+            self.assertEqual(eventd.classify(prefix + '[lane 15:43] EXITED: runner process gone', {}, {})[0], 'wake')
 
     def test_recover_done_and_new_run(self):
         runs = self.data / 'runs'
@@ -72,12 +83,45 @@ class EventdTest(unittest.TestCase):
         run_ingest.recover(runs, log)
         self.assertIn('[later] DONE: status=partial', log.read_text())
 
+    def test_recover_alias_with_timestamp_and_reused_title(self):
+        runs = self.data / 'runs'
+        runs.mkdir()
+        for name in ('old', 'new'):
+            (runs / name).mkdir()
+            (runs / name / 'result.json').write_text('{"status":"done"}')
+        log = self.data / 'aggregate.log'
+        log.write_text('15:43:39 [title] START old\n15:43:59 [title 15:43] DONE: status=done\n15:44:00 [title] START new\n')
+        run_ingest.recover(runs, log)
+        self.assertEqual(log.read_text().count('DONE:'), 2)
+        self.assertIn('[new] DONE:', log.read_text())
+
+    def test_watcher_flushes_unterminated_tail(self):
+        runs = self.data / 'runs'
+        (runs / 'run-1').mkdir(parents=True)
+        log = self.data / 'aggregate.log'
+        watcher = self.data / 'watcher'
+        watcher.write_text('#!/bin/sh\nprintf "[run-1] DONE: status=failed"\n')
+        watcher.chmod(0o755)
+        selector = selectors.DefaultSelector()
+        select = selector.select
+        calls = 0
+        def select_until_eof(timeout):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise KeyboardInterrupt
+            return select(timeout)
+        with mock.patch('run_ingest.selectors.DefaultSelector', return_value=selector), mock.patch.object(selector, 'select', side_effect=select_until_eof):
+            with self.assertRaises(KeyboardInterrupt):
+                run_ingest.follow_runs(runs, log, str(watcher))
+        self.assertEqual(log.read_text(), '[run-1] DONE: status=failed\n')
+
     def test_replay_summary_counts(self):
         log = self.data / 'replay.log'
         log.write_text('[a] MSG: hello\n[a] RISK: review\n[a] status=failed\n')
         with mock.patch('sys.stdout', new_callable=__import__('io').StringIO) as out:
             self.assertEqual(eventd.main(['--data-dir', str(self.data), 'replay', str(log)]), 0)
-        self.assertEqual(json.loads(out.getvalue())['summary'], {'wake_count': 1, 'decision_count': 1, 'event_count': 3})
+        self.assertEqual(json.loads(out.getvalue())['summary'], {'wake_count': 1, 'decision_count': 1, 'event_count': 3, 'rule_count': 2, 'decision_ratio': 1 / 3})
 
     def test_decision_fallback_and_limit(self):
         self.add('[lane] RISK: something')

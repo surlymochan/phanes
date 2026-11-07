@@ -74,6 +74,9 @@ def progress(db, groups, upto):
         # The latest terminal status per lane counts once, including failures.
         terminal = {}
         for text in history:
+            event = re.sub(r'^\d\d:\d\d:\d\d\s+(?=\[)', '', text)
+            if re.match(r'^\[[^]]+\]\s+(MSG|START|RESUME|HEARTBEAT|RISK|STALL)\b', event, re.I):
+                continue
             if regex.search(text) and re.search(r'\bstatus=(done|failed|partial|budget_exceeded)\b', text, re.I):
                 terminal[lane(text) or text] = text
         result[name] = {'done': len(terminal), 'expect': spec['expect']}
@@ -81,11 +84,14 @@ def progress(db, groups, upto):
 
 
 def classify(text, before, after):
+    text = re.sub(r'^\d\d:\d\d:\d\d\s+(?=\[)', '', text)
     if text.startswith('[eventd]'):
         return 'wake', text
     kind = re.match(r'^\[[^]]+\]\s+(MSG|START|RESUME|HEARTBEAT)\b', text, re.I)
     if kind:
         return 'ignore', 'routine event'
+    if re.match(r'^\[[^]]+\]\s+EXITED\b', text, re.I):
+        return 'wake', 'failure or process error'
     if any(v['done'] >= v['expect'] and before.get(k, {}).get('done', 0) < v['expect'] for k, v in after.items()):
         if re.search(r'\bstatus=(failed|budget_exceeded)\b', text, re.I):
             return 'wake', 'failure or process error'
@@ -376,7 +382,8 @@ def main(argv=None):
                 wakes.append(result)
                 with db: db.execute('UPDATE consumers SET cursor=?,last_wake=? WHERE name=?', (result['cursor'], time.time(), '__replay__'))
             decisions = db.execute("SELECT count(*) FROM calls").fetchone()[0]
-            print(json.dumps({'summary': {'wake_count': len(wakes), 'decision_count': decisions, 'event_count': number if 'number' in locals() else 0}, 'wake_count': len(wakes), 'wakes': wakes}, ensure_ascii=False))
+            total = number if 'number' in locals() else 0
+            print(json.dumps({'summary': {'wake_count': len(wakes), 'decision_count': decisions, 'event_count': total, 'rule_count': total - decisions, 'decision_ratio': decisions / total if total else 0}, 'wake_count': len(wakes), 'wakes': wakes}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, sqlite3.Error, re.error, json.JSONDecodeError) as exc:
         print('eventd: ' + str(exc), file=sys.stderr); return 2

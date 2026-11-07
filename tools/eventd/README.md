@@ -13,7 +13,9 @@ tools/eventd/eventd --backend fake replay events.log
 
 `wait` 输出一行 JSON：`reason`、`events`、`groups`、`cursor`，有唤醒时退出 0；超时退出 1，错误退出 2。每个消费者使用不同名称。`serve` 不启动消费者；Claude Code 可后台运行 `wait`，Codex 可在当前轮次等待同一命令。
 
-`ingest-runs` 每秒扫描 `--runs-dir` / `EVENTD_RUNS_DIR`（默认 `~/.claude/openswarm-executor-candidate/runs`），用 `--watch-command` 指定 swrm 程序，自动跟随新 run，并从 result.json 补报缺失的 DONE。采集器用完整 run ID 作为日志标签并按该标签去重；旧汇总器若使用别名作为标签，需先核对历史 DONE，不能可靠按 run ID 去重。日志旁的锁文件防止两个 eventd 采集器同时运行；不能阻止其他汇总器写入。已有的历史活动 run 会从头跟随。
+`ingest-runs` 每秒扫描 `--runs-dir` / `EVENTD_RUNS_DIR`（默认 `~/.claude/openswarm-executor-candidate/runs`），用 `--watch-command` 指定 swrm 程序，自动跟随新 run，并从 result.json 补报缺失的 DONE。采集器用完整 run ID 作为日志标签；历史别名通过之前最近的 `[title] START id` 映射，支持行首时间及 `[title HH:MM] DONE`。同名 run 并发或缺少 START 时无法可靠消歧，需人工核对。日志旁的锁文件防止两个 eventd 采集器同时运行；不能阻止其他汇总器写入。已有的历史活动 run 会从头跟随。
+
+`MSG` 是 lane 的不可信自由文本，按事件类型一律忽略，即使正文含 `fatal` 或 `status=failed` 也不唤醒；`RISK` 正文即使含 `status=failed`，仍进入决策层。这些正文也不计作分组终态。真实失败由 `DONE` 状态或 `EXITED` 事件表达；`EXITED` 直接唤醒。
 
 `--log` / `EVENTD_LOG` 指定汇总日志；`--data-dir` / `EVENTD_DATA_DIR` 指定数据库、规则和审计目录。`--backend` / `EVENTD_BACKEND` 可设 `fake`、`openai`、`decisions`（默认）、`codex`。OpenAI 需设置环境变量 `OPENAI_API_KEY`，或通过 `--env-file` 加载该变量（已有环境变量优先），默认模型为 `gpt-6-luna`，effort 为 `high`；可用 `--model` / `EVENTD_MODEL` 和 `--effort` / `EVENTD_EFFORT` 配置。禁止使用 gpt-5.4 系列。`decisions` 只用 gpt-6-luna 的 choice 判断，不提供工具；失败时依次回退 Responses API 的 `gpt-6-luna` / `high`、`gpt-6.1-terra` / `medium`，都失败则唤醒。`openai` 后端失败时回退 Terra；审计记录实际模型、effort 和回退状态。缺少密钥时 `serve` 和 `wait` 会报错。默认选择依据：53 个冻结案例中 decisions 漏唤醒 0 次、准确率 98.11%，Responses Luna high 分别为 2 次和 96.23%；样本有限，详见 [EVAL.md](EVAL.md)。文件仅解析密钥赋值，不执行 shell 命令。模型没有提供工具。当前 Codex CLI 无法验证禁用全部工具，因此 Codex 后端保守判定为不可用并唤醒，尚不执行模型调用。可调 `--decision-timeout`、`--hourly-limit`、`--max-silence`、`--health-timeout`（时间单位为秒）。超限及决策错误均唤醒。每条判断写入数据目录 `decisions.jsonl`。
 

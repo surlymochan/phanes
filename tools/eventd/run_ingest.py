@@ -13,10 +13,15 @@ def done_runs(log):
     if not log.exists():
         return set()
     found = set()
+    active = {}
     for line in log.read_text(errors='replace').splitlines():
-        match = re.match(r'^\[([^\]]+?)(?: \d\d:\d\d)?\]\s+DONE:', line)
+        match = re.match(r'^(?:\d\d:\d\d:\d\d\s+)?\[([^\]]+?)(?: \d\d:\d\d)?\]\s+(?:START\s+(\S+)|DONE:)', line)
         if match:
-            found.add(match.group(1))
+            label, run_id = match.groups()
+            if run_id:
+                active[label] = run_id
+            else:
+                found.add(active.get(label, label))
     return found
 
 
@@ -72,7 +77,11 @@ def follow_runs(runs, log, command):
                         selector.unregister(key.fileobj)
                         key.fileobj.close()
                         watchers.pop(name).wait()
-                        buffers.pop(name)
+                        tail = buffers.pop(name)
+                        if tail:
+                            text = tail.decode('utf-8', errors='replace')
+                            if not (re.search(r'\]\s+DONE:', text) and name in done_runs(log)):
+                                append(log, text)
                         continue
                     data = buffers[name] + chunk
                     lines = data.split(b'\n')
