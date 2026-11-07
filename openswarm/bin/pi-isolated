@@ -81,7 +81,7 @@ else
     --tools "$3" --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-session "$4"
 fi
 '''
-    # Some nested sandboxes (e.g. instabox VMs) refuse a fresh /proc inside a new
+    # Some nested sandboxes refuse a fresh /proc inside a new
     # PID namespace. Keep every other namespace (network stays isolated) and fall
     # back to sharing only the PID namespace there.
     unshare = ['--unshare-all']

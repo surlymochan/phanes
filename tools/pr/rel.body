@@ -24,7 +24,7 @@ Surfaces: `src/backend` (provider runtime, agent service, dispatch, browser host
 
 ## Verification
 
-- [x] Each fix has an E2E case or a changed E2E script (`provider-account-reload-e2e`, `dispatch-history-e2e`, `acp-mcp-shared-token-e2e`, `backend-reliability-bounds-e2e`, the browser sweep case). Executor evidence from gocc and instabox: every run ended `done` with its host verify at rc 0.
+- [x] Each fix has an E2E case or a changed E2E script (`provider-account-reload-e2e`, `dispatch-history-e2e`, `acp-mcp-shared-token-e2e`, `backend-reliability-bounds-e2e`, the browser sweep case). Executor runs ended `done` with host verify at rc 0.
 - [x] Narrow checks on the final head are in the PR checks; broad checks run in CI.
 - [x] The pre-commit hook passed.
 - [x] No credentials, private data, generated output, or real user files are included.

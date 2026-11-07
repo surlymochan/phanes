@@ -193,7 +193,7 @@ Every subcommand, grouped by what it does. `openswarm <command> --help` lists al
 | `openswarm lane down` | Stop lane turns, children, and supervisors. | `openswarm lane down C1 K1` |
 | `openswarm lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `openswarm lane launchd-plist C1` |
 | `openswarm lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `openswarm lane systemd-unit K1` |
-| `openswarm batch` | Queue task cards across fleet hosts and collect their branches. | `openswarm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
+| `openswarm batch` | Queue task cards across fleet hosts and collect their branches. | `openswarm batch --repo project --cards ./cards --hosts worker --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `openswarm batch status` | Show the state of one batch. | `openswarm batch status <batch-id>` |
 | `openswarm bus init` | Create the bus labels, issue template, and protocol README. | `openswarm bus init acme/openswarm-bus` |
 | `openswarm bus status` | Show open bus issues with their executor and age. | `openswarm bus status --json` |
@@ -239,7 +239,7 @@ the `验收：` line and the section headings do not count. A pull request's eff
 | `openswarm ingest-claude` | Record Claude plan usage from the statusline hook or from flags. | `openswarm ingest-claude --five-hour 80 --seven-day 40` |
 | `openswarm fleet status` | Show reachability, paused hosts, lanes, and active runs. | `openswarm fleet status --json` |
 | `openswarm fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `openswarm fleet exec worker -- lane status` |
-| `openswarm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `openswarm fleet ledger pull --hosts worker,sandbox` |
+| `openswarm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `openswarm fleet ledger pull --hosts worker` |
 | `openswarm fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `openswarm fleet render-lanes --inventory fleet-inventory.json --check` |
 | `openswarm doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk) without installing anything. | `openswarm doctor --lane C1 --json` |
 | `openswarm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `openswarm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
@@ -354,7 +354,7 @@ reviewable drafts instead of editing the lesson or pattern catalog.
    accept or reject decision:
 
    ```bash
-   openswarm fleet ledger pull --hosts worker,sandbox
+   openswarm fleet ledger pull --hosts worker
    openswarm ledger ingest --repo acme/project --since 30
    openswarm ledger accept <run-id> --reason "Verified on host"
    ```
@@ -651,13 +651,11 @@ and an authenticated executor on each host. `repos` maps the same logical repo n
 {"hosts":[
   {"name":"local","kind":"local","repos":{"project":"~/code/project"}},
   {"name":"worker","kind":"ssh","ssh":"worker-alias","openswarm":"~/.local/bin/openswarm",
-   "repos":{"project":"~/work/project"}},
-  {"name":"sandbox","kind":"instabox","box":"task-box","openswarm":"~/.local/bin/openswarm",
    "repos":{"project":"~/work/project"},"seed_strategy":"fetch","fetch_retries":2}
 ]}
 ```
 
-Local hosts use subprocesses; remote commands use `ssh <alias> --` or `instabox ssh <box> --`, with timeouts.
+Local hosts use subprocesses; remote commands use `ssh <alias> --`, with timeouts.
 Without a local repo mapping, the planner uses its current checkout. A missing fleet config defaults to local only.
 Fleet hosts may set `seed_strategy` to `fetch` (default) or `push` for `fleet exec ... lane assign --base`.
 Fetch makes up to `fetch_retries + 1` attempts (default: 3 total), with exponential delays between failures.
@@ -687,7 +685,6 @@ openswarm fleet exec worker -- lane status
 openswarm fleet exec --timeout 120 worker -- runs --active --json
 ```
 
-Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
 `fleet exec` forwards stdout, stderr and the exit code; it does not issue a separate wake command.
 
 One fleet inventory renders every host's `lanes.json`, so the lane topology lives in one file instead of one
@@ -695,12 +692,12 @@ copy per host:
 
 ```bash
 openswarm fleet render-lanes --inventory fleet-inventory.json             # render every host
-openswarm fleet render-lanes --inventory fleet-inventory.json --host ib1  # render one host
+openswarm fleet render-lanes --inventory fleet-inventory.json --host worker  # render one host
 openswarm fleet render-lanes --inventory fleet-inventory.json --check     # compare with the hosts
 ```
 
 The inventory is `{"hosts": {"<host>": {"ssh": "<alias>", "lanes": [ ... ]}}}`; a host may also set `kind`
-(`local`, `ssh`, `instabox`), `box`, `openswarm`, and `lanes_file`. Every lane entry uses the `lanes.json` lane
+(`local`, `ssh`), `openswarm`, and `lanes_file`. Every lane entry uses the `lanes.json` lane
 schema (`name`, `backend`, `model`, absolute `repo`, plus the backend extras such as `effort`); an unknown field
 or a duplicate lane name is an error. `--check` reads the `lanes.json` each host has (the local file, or `cat`
 over the host transport) and reports the extra, missing, and changed lanes; it exits non-zero when a host
@@ -709,13 +706,13 @@ drifted. The command only renders and compares: it never writes to a host.
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
 ```bash
-openswarm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
+openswarm batch --repo project --cards ./cards --hosts worker --per-host 1 \
   --backend pi --model cheap-model --verify 'python3 -m unittest discover -s tests' \
   --budget-minutes 20 --detach
 openswarm batch status <batch-id>
 ```
 
-The batch wakes each selected instabox once, checks openswarm and the checkout, and makes `--base REV` available
+The batch checks openswarm and the checkout, and makes `--base REV` available
 on every host (default: the planner checkout's `HEAD`). Sorted cards are assigned round-robin; `--per-host`
 defaults to 1, with remaining cards queued until slots free. Backend, model and effort flags are optional and pass
 through to each `run --detach`. One line is printed per state change; detached output goes to

@@ -20,13 +20,12 @@ test_sim=""
 if [[ "$self_test" -eq 1 ]]; then
   test_sim="$(mktemp -d "${TMPDIR:-/tmp}/ctl-boot-selftest.XXXXXX")"
   mkdir -p "$test_sim/bin" "$test_sim/autodispatch"
-  for b in start-control-plane ctl-loop lane-autodispatch lane-merge bus-worker-loop health-loop health-check.py ib-refresh; do
+  for b in start-control-plane lane-autodispatch lane-merge bus-worker-loop health-loop health-check.py; do
     touch "$test_sim/bin/$b"
     chmod +x "$test_sim/bin/$b"
   done
   cat <<'EOF' >"$test_sim/bin/start-control-plane"
 #!/bin/bash
-start_one ib-refresh-loop   "$HOME/phanes-ctl/bin/ctl-loop"
 start_one lane-autodispatch "$HOME/phanes-ctl/bin/lane-autodispatch"
 start_one lane-merge        "$HOME/phanes-ctl/bin/lane-merge"
 start_one bus-worker-loop   "$HOME/phanes-ctl/bin/bus-worker-loop"
@@ -35,7 +34,6 @@ EOF
   chmod +x "$test_sim/bin/start-control-plane"
   touch "$test_sim/autodispatch/heartbeat"
   touch "$test_sim/autodispatch/merge-heartbeat"
-  touch "$test_sim/ctl-loop.heartbeat"
   touch "$test_sim/autodispatch/health.heartbeat"
   root="$test_sim/bin"
 fi
@@ -49,7 +47,7 @@ trap cleanup EXIT
 miss=0
 if [[ "$gate_only" -eq 0 ]]; then
   root="${root:-$HOME/phanes-ctl/bin}"
-  need=(start-control-plane ctl-loop lane-autodispatch lane-merge bus-worker-loop health-loop health-check.py ib-refresh)
+  need=(start-control-plane lane-autodispatch lane-merge bus-worker-loop health-loop health-check.py)
   for n in "${need[@]}"; do
     if [[ -x "$root/$n" || -f "$root/$n" ]]; then
       echo "OK $n"
@@ -58,11 +56,11 @@ if [[ "$gate_only" -eq 0 ]]; then
     fi
   done
 
-  # start-control-plane 五件套命令字符串:
-  # ib-refresh-loop, lane-autodispatch, lane-merge, bus-worker-loop, health-loop
+  # start-control-plane loop commands:
+  # lane-autodispatch, lane-merge, bus-worker-loop, health-loop
   scp="$root/start-control-plane"
   if [[ -f "$scp" ]]; then
-    for cmd_str in ib-refresh-loop lane-autodispatch lane-merge bus-worker-loop health-loop; do
+    for cmd_str in lane-autodispatch lane-merge bus-worker-loop health-loop; do
       if grep -qF "$cmd_str" "$scp"; then
         echo "OK start-control-plane loop $cmd_str"
       else
@@ -74,8 +72,8 @@ if [[ "$gate_only" -eq 0 ]]; then
   # Base directory for heartbeats and state
   base="${root%/bin}"
 
-  # 四条心跳文件路径:
-  # autodispatch/heartbeat, merge-heartbeat, ctl-loop.heartbeat, health.heartbeat
+  # Heartbeat paths:
+  # autodispatch/heartbeat, merge-heartbeat, health.heartbeat
   if [[ -f "$base/autodispatch/heartbeat" ]]; then
     echo "OK heartbeat autodispatch/heartbeat"
   else
@@ -86,12 +84,6 @@ if [[ "$gate_only" -eq 0 ]]; then
     echo "OK heartbeat merge-heartbeat"
   else
     echo "MISSING heartbeat merge-heartbeat ($base/autodispatch/merge-heartbeat)"; miss=1
-  fi
-
-  if [[ -f "$base/ctl-loop.heartbeat" || -f "$base/ib-refresh.status" ]]; then
-    echo "OK heartbeat ctl-loop.heartbeat"
-  else
-    echo "MISSING heartbeat ctl-loop.heartbeat ($base/ctl-loop.heartbeat)"; miss=1
   fi
 
   if [[ -f "$base/autodispatch/health.heartbeat" || -f "$base/health.heartbeat" ]]; then

@@ -22,8 +22,6 @@ Expected layout (all fleet hosts + box):
 
 Hosts / lanes:
 TXT
-expect ib1 M1; expect ib2 M2; expect ib3 M3; expect ib4 M4
-expect ib5 CX1; expect ib5 CX3
 expect govpn2 CX2; expect govpn2 CX4
 expect govpn CX5
 expect gorelay A2; expect gocc A1
@@ -33,7 +31,6 @@ if [[ "$probe" -eq 1 ]]; then
   echo
   echo "Probing (BatchMode, 12s cap)…"
   for spec in \
-    "ib1:M1" "ib2:M2" "ib3:M3" "ib4:M4" "ib5:CX1" "ib5:CX3" \
     "govpn2:CX2" "govpn2:CX4" "govpn:CX5" "gorelay:A2" "gocc:A1"
   do
     host=${spec%%:*}; lane=${spec##*:}

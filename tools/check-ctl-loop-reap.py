@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline contract for ctl-loop child reaping and restart (Refs #951).
 
-The production ``~/phanes-ctl/bin/ctl-loop`` uses the same inputs: one pid file
+The supervisor model uses these inputs: one pid file
 and one heartbeat file per child.  This check uses fake files and a supplied
 set of live pids, so it never signals or starts a real process.
 """
@@ -74,7 +74,7 @@ def main() -> None:
         now = time.time()
         children = [
             Child(name, root / f"{name}.heartbeat", root / f"{name}.pid")
-            for name in ("ad", "health", "ib-refresh")
+            for name in ("ad", "health", "merge")
         ]
         for index, child in enumerate(children, start=1):
             child.heartbeat.touch()
@@ -103,7 +103,7 @@ def main() -> None:
         os.utime(children[2].heartbeat, (old, old))
         children[2].pid_file.write_text("1003", encoding="utf-8")
         decisions = reap_decisions(children, now, {1001, 1002})
-        assert decisions == [Restart("ib-refresh", "pid exited", False)]
+        assert decisions == [Restart("merge", "pid exited", False)]
 
         print("OK: fresh heartbeat + live pid does not restart")
         print("OK: expired heartbeat restarts once and reaps a live old pid")

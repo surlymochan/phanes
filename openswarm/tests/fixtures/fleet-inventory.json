@@ -20,19 +20,6 @@
         }
       ]
     },
-    "ib1": {
-      "kind": "instabox",
-      "box": "ib1",
-      "lanes": [
-        {
-          "name": "M11",
-          "backend": "codex",
-          "model": "gpt-5-codex",
-          "effort": "medium",
-          "repo": "/home/me/work/phanes"
-        }
-      ]
-    },
     "local": {
       "kind": "local",
       "lanes": [
