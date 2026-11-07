@@ -51,6 +51,13 @@ class DefaultTableTests(unittest.TestCase):
     def test_unknown_class_uses_default_lane_failed(self):
         self.assertEqual(retry.decide("new_error", 0, retry.DEFAULT_TABLE), ("lane_failed", True))
 
+    def test_executor_start_failure_pauses_the_lane_without_counting(self):
+        table = retry.DEFAULT_TABLE
+        for attempts in (0, 1, 5):
+            with self.subTest(attempts=attempts):
+                self.assertEqual(retry.decide("executor_start_failed", attempts, table), ("pause_lane", False))
+        self.assertEqual(retry.lane_pause_ttl("executor_start_failed"), 600)
+
     def test_default_table_has_reroute_in_actions(self):
         self.assertIn("reroute", retry.ACTIONS)
 

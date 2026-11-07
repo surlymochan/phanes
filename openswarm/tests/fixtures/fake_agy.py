@@ -54,7 +54,26 @@ if mode in ("silent-eof", "silent-eof-stderr"):
     send({"type": "step_update", "text": "progress before unexpected EOF"})
     if mode == "silent-eof-stderr":
         sys.stderr.write("transient provider transport failure\\n")
+    # The disconnect happens after the lane's start grace window: an executor that dies
+    # inside the window never started and is restarted instead (#1595), a later disconnect
+    # is a task failure (exec_error).  The delay is the grace window plus a second;
+    # "FAKE_AGY_EOF_DELAY_S" overrides it.
+    grace = float(os.environ.get("OPENSWARM_AGY_START_GRACE_S") or 5)
+    time.sleep(float(os.environ.get("FAKE_AGY_EOF_DELAY_S") or grace + 1.0))
     sys.exit(17)
+if mode in ("start-crash", "start-crash-once"):
+    # The agy CLI cannot start: it exits right away with code 2, before any event (#1595).
+    if mode == "start-crash-once":
+        marker = os.environ["FAKE_AGY_ONCE_MARKER"]
+        if os.path.exists(marker):
+            mode = "ok"  # the restart after the start crash runs the task
+        else:
+            open(marker, "w").close()
+    if mode != "ok":
+        sys.stderr.write("agy: cannot start (exit 2)\\n")
+        sys.stderr.flush()
+        time.sleep(0.1)  # let the lane read the stderr before stdout closes
+        sys.exit(2)
 if mode == "print-timeout":
     partial = {"status":"done", "summary":"partial", "files_changed":[], "tests":"none", "followups":[]}
     send({"event":"result", "result":{"status":"SUCCESS", "finished_reason":"print_timeout",

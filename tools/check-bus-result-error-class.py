@@ -30,6 +30,7 @@ ERROR_CLASSES = {
     "exec_error",
     "executor_failed",
     "executor_io_lost",
+    "executor_start_failed",
     "model_unavailable",
     "network",
     "non-fast-forward",
@@ -81,10 +82,12 @@ def main():
     drift = """```openswarm-result
 {"status":"failed","run_id":"run-drift","error_class":"task_changed","summary":"the task card changed after the claim","files_changed":[],"tests":"not run: the task card changed after the claim","followups":[],"branch":null,"commit":null}
 ```"""
+    start_failed = failure.replace('"verify_failed"', '"executor_start_failed"')
     assert parse_result(success)["error_class"] == "none"
     assert parse_result(failure)["error_class"] == "verify_failed"
     # 卡片漂移失败分类必须被契约接受：与 bus_parse_result 的 error_class 枚举保持一致
     assert parse_result(drift)["error_class"] == "task_changed"
+    assert parse_result(start_failed)["error_class"] == "executor_start_failed"
 
     # 缺字段拒绝：针对 REQUIRED 中的每个字段，缺失均必须抛出异常
     for sample in (success, failure):

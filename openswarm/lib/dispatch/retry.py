@@ -27,6 +27,13 @@ class counts as ``exec_error``.
 in ``UNCOUNTED_CLASSES`` (a VM pause killed by the watchdog is not a failed try,
 and a quota failure must not burn a retry).
 
+``executor_start_failed`` is the class of a run whose resident executor never
+came up: the executor died before its first event, so the task never ran.  It is
+not counted as an attempt either, and it cools the lane down for
+``LANE_PAUSE_TTL_S`` seconds (``lane_pause_ttl``) so the same broken executor is
+not picked up again right away; the dispatcher returns the card to
+``lane-ready`` instead of failing it.
+
 The error class is normalized before the table lookup: case and hyphen
 differences do not matter (``RATE-LIMIT`` is ``rate_limit``) and the known
 aliases of a class are folded into their canonical name -- ``rate_limit``,
@@ -40,7 +47,7 @@ Refs #1401 (part of #1365), #1540.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 #: The actions a policy may ask for.
 ACTIONS = ("requeue", "reroute", "pause_lane", "lane_failed", "close")
@@ -52,7 +59,13 @@ DEFAULT_CLASS = "default"
 EXEC_ERROR_STATUSES = ("stopped", "partial")
 
 #: Error classes whose attempts do not count towards the retry limit.
-UNCOUNTED_CLASSES = frozenset({"vm_paused", "quota", "model_unavailable"})
+UNCOUNTED_CLASSES = frozenset({"vm_paused", "quota", "model_unavailable", "executor_start_failed"})
+
+#: How long a lane is cooled down after its executor failed to start (10 minutes).
+LANE_PAUSE_TTL_S = 600
+
+#: Error classes that cool their lane down for ``LANE_PAUSE_TTL_S`` seconds.
+LANE_PAUSE_CLASSES = frozenset({"executor_start_failed"})
 
 #: Reported error classes that are another class under a different name.
 ERROR_CLASS_ALIASES: Dict[str, str] = {
@@ -72,6 +85,7 @@ DEFAULT_TABLE: Dict[str, Any] = {
     "cli_too_old": "pause_lane",
     "quota": "pause_lane",
     "model_unavailable": "pause_lane",
+    "executor_start_failed": "pause_lane",
     DEFAULT_CLASS: "lane_failed",
 }
 
@@ -155,6 +169,18 @@ def _validate_attempts(attempts: Any) -> int:
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
         raise ValueError(f"attempts must be a non-negative integer, got {attempts!r}")
     return attempts
+
+
+def lane_pause_ttl(error_class: Any) -> Optional[int]:
+    """The seconds a lane is cooled down for this error class; None when no lane pause applies.
+
+    The caller writes the lane-level pause (scope ``lane:<name>``) with this TTL when it acts on
+    a ``pause_lane`` decision, so a lane whose executor never came up is not used again right
+    away (#1595).
+    """
+    if normalize_error_class(error_class) in LANE_PAUSE_CLASSES:
+        return LANE_PAUSE_TTL_S
+    return None
 
 
 def merge_table(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:

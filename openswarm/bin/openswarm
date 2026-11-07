@@ -7135,10 +7135,11 @@ def bus_parse_result(body, expected_run_id=None):
     if not isinstance(error_class, str) or error_class not in {
             "none", "auth", "base_unavailable", "budget_exceeded", "budget_exceeded_daily", "bus_error",
             "claim_task_mutated", "compare_runner_failed", "exec_error", "executor_failed",
-            "executor_io_lost", "model_unavailable", "network", "non-fast-forward", "no_report",
-            "prepare_failed", "protocol_error", "rate_limit", "repo-missing", "risk_blocked", "stopped",
-            "upstream_forbidden", "verify_failed", "worker_crashed", "worktree_unavailable",
-            "task_changed", "base_changed", "digest_mismatch", "task_removed"}:
+            "executor_io_lost", "executor_start_failed", "model_unavailable", "network",
+            "non-fast-forward", "no_report", "prepare_failed", "protocol_error", "rate_limit",
+            "repo-missing", "risk_blocked", "stopped", "upstream_forbidden", "verify_failed",
+            "worker_crashed", "worktree_unavailable", "task_changed", "base_changed", "digest_mismatch",
+            "task_removed"}:
         return None
     if result.get("status") != "done" and error_class == "none":
         return None
@@ -9273,6 +9274,20 @@ def lane_approval_response(child, msg, event_file):
 MAX_RISK_DENIALS = 3
 DENIABLE_RISKS = ("rm outside worktree", "secret print")
 
+# A resident executor that dies before its first event did not start: the agy CLI comes up with
+# exit code 2 when it cannot run (bad install, missing login, ...).  Such a start crash is
+# restarted once with the same prompt; an exit within the grace window is treated as a start
+# failure even if it emitted an early event. A later disconnect after events is a task failure
+# and stays an exec_error (#1595). A process that never emits an event is also retried.
+# The grace window defaults to 5 seconds; "OPENSWARM_AGY_START_GRACE_S" overrides it (0 keeps
+# only the "no event at all" rule, so every later disconnect stays a task failure).
+try:
+    AGY_START_GRACE_S = max(0.0, float(envvar("AGY_START_GRACE_S", 5)))
+except (TypeError, ValueError):
+    AGY_START_GRACE_S = 5.0
+# How often a single turn restarts an executor that never started.
+AGY_START_RESTARTS = 1
+
 
 def lane_risk_deniable(lane, block, spec):
     """A risk the lane can refuse per command (and let the model continue) instead of stopping the run."""
@@ -9327,6 +9342,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
         lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn)
+    executor_started_at = NOW()
     if lane_headless(lane):
         set_status(rdir, **executor_status_fields(child.pid, getattr(child, "pgid", None)))
     while pending:
@@ -9368,6 +9384,11 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     provider_checked_at = 0.0
     stall_hit = False
     stall_detail = None
+    # Executor start crash tracking (#1595): an executor that dies before its first event never
+    # started, so the turn is retried once instead of failing as a task error.
+    saw_executor_event = False
+    turn_restarts = 0
+    start_crashes = []
 
     def agy_resume_steer():
         """Restart the agy turn with the queued steer text; True when a new turn was started."""
@@ -9397,6 +9418,92 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         if stall_hit:
             return None, usage, "stalled", 124, event_file, stall_detail
         return None, usage, error_class, rc, event_file, detail
+
+    def agy_start_crash():
+        """Whether the executor died before it started running the task: a start crash.
+
+        Any exit in ``AGY_START_GRACE_S`` is considered a start crash, even if the executor
+        emitted an early event. An executor that never emits an event is also considered not
+        started, even if it exits after the grace window. Later disconnects after an event are
+        task failures and stay ``exec_error``.
+        """
+        elapsed = max(0.0, NOW() - executor_started_at)
+        return not saw_executor_event or elapsed < AGY_START_GRACE_S
+
+    def agy_restart_allowed():
+        """Whether a start crash may be retried: an aborted, stalled or timed out turn is not."""
+        return not (spec.get("abort_requested") or spec.get("down_requested")
+                    or budget_hit or stall_hit)
+
+    def agy_start_crash_detail():
+        """The exit codes and stderr tails of every start crash of this turn."""
+        parts = []
+        for crash in start_crashes:
+            code = crash["exit_code"]
+            parts.append(f"executor exit code {code if code is not None else 'unknown'}: "
+                         f"{crash['stderr_tail'] or '(no stderr)'}")
+        return (f"resident executor did not start (died within the {AGY_START_GRACE_S}s "
+                f"start grace): " + "; ".join(parts))
+
+    def agy_restart_executor(exit_code, stderr_tail):
+        """Start the resident executor again with the same prompt; True when it was restarted."""
+        nonlocal saw_executor_event, executor_started_at, turn_restarts, last_event_at
+        if turn_restarts >= AGY_START_RESTARTS:
+            return False
+        turn_restarts += 1
+        spec["_executor_restarts"] = spec.get("_executor_restarts", 0) + 1
+        set_status(rdir, executor_restarts=spec["_executor_restarts"], executor_exit_code=exit_code,
+                   executor_stderr_tail=stderr_tail)
+        lane_record_event(event_file, {"type": "executor_restart", "reason": "executor_start_crash",
+                                       "restart": turn_restarts, "exit_code": exit_code,
+                                       "stderr_tail": stderr_tail})
+        try:
+            if child.alive():
+                # A process that closed its stdout but lingers must not stay behind the restart.
+                lane_agy_stop(child)
+            # The prompt of this turn is re-sent unchanged: the argument is the prompt of the
+            # running turn (the task text, or the rate limit continuation) and a risk resume
+            # keeps its correction.  A continuation keeps its session, so the restarted
+            # executor continues the interrupted task instead of starting over.
+            child.start(turn.get("risk_resume") or prompt, model=lane["model"], effort=lane.get("effort"),
+                        conversation=turn.get("conversation_id"))
+        except Exception as e:
+            lane_record_event(event_file, {"type": "error", "error": f"executor restart failed: {short(e, 300)}"})
+            return False
+        turn["id"] = "agy-" + uuid.uuid4().hex
+        turn["prompt_sent_at"] = NOW()
+        saw_executor_event = False
+        executor_started_at = NOW()
+        last_event_at = NOW()
+        set_status(rdir, **executor_status_fields(child.pid, getattr(child, "pgid", None)))
+        return True
+
+    def agy_dead_executor(reason):
+        """A headless executor that died: restart it once when it never started, else fail the turn.
+
+        Returns None when the executor was restarted (the turn continues) or the failure tuple.
+        """
+        exit_code = child.reap_after_stdout_eof()
+        stderr_tail = child.stderr_text()[-600:]
+        if exit_code is not None:
+            set_status(rdir, executor_exit_code=exit_code)
+        error_class, detail = lane_failure(reason)
+        if error_class == "exec_error" and agy_start_crash() and agy_restart_allowed():
+            # The executor exited during startup; auth, quota or risk failures are real answers
+            # of the executor and are never restarted.
+            start_crashes.append({"exit_code": exit_code, "stderr_tail": stderr_tail})
+            set_status(rdir, executor_stderr_tail=stderr_tail,
+                       executor_start_elapsed_s=round(max(0.0, NOW() - executor_started_at), 3),
+                       executor_start_grace_s=AGY_START_GRACE_S)
+            if agy_restart_executor(exit_code, stderr_tail):
+                return None
+            return turn_failed("executor_start_failed", exit_code if exit_code is not None else 1,
+                               agy_start_crash_detail())
+        if exit_code is not None:
+            # lane_failure intentionally prefers stderr for error
+            # classification; retain the observed process status too.
+            detail += f" (executor exit code {exit_code})"
+        return turn_failed(error_class, 1, detail)
 
     if budget_hit:
         lane_abort_child(lane, child, turn)
@@ -9471,6 +9578,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         idle_tick = msg is False
         if msg is not False and msg is not None:
             last_event_at = NOW()
+            saw_executor_event = True
             if not timings.get("first_event_recorded"):
                 timings["first_event_s"] += max(0.0, NOW() - turn.get("prompt_sent_at", turn_started))
                 timings["first_event_recorded"] = True
@@ -9489,11 +9597,15 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 lane_note_executor_exit(rdir, desc_recorded_at)
                 if lane_headless(lane):
                     msg = child.next_event(1.0)  # a finished process may still have events in its pipe
+                    if msg is not False and msg is not None:
+                        saw_executor_event = True
                     if msg is False:
                         if agy_resume_steer():
                             continue
-                        error_class, detail = lane_failure("resident executor process exited")
-                        return turn_failed(error_class, 1, detail)
+                        failure = agy_dead_executor("resident executor process exited")
+                        if failure is None:
+                            continue
+                        return failure
                 else:
                     return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
                                        "resident executor process exited")
@@ -9503,15 +9615,10 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             if lane_headless(lane):
                 if agy_resume_steer():
                     continue
-                exit_code = child.reap_after_stdout_eof()
-                if exit_code is not None:
-                    set_status(rdir, executor_exit_code=exit_code)
-                error_class, detail = lane_failure("resident executor stdout closed")
-                if exit_code is not None:
-                    # lane_failure intentionally prefers stderr for error
-                    # classification; retain the observed process status too.
-                    detail += f" (executor exit code {exit_code})"
-                return turn_failed(error_class, 1, detail)
+                failure = agy_dead_executor("resident executor stdout closed")
+                if failure is None:
+                    continue
+                return failure
             return turn_failed("risk_blocked" if spec.get("risk_blocks") else "exec_error", 1,
                                "resident executor stdout closed")
         block = None if turn.get("risk_resume") else enforced_risk(msg, risk_policy, ws["path"])
@@ -10078,7 +10185,8 @@ def lane_do_run(lane, spec, child, server, current):
                 if child_returncode is not None and _SUBREAPER:
                     record_adopted_orphans(rdir, exclude={child.pid})
                 scan_stale = not _SUBREAPER and (jload(os.path.join(rdir, "status.json"), {}) or {}).get("executor_scan_stale")
-                normal_child_exit = (error_class == "exec_error" and child_returncode is not None
+                normal_child_exit = (error_class in ("exec_error", "executor_start_failed")
+                                     and child_returncode is not None
                                      and child_returncode >= 0 and not scan_stale and executor_stopped(rdir))
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
                         or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
