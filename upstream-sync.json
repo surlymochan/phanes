@@ -25,6 +25,12 @@
         "tests/test_dispatch_retry.py",
         "tests/test_procboundary.py"
       ]
+    },
+    "evalid": {
+      "upstream_repo": "https://github.com/surlymochan/evalid.git",
+      "base_sha": "020af4fb37660a86cb8d2fcf57ea098fde778b72",
+      "source_of_truth": "phanes",
+      "phanes_only": []
     }
   }
 }
