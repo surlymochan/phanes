@@ -315,7 +315,7 @@ The review records live in `$OPENSWARM_HOME/reviews.json`. One entry per pull re
 
 ```json
 {
-  "acme/project#42": {"sha": "1f0c3d9...", "verdict": "approved", "reviewer": "lane-C1"}
+  "acme/project#42": {"sha": "1f0c3d9...", "verdict": "approved", "reviewer": "lane-C1", "rules_hash": "3f9a1c0d7e21"}
 }
 ```
 
@@ -326,6 +326,10 @@ without a verdict is a review of that sha only. A list of records
 another repository never releases a PR, a list record without a repository never releases a PR either (the bare PR
 number is shared by every repository), and a bare number key only counts when the record names the repository
 itself.
+
+The `rules_hash` is the version of the rules the review worked by: the first 12 hex digits of the sha256 of the
+review prompt and the verdict standard. It only names the rules, it never changes them, so a changed hash marks the
+point where the review metrics before and after the change are not comparable any more.
 
 ### Rerun a failed run once, and the post-merge hook
 

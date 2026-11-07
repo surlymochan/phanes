@@ -35,6 +35,7 @@ import concurrent.futures as cf
 import copy
 import datetime
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import math
@@ -387,6 +388,23 @@ def quota_module():
         spec.loader.exec_module(mod)
         _QUOTA_MOD = mod
     return _QUOTA_MOD
+
+
+# --- Refs #1852: the version hash of the review rules -------------------------------------
+# The review rules are the prompt the reviewer works by plus the standard that reads its
+# verdict.  Every review event carries the hash of that text, so that a change of the rules
+# is visible as a break in the metrics.  The hash only *names* the rules: neither the prompt
+# nor the review standard is changed by it (anti-gaming, not anti-tuning).
+RULES_HASH_LEN = 12
+
+
+def rules_hash(text):
+    """The version hash of a rules text: the first 12 hex digits of its sha256.
+
+    The same text always hashes to the same value and a changed text (one character is
+    enough) hashes to another one: the hash is the marker of the rules a review worked by.
+    """
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:RULES_HASH_LEN]
 
 
 REMOTE_STATUS = r'''
@@ -2282,6 +2300,24 @@ class Dispatcher:
         """The path of the raw evidence pack of one PR inside the lane branch."""
         return "%s/PR-%s%s.md" % (self.R["verdict_dir"], pr, self.R.get("evidence_suffix") or "-evidence")
 
+    def review_rules_text(self):
+        """The rules a lane review works by: the review prompt and the verdict standard.
+
+        The text is read, never written (Refs #1852): only its hash goes into the review
+        event, so that a change of the rules shows up as a break in the metrics.
+        """
+        prompt = str((self.cfg.get("templates") or {}).get("review_task") or "")
+        parts = [prompt]
+        for name in ("VERDICT_LINE_RE", "TOOL_FAIL_RE"):
+            pattern = getattr(status, name, None) if status is not None else None
+            if pattern is not None:
+                parts.append(getattr(pattern, "pattern", "") or "")
+        return "\n".join(parts)
+
+    def review_rules_hash(self):
+        """The version hash of the review rules of this dispatcher (Refs #1852)."""
+        return rules_hash(self.review_rules_text())
+
     def diffstat_of(self, diff):
         """The raw diff statistics of a PR diff (files, added and deleted lines, effective lines)."""
         if evidence is None:
@@ -2470,6 +2506,11 @@ class Dispatcher:
             self.quota_lane_guard(lane, lc, info)
         pr, sha = st["review_pr"], st["review_sha"]
         r = self.load_reviews().get(str(pr)) or {}
+        # The rules version of this review event (Refs #1852): the hash of the rules the
+        # reviewer worked by.  The dispatch writes it into the lane state, so a review that
+        # ran under other rules keeps the hash of those rules and not the ones of today.
+        rules = st.get("rules_hash") or self.review_rules_hash()
+        r["rules_hash"] = rules
         txt = ""
         ev_txt = ""
         if info.get("branch") and info["branch"] != "None" and info.get("commit"):
@@ -2596,10 +2637,10 @@ class Dispatcher:
         comment = (f"**Lane review — {'✅ APPROVE' if v == 'APPROVE' else '❌ CHANGES REQUESTED'}** by {who}, "
                    f"run `{st['run']}`, head `{sha[:10]}`\n\n{txt.strip()[:36000]}")
         comment += self.evidence_comment(ev_txt, ev)
-        comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} -->"
+        comment += f"\n\n<!-- lane-review pr={pr} sha={sha} verdict={v} rules_hash={rules} -->"
         self.gh(["pr", "comment", str(pr), "--body", comment])
         r.update({"sha": sha, "verdict": v, "lane": lane, "at": time.strftime("%F %T"), "fails": 0,
-                  "fails_sha": sha, "fail_classes": []})
+                  "fails_sha": sha, "fail_classes": [], "rules_hash": rules})
         if v == "APPROVE":
             self.gh(["pr", "edit", str(pr), "--add-label", L["reviewed"], "--remove-label", L["needs_changes"]])
         else:
@@ -2623,7 +2664,7 @@ class Dispatcher:
                 self.gh(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
                 self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
         self.put_review(pr, r)
-        self.log(f"reviewed PR #{pr} by {who}: {v}")
+        self.log(f"reviewed PR #{pr} by {who}: {v} (rules {rules})")
         return True
 
     def idle_lanes(self, lanes, res, state):
@@ -2703,11 +2744,14 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
-                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
+                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"],
+                        # The rules version of the review (Refs #1852): the hash of the rules the
+                        # reviewer works by, taken when the task goes out.
+                        "rules_hash": self.review_rules_hash()}
             self.save_state(state)
             self.lru_picker().touch(L)
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
-                     f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run}")
+                     f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run} (rules {state[L]['rules_hash']})")
             self.heartbeat()
 
     # ------------------------------------------------------------ tick
