@@ -68,6 +68,55 @@ status = _load_review_module("status")
 evidence = _load_review_module("evidence")
 
 
+def _load_acceptance_map():
+    """Load the acceptance-mapping module (lib/review/acceptance_map.py) by path.
+
+    It is a sibling of the review status module and is loaded the same way: the
+    review directory is a namespace package without an __init__.py, so it must not
+    be imported as a package.
+    """
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "review", "acceptance_map.py"),
+        os.path.join(os.getcwd(), "openswarm", "lib", "review", "acceptance_map.py"),
+        os.path.join(os.getcwd(), "lib", "review", "acceptance_map.py"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            spec = importlib.util.spec_from_file_location("openswarm_acceptance_map", p)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+amap = _load_acceptance_map()
+
+
+# The file in the state dir that remembers when the acceptance-mapping gate went live
+# (Refs #1730): the boundary between an old PR and a new one.
+MAP_ENABLED_FILE = "acceptance-map-enabled-at"
+
+
+def parse_utc(value):
+    """Return an aware UTC datetime for an ISO-8601 stamp, None when it is unusable.
+
+    The stamps come from GitHub (``2026-11-04T00:00:00Z``) and from the dispatcher
+    itself, so they are parsed instead of compared as strings.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.astimezone(datetime.timezone.utc)
+
+
 _DISPATCH_MODULES = {}
 
 
@@ -179,6 +228,23 @@ DEFAULTS = {
         # than this many lines is read in chunks - and the chunks that were read are named.
         "diff_chunk_lines": 4000,
         "cifix_needs_burn": True,
+        # Acceptance mapping (Refs #1730): the PR body carries a numbered table that maps every
+        # acceptance item of the card to its evidence.  A PR without the section is an old PR
+        # and only gets a hint; a PR whose section carries no evidence is sent back before the
+        # review is dispatched (that send-back is not a review round).
+        "acceptance_map": {
+            "enabled": True,
+            "file": ".lane-acceptance.md",
+            "section_title": "验收映射",
+            "marker": "<!-- lane-acceptance-map -->",
+            "legacy_compat": True,
+            # The boundary between an old PR and a new one: the moment the gate went live.
+            # Empty = the first moment this dispatcher ran with the gate enabled (recorded
+            # once in the state dir).  No date is written into the code on purpose: the
+            # code that implements the gate is newer than any date one could hard-code, so
+            # a hard-coded date would send back the old PRs the compatibility path is for.
+            "enabled_since": "",
+        },
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
     # A legacy file marker remains supported when no timed parameters are supplied.
@@ -255,12 +321,33 @@ DEFAULTS = {
         "changes_section": ("Review round {round} ({who}) on PR #{pr} head `{sha10}` returned CHANGES. Start from branch "
                             "`rebase-pr-{pr}`, rebase onto main, apply the notes below and commit; the dispatcher force-pushes "
                             "back to `{branch}` and re-reviews.\n\n{notes}"),
+        "acceptance_map_section_title": "验收映射",
+        "acceptance_map_placeholder": ("（未给出：请按卡面验收项逐条编号，每条给出证据：`<测试名>` + 结果，"
+                                       "或判定命令与输出）"),
+        "acceptance_map_task_title": "验收映射（必填）",
+        "acceptance_map_task": ("卡面验收项（编号以卡面为准，逐条对应）：\n\n{items}\n\n"
+                                "把验收映射写进仓库根目录的 `{file}` 并提交到本分支，每行一条：\n\n"
+                                "1. <验收项原文> 证据：`<测试名>` PASS\n\n"
+                                "证据写测试名 + 结果；没有测试就写判定命令与输出。每条验收项都要有一行，"
+                                "编号与验收项原文照抄卡面。"),
+        "mapping_section_title": "补齐验收映射",
+        "mapping_section": ("PR #{pr} head `{sha10}` 的验收映射缺失或没有逐条证据，审查前被打回（不计审查轮次）。"
+                            "从分支 `rebase-pr-{pr}`（PR 头）出发，按卡面验收项逐条编号补齐证据"
+                            "（测试名 + 结果，或判定命令与输出），写进仓库根目录的 `{file}` 并提交；"
+                            "dispatcher 会把映射同步到 PR 正文，再重新审查。"),
         "review_task": ("Task type: PR review (review only, do not change code).\n\nPR #{pr} `{branch}` (author lane {author}): {title}\n"
                         "Head sha `{sha}`. The worktree is main; the PR head is in the local clone.\n\n"
                         "Check correctness, whether the acceptance is really met, out-of-scope changes (unrelated files, deleted "
                         "tests, hard-coded secrets/paths), obvious bugs or regressions. Do not run tests, do not leave the worktree, "
-                        "do not modify existing files.\n\nOnly output: create `{file}` and commit it (Refs #{pr}), exactly:\n"
-                        "```\nVERDICT: APPROVE   (or VERDICT: CHANGES)\nSUMMARY: one line\n## Findings\n- file:line findings\n"
+                        "do not modify existing files.\n\n"
+                        "Verify the acceptance mapping below item by item: every acceptance item of the card needs one mapping "
+                        "entry with evidence (a test name plus its result, or the deciding command output). Spot-check that the "
+                        "cited test names really exist and that their results match the evidence - a fabricated evidence is a "
+                        "BLOCKER. Cite the acceptance number in every finding (`[A1] file:line ...`, A1 = acceptance item 1). An "
+                        "acceptance item the mapping does not cover must be marked BLOCKER and the verdict must be CHANGES.\n\n"
+                        "Only output: create `{file}` and commit it (Refs #{pr}), exactly:\n"
+                        "```\nVERDICT: APPROVE   (or VERDICT: CHANGES)\nSUMMARY: one line\n## Findings\n- [A1] file:line findings\n"
+                        "## Acceptance check\n- A1: OK (evidence: `<test name>` PASS) or BLOCKER (reason)\n"
                         "## Required changes\n- only for CHANGES\n```\nGive CHANGES only for errors, unmet acceptance or scope "
                         "violations; style is not a reason.\n\nIf the diff cannot be read, write `SUMMARY: 无法获取 diff` and stop: a "
                         "review without the diff is evidence-insufficient (TOOL_FAIL) - it approves nothing, it rejects nothing and "
@@ -497,12 +584,17 @@ class Dispatcher:
         self.closes_re = re.compile(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", re.I)
         self._lru_picker = None
         self._quota_probe_cache = None
+        # The moment the acceptance-mapping gate went live (Refs #1730): recorded once
+        # per dispatcher, read from the state dir when it is not configured.
+        self._map_enabled_at = None
         # Claim metadata: the assignee and the project's Lane field of a dispatched issue (Refs #1761).
         self.meta = dispatch_module("issue_meta").IssueMeta(
             cfg["repo"], cfg.get("issue_meta"), runner=self.write, log=self.log,
             plan=self.plan.append, dry_run=dry_run, clock=self.clock)
         self._meta_guard = threading.Lock()
         self._meta_locks = {}      # issue number -> lock: one claim writer per issue
+        if not dry_run and self.acceptance_map_enabled():
+            self.map_enabled_since()
 
     # ------------------------------------------------------------ io helpers
     def path(self, name):
@@ -1145,7 +1237,144 @@ class Dispatcher:
     # ------------------------------------------------------------ dispatch one task
     def task_text(self, item):
         n = item["n"]
-        return f"# #{n} {item['title']}\n\n{item['body']}\n\n{self.cfg['templates']['rules'].format(n=n)}\n"
+        text = f"# #{n} {item['title']}\n\n{item['body']}\n\n{self.cfg['templates']['rules'].format(n=n)}\n"
+        if not item.get("review"):
+            text += self.acceptance_map_task(item.get("body") or "")
+        return text
+
+    # ------------------------------------------------------------ acceptance map
+    def acceptance_map_cfg(self):
+        cfg = self.R.get("acceptance_map") or {}
+        return cfg if isinstance(cfg, dict) else {}
+
+    def acceptance_map_enabled(self):
+        return bool(self.acceptance_map_cfg().get("enabled", True))
+
+    def acceptance_map_file(self):
+        return self.acceptance_map_cfg().get("file") or ".lane-acceptance.md"
+
+    def acceptance_map_title(self):
+        return (self.acceptance_map_cfg().get("section_title")
+                or self.cfg["templates"]["acceptance_map_section_title"])
+
+    def lane_acceptance_map(self, lane):
+        """Return the acceptance mapping the lane committed, empty when there is none."""
+        rc, out, _ = self.git("show", f"refs/fleet/{lane}:{self.acceptance_map_file()}", timeout=30)
+        return out if not rc else ""
+
+    def acceptance_map_section(self, mapping_text):
+        """Render the acceptance mapping section of a PR body."""
+        T = self.cfg["templates"]
+        marker = self.acceptance_map_cfg().get("marker") or amap.MARKER
+        entries = amap.parse_entries(mapping_text)
+        table = amap.render(entries) if entries else T["acceptance_map_placeholder"]
+        return f"## {self.acceptance_map_title()}\n\n{marker}\n\n{table}\n"
+
+    def pr_acceptance_entries(self, body):
+        """Return the mapping entries a PR body carries (empty when it has no section)."""
+        text = amap.section(body, self.acceptance_map_title())
+        return amap.parse_entries(text) if text is not None else []
+
+    def map_enabled_since(self):
+        """Return the moment the acceptance-mapping gate went live (ISO-8601 UTC).
+
+        This is the boundary between an old PR and a new one: a PR that was created
+        before it existed before the gate was live and takes the compatibility path
+        (a hint, never a send-back); a PR created after it has to carry the mapping.
+
+        The boundary is never a date written into the code.  The code that implements
+        the gate is newer than any date one could hard-code, so a hard-coded date
+        sends back PRs that were created before the gate went live - exactly the old
+        PRs the compatibility path is there for.  It is either the configured
+        ``enabled_since`` (the deployment states the moment) or the first moment this
+        dispatcher ran with the gate enabled, recorded once in the state dir.
+
+        Both are independent of the PR body, which anybody can edit at any time: a
+        deleted mapping section must never turn a new PR into an old one.
+        """
+        if self._map_enabled_at:
+            return self._map_enabled_at
+        configured = str(self.acceptance_map_cfg().get("enabled_since") or "").strip()
+        if configured:
+            self._map_enabled_at = configured
+            return configured
+        stamp = ""
+        try:
+            with open(self.path(MAP_ENABLED_FILE), encoding="utf-8") as stream:
+                stamp = stream.read().strip()
+        except OSError:
+            stamp = ""
+        if not stamp:
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock()))
+            self.touch_file(MAP_ENABLED_FILE, stamp)
+            self.log(f"acceptance mapping gate is live since {stamp}: a PR created before it is an old PR "
+                     f"(compatibility path), a PR created after it has to carry the mapping")
+        self._map_enabled_at = stamp
+        return stamp
+
+    def is_legacy_pr(self, created_at):
+        """True when the PR was created before the gate went live: an old PR.
+
+        The decision uses the creation time of the PR and the go-live moment of the
+        gate, never the body of the PR: the body is written by the author and can
+        be edited (or emptied) at any time.
+        """
+        if not self.acceptance_map_cfg().get("legacy_compat", True):
+            return False
+        created = parse_utc(created_at)
+        boundary = parse_utc(self.map_enabled_since())
+        if created is None or boundary is None:
+            return False
+        return created < boundary
+
+    def acceptance_map_state(self, body, created_at=None):
+        """Return the state of the acceptance mapping of a PR body.
+
+        ``(state, reason)`` where the state is one of:
+
+        ``legacy``   the PR body has no mapping section at all and the PR was created
+                     before the gate went live: an old PR, it takes the compatibility
+                     path and is only hinted at.
+        ``empty``   the section exists but carries no entry with evidence: the PR is
+                     sent back before the review is dispatched.
+        ``ok``      the section carries at least one entry with evidence.
+        """
+        text = amap.section(body, self.acceptance_map_title())
+        if text is None:
+            if self.is_legacy_pr(created_at):
+                return "legacy", "no mapping section"
+            return "empty", "no mapping section"
+        entries = amap.parse_entries(text)
+        if not entries:
+            return "empty", "the mapping section has no entry"
+        if not any((entry.get("evidence") or "").strip() for entry in entries):
+            return "empty", "no mapping entry carries evidence"
+        return "ok", ""
+
+    def acceptance_map_task(self, card_body):
+        """Return the task block that asks the lane for the acceptance mapping."""
+        items = amap.card_items(card_body)
+        if not items:
+            return ""
+        listed = "\n".join(f"{item['number']}. {item['text']}" for item in items)
+        return (f"\n## {self.cfg['templates']['acceptance_map_task_title']}\n\n" +
+                self.cfg["templates"]["acceptance_map_task"].format(items=listed, file=self.acceptance_map_file()) + "\n")
+
+    def sync_pr_acceptance_map(self, pr, lane):
+        """Copy the acceptance mapping of the lane branch into the PR body."""
+        rc, body, _ = self.gh(["pr", "view", str(pr), "--json", "body"])
+        if rc:
+            return False
+        try:
+            current = json.loads(body).get("body") or ""
+        except Exception:
+            return False
+        title = self.acceptance_map_title()
+        section = self.acceptance_map_section(self.lane_acceptance_map(lane))
+        if (amap.section(current, title) or "").strip() == section.strip():
+            return False
+        updated = self.section_strip(current, title).rstrip() + "\n\n" + section
+        return not self.gh_write(["pr", "edit", str(pr), "--body", updated])[0]
 
     def main_sha(self):
         rc, out, err = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git",
@@ -1849,6 +2078,10 @@ class Dispatcher:
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
                              f"Force-pushed to `{ob}`; it is merged after a fresh lane review and green CI."])
+                    if self.acceptance_map_enabled():
+                        # The fix may carry a new acceptance mapping: the PR body has to show it.
+                        if self.sync_pr_acceptance_map(pr, lane):
+                            self.log(f"{lane} rebased #{n} → PR #{pr}: acceptance mapping synced into the PR body")
                 self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
                 reason, detail = self.end_reason(lane, lc, run, info,
                                                  f"rebased onto {self.cfg['base_branch']}")
@@ -1929,6 +2162,10 @@ class Dispatcher:
             body = (f"Closes #{n}\n\nAutodispatched to lane **{lane}** on **{lc['host']}** ({info.get('backend')}/{info.get('model')}), "
                     f"run `{run}`, base `{st['base'][:8]}`, lane status `{info.get('status')}`, host verify rc `{info.get('verify_rc')}`."
                     f"\n\nExecutor summary: {info.get('summary')}")
+            if self.acceptance_map_enabled():
+                # The PR template carries the acceptance mapping: every acceptance item of the
+                # card gets one numbered line with the evidence that proves it.
+                body += "\n" + self.acceptance_map_section(self.lane_acceptance_map(lane))
             title = self.upstream_title(subj.strip() or f"#{n}", st["base"], head)[:200]
             rc, out, err = self.gh(["pr", "create", "--base", self.cfg["base_branch"], "--head", b, "--title", title, "--body", body])
             url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
@@ -2075,7 +2312,7 @@ class Dispatcher:
         """Open fleet PRs to act on: conflicting → rebase task (checked BEFORE the already-reviewed skip, so an approved
         PR that went DIRTY still gets rebased); red CI → fix task (burn mode); green+mergeable+unreviewed head → review."""
         rc, out, err = self.gh(["pr", "list", "--state", "open", "--limit", "200", "--json",
-                                "number,title,headRefName,headRefOid,isDraft,mergeable,statusCheckRollup,labels,body"], timeout=90)
+                                "number,title,headRefName,headRefOid,isDraft,mergeable,statusCheckRollup,labels,body,createdAt"], timeout=90)
         if rc:
             self.log(f"review: pr list failed: {(err or '')[-120:]}", brain=False)
             return []
@@ -2152,6 +2389,20 @@ class Dispatcher:
                 continue
             if p["mergeable"] != "MERGEABLE" or not self.green(p):
                 continue
+            if self.acceptance_map_enabled():
+                state_of_map, why = self.acceptance_map_state(p.get("body"), p.get("createdAt"))
+                if state_of_map == "empty":
+                    # The mapping is missing: the PR goes back to its author lane before
+                    # the review is dispatched.  This is not a review round.
+                    self.queue_mapping_fix(p, revs, why)
+                    continue
+                if state_of_map == "legacy" and r.get("map_legacy_sha") != p["headRefOid"]:
+                    # An old PR has no mapping section: compatibility path, the reviewer is
+                    # only told about the gap.
+                    self.merge_review(p["number"], {"map_legacy_sha": p["headRefOid"]})
+                    self.log(f"review: PR #{p['number']} has no acceptance mapping section (old PR, created "
+                             f"{p.get('createdAt')} before the gate went live {self.map_enabled_since()}); "
+                             "compatibility path, the reviewer is only told about it", brain=False)
             out_l.append(p)
         return out_l
 
@@ -2163,7 +2414,7 @@ class Dispatcher:
             return body
         return self.cfg["templates"]["rebase_line"].format(pr=pr, branch=branch) + "\n\n" + body
 
-    def queue_fix(self, p, revs, kind, base_sha=None):
+    def queue_fix(self, p, revs, kind, base_sha=None, why=""):
         """Requeue the PR's issue as a rebase (conflict) or CI-fix task on the PR head.
 
         A rebase task is queued once per (head, main) pair: the head it rebases and the
@@ -2183,20 +2434,48 @@ class Dispatcher:
         if kind == "cifix":
             bad = ", ".join(sorted(set(self._ci_result(p)["red"])))[:400]
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
-        ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
+        ib += (f"\n\n## {title}\n\n" +
+               T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"],
+                                           checks=bad, file=self.acceptance_map_file()) + "\n")
         L = self.L
-        self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
-                       "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
+        rc, _, err = self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
+                                    "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
+        if rc:
+            self.log(f"review: PR #{pr} {kind} task write failed: {err}; retry next tick", brain=False)
+            return
         r = revs.get(str(pr)) or {}
-        r["rebase_sha" if kind == "rebase" else "cifix_sha"] = p["headRefOid"]
+        sha_key = {"rebase": "rebase_sha", "cifix": "cifix_sha", "mapping": "map_sha"}[kind]
+        r[sha_key] = p["headRefOid"]
         if kind == "rebase":
             r["rebase_base_sha"] = base_sha
         revs[str(pr)] = r
         self.put_review(pr, r)
         if kind == "rebase":
             self.log(f"review: PR #{pr} CONFLICTING → rebase task queued on #{n}")
-        else:
+        elif kind == "cifix":
             self.log(f"review: PR #{pr} CI red ({bad[:80]}) → fix task queued on #{n}")
+        else:
+            self.log(f"review: PR #{pr} 验收映射缺失（{why}；PR 创建于 {p.get('createdAt')}，"
+                     f"映射门禁上线于 {self.map_enabled_since()}）→ 补齐任务已派到 #{n}（不计审查轮次）")
+
+    def queue_mapping_fix(self, p, revs, why=""):
+        """Send the PR back to its author lane: its acceptance mapping is missing.
+
+        The send-back happens before the review is dispatched and does not count as a
+        review round: the PR has not been reviewed at all.  Once per head sha, so a
+        lane that does not fix the mapping is not sent round after round.
+        """
+        pr, n = p["number"], p.get("issue")
+        r = revs.get(str(pr)) or {}
+        if r.get("map_sha") == p["headRefOid"]:
+            return
+        if not n:
+            self.gh_write(["pr", "comment", str(pr), "--body",
+                           f"PR #{pr} 的验收映射缺失（{why}），无法进入审查。"
+                           f"请按卡面验收项逐条编号补齐 PR 正文的「验收映射」段。"])
+            self.log(f"review: PR #{pr} 验收映射缺失（{why}）；没有关联 issue，只能在 PR 上留言", brain=False)
+            return
+        self.queue_fix(p, revs, "mapping", why=why)
 
     def pick_reviewer(self, idle, lanes, author):
         ab = (lanes.get(author) or {}).get("backend")
@@ -2233,24 +2512,36 @@ class Dispatcher:
                          f"({(err or '').strip()[-80:]}); using the local git objects", brain=False)
         stats = self.diffstat_of(diff) if diff else {}  # unknown is not a zero-sized diff
         issue = ""
+        card = ""
         if p.get("issue"):
             iv = self.gh(["issue", "view", str(p["issue"]), "--json", "title,body"])[1]
             try:
                 j = json.loads(iv)
-                issue = f"### Issue #{p['issue']}: {j['title']}\n\n{(j['body'] or '')[:6000]}"
+                card = j.get("body") or ""
+                issue = f"### Issue #{p['issue']}: {j['title']}\n\n{card[:6000]}"
             except Exception:
                 pass
+        # The reviewer verifies the acceptance mapping item by item: the card states the
+        # items, the PR body states the evidence.  The card is the authority for the
+        # numbering, so an item the mapping does not cover is a BLOCKER.
+        items = amap.card_items(card)
+        legacy = self.acceptance_map_state(p.get("body"), p.get("createdAt"))[0] == "legacy"
+        entries = self.pr_acceptance_entries(p.get("body"))
+        gap = [] if legacy else amap.coverage(items, entries)["missing"]
+        block = amap.prompt_block(items, entries, gap, legacy=legacy)
         f = f"{self.R['verdict_dir']}/PR-{pr}.md"
         diff_read = self.review_diff_read(pr, p)
         # `diff` is passed as well: a task template of an older deployment still asks for
         # `{diff}` and gets the same instructions instead of an empty section.
         body = self.cfg["templates"]["review_task"].format(pr=pr, branch=p["headRefName"], author=self.author_lane(p["headRefName"]) or "?",
                                                            title=p["title"], sha=p["headRefOid"], file=f, issue=issue,
-                                                           diff_read=diff_read, diff=diff_read)
+                                                           diff_read=diff_read, diff=diff_read, acceptance_map=block)
+        if block and block not in body:
+            body += "\n" + block
         body += self.evidence_inputs(p, stats)
         body += self.evidence_instruction(pr, self.evidence_path(pr))
         return {"n": pr, "title": f"Review PR #{pr}: {p['title']}"[:110], "body": body, "review": True,
-                "head_sha": p.get("headRefOid"), "head_branch": p.get("headRefName")}
+                "map_gap": gap, "head_sha": p.get("headRefOid"), "head_branch": p.get("headRefName")}
 
     def review_diff_read(self, pr, p):
         """How the review lane reads the diff of the PR head, offline (Refs #1828).
@@ -2557,6 +2848,14 @@ class Dispatcher:
         bk = f"{bk_backend}/{bk_model}"
         who = f"{lane} ({bk})"
         L = self.L
+        gap = [int(n) for n in (st.get("map_gap") or []) if str(n).isdigit()]
+        if v == "APPROVE" and gap:
+            # An acceptance item the mapping does not cover has to be a BLOCKER, so an
+            # approval that ignores the gap is not an approval.
+            v = "CHANGES"
+            txt = (txt.rstrip() + "\n\n## Acceptance check\n" +
+                   "".join(f"- A{n}: BLOCKER (the acceptance mapping does not cover this item)\n" for n in gap))
+            self.log(f"review PR #{pr} by {lane}: APPROVE downgraded to CHANGES; 验收项 {gap} 没有映射证据（BLOCKER）")
 
         try:
             payload = status.build_status(
@@ -2703,7 +3002,8 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
-                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
+                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"],
+                        "map_gap": item.get("map_gap") or []}
             self.save_state(state)
             self.lru_picker().touch(L)
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
