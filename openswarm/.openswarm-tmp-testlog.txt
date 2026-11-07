@@ -1,0 +1,79 @@
+............../usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2584323 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2584324 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2584327 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2584329 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+................2026-11-03 17:44:14 pauses active: backend:pi
+.2026-11-03 17:44:14 pauses active: host:h1
+.2026-11-03 17:44:14 pauses active: lane:L1
+2026-11-03 17:44:14 review dispatch exc: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')
+2026-11-03 17:44:14 claim metadata #7: lane L1: project 6 of acme not readable
+2026-11-03 17:44:14 dispatched #7 → L1 (h1) run run-1 base bbbbbbbb
+.2026-11-03 17:44:14 review dispatch exc: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')
+2026-11-03 17:44:14 claim metadata #7: lane L1: project 6 of acme not readable
+2026-11-03 17:44:14 dispatched #7 → L1 (h1) run run-1 base bbbbbbbb
+.2026-11-03 17:44:14 review dispatch exc: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')
+2026-11-03 17:44:14 claim metadata #7: lane L1: project 6 of acme not readable
+2026-11-03 17:44:14 dispatched #7 → L1 (h1) run run-1 base bbbbbbbb
+..2026-11-03 17:44:15 pauses active: lane:L1
+.2026-11-03 17:44:15 pauses active: mint
+2026-11-03 17:44:15 review dispatch exc: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')
+2026-11-03 17:44:15 claim metadata #7: lane L1: project 6 of acme not readable
+2026-11-03 17:44:15 dispatched #7 → L1 (h1) run run-1 base bbbbbbbb
+2026-11-03 17:44:15 claim metadata #7: retry failed (lane L1: project 6 of acme not readable)
+2026-11-03 17:44:15 review dispatch exc: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')
+2026-11-03 17:44:15 claim metadata #7: lane L1: project 6 of acme not readable
+2026-11-03 17:44:15 dispatched #7 → L1 (h1) run run-1 base bbbbbbbb
+.2026-11-03 17:44:15 review dispatch exc: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')
+2026-11-03 17:44:15 claim metadata #7: lane L1: project 6 of acme not readable
+2026-11-03 17:44:15 dispatched #7 → L1 (h1) run run-1 base bbbbbbbb
+.................................................../root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/tests/test_bus.py:968: ResourceWarning: unclosed file <_io.TextIOWrapper name=3 encoding='utf-8'>
+  outcome["handled"] = xs.bus_worker_run(self.issue(issue["number"]), self.cfg,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.............................................................................F................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/tests/test_external_backend.py:322: ResourceWarning: unclosed file <_io.TextIOWrapper name='/root/.claude/openswarm-executor-candidate/lanes/M10/wt/.github/workflows/external-lane-notify.yml' mode='r' encoding='utf-8'>
+  wf = open(os.path.join(os.path.dirname(ROOT), ".github", "workflows", "external-lane-notify.yml")).read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+........................................................................./root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174359-96af1a/events.1.agy.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174401-073678/events.1.agy.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174405-3dc3d7/events.1.agy.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174405-4e96d0/events.1.agy.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174405-a73693/events.2.agy.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174615-0113a6/events.1.cursor.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174616-3a8cab/events.1.cursor.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/root/.claude/openswarm-executor-candidate/lanes/M10/wt/openswarm/bin/openswarm:13219: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/openswarm-test-home-eedyjhfr/runs/20261103-174616-78444c/events.2.cursor.jsonl' mode='r' encoding='utf-8'>
+  for line in open(st["events"], errors="ignore"):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+......................................................F.........................................................EEEEE............................................................................................................................./usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2614980 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2614981 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2614991 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./usr/lib/python3.12/subprocess.py:1127: ResourceWarning: subprocess 2614997 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.....................................FFFF......................

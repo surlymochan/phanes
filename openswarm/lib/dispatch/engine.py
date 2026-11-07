@@ -90,6 +90,21 @@ def failure_reasons():
     return dispatch_module("failure_reason")
 
 
+# The marker the dispatcher itself writes into the issue body when a review asks for changes
+# ("Review round N (...) on PR #x head ... returned CHANGES"). It names the fix round a task
+# belongs to, so the dispatcher can pick the thinking level of that round (Refs #1847).
+FIX_ROUND_RE = re.compile(r"Review round (\d+)\b")
+
+# A lane host that does not know a flag yet says so in its error text (argparse).
+UNKNOWN_FLAG_RE = re.compile(r"unrecognized arguments|no such option|unexpected argument", re.I)
+
+
+def fix_round_of(body):
+    """The fix round a task belongs to (1 = the first fix round), or None when it is not one."""
+    rounds = FIX_ROUND_RE.findall(body or "")
+    return max(int(round_no) for round_no in rounds) if rounds else None
+
+
 def _load_ci_checks():
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ci", "checks.py")
     spec = importlib.util.spec_from_file_location("openswarm_ci_checks", path)
@@ -179,6 +194,10 @@ DEFAULTS = {
         # than this many lines is read in chunks - and the chunks that were read are named.
         "diff_chunk_lines": 4000,
         "cifix_needs_burn": True,
+        # The thinking level a pi fix round runs at, by fix round (Refs #1847): the first fix round
+        # runs at "high", a later round only has to apply the reviewer's notes, so the level steps
+        # down; the last entry covers every further round. A review task keeps the lane's own level.
+        "fix_thinking_levels": ["high", "medium", "low"],
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
     # A legacy file marker remains supported when no timed parameters are supplied.
@@ -1154,6 +1173,7 @@ class Dispatcher:
             raise RuntimeError(f"ls-remote failed: {(err or out)[-120:]}")
         return out.split()[0]
 
+
     def review_head_check(self, repo_path, rb, sha):
         """The host-side guard of the seeded PR head (Refs #1828).
 
@@ -1166,6 +1186,25 @@ class Dispatcher:
         ref = f"refs/heads/rebase-pr-{rb[0]}"
         return (f"git -C {repo_path} rev-parse --verify --quiet {ref} | grep -qx {sha} || "
                 f"git -C {repo_path} update-ref -d {ref}; ")
+    def fix_thinking(self, lc, item):
+        """The thinking level a pi fix round runs at, or None (Refs #1847).
+
+        The Nth fix round takes the Nth level of `review.fix_thinking_levels` (the first fix round
+        runs at "high"). Only pi lanes get a level: the other executors have no such flag, and a
+        review task keeps the lane's own level, so the review rules stay untouched.
+        """
+        if item.get("review"):
+            return None
+        if (lc or {}).get("backend") != "pi":
+            return None
+        levels = self.R.get("fix_thinking_levels") or []
+        if not levels:
+            return None
+        round_no = fix_round_of(item.get("body") or "")
+        if not round_no:
+            return None
+        return levels[min(round_no, len(levels)) - 1]
+
 
     def dispatch(self, lane, lc, item, base):
         if self.dry_run:
@@ -1234,6 +1273,10 @@ class Dispatcher:
                f"git -C {R} cat-file -e {base}^{{commit}} && "
                f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes "
                f"{self.cfg['review_budget_minutes'] if item.get('review') else self.cfg['budget_minutes']} --title {shlex.quote(title)}" + (f" --verify {shlex.quote(ver)}" if ver else ""))
+        thinking = self.fix_thinking(lc, item)
+        if thinking:
+            # A pi fix round runs at the thinking level of its round (Refs #1847).
+            cmd += f" --thinking {shlex.quote(thinking)}"
         key = None
         if self.cfg.get("assign_idempotency_key"):
             # one key per dispatch attempt: a retry after a dropped transport returns the run that already landed
@@ -1255,6 +1298,12 @@ class Dispatcher:
         rc, out, err = run_assign()
         if key and rc in (124, 255) and h not in self.local_hosts:
             self.log(f"{lane} assign transport rc={rc} on {h}; retrying with the same idempotency key", brain=False)
+            rc, out, err = run_assign()
+        if rc and thinking and UNKNOWN_FLAG_RE.search(err or ""):
+            # A lane host on an older release does not know --thinking: the fix round still runs,
+            # at the level the lane itself carries (Refs #1847).
+            self.log(f"{lane} assign on {h} does not know --thinking; retrying without it", brain=False)
+            cmd = cmd.replace(f" --thinking {shlex.quote(thinking)}", "")
             rc, out, err = run_assign()
         m = re.search(r'"id":\s*"([^"]+)"', out or "")
         if (rc or not m) and h not in self.local_hosts:
