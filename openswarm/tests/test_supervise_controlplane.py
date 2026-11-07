@@ -14,7 +14,7 @@ _spec.loader.exec_module(controlplane)
 
 # The loop names of the box (docs/ctl-boot.md) -- they contain "-" and "." and must
 # still produce a script the shell accepts.
-BOX_SERVICE_NAMES = ["ib-refresh-loop", "lane-autodispatch", "lane-merge", "bus-worker-loop", "health-loop"]
+BOX_SERVICE_NAMES = ["lane-autodispatch", "lane-merge", "bus-worker-loop", "health-loop"]
 
 
 class ControlPlaneSupervisorTests(unittest.TestCase):

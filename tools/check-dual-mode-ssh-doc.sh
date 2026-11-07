@@ -10,7 +10,7 @@ if [[ ! -f "$doc" ]]; then
   exit 1
 fi
 
-for required in phanes_ctl ib1 govpn2 gocc; do
+for required in phanes_ctl govpn2 gocc; do
   if grep -Fq -- "$required" "$doc"; then
     echo "OK $required"
   else

@@ -128,17 +128,17 @@ def main() -> None:
         assert clear_auto(state_dir, now, []) == ["pi"]
         assert dispatchable(state_dir, "pi"), "cleared backend must be dispatchable"
 
-        cooldown_pause = state_dir / "PAUSE-HOST-ib1"
+        cooldown_pause = state_dir / "PAUSE-HOST-host-a"
         until = now + 600
         assert set_host_cooldown(
-            state_dir, "ib1", f"machine_cooldown until={until}"
+            state_dir, "host-a", f"machine_cooldown until={until}"
         )
         assert cooldown_until(f"SSH: cooling down until {until}") == str(until)
         assert cooldown_pause.read_text() == f"auto:cooldown:until={until}\n"
         os.utime(cooldown_pause, (old, old))
         assert clear_auto(state_dir, now, []) == [], "cooldown host must be held until deadline"
         assert cooldown_pause.exists()
-        assert clear_auto(state_dir, until + 1, []) == ["ib1"]
+        assert clear_auto(state_dir, until + 1, []) == ["host-a"]
         assert not cooldown_pause.exists()
 
         manual_pause = state_dir / "PAUSE-BACKEND-pi"

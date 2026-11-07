@@ -100,8 +100,8 @@ def check_loader(ad) -> None:
     env = ad.JUMP_HOSTS_ENV
     old = os.environ.get(env)
     try:
-        os.environ[env] = json.dumps({"ib1": SAMPLE_PROXY})
-        assert ad.load_jump_hosts() == {"ib1": SAMPLE_PROXY}, "AD_JUMP_HOSTS must be read as a JSON table"
+        os.environ[env] = json.dumps({"host-a": SAMPLE_PROXY})
+        assert ad.load_jump_hosts() == {"host-a": SAMPLE_PROXY}, "AD_JUMP_HOSTS must be read as a JSON table"
         os.environ[env] = "{not json"
         assert ad.load_jump_hosts() == {}, "an unreadable jump table must fall back to no injection"
     finally:

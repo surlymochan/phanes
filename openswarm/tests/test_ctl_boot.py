@@ -18,10 +18,9 @@ class CtlBootDocumentationTests(unittest.TestCase):
         self.content = DOC.read_text(encoding="utf-8")
 
     def test_acceptance_criteria_keywords_present(self):
-        """验收条件: lane-autodispatch, bus-worker, ib-refresh 必须在文档中出现。"""
+        """验收条件: lane-autodispatch, bus-worker 必须在文档中出现。"""
         self.assertIn("lane-autodispatch", self.content)
         self.assertIn("bus-worker", self.content)
-        self.assertIn("ib-refresh", self.content)
 
     def test_startup_commands_and_heartbeats_documented(self):
         """核对三个核心循环的启动命令与心跳文件路径均已列出。"""
@@ -32,10 +31,6 @@ class CtlBootDocumentationTests(unittest.TestCase):
         # bus-worker-loop
         self.assertIn("~/phanes-ctl/bin/bus-worker-loop", self.content)
         self.assertIn("~/phanes-ctl/bus-worker/heartbeat", self.content)
-
-        # ib-refresh
-        self.assertIn("~/phanes-ctl/ctl-loop.heartbeat", self.content)
-        self.assertIn("~/phanes-ctl/ib-refresh.status", self.content)
 
     def test_single_command_path_existence_check_present(self):
         """确认文档中包含单条不连 SSH 的离线路径存在性检查命令。"""
@@ -51,7 +46,6 @@ class CtlBootDocumentationTests(unittest.TestCase):
             bin_dir.mkdir(parents=True)
             (bin_dir / "lane-autodispatch").touch()
             (bin_dir / "bus-worker-loop").touch()
-            (bin_dir / "ib-refresh").touch()
             (bin_dir / "start-control-plane").touch()
 
             ad_dir = ctl / "autodispatch"
@@ -62,18 +56,14 @@ class CtlBootDocumentationTests(unittest.TestCase):
             bw_dir.mkdir()
             (bw_dir / "heartbeat").touch()
 
-            (ctl / "ctl-loop.heartbeat").touch()
-            (ctl / "ib-refresh.status").touch()
 
             # 执行文档中核对路径的存在性逻辑（将 ~/phanes-ctl 替换为临时 mock 路径）
             check_cmd = (
                 f"test -f {bin_dir}/lane-autodispatch "
                 f"-a -f {bin_dir}/bus-worker-loop "
-                f"-a \\( -f {bin_dir}/ib-refresh -o -f {bin_dir}/ctl-loop \\) "
                 f"-a -f {bin_dir}/start-control-plane "
                 f"-a -f {ad_dir}/heartbeat "
-                f"-a \\( -f {bw_dir}/heartbeat -o -d {bw_dir} \\) "
-                f"-a \\( -f {ctl}/ctl-loop.heartbeat -o -f {ctl}/ib-refresh.status \\)"
+                f"-a \\( -f {bw_dir}/heartbeat -o -d {bw_dir} \\)"
             )
             res = subprocess.run(["bash", "-c", check_cmd])
             self.assertEqual(res.returncode, 0)
@@ -92,18 +82,17 @@ class CtlBootDocumentationTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_tools_check_ctl_boot_self_test(self):
-        """tools/check-ctl-boot.sh --self-test 离线自检通过（含五件套与心跳路径）。"""
+        """tools/check-ctl-boot.sh --self-test 离线自检通过（含控制面循环与心跳路径）。"""
         self.assertTrue(TOOL_CHECK.is_file())
         res = subprocess.run(["bash", str(TOOL_CHECK), "--self-test"], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("OK start-control-plane loop health-loop", res.stdout)
         self.assertIn("OK heartbeat health.heartbeat", res.stdout)
 
-    def test_five_loops_and_four_heartbeats_asserted(self):
-        """Refs #847: 文档与脚本均点名五件套命令与四条心跳路径。"""
+    def test_four_loops_and_three_heartbeats_asserted(self):
+        """Refs #847: 文档与脚本均点名四个循环与三条心跳路径。"""
         tool_content = TOOL_CHECK.read_text(encoding="utf-8")
         loops = [
-            "ib-refresh-loop",
             "lane-autodispatch",
             "lane-merge",
             "bus-worker-loop",
@@ -112,21 +101,11 @@ class CtlBootDocumentationTests(unittest.TestCase):
         heartbeats = [
             "autodispatch/heartbeat",
             "merge-heartbeat",
-            "ctl-loop.heartbeat",
             "health.heartbeat",
         ]
         for item in loops + heartbeats:
             self.assertIn(item, self.content, f"docs/ctl-boot.md missing {item}")
             self.assertIn(item, tool_content, f"tools/check-ctl-boot.sh missing {item}")
-
-    def test_check_dual_hosts_ok_contract(self):
-        """Refs #1637: tools/check-dual-hosts-ok.py 离线契约与假 status + lanes.json 断言通过。"""
-        dual_check = ROOT / "tools" / "check-dual-hosts-ok.py"
-        self.assertTrue(dual_check.is_file(), f"Expected {dual_check} to exist")
-        self.assertIn("check-dual-hosts-ok.py", self.content, "docs/ctl-boot.md missing check-dual-hosts-ok.py")
-        res = subprocess.run([sys.executable, str(dual_check)], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("dual hosts_ok to reachable lanes: OK", res.stdout)
 
     def test_check_merge_idle_heartbeat_contract(self):
         """Refs #955: tools/check-merge-idle-heartbeat.py 离线契约与假目录断言通过。"""
