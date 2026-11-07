@@ -990,6 +990,100 @@ class HarvestArtifactFilter(Base):
         self.assertIn(7, state["_done"])
 
 
+class VerifyGate(Base):
+    """The push of a fix is gated on the acceptance of its card (Refs #1865).
+
+    A failed acceptance is not pushed: the card is requeued with the failure output and
+    the local retries are counted on the card (the marker makes the requeue idempotent).
+    """
+
+    ST = {"issue": 7, "run": "r1", "rebase_pr": 70, "rebase_branch": "fleet/M5-issue7-r0",
+          "rebase_head": SHA2}
+    INFO = {"branch": "lane/x", "commit": "c", "status": "done", "repo": "/w"}
+    FAIL = {"cmd": "pytest tests", "rc": 1, "tail": "FAILED tests/test_x.py", "failing": ["tests/test_x.py"]}
+
+    def setUp(self):
+        super().setUp()
+        self.base = self.init_repo()
+        self.card = {"state": "OPEN", "body": "Rebase-PR: #70 fleet/M5-issue7-r0\n",
+                     "labels": [{"name": "lane-ready"}]}
+        self.bodies = []
+
+    def fake(self, edit_rc=0, push=(0, "", "")):
+        """The GitHub answers of the card: its body and the files of the PR."""
+        def edit(text):
+            if "--body " in text and edit_rc == 0:
+                body = text.split("--body ", 1)[1].split(" --add-label")[0]
+                self.bodies.append(body)
+                self.card["body"] = body
+            return edit_rc, "", ""
+
+        return [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
+                ("issue view", lambda t: (0, json.dumps(self.card), "")), ("issue edit", edit),
+                ("issue list", lambda t: (0, json.dumps([issue(7, ["lane-ready"], self.card["body"])]), "")),
+                ("pr view", (0, json.dumps({"files": [{"path": "openswarm/lib/dispatch/engine.py"}]}), "")),
+                ("ls-remote", (0, "d" * 40 + "\trefs/heads/main\n", "")),
+                ("lane assign", (0, '{"id":"r2"}', "")), (" push -q", push)]
+
+    def harvest(self, d, run="r1", info=None):
+        st = dict(self.ST, run=run, base=self.base)
+        state = {"M5": st}
+        return d.finish("M5", {"host": "box", "backend": "pi"}, st, dict(info or self.INFO), state), state
+
+    def test_verify_zero_pushes_and_a_failed_verify_requeues_the_card(self):
+        self.lane_commit({"code.py": "print('lane')\n"})
+        d = self.make(self.fake())
+        done, _ = self.harvest(d, info=dict(self.INFO, verify_rc=0))
+        self.assertTrue(done)
+        self.assertEqual(len(d.runner.called(" push -q")), 1)
+        self.assertEqual(self.bodies, [])
+        # a failed acceptance is not pushed: the card is requeued with the failure output
+        done, _ = self.harvest(d, run="r2", info=dict(self.INFO, verify_rc=1, verify=self.FAIL))
+        self.assertTrue(done)
+        self.assertEqual(len(d.runner.called(" push -q")), 1)
+        self.assertIn("验收失败", self.bodies[0])
+        self.assertIn("FAILED tests/test_x.py", self.bodies[0])
+        self.assertIn("--add-label lane-ready", " ".join(d.runner.called("issue edit 7")))
+        self.assertEqual(d.load_reviews(), {})      # the review round is not consumed
+
+    def test_after_two_retries_the_fix_is_pushed_with_a_red_comment(self):
+        self.lane_commit({"code.py": "print('lane')\n"})
+        d = self.make(self.fake())
+        for run in ("r1", "r2", "r3"):
+            done, _ = self.harvest(d, run=run, info=dict(self.INFO, verify_rc=1, verify=self.FAIL))
+            self.assertTrue(done)
+        self.assertEqual(len(d.runner.called(" push -q")), 1)
+        comment = " ".join(d.runner.called("pr comment 70"))
+        self.assertIn("🔴", comment)
+        self.assertIn("验收失败", comment)
+
+    def test_a_card_without_the_acceptance_line_falls_back_to_the_tests(self):
+        os.makedirs(os.path.join(self.tmp, "openswarm", "tests"), exist_ok=True)
+        open(os.path.join(self.tmp, "openswarm", "tests", "test_dispatch_engine.py"), "w").close()
+        d = self.make(self.fake())
+        body = d.ensure_verify_line("fix it\n", 70)
+        self.assertIn("验收: `python -m unittest openswarm.tests.test_dispatch_engine`", body)
+
+    def test_the_tick_requeues_the_failed_fix_and_dispatches_it_again(self):
+        # the acceptance failed: nothing is pushed, the card goes back into the lane-ready
+        # queue with the failure output and the tick dispatches it again
+        self.lane_commit({"code.py": "print('lane')\n"})
+        d = self.make(self.fake())
+        lanes = {"M5": {"host": "remote", "backend": "pi"}}
+        state = {"M5": {"issue": 7, "run": "r1", "base": self.base, "at": "2026-11-04 10:00:00",
+                        "rebase_pr": 70, "rebase_branch": "fleet/M5-issue7-r0", "rebase_head": SHA2}}
+        d.probe = lambda *_: {"M5": {"lane": "busy", "run": dict(self.INFO, verify_rc=1, verify=self.FAIL)}}
+        d.tick(lanes, state)
+        self.assertEqual(d.runner.called(" push -q"), [])
+        self.assertIn("验收失败", self.card["body"])
+        self.assertIn("--add-label lane-ready", " ".join(d.runner.called("issue edit 7")))
+        # the lane frees up: the next tick dispatches the card again
+        d.probe = lambda *_: {"M5": {"lane": "idle"}}
+        d.tick(lanes, state)
+        self.assertEqual(len(d.runner.called("lane assign")), 1)
+        self.assertEqual(state["M5"]["run"], "r2")
+
+
 class RebaseTickIntegration(Base):
     """The rebase of a PR whose head moved is dispatched again (Refs #1842).
 

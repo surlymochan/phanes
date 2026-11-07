@@ -233,6 +233,9 @@ DEFAULTS = {
         "lane_field": "Lane",             # the project field that carries the lane id (TEXT)
     },
     "upstream_manifest": "",              # e.g. upstream-sync.json: prefix PR title with upstream(<comp>):
+    # The acceptance of a fix gates its push (Refs #1865): the local retries of a fix
+    # whose acceptance failed before the change is pushed anyway (the PR comment says so).
+    "verify_gate": {"max_retries": 2},
     "thin_pr": {"min_effective_diff": 30,
                 "doc_ext": [".md", ".txt", ".rst", ".adoc"],
                 "code_ext": [".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".go", ".rs", ".sh"],
@@ -410,7 +413,8 @@ if R:
       "started":r.get("started") if r.get("started") is not None else rs.get("started"),
       "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
       "seconds":r.get("seconds"),
-      "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
+      "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None,
+      "verify":(r.get("verify") if isinstance(r.get("verify"),dict) else None)}
   else:
     out["run"]="running"
     try:
@@ -459,6 +463,11 @@ class HeadMoved(Exception):
     moved between the PR list and the fetch must not be reviewed: the review is dispatched
     again on the next tick, with the head that is current then.
     """
+
+
+# The failure of the acceptance is written into the card of the fix (Refs #1865); the
+# marker makes the requeue idempotent: the same run is never counted twice.
+VERIFY_FAIL_RE = re.compile(r"\n*## 验收失败[^\n]*\n.*?<!-- lane-verify-fail [^\n]*-->\n*", re.S)
 
 
 class Dispatcher:
@@ -1051,6 +1060,91 @@ class Dispatcher:
         m = re.search(self.cfg["rebase_line_re"], body or "", re.M)
         return (int(m.group(1)), m.group(2)) if m else None
 
+    # ------------------------------------------------------------ verify gate (Refs #1865)
+    def verify_fallback(self, paths):
+        """The acceptance of the changed files: the existing test of every changed module.
+
+        `engine.py` is covered by `tests/test_dispatch_engine.py`.
+        """
+        root = os.path.expanduser(self.cfg.get("local_repo") or "")
+        tests = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__", ".venv")]
+            if os.path.basename(dirpath) != "tests":
+                continue
+            tests += [(n, os.path.relpath(os.path.join(dirpath, n), root)[:-3].replace(os.sep, "."))
+                      for n in filenames if n.startswith("test_") and n.endswith(".py")]
+        mods = []
+        for path in paths or []:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            mods += [rel for name, rel in tests if stem and not stem.startswith(".") and stem in name]
+        mods = list(dict.fromkeys(mods))
+        return " && ".join("python -m unittest %s" % mod for mod in mods[:4]) if mods else None
+
+    def changed_files(self, pr):
+        """The files the head of a PR changes (the acceptance of a fix card falls back to their tests)."""
+        rc, out, _ = self.gh(["pr", "view", str(pr), "--json", "files"])
+        try:
+            files = [] if rc else ((json.loads(out) or {}).get("files") or [])
+        except Exception:
+            files = []
+        return [f.get("path") for f in files if isinstance(f, dict) and f.get("path")]
+
+    def ensure_verify_line(self, body, pr):
+        """A fix card names its acceptance command (Refs #1865).
+
+        A card without an `验收:` line runs no verification at the lane: it gets the
+        fallback of the changed files (the existing tests of the modules the PR touches).
+        """
+        if self.verify_of(body):
+            return body
+        cmd = self.verify_fallback(self.changed_files(pr))
+        return body.rstrip() + "\n\n验收: `%s`\n" % cmd if cmd else body
+
+    def verify_gate(self, lane, lc, st, info, state):
+        """The push of a fix is gated on the acceptance of its card (Refs #1865).
+
+        Returns (decision, note): "push" (the harvest goes on), "done" (the card was
+        requeued with the failure output, the run ends) or "retry" (the requeue failed).
+        """
+        n, run, pr = st["issue"], st["run"], st.get("rebase_pr")
+        vrc = info.get("verify_rc")
+        if vrc is None:
+            self.log(f"{lane} #{n} run {run}: no acceptance evidence (verify_rc is null); the push is not gated", brain=False)
+            return "push", ""
+        if vrc == 0:
+            return "push", ""
+        rc, out, _ = self.gh(["issue", "view", str(n), "--json", "body"])
+        if rc:
+            self.log(f"{lane} #{n} run {run}: the card cannot be read; the push waits for the next tick", brain=False)
+            return "retry", ""
+        try:
+            body = (json.loads(out) or {}).get("body") or ""
+        except Exception:
+            body = ""
+        marker = f"<!-- lane-verify-fail pr={pr} run={run} -->"
+        if marker in body:
+            # the card was already requeued for this run (an interrupted harvest): no second try is counted
+            self.log(f"{lane} #{n} run {run}: the card is already requeued for this acceptance failure")
+            return "done", ""
+        tries = len(VERIFY_FAIL_RE.findall(body))
+        limit = int((self.cfg.get("verify_gate") or {}).get("max_retries", 2))
+        if tries >= limit:
+            # the local retries are used up: the change is pushed, the comment says that the acceptance failed
+            return "push", ("\n\n🔴 **验收失败**：verify rc `%s`，本地重排 %s 次后仍失败；这次推送的改动没有通过验收。" % (vrc, tries))
+        ver = info.get("verify") or {}
+        section = ("\n\n## 验收失败（verify rc %s）\n\n第 %s 次验收失败，未推送；重排本卡重试。\n\n命令：`%s`\n失败用例：%s\n\n```\n%s\n```\n\n%s\n"
+                   % (vrc, tries + 1, ver.get("cmd") or "?", ", ".join(ver.get("failing") or []) or "-",
+                      (ver.get("tail") or "").strip()[-800:] or "-", marker))
+        rc = self.gh_write(["issue", "edit", str(n), "--body", body.rstrip() + section,
+                            "--add-label", self.L["ready"], "--remove-label", self.L["in_progress"]])[0]
+        if rc:
+            self.log(f"{lane} #{n} run {run}: the acceptance failure was not written to the card; retry next tick", brain=False)
+            return "retry", ""
+        self.log(f"{lane} #{n} run {run}: verify rc {vrc} → not pushed, the card is requeued ({tries + 1}/{limit})")
+        self.mark_done(state, n)
+        return "done", ""
+
     def hot_of(self, body):
         return {f for f in self.hotfiles.parse_hot_files(body)
                 if f not in self.hot_union and not self.hotfiles.is_doc_file(f)}
@@ -1189,8 +1283,11 @@ class Dispatcher:
         if rc:
             raise RuntimeError(f"task-upload: {(err or '').strip()[-200:]}")
         ver = self.verify_of(item["body"])
-        title = f"#{n} {item['title']}"[:120]
         rb = self.rebase_of(item["body"])
+        if not ver and rb:
+            # a fix card without an acceptance line: the tests of the changed files are the fallback (Refs #1865)
+            ver = self.verify_fallback(self.changed_files(rb[0]))
+        title = f"#{n} {item['title']}"[:120]
         head_sha = item.get("head_sha")
         if item.get("review"):
             # The review sandbox has no network: the PR head is seeded into the lane
@@ -1810,6 +1907,11 @@ class Dispatcher:
                     self.mark_done(state, n)
                     return True
                 else:
+                    gate, note = self.verify_gate(lane, lc, st, info, state)
+                    if gate == "retry":
+                        return False
+                    if gate == "done":
+                        return True
                     expect = st.get("rebase_head")
                     if not expect:      # never force blindly: lease against the head as it is now
                         ls = self.sh(["git", "ls-remote", f"https://github.com/{self.cfg['repo']}.git", f"refs/heads/{ob}"], timeout=30)
@@ -1848,7 +1950,7 @@ class Dispatcher:
                     self.gh_write(["pr", "comment", str(pr), "--body",
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
-                             f"Force-pushed to `{ob}`; it is merged after a fresh lane review and green CI."])
+                             f"Force-pushed to `{ob}`; it is merged after a fresh lane review and green CI." + note])
                 self.relabel(n, L["pr"], [L["in_progress"], L["ready"]], state)
                 reason, detail = self.end_reason(lane, lc, run, info,
                                                  f"rebased onto {self.cfg['base_branch']}")
@@ -2183,7 +2285,9 @@ class Dispatcher:
         if kind == "cifix":
             bad = ", ".join(sorted(set(self._ci_result(p)["red"])))[:400]
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
+        ib = VERIFY_FAIL_RE.sub("", ib)
         ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
+        ib = self.ensure_verify_line(ib, pr)
         L = self.L
         self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
                        "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
@@ -2617,9 +2721,11 @@ class Dispatcher:
                 ib = (json.loads(iv)["body"] or "") if iv else ""
                 T = self.cfg["templates"]
                 ib = self.with_rebase_line(self.section_strip(ib, T["changes_section_title"]), pr, cj["headRefName"])
+                ib = VERIFY_FAIL_RE.sub("", ib)
                 ib += (f"\n\n## {T['changes_section_title']}\n\n" +
                        T["changes_section"].format(round=r["rounds"], who=who, pr=pr, sha10=sha[:10], branch=cj["headRefName"],
                                                    notes=txt.strip()[:8000]) + "\n")
+                ib = self.ensure_verify_line(ib, pr)
                 self.gh(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"], "--remove-label", L["failed"]])
                 self.log(f"review PR #{pr}: CHANGES → fix task queued on #{n} (round {r['rounds']})")
         self.put_review(pr, r)
