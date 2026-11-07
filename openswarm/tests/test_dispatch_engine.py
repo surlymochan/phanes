@@ -1804,16 +1804,20 @@ class Cli(Base):
 
 
 class ScriptRun(unittest.TestCase):
+    def prepare_script_dir(self, tmp):
+        """Fill ``tmp`` with the engine and the sibling modules that would shadow the stdlib."""
+        for mod in ("queue", "json"):
+            with open(os.path.join(tmp, f"{mod}.py"), "w") as f:
+                f.write(f"raise ImportError('sibling {mod}.py shadowed the stdlib')\n")
+        shutil.copy(os.path.join(os.path.dirname(HERE), "lib", "dispatch", "engine.py"), os.path.join(tmp, "engine.py"))
+
     def test_sibling_modules_do_not_shadow_stdlib_when_run_as_script(self):
         # lib/dispatch/queue.py once shadowed the stdlib queue that concurrent.futures needs
         import subprocess
         import sys
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        for mod in ("queue", "json"):
-            with open(os.path.join(tmp, f"{mod}.py"), "w") as f:
-                f.write(f"raise ImportError('sibling {mod}.py shadowed the stdlib')\n")
-        shutil.copy(os.path.join(os.path.dirname(HERE), "lib", "dispatch", "engine.py"), os.path.join(tmp, "engine.py"))
+        self.prepare_script_dir(tmp)
         cfg = os.path.join(tmp, "c.txt")
         with open(cfg, "w") as f:
             f.write('{"repo": "a/b", "state_dir": "%s"}' % tmp)
@@ -1821,6 +1825,50 @@ class ScriptRun(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr[-500:])
         self.assertIn('"repo": "a/b"', r.stdout)
+
+    def test_sibling_modules_do_not_shadow_stdlib_when_the_script_dir_is_a_link(self):
+        # python computes sys.path[0] with realpath() while __file__ keeps the path as it was
+        # given: on macOS the temporary directories live under /var, a link to /private/var, so the
+        # two only match after a realpath and the guard of the engine missed them (Refs #1815)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        physical = os.path.join(tmp, "physical")
+        os.mkdir(physical)
+        linked = os.path.join(tmp, "linked")
+        os.symlink(physical, linked)
+        self.prepare_script_dir(physical)
+        cfg = os.path.join(physical, "c.txt")
+        with open(cfg, "w") as f:
+            f.write('{"repo": "a/b", "state_dir": "%s"}' % physical)
+        r = subprocess.run([sys.executable, os.path.join(linked, "engine.py"), "dispatch", "check-config",
+                            "--config", cfg], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn('"repo": "a/b"', r.stdout)
+
+    def test_the_script_dir_is_dropped_from_sys_path_when_the_paths_are_linked(self):
+        # sys.path[0] holds the physical directory of the script, __file__ the linked one
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        physical = os.path.join(tmp, "physical")
+        os.mkdir(physical)
+        linked = os.path.join(tmp, "linked")
+        os.symlink(physical, linked)
+        script = os.path.join(linked, "engine.py")
+        with open(script, "w") as f:
+            f.write("")
+        path = [physical, os.path.join(tmp, "rest")]
+        self.assertTrue(E._drop_script_dir_from_sys_path(path, script=script))
+        self.assertEqual(path, [os.path.join(tmp, "rest")])
+
+    def test_a_foreign_directory_is_kept_on_sys_path(self):
+        # the guard drops the directory of the script only, never a directory of the caller
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        foreign = os.path.join(tmp, "foreign")
+        os.mkdir(foreign)
+        path = [foreign]
+        self.assertFalse(E._drop_script_dir_from_sys_path(path, script=os.path.join(tmp, "engine.py")))
+        self.assertEqual(path, [foreign])
 
 
 class ThinDiff(unittest.TestCase):
