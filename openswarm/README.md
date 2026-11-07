@@ -328,8 +328,9 @@ number is shared by every repository), and a bare number key only counts when th
 itself.
 
 The `rules_hash` is the version of the rules the review worked by: the first 12 hex digits of the sha256 of the
-review prompt and the verdict standard. It only names the rules, it never changes them, so a changed hash marks the
-point where the review metrics before and after the change are not comparable any more.
+review prompt (the prompt text alone, so that anyone can recompute it). It only names the rules, it never changes
+them, so a changed hash marks the point where the review metrics before and after the change are not comparable
+any more.
 
 ### Rerun a failed run once, and the post-merge hook
 

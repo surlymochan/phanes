@@ -391,10 +391,10 @@ def quota_module():
 
 
 # --- Refs #1852: the version hash of the review rules -------------------------------------
-# The review rules are the prompt the reviewer works by plus the standard that reads its
-# verdict.  Every review event carries the hash of that text, so that a change of the rules
-# is visible as a break in the metrics.  The hash only *names* the rules: neither the prompt
-# nor the review standard is changed by it (anti-gaming, not anti-tuning).
+# The review rules are the prompt the reviewer works by.  Every review event carries the
+# hash of that text, so that a change of the rules is visible as a break in the metrics.
+# The hash only *names* the rules: neither the prompt nor the review standard is changed
+# by it (anti-gaming, not anti-tuning).
 RULES_HASH_LEN = 12
 
 
@@ -403,6 +403,7 @@ def rules_hash(text):
 
     The same text always hashes to the same value and a changed text (one character is
     enough) hashes to another one: the hash is the marker of the rules a review worked by.
+    It is the hash of the rules text and of nothing else, so anyone can recompute it.
     """
     return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:RULES_HASH_LEN]
 
@@ -2300,23 +2301,22 @@ class Dispatcher:
         """The path of the raw evidence pack of one PR inside the lane branch."""
         return "%s/PR-%s%s.md" % (self.R["verdict_dir"], pr, self.R.get("evidence_suffix") or "-evidence")
 
-    def review_rules_text(self):
-        """The rules a lane review works by: the review prompt and the verdict standard.
+    def review_prompt_text(self):
+        """The rules a lane review works by: the text of the review prompt.
 
-        The text is read, never written (Refs #1852): only its hash goes into the review
+        The prompt is read, never written (Refs #1852): only its hash goes into the review
         event, so that a change of the rules shows up as a break in the metrics.
         """
-        prompt = str((self.cfg.get("templates") or {}).get("review_task") or "")
-        parts = [prompt]
-        for name in ("VERDICT_LINE_RE", "TOOL_FAIL_RE"):
-            pattern = getattr(status, name, None) if status is not None else None
-            if pattern is not None:
-                parts.append(getattr(pattern, "pattern", "") or "")
-        return "\n".join(parts)
+        return str((self.cfg.get("templates") or {}).get("review_task") or "")
 
     def review_rules_hash(self):
-        """The version hash of the review rules of this dispatcher (Refs #1852)."""
-        return rules_hash(self.review_rules_text())
+        """The version hash of the review rules of this dispatcher (Refs #1852).
+
+        It is the first 12 hex digits of the sha256 of the review prompt - the hash of the
+        rules text itself, and of nothing else, so that it can be recomputed from the
+        prompt by anyone who reads the event.
+        """
+        return rules_hash(self.review_prompt_text())
 
     def diffstat_of(self, diff):
         """The raw diff statistics of a PR diff (files, added and deleted lines, effective lines)."""
