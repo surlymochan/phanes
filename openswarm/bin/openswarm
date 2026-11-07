@@ -8509,6 +8509,7 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
 class LaneChild:
     def __init__(self, lane, cwd, policy, on_started=None):
         self.lane, self.cwd = lane, cwd
+        self.started_at = NOW()
         _tmpdir, self.env = configure_executor_environment(cwd)
         self.events = queue.Queue()
         self.backlog = []
@@ -8624,6 +8625,36 @@ class LaneChild:
         with self.write_lock:
             self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
+
+    def probe(self, timeout=20, method="initialize"):
+        """Ask the server whether it still answers; return (ok, detail).
+
+        The request is the lightest one every JSON-RPC lane server understands.  A
+        JSON-RPC error still proves the server answers, so only a missing answer
+        counts as a failure: a wedged server is one that stops answering at all.
+        """
+        req_id = "probe-" + uuid.uuid4().hex
+        try:
+            self.send({"jsonrpc": "2.0", "id": req_id, "method": method,
+                       "params": {"clientInfo": {"name": "openswarm-probe", "version": "1"}}})
+        except (BrokenPipeError, OSError) as error:
+            return False, f"probe write failed: {short(error, 120)}"
+        end = time.monotonic() + max(0.0, float(timeout or 0))
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                return False, f"no answer within {float(timeout or 0):g}s"
+            item = self.next_event(min(0.2, left))
+            if item is False:
+                if not self.alive():
+                    return False, "executor process exited"
+                continue
+            if item is None:
+                return False, "executor stdout closed"
+            if isinstance(item, dict) and item.get("id") == req_id and ("result" in item or "error" in item):
+                if "error" in item:
+                    return True, f"answered with an error: {short(item['error'], 120)}"
+                return True, "answered"
 
     def next_event(self, timeout=0):
         if self.backlog:
@@ -8952,7 +8983,11 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                     # A retry after a broken transport reuses the run the first attempt created.
                     answer = {"ok": True, "id": existing, "reused": True, "state": lane_run_state(existing)}
                 elif state.get("state") != "idle" or current.get("run_id"):
-                    answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
+                    if state.get("state") == LANE_PROBE_PAUSED_STATE:
+                        answer = {"ok": False, "error": f"lane {lane['name']} is paused "
+                                                       f"({state.get('last_error') or 'lane server is wedged'})"}
+                    else:
+                        answer = {"ok": False, "error": f"lane {lane['name']} is busy ({state.get('state')})"}
                 elif (pause_error := lane_pause_check(lane["name"], lane)):
                     answer = {"ok": False, **pause_error}
                 elif (drain_error := lane_drain_check(lane["name"])):
@@ -10193,6 +10228,187 @@ def agy_quota_available(lane, child):
         return False
 
 
+# ---------------------------------------------------------------- lane server health probe
+#
+# A lane supervisor watches its own executor server: a codex app-server that stops
+# answering is restarted and verified with an empty run before the lane takes work
+# again (Refs #1709).  The lane state of a lane that failed the verification is
+# not "idle", so the dispatcher does not hand it a card.
+
+LANE_PROBE_PROMPT = "health probe: reply with OK and do nothing else."
+LANE_PROBE_PAUSED_STATE = "server_wedged"
+
+
+def lane_probe_module():
+    """The lane server health probe (lib/supervise/lane_probe.py), loaded by path."""
+    name = "openswarm_lane_probe"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "supervise", "lane_probe.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def lane_probe_settings(policy=None):
+    """The lane server probe settings of the live policy."""
+    return lane_probe_module().settings(load_policy() if policy is None else policy)
+
+
+def lane_probe_state(name):
+    """The probe state the lane state file keeps for one lane."""
+    state = jload(lane_state_path(name), {}) or {}
+    probe = state.get("server_probe")
+    return probe if isinstance(probe, dict) else {}
+
+
+def lane_brain_log(name, message, now=None):
+    """Write one line into the brain log of a lane.
+
+    The brain log is the operator's short log; the dispatch engine writes its lines
+    in the same shape.  The policy names the file (``lane.brain_log``); without one
+    the line goes to the lane's own brain log, so a lane host without the shared
+    file still records what it did.
+    """
+    line = lane_probe_module().brain_line(name, message, now=now)
+    paths = []
+    configured = ((load_policy().get("lane") or {}).get("brain_log") or "").strip()
+    if configured:
+        paths.append(os.path.expanduser(configured))
+    paths.append(os.path.join(lane_root(name), "brain.log"))
+    for path in paths:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "a") as stream:
+                stream.write(line + "\n")
+        except OSError:
+            continue
+    return line
+
+
+def lane_probe_check(child, settings):
+    """Ask the lane server whether it still answers; return (ok, detail)."""
+    if child is None:
+        return False, "no lane server"
+    try:
+        return child.probe(timeout=settings["timeout_s"], method=settings["method"])
+    except Exception as error:
+        return False, f"probe failed: {short(error, 200)}"
+
+
+def lane_probe_verify(lane, child, timeout=180, policy=None):
+    """Verify a restarted lane server with an empty run.
+
+    The probe only proves that the server answers; the CX9 failure was a server
+    that answered but could not start a session any more.  The verification
+    therefore runs a real (empty) turn: a new thread and a minimal prompt.  It
+    returns (ok, detail).
+    """
+    if lane.get("backend") != "codex":
+        return True, "backend has no empty-run verification"
+    if child is None:
+        return False, "no lane server"
+    policy = load_policy() if policy is None else policy
+    directory = os.path.join(lane_root(lane["name"]), "probe-verify")
+    shutil.rmtree(directory, ignore_errors=True)
+    os.makedirs(directory, exist_ok=True)
+    event_file = os.path.join(lane_root(lane["name"]), "probe-events.jsonl")
+    open(event_file, "w").close()
+    deadline = time.monotonic() + max(1.0, float(timeout or 0))
+    try:
+        req_id = "verify-thread-" + uuid.uuid4().hex
+        child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start",
+                    "params": {"cwd": directory, "model": lane["model"], "approvalPolicy": "never",
+                               "sandbox": (policy.get("codex") or {}).get("sandbox", "workspace-write"),
+                               "ephemeral": True}})
+        reply = child.wait_response(req_id, max(1.0, deadline - time.monotonic()), event_file)
+        if reply.get("error"):
+            return False, f"thread/start failed: {short(reply['error'], 200)}"
+        thread_id = (reply.get("thread") or {}).get("id")
+        if not thread_id:
+            return False, "thread/start did not return a thread id"
+        req_id = "verify-turn-" + uuid.uuid4().hex
+        child.send({"jsonrpc": "2.0", "id": req_id, "method": "turn/start",
+                    "params": {"threadId": thread_id,
+                               "input": [{"type": "text", "text": LANE_PROBE_PROMPT}]}})
+        reply = child.wait_response(req_id, max(1.0, deadline - time.monotonic()), event_file)
+        if reply.get("error"):
+            return False, f"turn/start failed: {short(reply['error'], 200)}"
+        while time.monotonic() < deadline:
+            item = child.next_event(min(0.5, max(0.0, deadline - time.monotonic())))
+            if item is False:
+                continue
+            if item is None:
+                return False, "executor stdout closed"
+            if not isinstance(item, dict):
+                continue
+            method = item.get("method")
+            params = item.get("params") or {}
+            if method == "turn/completed":
+                outcome = (params.get("turn") or {}).get("status")
+                lane_record_event(event_file, {"type": "lane_probe_verified", "status": outcome})
+                if outcome and outcome != "completed":
+                    return False, f"empty run ended as {outcome}"
+                return True, "empty run completed"
+            if method in ("turn/failed", "error"):
+                detail = short(params.get("error") or params, 200)
+                lane_record_event(event_file, {"type": "lane_probe_failed", "error": detail})
+                return False, f"empty run failed: {detail}"
+        return False, f"empty run did not finish within {float(timeout or 0):g}s"
+    except Exception as error:
+        return False, f"empty run failed: {short(error, 200)}"
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def lane_probe_restart(lane, policy, child, probe, settings):
+    """Restart a wedged lane server and verify that it works again.
+
+    The restart replaces the wedged app-server with a fresh one and then runs the
+    empty-run verification.  Only a verified server lets the lane take work again;
+    a lane that fails the verification stays paused and raises an alert.
+
+    Returns a dict with the new child, whether the lane may work again, and the
+    detail of the decision.
+    """
+    name = lane["name"]
+    module = lane_probe_module()
+    started = float(getattr(child, "started_at", 0) or 0)
+    uptime = max(0.0, NOW() - started) if started else 0.0
+    reason = probe.last_error or "no answer"
+    failures = probe.failures
+    message = module.restart_message(uptime, reason, failures)
+    lane_brain_log(name, message)
+    lane_write_state(name, state="restarting", child_pid=None,
+                     last_error=f"lane server wedged: {reason}", server_probe=probe.to_dict())
+    if child:
+        try:
+            child.close()
+        except Exception:
+            pass
+    wt = os.path.join(lane_root(name), "wt")
+    try:
+        new_child = lane_child(lane, wt, policy)
+    except Exception as error:
+        detail = f"lane server restart failed: {short(error, 300)}"
+        lane_brain_log(name, detail)
+        probe.note_restart(NOW())
+        return {"child": None, "ok": False, "detail": detail, "uptime_s": uptime,
+                "server_probe": probe.to_dict()}
+    ok, detail = lane_probe_verify(lane, new_child, settings["verify_timeout_s"])
+    probe.note_restart(NOW())
+    if ok:
+        probe.record_recovered(NOW())
+        lane_brain_log(name, f"lane server restarted and verified (uptime before the restart "
+                             f"{int(round(uptime))}s, basis: {reason})")
+    else:
+        lane_brain_log(name, f"lane server restart verification failed: {detail}")
+    return {"child": new_child, "ok": ok, "detail": detail, "uptime_s": uptime,
+            "server_probe": probe.to_dict()}
+
+
 def cmd_lane_serve(lane, policy):
     name = lane["name"]
     lane_become_subreaper()
@@ -10217,6 +10433,22 @@ def cmd_lane_serve(lane, policy):
         due = quota_state.get("quota_until")
         if isinstance(due, (int, float)) and due > NOW() + 3600:
             lane_write_state(name, quota_until=NOW() + 3600)
+    # Lane server health probe (Refs #1709).  A lane whose server failed the
+    # verification stays paused: it keeps no card until an empty run works again.
+    probe_policy = load_policy()
+    probe_settings = lane_probe_settings(probe_policy)
+    probe = lane_probe_module().probe_from(probe_policy, lane_probe_state(name))
+    paused = quota_state.get("state") == LANE_PROBE_PAUSED_STATE
+    next_probe = NOW() + probe_settings["interval_s"] if probe_settings["interval_s"] > 0 else float("inf")
+
+    def lane_idle(child_obj, **extra):
+        """Mark the lane idle; a lane paused by the server probe stays paused."""
+        changes = {"state": LANE_PROBE_PAUSED_STATE if paused else "idle",
+                   "child_pid": child_obj.pid if child_obj else None,
+                   "current_run": None, "turn_state": None, "concurrency_keys": []}
+        changes.update(extra)
+        lane_write_state(name, **changes)
+
     try:
         wt = os.path.join(lane_root(name), "wt")
         # Create the fixed worktree before launching a cwd-bound Pi child.
@@ -10233,8 +10465,7 @@ def cmd_lane_serve(lane, policy):
             if rc:
                 raise RuntimeError(f"lane worktree creation failed: {err[:250]}")
         child = lane_child(lane, wt, policy)
-        lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
-                         turn_state=None, concurrency_keys=[])
+        lane_idle(child, last_error=None)
     except Exception as e:
         traceback.print_exc()
         reason = short(e, 500)
@@ -10256,6 +10487,57 @@ def cmd_lane_serve(lane, policy):
                     child = None
                 lane_write_state(name, state=reason, child_pid=None, last_error=reason, current_run=None)
                 next_start = max(next_start, next_codex_check)
+        # Lane server health probe: ask the app-server whether it still answers.
+        # The probe only runs while the lane is idle, so it never competes with a
+        # running turn for the server.
+        if (lane["backend"] == "codex" and child and child.alive() and not current.get("run_id")
+                and probe_settings["interval_s"] > 0 and NOW() >= next_probe):
+            next_probe = NOW() + probe_settings["interval_s"]
+            probe_policy = load_policy()
+            probe_settings = lane_probe_settings(probe_policy)
+            probe = lane_probe_module().probe_from(probe_policy, lane_probe_state(name))
+            ok, detail = lane_probe_check(child, probe_settings)
+            if ok:
+                probe.record_success(NOW())
+                if paused:
+                    # The lane was paused after a failed verification: only a working
+                    # empty run lets it take work again.
+                    verified, vdetail = lane_probe_verify(lane, child, probe_settings["verify_timeout_s"])
+                    if verified:
+                        paused = False
+                        lane_idle(child, last_error=None, server_probe=probe.to_dict())
+                        lane_brain_log(name, "lane server answered again and the empty run verified; "
+                                             "the lane takes work again")
+                    else:
+                        lane_write_state(name, state=LANE_PROBE_PAUSED_STATE, child_pid=child.pid,
+                                         last_error=vdetail, server_probe=probe.to_dict())
+                else:
+                    lane_write_state(name, server_probe=probe.to_dict())
+            else:
+                probe.record_failure(NOW(), detail)
+                if not probe.wedged():
+                    lane_write_state(name, server_probe=probe.to_dict())
+                elif probe.restart_storm(NOW()):
+                    # The server keeps wedging: the lane stays paused and waits for a human
+                    # instead of restarting the server forever.
+                    if not paused:
+                        lane_brain_log(name, f"the lane server keeps wedging ({probe.restarts} restarts); "
+                                             "the lane stays paused until a human looks at it")
+                    paused = True
+                    lane_write_state(name, state=LANE_PROBE_PAUSED_STATE,
+                                     child_pid=child.pid if child else None,
+                                     last_error=probe.last_error or "lane server keeps wedging",
+                                     server_probe=probe.to_dict())
+                else:
+                    outcome = lane_probe_restart(lane, policy, child, probe, probe_settings)
+                    child = outcome["child"]
+                    paused = not outcome["ok"]
+                    if outcome["ok"]:
+                        lane_idle(child, last_error=None, server_probe=outcome["server_probe"])
+                    else:
+                        lane_write_state(name, state=LANE_PROBE_PAUSED_STATE,
+                                         child_pid=child.pid if child else None,
+                                         last_error=outcome["detail"], server_probe=outcome["server_probe"])
         # This is the existing resident lane polling loop, not a second daemon.
         # A killed runner otherwise cannot release its host capacity until a later admission.
         if NOW() >= next_fleet_recovery:
@@ -10288,8 +10570,7 @@ def cmd_lane_serve(lane, policy):
                 wt = os.path.join(lane_root(name), "wt")
                 child = lane_child(lane, wt, policy)
                 backoff = 1
-                lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None,
-                                 turn_state=None, concurrency_keys=[])
+                lane_idle(child, last_error=None)
             except Exception as e:
                 traceback.print_exc()
                 reason = short(e, 500)
@@ -10331,7 +10612,7 @@ def cmd_lane_serve(lane, policy):
                 next_start = NOW() + 15
                 next_codex_check = next_start
             elif child and child.alive():
-                lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None)
+                lane_idle(child, last_error=None)
             else:
                 lane_write_state(name, state="crashed", child_pid=None, current_run=None,
                                  last_error="resident executor process exited")
@@ -10339,8 +10620,7 @@ def cmd_lane_serve(lane, policy):
                 shutdown = True
             continue
         if child:
-                lane_write_state(name, state="idle", child_pid=child.pid, current_run=None,
-                                 turn_state=None, concurrency_keys=[])
+                lane_idle(child)
         if child and lane["backend"] == "agy":
             quota_state = jload(lane_state_path(name), {}) or {}
             if (quota_state.get("quota_model") == lane["model"] and
@@ -10383,6 +10663,8 @@ def lane_state_error(state):
         return None
     if state.get("state") == "crashed":
         return state.get("last_error") or "lane child is crashed"
+    if state.get("state") == LANE_PROBE_PAUSED_STATE:
+        return state.get("last_error") or "lane server is wedged"
     if lane_state_blocked(state.get("state")):
         return state.get("last_error") or state.get("state")
     return None
@@ -10402,7 +10684,8 @@ def cmd_lane_up(args, policy):
                     ping = lane_call(name, {"op": "ping"}, timeout=0.3)
                     if ping.get("ok"):
                         break
-                elif state.get("state") == "crashed" or lane_state_blocked(state.get("state")):
+                elif (state.get("state") == "crashed" or lane_state_blocked(state.get("state"))
+                      or state.get("state") == LANE_PROBE_PAUSED_STATE):
                     break
                 time.sleep(0.1)
             if ping.get("ok"):
@@ -10523,7 +10806,11 @@ def lane_status_rows():
                      "run_state": state.get("turn_state"),
                      "provider": execution_provider(lane["backend"], policy=load_policy(), lane=lane),
                      "uptime_seconds": round(NOW() - state["started"], 1) if state.get("started") else None,
-                     "last_error": state.get("last_error")})
+                     "last_error": state.get("last_error"),
+                     # The lane server probe: is the server alive, when did it answer
+                     # last, and how often did it have to be restarted.
+                     "server_probe": (lane_probe_module().status(state.get("server_probe"))
+                                      if lane["backend"] == "codex" else None)})
         if lane.get("drain") is True:
             rows[-1]["drain"] = True
         last_quota = state.get("last_quota") or {}

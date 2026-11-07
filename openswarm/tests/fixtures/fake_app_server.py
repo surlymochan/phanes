@@ -23,6 +23,20 @@ model = None
 overload_model = os.environ.get("FAKE_APP_SERVER_OVERLOAD_MODEL")
 overload_used = False
 
+# A wedged server keeps its process alive but stops answering the health probe:
+# the lane probe has to notice that and restart the server.  The marker file keeps
+# the wedge to the first server of a host: the replacement answers again.
+wedge_probe = bool(os.environ.get("FAKE_APP_SERVER_WEDGE_PROBE"))
+wedge_marker = os.environ.get("FAKE_APP_SERVER_WEDGE_MARKER")
+fail_verify = bool(os.environ.get("FAKE_APP_SERVER_FAIL_VERIFY"))
+wedged = False
+if wedge_probe:
+    if not (wedge_marker and os.path.exists(wedge_marker)):
+        wedged = True
+        if wedge_marker:
+            with open(wedge_marker, "w") as marker:
+                marker.write("wedged\n")
+
 for line in sys.stdin:
     try:
         req = json.loads(line)
@@ -30,6 +44,8 @@ for line in sys.stdin:
         continue
     method = req.get("method")
     params = req.get("params") or {}
+    if wedged and str(req.get("id") or "").startswith("probe-"):
+        continue
     if method == "initialize":
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
         response(req, {"serverInfo": {"name": "fake-app-server", "version": "1"}})
@@ -49,6 +65,11 @@ for line in sys.stdin:
             os._exit(17)
         send({"jsonrpc": "2.0", "method": "fixture/unrelated", "params": {"before": method}})
         response(req, {"turn": {"id": turn_id, "status": "inProgress"}})
+        if fail_verify and "health probe" in prompt:
+            send({"jsonrpc": "2.0", "method": "turn/failed", "params": {
+                "threadId": thread_id, "turn": {"id": turn_id},
+                "error": {"message": "fake app-server cannot run the verification"}}})
+            continue
         if "LANE_TEST_IO_LOST" in prompt:
             for seq in range(3):
                 send({"jsonrpc": "2.0", "method": "item/completed", "params": {

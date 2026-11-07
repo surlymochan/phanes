@@ -81,13 +81,24 @@ class LanePureFunctionTests(unittest.TestCase):
             list(row),
             ["name", "state", "backend", "model", "pid", "supervisor_pid",
              "quota_reset_at", "current_run", "run_state", "provider",
-             "uptime_seconds", "last_error"],
+             "uptime_seconds", "last_error", "server_probe"],
         )
         self.assertIsInstance(row["name"], str)
         self.assertIsInstance(row["state"], str)
         self.assertIsInstance(row["backend"], str)
         self.assertIsInstance(row["model"], str)
         self.assertIsInstance(row["provider"], str)
+
+    def test_lane_status_rows_carry_the_server_probe_state(self):
+        row = self.lane_status_row({"state": "idle", "supervisor_pid": 42, "server_probe": {
+            "alive": False, "last_success_at": 100.0, "restarts": 2, "failures": 3,
+            "last_error": "no answer within 20s"}})
+
+        self.assertEqual(row["server_probe"]["alive"], False)
+        self.assertEqual(row["server_probe"]["last_success_at"], 100.0)
+        self.assertEqual(row["server_probe"]["restarts"], 2)
+        self.assertEqual(row["server_probe"]["failures"], 3)
+        self.assertEqual(row["server_probe"]["last_error"], "no answer within 20s")
 
     def test_lane_status_rows_missing_optional_metadata_is_stable(self):
         row = self.lane_status_row({"state": "idle", "supervisor_pid": 42})

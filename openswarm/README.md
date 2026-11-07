@@ -561,6 +561,23 @@ last activity time. The check is backend independent, so pi, codex, agy and copi
 `lane.provider_request_log` in `policy.local.json` (or `OPENSWARM_PROVIDER_REQUEST_LOG`) points at a broker
 request log used as the provider activity signal; without it only child events count.
 
+A lane *server* has to answer as well. A Codex app-server can stop answering while its process and the lane
+serve process are still alive: new sessions never start, and the only visible symptom is a run that fails
+without a commit (the 2026-11-02 CX9 incident). `lane serve` therefore asks its app-server whether it still
+answers, every `lane.server_probe.interval_s` seconds (default 120; `0` turns the probe off). The request is
+the `initialize` handshake (`lane.server_probe.method` picks another JSON-RPC method); a JSON-RPC error still
+counts as an answer, because only a missing answer means a wedged server. A server that misses
+`lane.server_probe.failures` probes in a row (default 3, `timeout_s` default 20) counts as wedged: the lane
+restarts it and writes a brain log line with the lane, the uptime of the server before the restart, and the
+basis of the decision. The fresh server is then verified with an empty run (a new thread and a minimal turn),
+because a server that answers but cannot start a session any more is exactly the CX9 failure. Only a verified
+server lets the lane take work again. A lane that fails the verification keeps the state `server_wedged`,
+refuses new assignments, and stays that way until an empty run works again; the alert is in the lane state and
+in the brain log. `lane status` reports the probe of every codex lane under `server_probe` (`alive`,
+`last_success_at`, `restarts`, `failures`, `last_error`). The brain log line goes to
+`$OPENSWARM_HOME/lanes/<name>/brain.log`, and to the file `lane.brain_log` names in `policy.local.json` when
+that is set.
+
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
 ```bash
