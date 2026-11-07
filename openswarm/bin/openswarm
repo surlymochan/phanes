@@ -3502,11 +3502,17 @@ def classify_lane_failure(text, model=None, risk_blocks=False):
     return ("risk_blocked" if risk_blocks else "exec_error"), text
 
 
+# The lease heartbeat writes the status of a run from its own thread, so the
+# read-modify-write of one status file is serialized inside the process.
+_STATUS_LOCK = threading.Lock()
+
+
 def set_status(rdir, **kw):
-    s = jload(f"{rdir}/status.json", {}) or {}
-    s.update(kw)
-    s["updated"] = NOW()
-    jsave(f"{rdir}/status.json", s)
+    with _STATUS_LOCK:
+        s = jload(f"{rdir}/status.json", {}) or {}
+        s.update(kw)
+        s["updated"] = NOW()
+        jsave(f"{rdir}/status.json", s)
 
 
 def concurrency_keys(backend, provider=None):
@@ -3604,6 +3610,263 @@ def fleet_recovery_poll_seconds(policy):
 # A resident lane keeps one executor child alive between turns, so a live child
 # never proves that the reservation of a finished run is still in use.
 FLEET_TERMINAL_RUN_STATES = ("finished", "failed", "unroutable", "dry-run", "dead")
+
+
+# A reservation is a lease: the owning host renews it while its run lives and the
+# coordinator reclaims it when the lease expires.  A crashed or lost run therefore
+# cannot hold a slot forever, and the reclaim does not depend on any termination
+# path (Refs #1792, docs/design/issue-34-authoritative-recovery.md).
+FLEET_LEASE_TIERS = ((5, 600), (15, 1200), (45, 2700))
+FLEET_LEASE_DEFAULT_TTL = 900
+FLEET_LEASE_GRACE = 300
+FLEET_LEASE_RENEW_INTERVAL = 60
+# The executor of a run stops this many seconds before the lease may expire: the
+# coordinator may hand the slot to another run at the expiry, so the executor of
+# the old run has to be gone before it.
+FLEET_LEASE_STOP_MARGIN = 5
+# The timeout of one renewal call.  It never outlives the deadline of the lease.
+FLEET_LEASE_RENEW_TIMEOUT = 15
+_FLEET_LEASE_HEARTBEATS = {}
+
+
+def fleet_lease_settings(policy):
+    """The lease TTL and the heartbeat period of ``fleet.lease`` in the policy."""
+    lease = ((policy or {}).get("fleet") or {}).get("lease")
+    if not isinstance(lease, dict):
+        lease = {}
+
+    def positive(value, fallback, name):
+        if value is None:
+            return fallback
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            raise ValueError(f"fleet.lease.{name} must be a positive finite number")
+        return float(value)
+
+    tiers = []
+    for item in lease.get("tiers") or []:
+        if isinstance(item, dict):
+            budget, ttl = item.get("budget_minutes"), item.get("ttl_seconds")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            budget, ttl = item
+        else:
+            raise ValueError("fleet.lease.tiers must be budget/ttl pairs")
+        if (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0
+                or isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0):
+            raise ValueError("fleet.lease.tiers must be budget/ttl pairs")
+        tiers.append((float(budget), float(ttl)))
+    if not tiers:
+        tiers = [(float(budget), float(ttl)) for budget, ttl in FLEET_LEASE_TIERS]
+    return {"ttl_seconds": positive(lease.get("ttl_seconds"), None, "ttl_seconds"),
+            "default_ttl_seconds": positive(lease.get("default_ttl_seconds"),
+                                            FLEET_LEASE_DEFAULT_TTL, "default_ttl_seconds"),
+            "grace_seconds": positive(lease.get("budget_grace_seconds"),
+                                      FLEET_LEASE_GRACE, "budget_grace_seconds"),
+            "renew_interval_seconds": positive(lease.get("renew_interval_seconds"),
+                                               FLEET_LEASE_RENEW_INTERVAL, "renew_interval_seconds"),
+            "stop_margin_seconds": positive(lease.get("stop_margin_seconds"),
+                                            FLEET_LEASE_STOP_MARGIN, "stop_margin_seconds"),
+            "tiers": sorted(tiers)}
+
+
+def fleet_lease_ttl_seconds(policy, budget_minutes=None):
+    """The lease TTL of a run: its budget tier by default, an explicit value if set.
+
+    The tier keeps a long run from losing its slot while it works, and the
+    heartbeat covers the gap between two renewals.
+    """
+    settings = fleet_lease_settings(policy)
+    if settings["ttl_seconds"] is not None:
+        return settings["ttl_seconds"]
+    if (isinstance(budget_minutes, bool) or not isinstance(budget_minutes, (int, float))
+            or budget_minutes <= 0):
+        return settings["default_ttl_seconds"]
+    for budget, ttl in settings["tiers"]:
+        if budget_minutes <= budget:
+            return ttl
+    return float(budget_minutes) * 60 + settings["grace_seconds"]
+
+
+def fleet_lease_renew_interval(policy, ttl_seconds):
+    """The heartbeat period: at most a third of the TTL, so one lost call is not fatal."""
+    settings = fleet_lease_settings(policy)
+    return max(0.2, min(settings["renew_interval_seconds"], float(ttl_seconds) / 3.0))
+
+
+def fleet_lease_budget_minutes(rdir):
+    """The budget of a run, which selects its lease TTL tier."""
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    budget = status.get("budget_minutes")
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
+        return None
+    return float(budget)
+
+
+def fleet_lease_run_alive(rdir, run_id):
+    """Whether the run behind a lease still works.
+
+    A terminal run and a lane which already moved on are both over: their lease
+    has to expire instead of being renewed, so the slot returns to the pool.
+    """
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    if status.get("state") in FLEET_TERMINAL_RUN_STATES:
+        return False
+    return not fleet_lane_moved_on(status.get("lane"), run_id)
+
+
+class FleetLeaseHeartbeat:
+    """Renews the lease of one live run until the run stops or the lease is lost."""
+
+    def __init__(self, rdir, command, payload, policy):
+        self.rdir = os.path.realpath(rdir)
+        self.command = command
+        self.payload = payload
+        self.ttl = float(payload.get("ttl_seconds") or FLEET_LEASE_DEFAULT_TTL)
+        self.interval = fleet_lease_renew_interval(policy, self.ttl)
+        settings = fleet_lease_settings(policy)
+        # The margin covers the time the stop of the executor needs: the run has
+        # to be gone before the coordinator may hand its slot to another run.
+        self.margin = min(settings["stop_margin_seconds"], self.ttl / 3.0)
+        self.stopped = threading.Event()
+        self.thread = None
+        # The last answer of the coordinator which the run could not use: it
+        # names the reason why the lease could not be renewed.
+        self.last_error = None
+        # The conservative deadline of the lease: the earliest moment at which the
+        # coordinator may reclaim the slot.  The coordinator computes the expiry
+        # from its own clock when it processes the request, so the lease lasts at
+        # least from the start of the request.  The response latency and a clock
+        # skew may only make the real expiry earlier, never later.
+        acquired_at = payload.get("lease_acquired_at")
+        if isinstance(acquired_at, bool) or not isinstance(acquired_at, (int, float)):
+            acquired_at = time.monotonic()
+        self.deadline = acquired_at + self.ttl
+
+    def start(self):
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._run, name="fleet-lease", daemon=True)
+        self.thread.start()
+
+    def stop(self, timeout=5):
+        self.stopped.set()
+        thread, self.thread = self.thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+
+    def lose(self, reason):
+        """The lease is gone: the run must not use capacity it does not own.
+
+        The coordinator may hand the same slot to another run, so the executor
+        of this run is stopped instead of running next to it (fail closed).
+        """
+        set_status(self.rdir, fleet_lease_lost_at=NOW(), fleet_lease_state="lost",
+                   fleet_lease_error=short(reason, 250))
+        stop_fleet_lease_lost_executor(self.rdir)
+    def _stop_at(self):
+        """The moment at which the lease can no longer be proven."""
+        return self.deadline - self.margin
+
+    def _renew_timeout(self):
+        """The timeout of one renewal: it never outlives the deadline of the lease."""
+        remaining = self._stop_at() - time.monotonic()
+        return max(0.1, min(FLEET_LEASE_RENEW_TIMEOUT, remaining))
+
+    def _run(self):
+        try:
+            self._renew_loop()
+        finally:
+            # The heartbeat of a run which ended or lost its lease is gone.
+            if _FLEET_LEASE_HEARTBEATS.get(self.rdir) is self:
+                _FLEET_LEASE_HEARTBEATS.pop(self.rdir, None)
+
+    def _renew(self):
+        """Renew the lease and move its conservative deadline forward."""
+        started = time.monotonic()
+        answer = fleet_guard_call(self.command, {
+            "op": "renew", "token": self.payload.get("token"),
+            "run_id": self.payload.get("run_id"),
+            "ttl_seconds": self.payload.get("ttl_seconds")}, timeout=self._renew_timeout())
+        # The lease lasts from the moment the coordinator processed the request:
+        # the response latency may only make the real expiry earlier.
+        self.deadline = started + self.ttl
+        set_status(self.rdir, fleet_lease_deadline_at=NOW() + (self.deadline - time.monotonic()))
+        return answer
+
+    def _renew_loop(self):
+        while not self.stopped.is_set():
+            now = time.monotonic()
+            if now >= self._stop_at():
+                # The lease cannot be proven any more: the run must not keep a
+                # slot which the coordinator may hand to another run.
+                if self.last_error:
+                    self.lose("coordinator unreachable beyond the lease deadline: %s" % self.last_error)
+                else:
+                    self.lose("the lease could not be renewed before its deadline")
+                break
+            # Wake up in time to stop the executor before the deadline passes.
+            wait = min(self.interval, max(0.05, self._stop_at() - now))
+            if self.stopped.wait(wait):
+                break
+            if not fleet_lease_run_alive(self.rdir, self.payload.get("run_id")):
+                break
+            try:
+                answer = self._renew()
+            except RuntimeError as error:
+                # Fail closed: the reservation stays and the renewal is retried.
+                # A renewal which fails until the deadline cannot prove the
+                # lease any more, so the run stops before the coordinator hands
+                # the same slot to another run.
+                self.last_error = short(str(error), 250)
+                set_status(self.rdir, fleet_lease_error=self.last_error)
+                continue
+            if not answer.get("renewed"):
+                # The coordinator already reclaimed the lease: it is not resurrected.
+                self.lose(answer.get("reason") or "lease lost")
+                break
+            self.last_error = None
+            set_status(self.rdir, fleet_lease_error=None, fleet_lease_state="held",
+                       fleet_lease_renewed_at=NOW(), fleet_lease_expires_at=answer.get("expires_at"))
+
+
+def start_fleet_lease_heartbeat(rdir, command, payload, policy):
+    """Start the heartbeat of one reservation."""
+    stop_fleet_lease_heartbeat(rdir)
+    heartbeat = FleetLeaseHeartbeat(rdir, command, payload, policy)
+    _FLEET_LEASE_HEARTBEATS[os.path.realpath(rdir)] = heartbeat
+    heartbeat.start()
+    return heartbeat
+
+
+def stop_fleet_lease_heartbeat(rdir):
+    """Stop the heartbeat of one reservation."""
+    heartbeat = _FLEET_LEASE_HEARTBEATS.pop(os.path.realpath(rdir), None)
+    if heartbeat is not None:
+        heartbeat.stop()
+    return heartbeat
+
+
+def stop_fleet_lease_lost_executor(rdir):
+    """Stop the executor of a run whose lease was lost.
+
+    The run keeps working without a reservation while the coordinator may hand
+    the same slot to another run: the real concurrency would exceed the cap.
+    The recorded groups are stopped, the identity of the run is checked first.
+    """
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    pid = status.get("executor_pid")
+    if pid_alive(pid):
+        if not recorded_executor_identity_matches(status):
+            set_status(rdir, fleet_lease_error="lease lost; executor identity cannot be confirmed")
+            return False
+        record_executor_descendants(rdir, pid)
+    for record in recorded_executor_records(rdir):
+        if not process_group_alive(record.get("pgid")):
+            continue
+        if not recorded_executor_group_matches(record):
+            continue
+        kill_tree(record["pid"], grace=0.2)
+    return executor_stopped(rdir)
 
 
 def fleet_run_terminal_result(rdir, status):
@@ -3718,20 +3981,45 @@ def recover_expired_fleet_slots(command, policy, max_candidates=None, call_timeo
             if not latest.get("fleet_reservation_error"):
                 set_status(rdir, fleet_reservation_error="retained after TTL: executor process group is still live")
             continue
+        # The owner frees its own dead reservation with the exact token.  The
+        # coordinator's `recover` op is the cross-host repair path and only
+        # accepts an expired lease; the automatic reclaim of a lease which nobody
+        # renews does not depend on this path at all.
+        token = status.get("fleet_reservation_token")
+        if not (isinstance(token, str) and len(token) == 32):
+            # A record without a token (a run admitted before the lease rollout)
+            # cannot address its reservation by token.  The coordinator knows the
+            # token of the reservation of the run its owner owns.
+            try:
+                answer = fleet_guard_call(command, {"op": "token", "run_id": run_id},
+                                          timeout=call_timeout)
+            except RuntimeError as error:
+                set_status(rdir, fleet_reservation_error=str(error))
+                continue
+            token = answer.get("token")
+            if not (isinstance(token, str) and len(token) == 32):
+                # The coordinator holds no reservation for this run: its lease
+                # expired and the coordinator reclaimed it.  The slot is free.
+                set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="lease-expired",
+                           fleet_reservation_error=None, fleet_reservation_token=None,
+                           fleet_reservation_pending=None)
+                recovered.append(run_id)
+                continue
         try:
-            answer = fleet_guard_call(command, {"op": "recover", "host": owner, "run_id": run_id,
-                                                "confirm": "runner-and-executors-stopped-after-ttl"}, timeout=call_timeout)
+            answer = fleet_guard_call(command, {"op": "release", "token": token, "run_id": run_id},
+                                      timeout=call_timeout)
         except RuntimeError as error:
             set_status(rdir, fleet_reservation_error=str(error))
             continue
-        if answer.get("recovered"):
+        if answer.get("released"):
             set_status(rdir, fleet_recovered_at=now, fleet_reservation_error=None,
                        fleet_reservation_token=None, fleet_reservation_pending=None)
             recovered.append(run_id)
         else:
-            # The coordinator definitely has no matching row.  Keeping the local token would
-            # retry an already-resolved uncertain admission forever, so mark the checked result.
-            set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="not-found",
+            # The coordinator has no matching row: its lease expired and the
+            # coordinator reclaimed it.  Keeping the local token would retry an
+            # already-resolved admission forever, so mark the checked result.
+            set_status(rdir, fleet_recovered_at=now, fleet_recovery_outcome="lease-expired",
                        fleet_reservation_error=None, fleet_reservation_token=None,
                        fleet_reservation_pending=None)
     return recovered
@@ -3754,6 +4042,9 @@ def lane_recover_expired_fleet_slots(lane, policy):
 
 
 def release_fleet_slot(rdir, *, confirmed=False, pending_release=None, guard_command=None):
+    # The lease of a released reservation is not renewed any more: the slot is
+    # free from now on, whether or not the coordinator answered.
+    stop_fleet_lease_heartbeat(rdir)
     item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
     if pending_release is not None:
@@ -3824,8 +4115,11 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
     token = uuid.uuid4().hex
+    # The lease TTL follows the budget tier of the run: a long run keeps its slot
+    # between two renewals, a short one releases it sooner.
+    ttl = fleet_lease_ttl_seconds(policy, fleet_lease_budget_minutes(rdir))
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
-               "backend": backend, "provider": provider}
+               "backend": backend, "provider": provider, "ttl_seconds": ttl}
     next_recovery = NOW()
     while True:
         # The first attempt can precede the TTL; retry recovery while queued so it is not stranded
@@ -3872,15 +4166,32 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                     set_status(rdir, fleet_host=fleet_guard_host(command), fleet_reserved_at=NOW(),
                                fleet_reservation_token=token, fleet_reservation_pending=True,
                                fleet_reservation_error=None)
+                    acquired_at = time.monotonic()
                     try:
-                        admitted = bool(fleet_guard_call(command, payload).get("admitted"))
+                        answer = fleet_guard_call(command, payload)
+                        admitted = bool(answer.get("admitted"))
+                        expires_at = answer.get("expires_at")
                     except RuntimeError as error:
                         admitted = False
                         uncertain_admission = True
+                        expires_at = None
                         set_status(rdir, fleet_reservation_error=str(error))
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
                     set_status(rdir, fleet_reservation_pending=None)
+                    # The lease of the reservation: the heartbeat keeps it alive
+                    # while the run works and the coordinator reclaims it when the
+                    # run stops renewing it.
+                    set_status(rdir, fleet_lease_ttl_seconds=ttl, fleet_lease_renewed_at=NOW(),
+                               fleet_lease_state="held",
+                               fleet_lease_expires_at=expires_at if isinstance(expires_at, (int, float))
+                               else NOW() + ttl)
+                    # The heartbeat counts the lease from the start of the request
+                    # which took the slot: the coordinator may reclaim it earlier
+                    # than the client believes.
+                    lease_payload = dict(payload)
+                    lease_payload["lease_acquired_at"] = acquired_at
+                    start_fleet_lease_heartbeat(rdir, command, lease_payload, policy)
                 elif command and not uncertain_admission:
                     # A definite rejection cannot have created a coordinator reservation.
                     set_status(rdir, fleet_host=None, fleet_reserved_at=None,
@@ -4644,12 +4955,90 @@ def recorded_executor_identity_matches(status):
                 and process_identity(pid) == identity)
 
 
+def process_exited(pid):
+    """Whether the process already exited, even if nobody reaped it yet.
+
+    A zombie holds no resources: it cannot work and cannot use a capacity slot.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+            fields = stream.read().rsplit(")", 1)[1].split()
+    except (OSError, ValueError, TypeError, IndexError):
+        return False
+    return bool(fields) and fields[0] == "Z"
+
+
+def process_orphan(pid):
+    """Whether the exited process is an orphan which nobody will reap.
+
+    A child of this process is reaped as soon as it is waited for, so its slot
+    stays reserved until then.  An orphan which already exited and which no
+    parent will ever reap holds no resources for ever: it cannot use a
+    capacity slot any more, and a slot it keeps would be a ghost reservation.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as stream:
+            fields = stream.read().rsplit(")", 1)[1].split()
+    except (OSError, ValueError, TypeError, IndexError):
+        return False
+    try:
+        parent = int(fields[1])
+    except (ValueError, IndexError):
+        return False
+    return parent > 0 and parent != os.getpid()
+
+
+def process_group_has_live_member(pgid):
+    """Whether a process group still holds a process which can work.
+
+    A zombie member of the group holds no resources, so a group whose members
+    all exited counts as gone.  Without /proc (macOS) the liveness of the group
+    is the only signal available.
+    """
+    try:
+        target = int(pgid)
+    except (TypeError, ValueError):
+        return False
+    if not os.path.isdir("/proc"):
+        return process_group_alive(pgid)
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return process_group_alive(pgid)
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+        except (OSError, ValueError):
+            continue
+        if len(fields) < 3 or fields[0] == "Z":
+            continue
+        try:
+            if int(fields[2]) == target:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def recorded_process_working(record):
+    """Whether a recorded executor process can still work.
+
+    A process which exited and which nobody will reap holds no resources and
+    cannot use a capacity slot; only a live member of its process group can.
+    """
+    pid, pgid = record.get("pid"), record.get("pgid")
+    if pid and pid_alive(pid):
+        if not (process_exited(pid) and process_orphan(pid)):
+            return True
+    return bool(pgid) and process_group_has_live_member(pgid)
+
+
 def executor_stopped(rdir):
     """A failure may release capacity only after every recorded executor group has gone."""
-    for record in recorded_executor_records(rdir):
-        if pid_alive(record.get("pid")) or process_group_alive(record.get("pgid")):
-            return False
-    return True
+    return not any(recorded_process_working(record) for record in recorded_executor_records(rdir))
 
 
 def stop_orphaned_executor(rdir):
@@ -8570,6 +8959,8 @@ class LaneChild:
         self.proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True,
                                      env=child_env)
+        # Whether the executor closed its output: it is on its way out then.
+        self.stdout_closed = False
         try:
             self.pgid = os.getpgid(self.proc.pid)
         except OSError:
@@ -8611,6 +9002,7 @@ class LaneChild:
                 except ValueError:
                     continue
         finally:
+            self.stdout_closed = True
             self.events.put(None)
 
     def alive(self):
@@ -8666,6 +9058,15 @@ class LaneChild:
     def close(self):
         if self.proc is None:
             return
+        if self.stdout_closed:
+            # The executor closed its output: it is on its way out and a
+            # descendant of its group may still work.  Reap the executor
+            # instead of killing its group, so the group stays recorded for the
+            # recovery path which stops it with the confirmed identity.
+            try:
+                self.proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
         if self.alive():
             kill_tree(self.proc.pid, grace=1)
         try:
@@ -10469,16 +10870,18 @@ def cmd_lane_down(args):
         name = lane["name"]
         state = jload(lane_state_path(name), {}) or {}
         pid = state.get("supervisor_pid")
-        if not pid or not pid_alive(pid):
+        # A supervisor which already exited (a zombie nobody reaped yet) is down.
+        if not pid or not pid_alive(pid) or process_exited(pid):
             results.append({"name": name, "stopped": False, "state": "down"})
             continue
         response = lane_call(name, {"op": "down"}, timeout=10)
         deadline = NOW() + 40
-        while pid_alive(pid) and NOW() < deadline:
+        while pid_alive(pid) and not process_exited(pid) and NOW() < deadline:
             time.sleep(0.1)
-        if pid_alive(pid):
+        if pid_alive(pid) and not process_exited(pid):
             kill_tree(pid, grace=1)
-        results.append({"name": name, "stopped": True, "clean": not pid_alive(pid), "response": response})
+        results.append({"name": name, "stopped": True,
+                        "clean": not pid_alive(pid) or process_exited(pid), "response": response})
     print(json.dumps({"lanes": results}, indent=2, ensure_ascii=False))
 
 

@@ -933,6 +933,47 @@ The forced command pins the authenticated owner; OpenSwarm also records the fina
 not infer ownership from an SSH alias or expose the fleet-control key/socket to
 an executor sandbox.
 
+A reservation is a lease: the owning host renews it while its run lives, and the
+coordinator reclaims an expired lease on its own, so a crashed or lost run cannot
+hold a slot forever. `fleet.lease` in `policy.json` maps the budget of a run in
+minutes to its lease TTL in seconds (`tiers`), sets the TTL of a run without a
+known budget (`default_ttl_seconds`), the heartbeat period
+(`renew_interval_seconds`, at most a third of the TTL) and the time before the
+expiry in which a run stops its executor (`stop_margin_seconds`). The reclaim
+does not depend on a run's termination path; every reclaim is recorded in
+`lease-audit.jsonl` next to the coordinator database.
+
+The coordinator reclaims without a request, and the sweeper belongs to the
+deployment of the coordinator: the first request starts `fleet-capacity
+--sweep-loop <host>` next to the coordinator database, so an expired lease is
+swept every `lease.sweep_interval_seconds` of `topology.json` (30 seconds by
+default, `OPENSWARM_FLEET_CAPACITY_SWEEP_INTERVAL` overrides it) even while the
+coordinator stays idle. The sweeper holds `sweep.lock` next to the database, so
+only one of them sweeps a coordinator, and it leaves with the coordinator
+database. `OPENSWARM_FLEET_CAPACITY_SWEEP=0` switches it off for a host which
+supervises the sweep itself (a systemd timer or the host supervisor running
+`fleet-capacity --sweep-loop <host>`). The sweep runs in the coordinator
+transaction, so the audit trail of a reclaim is written with it;
+`fleet-capacity <host>` with `{"op": "audit"}` reads the trail of the committed
+transactions, also when the JSONL mirror could not be written.
+
+A reservation which predates the lease rollout has no expiry of its own: the
+coordinator gives it a fallback expiry at its creation
+(`lease.legacy_ttl_seconds`, one hour by default), which covers the longest run
+a client may hold, so a live old run keeps its slot while the fleet rolls out
+and an old ghost is reclaimed with the same rule. A renewal never shortens a
+lease, so a new client which adopts an old reservation cannot cut its window
+short.
+
+A run which cannot prove its lease any more stops its executor instead of
+running on capacity it does not own. The client counts the lease from the start
+of the request which took the slot: the coordinator computes the expiry from its
+own clock, so the response latency and a clock skew may only make the real
+expiry earlier, never later. The executor therefore stops `stop_margin_seconds`
+before that deadline, and a renewal call never outlives it. A network outage
+longer than the TTL thus ends the run before the coordinator may hand its slot
+to another run.
+
 `risk.enforce` defaults to `["push", "publish", "secret print", "rm outside worktree", "sudo", "computer use"]`.
 The runner stops one-shot executors or aborts lane turns on matching command events,
 without requiring `watch`. Results include `status: stopped`, `error_class: risk_blocked`
