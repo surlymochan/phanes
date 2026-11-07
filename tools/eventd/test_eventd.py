@@ -56,6 +56,37 @@ class EventdTest(unittest.TestCase):
             with mock.patch.dict('os.environ', {'OPENAI_API_KEY': 'test'}):
                 self.assertEqual(eventd.decide('openai', 'x', [], 1, 'model')[0], 'wake')
 
+    def test_openai_effort_and_fallback_audit(self):
+        self.args.backend = 'openai'
+        self.args.model = 'gpt-6-luna'
+        self.args.effort = 'high'
+        self.add('[lane] RISK: review')
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({'output': [{'content': [{'type': 'output_text', 'text': json.dumps({'action': 'wake', 'reason': 'review', 'urgency': 'now'})}]}], 'usage': {'total_tokens': 20}}).encode()
+        with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}), mock.patch('eventd.urllib.request.urlopen', side_effect=[TimeoutError(), response]) as request:
+            eventd.wait_once(self.db, self.data, 'one', self.args)
+        payloads = [json.loads(call.args[0].data) for call in request.call_args_list]
+        self.assertEqual([(p['model'], p['reasoning']['effort']) for p in payloads], [('gpt-6-luna', 'high'), ('gpt-6.1-terra', 'medium')])
+        record = json.loads((self.data / 'decisions.jsonl').read_text())
+        self.assertEqual((record['model'], record['effort'], record['fallback']), ('gpt-6.1-terra', 'medium', True))
+
+    def test_default_model_and_effort(self):
+        with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}, clear=True), mock.patch('eventd.check_config', side_effect=lambda args: self.assertEqual((args.model, args.effort), ('gpt-6-luna', 'high'))), mock.patch('eventd.ingest', side_effect=KeyboardInterrupt):
+            self.assertEqual(eventd.main(['--data-dir', str(self.data), 'serve']), 0)
+
+    def test_invalid_json_retries_then_wakes(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'not json'
+        info = {}
+        with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}), mock.patch('eventd.urllib.request.urlopen', return_value=response) as request:
+            action, reason, _, _ = eventd.decide('openai', 'x', [], 1, audit_info=info)
+        self.assertEqual(action, 'wake')
+        self.assertIn('decision unavailable', reason)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(info, {'model': 'gpt-6.1-terra', 'effort': 'medium', 'fallback': True})
+
     def test_defer_silence_and_consumer_cursor(self):
         self.add('[lane] RISK: something')
         self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
