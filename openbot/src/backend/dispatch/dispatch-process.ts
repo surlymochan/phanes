@@ -76,7 +76,7 @@ export function assertDispatchArgs(
 }
 
 export interface DispatchFileTransport {
-  kind: "ssh" | "instabox";
+  kind: "ssh";
   destination: string;
 }
 
@@ -89,9 +89,7 @@ function remotePythonCommand(source: string, args: readonly string[] = []): stri
 }
 
 function transportArgs(transport: DispatchFileTransport, command: string): [string, string[]] {
-  return transport.kind === "ssh"
-    ? ["ssh", [transport.destination, "--", command]]
-    : ["instabox", ["ssh", transport.destination, "--", command]];
+  return ["ssh", [transport.destination, "--", command]];
 }
 
 const remoteCardPathPattern = /^\/tmp\/openbot-dispatch-[A-Za-z0-9_-]+\.md$/u;

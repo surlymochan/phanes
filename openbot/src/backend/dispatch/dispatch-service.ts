@@ -73,9 +73,8 @@ const fleetSchema = Schema.Struct({
   hosts: Schema.Array(
     Schema.Struct({
       name: identifier,
-      kind: Schema.optional(Schema.Literals(["local", "ssh", "instabox"])),
+      kind: Schema.optional(Schema.Literals(["local", "ssh"])),
       ssh: Schema.optional(Schema.String),
-      box: Schema.optional(Schema.String),
       repos: Schema.optional(Schema.Record(Schema.String, Schema.String)),
     }),
   ),
@@ -499,7 +498,6 @@ export class DispatchService {
 
   #dispatchFileTransport(host: DispatchFleet["hosts"][number] | undefined): DispatchFileTransport | null {
     if (host?.kind === "ssh" && host.ssh) return { kind: "ssh", destination: host.ssh };
-    if (host?.kind === "instabox" && host.box) return { kind: "instabox", destination: host.box };
     return null;
   }
 
