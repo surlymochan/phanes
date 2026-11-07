@@ -4618,6 +4618,162 @@ def record_adopted_orphans(rdir, exclude=()):
     return found
 
 
+ZOMBIE_WARN_DEFAULT = 200
+# The host's zombie count reads the whole process table, so it is polled rarely.
+LANE_ZOMBIE_POLL_SECONDS = 30
+
+
+def lane_reap_zombies(child=None):
+    """Reap the dead children of this supervisor, the adopted orphans included.
+
+    The lane supervisor is a Linux subreaper, so an orphan of the executor is reparented
+    to it.  A `git` command leaves such an orphan behind when git detaches its own
+    background work (`git gc --auto` forks a background `git gc` and returns at once),
+    and that orphan is never waited for by its new parent.  The dead child then stays a
+    zombie until the next reboot and fills the host's process table; a new `git` on that
+    host fails with "unable to create threaded lstat" (Refs #1817).
+
+    The resident executor is not reaped here: its exit status belongs to the child
+    object, so the status is handed back to that object instead.
+    """
+    proc = getattr(child, "proc", None)
+    reaped = 0
+    while True:
+        try:
+            pid, status = os.waitpid(-1, os.WNOHANG)
+        except OSError:
+            break
+        if pid == 0:
+            break
+        reaped += 1
+        if proc is not None and getattr(proc, "pid", None) == pid:
+            # The resident executor owns its own exit status: hand it back to the child
+            # object instead of dropping it, so `child.alive()` still reports the crash.
+            try:
+                proc.returncode = os.waitstatus_to_exitcode(status)
+            except (AttributeError, ValueError, OSError):
+                proc.returncode = 0
+    return reaped
+
+
+def lane_idle_poll(child=None):
+    """One idle poll of the lane supervisor.
+
+    It reaps the dead children, so an idle lane never accumulates zombies.  The
+    supervisor adopts the orphans of the executor (see :func:`lane_reap_zombies`), and
+    without this the zombies pile up until the host runs out of process slots.
+    """
+    return lane_reap_zombies(child)
+
+
+def lane_child_wakeup():
+    """The wakeup pipe of the SIGCHLD of the supervisor, or None.
+
+    The supervisor is a Linux subreaper, so it adopts the orphans of the executor (see
+    :func:`lane_reap_zombies`).  Without a wakeup the supervisor learns about a dead
+    child only at its next poll, so the orphan sits in the process table as a zombie
+    until then.  The SIGCHLD wakeup ends that window at the loop iteration, so an idle
+    lane holds no zombie at all (Refs #1817).
+
+    The pipe is a fallback-free extra: when the platform refuses the wakeup, the
+    supervisor keeps polling as before.
+    """
+    try:
+        read_sock, write_sock = socket.socketpair()
+    except (OSError, AttributeError):
+        return None
+    try:
+        write_sock.setblocking(False)
+        signal.set_wakeup_fd(write_sock.fileno())
+        previous = signal.signal(signal.SIGCHLD, lambda *_: None)
+        return {"read": read_sock, "write": write_sock, "previous": previous}
+    except (ValueError, OSError, AttributeError):
+        for sock in (read_sock, write_sock):
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return None
+
+
+def lane_drain_wakeup(wakeup):
+    """Read the wakeup bytes of the SIGCHLD pipe."""
+    try:
+        while wakeup["read"].recv(4096, socket.MSG_DONTWAIT):
+            pass
+    except (BlockingIOError, OSError):
+        pass
+
+
+def lane_close_wakeup(wakeup):
+    """Restore the signal state of the supervisor and close the wakeup pipe."""
+    if not wakeup:
+        return
+    try:
+        signal.set_wakeup_fd(-1)
+    except (ValueError, OSError):
+        pass
+    try:
+        signal.signal(signal.SIGCHLD, wakeup.get("previous") or signal.SIG_DFL)
+    except (ValueError, OSError, TypeError):
+        pass
+    for key in ("read", "write"):
+        try:
+            wakeup[key].close()
+        except (KeyError, OSError):
+            pass
+
+
+def lane_serve_poll(child=None, name=None, policy=None, zombie_check=False):
+    """One poll of the lane supervisor: the path every idle lane serve walks.
+
+    It reaps the dead children of the supervisor (the adopted orphans of the executor
+    included), so an idle lane keeps no zombie; without it the zombies of every
+    detached `git` pile up until the host runs out of process slots and a new `git`
+    fails with "unable to create threaded lstat" (Refs #1817).
+
+    ``zombie_check`` also records the host's zombie count in the lane state and warns
+    above the threshold.  The serve loop asks for it on its own slow interval, because
+    the count reads the whole process table.
+    """
+    reaped = lane_idle_poll(child)
+    count, warning = None, None
+    if zombie_check and name:
+        count, warning = lane_record_zombie_state(name, policy)
+    return {"reaped": reaped, "zombie_count": count, "zombie_warning": warning}
+
+
+def host_zombie_count():
+    """The number of zombie (Z) processes on this host."""
+    rc, out, _ = sh(["ps", "-eo", "stat="])
+    if rc:
+        return 0
+    return sum(1 for line in out.splitlines() if line.strip().startswith("Z"))
+
+
+def lane_zombie_warn_threshold(policy=None):
+    """The number of zombie processes on the host that makes a lane report a warning."""
+    policy = policy if isinstance(policy, dict) else load_policy()
+    policy_lane = policy.get("lane")
+    value = policy_lane.get("zombie_warn_count", ZOMBIE_WARN_DEFAULT) if isinstance(policy_lane, dict) \
+        else ZOMBIE_WARN_DEFAULT
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return ZOMBIE_WARN_DEFAULT
+    return value
+
+
+def lane_record_zombie_state(name, policy=None):
+    """Record the host's zombie count in the lane state and warn above the threshold."""
+    count = host_zombie_count()
+    threshold = lane_zombie_warn_threshold(policy)
+    warning = None
+    if count >= threshold:
+        warning = (f"host has {count} zombie processes (threshold {threshold}); "
+                   "a lane supervisor is leaking unreaped children")
+    lane_write_state(name, zombie_count=count, zombie_warning=warning, zombie_checked_at=NOW())
+    return count, warning
+
+
 def recorded_executor_records(rdir):
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
     records = [{"pid": status.get("executor_pid"), "pgid": status.get("executor_pgid"),
@@ -10197,13 +10353,16 @@ def cmd_lane_serve(lane, policy):
     name = lane["name"]
     lane_become_subreaper()
     server = lane_ctl_listener(name)
+    wakeup = lane_child_wakeup()
     current, child = {}, None
     started, backoff, next_start = NOW(), 1, 0
     next_codex_check = NOW()
     next_fleet_recovery = NOW()
+    next_zombie_check = NOW()
+    zombies_reaped = 0
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
-                     started=started, last_error=None, resolved_model=None)
+                     started=started, last_error=None, resolved_model=None, zombies_reaped=0)
     try:
         lane_apply_environment(lane)
     except RuntimeError as error:
@@ -10283,6 +10442,18 @@ def cmd_lane_serve(lane, policy):
                              last_error="resident executor process exited")
             next_start = NOW() + backoff
             backoff = min(backoff * 2, 60)
+        # The supervisor is a Linux subreaper and adopts the orphans of the executor, so it
+        # reaps the dead children on every poll.  Without it an idle lane keeps the zombies
+        # of every detached `git` until the host runs out of process slots (Refs #1817).
+        if NOW() >= next_zombie_check:
+            next_zombie_check = NOW() + LANE_ZOMBIE_POLL_SECONDS
+            # The live policy carries the threshold, so a new value applies without a restart.
+            polled = lane_serve_poll(child, name, load_policy(), zombie_check=True)
+        else:
+            polled = lane_serve_poll(child)
+        # The lane state counts the dead children this supervisor has reaped, so an idle
+        # lane shows that it collects its orphans instead of leaking them (Refs #1817).
+        zombies_reaped += polled["reaped"]
         if child is None and NOW() >= next_start:
             try:
                 wt = os.path.join(lane_root(name), "wt")
@@ -10340,7 +10511,7 @@ def cmd_lane_serve(lane, policy):
             continue
         if child:
                 lane_write_state(name, state="idle", child_pid=child.pid, current_run=None,
-                                 turn_state=None, concurrency_keys=[])
+                                 turn_state=None, concurrency_keys=[], zombies_reaped=zombies_reaped)
         if child and lane["backend"] == "agy":
             quota_state = jload(lane_state_path(name), {}) or {}
             if (quota_state.get("quota_model") == lane["model"] and
@@ -10350,10 +10521,16 @@ def cmd_lane_serve(lane, policy):
                     lane_write_state(name, quota_model=None, quota_until=None)
         until_recovery = max(0, next_fleet_recovery - NOW())
         timeout = max(0, min(0.5, next_start - NOW(), until_recovery)) if child is None else min(0.5, until_recovery)
+        # The wakeup pipe of the SIGCHLD wakes the supervisor when a child dies, so the
+        # orphan of the executor is reaped at once instead of at the next poll (Refs #1817).
+        watch = [server] + ([wakeup["read"]] if wakeup else [])
         try:
-            ready, _, _ = select.select([server], [], [], timeout)
+            ready, _, _ = select.select(watch, [], [], timeout)
         except Exception:
             ready = []
+        if wakeup and wakeup["read"] in ready:
+            lane_drain_wakeup(wakeup)
+            ready = [item for item in ready if item is not wakeup["read"]]
         if ready:
             # Accept one request. This mirrors lane_control_messages while allowing a newly accepted
             # assignment to be acknowledged before starting its resident turn.
@@ -10362,6 +10539,7 @@ def cmd_lane_serve(lane, policy):
                 shutdown = True
     if child:
         child.close()
+    lane_close_wakeup(wakeup)
     cleanup_executor_tmp(os.path.join(lane_root(name), "wt"))
     lane_write_state(name, state="idle", child_pid=None, supervisor_pid=None, current_run=None,
                      turn_state=None, concurrency_keys=[], stopped=NOW(), last_error=None)
