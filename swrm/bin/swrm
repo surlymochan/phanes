@@ -77,6 +77,10 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+# Resolve the entrypoint itself so invocation through a symlink still finds
+# sibling modules, and SourceFileLoader-based tests get the same import path.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
 import evalid_roles
 
 
