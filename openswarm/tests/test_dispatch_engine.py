@@ -606,6 +606,42 @@ class ReviewGate(Base):
                 d.review_candidates({}, {}, [])
                 self.assertEqual(len(self.runner.called(f"issue edit {number + 1}")), 1)
 
+    def test_the_rebase_cap_parks_the_pr_after_n_main_advances(self):
+        # Refs #1870: a PR that stays CONFLICTING is rebased again on every advance of main.
+        # After N rebase attempts the dispatcher queues none and parks the PR as `needs-human`.
+        p = pr(40, 400, mergeable="CONFLICTING")
+        d = self.make(self.rules([p]))
+        cap = d.rebase_cap()
+        for i in range(cap + 1):
+            d.main_sha = lambda i=i: "%040x" % (i + 1)       # main advances on every tick
+            d.review_candidates({}, {}, [])
+        # N rebase tasks were queued, the N+1'st main advance queues none
+        self.assertEqual(len(self.runner.called("issue edit 400")), cap)
+        self.assertEqual(d.load_reviews()["40"]["rebase_rounds"], cap)
+        # the PR is parked for a human and the reason is written
+        self.assertTrue(self.runner.called("pr edit 40 --add-label needs-human"))
+        self.assertTrue(self.runner.called("pr comment 40"))
+        self.assertEqual(d.load_reviews()["40"]["needs_human_reason"], "rebase_rounds")
+        # a parked PR is not rebased again
+        self.runner.calls.clear()
+        d.main_sha = lambda: "%040x" % (cap + 2)
+        d.review_candidates({}, {}, [])
+        self.assertEqual(self.runner.called("issue edit 400"), [])
+
+    def test_the_rebase_cap_is_lifted_when_the_head_moves(self):
+        # Refs #1870: the label is ours to lift - a human that pushed a new head starts the
+        # count of this PR over.
+        p = pr(41, 401, mergeable="CONFLICTING", head=SHA2, labels=("needs-human",))
+        d = self.make(self.rules([p], reviews={"41": {"rebase_rounds": 3, "needs_human_reason": "rebase_rounds",
+                                                       "needs_human_sha": SHA}}))
+        d.main_sha = lambda: "c" * 40
+        d.review_candidates({}, {}, [])
+        self.assertTrue(self.runner.called("pr edit 41 --remove-label needs-human"))
+        # the PR is rebased again and the count starts over
+        self.assertEqual(len(self.runner.called("issue edit 401")), 1)
+        self.assertEqual(d.load_reviews()["41"]["rebase_rounds"], 1)
+        self.assertIsNone(d.load_reviews()["41"]["needs_human_reason"])
+
     def test_conflict_checked_before_reviewed_skip(self):
         # PR 10 was APPROVED at this head but went CONFLICTING after a sibling merge: it must get a rebase task.
         d = self.make(self.rules([pr(10, 100, mergeable="CONFLICTING")], reviews={"10": {"sha": SHA, "verdict": "APPROVE"}}))
@@ -864,6 +900,26 @@ class RebaseHarvest(Base):
         self.assertEqual(d.load_reviews()["70"]["rebase_sha"], SHA2)
         self.assertEqual(d.load_reviews()["70"]["rebase_base_sha"], self.base)
         self.assertIn("--add-label lane-pr", " ".join(self.runner.called("issue edit 7")))
+
+    def write_review(self, record):
+        os.makedirs(self.cfg["state_dir"], exist_ok=True)
+        with open(os.path.join(self.cfg["state_dir"], "reviews.json"), "w") as f:
+            json.dump(record, f)
+
+    def test_a_successful_rebase_clears_the_rebase_counter(self):
+        # Refs #1870: a rebase that worked starts the count of the PR over.
+        self.write_review({"70": {"rebase_rounds": 3}})
+        ok = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", ""))]
+        d, done, _ = self.harvest(ok, dict(self.ST, rebase_head=SHA2))
+        self.assertTrue(done)
+        self.assertEqual(d.load_reviews()["70"]["rebase_rounds"], 0)
+
+    def test_a_rebase_without_a_push_keeps_the_rebase_counter(self):
+        # Refs #1870: a rebase that produced nothing is not a success: the count stays.
+        self.write_review({"70": {"rebase_rounds": 3}})
+        d, done, _ = self.harvest([("merge-base", (1, "", "")), ("diff --stat", (0, " a | 1\n", ""))])
+        self.assertTrue(done)
+        self.assertEqual(d.load_reviews()["70"]["rebase_rounds"], 3)
 
 
 class HarvestArtifactFilter(Base):

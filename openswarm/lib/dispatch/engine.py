@@ -203,6 +203,16 @@ DEFAULTS = {
         # than this many lines is read in chunks - and the chunks that were read are named.
         "diff_chunk_lines": 4000,
         "cifix_needs_burn": True,
+        # The rebase cap of one PR (Refs #1870).  A PR that stays CONFLICTING is rebased again on
+        # every advance of main (the dedup key is the pair (head, main), Refs #1842), so a PR that
+        # the lane cannot resolve burns a lane and a budget on every merge of main.  After this
+        # many rebase attempts of the same PR the dispatcher stops and parks the PR as
+        # `needs-human`; the reason is written into the review record and as a PR comment.
+        # N = this value (3: the same order as the CHANGES-round limit `rounds`).  The count is
+        # `rebase_rounds` in the review record of that PR (reviews.json): one per rebase task the
+        # dispatcher queued for it.  A successful rebase (the lane pushed the rebased head) clears
+        # the count, and so does a head that moved (a human fixed the PR by hand).
+        "rebase_max_rounds": 3,
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
     # A legacy file marker remains supported when no timed parameters are supplied.
@@ -1867,8 +1877,11 @@ class Dispatcher:
                     # The head that went to the PR branch is the head of the push source (the artifact
                     # filter may have rebuilt it): the rebase of that head is done (Refs #1842).
                     rc_head, pushed_head, _ = self.git("rev-parse", head)
+                    fields = {"rebase_rounds": 0}      # the rebase worked: the count starts over (Refs #1870)
                     if not rc_head and pushed_head.strip():
-                        self.merge_review(pr, {"rebase_sha": pushed_head.strip(), "rebase_base_sha": st["base"]})
+                        fields["rebase_sha"] = pushed_head.strip()
+                        fields["rebase_base_sha"] = st["base"]
+                    self.merge_review(pr, fields)
                     self.gh_write(["pr", "comment", str(pr), "--body",
                              f"Rebased onto {self.cfg['base_branch']} by lane **{lane}** ({info.get('backend')}/{info.get('model')}), "
                              f"run `{run}`, lane status `{info.get('status')}`, verify rc `{info.get('verify_rc')}`. "
@@ -2095,6 +2108,42 @@ class Dispatcher:
             limits["review"] = 1
         return dispatch_module("burn").apply(limits, factor)["review"]
 
+    def rebase_cap(self):
+        """The number of rebase attempts one PR gets before it is parked for a human (Refs #1870).
+
+        N comes from the config (`review.rebase_max_rounds`, default 3).  The count itself is
+        `rebase_rounds` in the review record of the PR (reviews.json): one per rebase task that
+        was queued for it and that did not resolve the conflict.
+        """
+        try:
+            return max(1, int(self.R.get("rebase_max_rounds", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    def park_rebase(self, p, r, main_sha):
+        """The rebase cap of this PR is reached: stop the rebase loop and ask a human (Refs #1870).
+
+        The PR is parked with the `needs-human` label; the reason (how many rebase attempts, on
+        which main) is written into the review record and as a PR comment.  The label is ours to
+        lift: a moved head (the human fixed the conflict by hand) starts the count over.
+        """
+        pr = p["number"]
+        rounds = int(r.get("rebase_rounds") or 0)
+        cap = self.rebase_cap()
+        base = self.cfg["base_branch"]
+        if self.gh_write(["pr", "edit", str(pr), "--add-label", self.L["needs_human"]])[0] == 0:
+            self.merge_review(pr, {"needs_human_reason": "rebase_rounds", "needs_human_sha": p["headRefOid"]})
+        if r.get("needs_human_sha") != p["headRefOid"]:
+            # the reason is written once per head: a human that removes the label gets it back
+            self.gh_write(["pr", "comment", str(pr), "--body",
+                           f"Rebase cap reached: PR #{pr} was rebased {rounds} time(s) by the dispatcher and is still "
+                           f"CONFLICTING with `{base}` ({main_sha[:8] if main_sha else '?'}); the cap is {cap}. "
+                           f"No further rebase task is dispatched. Resolve the conflict by hand (rebase "
+                           f"`{p['headRefName']}` onto `{base}`, push) and remove the `{self.L['needs_human']}` label, "
+                           f"or rebase the PR yourself."])
+        self.log(f"review: PR #{pr} CONFLICTING after {rounds} rebase attempt(s) → {self.L['needs_human']} "
+                 f"(rebase cap {cap})")
+
     def review_candidates(self, lanes, state, q):
         """Open fleet PRs to act on: conflicting → rebase task (checked BEFORE the already-reviewed skip, so an approved
         PR that went DIRTY still gets rebased); red CI → fix task (burn mode); green+mergeable+unreviewed head → review."""
@@ -2134,13 +2183,21 @@ class Dispatcher:
                     args += ["--remove-label", lab]
                 if not self.gh_write(args)[0]:
                     self.log(f"review: PR #{p['number']} head moved since review; removed {', '.join(stale)}", brain=False)
-            if (L["needs_human"] in labs and r.get("needs_human_reason") == "fails"
+            if (L["needs_human"] in labs and r.get("needs_human_reason") in ("fails", "rebase_rounds")
                     and r.get("needs_human_sha") and r["needs_human_sha"] != p["headRefOid"]):
-                # only the failure-limit label is ours to lift (a CHANGES-round escalation stays for a human)
+                # only the failure-limit and the rebase-cap labels are ours to lift
+                # (a CHANGES-round escalation stays for a human)
                 if self.gh_write(["pr", "edit", str(p["number"]), "--remove-label", L["needs_human"]])[0] == 0:
                     labs.discard(L["needs_human"])
-                    self.merge_review(p["number"], {"needs_human_sha": None, "needs_human_reason": None})
-                    self.log(f"review: PR #{p['number']} head moved; removed {L['needs_human']} (failure limit starts over)", brain=False)
+                    fields = {"needs_human_sha": None, "needs_human_reason": None}
+                    if r.get("needs_human_reason") == "rebase_rounds":
+                        # a moved head is a new series of rebase attempts: the count starts over
+                        fields["rebase_rounds"] = 0
+                        r["rebase_rounds"] = 0
+                    self.merge_review(p["number"], fields)
+                    why = ("rebase count starts over" if r.get("needs_human_reason") == "rebase_rounds"
+                           else "failure limit starts over")
+                    self.log(f"review: PR #{p['number']} head moved; removed {L['needs_human']} ({why})", brain=False)
             if L["needs_human"] in labs or p["number"] in busy_pr:
                 continue
             m = self.closes_re.search(p["body"] or "")
@@ -2159,6 +2216,11 @@ class Dispatcher:
                 if not main_sha:
                     continue
                 if (r.get("rebase_sha"), r.get("rebase_base_sha")) != (p["headRefOid"], main_sha):
+                    if int(r.get("rebase_rounds") or 0) >= self.rebase_cap():
+                        # Refs #1870: the rebase cap of this PR is reached: no new rebase task is
+                        # queued, the PR is parked for a human (the label stops every later attempt).
+                        self.park_rebase(p, r, main_sha)
+                        continue
                     tasks = sources.rebase_source([p], inflight, issue_for_pr=lambda pr: pr.get("issue"))
                     if tasks:
                         self.queue_fix(p, revs, "rebase", main_sha)
@@ -2209,12 +2271,17 @@ class Dispatcher:
         ib = self.with_rebase_line(self.section_strip(j["body"], title), pr, p["headRefName"])
         ib += f"\n\n## {title}\n\n" + T[f"{kind}_section"].format(pr=pr, sha10=p["headRefOid"][:10], branch=p["headRefName"], checks=bad) + "\n"
         L = self.L
-        self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
-                       "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
-        r = revs.get(str(pr)) or {}
+        rc, _, _ = self.gh_write(["issue", "edit", str(n), "--body", ib, "--add-label", L["ready"], "--remove-label", L["pr"],
+                                  "--remove-label", L["failed"], "--remove-label", L["in_progress"]])
+        # the record on disk is the freshest one: a merge of this tick (a moved head clears the
+        # rebase count, Refs #1870) must not be lost by the copy that was loaded with the tick
+        r = dict(self.load_reviews().get(str(pr)) or {})
         r["rebase_sha" if kind == "rebase" else "cifix_sha"] = p["headRefOid"]
         if kind == "rebase":
             r["rebase_base_sha"] = base_sha
+            if not rc:
+                # Refs #1870: the rebase counter of this PR: one per rebase task that was queued.
+                r["rebase_rounds"] = int(r.get("rebase_rounds") or 0) + 1
         revs[str(pr)] = r
         self.put_review(pr, r)
         if kind == "rebase":
