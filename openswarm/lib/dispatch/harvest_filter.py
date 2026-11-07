@@ -15,9 +15,14 @@ import re
 import subprocess
 import tempfile
 
+# The hidden shared objects: the native library the agent runtime unpacks into the
+# working directory (Refs #1773).  A named rule, so the repository check and the
+# harvest use the same one.
+HIDDEN_SHARED_OBJECT = re.compile(r"(^|/)\.[^/]*\.so$")
+
 # The artifacts that never enter a PR.  A list, so the rule set stays configurable.
 HARVEST_EXCLUDE_PATTERNS = [
-    re.compile(r"(^|/)\.[^/]*\.so$"),        # hidden shared objects (build leftovers)
+    HIDDEN_SHARED_OBJECT,                   # hidden shared objects (build leftovers)
     re.compile(r"(^|/)\.lane-review/"),      # the review products of the lane
 ]
 
@@ -44,6 +49,17 @@ def _git(repo, *args, env=None, inp=None):
     if proc.returncode:
         raise FilterError(proc.stderr.decode("utf-8", "replace").strip() or ("git %s failed" % args[0]))
     return proc.stdout
+
+
+def tracked_artifacts(repo, patterns=None):
+    """The artifacts among the files the repository tracks.
+
+    The filter cleans a lane branch before it is pushed, but the repository itself
+    must not carry the artifacts either: a tracked one is swept into every change
+    that runs ``git add -A`` (Refs #1773).
+    """
+    paths = [os.fsdecode(path) for path in _git(repo, "ls-files", "-z").split(b"\0") if path]
+    return excluded_paths(paths, patterns)
 
 
 def _tree(repo, ref):
