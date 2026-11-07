@@ -116,16 +116,8 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 不是比较 head），按空结果处理、不推送；过滤本身失败（git 命令报错）时 fail closed、
 不推送并记因。规则是列表常量（`HARVEST_EXCLUDE_PATTERNS`），可配置。
 
-对应关系：本文件是仓内版 AD；派发引擎里的同一套过滤在
-`swrm/lib/dispatch/harvest_filter.py`（fix/rebase 与新 PR 两条收割路径都接入，
-见 `swrm/docs/harvest-artifact-filter.md`）。两份规则必须同步；部署版另行同步
-（sync steps 见 [`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)）。
-
-离线回放某个 PR 头会被剔掉哪些产物：
-
-```bash
-python3 tools/check-harvest-filter.py 1768 1677
-```
+旧 dispatcher 及其离线回放工具已删除。仓内 AD 的过滤由
+`test_harvest_filter.py` 独立验证；不再与已删除的模块同步。
 
 ## 开关来源审计（Refs #1827）
 

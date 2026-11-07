@@ -11,30 +11,30 @@
 
 ```json
 {
-  "hosts": ["ib1", "ib2", "ib3", "ib4", "ib5", "gocc", "gorelay", "govpn", "govpn2"],
+  "hosts": ["node-1.example.invalid", "node-2.example.invalid", "node-3.example.invalid", "node-4.example.invalid", "node-5.example.invalid", "broker", "relay.example.invalid", "worker-a.example.invalid", "worker-b.example.invalid"],
   "limits": {
     "total": 11,
-    "host:ib1": 1,
-    "host:ib2": 1,
-    "host:ib3": 1,
-    "host:ib4": 1,
-    "host:ib5": 2,
-    "host:gocc": 1,
-    "host:gorelay": 1,
-    "host:govpn": 1,
-    "host:govpn2": 2
+    "host:node-1.example.invalid": 1,
+    "host:node-2.example.invalid": 1,
+    "host:node-3.example.invalid": 1,
+    "host:node-4.example.invalid": 1,
+    "host:node-5.example.invalid": 2,
+    "host:broker": 1,
+    "host:relay.example.invalid": 1,
+    "host:worker-a.example.invalid": 1,
+    "host:worker-b.example.invalid": 2
   }
 }
 ```
 
 | Host | 最大 lane 数 |
 |---|---:|
-| `gocc` | 1 |
-| `gorelay` | ≤1 |
-| `ib1`–`ib4` | 每台 1 |
-| `ib5` | 2 |
-| `govpn2` | 2 |
-| `govpn` | ≤1 |
+| `broker` | 1 |
+| `relay.example.invalid` | ≤1 |
+| `node-1.example.invalid`–`node-4.example.invalid` | 每台 1 |
+| `node-5.example.invalid` | 2 |
+| `worker-b.example.invalid` | 2 |
+| `worker-a.example.invalid` | ≤1 |
 
 上述限额合计为 11 个 lane 的上限；实际可用总量不得低于 10。`copilot`
 不属于受控 fleet host，也不得配置为 lane backend。

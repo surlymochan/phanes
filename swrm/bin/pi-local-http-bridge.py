@@ -15,9 +15,11 @@ import threading
 parser = argparse.ArgumentParser()
 parser.add_argument('--port', type=int, default=8742)
 parser.add_argument('--token-file', required=True, type=Path)
-parser.add_argument('--broker-host', default='gocc')
+parser.add_argument('--broker-host', default=os.environ.get('SWRM_BROKER_HOST', ''))
 parser.add_argument('--ssh', default='/usr/bin/ssh')
 args = parser.parse_args()
+if not args.broker_host:
+    parser.error('--broker-host or SWRM_BROKER_HOST is required')
 token = args.token_file.read_text(encoding='utf-8').strip()
 if not token:
     raise SystemExit('local broker token is empty')

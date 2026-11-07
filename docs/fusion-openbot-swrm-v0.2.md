@@ -11,7 +11,7 @@
 - `autodispatch`（AD）只剩启动器：现有 `autodispatch.py` 禁止加新功能；
   新能力先进 swrm 上游 PR，再让 AD 变薄。本卡不碰 AD。
 - 事实基线以 2026-11-02 为准：Instabox 已删；控制面在 box；远端主机为
-  gores1、gores2、govpn、gorelay、gocc；配比 MiniMax 50%、Codex 30%、
+  worker、gores2、worker-a.example.invalid、relay.example.invalid、broker；配比 MiniMax 50%、Codex 30%、
   agy 10%、Copilot 10%（Copilot 仅远程、超额为 0）。
 - 证据大于自报：拆卡须含四要素，派单前做名册与 duty 校验，还价只落卡上。
 - 控制面与执行面的状态以 swrm 与 GitHub 上的合约状态为准；
@@ -43,8 +43,8 @@
 - [ ] 统一发版：同一 phanes 提交部署到 box 与各远端，逐机留版本记录
 - [ ] 故障名额回收经 kill 实测
 - [ ] box 重启后 `boot-ensure` / `start-control-plane` 自恢复实测
-- [ ] 改写 `docs/fleet-topology-expected.md` 为 2026-11-02 基线，去 ib1–ib5 限额表
-- [ ] 拓扑文档更新：gores1、gores2、govpn、gorelay、gocc 为当前主机清单
+- [ ] 改写 `docs/fleet-topology-expected.md` 为 2026-11-02 基线，去 node-1.example.invalid–node-5.example.invalid 限额表
+- [ ] 拓扑文档更新：worker、gores2、worker-a.example.invalid、relay.example.invalid、broker 为当前主机清单
 - [ ] P0 出口不要再对着旧 PR #14 / #2 / #3 清单原样开工
 
 ## 4. 控制面宕机映射

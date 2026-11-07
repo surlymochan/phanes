@@ -22,19 +22,19 @@ Expected layout (all fleet hosts + box):
 
 Hosts / lanes:
 TXT
-expect ib1 M1; expect ib2 M2; expect ib3 M3; expect ib4 M4
-expect ib5 CX1; expect ib5 CX3
-expect govpn2 CX2; expect govpn2 CX4
-expect govpn CX5
-expect gorelay A2; expect gocc A1
+expect node-1.example.invalid M1; expect node-2.example.invalid M2; expect node-3.example.invalid M3; expect node-4.example.invalid M4
+expect node-5.example.invalid CX1; expect node-5.example.invalid CX3
+expect worker-b.example.invalid CX2; expect worker-b.example.invalid CX4
+expect worker-a.example.invalid CX5
+expect relay.example.invalid A2; expect broker A1
 expect box GH1; expect box GH2
 
 if [[ "$probe" -eq 1 ]]; then
   echo
   echo "Probing (BatchMode, 12s cap)…"
   for spec in \
-    "ib1:M1" "ib2:M2" "ib3:M3" "ib4:M4" "ib5:CX1" "ib5:CX3" \
-    "govpn2:CX2" "govpn2:CX4" "govpn:CX5" "gorelay:A2" "gocc:A1"
+    "node-1.example.invalid:M1" "node-2.example.invalid:M2" "node-3.example.invalid:M3" "node-4.example.invalid:M4" "node-5.example.invalid:CX1" "node-5.example.invalid:CX3" \
+    "worker-b.example.invalid:CX2" "worker-b.example.invalid:CX4" "worker-a.example.invalid:CX5" "relay.example.invalid:A2" "broker:A1"
   do
     host=${spec%%:*}; lane=${spec##*:}
     if timeout 12 ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \

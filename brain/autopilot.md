@@ -19,7 +19,7 @@
 3. `lane-autodispatch` 自动 SSH 到对应主机 `swrm-fleet lane assign`。
 4. 看状态：`~/phanes-ctl/bin/lane-autodispatch-status` 或 `lanes-status.json`。
 
-当前拓扑（目标 ≥10，实测可达 11）：M1–M4 pi@ib1–4；A1 agy@gocc；A2 agy@gorelay；CX1/CX3 codex@ib5；CX2/CX4 codex@govpn2；CX5 codex@govpn（内存紧，盯 swap）。**禁止 Copilot。** 控制面在 **box**，不依赖用户 Mac。
+当前拓扑（目标 ≥10，实测可达 11）：M1–M4 pi@node-1.example.invalid–4；A1 agy@broker；A2 agy@relay.example.invalid；CX1/CX3 codex@node-5.example.invalid；CX2/CX4 codex@worker-b.example.invalid；CX5 codex@worker-a.example.invalid（内存紧，盯 swap）。**禁止 Copilot。** 控制面在 **box**，不依赖用户 Mac。
 
 ### 2) GitHub issue bus（非受控执行器）
 协议见仓库 `swrm/docs/BUS.md`。落地与冒烟任务：#225。概要：

@@ -1,9 +1,9 @@
-# Coordinator：gorelay↔gocc SSH 横幅超时退避与观察指标
+# Coordinator：relay.example.invalid↔broker SSH 横幅超时退避与观察指标
 
-本文档记录在 10 路/11 路并行高并发场景下，`gorelay → gocc` reverse tunnel 发生 SSH protocol banner exchange timeout 的现象、现有退避机制（30s → 600s）以及建议的观察与诊断命令。
+本文档记录在 10 路/11 路并行高并发场景下，`relay.example.invalid → broker` reverse tunnel 发生 SSH protocol banner exchange timeout 的现象、现有退避机制（30s → 600s）以及建议的观察与诊断命令。
 
 依据与核对基准：
-- `brain/dual-mode-status.md:13`（`coordinator 在 gocc`，gorelay↔gocc 高峰 banner timeout 退避记录）
+- `brain/dual-mode-status.md:13`（`coordinator 在 broker`，relay.example.invalid↔broker 高峰 banner timeout 退避记录）
 - `brain/autopilot.md:20-22,34`（10+ 路并行拓扑与状态监控脚本）
 - `docs/fleet-topology-expected.md:6-18`（Fleet topology 各主机并发限额约定）
 - `docs/dual-mode-ssh.md:32-41,53-75`（ControlMaster 配置与 SSH fleet 拓扑）
@@ -18,12 +18,12 @@
 ### 1.1 架构与背景
 在当前的 10+ 并行受控拓扑中（`brain/autopilot.md:22`、`docs/fleet-topology-expected.md:6-18`）：
 - 控制面统一运行在 `box`，维护 10–11 个并发 lane。
-- 全局资源协调器（`fleet-capacity`）部署在 `gocc` 主机上，负责控制跨主机和跨后端的并发限额。
-- 执行器主机（如 `gorelay`，运行 A2 lane 或 codex 执行器）通过反向隧道（reverse tunnel / SSH 转发）连通 `gocc` 上的协调器以进行准入（`acquire`）、释放（`release`）与状态检查（`status`）。
+- 全局资源协调器（`fleet-capacity`）部署在 `broker` 主机上，负责控制跨主机和跨后端的并发限额。
+- 执行器主机（如 `relay.example.invalid`，运行 A2 lane 或 codex 执行器）通过反向隧道（reverse tunnel / SSH 转发）连通 `broker` 上的协调器以进行准入（`acquire`）、释放（`release`）与状态检查（`status`）。
 
 ### 1.2 Banner-Exchange Timeout 现象
 当 fleet 处于 10 路满负荷执行，且同时伴随多个主机间的 SSH 握手、状态查询、心跳检测与任务派发时：
-1. `gorelay` 向 `gocc` 建立 SSH 反向通道或 ControlMaster 控制连接时，在协议握手阶段发生阻塞。
+1. `relay.example.invalid` 向 `broker` 建立 SSH 反向通道或 ControlMaster 控制连接时，在协议握手阶段发生阻塞。
 2. 客户端在等待服务端返回 SSH protocol identification banner（`SSH-2.0-...`）时达到超时限制，触发典型错误：
    ```text
    kex_exchange_identification: Connection timed out during banner exchange
@@ -98,7 +98,7 @@ cat ~/phanes-ctl/autodispatch/lanes-status.json
 ```
 
 **重点观察指标**：
-- **Lane 运行状态**：观察 `A2`（gorelay）以及 `A1`（gocc）的状态是否为 `busy`、`idle` 或异常停留在 `queued`。
+- **Lane 运行状态**：观察 `A2`（relay.example.invalid）以及 `A1`（broker）的状态是否为 `busy`、`idle` 或异常停留在 `queued`。
 - **心跳时戳（Heartbeat）**：检查各 lane 的最后心跳时间；若心跳超过 **3 分钟** 未更新，说明对应 worker 可能被阻塞在网络握手或退避中。
 - **派发日志输出**：
   ```bash
@@ -110,17 +110,17 @@ cat ~/phanes-ctl/autodispatch/lanes-status.json
 
 ### 3.2 观察协调器预约状态（coordinator status）
 
-通过 box 上的受控 SSH 渠道向 `gocc` 主机查询协调器当前预约快照：
+通过 box 上的受控 SSH 渠道向 `broker` 主机查询协调器当前预约快照：
 
 ```bash
-ssh -F ~/.ssh/swrm-hub/config gocc -- \
-  python3 ~/.claude/swrm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'
+ssh -F ~/.ssh/swrm-hub/config broker -- \
+  python3 ~/.claude/swrm-fleet-capacity/fleet-capacity broker <<< '{"op":"status"}'
 ```
 
-若直接在 `gocc` 宿主机或本地测试环境下：
+若直接在 `broker` 宿主机或本地测试环境下：
 
 ```bash
-python3 swrm/bin/fleet-capacity gocc <<< '{"op":"status"}'
+python3 swrm/bin/fleet-capacity broker <<< '{"op":"status"}'
 ```
 
 **返回结构与重点观察指标**：
@@ -129,7 +129,7 @@ python3 swrm/bin/fleet-capacity gocc <<< '{"op":"status"}'
   "ok": true,
   "reservations": [
     {
-      "host": "gorelay",
+      "host": "relay.example.invalid",
       "run_id": "run-xxxxxx",
       "backend": "agy",
       "provider": null,
@@ -140,21 +140,21 @@ python3 swrm/bin/fleet-capacity gocc <<< '{"op":"status"}'
 ```
 
 - **`reservations` 列表**：
-  - 检查是否存在 `host: "gorelay"` 的陈旧 reservation。
+  - 检查是否存在 `host: "relay.example.invalid"` 的陈旧 reservation。
   - 计算 `created` 距离当前时间的秒数：若已超过 600s，需评估是否发生 runner 断开而未 release，可由 owner 进行 TTL recover。
 - **总数与限额对比**：
   - 核对 `reservations` 总数是否达到 `LIMITS["total"]`（8 或 `topology.json` 中的配置值，见 `swrm/bin/fleet-capacity:13-31`）。
-  - 核对 `host:gorelay` 与 `host:gocc` 的实际占用数是否触顶导致后续任务被 `blocked`。
+  - 核对 `host:relay.example.invalid` 与 `host:broker` 的实际占用数是否触顶导致后续任务被 `blocked`。
 
 ---
 
 ## 4. 辅助排查与应急操作
 
 1. **测试 SSH 与 ControlMaster 状态**：
-   在 box 上验证到 `gocc` 与 `gorelay` 的直接通道是否通畅：
+   在 box 上验证到 `broker` 与 `relay.example.invalid` 的直接通道是否通畅：
    ```bash
-   ssh -F ~/.ssh/swrm-hub/config -O check gocc
-   ssh -F ~/.ssh/swrm-hub/config -O check gorelay
+   ssh -F ~/.ssh/swrm-hub/config -O check broker
+   ssh -F ~/.ssh/swrm-hub/config -O check relay.example.invalid
    ```
 
 2. **临时暂停对应 Lane**：

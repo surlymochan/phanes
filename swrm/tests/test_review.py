@@ -70,7 +70,7 @@ class PeerReviewTests(unittest.TestCase):
     def test_timed_out_review_releases_the_fleet_reservation(self):
         guard = self.root / 'guard.json'
         coordinator = Path(_load.ROOT) / 'bin/fleet-capacity'
-        guard.write_text(json.dumps({'command': [str(coordinator), 'gocc']}))
+        guard.write_text(json.dumps({'command': [str(coordinator), 'broker']}))
         script = self.root / 'slow-review.py'
         script.write_text('import time\ntime.sleep(30)\n')
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard), 'OPENSWARM_FLEET_CAPACITY_DIR': str(self.root / 'capacity')}
@@ -79,7 +79,7 @@ class PeerReviewTests(unittest.TestCase):
                 xs.invoke_reviewer({'backend': 'agy'}, 'review', str(self.repo), str(self.run_dir),
                                    {'review': {'timeout_seconds': 2}})
             coordinator_cmd = [sys.executable, str(coordinator)] if os.name == 'nt' else [str(coordinator)]
-            status = subprocess.run([*coordinator_cmd, 'gocc'], input=json.dumps({'op': 'status'}),
+            status = subprocess.run([*coordinator_cmd, 'broker'], input=json.dumps({'op': 'status'}),
                                     text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(status.stdout)['reservations'], [])
 

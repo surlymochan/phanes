@@ -39,6 +39,47 @@ class FleetAutoTests(unittest.TestCase):
             MOD['main']()
         self.assertEqual(json.loads(out.getvalue())['lane'], 'K1')
 
+    def test_discovered_local_lanes_do_not_require_remote_configuration(self):
+        for lane in ('A1', 'C1', 'GH1', 'GH2'):
+            for dry_run in (True, False):
+                with self.subTest(lane=lane, dry_run=dry_run):
+                    args = ['swrm-auto', '--type', 'migration', '--difficulty', '3' if lane == 'GH1' else '4',
+                            '--base', 'abcdef0', '--prompt', 'task']
+                    if dry_run: args.append('--dry-run')
+                    rows = [{'name': lane, 'state': 'idle', 'backend': 'test', 'model': 'test'}]
+                    reply = mock.Mock(returncode=0, stdout=json.dumps({'id': 'local-test', 'state': 'queued'}))
+                    with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(sys, 'argv', args), \
+                            mock.patch.dict(G, {'local_lanes': lambda: rows}), \
+                            mock.patch.object(G['subprocess'], 'run', return_value=reply) as run, \
+                            contextlib.redirect_stdout(io.StringIO()) as output:
+                        MOD['main']()
+                    self.assertEqual(json.loads(output.getvalue())['host'], 'local')
+                    if dry_run: run.assert_not_called()
+                    else: self.assertEqual(run.call_args.args[0][1:4], ['lane', 'assign', lane])
+
+    def test_duplicate_remote_name_cannot_override_local_busy_state(self):
+        args = ['swrm-auto', '--base', 'abcdef0', '--prompt', 'task', '--dry-run']
+        local = [{'name': 'C1', 'state': 'busy'}]
+        remote = [{'name': 'C1', 'state': 'idle', 'backend': 'test', 'model': 'test'}]
+        with mock.patch.object(sys, 'argv', args), \
+                mock.patch.dict(G, {'local_lanes': lambda: local, 'remote': lambda req: remote}), \
+                self.assertRaisesRegex(RuntimeError, 'no available fleet lane'):
+            MOD['main']()
+
+    def test_remote_named_k1_is_dispatched_remotely(self):
+        args = ['swrm-auto', '--type', 'test', '--base', 'abcdef0', '--prompt', 'task']
+        def remote(req):
+            if req['op'] == 'lanes':
+                return [{'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'test'}]
+            return {'id': 'remote-test', 'state': 'queued'}
+        with mock.patch.object(sys, 'argv', args), \
+                mock.patch.dict(G, {'local_lanes': lambda: [], 'remote': remote}), \
+                mock.patch.object(G['subprocess'], 'run') as run, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['main']()
+        run.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())['host'], 'gateway.example.invalid')
+
     def test_task_profiles_cover_all_five_backends(self):
         expected = [('mechanical', 1, 'M1'), ('test', 2, 'K1'), ('impl', 2, 'GH1'),
                     ('impl', 3, 'C1'), ('impl', 4, 'GH2'), ('migration', 3, 'A1')]

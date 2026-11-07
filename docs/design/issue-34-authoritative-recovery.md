@@ -9,7 +9,7 @@
 ## 当前依据
 
 - `swrm/bin/fleet-capacity:72-79`：协调器在本机 SQLite `reservations` 表存储 token、owner、run_id、backend、provider、created，并以 `BEGIN IMMEDIATE` 执行操作。
-- `swrm/bin/fleet-capacity:83-94`：recover 接收调用者提供的 `confirm` 字符串；本机 owner 或 gocc 可据此删除 reservation。该字符串本身不是 liveness 证明。
+- `swrm/bin/fleet-capacity:83-94`：recover 接收调用者提供的 `confirm` 字符串；本机 owner 或 broker 可据此删除 reservation。该字符串本身不是 liveness 证明。
 - `swrm/bin/swrm:3377-3418`：回收候选由本地 `status.json` 的 `fleet_reserved_at`、本地 PID 存活检查及 pending 状态构成。
 - `swrm/bin/swrm:3436-3451`：调用方检查/停止记录的 executor 后，再发送 recover；协调器无法独立确认远端进程已停止。
 - `swrm/README.md:690-699`：现有部署通过专用 fleet-control SSH key 和限制的 forced-command endpoint；forced command 固定认证 owner，执行端记录并复用该 owner。
@@ -39,7 +39,7 @@ forced-command 传入的 owner 是认证边界；请求体不得覆盖 owner。�
 
 新增 `renew` 操作，输入 `run_id`、reservation `token`；身份来自 forced-command 的 host 参数。协调器在事务内校验 token、host、run_id 精确匹配后，将 `lease_expires` 更新为协调器当前时间加 TTL，并返回新到期时间。未知 reservation 或 owner 不匹配返回拒绝，不创建 reservation。
 
-`recover` 输入精确的 host、run_id、token。仅允许已认证的 owner 回收自身 reservation（operator 修复权限单独沿用既有 gocc 管理路径，但同样必须满足 lease 过期并精确定位记录）。SQL 删除条件包含 token、host、run_id 和 `lease_expires <= coordinator_now`；零行表示尚未过期/记录已变化，绝不报告为已回收。操作在 `BEGIN IMMEDIATE` 事务中串行化，避免 renew 与 recover 的竞态。
+`recover` 输入精确的 host、run_id、token。仅允许已认证的 owner 回收自身 reservation（operator 修复权限单独沿用既有 broker 管理路径，但同样必须满足 lease 过期并精确定位记录）。SQL 删除条件包含 token、host、run_id 和 `lease_expires <= coordinator_now`；零行表示尚未过期/记录已变化，绝不报告为已回收。操作在 `BEGIN IMMEDIATE` 事务中串行化，避免 renew 与 recover 的竞态。
 
 `status` 可输出 lease 到期时间，避免暴露 token。现有调用端须传 token；旧的按 host/run_id 批量删除路径不得继续绕过 lease 检查。
 

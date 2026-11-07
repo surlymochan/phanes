@@ -10,7 +10,6 @@ import tempfile
 
 home = Path(os.environ.get("HOME") or os.path.expanduser("~"))  # Windows Path.home() ignores $HOME
 cli = str(home / '.local/bin/swrm')
-ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/swrm-fleet/config'), 'swrm-pi-broker']
 
 def _load_spawnable():
     import importlib.util
@@ -33,7 +32,7 @@ def result(cmd, payload=None, timeout=45):
         if isinstance(data, dict) and data.get('error') in (
                 'no available fleet lane', 'available lanes changed or rejected the task',
                 'local lane status unavailable', 'local dispatch acknowledgement unavailable',
-                'gocc dispatch gateway unavailable', 'gocc dispatch gateway rejected request'):
+                'remote dispatch gateway unavailable', 'remote dispatch gateway rejected request'):
             raise ValueError(data['error'])
         raise ValueError('fleet command rejected request')
     return data
@@ -64,8 +63,13 @@ def main():
     if op in ('info','bundle','stop'):
         run_id, host = req.get('id'), req.get('host')
         if not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',run_id): raise ValueError('invalid id')
-        if host not in ('gores1','gocc'): raise ValueError('invalid host')
-        if host == 'gocc':
+        remote_host = os.environ.get('OPENSWARM_AUTO_SSH_HOST')
+        if host not in ('local', remote_host) or not host: raise ValueError('invalid host')
+        if host == remote_host:
+            ssh = ['/usr/bin/ssh', '-T']
+            config = os.environ.get('OPENSWARM_AUTO_SSH_CONFIG')
+            if config: ssh += ['-F', os.path.expanduser(config)]
+            ssh.append(remote_host)
             data = result(ssh, {'op':{'info':'run_info','bundle':'bundle','stop':'stop'}[op],'run_id':run_id}, timeout=140)
             return data['result']
         if op == 'bundle':

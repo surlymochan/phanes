@@ -45,4 +45,4 @@ cd "${PHANES_LOCAL_REPO:?Set PHANES_LOCAL_REPO}" || exit 1
 git fetch -q "$PUBLISH_HOST" "$BR" 2>&1 | tail -1
 sha=$(git rev-parse FETCH_HEAD)
 git push -q origin "$sha:refs/heads/$BR" 2>&1 | tail -1
-gh pr create -R nibiru-labs/openbot --base main --head "$BR" --title "$TITLE" --body-file "$BODY" 2>&1 | tail -1
+gh pr create ${PHANES_PR_REPO:+--repo "$PHANES_PR_REPO"} --base main --head "$BR" --title "$TITLE" --body-file "$BODY" 2>&1 | tail -1

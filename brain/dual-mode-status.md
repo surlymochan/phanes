@@ -5,11 +5,11 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 
 ## Mode A — Hub/SSH (Mac-independent from box)
 - Status: **OPERATIONAL** (11 lanes configured; health-loop guards hosts)
-- SSH: `id_ed25519_phanes_ctl` + ControlMaster; hosts ib1–5 / gocc / gorelay / govpn / govpn2
+- SSH: `id_ed25519_fleet_operator` + ControlMaster; hosts node-1.example.invalid–5 / broker / relay.example.invalid / worker-a.example.invalid / worker-b.example.invalid
 - Dispatch: `~/phanes-ctl/bin/lane-autodispatch` reading `lane-ready` issues
 - Boot: `~/phanes-ctl/bin/start-control-plane` (see [`docs/ctl-boot.md`](../docs/ctl-boot.md))
 - Status paths: `~/.claude/swrm-executor-candidate/lanes/<L>/state.json` (see `tools/check-lane-status-paths.sh`)
-- Proof (earlier): run `20261101-031136-7a2856` → gorelay/agy
+- Proof (earlier): run `20261101-031136-7a2856` → relay.example.invalid/agy
 
 ## Mode B — GitHub issue bus
 - Status: **RESIDENT, zero-manual PASS**
@@ -20,7 +20,7 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 - Credential: box `gh` only; no token copied to fleet hosts
 
 ## Stability guards (2026-11-01)
-- `health-loop` probes disk/mem/ssh jitter on box+ib*+govpn*+gocc+gorelay every ~60s
+- `health-loop` probes disk/mem/ssh jitter on box+ib*+worker-a.example.invalid*+broker+relay.example.invalid every ~60s
 - Hard degrade → `PAUSE-HOST-*` / `PAUSE-<LANE>` / `PAUSE-BACKEND-*` (auto: bodies); autodispatch skips them; other backends keep running
 - Quota/429 on harvest also sets `PAUSE-BACKEND-*`; health-loop clears after hold if no fresh signal
 - 37-minute tick silence: structural fix (wall-kill process trees, parallel probes, early heartbeat) — soak in progress; see `brain/lessons-37min-silence.md` if present
@@ -29,7 +29,7 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 ## Remaining gaps (Epic #223)
 1. Box reboot still needs manual `start-control-plane` (documented; no systemd on box).
 2. Hub App UI bridge may still default to Mac paths for interactive Hub — fleet SSH path from box is fine (#224 docs Done).
-3. gocc Data volume often ≥96% used — health soft-alerts; free space recovered by clearing retired codex/copilot caches (~4GiB on 2026-11-01). Keep watching.
+3. broker Data volume often ≥96% used — health soft-alerts; free space recovered by clearing retired codex/copilot caches (~4GiB on 2026-11-01). Keep watching.
 4. GH token rotation (user action; not automated).
 5. Soak: confirm ≥30–60 min without autodispatch heartbeat gaps after stallfix.
 6. #226 lane status path check script now in repo; mark Done when merged.

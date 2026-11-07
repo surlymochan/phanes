@@ -1,14 +1,14 @@
-# CX5 on govpn: memory and smoke-task notes
+# CX5 on worker-a.example.invalid: memory and smoke-task notes
 
 ## Baseline
 
-- Host `govpn` has **2 GiB RAM**; the fleet status notes CX5 is memory-tight and
+- Host `worker-a.example.invalid` has **2 GiB RAM**; the fleet status notes CX5 is memory-tight and
   should be watched for swap (`brain/dual-mode-status.md:41`).
 - The generated swrm lane systemd unit sets `MemoryMax=900M` by default
   (`swrm/bin/swrm:8830`, default constant `LANE_DEFAULT_MEMORY_MAX`
   at `swrm/bin/swrm:6831`). That default is the **high profile** and
   must stay untouched for normal hosts. On a low-memory host (~1 GiB class,
-  such as `govpn`/`govpn2`) lower it instead of editing the generated unit.
+  such as `worker-a.example.invalid`/`worker-b.example.invalid`) lower it instead of editing the generated unit.
 - No verified swap size or current swap-use measurement is recorded in this
   worktree. Before and during a smoke task, capture `free -h` and
   `swapon --show`; do not infer swap headroom from the RAM total.
@@ -45,10 +45,10 @@ of silently producing an unlimited unit.
 | Host class | RAM | Recommended `MemoryMax` | Note |
 |---|---|---|---|
 | default / high profile | ≥4 GiB | `900M` (built-in default) | unchanged behaviour |
-| low-memory (`govpn`, `govpn2`) | ~1–2 GiB | `700M` | leaves room for the OS, cache and one task |
+| low-memory (`worker-a.example.invalid`, `worker-b.example.invalid`) | ~1–2 GiB | `700M` | leaves room for the OS, cache and one task |
 | very tight (~1 GiB, one lane only) | ~1 GiB | `512M` | only with `--verify` omitted |
 
-`700M` is the recommended ceiling for the ~1 GiB `govpn`/`govpn2` lanes: it
+`700M` is the recommended ceiling for the ~1 GiB `worker-a.example.invalid`/`worker-b.example.invalid` lanes: it
 keeps the lane well below the host total so the OS, other services and
 filesystem cache keep their share. The cap is a ceiling, not a measured
 steady-state footprint — measure before and after a smoke task.
@@ -99,5 +99,5 @@ swrm lane systemd-unit CX5 | grep -E '^MemoryMax='
 Documentation acceptance also requires no root access:
 
 ```sh
-test -f docs/fleet-govpn-cx5.md && rg -n 'MemoryMax|swap|CX5' docs/fleet-govpn-cx5.md
+test -f docs/fleet-worker-cx5.md && rg -n 'MemoryMax|swap|CX5' docs/fleet-worker-cx5.md
 ```

@@ -27,15 +27,15 @@ def main() -> None:
         fake_cli.chmod(0o755)
 
         until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-        (pause_dir / "PAUSE-HOST-ib2").write_text(f"auto:cooldown:until={until}\n")
+        (pause_dir / "PAUSE-HOST-node-2.example.invalid").write_text(f"auto:cooldown:until={until}\n")
         fleet = root / "fleet.json"
         fleet.write_text(json.dumps({
             "need_ok": 0,
             "hosts": [
-                {"name": "ib2", "cert": "ib2.crt"},
+                {"name": "node-2.example.invalid", "cert": "node-2.example.invalid.crt"},
             ],
         }))
-        # ib2 is intentionally absent. The fake CLI must not receive ib2, and
+        # node-2.example.invalid is intentionally absent. The fake CLI must not receive node-2.example.invalid, and
         # no resume/wake helper is called.
         result = subprocess.run(
             ["python3", str(REFRESH), "--fleet-config", str(fleet),
@@ -48,7 +48,7 @@ def main() -> None:
         fields = dict(field.split("=", 1) for field in payload["status_line"].split())
         assert fields["skipped_cooldown"] == "1"
         assert not calls.exists(), "active cooldown host must not invoke resume/wake/renew CLI"
-        assert (pause_dir / "PAUSE-HOST-ib2").exists(), "check must not modify the PAUSE file"
+        assert (pause_dir / "PAUSE-HOST-node-2.example.invalid").exists(), "check must not modify the PAUSE file"
         print("ib-refresh active cooldown skip: OK")
 
 

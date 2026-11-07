@@ -202,88 +202,88 @@ def main() -> None:
         fixture = Fixture(Path(raw_dir))
         now = 1_800_000_000.0  # fixed clock: the check never depends on wall time
 
-        # 1) a fresh PAUSE-HOST-ib3 cooldown is the only pause: ib3 must not count as ok
-        fixture.write_health({"ib1": "ok", "ib2": "ok", "ib3": "ok", "ib4": "degraded"})
-        fixture.write_pause("PAUSE-HOST-ib3", "auto: disk 97% used\n", now)
+        # 1) a fresh PAUSE-HOST-node-3.example.invalid cooldown is the only pause: node-3.example.invalid must not count as ok
+        fixture.write_health({"node-1.example.invalid": "ok", "node-2.example.invalid": "ok", "node-3.example.invalid": "ok", "node-4.example.invalid": "degraded"})
+        fixture.write_pause("PAUSE-HOST-node-3.example.invalid", "auto: disk 97% used\n", now)
         fixture.write_pause("PAUSE-BACKEND-pi", "auto: quota 429\n", now)
         fixture.tick(now)
         health = health_of(fixture)
-        assert health["hosts_ok"] == ["ib1", "ib2"], health
-        assert health["skipped_cooldown"] == ["ib3"], health
-        assert health["hosts_degraded"] == ["ib4"], health
-        assert health["cooldown"] == ["ib3"], health
+        assert health["hosts_ok"] == ["node-1.example.invalid", "node-2.example.invalid"], health
+        assert health["skipped_cooldown"] == ["node-3.example.invalid"], health
+        assert health["hosts_degraded"] == ["node-4.example.invalid"], health
+        assert health["cooldown"] == ["node-3.example.invalid"], health
         assert health["released_cooldown"] == [], health
-        assert fixture.pause_exists("PAUSE-HOST-ib3"), "a pause that has not expired must not be cleared"
+        assert fixture.pause_exists("PAUSE-HOST-node-3.example.invalid"), "a pause that has not expired must not be cleared"
         assert_consistent(health)
-        print("OK: cooling host ib3 is not counted in hosts_ok, it is listed in skipped_cooldown")
+        print("OK: cooling host node-3.example.invalid is not counted in hosts_ok, it is listed in skipped_cooldown")
 
         # 2) the cooldown expired -> released, and the host is ok again
-        fixture.write_pause("PAUSE-HOST-ib3", "auto: disk 97% used\n", now - PAUSE_TTL - 1)
+        fixture.write_pause("PAUSE-HOST-node-3.example.invalid", "auto: disk 97% used\n", now - PAUSE_TTL - 1)
         fixture.tick(now)
         health = health_of(fixture)
-        assert health["released_cooldown"] == ["ib3"], health
-        assert not fixture.pause_exists("PAUSE-HOST-ib3"), "an expired cooldown must be released"
-        assert health["hosts_ok"] == ["ib1", "ib2", "ib3"], health
+        assert health["released_cooldown"] == ["node-3.example.invalid"], health
+        assert not fixture.pause_exists("PAUSE-HOST-node-3.example.invalid"), "an expired cooldown must be released"
+        assert health["hosts_ok"] == ["node-1.example.invalid", "node-2.example.invalid", "node-3.example.invalid"], health
         assert health["skipped_cooldown"] == [], health
         assert_consistent(health)
         print("OK: an elapsed cooldown is released and the host returns to hosts_ok")
 
-        # 3) the cooldown expired but ib3 still probes degraded -> the expired pause is
-        #    released (the mirrored clear_auto has no probe condition) and ib3 stays out
+        # 3) the cooldown expired but node-3.example.invalid still probes degraded -> the expired pause is
+        #    released (the mirrored clear_auto has no probe condition) and node-3.example.invalid stays out
         #    of hosts_ok because it probes degraded, not because of a cooldown
-        fixture.write_health({"ib1": "ok", "ib2": "ok", "ib3": "degraded"})
-        fixture.write_pause("PAUSE-HOST-ib3", "auto: disk 97% used\n", now - PAUSE_TTL - 1)
+        fixture.write_health({"node-1.example.invalid": "ok", "node-2.example.invalid": "ok", "node-3.example.invalid": "degraded"})
+        fixture.write_pause("PAUSE-HOST-node-3.example.invalid", "auto: disk 97% used\n", now - PAUSE_TTL - 1)
         fixture.tick(now)
         health = health_of(fixture)
-        assert health["released_cooldown"] == ["ib3"], health
-        assert not fixture.pause_exists("PAUSE-HOST-ib3"), "an expired cooldown must be released"
-        assert "ib3" not in health["hosts_ok"], health
+        assert health["released_cooldown"] == ["node-3.example.invalid"], health
+        assert not fixture.pause_exists("PAUSE-HOST-node-3.example.invalid"), "an expired cooldown must be released"
+        assert "node-3.example.invalid" not in health["hosts_ok"], health
         assert health["skipped_cooldown"] == [], health
-        assert health["hosts_degraded"] == ["ib3"], health
+        assert health["hosts_degraded"] == ["node-3.example.invalid"], health
         assert_consistent(health)
         print("OK: an expired cooldown is released even while the host still probes degraded")
 
         # 4) a manual pause (body not auto:) is never released and holds the host out of
         #    hosts_ok; like an automatic cooldown it lands in skipped_cooldown
-        fixture.write_health({"ib1": "ok", "ib2": "ok", "ib3": "ok"})
-        fixture.write_pause("PAUSE-HOST-ib3", "operator hold\n", now - PAUSE_TTL - 1)
+        fixture.write_health({"node-1.example.invalid": "ok", "node-2.example.invalid": "ok", "node-3.example.invalid": "ok"})
+        fixture.write_pause("PAUSE-HOST-node-3.example.invalid", "operator hold\n", now - PAUSE_TTL - 1)
         fixture.tick(now)
         health = health_of(fixture)
         assert health["released_cooldown"] == [], health
-        assert fixture.pause_exists("PAUSE-HOST-ib3"), "a manual pause must never be cleared"
-        assert health["hosts_ok"] == ["ib1", "ib2"], health
-        assert health["skipped_cooldown"] == ["ib3"], health
+        assert fixture.pause_exists("PAUSE-HOST-node-3.example.invalid"), "a manual pause must never be cleared"
+        assert health["hosts_ok"] == ["node-1.example.invalid", "node-2.example.invalid"], health
+        assert health["skipped_cooldown"] == ["node-3.example.invalid"], health
         assert_consistent(health)
         print("OK: a manual PAUSE-HOST pause is never cleared and holds the host out of hosts_ok")
 
         # 5) only PAUSE-HOST-* files are cooldowns; other PAUSE-* kinds are ignored
-        fixture.write_health({"ib1": "ok", "ib2": "ok", "ib3": "ok"})
-        fixture.write_pause("PAUSE-HOST-ib3", "auto: disk 97% used\n", now)
+        fixture.write_health({"node-1.example.invalid": "ok", "node-2.example.invalid": "ok", "node-3.example.invalid": "ok"})
+        fixture.write_pause("PAUSE-HOST-node-3.example.invalid", "auto: disk 97% used\n", now)
         fixture.write_pause("PAUSE-M3", "auto: lane hold\n", now)
         fixture.write_pause("PAUSE-BACKEND-pi", "auto: quota 429\n", now)
         fixture.tick(now)
         health = health_of(fixture)
-        assert health["cooldown"] == ["ib3"], health
-        assert health["hosts_ok"] == ["ib1", "ib2"], health
-        assert health["skipped_cooldown"] == ["ib3"], health
+        assert health["cooldown"] == ["node-3.example.invalid"], health
+        assert health["hosts_ok"] == ["node-1.example.invalid", "node-2.example.invalid"], health
+        assert health["skipped_cooldown"] == ["node-3.example.invalid"], health
         assert_consistent(health)
         print("OK: only PAUSE-HOST-<host> files make a host cooldown")
 
         # 6) a cooldown deadline in the body outranks the file age: it is not cleared early
-        fixture.write_health({"ib1": "ok", "ib2": "ok", "ib3": "ok"})
-        fixture.write_pause("PAUSE-HOST-ib3", f"auto:cooldown:until={now + 600}\n", now - PAUSE_TTL - 1)
+        fixture.write_health({"node-1.example.invalid": "ok", "node-2.example.invalid": "ok", "node-3.example.invalid": "ok"})
+        fixture.write_pause("PAUSE-HOST-node-3.example.invalid", f"auto:cooldown:until={now + 600}\n", now - PAUSE_TTL - 1)
         fixture.tick(now)
         health = health_of(fixture)
         assert health["released_cooldown"] == [], health
-        assert fixture.pause_exists("PAUSE-HOST-ib3"), "a cooldown before its deadline must not be cleared"
-        assert health["hosts_ok"] == ["ib1", "ib2"], health
-        assert health["skipped_cooldown"] == ["ib3"], health
+        assert fixture.pause_exists("PAUSE-HOST-node-3.example.invalid"), "a cooldown before its deadline must not be cleared"
+        assert health["hosts_ok"] == ["node-1.example.invalid", "node-2.example.invalid"], health
+        assert health["skipped_cooldown"] == ["node-3.example.invalid"], health
         assert_consistent(health)
         fixture.tick(now + 601)
         health = health_of(fixture)
-        assert health["released_cooldown"] == ["ib3"], health
-        assert not fixture.pause_exists("PAUSE-HOST-ib3"), "a cooldown past its deadline must be released"
-        assert health["hosts_ok"] == ["ib1", "ib2", "ib3"], health
+        assert health["released_cooldown"] == ["node-3.example.invalid"], health
+        assert not fixture.pause_exists("PAUSE-HOST-node-3.example.invalid"), "a cooldown past its deadline must be released"
+        assert health["hosts_ok"] == ["node-1.example.invalid", "node-2.example.invalid", "node-3.example.invalid"], health
         assert_consistent(health)
         print("OK: a cooldown body deadline outranks the file age and is never cleared early")
 

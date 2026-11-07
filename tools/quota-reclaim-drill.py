@@ -41,7 +41,7 @@ CLI = ROOT / "swrm" / "bin" / "swrm"
 CAPACITY = ROOT / "swrm" / "bin" / "fleet-capacity"
 FAKE_PI = ROOT / "swrm" / "tests" / "fixtures" / "fake_pi_rpc.py"
 
-# 演练只用本机协调器，不冒充 gocc/gores1 等生产宿主。
+# 演练只用本机协调器，不冒充 broker/worker 等生产宿主。
 HOST = "local"
 LANES = ("L1", "L2")
 TASK = "LANE_TEST_WAIT hold the only fleet slot for the drill"

@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -142,6 +143,29 @@ class HubBridgeTests(unittest.TestCase):
         with mock.patch.object(subprocess, 'run', return_value=response):
             with self.assertRaisesRegex(RuntimeError, '^fleet gateway rejected request$'):
                 MOD['gateway']({'op':'submit'})
+
+    def test_gateway_result_host_uses_configured_target_or_local(self):
+        for host in ('local', 'gateway.example.invalid', 'unknown.example.invalid'):
+            with self.subTest(host=host):
+                req = {'op': 'info', 'id': 'run-test', 'host': host}
+                payload = {'result': {'id': 'run-test'}} if host == 'gateway.example.invalid' else {'id': 'run-test'}
+                reply = subprocess.CompletedProcess([], 0, json.dumps(payload), '')
+                with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_SSH_HOST': 'gateway.example.invalid'}), \
+                        mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(req))), \
+                        mock.patch.object(subprocess, 'run', return_value=reply) as run, \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    if host == 'unknown.example.invalid':
+                        with self.assertRaises(SystemExit):
+                            runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
+                        run.assert_not_called()
+                    else:
+                        runpy.run_path(str(ROOT / 'bin/hub-fleet-gateway'))
+                        command = run.call_args.args[0]
+                        self.assertEqual(command[0].endswith('ssh'), host == 'gateway.example.invalid')
+                        if host == 'gateway.example.invalid': self.assertEqual(command[-1], host)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['ok'], host != 'unknown.example.invalid')
+                if result['ok']: self.assertEqual(result['result']['id'], 'run-test')
 
     def test_remote_gateway_preserves_known_dispatch_failure(self):
         req = {'op':'submit', 'prompt':'task', 'title':'test', 'base':'a'*40,

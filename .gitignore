@@ -21,3 +21,7 @@ __pycache__/
 
 # lane 临时目录
 .tmp/
+
+# Private deployment settings stay on the operator machine.
+.deployment.env
+openswarm/tests/.*.so

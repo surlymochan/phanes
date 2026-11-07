@@ -73,25 +73,31 @@ def main():
     if not base or len(base)>100 or any(c not in '0123456789abcdef' for c in base):
         raise ValueError('base must be a hexadecimal commit')
     read_only = args.type in ('review', 'research', 'audit', 'second-opinion')
-    lanes = local_lanes()
-    try: lanes += remote({'op':'lanes'})
+    local = {row['name']: (row, 'local') for row in local_lanes()}
+    discovered = {}
+    try:
+        discovered = {row['name']: (row, os.environ.get('OPENSWARM_AUTO_SSH_HOST'))
+                      for row in remote({'op':'lanes'})}
     except (RuntimeError, OSError, subprocess.SubprocessError): pass
-    available = {row['name']: row for row in lanes if row.get('state') == 'idle'}
+    # Local discovery owns a duplicate name, including its busy state.
+    discovered.update(local)
+    available = {name: entry for name, entry in discovered.items() if entry[0].get('state') == 'idle'}
     ordered = [x for x in preference(args.type,args.difficulty) if x in available]
     if not ordered:
         raise RuntimeError('no available fleet lane')
     for lane in ordered:
-        row = available[lane]
+        row, host = available[lane]
+        is_local = host == 'local'
         result = {'ok': True, 'lane': lane, 'backend': row['backend'], 'model': row['model'],
-                  'host': 'local' if lane in ('M1','K1') else os.environ['OPENSWARM_AUTO_SSH_HOST'],
+                  'host': host,
                   'profile': {'type': args.type, 'difficulty': args.difficulty}}
         if read_only: result['read_only'] = True
-        if lane == 'M1' and read_only:
+        if is_local and lane == 'M1' and read_only:
             result['lane'] = None
             result['execution_mode'] = 'one-shot'
         if args.dry_run:
             print(json.dumps(result)); return
-        if lane == 'M1' and read_only:
+        if is_local and lane == 'M1' and read_only:
             command = [cli, 'run', '--type', 'review', '--backend', 'pi', '--read-only', '--no-fallback',
                        '--cwd', str(repo), '--base', base, '--prompt', prompt, '--detach',
                        '--budget-minutes', str(args.budget_minutes)]
@@ -102,7 +108,7 @@ def main():
             except ValueError: raise RuntimeError('local dispatch acknowledgement unavailable')
             if proc.returncode or not response.get('id'):
                 raise RuntimeError('local dispatch acknowledgement unavailable')
-        elif lane in ('M1','K1'):
+        elif is_local:
             command = [cli,'lane','assign',lane,'--prompt',prompt,'--base',base,
                        '--budget-minutes',str(args.budget_minutes)]
             if args.title: command += ['--title', args.title]

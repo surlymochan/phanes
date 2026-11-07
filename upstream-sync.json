@@ -11,8 +11,13 @@
     },
     "swrm": {
       "upstream_repo": "https://github.com/surlymochan/swrm.git",
-      "base_sha": "b9c0b5831ea9f58aefed479f649d2673429c3fc5",
-      "phanes_only": [],
+      "base_sha": "a4ff878970ad3978058ee47cc62af6851dbae9e1",
+      "phanes_only": [
+        ".github/workflows/pypi-publish.yml",
+        "pypi-stub/README.md",
+        "pypi-stub/pyproject.toml",
+        "pypi-stub/swrm/__init__.py"
+      ],
       "source_of_truth": "phanes"
     }
   }

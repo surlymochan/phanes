@@ -9,8 +9,8 @@ from pathlib import Path
 
 ALLOWED_COOLDOWN_PAUSES = frozenset(
     {
-        "PAUSE-HOST-ib1",
-        "PAUSE-HOST-ib2",
+        "PAUSE-HOST-node-1.example.invalid",
+        "PAUSE-HOST-node-2.example.invalid",
         "PAUSE-M1",
         "PAUSE-M2",
     }
@@ -40,9 +40,9 @@ def main() -> None:
             (state_dir / name).touch()
 
         assert_cooldown_pause_set(state_dir)
-        print("OK: cooldown pause set contains only PAUSE-HOST-ib1/2 and PAUSE-M1/M2")
+        print("OK: cooldown pause set contains only PAUSE-HOST-node-1.example.invalid/2 and PAUSE-M1/M2")
 
-        (state_dir / "PAUSE-HOST-ib3").touch()
+        (state_dir / "PAUSE-HOST-node-3.example.invalid").touch()
         try:
             assert_cooldown_pause_set(state_dir)
         except AssertionError:

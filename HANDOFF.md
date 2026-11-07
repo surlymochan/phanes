@@ -7,11 +7,11 @@
 | 角色 / 执行器 | 模型配置 | 主机 |
 |---|---|---|
 | OpenBot Hub | 本机 Hub | local |
-| Codex | gpt-6-luna，high | gocc |
-| Antigravity | gemini-3.8-flash-medium | gocc |
-| GitHub Copilot 常规 / 较难 | claude-haiku-5.5 / claude-sonnet-5.5，medium | gocc |
-| Pi + MiniMax | MiniMax-M3.1-Flash | gores1 |
-| Cursor | composer-2.5，非 fast | gores1 |
+| Codex | gpt-6-luna，high | broker |
+| Antigravity | gemini-3.8-flash-medium | broker |
+| GitHub Copilot 常规 / 较难 | claude-haiku-5.5 / claude-sonnet-5.5，medium | broker |
+| Pi + MiniMax | MiniMax-M3.1-Flash | worker |
+| Cursor | composer-2.5，非 fast | worker |
 
 以上是现有主机配置；统一部署后的配置和模型仍待逐机验证。
 

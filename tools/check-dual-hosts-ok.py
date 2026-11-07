@@ -47,13 +47,13 @@ SPEC.loader.exec_module(IB_REFRESH)
 STATUS_KEYS = ("ok", "hosts_ok", "skipped_cooldown", "min_ttl", "min_exp")
 
 # Probe outcomes for the fake fleet: two refusals, one timeout, two ok hosts.
-# ib5 is valid but held by an active PAUSE-HOST cooldown (see below).
+# node-5.example.invalid is valid but held by an active PAUSE-HOST cooldown (see below).
 FAKE_OUTPUT = {
-    "ib1": (255, "", "ib1: Permission denied (publickey,keyboard-interactive)."),
-    "ib2": (255, "", "Connection closed by remote host"),
-    "ib3": (124, "", "ssh: connect to host ib3 port 22: Connection timed out"),
-    "ib4": (0, "OK\n", ""),
-    "gocc": (0, "OK\n", ""),
+    "node-1.example.invalid": (255, "", "node-1.example.invalid: Permission denied (publickey,keyboard-interactive)."),
+    "node-2.example.invalid": (255, "", "Connection closed by remote host"),
+    "node-3.example.invalid": (124, "", "ssh: connect to host node-3.example.invalid port 22: Connection timed out"),
+    "node-4.example.invalid": (0, "OK\n", ""),
+    "broker": (0, "OK\n", ""),
 }
 FAKE_OPENSSL = """#!/bin/sh
 # Fake `openssl` for the offline contract check: report a far-future expiry so the
@@ -69,17 +69,17 @@ exit 1
 # Fake lanes.json for the dual-mode fleet: one lane per host, plus the edge
 # cases the mapping must reject (drained, unknown host, no host at all).
 LANES = [
-    {"name": "PI1", "host": "ib1", "backend": "pi"},
-    {"name": "PI2", "host": "ib2", "backend": "pi"},
-    {"name": "PI3", "host": "ib3", "backend": "pi"},
-    {"name": "PI4", "host": "ib4", "backend": "pi"},
-    {"name": "PI4D", "host": "ib4", "backend": "pi", "drain": True},
-    {"name": "PI5", "host": "ib5", "backend": "pi"},
-    {"name": "AG1", "host": "gocc", "backend": "agy"},
-    {"name": "CX1", "host": "govpn", "backend": "codex"},
+    {"name": "PI1", "host": "node-1.example.invalid", "backend": "pi"},
+    {"name": "PI2", "host": "node-2.example.invalid", "backend": "pi"},
+    {"name": "PI3", "host": "node-3.example.invalid", "backend": "pi"},
+    {"name": "PI4", "host": "node-4.example.invalid", "backend": "pi"},
+    {"name": "PI4D", "host": "node-4.example.invalid", "backend": "pi", "drain": True},
+    {"name": "PI5", "host": "node-5.example.invalid", "backend": "pi"},
+    {"name": "AG1", "host": "broker", "backend": "agy"},
+    {"name": "CX1", "host": "worker-a.example.invalid", "backend": "codex"},
     {"name": "NO1", "backend": "pi"},
 ]
-FLEET_HOSTS = ("ib1", "ib2", "ib3", "ib4", "ib5", "gocc")
+FLEET_HOSTS = ("node-1.example.invalid", "node-2.example.invalid", "node-3.example.invalid", "node-4.example.invalid", "node-5.example.invalid", "broker")
 
 
 def parse_status_row(text: str) -> dict[str, int]:
@@ -152,17 +152,17 @@ def main() -> None:
                 cert.write_text("fake certificate\n")
                 fleet_hosts.append({"name": name, "cert": str(cert)})
             ssh_config = root / "ssh_config"
-            ssh_config.write_text("Host ib1 ib2 ib3 ib4 ib5 gocc\n    User swrm\n")
+            ssh_config.write_text("Host node-1.example.invalid node-2.example.invalid node-3.example.invalid node-4.example.invalid node-5.example.invalid broker\n    User swrm\n")
             fleet = root / "fleet.json"
             fleet.write_text(json.dumps({
                 "need_ok": 2,
                 "ssh_probe": {"enabled": True, "ssh_config": str(ssh_config)},
                 "hosts": fleet_hosts,
             }))
-            # ib5 is valid but cooling: an active auto cooldown until 2035.
+            # node-5.example.invalid is valid but cooling: an active auto cooldown until 2035.
             pause_dir = root / "autodispatch"
             pause_dir.mkdir()
-            (pause_dir / "PAUSE-HOST-ib5").write_text(
+            (pause_dir / "PAUSE-HOST-node-5.example.invalid").write_text(
                 "auto:cooldown:until=2035-01-01T00:00:00Z\n")
 
             commands = []
@@ -189,7 +189,7 @@ def main() -> None:
 
             usable = [row["host"] for row in
                       IB_REFRESH._usable_hosts(result["hosts"], set(FLEET_HOSTS))]
-            assert usable == ["ib4", "gocc"], usable
+            assert usable == ["node-4.example.invalid", "broker"], usable
             assert fields["hosts_ok"] == len(usable), "status count must match usable hosts"
 
             # The fake lanes.json the mapping is asserted against.

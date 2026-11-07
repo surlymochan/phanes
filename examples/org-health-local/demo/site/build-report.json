@@ -1,5 +1,5 @@
 {
-  "输入路径": "/root/.claude/openswarm-executor-candidate/lanes/CX2/wt/openbot/examples/org-health-local/demo/diagnosis.json",
+  "输入路径": "/path/to/executor-state/lanes/CX2/wt/openbot/examples/org-health-local/demo/diagnosis.json",
   "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f",
   "输入摘要": {
     "diagnosis": {

@@ -30,7 +30,7 @@ def _temp_home():
 class PiFleetBridgeArgparseTests(unittest.TestCase):
     def _run(self, *args):
         with _temp_home() as home:
-            env = dict(os.environ, HOME=home)
+            env = dict(os.environ, HOME=home, SWRM_BROKER_HOST='broker.example.invalid', SWRM_WORKER_HOST='worker.example.invalid')
             return subprocess.run([sys.executable, str(SCRIPT), *args],
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE,
@@ -72,7 +72,7 @@ class PiFleetBridgeArgparseTests(unittest.TestCase):
         self.assertIn(b'minutes must be between 1 and 480', proc.stderr)
 
     def test_broker_equals_worker_exits_2(self):
-        proc = self._run('--broker-host', 'gocc', '--worker', 'gocc')
+        proc = self._run('--broker-host', 'broker', '--worker', 'broker')
         self.assertEqual(proc.returncode, 2, proc.stderr.decode())
         self.assertIn(b'broker and worker must use separate hosts',
                       proc.stderr)

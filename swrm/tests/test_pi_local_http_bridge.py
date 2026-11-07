@@ -30,7 +30,7 @@ class PiLocalBridgeTests(unittest.TestCase):
                            'time.sleep(30)\n')
             ssh.chmod(0o700)
             process = subprocess.Popen([sys.executable, str(ROOT / 'bin/pi-local-http-bridge.py'),
-                                        '--port', '0', '--token-file', str(token), '--ssh', str(ssh)],
+                                        '--broker-host', 'broker.example.invalid', '--port', '0', '--token-file', str(token), '--ssh', str(ssh)],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                        env={**os.environ, 'FAKE_PID': str(marker)})
             child_stopped = False
@@ -85,7 +85,7 @@ class PiLocalBridgeTests(unittest.TestCase):
             ssh.chmod(0o700)
             for _ in range(2):
                 process = subprocess.Popen([sys.executable, str(ROOT / 'bin/pi-local-http-bridge.py'),
-                                            '--port', '0', '--token-file', str(token), '--ssh', str(ssh)],
+                                            '--broker-host', 'broker.example.invalid', '--port', '0', '--token-file', str(token), '--ssh', str(ssh)],
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                            env={**os.environ, 'FAKE_CAPTURE': str(capture)})
                 try:

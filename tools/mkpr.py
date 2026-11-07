@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Write <key>.msg and <key>.body into scratchpad/pr from a JSON spec on stdin.
 Spec keys: key, subject, detail, linked, type, bullets[], surfaces, verification[], risk, runs"""
+import os
 import json
 import sys
 
-S = "/private/tmp/claude-501/-Users-chenchao-Documents-workspace-nibiru-openbot-openbot/62926203-41d2-4936-8582-8fe69de7f53c/scratchpad/pr"
+S = os.path.join(os.environ["PHANES_SCRATCH_DIR"], "pr")
 d = json.load(sys.stdin)
 open(f"{S}/{d['key']}.msg", "w").write(f"{d['subject']}\n\n{d['detail']}\n")
 types = [

@@ -154,10 +154,10 @@
 | 规划方先发 `openswarm-task-digest: sha256:<hex>` 摘要评论 | `openswarm/docs/BUS.md:65` | `openswarm/bin/openswarm:6119-6125`、`:6212` |
 | worker 固定推送 `openswarm/<run_id>` | `openswarm/docs/BUS.md:82` | `openswarm/bin/openswarm:6616` |
 | fleet-capacity：forced command 末位参数即“宿主”，写入 `status.fleet_host` 并在释放/TTL 恢复中复用 | `openswarm/README.md:692-698` | `openswarm/bin/openswarm:3355-3360`、`:3594`、`:3505-3517`、`:3444-3446` |
-| fleet-capacity 允许的认证宿主为 `gocc/gores1/local`，支持 acquire/release/status/recover | `openswarm/README.md:693` | `openswarm/bin/fleet-capacity:15-16`、`:70-79` |
+| fleet-capacity 允许的认证宿主为 `broker/worker/local`，支持 acquire/release/status/recover | `openswarm/README.md:693` | `openswarm/bin/fleet-capacity:15-16`、`:70-79` |
 | `fleet status` 不连接暂停的 instabox，未知状态同样不连 | `openswarm/README.md:487` | `openswarm/bin/openswarm:9276-9280`、`:9363-9368` |
 | 跨主机 provider 配额由规划方协调（`batch` 汇总各主机快照） | `openswarm/README.md:505` | `openswarm/bin/openswarm:9472-9520`（`batch_provider_slot_available`） |
-| fleet-capacity 的后端白名单与上限（total 8、host:gocc 4、host:gores1 4、host:local 2、codex 1、pi 4、cursor 2、agy 2、copilot 2、minimax-cn 4） | 文档未写 | `openswarm/bin/fleet-capacity:12-14` |
+| fleet-capacity 的后端白名单与上限（total 8、host:broker 4、host:worker 4、host:local 2、codex 1、pi 4、cursor 2、agy 2、copilot 2、minimax-cn 4） | 文档未写 | `openswarm/bin/fleet-capacity:12-14` |
 | SWE-bench / 合成任务 / 路由配额基准表中的数值 | `openswarm/README.md:12-64` | `openswarm/bench/swebench/results/deepseek/tables.md`、`openswarm/bench/e2e/results/headline.json`、`openswarm/bench/results/summary.md:144` |
 | `agy-via-local-proxy` 的 Keychain/RAM disk 行为描述 | `openswarm/docs/agy-macos-runtime.md` | `openswarm/bin/agy-via-local-proxy`（Keychain 账号 `openswarm`、服务 `openbot-agy-nick-oauth`、RAM 卷 `/Volumes/OpenBotAgyVolatile`、仅在 refresh token 变化时回写） |
 
@@ -183,7 +183,7 @@
   （`bin/pi-isolated` 只检查 `node_modules/.bin/pi` 是否存在），无法在仓库内证实或证伪。
 - `openswarm/docs/executor-recovery.md:6-7`（Cursor ACP 默认暴露 Composer 2.5 fast）、`:37-40`（macOS Keychain、
   `COPILOT_HOME` 明文回退）依赖 Cursor / Copilot CLI 与 macOS 外部环境。
-- `openswarm/README.md:692-698`（SSH forced-command 端点、`/root/.ssh/openswarm-fleet/config` 示例）依赖部署侧
+- `openswarm/README.md:692-698`（SSH forced-command 端点、`/path/to/ssh/config` 示例）依赖部署侧
   SSH 配置；仓库内只能核对 `bin/openswarm` 与 `bin/fleet-capacity` 的协议行为（见第 4 节相关行）。
 
 ## 7. 复现方式与测试

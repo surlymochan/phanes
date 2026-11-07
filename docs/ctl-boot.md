@@ -149,7 +149,7 @@ config, so three reachable hosts can keep `ok=1` while two hosts cool down
 Hosts absent from the configured topology are errors and are excluded from
 `hosts_ok` (Refs #1164); exercise this invariant with
 `python3 tools/check-fleet-unknown-host.py`.
-For the ib1/ib2 cooldown case, exercise this accounting with the fake-input check
+For the node-1.example.invalid/node-2.example.invalid cooldown case, exercise this accounting with the fake-input check
 `python3 tools/check-ib-cooldown-status.py` (Refs #1262).
 An active `PAUSE-HOST-<host>` body with `auto:cooldown:until=<ISO-Z>` is read
 without modification; `ib-refresh` skips resume/wake/renew for that host and
@@ -191,7 +191,7 @@ Enable the probe in the fleet config (`~/phanes-ctl/fleet.json`) or on the comma
 {
   "need_ok": 3,
   "ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/swrm-hub/config"},
-  "hosts": [{"name": "ib1", "cert": "certs/ib1.crt"}]
+  "hosts": [{"name": "node-1.example.invalid", "cert": "certs/node-1.example.invalid.crt"}]
 }
 ```
 
@@ -529,9 +529,9 @@ Manual `touch PAUSE-*` without `auto:` is never cleared by health-loop. Soft ale
 `PAUSE-HOST-*` file. The disk boundary contract is checked offline with
 `python3 tools/check-health-disk-soft.py`.
 
-For low-memory `govpn2`-class hosts, the offline contract uses
+For low-memory `worker-b.example.invalid`-class hosts, the offline contract uses
 `HEALTH_MEM_HARD_MB=256` and `HEALTH_MEM_SOFT_MB=512`. A `health.json` snapshot
-below hard writes `auto:host_hard` to `PAUSE-HOST-govpn2` and `auto:mem_hard`
+below hard writes `auto:host_hard` to `PAUSE-HOST-worker-b.example.invalid` and `auto:mem_hard`
 to each lane pause on that host. When a later snapshot recovers to soft or
 above, the health loop self-heals by removing those auto pauses together, so
 the same host's lanes become dispatchable again; manual pause bodies are
@@ -539,14 +539,14 @@ retained. The executable set/clear contract uses fake health snapshots and a
 temporary pause directory: `python3 tools/check-health-pause.py`.
 
 During dual-mode cooldown, the production pause set is restricted to
-`PAUSE-HOST-ib1`, `PAUSE-HOST-ib2`, `PAUSE-M1`, and `PAUSE-M2`. The offline
+`PAUSE-HOST-node-1.example.invalid`, `PAUSE-HOST-node-2.example.invalid`, `PAUSE-M1`, and `PAUSE-M2`. The offline
 check uses a fake pause directory and never changes the real state:
 
 ```bash
 python3 tools/check-pause-set-cooldown.py
 ```
 
-The #1642 soak check verifies that the ib1/ib2 host pauses match paused M1/M2
+The #1642 soak check verifies that the node-1.example.invalid/node-2.example.invalid host pauses match paused M1/M2
 lanes in a fake `lanes-status` snapshot, and that the other lanes can be busy
 up to the cooldown limit of nine:
 
@@ -588,7 +588,7 @@ Release rules, mirroring `clear_auto` in `tools/check-health-pause.py`:
 - a manual pause (body not starting with `auto:`) is never cleared at all;
 - the mem hard pauses (`auto:host_hard`, `auto:mem_hard`) are additionally
   removed by the health self-heal path as soon as the host recovers (see the
-  low-memory `govpn2` paragraph above);
+  low-memory `worker-b.example.invalid` paragraph above);
 - a pause that has not expired yet is never cleared.
 
 `clear_auto` has no probe condition: an expired automatic pause is released even
@@ -648,7 +648,7 @@ Autodispatch skips paused host/backend/lane and keeps other backends busy.
 
 ## Lane memory ceiling on low-memory hosts (Refs #867)
 
-Lane hosts with ~1 GiB RAM (`govpn`, `govpn2`) should lower the memory ceiling of the
+Lane hosts with ~1 GiB RAM (`worker-a.example.invalid`, `worker-b.example.invalid`) should lower the memory ceiling of the
 generated lane unit instead of editing an installed unit:
 
 - per lane: `"memory_max": "700M"` in that host's `$OPENSWARM_HOME/lanes.json`
@@ -656,14 +656,14 @@ generated lane unit instead of editing an installed unit:
 
 `swrm lane systemd-unit <lane>` then prints `MemoryMax=700M`; without either setting the
 default stays `900M`, so higher-memory hosts are unaffected. The recommended values and the
-launchd equivalent are documented in [`docs/fleet-govpn-cx5.md`](fleet-govpn-cx5.md).
+launchd equivalent are documented in [`docs/fleet-worker-cx5.md`](fleet-worker-cx5.md).
 
 ## Per-lane proxy and token environment (Refs #1347)
 
 Give one lane its own proxy or token in `lanes.json` instead of a unit drop-in, a wrapper
 script or a global `/etc/environment` proxy:
 
-- `"env_file": "/root/.config/swrm-secrets/<lane>.env"` (absolute path or list, `KEY=value` lines, mode `600`)
+- `"env_file": "/path/to/local-secrets/<lane>.env"` (absolute path or list, `KEY=value` lines, mode `600`)
 - `"env": {"NO_PROXY": "localhost,127.0.0.1"}` (string map; overrides `env_file`)
 
 The lane supervisor applies both on systemd and launchd hosts alike; the generated unit or plist

@@ -95,7 +95,7 @@
 
 | 提交 | 内容 |
 | --- | --- |
-| `443f34554` "Bridge remote fleet guards through gocc coordinator" | 新增 `fleet-capacity-stdio`、`fleet-capacity-reverse-tunnel`、`fleet-capacity-socket-client` 与文档 `openswarm/docs/fleet-reverse-socket.md`，用于让一批自建网络主机（该文档以 `govpn` / `govpn2` 为主机示例）通过**反向 Unix socket + SSH 转发**接入共享协调器；远端以 socket client 作为 guard command |
+| `443f34554` "Bridge remote fleet guards through broker coordinator" | 新增 `fleet-capacity-stdio`、`fleet-capacity-reverse-tunnel`、`fleet-capacity-socket-client` 与文档 `openswarm/docs/fleet-reverse-socket.md`，用于让一批自建网络主机（该文档以 `worker-a.example.invalid` / `worker-b.example.invalid` 为主机示例）通过**反向 Unix socket + SSH 转发**接入共享协调器；远端以 socket client 作为 guard command |
 | `c33d8d4d5` "Revert expanded fleet transport changes" | 整体回滚上述改动（−555 行），并删除 `openswarm/docs/fleet-reverse-socket.md` 与相关测试。该提交信息未给出回滚原因 |
 | `45c8ada52`（`origin/brain/fleet-multihost`，**未合入本分支**） | 改用配置扩展：协调器读取 `topology.json`（主机 + 限额），`openswarm` 接受 `OPENSWARM_FLEET_HOSTS` 追加守护属主，使**新执行主机**可以接入而无需新增传输层 |
 | `tools/watch8.sh:3` | 历史批次清单里出现过自建网络主机别名与 instabox 临时盒两类远端主机 |

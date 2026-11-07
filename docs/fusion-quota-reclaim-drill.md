@@ -216,7 +216,7 @@ slot_holder=None
   所以不会误用生产的 `lanes.json`，也不会让 `OPENSWARM_PI_RPC_BIN` 顶掉假执行器；
   但它毕竟跑在宿主上，仍然会起真实进程、真实 socket。
 - **只测了 pi 后端 + 本机协调器**：没有覆盖 codex/agy 等后端，也没有覆盖多机
-  （`gocc`/`gores1`）的 `HOST` 拓扑；跨机回收走的是同一套 `fleet-capacity` 协议，但本次没有实测。
+  （`broker`/`worker`）的 `HOST` 拓扑；跨机回收走的是同一套 `fleet-capacity` 协议，但本次没有实测。
 - **AF_UNIX 路径长度**：lane 控制 socket 路径有硬上限（macOS 103 字节、Linux 107 字节，
   与 `swrm/bin/swrm:7627` `lane_validate_socket_path` 一致）。仓库路径太深时演练会直接报错，
   换短一点的 `--workdir` 即可。

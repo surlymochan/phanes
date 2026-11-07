@@ -13,15 +13,15 @@ SPEC.loader.exec_module(IB_REFRESH)
 
 
 def main():
-    hosts = [{"name": f"ib{i}", "cert": f"certs/ib{i}.crt"} for i in range(1, 6)]
+    hosts = [{"name": f"node-{i}.example.invalid", "cert": f"certs/node-{i}.example.invalid.crt"} for i in range(1, 6)]
     rows = [
         # A cooldown host may still have a valid certificate; it is not reachable
         # for this refresh and must remain outside hosts_ok.
-        {"host": "ib1", "status": "cooldown", "final_status": "valid"},
-        {"host": "ib2", "status": "skipped_cooldown"},
-        {"host": "ib3", "status": "valid", "final_status": "valid"},
-        {"host": "ib4", "status": "valid", "final_status": "valid"},
-        {"host": "ib5", "status": "valid", "final_status": "valid"},
+        {"host": "node-1.example.invalid", "status": "cooldown", "final_status": "valid"},
+        {"host": "node-2.example.invalid", "status": "skipped_cooldown"},
+        {"host": "node-3.example.invalid", "status": "valid", "final_status": "valid"},
+        {"host": "node-4.example.invalid", "status": "valid", "final_status": "valid"},
+        {"host": "node-5.example.invalid", "status": "valid", "final_status": "valid"},
     ]
     result = IB_REFRESH._status_for(
         {"ok": True, "start_lane_autodispatch": True, "hosts": rows},
@@ -33,7 +33,7 @@ def main():
     assert result["ok"] is True
     assert result["start_lane_autodispatch"] is True
     assert [row["host"] for row in IB_REFRESH._usable_hosts(rows, {host["name"] for host in hosts})] == [
-        "ib3", "ib4", "ib5"
+        "node-3.example.invalid", "node-4.example.invalid", "node-5.example.invalid"
     ]
     fields = dict(field.split("=", 1) for field in result["status_line"].split())
     assert fields["ok"] == "1"

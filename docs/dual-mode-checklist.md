@@ -20,22 +20,22 @@
 
 | 检查项 | 巡检目标 | 一行命令 |
 |---|---|---|
-| **ssh BatchMode** | 验证 box 至受控节点非交互连通性与 ControlMaster 复用 | `ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config ib1 true` |
+| **ssh BatchMode** | 验证 box 至受控节点非交互连通性与 ControlMaster 复用 | `ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config node-1.example.invalid true` |
 | **lane idle** | 检查 10+ 路真实 lane 运行水位与空闲（idle）分配状态 | `~/phanes-ctl/bin/lane-autodispatch-status` |
-| **coordinator** | 向 gocc 协调器查询当前全局并发预约快照 | `ssh -F ~/.ssh/swrm-hub/config gocc -- python3 ~/.claude/swrm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'` |
+| **coordinator** | 向 broker 协调器查询当前全局并发预约快照 | `ssh -F ~/.ssh/swrm-hub/config broker -- python3 ~/.claude/swrm-fleet-capacity/fleet-capacity broker <<< '{"op":"status"}'` |
 | **autodispatch heartbeat** | 检查 autodispatch 派发守护循环最后心跳（>3 分钟异常） | `cat ~/phanes-ctl/autodispatch/heartbeat` |
 | **merge heartbeat** | 检查 lane-merge 自动合并循环日志与最新时戳（>3 分钟异常） | `tail -n 20 ~/phanes-ctl/autodispatch/merge.log` |
 
 ### 详细步骤与判定说明
 
 - [ ] **1. ssh BatchMode**：
-  - 命令：`ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config ib1 true`
+  - 命令：`ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config node-1.example.invalid true`
   - 判定：退出码为 0 说明非交互认证与长连接复用正常；若非零退出（含 Permission denied、Connection closed 或超时）则判定 probe 探测失败，容量/健康汇总不得 +1 hosts_ok，需排查 instabox 证书或 key 状态（`ib-refresh` 开启 `ssh_probe` 后该 host 记为 `probe_status: failed` 且不计入 hosts_ok；离线断言见 tools/check-fleet-batchmode-probe.py）。
 - [ ] **2. lane idle**：
   - 命令：`~/phanes-ctl/bin/lane-autodispatch-status`
   - 判定：输出中各 lane（M1–M4、A1、A2、CX1–CX5）应处于 `busy` 或 `idle` 轮转中，不可异常挂死在非预期状态。
 - [ ] **3. coordinator**：
-  - 命令：`ssh -F ~/.ssh/swrm-hub/config gocc -- python3 ~/.claude/swrm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'`
+  - 命令：`ssh -F ~/.ssh/swrm-hub/config broker -- python3 ~/.claude/swrm-fleet-capacity/fleet-capacity broker <<< '{"op":"status"}'`
   - 判定：返回 `{"ok": true, "reservations": [...]}`，若报 `coordinator unavailable` 说明协调器或网络退避中。
 - [ ] **4. autodispatch heartbeat**：
   - 命令：`cat ~/phanes-ctl/autodispatch/heartbeat`

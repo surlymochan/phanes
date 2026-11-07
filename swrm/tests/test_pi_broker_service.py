@@ -1,7 +1,7 @@
 """Smoke tests for bin/pi-broker-service: socket guard + node exec.
 
 Runs the script against a fake HOME and a fake node binary, so the live
-broker (a LaunchAgent service on gocc) is never touched: the script only
+broker (a LaunchAgent service on broker) is never touched: the script only
 ever execs $HOME/.local/node-v24.14.1/bin/node, which the tests replace
 with a recorder that exits 0.
 """

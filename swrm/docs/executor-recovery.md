@@ -18,7 +18,7 @@ that limit is reached.
 From a machine with the existing SSH identities, start the bounded bridge:
 
 ```sh
-bin/pi-fleet-bridge --broker-host gocc --worker gores1 --minutes 120
+bin/pi-fleet-bridge --broker-host broker --worker worker --minutes 120
 ```
 
 The command prints the worker socket path. On the worker, set

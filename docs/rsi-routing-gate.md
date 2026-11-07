@@ -2,7 +2,7 @@
 
 ## 1. 设计原则与背景
 
-依据主架构设计原则（见 [`README.md:45`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/README.md#L45)）：
+依据主架构设计原则（见 [`README.md:45`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/README.md#L45)）：
 > **Self-improvement is evidence-driven and gated.** RSI proposes experience and policy changes; weighted routing stays record-only until controlled comparisons on the same task type and environment justify enabling it, and every change can roll back.
 
 RSI（Recursive Self-Improvement，递归自完善层，对应 `knowledge.repo`）负责从实际运行历史中提炼经验教训（lessons）、复用模式（patterns）以及路由优化建议（routing advice）。然而，执行控制平面（execution plane）默认严守确定性与稳定性，**权重路由在未完成受控对照验证之前必须保持只读记录（record-only）状态**，不得自动替代线上生产分发。
@@ -12,31 +12,31 @@ RSI（Recursive Self-Improvement，递归自完善层，对应 `knowledge.repo`�
 ## 2. 现有 RSI 核心入口清单与代码路径
 
 ### 2.1 路由（Routing）入口
-- **实时路由决策**：[`swrm/bin/swrm:3197-3243`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L3197-L3243) (`route`)。基于 `policy.json` 中的 `default_order`、`review_types`、`ocgo_first_types` 与额度/窗口状态给出执行分发。
+- **实时路由决策**：[`swrm/bin/swrm:3197-3243`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L3197-L3243) (`route`)。基于 `policy.json` 中的 `default_order`、`review_types`、`ocgo_first_types` 与额度/窗口状态给出执行分发。
 - **权重计算与只读建议**：
-  - 样本指标聚合：[`swrm/bin/swrm:2125-2182`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2125-L2182) (`compute_routing_weights`)。
-  - 只读建议生成：[`swrm/bin/swrm:2204-2241`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2204-L2241) (`routing_advice`)。明确声明 `"actual routing unchanged"`。
-  - 运行时记录：[`swrm/bin/swrm:5173-5178`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L5173-L5178) 及 `:5250, :5409` (`cmd_run`)。仅将 `routing_advice` 写入 `run.json` 与账本 `ledger.jsonl`，执行器仍由 `route()` 真实派发。
+  - 样本指标聚合：[`swrm/bin/swrm:2125-2182`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2125-L2182) (`compute_routing_weights`)。
+  - 只读建议生成：[`swrm/bin/swrm:2204-2241`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2204-L2241) (`routing_advice`)。明确声明 `"actual routing unchanged"`。
+  - 运行时记录：[`swrm/bin/swrm:5173-5178`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L5173-L5178) 及 `:5250, :5409` (`cmd_run`)。仅将 `routing_advice` 写入 `run.json` 与账本 `ledger.jsonl`，执行器仍由 `route()` 真实派发。
 - **CLI 审查与对比入口**：
-  - `swrm routing weights [--out FILE] [--fleet]`：[`swrm/bin/swrm:2243-2248, 11601`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2243-L2248)。
-  - `swrm routing compare [--days N]`：[`swrm/bin/swrm:2259-2273, 11604`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2259-L2273)。对偶未执行路线严格标为 `not run`。
+  - `swrm routing weights [--out FILE] [--fleet]`：[`swrm/bin/swrm:2243-2248, 11601`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2243-L2248)。
+  - `swrm routing compare [--days N]`：[`swrm/bin/swrm:2259-2273, 11604`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2259-L2273)。对偶未执行路线严格标为 `not run`。
 - **策略门控与受控回归选择器**：
-  - 默认策略开关：[`swrm/policy.json:78-80`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/policy.json#L78-L80)（`"min_samples": 8`, `"weighted": false`）。
-  - 回归测试选择器：[`swrm/bin/swrm:11224-11235`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L11224-L11235) (`regress_select_backend`) 与 CLI 参数 `--routing {static,weighted}`（[`swrm/bin/swrm:11585`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L11585)）。
+  - 默认策略开关：[`swrm/policy.json:78-80`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/policy.json#L78-L80)（`"min_samples": 8`, `"weighted": false`）。
+  - 回归测试选择器：[`swrm/bin/swrm:11224-11235`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L11224-L11235) (`regress_select_backend`) 与 CLI 参数 `--routing {static,weighted}`（[`swrm/bin/swrm:11585`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L11585)）。
 
 ### 2.2 经验教训（Lessons）入口
 - **提议与升级**：
-  - `swrm lessons propose`：[`swrm/bin/swrm:1122-1306, 11460`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L1122-L1306)（从已关联 P0/P1 的 PR 审查结果中提炼新规则草案）。
-  - `swrm lessons escalate`：[`swrm/bin/swrm:1414-1478, 11465`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L1414-L1478)（对反复复发的 lesson 提议 L3 防御护栏）。
+  - `swrm lessons propose`：[`swrm/bin/swrm:1122-1306, 11460`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L1122-L1306)（从已关联 P0/P1 的 PR 审查结果中提炼新规则草案）。
+  - `swrm lessons escalate`：[`swrm/bin/swrm:1414-1478, 11465`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L1414-L1478)（对反复复发的 lesson 提议 L3 防御护栏）。
 - **匹配与提示词注入**：
-  - [`swrm/bin/swrm:378-422`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L378-L422) (`select_lessons`)，[`swrm/bin/swrm:425-434`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L425-L434) (`add_lessons_to_prompt`)，`swrm lessons preview`（[`swrm/bin/swrm:11456`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L11456)）。
+  - [`swrm/bin/swrm:378-422`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L378-L422) (`select_lessons`)，[`swrm/bin/swrm:425-434`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L425-L434) (`add_lessons_to_prompt`)，`swrm lessons preview`（[`swrm/bin/swrm:11456`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L11456)）。
 
 ### 2.3 复用模式（Patterns）入口
 - **提议与淘汰检查**：
-  - `swrm patterns propose`：[`swrm/bin/swrm:768-825, 11471`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L768-L825)（从 `swrm compare` 获胜方和重复审查项提炼模式）。
-  - `swrm patterns retire-check`：[`swrm/bin/swrm:832-868, 11473`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L832-L868)（检查模式对成功率无提升时提议下线）。
+  - `swrm patterns propose`：[`swrm/bin/swrm:768-825, 11471`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L768-L825)（从 `swrm compare` 获胜方和重复审查项提炼模式）。
+  - `swrm patterns retire-check`：[`swrm/bin/swrm:832-868, 11473`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L832-L868)（检查模式对成功率无提升时提议下线）。
 - **匹配与提示词注入**：
-  - [`swrm/bin/swrm:504-557`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L504-L557) (`select_patterns`)，[`swrm/bin/swrm:560-569`](file:///file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L560-L569) (`add_patterns_to_prompt`)。
+  - [`swrm/bin/swrm:504-557`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L504-L557) (`select_patterns`)，[`swrm/bin/swrm:560-569`](file:///file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L560-L569) (`add_patterns_to_prompt`)。
 
 ---
 
@@ -60,7 +60,7 @@ RSI（Recursive Self-Improvement，递归自完善层，对应 `knowledge.repo`�
 3. **统一预算与约束条件**：
    - 任务给定的超时时限（`est_minutes` / `budget_minutes`）、最大上下文 Token 限制等外部配额完全一致。
 4. **杜绝反事实臆测（Unrun Counterfactuals）**：
-   - 依据 [`swrm/bin/swrm:2265-2272`](file:///Users/surlymo/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2265-L2272) 与 `test_compare_shows_actual_outcome_and_unrun_counterfactual`：若线上运行真实调度了 Backend A，而历史建议为 Backend B，因 Backend B 并未在当时执行，其结果必须如实记为 `not run`。受控对比必须通过实际并行对撞（`swrm compare`）或批量回归套件（`swrm regress run`）真实运行两套体系，严禁将静态推论当作对比证据。
+   - 依据 [`swrm/bin/swrm:2265-2272`](file:///path/to/operator/.claude/swrm-executor-candidate/lanes/A1/wt/swrm/bin/swrm#L2265-L2272) 与 `test_compare_shows_actual_outcome_and_unrun_counterfactual`：若线上运行真实调度了 Backend A，而历史建议为 Backend B，因 Backend B 并未在当时执行，其结果必须如实记为 `not run`。受控对比必须通过实际并行对撞（`swrm compare`）或批量回归套件（`swrm regress run`）真实运行两套体系，严禁将静态推论当作对比证据。
 
 ---
 

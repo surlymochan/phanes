@@ -12,8 +12,8 @@ import tempfile
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--broker-host', default='gocc')
-parser.add_argument('--worker', default='gores1')
+parser.add_argument('--broker-host', default=os.environ.get('SWRM_BROKER_HOST', ''))
+parser.add_argument('--worker', default=os.environ.get('SWRM_WORKER_HOST', ''))
 parser.add_argument('--model', default='MiniMax-M3.1-Flash')
 parser.add_argument('--minutes', type=int, default=120)
 args = parser.parse_args()

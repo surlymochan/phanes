@@ -1,0 +1,3202 @@
+{
+  "baseline": "a4ff878970ad3978058ee47cc62af6851dbae9e1",
+  "normalization": "Existing paths retained; renamed paths and content normalize openswarm to swrm.",
+  "counts": {
+    "rename-only": 65,
+    "identical": 238,
+    "modified": 26,
+    "deleted": 594,
+    "added": 4
+  },
+  "test_method_differences": [
+    {
+      "path": "swrm/tests/_load.py",
+      "before": 0,
+      "after": 0,
+      "added": [],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_bench.py",
+      "before": 4,
+      "after": 4,
+      "added": [],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_fleet_auto.py",
+      "before": 13,
+      "after": 17,
+      "added": [
+        "test_discovered_local_lanes_do_not_require_remote_configuration",
+        "test_duplicate_remote_name_cannot_override_local_busy_state",
+        "test_remote_dispatch_requires_configured_target",
+        "test_remote_named_k1_is_dispatched_remotely"
+      ],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_fleet_capacity.py",
+      "before": 17,
+      "after": 17,
+      "added": [],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_hub_bridge.py",
+      "before": 15,
+      "after": 17,
+      "added": [
+        "test_gateway_result_host_uses_configured_target_or_local",
+        "test_submit_rejects_unconfigured_executor_host"
+      ],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_pi_broker_service.py",
+      "before": 6,
+      "after": 6,
+      "added": [],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_pi_fleet_bridge.py",
+      "before": 8,
+      "after": 8,
+      "added": [],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_pi_local_http_bridge.py",
+      "before": 2,
+      "after": 2,
+      "added": [],
+      "removed": []
+    },
+    {
+      "path": "swrm/tests/test_review.py",
+      "before": 12,
+      "after": 12,
+      "added": [],
+      "removed": []
+    }
+  ],
+  "differences": [
+    {
+      "status": "modified",
+      "upstream": "README.md",
+      "current": "swrm/README.md"
+    },
+    {
+      "status": "modified",
+      "upstream": "bench/README.md",
+      "current": "swrm/bench/README.md"
+    },
+    {
+      "status": "modified",
+      "upstream": "bench/catalogue.json",
+      "current": "swrm/bench/catalogue.json"
+    },
+    {
+      "status": "modified",
+      "upstream": "bench/e2e/README.md",
+      "current": "swrm/bench/e2e/README.md"
+    },
+    {
+      "status": "modified",
+      "upstream": "bench/swebench/README.md",
+      "current": "swrm/bench/swebench/README.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-10356/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/baseline/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pylint-dev__pylint-8898/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/solution.diff.gz",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/solution.diff.gz"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/solution.diff.sha256",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/solution.diff.sha256"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-10356/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/solution.diff.gz",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/solution.diff.gz"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/solution.diff.sha256",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/solution.diff.sha256"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-5787/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/pytest-dev__pytest-6197/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-14248/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/openflow/sympy__sympy-17630/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/executor-1-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/executor-1-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/executor-1-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/executor-1-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/executor-1-record.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/executor-1-record.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/executor-1-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/executor-1-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/executor-task.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/executor-task.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/openswarm-stdout.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/swrm-stdout.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/openswarm.err",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/swrm.err"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pylint-dev__pylint-8898/r1/verify.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pylint-dev__pylint-8898/r1/verify.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/executor-1-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/executor-1-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/executor-1-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/executor-1-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/executor-1-record.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/executor-1-record.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/executor-1-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/executor-1-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/executor-task.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/executor-task.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/openswarm-stdout.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/swrm-stdout.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/openswarm.err",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/swrm.err"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-10356/r1/verify.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-10356/r1/verify.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/executor-1-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/executor-1-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/executor-1-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/executor-1-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/executor-1-record.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/executor-1-record.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/executor-1-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/executor-1-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/executor-task.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/executor-task.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/openswarm-stdout.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/swrm-stdout.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/openswarm.err",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/swrm.err"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-5787/r1/verify.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-5787/r1/verify.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/executor-1-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/executor-1-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/executor-1-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/executor-1-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/executor-1-record.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/executor-1-record.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/executor-1-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/executor-1-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/executor-task.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/executor-task.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/openswarm-stdout.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/swrm-stdout.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/openswarm.err",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/swrm.err"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/pytest-dev__pytest-6197/r1/verify.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/pytest-dev__pytest-6197/r1/verify.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/executor-1-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/executor-1-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/executor-1-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/executor-1-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/executor-1-record.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/executor-1-record.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/executor-1-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/executor-1-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/executor-task.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/executor-task.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/openswarm-stdout.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/swrm-stdout.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/openswarm.err",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/swrm.err"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-14248/r1/verify.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-14248/r1/verify.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/executor-1-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/executor-1-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/executor-1-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/executor-1-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/executor-1-record.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/executor-1-record.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/executor-1-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/executor-1-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/executor-task.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/executor-task.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/openswarm-stdout.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/swrm-stdout.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/openswarm.err",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/swrm.err"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/openswarm/sympy__sympy-17630/r1/verify.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/swrm/sympy__sympy-17630/r1/verify.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-10356/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw-deepseek/superpowers/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-4551/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r2/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r2/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r2/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-10356/r2/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-12489/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13852/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-13878/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r2/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r2/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-14248/r2/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-14248/r2/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-16597/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r2/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r2/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-17630/r2/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-17630/r2/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/baseline/sympy__sympy-18199/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pylint-dev__pylint-8898/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-10356/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-5787/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/pytest-dev__pytest-6197/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-14248/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/measure-from.txt",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/measure-from.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/openflow/sympy__sympy-17630/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pylint-dev__pylint-8898/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pylint-dev__pylint-8898/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-10356/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-10356/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-5787/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-5787/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/planner-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/planner-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/pytest-dev__pytest-6197/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/pytest-dev__pytest-6197/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-14248/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-14248/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/planner-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/planner-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/planner-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/planner-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/openswarm/sympy__sympy-17630/r1/tool-version.json",
+      "current": "swrm/bench/swebench/results/raw/swrm/sympy__sympy-17630/r1/tool-version.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pylint-dev__pylint-8898/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-10356/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-5787/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/pytest-dev__pytest-6197/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-12489/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-14248/r1/solution.diff"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/agent-events.jsonl",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/agent-events.jsonl"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/agent-prompt.md",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/agent-prompt.md"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/agent-run_pi.stderr.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/agent-run_pi.stderr.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/env.log",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/env.log"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/grade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/grade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/grade/test.patch",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/grade/test.patch"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/grade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/grade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/regrade/grade.json",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/regrade/grade.json"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/regrade/test_output.txt",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/regrade/test_output.txt"
+    },
+    {
+      "status": "deleted",
+      "upstream": "bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/solution.diff",
+      "current": "swrm/bench/swebench/results/raw/superpowers/sympy__sympy-17630/r1/solution.diff"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/fleet-capacity",
+      "current": "swrm/bin/fleet-capacity"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/hub-fleet-gateway",
+      "current": "swrm/bin/hub-fleet-gateway"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/hub-openswarm-bridge",
+      "current": "swrm/bin/hub-swrm-bridge"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/openswarm-auto",
+      "current": "swrm/bin/swrm-auto"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/openswarm_consult.py",
+      "current": "swrm/bin/swrm_consult.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/pi-fleet-bridge",
+      "current": "swrm/bin/pi-fleet-bridge"
+    },
+    {
+      "status": "modified",
+      "upstream": "bin/pi-local-http-bridge.py",
+      "current": "swrm/bin/pi-local-http-bridge.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "docs/executor-recovery.md",
+      "current": "swrm/docs/executor-recovery.md"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/_load.py",
+      "current": "swrm/tests/_load.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/golden/help-batch.txt",
+      "current": "swrm/tests/golden/help-batch.txt"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/golden/help-bus-worker.txt",
+      "current": "swrm/tests/golden/help-bus-worker.txt"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/golden/help-lane-assign.txt",
+      "current": "swrm/tests/golden/help-lane-assign.txt"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/golden/help-run.txt",
+      "current": "swrm/tests/golden/help-run.txt"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_bench.py",
+      "current": "swrm/tests/test_bench.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_fleet_auto.py",
+      "current": "swrm/tests/test_fleet_auto.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_fleet_capacity.py",
+      "current": "swrm/tests/test_fleet_capacity.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_hub_bridge.py",
+      "current": "swrm/tests/test_hub_bridge.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_pi_broker_service.py",
+      "current": "swrm/tests/test_pi_broker_service.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_pi_fleet_bridge.py",
+      "current": "swrm/tests/test_pi_fleet_bridge.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_pi_local_http_bridge.py",
+      "current": "swrm/tests/test_pi_local_http_bridge.py"
+    },
+    {
+      "status": "modified",
+      "upstream": "tests/test_review.py",
+      "current": "swrm/tests/test_review.py"
+    },
+    {
+      "status": "added",
+      "current": "swrm/.github/workflows/pypi-publish.yml"
+    },
+    {
+      "status": "added",
+      "current": "swrm/pypi-stub/README.md"
+    },
+    {
+      "status": "added",
+      "current": "swrm/pypi-stub/pyproject.toml"
+    },
+    {
+      "status": "added",
+      "current": "swrm/pypi-stub/swrm/__init__.py"
+    }
+  ]
+}

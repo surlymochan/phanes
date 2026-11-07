@@ -31,17 +31,17 @@ class FleetCapacityTests(unittest.TestCase):
 
     def test_atomic_limit_and_idempotent_recovery(self):
         def attempt(i):
-            return self.call('gocc' if i % 2 else 'gores1', op='acquire',
+            return self.call('broker' if i % 2 else 'worker', op='acquire',
                              token=f'{i:032x}', run_id=f'run-{i}', backend='pi', provider='minimax-cn')
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             answers = list(pool.map(attempt, range(8)))
         self.assertEqual(sum(bool(a.get('admitted')) for a in answers), 1)
         winner = next(i for i, a in enumerate(answers) if a.get('admitted'))
-        host = 'gocc' if winner % 2 else 'gores1'
+        host = 'broker' if winner % 2 else 'worker'
         token = f'{winner:032x}'
         self.assertTrue(self.call(host, op='acquire', token=token, run_id=f'run-{winner}',
                                   backend='pi', provider='minimax-cn')['existing'])
-        self.assertFalse(self.call('gores1' if host == 'gocc' else 'gocc', op='release',
+        self.assertFalse(self.call('worker' if host == 'broker' else 'broker', op='release',
                                    token=token, run_id=f'run-{winner}')['ok'])
         self.assertEqual(len(self.call(host, op='status')['reservations']), 1)
         self.assertTrue(self.call(host, op='release', token=token, run_id=f'run-{winner}')['released'])
@@ -100,7 +100,7 @@ class FleetCapacityTests(unittest.TestCase):
         binary.chmod(0o755)
         self.env['HOME'] = str(root)
         self.env['FAKE_ARGS'] = str(root / 'args.json')
-        response = self.call('gores1', op='assign', lane='GH1', prompt='review', base='abcdef0',
+        response = self.call('worker', op='assign', lane='GH1', prompt='review', base='abcdef0',
                              budget_minutes=3, title='review', verify=None, read_only=True)
         self.assertTrue(response['ok'])
         self.assertIn('--read-only', json.loads((root / 'args.json').read_text()))
@@ -127,7 +127,7 @@ class FleetCapacityTests(unittest.TestCase):
         fake.write_text('#!' + sys.executable + '\nimport json\nprint(' + repr(json.dumps(info)) + ')\n')
         fake.chmod(0o755)
         self.env['HOME'] = str(root)
-        response = self.call('gores1', op='bundle', run_id='run-1')
+        response = self.call('worker', op='bundle', run_id='run-1')
         self.assertTrue(response['ok'])
         self.assertEqual(response['result']['commit'], commit)
         self.assertTrue(response['result']['bundle'])
@@ -139,7 +139,7 @@ class FleetCapacityTests(unittest.TestCase):
 
     def test_reaped_stopped_runner_releases_slot(self):
         guard = pathlib.Path(self.temp.name, 'guard.json')
-        guard.write_text(json.dumps({'command': [str(BIN), 'gocc']}))
+        guard.write_text(json.dumps({'command': [str(BIN), 'broker']}))
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard), 'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
         with mock.patch.dict(os.environ, env), mock.patch.dict(xs.EXECUTORS, {'pi': lambda *args: (133, None, {}, 'stopped')}):
             rdir = pathlib.Path(self.temp.name, 'runs', 'reaped')
@@ -148,11 +148,11 @@ class FleetCapacityTests(unittest.TestCase):
                                                           self.temp.name, str(rdir), xs.NOW() + 15,
                                                           {'concurrency': {'total': 8}})
             self.assertEqual(error, 'risk_blocked')
-            self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+            self.assertEqual(self.call('broker', op='status')['reservations'], [])
 
     def test_one_shot_agy_403_releases_slot_for_next_run(self):
         guard = pathlib.Path(self.temp.name, 'guard.json')
-        guard.write_text(json.dumps({'command': [str(BIN), 'gocc']}))
+        guard.write_text(json.dumps({'command': [str(BIN), 'broker']}))
         fake = HERE / 'fixtures/fake_agy.py'
         fake.chmod(0o755)
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard),
@@ -167,37 +167,37 @@ class FleetCapacityTests(unittest.TestCase):
                     str(rdir), xs.NOW() + 15, {'concurrency': {'total': 8}})
                 self.assertEqual(error, 'upstream_forbidden')
                 self.assertEqual(attempts[0]['rc'], 1)
-                self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+                self.assertEqual(self.call('broker', op='status')['reservations'], [])
 
     def test_recovery_requires_local_explicit_confirmation(self):
         token = 'a' * 32
-        self.assertTrue(self.call('gores1', op='acquire', token=token, run_id='orphan',
+        self.assertTrue(self.call('worker', op='acquire', token=token, run_id='orphan',
                                   backend='cursor', provider=None)['admitted'])
-        self.assertFalse(self.call('gores1', op='recover', host='gores1', run_id='orphan',
+        self.assertFalse(self.call('worker', op='recover', host='worker', run_id='orphan',
                                    confirm='all-executor-processes-stopped')['ok'])
-        self.assertFalse(self.call('gocc', op='recover', host='gores1', run_id='orphan')['ok'])
-        self.assertEqual(self.call('gocc', op='recover', host='gores1', run_id='orphan',
+        self.assertFalse(self.call('broker', op='recover', host='worker', run_id='orphan')['ok'])
+        self.assertEqual(self.call('broker', op='recover', host='worker', run_id='orphan',
                                    confirm='all-executor-processes-stopped')['recovered'], 1)
 
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
         second = dict(op='acquire', token='2' * 32, run_id='two', backend='agy', provider=None)
         third = dict(op='acquire', token='3' * 32, run_id='three', backend='copilot', provider=None)
-        self.assertTrue(self.call('gocc', **first)['admitted'])
-        self.assertTrue(self.call('gocc', **second)['admitted'])
-        self.assertEqual(self.call('gocc', **third)['blocked'], ['host:gocc'])
-        self.assertTrue(self.call('gores1', **third)['admitted'])
+        self.assertTrue(self.call('broker', **first)['admitted'])
+        self.assertTrue(self.call('broker', **second)['admitted'])
+        self.assertEqual(self.call('broker', **third)['blocked'], ['host:broker'])
+        self.assertTrue(self.call('worker', **third)['admitted'])
 
     def test_local_host_shares_backend_limit_and_cannot_recover(self):
         local = dict(op='acquire', token='1' * 32, run_id='local-turn', backend='codex', provider=None)
         remote = dict(op='acquire', token='2' * 32, run_id='remote-run', backend='codex', provider=None)
         self.assertTrue(self.call('local', **local)['admitted'])
-        self.assertEqual(self.call('gocc', **remote)['blocked'], ['codex'])
+        self.assertEqual(self.call('broker', **remote)['blocked'], ['codex'])
         self.assertFalse(self.call('local', op='recover', host='local', run_id='local-turn',
                                    confirm='all-executor-processes-stopped')['ok'])
-        self.assertEqual(self.call('gocc', op='recover', host='local', run_id='local-turn',
+        self.assertEqual(self.call('broker', op='recover', host='local', run_id='local-turn',
                                    confirm='all-executor-processes-stopped')['recovered'], 1)
-        self.assertTrue(self.call('gocc', **remote)['admitted'])
+        self.assertTrue(self.call('broker', **remote)['admitted'])
 
     def test_local_host_limit_applies_across_backends(self):
         for i, backend in enumerate(('codex', 'agy', 'copilot'), 1):
@@ -232,14 +232,14 @@ class FleetCapacityTests(unittest.TestCase):
         fake = mock.Mock(return_value=(1, None, {'usage':{}, 'finished_reason':'print_timeout'},
                                       'agy turn ended early: print_timeout'))
         with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
-             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'gocc']), \
+             mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'broker']), \
              mock.patch.dict(xs.EXECUTORS, {'agy':fake}):
             attempts, final, error = xs.run_executor_with_rate_limit(
                 'agy', {'backend':'agy', 'model':'gemini-3.8-flash-medium', 'effort':None}, {}, 'task', self.temp.name, rdir,
                 xs.NOW() + 30, xs.load_policy())
         self.assertEqual(error, 'exec_error')
         self.assertIsNone(final)
-        self.assertEqual(self.call('gocc', op='status')['reservations'], [])
+        self.assertEqual(self.call('broker', op='status')['reservations'], [])
 
 if __name__ == '__main__':
     unittest.main()
