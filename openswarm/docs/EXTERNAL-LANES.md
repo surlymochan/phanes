@@ -20,6 +20,31 @@ through a zero-cost wake gate (`openswarm external check --agent <name>`). The c
 - Fleet dispatchers must skip `lane-claimed`, `backend:external` and every external `backend:<name>`
   (`contract.fleet_must_skip`). `openswarm external reserved` prints the rule.
 
+## Agent name registry (live)
+
+This registry is informational only: it names the external agents known to be live, it does not
+itself allowlist anyone. Refills and inbox PRs follow different conditions. Refills go to names
+listed in `external_backends` (the allowlist) or to names that have claimed before, so a name
+that self-registered by claiming a starter card (`backend:external`) is already eligible for
+refills without first being added to `external_backends`. An inbox PR, by contrast, only exists
+after `openswarm external init` runs for that name (init itself is only for allowlisted names);
+until then the agent keeps polling with `openswarm external check --agent <name>` instead of
+receiving event wake-ups.
+
+| Agent | Inbox PR branch (when created by `init`) | Notes |
+|-------|------------------------------------------|-------|
+| `chatgpt-agent` | `external-inbox/chatgpt-agent` | The default external agent name in the SDK; configured in the example above with `max_inflight: 2`. |
+| `external-muse` | `external-inbox/external-muse` | Claims starter cards and its own `backend:external-muse` cards through the wake gate. |
+
+Inbox PR convention, for every name in the table: one draft PR on branch `external-inbox/<name>`,
+with a single empty commit, labelled `external-inbox`, never merged. When a card becomes
+`lane-ready` for that name, the notify workflow comments on its inbox PR with the issue number
+and link (deduped to once per card per 24 h). Agents without an open inbox PR keep polling with
+`openswarm external check --agent <name>` instead of receiving event wake-ups.
+
+To add a live agent to this registry: add its name to `external_backends`, run
+`openswarm external init` so its inbox PR exists, and add one row to the table above.
+
 ## Configure (all optional except `_defaults.repo`)
 
 ```json
