@@ -34,6 +34,23 @@ JUMP_HOSTS_FILE = "jump-hosts.json"
 BACKOFF = {}  # host -> {"n": consecutive failures, "until": epoch}; transient ssh errors never mark a lane or issue failed
 HOST_BACKOFF_BASE = 30
 HOST_BACKOFF_MAX = 600
+# Host recovery (Refs #1673): the 2026-11-02 incident left PAUSE-HOST-box behind and the run that was in
+# flight (M6, #1361) was lost for 44 minutes. The tick observes the reachability of every host (it probes
+# them over ssh anyway) and acts on the down -> up edge: the hold of the host is reviewed and the runs that
+# were in flight are verified.
+PAUSE_HOST_PREFIX = "PAUSE-HOST-"
+AUTO_PREFIX = "auto:"
+# Holds another owner owns: the memory holds are healed by the health self-heal path, a machine cooldown has
+# its own deadline, and a disk hold is not cured by the host answering ssh again (the disk can still be full).
+RESOURCE_HOLD_RE = re.compile(r"disk|host_hard|mem_hard", re.I)
+# An automatic hold whose body names the unreachable host: the cause of the hold is known, and the host
+# answering ssh again cures it. An automatic hold without such a cause keeps its pause: the write time of a
+# hold says nothing about its cause (an independent protection can be written during the very same outage).
+UNREACHABLE_HOLD_RE = re.compile(r"ssh|unreachable|streak", re.I)
+# A run is only given up when its assignment is at least this old: a runner that just died may still be
+# writing its result.json.
+LOST_RUN_MIN_AGE_S = 180
+RECOVERY_LOG = "host-recoveries.jsonl"
 HARVEST_FETCH_MAX_ATTEMPTS = 3  # initial fetch plus two bounded retries
 HARVEST_FETCH_RETRY_DELAY = 20
 # Refs #947: a harvest fetch failure is transient until HARVEST_FETCH_MAX_TRANSIENT_FAILURES consecutive
@@ -714,20 +731,171 @@ def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
     except Exception: return 1e9
 
-def reconcile(L, cfg, st, r, state):
-    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
-    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
-    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
-    if r.get("runner_alive") or (r.get("runner_alive") is None and age_s(st) < 600) or age_s(st) < 180: return False
-    n = st["issue"]; _, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
+def requeue_orphaned_issue(L, st, r, why):
+    """Give the issue of an orphaned (or lost) run back to the queue.
+
+    The labels are the ones the scheduler expects: `in-progress` is removed and `lane-ready` is added, so the
+    issue can be dispatched again. An issue that already got a PR (or that is closed) is only dropped.
+
+    Returns whether the issue was released. A failed read or a failed label edit returns False: the lane keeps
+    its record and a later tick retries, so a lane is never dropped while its issue still carries
+    `in-progress` (the scheduler skips that label: such an issue would never be dispatched again)."""
+    n = st["issue"]; rc, out, err = gh(["issue", "view", str(n), "--json", "state,labels"])
+    if rc:
+        log(f"{L} #{n} run {st['run']} {why} → issue read failed (gh rc={rc}: {(err or out).strip()[-120:]}); lane kept", brain=False)
+        return False
     try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
     except Exception: return False
-    if j["state"] == "OPEN" and "lane-pr" not in labels:
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+    issue_state = str(j.get("state", ""))
+    if issue_state == "OPEN" and "lane-pr" not in labels:
+        rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+        if rc:
+            log(f"{L} #{n} run {st['run']} {why} → requeue failed (gh issue edit rc={rc}: {(err or '').strip()[-120:]}); lane kept for a retry", brain=False)
+            return False
         what = "requeued (lane-ready)"
-    else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
-    log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
+    else: what = f"already {issue_state.lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
+    log(f"{L} #{n} run {st['run']} {why} → {what}")
     return True
+
+def reconcile(L, cfg, st, r, state):
+    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
+    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed.
+
+    A failed label edit keeps the lane record (the requeue helper returns False): the issue still carries
+    `in-progress`, so the lane must not be dropped before the labels are back in sync."""
+    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
+    if r.get("runner_alive") or (r.get("runner_alive") is None and age_s(st) < 600) or age_s(st) < 180: return False
+    return requeue_orphaned_issue(L, st, r, f"orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead)")
+
+def run_is_lost(st, r, min_age_s=LOST_RUN_MIN_AGE_S):
+    """True when the run of `st` is gone: it wrote no result, the lane does not run it any more and its runner is dead.
+
+    The age guard keeps a runner that just died out of the verdict: it may still be writing its result.json."""
+    if r.get("run") != "running": return False              # a result exists: the run finished
+    if r.get("current_run") == st["run"]: return False       # the lane still runs our run
+    if r.get("runner_alive"): return False                  # the runner is still there
+    if r.get("runner_alive") is None and age_s(st) < 600: return False   # unknown runner: too early to call it lost
+    return age_s(st) >= min_age_s
+
+# ---------------------------------------------------------------- host recovery
+def host_pause_path(host):
+    """Return the path of the PAUSE-HOST-<host> marker of the autodispatch state dir."""
+    return os.path.join(D, PAUSE_HOST_PREFIX + str(host))
+
+def classify_host_hold(body):
+    """Classify the body of a PAUSE-HOST marker.
+
+    "manual"    an operator hold (no `auto:` prefix): never released here.
+    "cooldown"  a machine cooldown with its own deadline.
+    "resource"  a disk/memory hold owned by the health self-heal path.
+    "outage"    an automatic hold written because the host was unreachable.
+    "unknown"   an automatic hold of an unknown cause: its owner has to release it."""
+    body = (body or "").strip()
+    if not body.startswith(AUTO_PREFIX): return "manual"
+    if body.startswith("auto:cooldown:"): return "cooldown"
+    if RESOURCE_HOLD_RE.search(body): return "resource"
+    if UNREACHABLE_HOLD_RE.search(body): return "outage"
+    return "unknown"
+
+def review_host_hold(host):
+    """Review the PAUSE-HOST marker of a host that answered again.
+
+    Only a hold whose body names the unreachable host is released: an operator hold, a machine cooldown, a
+    disk/memory hold and an automatic hold of an unknown cause are kept, because the host answering ssh again
+    says nothing about them. The cause is read from the body of the hold, never from its write time: an
+    independent protection can be written while the host is down, and the host coming back does not cure it."""
+    path = host_pause_path(host)
+    try:
+        with open(path, encoding="utf-8") as f: body = f.read()
+    except OSError:
+        return {"host": str(host), "present": False, "kind": "none", "released": False, "reason": "no-hold"}
+    kind = classify_host_hold(body)
+    record = {"host": str(host), "present": True, "kind": kind, "body": body.strip(), "released": False}
+    if kind == "manual": record["reason"] = "manual-hold"; return record
+    if kind == "cooldown": record["reason"] = "cooldown-hold"; return record
+    if kind == "resource": record["reason"] = "resource-hold"; return record
+    if kind == "unknown": record["reason"] = "unknown-hold"; return record
+    record["reason"] = "host-recovered"
+    try: os.unlink(path)
+    except OSError as error:
+        record["reason"] = f"release-failed: {error}"; return record
+    record["released"] = True
+    return record
+
+def host_reachability(lanes, res):
+    """Return the reachability of every host: True (it answered), False (a probe failed), None (not probed).
+
+    A host that is in the ssh backoff is not probed at all, so its reachability is unknown in this tick and the
+    last observation stands."""
+    hosts = {}
+    for L, cfg in lanes.items(): hosts.setdefault(cfg["host"], []).append(L)
+    reach = {}
+    for h, host_lanes in hosts.items():
+        probed = [res[L] for L in host_lanes if L in res and not res[L].get("skip")]
+        reach[h] = None if not probed else not any("error" in r for r in probed)
+    return reach
+
+def append_recovery(record):
+    """Append a recovery record to the recovery log of the state dir."""
+    try:
+        with open(os.path.join(D, RECOVERY_LOG), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as error:
+        log(f"cannot write {RECOVERY_LOG}: {error}", brain=False)
+
+def recover_host(host, lanes, state, res, down_since, now=None):
+    """A host answered again: review its hold and verify the runs that were in flight.
+
+    The runs are verified with the probe of this tick: a run that survived keeps its lane, a run that was lost
+    is given back to the queue with the labels of the orphan flow (`in-progress` removed, `lane-ready` added),
+    and a lane whose probe did not answer is never touched."""
+    now = time.time() if now is None else now
+    hold = review_host_hold(host)
+    kept, requeued = [], []
+    for L, cfg in lanes.items():
+        if cfg["host"] != host: continue
+        st = state.get(L)
+        if not isinstance(st, dict): continue
+        r = res.get(L)
+        if not r or "error" in r: continue        # the probe did not answer: never touch the lane
+        # the run of this lane is gone: the issue goes back to the queue with the labels of the orphan flow.
+        # A failed label edit keeps the lane record, so the next tick retries instead of losing the issue.
+        if run_is_lost(st, r) and requeue_orphaned_issue(L, st, r, f"lost with the host (lane={r.get('lane')}, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead)"):
+            state.pop(L, None); save_state(state); requeued.append(L); continue
+        kept.append(L)
+    record = {"host": str(host), "down_since": down_since, "down_s": round(float(now) - float(down_since), 3),
+              "recovered_at": now, "hold": hold, "kept": kept, "requeued": requeued}
+    append_recovery(record)
+    log(f"host {host} recovered after {int(record['down_s'])}s: hold {hold['kind']} ({hold['reason']}), "
+        f"lanes kept {' '.join(kept) or '-'}, requeued {' '.join(requeued) or '-'}")
+    return record
+
+def recover_hosts(lanes, state, res, now=None):
+    """Act on the down -> up edge of every host (Refs #1673).
+
+    The reachability comes from the ssh probes of this tick; the observation is kept in the control plane state
+    (`_hosts`), so a restart of the loop does not lose the edge. When a host that was unreachable answers again
+    its hold is reviewed and the runs that were in flight on it are verified. Returns the recovery records."""
+    now = time.time() if now is None else now
+    seen = state.get("_hosts") if isinstance(state.get("_hosts"), dict) else {}
+    changed = False
+    records = []
+    for h, reachable in host_reachability(lanes, res).items():
+        if reachable is None: continue       # the host was not probed (ssh backoff): keep the last observation
+        record = seen.get(h) if isinstance(seen.get(h), dict) else {}
+        was_reachable = bool(record.get("reachable")); down_since = record.get("down_since")
+        if not reachable:
+            new = {"reachable": False, "down_since": down_since or now}
+            if new != {"reachable": was_reachable, "down_since": down_since}:
+                seen[h] = new; changed = True
+            continue
+        seen[h] = {"reachable": True, "down_since": None}; changed = True
+        if was_reachable or down_since is None: continue    # no outage: nothing to recover
+        records.append(recover_host(h, lanes, state, res, down_since, now))
+    if changed:
+        state["_hosts"] = seen
+        save_state(state)
+    return records
 
 def verify_of(body):
     for line in reversed(body.splitlines()):
@@ -1190,6 +1358,8 @@ def tick(lanes, state, last_warn):
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
         if errs: host_fail(h, errs[0]["error"]); seen.add(h)
         else: host_good(h); seen.add(h)
+    # a host that answers again releases its hold and its in-flight runs are verified (Refs #1673)
+    recover_hosts(lanes, state, res)
     for L, r in res.items():
         st = state.get(L)
         if "error" in r: continue
