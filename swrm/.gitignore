@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+/.tmp/
 .venv/
 venv/
 .DS_Store

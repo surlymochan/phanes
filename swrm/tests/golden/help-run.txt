@@ -4,8 +4,9 @@ usage: swrm run [-h] [--type TYPE] [--difficulty DIFFICULTY]
                 [--model MODEL] [--effort EFFORT] [--card-type CARD_TYPE]
                 [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
                 [--prompt PROMPT] [--task-file TASK_FILE] [--title TITLE]
-                [--cwd CWD] [--base BASE] [--no-worktree] [--verify-baseline]
-                [--verify VERIFY] [--keep-worktree] [--no-fallback]
+                [--cwd CWD] [--scope {repo,host}] [--base BASE]
+                [--no-worktree] [--verify-baseline] [--verify VERIFY]
+                [--keep-worktree] [--no-fallback]
                 [--budget-minutes BUDGET_MINUTES] [--detach] [--dry-run]
                 [--read-only] [--executor EXECUTOR]
 
@@ -33,6 +34,8 @@ options:
   --task-file TASK_FILE
   --title TITLE
   --cwd CWD
+  --scope {repo,host}   task scope (repo by default; host for authorized host
+                        operations)
   --base BASE           base commit for an isolated worktree; defaults to HEAD
   --no-worktree
   --verify-baseline     when verify fails, rerun it on the base commit and

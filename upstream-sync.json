@@ -11,7 +11,7 @@
     },
     "swrm": {
       "upstream_repo": "https://github.com/surlymochan/swrm.git",
-      "base_sha": "a4ff878970ad3978058ee47cc62af6851dbae9e1",
+      "base_sha": "82558f1f838842fdd1f3b2a7adc59c076467ffab",
       "phanes_only": [
         ".github/workflows/pypi-publish.yml",
         "pypi-stub/README.md",
@@ -24,19 +24,23 @@
       "upstream_repo": "https://github.com/surlymochan/evalid.git",
       "base_sha": "020af4fb37660a86cb8d2fcf57ea098fde778b72",
       "source_of_truth": "phanes",
-      "phanes_only": ["scripts/redact-home-paths.py", "scripts/redact-ip-addresses.py", "test/privacy-scans.test.js"],
+      "phanes_only": [
+        "scripts/redact-home-paths.py",
+        "scripts/redact-ip-addresses.py",
+        "test/privacy-scans.test.js"
+      ],
       "excluded_paths": [
         "bench/**/results/raw*/**",
         "bench/e2e/results/e2e-2026-10-17*.jsonl",
         "bench/e2e/results/usage/**",
         "bench/results/llm-*.jsonl"
       ],
-      "excluded_paths_reason": "公开仓库隐私：不导入原始运行产物（包括压缩补丁、提示词、日志和 grader 输出）；仅保留汇总结果与复现脚本，原始记录从上游 evalid 仓库获取。",
+      "excluded_paths_reason": "\u516c\u5f00\u4ed3\u5e93\u9690\u79c1\uff1a\u4e0d\u5bfc\u5165\u539f\u59cb\u8fd0\u884c\u4ea7\u7269\uff08\u5305\u62ec\u538b\u7f29\u8865\u4e01\u3001\u63d0\u793a\u8bcd\u3001\u65e5\u5fd7\u548c grader \u8f93\u51fa\uff09\uff1b\u4ec5\u4fdd\u7559\u6c47\u603b\u7ed3\u679c\u4e0e\u590d\u73b0\u811a\u672c\uff0c\u539f\u59cb\u8bb0\u5f55\u4ece\u4e0a\u6e38 evalid \u4ed3\u5e93\u83b7\u53d6\u3002",
       "redactions": {
-        "description": "隐私优先于上游逐字一致：用户主目录路径统一替换为 ~/；保留 base_sha 作为来源基线，导入文件树不再与上游逐字一致。",
+        "description": "\u9690\u79c1\u4f18\u5148\u4e8e\u4e0a\u6e38\u9010\u5b57\u4e00\u81f4\uff1a\u7528\u6237\u4e3b\u76ee\u5f55\u8def\u5f84\u7edf\u4e00\u66ff\u6362\u4e3a ~/\uff1b\u4fdd\u7559 base_sha \u4f5c\u4e3a\u6765\u6e90\u57fa\u7ebf\uff0c\u5bfc\u5165\u6587\u4ef6\u6811\u4e0d\u518d\u4e0e\u4e0a\u6e38\u9010\u5b57\u4e00\u81f4\u3002",
         "script": "phanes/evalid/scripts/redact-home-paths.py",
         "check": "python3 phanes/evalid/scripts/redact-home-paths.py --check",
-        "ip_description": "非回环 IP 字面量替换为文档保留地址，保持 CIDR 场景的前缀长度及主机位；按裁定允许 127.0.0.1、localhost 和 ::1。版本号和源码双冒号分隔符不是 IP，扫描时明确分类排除。",
+        "ip_description": "\u975e\u56de\u73af IP \u5b57\u9762\u91cf\u66ff\u6362\u4e3a\u6587\u6863\u4fdd\u7559\u5730\u5740\uff0c\u4fdd\u6301 CIDR \u573a\u666f\u7684\u524d\u7f00\u957f\u5ea6\u53ca\u4e3b\u673a\u4f4d\uff1b\u6309\u88c1\u5b9a\u5141\u8bb8 127.0.0.1\u3001localhost \u548c ::1\u3002\u7248\u672c\u53f7\u548c\u6e90\u7801\u53cc\u5192\u53f7\u5206\u9694\u7b26\u4e0d\u662f IP\uff0c\u626b\u63cf\u65f6\u660e\u786e\u5206\u7c7b\u6392\u9664\u3002",
         "ip_script": "phanes/evalid/scripts/redact-ip-addresses.py",
         "ip_check": "python3 phanes/evalid/scripts/redact-ip-addresses.py --check"
       }

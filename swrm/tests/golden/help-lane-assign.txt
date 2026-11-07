@@ -1,8 +1,9 @@
 usage: swrm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
                         [--title TITLE] [--verify VERIFY] [--verify-baseline]
                         [--budget-minutes BUDGET_MINUTES] [--base BASE]
-                        [--card-type CARD_TYPE] [--rework-of REWORK_OF]
-                        [--paths PATHS [PATHS ...]] [--read-only]
+                        [--scope {repo,host}] [--card-type CARD_TYPE]
+                        [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
+                        [--read-only]
                         name
 
 positional arguments:
@@ -17,6 +18,8 @@ options:
   --verify-baseline
   --budget-minutes BUDGET_MINUTES
   --base BASE
+  --scope {repo,host}   task scope (repo by default; host for authorized host
+                        operations)
   --card-type CARD_TYPE
                         optional task card type from knowledge/card-types.yaml
   --rework-of REWORK_OF

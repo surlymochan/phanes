@@ -69,6 +69,7 @@ elif sys.argv[1:3] == ["fleet", "_run-info"]:
 elif sys.argv[1:2] == ["run"]:
     parser = argparse.ArgumentParser()
     parser.add_argument("--detach", action="store_true")
+    parser.add_argument("--scope", choices=("repo", "host"), default="repo")
     for flag in ("cwd", "task-file", "base", "backend", "model", "effort", "verify", "budget-minutes"):
         parser.add_argument("--" + flag)
     args = parser.parse_args(sys.argv[2:])

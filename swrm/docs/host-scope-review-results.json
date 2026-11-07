@@ -1,0 +1,94 @@
+{
+  "date": "2026-11-08",
+  "source_head": "9e0df323dca155afee08772b904d72f3fc29a8d7",
+  "baseline_ref": "a4ff878970ad3978058ee47cc62af6851dbae9e1",
+  "python": "3.14.3",
+  "scope": "focused unittest modules only; not full discovery",
+  "tmpdir": "<worktree>/.tmp/test-tmp",
+  "isolation": "Isolated OPENSWARM_HOME, fleet guard and capacity paths via tests/_load.py; fake executors and transports; baseline uses the same isolation helper.",
+  "source_files_sha256": {
+    "bin/swrm": "cdca3b6cc5ccfc2fa76bd8ae4985122cd6a0161b293196ea91de2ed50d9c7ce4",
+    "tests/test_host_scope.py": "c5ad667492e40b026912016b39a8db3ead549f6b6278bd415b0fbdfa96a9e571",
+    "tests/_load.py": "d15b57ef428d76db82203c523997bd4889f821d3466cd7c77d2b78ef78fac5f8"
+  },
+  "current": {
+    "modules": [
+      "test_host_scope",
+      "test_guardrails",
+      "test_workspace",
+      "test_ledger",
+      "test_cli_golden",
+      "test_batch",
+      "test_fleet"
+    ],
+    "tests_run": 91,
+    "passed": 88,
+    "failures": [],
+    "errors": [
+      {
+        "test": "test_guardrails.GuardrailsTests.test_enforced_risks_all_protocols_and_policy_opt_out",
+        "traceback": "Traceback (most recent call last):\n  File \"<worktree>/tests/test_guardrails.py\", line 180, in test_enforced_risks_all_protocols_and_policy_opt_out\n    self.assertEqual(xs.enforced_risk(event, {}, str(self.root))[\"risk\"], expected)\n                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^\nTypeError: 'NoneType' object is not subscriptable\n"
+      },
+      {
+        "test": "test_guardrails.GuardrailsTests.test_rm_block_records_only_path_class",
+        "traceback": "Traceback (most recent call last):\n  File \"<worktree>/tests/test_guardrails.py\", line 244, in test_rm_block_records_only_path_class\n    self.assertEqual(block[\"path_class\"], \"outside\")\n                     ~~~~~^^^^^^^^^^^^^^\nTypeError: 'NoneType' object is not subscriptable\n"
+      }
+    ],
+    "skipped": [
+      {
+        "test": "test_workspace.CredentialOptInTest.test_keychain_is_noop_off_macos",
+        "reason": "macOS has a real Keychain"
+      }
+    ],
+    "elapsed_seconds": 37.083,
+    "successful": false,
+    "exit_code": 1
+  },
+  "baseline": {
+    "modules": [
+      "test_guardrails",
+      "test_workspace",
+      "test_ledger",
+      "test_cli_golden",
+      "test_batch",
+      "test_fleet"
+    ],
+    "tests_run": 81,
+    "passed": 78,
+    "failures": [],
+    "errors": [
+      {
+        "test": "test_guardrails.GuardrailsTests.test_enforced_risks_all_protocols_and_policy_opt_out",
+        "traceback": "Traceback (most recent call last):\n  File \"<baseline>/tests/test_guardrails.py\", line 125, in test_enforced_risks_all_protocols_and_policy_opt_out\n    self.assertEqual(xs.enforced_risk(event, {}, str(self.root))[\"risk\"], expected)\n                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^\nTypeError: 'NoneType' object is not subscriptable\n"
+      },
+      {
+        "test": "test_guardrails.GuardrailsTests.test_rm_block_records_only_path_class",
+        "traceback": "Traceback (most recent call last):\n  File \"<baseline>/tests/test_guardrails.py\", line 189, in test_rm_block_records_only_path_class\n    self.assertEqual(block[\"path_class\"], \"outside\")\n                     ~~~~~^^^^^^^^^^^^^^\nTypeError: 'NoneType' object is not subscriptable\n"
+      }
+    ],
+    "skipped": [
+      {
+        "test": "test_workspace.CredentialOptInTest.test_keychain_is_noop_off_macos",
+        "reason": "macOS has a real Keychain"
+      }
+    ],
+    "elapsed_seconds": 32.045,
+    "successful": false,
+    "exit_code": 1
+  },
+  "new_regressions_passed": [
+    "test_host_scope.HostScopeTests.test_wrapped_commands_keep_all_inner_enforcement",
+    "test_host_scope.HostScopeTests.test_wrapped_rm_and_sudo_remain_host_warnings",
+    "test_host_scope.HostScopeTests.test_wrapper_cwd_does_not_change_later_shell_commands",
+    "test_host_scope.HostScopeTests.test_fake_executor_records_warnings_and_stops_wrapped_enforced_risks",
+    "test_host_scope.HostScopeTests.test_host_warnings_still_answer_lane_permission_requests",
+    "test_host_scope.HostScopeTests.test_run_and_lane_write_scope_through_ledger_to_daily_report"
+  ],
+  "new_errors_or_failures": [],
+  "resolved_errors_or_failures": [],
+  "reproduce_current": "TMPDIR=\"$PWD/.tmp/test-tmp\" PYTHONPATH=tests python3 -m unittest test_host_scope test_guardrails test_workspace test_ledger test_cli_golden test_batch test_fleet -v",
+  "static_checks": {
+    "git diff --check": "passed",
+    "python3 -m py_compile bin/swrm tests/test_host_scope.py": "passed"
+  }
+}
