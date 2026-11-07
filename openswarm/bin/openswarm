@@ -8006,6 +8006,9 @@ def lane_memory_limit(lane, policy=None):
 LANE_STALL_DEFAULT_SECONDS = 900
 # The provider request log is optional, so it is polled rarely instead of on every loop tick.
 LANE_PROVIDER_ACTIVITY_POLL_SECONDS = 5
+# The progress stamp of a run is written at most this often, so a busy event stream does
+# not turn the status file into a write amplifier (Refs #1786).
+LANE_ACTIVITY_WRITE_INTERVAL_S = 5.0
 
 
 def lane_stall_after_seconds(policy=None):
@@ -8084,6 +8087,22 @@ def lane_provider_last_request(path):
             if stamp is not None:
                 return stamp
     return None
+
+
+def lane_activity_stamp(rdir, activity):
+    """The progress stamp of a run: the newest of the recorded one and the new one.
+
+    Only real steps of the run count (a child event or a provider request).  The
+    stamp never moves backwards, so a clock that jumped backwards cannot make a
+    dead run look alive, and a run that keeps working keeps moving it forward
+    (Refs #1786).
+    """
+    value = lane_activity_timestamp(activity)
+    if value is None or value <= 0:
+        return None
+    known = (jload(os.path.join(rdir, "status.json"), {}) or {}).get("last_activity_at")
+    known = lane_activity_timestamp(known)
+    return value if known is None else max(known, value)
 
 
 def lane_root(name):
@@ -9321,6 +9340,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
+               last_activity_at=NOW(),
                **executor_status_fields(child.pid, getattr(child, "pgid", None)))
     lane_record_event(event_file, {"type": "lane_start", "lane": lane["name"]})
     if continuation:
@@ -9407,6 +9427,13 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     desc_recorded_at = 0.0
     desc_eager_until = time.monotonic() + 3.0
     idle_tick = True
+    # The trusted activity of the run: the moment of its last real step (a child
+    # event or a provider request).  The dispatcher expires a busy lane whose run
+    # shows no life any more (Refs #1786), and it may only use a signal that a
+    # stuck run cannot fake.  The "updated" stamp of the status file is no such
+    # signal: the housekeeping writes below refresh it every few seconds.
+    activity_recorded_at = 0.0
+    activity_written_at = 0.0
     # pi auto-retry: a deadline (monotonic seconds) by which pi must show the retry progressing.
     pi_retry_wait = None
     pi_retry_started = False
@@ -9430,14 +9457,25 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         if spec.get("abort_requested") and not abort_deadline:
             lane_abort_child(lane, child, turn)
             abort_deadline = now + 30
+        # The provider request log is the second signal of life, next to the child
+        # events.  It is polled for the stall watchdog and for the activity stamp,
+        # so both see the same notion of "the run moved".
+        if now - provider_checked_at >= LANE_PROVIDER_ACTIVITY_POLL_SECONDS:
+            provider_checked_at = now
+            observed = lane_provider_last_request(provider_log)
+            if observed is not None:
+                last_provider_at = observed
+        activity = max(last_event_at, last_provider_at or 0.0)
+        if activity > activity_recorded_at and now - activity_written_at >= LANE_ACTIVITY_WRITE_INTERVAL_S:
+            # The run really moved: remember when.  A run that stops moving keeps
+            # its last stamp, and the silence grows on the dispatcher's side.
+            stamp = lane_activity_stamp(rdir, activity)
+            if stamp is not None:
+                activity_recorded_at = activity
+                activity_written_at = now
+                set_status(rdir, last_activity_at=stamp)
         if stall_after and not stall_hit and not budget_hit and not spec.get("abort_requested"):
             # Without a broker request log only child events count as activity.
-            if now - provider_checked_at >= LANE_PROVIDER_ACTIVITY_POLL_SECONDS:
-                provider_checked_at = now
-                observed = lane_provider_last_request(provider_log)
-                if observed is not None:
-                    last_provider_at = observed
-            activity = max(last_event_at, last_provider_at or 0.0)
             if now - activity > stall_after:
                 stall_hit = True
                 stall_detail = (f"lane stalled: no provider request and no child event for "

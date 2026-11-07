@@ -17,7 +17,7 @@
 
 | 分区 | 内容 | 来源 | 采集时间 |
 |---|---|---|---|
-| `lanes` | 忙/闲车道、在途卡号、状态异常的车道 | `lanes-status.json`（AD 扁平格式或 dispatch schema 2） | 快照自带的 `_at`（**不是文件 mtime**） |
+| `lanes` | 忙/闲车道、在途卡号、状态异常的车道、**过期（stale）的忙条目** | `lanes-status.json`（AD 扁平格式或 dispatch schema 2） | 快照自带的 `_at`（**不是文件 mtime**） |
 | `pool` | 池深度**双口径并列**：gh 标签口径与 AD `_ready` 口径，给出 delta | `gh issue list --label lane-ready` + `lanes-status.json` | 两个口径各自的时间戳（gh 取数时刻 / 快照 `_at`） |
 | `capacity` | 预留总数、最老预留的年龄、按主机/后端分布、限额占用 | `fleet-capacity status` 或 `capacity.sqlite` | 文件 mtime |
 | `hosts` | 每台主机存活、最差状态、每台探活时间 | `fleet-health.json` | 文件 mtime + 每台 `updated_at` |
@@ -41,6 +41,7 @@
 - **过期一眼可见**：分区年龄超过 `--max-age`（默认 300 秒）标 `过期`，页面 `ok` 置假。
 - **采集失败不拖垮整页**：某分区采集失败时该区标 `未核实`（`verified: false`、`status: "unverified"`）并附 `error`，其余分区照常产出，页面照样写出；能读到的数字仍以 `未核实: <原因> | <读数>` 的形式留在原位。
 - **双口径并列**：池深度同时给 gh 口径与 AD `_ready` 口径并给 delta；两者不一致本身就是「有一边过期」的信号。
+- **忙条目也会过期（Refs #1786）**：dispatcher 按「最后一次可信活动时间」（主机自己写的进展记录：子事件或 provider 请求）算无活动时长，超过阈值（`busy_stale.max_idle_s`，默认 1800 秒）就把该忙条目标成 `stale`。这个标记是**叠加层**：它不删 run 记录，主机恢复后照样收割结果；标记跨 tick 保留，直到 run 被解决或被显式处理（`openswarm dispatch stale --clear <车道>`）。车道行里的 `stale=N` 就是这个计数。
 
 ## 用法
 

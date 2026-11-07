@@ -186,6 +186,9 @@ DEFAULTS = {
     "local_hosts": [],
     "pauses_file": "",                    # default <state_dir>/box-pauses.jsonl
     "min_gap_s": 120,
+    # A busy lane that showed no trustworthy activity for this long is marked stale in
+    # lanes-status.json (Refs #1786).  0 turns the check off.
+    "busy_stale": {"max_idle_s": 1800},
     "local_env": {},
     "local_inode": {"pause_pct": 95, "resume_pct": 92, "path": "~"},
     "ssh": {
@@ -268,6 +271,13 @@ DEFAULTS = {
                         "Acceptance: `grep -qE '^VERDICT: (APPROVE|CHANGES)' {file}`"),
     },
 }
+
+
+# The file the operator drops a "this stale mark is handled" request into.  It
+# lives in the state dir next to state.json, but it is a file of its own: the
+# dispatcher is the only writer of state.json, so an operator must not edit
+# the state of a running dispatcher (Refs #1786).
+STALE_HANDLED_FILE = "busy-stale-handled.json"
 
 
 def deep_merge(base, over):
@@ -392,7 +402,12 @@ def quota_module():
 REMOTE_STATUS = r'''
 import json,os,sys
 O=os.path.expanduser(sys.argv[3] if len(sys.argv)>3 and sys.argv[3] else "~/.claude/openswarm"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
-out={"lane":None,"run":None}
+out={"lane":None,"run":None,"activity":None}
+def num(value):
+  if value is None or isinstance(value,bool): return None
+  try: f=float(value)
+  except Exception: return None
+  return f
 try:
   with open(f"{O}/lanes/{L}/state.json") as stream: ls=json.load(stream)
   out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
@@ -411,11 +426,19 @@ if R:
       "finished":r.get("finished") if r.get("finished") is not None else rs.get("finished") if rs.get("finished") is not None else os.path.getmtime(p),
       "seconds":r.get("seconds"),
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
+    # A finished run is harvested in the same tick; its activity is the moment it finished.
+    out["activity"]=num(r.get("finished_at")) or num(r.get("updated_at")) or num(rs.get("finished")) or num(rs.get("last_activity_at"))
   else:
     out["run"]="running"
     try:
       with open(f"{O}/runs/{R}/status.json") as stream: s=json.load(stream)
       pid=s.get("runner_pid"); out["run_state"]=s.get("state")
+      # The trusted activity of a running run is the progress stamp the host writes
+      # when the run really moves (a child event or a provider request).  The
+      # "updated" stamp of the status file is NOT activity: the housekeeping writes
+      # (the descendant scan) refresh it every few seconds, so a stuck run whose
+      # process is still alive would look busy for ever (#1786).
+      out["activity"]=num(s.get("last_activity_at"))
       if pid:
         try: os.kill(int(pid),0); out["runner_alive"]=True
         except ProcessLookupError: out["runner_alive"]=False
@@ -486,6 +509,7 @@ class Dispatcher:
         self.plan = []   # dry-run decisions
         hotfiles = dispatch_module("hotfiles")
         self.hotfiles = hotfiles
+        self.busy_stale = dispatch_module("busy_stale")
         self.hot_union = set(hotfiles.parse_hot_files("热文件：" + " ".join(cfg["hot_files"].get("union") or [])))
         hot_cfg = cfg["hot_files"]
         hot_caps = dict(hot_cfg.get("limits") or {})
@@ -2703,12 +2727,133 @@ class Dispatcher:
             if self.dry_run:
                 continue
             state[L] = {"issue": f"PR{p['number']}", "run": run, "host": lanes[L]["host"], "base": base,
-                        "at": time.strftime("%F %T"), "verify": ver, "review_pr": p["number"], "review_sha": p["headRefOid"]}
+                        "at": time.strftime("%F %T"), "dispatched_at": self.clock(), "verify": ver,
+                        "review_pr": p["number"], "review_sha": p["headRefOid"]}
             self.save_state(state)
             self.lru_picker().touch(L)
             self.log(f"review dispatched PR #{p['number']} (head {p['headRefOid'][:8]}, author {self.author_lane(p['headRefName'])}) "
                      f"→ {L} ({lanes[L]['host']}/{lanes[L]['backend']}) run {run}")
             self.heartbeat()
+
+    # ------------------------------------------------------------ busy expiry
+    def busy_activity(self, entry, probe):
+        """Fold the probe reading of a busy lane into its activity record.
+
+        The record says when the run last showed life.  It moves only when the
+        host's own progress record moves, and the silence is counted on our own
+        clock, so a host that is gone (or a host whose clock is off) can never
+        make a healthy lane look stale.  The record is stored on the run entry,
+        so it survives the ticks and dies with the run it belongs to.
+        """
+        dispatched = entry.get("dispatched_at")
+        if dispatched is None:
+            dispatched = self.busy_stale.stamp(entry.get("at"))
+        record = self.busy_stale.observe(entry.get("activity"), probe, self.clock(), dispatched)
+        if record != entry.get("activity"):
+            entry["activity"] = record
+        return record
+
+    def stale_handled(self):
+        """The explicit handling requests of the stale marks (Refs #1786).
+
+        The requests live in their own file: the dispatcher is the only writer
+        of ``state.json``, so an operator handles a mark by dropping a request
+        here instead of editing the state of a running dispatcher.
+        """
+        data = load_json(self.path(STALE_HANDLED_FILE), {})
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+    def save_stale_handled(self, handled):
+        if self.dry_run:
+            return
+        path = self.path(STALE_HANDLED_FILE)
+        if load_json(path, {}) == handled:
+            return
+        write_json(path, handled)
+
+    def mark_stale_busy(self, lanes, state, res):
+        """Mark the busy entries whose last activity is too old (Refs #1786).
+
+        The mark is an overlay on top of the run tracking: it never removes a
+        run record, so a host that comes back is still harvested normally.  It
+        lives in ``state["_stale"]`` (its own map, not the run records) and
+        survives the ticks until the run it marks is resolved -- harvested, or
+        replaced by a new run -- or until it is handled explicitly
+        (``openswarm dispatch stale --clear <lane>``).
+
+        A lane that shows life again does NOT drop the mark: the review prompt
+        has to stay visible until somebody dealt with it.
+        """
+        limit = self.busy_stale.max_idle((self.cfg.get("busy_stale") or {}).get("max_idle_s"),
+                                         self.busy_stale.DEFAULT_MAX_IDLE_S)
+        marks = state.get("_stale")
+        if not isinstance(marks, dict):
+            marks = {}
+        now = self.clock()
+        handled = self.stale_handled()
+        for L in list(marks):
+            entry = state.get(L)
+            mark = marks.get(L) or {}
+            if not isinstance(entry, dict) or entry.get("run") != mark.get("run"):
+                marks.pop(L, None)      # the marked run is gone or replaced: the mark is resolved
+                continue
+            request = handled.get(L)
+            if isinstance(request, dict) and request.get("run") in (None, mark.get("run")):
+                marks.pop(L, None)      # an operator handled the mark
+                self.log(f"{L} stale mark handled", brain=False)
+        for L in list(handled):
+            entry = state.get(L)
+            run = entry.get("run") if isinstance(entry, dict) else None
+            request = handled.get(L) or {}
+            if request.get("run") not in (None, run):
+                handled.pop(L, None)    # the handled run is gone: the request is spent
+        for L in lanes:
+            entry = state.get(L)
+            if not isinstance(entry, dict):
+                continue                # the lane is not busy: nothing to mark
+            request = handled.get(L)
+            if isinstance(request, dict) and request.get("run") in (None, entry.get("run")):
+                continue                # handled: the mark must not come back
+            record = self.busy_activity(entry, res.get(L) or {})
+            verdict = self.busy_stale.judge(record, now, limit)
+            mark = marks.get(L)
+            if not verdict["stale"]:
+                if isinstance(mark, dict) and not mark.get("recovered_at"):
+                    # The lane showed life again: the mark stays open (the review
+                    # prompt must not vanish), but the recovery is recorded.
+                    mark["recovered_at"] = now
+                continue
+            if not isinstance(mark, dict) or mark.get("run") != entry.get("run"):
+                mark = {"run": entry.get("run"), "issue": entry.get("issue"), "since": now}
+                self.log(f"{L} busy #{entry.get('issue')} stale: no activity for "
+                         f"{int(verdict['idle_s'] or 0)}s (limit {int(limit)}s)")
+            mark["idle_s"] = verdict["idle_s"]
+            mark["activity_at"] = verdict["activity_at"]
+            mark["source"] = verdict["source"]
+            mark["at"] = now
+            mark.pop("recovered_at", None)   # the lane is silent again
+            marks[L] = mark
+        if limit > 0:
+            state["_stale"] = marks
+        else:
+            state.pop("_stale", None)
+        self.save_stale_handled(handled)
+        return marks
+
+    def stale_status_fields(self, mark):
+        """The status fields of one stale mark, with human readable stamps."""
+        if not isinstance(mark, dict):
+            return {}
+        fields = {"stale": True,
+                  "stale_idle_s": int(mark.get("idle_s") or 0),
+                  "stale_source": mark.get("source")}
+        for key, value in (("stale_since", mark.get("since")),
+                           ("last_activity_at", mark.get("activity_at")),
+                           ("stale_recovered_at", mark.get("recovered_at"))):
+            fields[key] = time.strftime("%F %T", time.localtime(value)) if value else None
+        return fields
 
     # ------------------------------------------------------------ tick
     def probe(self, lanes, state):
@@ -2886,7 +3031,8 @@ class Dispatcher:
             self.stamp_claim(pick["n"], L)
             if self.dry_run:
                 continue
-            state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver}
+            state[L] = {"issue": pick["n"], "run": run, "host": lc["host"], "base": base,
+                        "at": time.strftime("%F %T"), "dispatched_at": self.clock(), "verify": ver}
             self.lru_picker().touch(L)
             rb = self.rebase_of(pick["body"])
             if hot:
@@ -2958,27 +3104,34 @@ class Dispatcher:
             self.sweep_leaked_inprogress(state)
         except Exception as e:
             self.log(f"leak-sweep exc: {e!r}", brain=False)
+        queue_error = None
         try:
             q = self.queue()
         except Exception as e:
+            # The queue is not the whole tick: the lanes status must still be written,
+            # or the busy entries of a broken `gh` keep their last reading forever (#1786).
+            queue_error = str(e)
             self.log(f"queue error: {e}", brain=False)
-            return res
-        for i in q:
-            i["deps_ok"] = self.deps_met(i)
-        blocked = sum(not i["deps_ok"] for i in q)
-        try:
-            self.dispatch_reviews(lanes, res, state, q)
-        except Exception as e:
-            self.log(f"review dispatch exc: {e!r}", brain=False)
-        self.assign_issues(lanes, res, state, q)
-        ready = len(q) - blocked
-        rp = self.cfg.get("replenish") or {}
-        short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and self.can_take(b, i))
-                 for b in {c["backend"] for c in lanes.values()}}
-        starve = max(short.values(), default=0)
-        low, target = int(rp.get("low", 20)), int(rp.get("target", 24))
-        if ready < low or starve > 0:
-            self.replenish(max(target - ready, starve, 1 if ready < low else 0), lanes, q, blocked)
+            q = []
+        ready = blocked = None
+        if queue_error is None:
+            for i in q:
+                i["deps_ok"] = self.deps_met(i)
+            blocked = sum(not i["deps_ok"] for i in q)
+            try:
+                self.dispatch_reviews(lanes, res, state, q)
+            except Exception as e:
+                self.log(f"review dispatch exc: {e!r}", brain=False)
+            self.assign_issues(lanes, res, state, q)
+            ready = len(q) - blocked
+            rp = self.cfg.get("replenish") or {}
+            short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and self.can_take(b, i))
+                     for b in {c["backend"] for c in lanes.values()}}
+            starve = max(short.values(), default=0)
+            low, target = int(rp.get("low", 20)), int(rp.get("target", 24))
+            if ready < low or starve > 0:
+                self.replenish(max(target - ready, starve, 1 if ready < low else 0), lanes, q, blocked)
+        marks = self.mark_stale_busy(lanes, state, res)
         model_history = state.setdefault("_model_last", {})
         for L, result in res.items():
             run = result.get("run")
@@ -3006,11 +3159,14 @@ class Dispatcher:
             if model_cfg and last.get("model") and model_cfg != last["model"]:
                 entry["model_drift"] = True
                 drift.append(L)
+            entry.update(self.stale_status_fields(marks.get(L)))
             st[L] = entry
         st.update({"schema": 2, "_summary": {"busy": busy, "idle": idle, "by_backend": by_backend,
-                                                "model_drift": drift},
+                                                "model_drift": drift, "stale": len(marks)},
                    "_busy": busy, "_ready": ready, "_blocked": blocked,
                    "_at": time.strftime("%F %T"), "_engine": "openswarm-dispatch"})
+        if queue_error:
+            st["_queue_error"] = queue_error
         if not self.dry_run:
             write_json(self.path("lanes-status.json"), st)
         return res
@@ -3068,7 +3224,39 @@ def add_parser(sub):
         if name == "tick":
             p.add_argument("--dry-run", action="store_true", help="decide only: no labels, assigns, pushes or state writes")
             p.add_argument("--json", action="store_true")
+    p = dsub.add_parser("stale", help="list the stale busy marks, or handle one of them")
+    p.add_argument("--config", required=True)
+    p.add_argument("--clear", metavar="LANE", help="handle the stale mark of a lane (the next tick drops it)")
     sp.set_defaults(func=cmd_dispatch)
+
+
+def cmd_stale(args):
+    """List or handle the stale busy marks (Refs #1786).
+
+    A mark is handled by dropping a request into the state dir: the dispatcher
+    picks it up on its next tick and drops the mark.  The run record itself is
+    never touched, so a host that comes back is still harvested normally.
+    """
+    cfg = load_config(args.config)
+    d = Dispatcher(cfg, out=sys.stdout)
+    state = load_json(d.path("state.json"), {})
+    marks = state.get("_stale") if isinstance(state.get("_stale"), dict) else {}
+    if not args.clear:
+        print(json.dumps(marks, indent=1, ensure_ascii=False))
+        return 0
+    lane = args.clear
+    mark = marks.get(lane)
+    if not isinstance(mark, dict):
+        print(f"no stale mark for lane {lane}", file=sys.stderr)
+        return 1
+    handled = d.stale_handled()
+    if (handled.get(lane) or {}).get("run") == mark.get("run"):
+        print(f"stale mark of lane {lane} was already handled")
+        return 0
+    handled[lane] = {"run": mark.get("run"), "at": time.time()}
+    d.save_stale_handled(handled)
+    print(f"stale mark of lane {lane} handled: the dispatcher drops it on its next tick")
+    return 0
 
 
 def cmd_dispatch(args):
@@ -3079,6 +3267,8 @@ def cmd_dispatch(args):
     if args.dispatch_cmd == "serve":
         Dispatcher(cfg).serve()
         return 0
+    if args.dispatch_cmd == "stale":
+        return cmd_stale(args)
     d = Dispatcher(cfg, dry_run=args.dry_run, out=sys.stderr if args.json else sys.stdout)
     d.tick(load_json(cfg["lanes_file"], {}), load_json(d.path("state.json"), {}))
     if args.json:
