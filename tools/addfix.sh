@@ -1,12 +1,12 @@
 #!/bin/bash
 # Mac side. Add one executor run commit as a new, hooked commit on top of an existing PR branch worktree on gocc.
-# Usage: addfix.sh <ibx|ssh> <target> <repo> <run-id> <branch> <message-file>
+# Usage: addfix.sh <ssh> <target> <repo> <run-id> <branch> <message-file>
 set -uo pipefail
 S=/private/tmp/claude-501/-Users-chenchao-Documents-workspace-nibiru-openbot-openbot/62926203-41d2-4936-8582-8fe69de7f53c/scratchpad
 tr=$1; tgt=$2; repo=$3; r=$4; BR=$5; MSG=$6
 f=$S/af-$r.bundle
-if [ "$tr" = ssh ]; then ssh -o ConnectTimeout=10 "$tgt" "cd $repo && git bundle create - openswarm/$r ^b50d5ce925 2>/dev/null" > "$f"
-else for n in 1 2 3 4; do instabox ssh "$tgt" -- "cd $repo && git bundle create - openswarm/$r ^b50d5ce925 2>/dev/null" > "$f" 2>/dev/null; [ -s "$f" ] && break; sleep 4; done; fi
+[ "$tr" = ssh ] || { echo "unsupported transport: $tr" >&2; exit 2; }
+ssh -o ConnectTimeout=10 "$tgt" "cd $repo && git bundle create - openswarm/$r ^b50d5ce925 2>/dev/null" > "$f"
 [ -s "$f" ] || { echo "no bundle"; exit 3; }
 scp -q "$f" gocc:/tmp/af-$r.bundle; scp -q "$MSG" gocc:/tmp/af-msg-$r.txt
 W=pub-$(echo "$BR" | tr '/' '-')

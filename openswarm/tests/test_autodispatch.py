@@ -141,7 +141,7 @@ class HarvestFetchBackoffTests(unittest.TestCase):
             "fetch-pack: unexpected disconnect while reading sideband packet",
             "fatal: bad pack header at offset 0",
             "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly",
-            "ssh: connect to host instabox port 22: Connection reset by peer",
+            "ssh: connect to host worker port 22: Connection reset by peer",
         ):
             self.assertEqual(autodispatch.classify_harvest_fetch_error(error), "transient", error)
             self.assertTrue(autodispatch.should_retry_harvest_fetch(error, 1), error)

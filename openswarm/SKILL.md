@@ -152,8 +152,8 @@ parameterized value (`composer-2.5[fast=true]`). Ambiguity fails with the matche
 
 ### Fleet, batch, and remote verification
 
-Configure `$OPENSWARM_HOME/fleet.json` with `hosts`: each has `name`, `kind` (`local`, `ssh`, `instabox`),
-`ssh` alias or `box` when remote, optional `openswarm` executable, and `repos: {"project":"~/work/project"}`.
+Configure `$OPENSWARM_HOME/fleet.json` with `hosts`: each has `name`, `kind` (`local`, `ssh`),
+`ssh` alias when remote, optional `openswarm` executable, and `repos: {"project":"~/work/project"}`.
 Hosts can set `seed_strategy` to `fetch` (default) or `push` for bases passed to
 `fleet exec ... lane assign --base`. `fetch_retries` counts retries after the initial fetch attempt
 (default 2, so up to 3 total attempts); delays grow exponentially. `push` sends a Git bundle into
@@ -165,10 +165,10 @@ Use the same logical repo name on all hosts; local defaults to the current check
 and authenticated executors on the hosts. Full config example: [README](README.md#fleet-and-batch-dispatch).
 
 ```bash
-$XS fleet status --json                  # never wakes paused instaboxes
+$XS fleet status --json                  # fleet reachability and capacity
 $XS fleet exec worker -- lane status     # arbitrary openswarm arguments, stdout/rc forwarded
 $XS fleet render-lanes --inventory fleet-inventory.json --check   # one inventory, every host's lanes.json
-$XS batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
+$XS batch --repo project --cards ./cards --hosts worker --per-host 1 \
   --backend pi --model cheap-model --budget-minutes 20 --detach
 $XS batch status <batch-id>
 $XS verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'
@@ -179,7 +179,7 @@ renders each host's `lanes.json`; every lane entry uses the `lanes.json` lane sc
 inventory with the `lanes.json` each host has (local file, or `cat` over the host transport) and lists the extra,
 missing, and changed lanes, exiting non-zero on drift. It renders and compares only, and never writes to a host.
 
-Batch wakes each chosen instabox once, checks repos, syncs `--base` (default local HEAD), queues sorted cards
+Batch checks repos, syncs `--base` (default local HEAD), queues sorted cards
 round-robin, polls without Monitor, and fetches each result branch before deleting it on the executor host.
 Bundles travel over the transport; no pushes or git remotes. Optional backend/model/effort/verify flags pass to runs.
 Read `batches/<id>/summary.json` or `summary.md`; detached progress is in `batch.out`. Failed runs with commits
@@ -298,7 +298,7 @@ Grouped by what the command does. `openswarm <command> --help` lists every flag.
 | `lane down` | Stop lane turns, children, and supervisors. | `$XS lane down C1 K1` |
 | `lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `$XS lane launchd-plist C1` |
 | `lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `$XS lane systemd-unit K1` |
-| `batch` | Queue task cards across fleet hosts and collect their branches. | `$XS batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
+| `batch` | Queue task cards across fleet hosts and collect their branches. | `$XS batch --repo project --cards ./cards --hosts worker --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `batch status` | Show the state of one batch. | `$XS batch status <batch-id>` |
 | `bus init` | Create the bus labels, issue template, and protocol README. | `$XS bus init acme/openswarm-bus` |
 | `bus status` | Show open bus issues with their executor and age. | `$XS bus status --json` |
@@ -331,7 +331,7 @@ and exits `1` when it rejects the card or the diff.
 | `ingest-claude` | Record Claude plan usage from the statusline hook or from flags. | `$XS ingest-claude --five-hour 80 --seven-day 40` |
 | `fleet status` | Show reachability, paused hosts, lanes, and active runs. | `$XS fleet status --json` |
 | `fleet exec` | Run an openswarm command on another host; stdout and the exit code are forwarded. | `$XS fleet exec worker -- lane status` |
-| `fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `$XS fleet ledger pull --hosts worker,sandbox` |
+| `fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `$XS fleet ledger pull --hosts worker` |
 | `fleet render-lanes` | Render or check every host's `lanes.json` from one fleet inventory. | `$XS fleet render-lanes --inventory fleet-inventory.json --check` |
 | `doctor` | Report lane prerequisites (binary, Codex sandbox tools, env file, proxy, disk); installs nothing. | `$XS doctor --lane C1 --json` |
 
@@ -408,7 +408,7 @@ the lesson or pattern catalog.
    accept or reject decision.
 
    ```bash
-   $XS fleet ledger pull --hosts worker,sandbox
+   $XS fleet ledger pull --hosts worker
    $XS ledger ingest --repo acme/project --since 30
    $XS ledger accept <run-id> --reason "Verified on host"
    ```

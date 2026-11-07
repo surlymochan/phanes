@@ -136,7 +136,7 @@ class FleetSshOptionsTests(unittest.TestCase):
                     xs.fleet_config()
 
     def test_ssh_fields_require_an_ssh_host(self):
-        self.config([{"name": "box", "kind": "instabox", "box": "task-box", "jump": "bastion"}])
+        self.config([{"name": "local", "kind": "local", "jump": "bastion"}])
         with self.assertRaises(ValueError) as raised:
             xs.fleet_config()
         self.assertIn("ssh options require an ssh host", str(raised.exception))

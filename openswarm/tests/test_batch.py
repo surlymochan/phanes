@@ -46,7 +46,7 @@ class FakeFleetFixture:
             bundle.write_bytes(subprocess.check_output(["git", "-C", str(self.repo), "bundle", "create", "-", "HEAD"]))
             self.git(repo, "fetch", str(bundle), "HEAD")
             self.git(repo, "checkout", "-q", "--detach", "FETCH_HEAD")
-            self.hosts[name] = {"name": name, "kind": "instabox", "box": name + "-box",
+            self.hosts[name] = {"name": name, "kind": "ssh", "ssh": name,
                                 "openswarm": str(STUB), "repos": {"project": str(repo)}}
         (self.repo / "new-base").write_text("local only")
         self.git(self.repo, "add", "new-base")
@@ -69,10 +69,6 @@ class FakeFleetFixture:
         return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.PIPE).decode().strip()
 
     def shell(self, command, **kwargs):
-        if command[:2] == ["instabox", "ls"]:
-            states = [{"name": host["box"], "status": "Running"} for host in self.hosts.values()
-                      if host["kind"] == "instabox"]
-            return 0, json.dumps(states), ""
         return 0, "", ""
 
     def transport(self, host, command, timeout=60, input=None):
@@ -193,8 +189,6 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         markdown = (self.data / "batches" / summary["id"] / "summary.md").read_text()
         self.assertIn("FAIL card one", markdown)
         self.assertIn("Verify rc", markdown)
-        wakes = [call for call in xs.sh.call_args_list if call.args[0][:2] == ["instabox", "wake"]]
-        self.assertEqual(len(wakes), 2)
         self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), self.base)
         self.assertEqual(self.git(self.repo, "remote"), "")
 

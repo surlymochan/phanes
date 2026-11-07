@@ -62,7 +62,7 @@ class FleetRenderLanesTests(unittest.TestCase):
     def test_render_writes_one_lanes_json_per_host(self):
         report, code = self.render(str(INVENTORY))
         self.assertEqual(code, 0)
-        self.assertEqual(sorted(report["hosts"]), ["gorelay", "ib1", "local"])
+        self.assertEqual(sorted(report["hosts"]), ["gorelay", "local"])
         for host in report["hosts"].values():
             self.assertEqual(sorted(host), ["lanes"])
             for lane in host["lanes"]:
