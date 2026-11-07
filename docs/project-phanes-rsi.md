@@ -142,7 +142,7 @@ gh project item-edit 6 --owner surlymochan \
 （issue 贴上 `in-progress`、lane 领到卡之后）自动写两样东西：
 
 1. **assigner**：`gh issue edit <N> --add-assignee <assignee>`，**只增不删**既有 assignee。
-   默认取仓库 owner（`surlymochan`）；OpenBot 层架设后改为 bot name，由配置给出。
+   默认取仓库 owner（`surlymochan`）；volto 层架设后改为 bot name，由配置给出。
 2. **Project 6 的 Lane 字段**：`gh project item-edit --field-id <Lane 字段 id> --text <lane id>`。
    字段**按名 `Lane` 解析 id，不写死**；issue 不在 Project 6 时先 `gh project item-add` 再设值，
    与看板同步脚本不冲突。

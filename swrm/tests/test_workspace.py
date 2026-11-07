@@ -53,14 +53,14 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(files, ["pkg/b.txt"])
 
     @unittest.skipIf(os.name == "nt", 'worktree dependency linking relies on POSIX symlinks and shell prepare steps; Windows git/symlink semantics differ')
-    def test_openbot_prepare_does_not_commit_nested_dependency_symlinks(self):
+    def test_volto_prepare_does_not_commit_nested_dependency_symlinks(self):
         write(os.path.join(self.repo, "apps", "auth-api", "index.js"), "export {}\n")
         sh("git", "add", "apps/auth-api/index.js", cwd=self.repo)
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "app", cwd=self.repo)
         os.makedirs(os.path.join(self.repo, "apps", "auth-api", "node_modules"))
-        os.makedirs(os.path.join(self.repo, "node_modules", "@openbot"))
-        link_dir("../../pkg", os.path.join(self.repo, "node_modules", "@openbot", "core"))
-        wt = os.path.join(self.tmp, "openbot-wt")
+        os.makedirs(os.path.join(self.repo, "node_modules", "@volto"))
+        link_dir("../../pkg", os.path.join(self.repo, "node_modules", "@volto", "core"))
+        wt = os.path.join(self.tmp, "volto-wt")
         sh("git", "worktree", "add", "--detach", "-q", wt, "HEAD", cwd=self.repo)
         script = os.path.join(HERE, "..", "bin", "link-openbot-deps")
         sh(script, self.repo, cwd=wt)

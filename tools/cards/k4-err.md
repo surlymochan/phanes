@@ -1,11 +1,11 @@
 # M10 #63: provider status messages and the hourly provider update check (errors 5, 7)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
 
-Error-handling findings 5 and 7 below: two provider status messages bypass the catalog; the hourly provider update check swallows every failure. Map the messages to @openbot/i18n catalog keys (every locale) and make the update-check failure visible (log with a code and, where the audit says so, a status the UI already shows). Do not change provider start timeouts or account-read logic (other runs changed them). Add or extend an E2E script case for each finding.
+Error-handling findings 5 and 7 below: two provider status messages bypass the catalog; the hourly provider update check swallows every failure. Map the messages to @volto/i18n catalog keys (every locale) and make the update-check failure visible (log with a code and, where the audit says so, a status the UI already shows). Do not change provider start timeouts or account-read logic (other runs changed them). Add or extend an E2E script case for each finding.
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -15,7 +15,7 @@ Error-handling findings 5 and 7 below: two provider status messages bypass the c
 
 Evidence:
 
-- `src/backend/agent/provider-runtime.ts:3076` — `` `${providerLabel(client.provider)} stopped repeatedly. Restart OpenBot after checking the CLI.` ``
+- `src/backend/agent/provider-runtime.ts:3076` — `` `${providerLabel(client.provider)} stopped repeatedly. Restart Volto after checking the CLI.` ``
 - `src/backend/agent/provider-runtime.ts:3096` — `` `${providerLabel(client.provider)} stopped. Retrying (${attempts + 1}/3)…` ``
 - `src/backend/agent/provider-runtime.ts:3134-3136` — the same file uses `sourceText("error.provider.startStopped", …)` for the third message.
 
@@ -49,7 +49,7 @@ provider card can show it.
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

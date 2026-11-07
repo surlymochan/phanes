@@ -256,8 +256,8 @@ python3 builder/check_site.py <dist>
   覆盖根目录与 `boss/`、`da/`、`builder/`、`review/` 子包的全部 `test_*.py`
   （`examples/org-health-local/run_tests.py:14-19`）。
 - 浏览器端到端（需要 Bun 与 Chrome）：在**仓库根目录**跑 `bun run test:org-health-demo`
-  （`openbot/package.json:194`），覆盖中英文、回退语言、无效数据、无效 Host 与私有路径，
-  结果写 `.openbot-build/`（`examples/org-health-local/README.md:168`）。
+  （`volto/package.json:194`），覆盖中英文、回退语言、无效数据、无效 Host 与私有路径，
+  结果写 `.volto-build/`（`examples/org-health-local/README.md:168`）。
 - 不打开浏览器核对页面会展示什么：`python3 demo/make_site_summary.py`
   （`examples/org-health-local/demo/make_site_summary.py:422-423`），生成
   `demo/site-summary.md`：指标卡片的标题与各期次数值、口径说明条目、洞察/建议条数，

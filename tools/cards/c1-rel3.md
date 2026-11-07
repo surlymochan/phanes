@@ -1,6 +1,6 @@
 # M10 #64: fix backend reliability findings 6-8
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every directory you change, and follow them.
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every directory you change, and follow them.
 
 ## Scope
 
@@ -39,7 +39,7 @@ Evidence:
 - `src/backend/dispatch/dispatch-service.ts:369` — `const saved = yield* Effect.result(this.#save([...this.#runs, record], output.exitCode));`
 
 Why it matters: every dispatch adds a record, and the records are never removed. The whole array
-is written to `openbot-dispatch-v1.json` on each change. The file therefore grows with each
+is written to `volto-dispatch-v1.json` on each change. The file therefore grows with each
 dispatch, and each write costs the size of the whole file. The array also holds every record in
 memory for the life of the app.
 
@@ -66,7 +66,7 @@ seen order is enough for the read at `src/backend/browser-host.ts:1067`.
 
 - First confirm each finding against the current code. If upstream already fixed one, do not change it: report
   "already fixed" with the file and line that show it. That is a valid result.
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`.

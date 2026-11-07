@@ -1,6 +1,6 @@
 ## Linked issue
 
-Closes nibiru-labs/openbot-roadmap#62 (M10 accessibility, audit `docs/audits/openbot-a11y.md`, all 15 findings).
+Closes nibiru-labs/volto-roadmap#62 (M10 accessibility, audit `docs/audits/volto-a11y.md`, all 15 findings).
 
 ## Type of change
 
@@ -19,7 +19,7 @@ Closes nibiru-labs/openbot-roadmap#62 (M10 accessibility, audit `docs/audits/ope
 - Pinned tile reorder publishes `aria-keyshortcuts` (9). Nine toggles carry `aria-controls` (10). Four dialog triggers report `aria-expanded` (11).
 - The tab close hint uses `aria-describedby` (12). Diagram and preview canvases use `role=group` instead of `application` (13). The switch field reads label first (14).
 
-Surfaces: Desktop renderer and `packages/ui` shared controls. Mouse behavior and visuals are unchanged. No IPC, contract or migration change; new text comes from `@openbot/i18n`.
+Surfaces: Desktop renderer and `packages/ui` shared controls. Mouse behavior and visuals are unchanged. No IPC, contract or migration change; new text comes from `@volto/i18n`.
 
 ## Verification
 

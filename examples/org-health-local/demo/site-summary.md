@@ -68,4 +68,4 @@
 - 指标标题与顺序固定为：整体技术人力成本 / 整体折算人头 / 营收业务（含共享平台）技术人力成本与折算人头 / 收入与成本率；任一不符页面判为结构错误并清空各容器（app.js render()）。
 - 期次值为 null 时页面显示“未提供”，不以 0 或估算值替代。
 - 参考期次 `2026-05H1参考`：5/6 张卡片显示“未提供”（整体技术人力成本、整体折算人头、营收业务技术人力成本、营收业务折算人头、整体技术人力成本率）。
-- 卡片单位文案取自 openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts。
+- 卡片单位文案取自 volto/packages/i18n/src/messages/zh/orgHealthDemo.ts。

@@ -1,6 +1,6 @@
 # Re-apply PR #33 (iOS self-build guide) and PR #36 (PRIVACY note on coding dispatch) on the new main
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript). Read AGENTS.md and the AGENTS.md of every directory you change.
+Repository: Volto desktop (Electron, Bun, TypeScript). Read AGENTS.md and the AGENTS.md of every directory you change.
 Base: `fd5719fc7f`, the new main. It contains the merge of 429 upstream commits, so the code, docs and scripts
 around these files changed a lot since these PRs were written.
 
@@ -14,14 +14,14 @@ Re-apply each PR below onto this base so that it is correct for the new code. Fo
    longer true, drop what upstream already did, and say so. Do not copy a stale claim.
 4. Keep the PR's scope. Do not add unrelated changes.
 
-### PR nibiru-labs/openbot#33  (branch `docs/ios-self-build`)
+### PR nibiru-labs/volto#33  (branch `docs/ios-self-build`)
 
 Files this PR changes: docs/ios-self-build.md
 
 Get its change: `git fetch https://github.com/nibiru-labs/openbot.git docs/ios-self-build` then
 `git diff 44c1e550da FETCH_HEAD -- docs/ios-self-build.md` (44c1e550da is the old main it was written against;
 ignore any other commit on that branch, those are already merged or belong to other PRs).
-### PR nibiru-labs/openbot#36  (branch `docs/privacy-dispatch`)
+### PR nibiru-labs/volto#36  (branch `docs/privacy-dispatch`)
 
 Files this PR changes: PRIVACY.md, changelog.d/docs-privacy-dispatch.md
 
@@ -31,11 +31,11 @@ ignore any other commit on that branch, those are already merged or belong to ot
 
 ## Rules
 
-- Smallest change. No new dependency. Interface text comes from `@openbot/i18n` keys. No migrations, no released
+- Smallest change. No new dependency. Interface text comes from `@volto/i18n` keys. No migrations, no released
   wire or IPC contract change.
 - Tests are E2E scripts under `scripts/`; do not add unit tests. Wait on state, not time.
-- To clean up a temporary directory, make it inside the worktree under `.openbot-build/` and remove it with a literal relative path, for example `rm -rf .openbot-build/probe`. Never run `rm -rf "$VAR"` or `cd / && rm ...`: the guard cannot see what the variable points to and stops the run.
-- Never read or print `.env*`, auth or credential files. Temporary files only under `$TMPDIR` or `.openbot-build/`
+- To clean up a temporary directory, make it inside the worktree under `.volto-build/` and remove it with a literal relative path, for example `rm -rf .volto-build/probe`. Never run `rm -rf "$VAR"` or `cd / && rm ...`: the guard cannot see what the variable points to and stops the run.
+- Never read or print `.env*`, auth or credential files. Temporary files only under `$TMPDIR` or `.volto-build/`
   in the worktree; never write or remove anything in `/tmp` or outside the worktree. Do not use Computer Use.
 - Do not commit (the runner commits) and do not push. Add a release note `changelog.d/<short-name>.md` only if the PR
   did not carry the `no-changelog` label (PR #36 carries a note; keep it).

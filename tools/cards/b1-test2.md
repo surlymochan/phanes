@@ -1,11 +1,11 @@
 # M10 #66: E2E for channel chat Stop, Resume, Reassign, Archive, Restore (tests 3)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Continue
 
-Your base 0d6ac59f42 has the work of your earlier run, which the risk guard stopped. Finish it: run your new script, fix it until it passes, run the checks below, add the release note. Temporary files only under `$TMPDIR` or `.openbot-build/` in the worktree; never write to or remove anything in `/tmp` or outside the worktree.
+Your base 0d6ac59f42 has the work of your earlier run, which the risk guard stopped. Finish it: run your new script, fix it until it passes, run the checks below, add the release note. Temporary files only under `$TMPDIR` or `.volto-build/` in the worktree; never write to or remove anything in `/tmp` or outside the worktree.
 
 ## Scope
 
@@ -37,7 +37,7 @@ Add `scripts/channel-service-e2e.ts`. It runs the real `ChannelService` on a tem
 fake provider and a fake mailbox. It creates a channel with two members, archives it and checks that
 a new task is refused, restores it and checks that a task runs again, stops a run and resumes it, and
 reassigns one task and checks that the other task keeps its owner. It writes
-`.openbot-build/channel-service-e2e/report.json`.
+`.volto-build/channel-service-e2e/report.json`.
 
 **Size: M**
 
@@ -49,7 +49,7 @@ reassigns one task and checks that the other task keeps its owner. It writes
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

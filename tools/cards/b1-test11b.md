@@ -1,15 +1,15 @@
-# M10 #66: E2E for signing in to a server with openbot login (tests 11)
+# M10 #66: E2E for signing in to a server with volto login (tests 11)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Continue
 
-Your base cf58418221 already has the work of an earlier run that ran out of time or was stopped (scripts for `openbot login`). Run what is there, fix it until it passes, finish the checks below and the release note. Temporary files only under `$TMPDIR` or `.openbot-build/` in the worktree; never write to or remove anything in `/tmp` or outside the worktree.
+Your base cf58418221 already has the work of an earlier run that ran out of time or was stopped (scripts for `volto login`). Run what is there, fix it until it passes, finish the checks below and the release note. Temporary files only under `$TMPDIR` or `.volto-build/` in the worktree; never write to or remove anything in `/tmp` or outside the worktree.
 
 ## Scope
 
-Test-coverage finding 11 below. First check existing scripts (grep scripts/ for server-mode, openbot login, central-auth) and report what they cover. Add one new E2E script for the uncovered path against a local fake server started inside the script (no internet). No product code change unless a test exposes a real bug; then report it. Temporary files only under $TMPDIR or .openbot-build/.
+Test-coverage finding 11 below. First check existing scripts (grep scripts/ for server-mode, volto login, central-auth) and report what they cover. Add one new E2E script for the uncovered path against a local fake server started inside the script (no internet). No product code change unless a test exposes a real bug; then report it. Temporary files only under $TMPDIR or .volto-build/.
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -17,12 +17,12 @@ Test-coverage finding 11 below. First check existing scripts (grep scripts/ for 
 
 **Evidence**
 
-- `docs/self-hosted-server.md:68` lists the commands. `sudo openbot login` and `openbot name` work
+- `docs/self-hosted-server.md:68` lists the commands. `sudo volto login` and `volto name` work
   only through the socket.
 - `src/main/server-mode.ts:202` is the route switch. It holds `/v1/login/start`, `/v1/login/verify`,
   `/v1/login/claim`, `/v1/name`, `/v1/mobile-connect`, and `/v1/logout`.
   `src/main/server-mode.ts:191` applies the 4 KiB body limit.
-- `scripts/hosting/openbot:4` names the file in a comment only.
+- `scripts/hosting/volto:4` names the file in a comment only.
 
 **Why it matters**
 
@@ -45,7 +45,7 @@ that the answer never carries the session token, the sign-in code, or the claim.
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

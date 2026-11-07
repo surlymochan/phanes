@@ -1,6 +1,6 @@
 ## Linked issue
 
-Refs nibiru-labs/openbot-roadmap#65 (M10 mobile parity, audit `docs/audits/openbot-mobile.md`). Findings 1, 7, 14 and 15 and three smaller gaps are here. Findings 4, 6, 9 and 10 were already fixed upstream. Findings 2, 3 and 12 need a new Team API capability and follow in their own PR.
+Refs nibiru-labs/volto-roadmap#65 (M10 mobile parity, audit `docs/audits/volto-mobile.md`). Findings 1, 7, 14 and 15 and three smaller gaps are here. Findings 4, 6, 9 and 10 were already fixed upstream. Findings 2, 3 and 12 need a new Team API capability and follow in their own PR.
 
 ## Type of change
 
@@ -19,7 +19,7 @@ Refs nibiru-labs/openbot-roadmap#65 (M10 mobile parity, audit `docs/audits/openb
 - `Stop and send`: stops the running turn through the existing interrupt route, then sends; a failed stop sends nothing.
 - Messages are grouped like the desktop rule (one time and one sender name per run); a created or changed routine shows as a card that opens the routine screen.
 
-Surfaces: `apps/mobile` and `@openbot/i18n`. No file under `packages/contracts`, `packages/team-client`, `src/main` or `src/backend` changed; no migration; no new dependency.
+Surfaces: `apps/mobile` and `@volto/i18n`. No file under `packages/contracts`, `packages/team-client`, `src/main` or `src/backend` changed; no migration; no new dependency.
 
 ## Verification
 

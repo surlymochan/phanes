@@ -1,0 +1,163 @@
+/*
+ * The light palette of the desktop app and the web client. tokens.css declares every
+ * token, dark; this file changes only the colors that must change, when the root element
+ * has data-volto-color-scheme="light". Each desktop window and the web client set that
+ * attribute from the saved choice, and resolve System from prefers-color-scheme. The public
+ * site never sets it, so it stays dark.
+ *
+ * The rules of the dark palette stay true here, turned over: a raised surface is lighter
+ * than the canvas, and a hover or a border is a translucent ink. In the dark palette that
+ * ink is white; here it is the primary text color, #141414.
+ *
+ * Not here, on purpose:
+ * - The native-only tokens (bg-native-canvas, chrome-*): mobile has its own light theme in
+ *   tokens-native.css. The desktop uses the native sidebar, sheet and grouped tokens, so they are here.
+ * - The landing-page materials (price-*, hero-grid, download-card-*): the public site is dark only.
+ * - The paper-* tokens: they stay on paper that is always light, such as a QR code.
+ * - Illustration and brand colors (logo-*, onboarding-*, sound-*, provider logos): a drawing
+ *   keeps its colors in both themes.
+ * - The Dynamic Island: it imitates the camera housing, so its window never sets the attribute.
+ */
+
+:root[data-appearance="light"],
+:root[data-volto-color-scheme="light"] {
+  color-scheme: light;
+
+  --volto-bg-native-canvas: #f5f5f7;
+  --volto-bg-host-inset: #ebedf0;
+  --volto-window-frame: #e4e4e8;
+  --volto-action: #141414;
+  --volto-action-foreground: #f2f2f2;
+  --volto-shadow-card: 0 1px 2px rgba(20, 20, 20, 0.05);
+  --volto-shadow-composer: 0 2px 12px rgba(20, 20, 20, 0.06);
+  --volto-shadow-block: 0 4px 16px rgba(20, 20, 20, 0.08);
+
+  --volto-bg-canvas: #f5f5f6;
+  --volto-bg-canvas-clear: rgba(245, 245, 246, 0);
+  --volto-bg-frame: #e8e8eb;
+  --volto-bg-sidebar: #f5f5f6;
+  --volto-bg-native-sidebar: #f5f5f6;
+  --volto-bg-sheet: #ffffff;
+  --volto-bg-sheet-inset: #f0f0f2;
+  --volto-bg-grouped: #ffffff;
+  --volto-text-grouped-secondary: #6b6b70;
+  --volto-border-grouped: #e3e3e6;
+  --volto-marketplace-detail-bg: #ececee;
+  --volto-bg-surface: #ffffff;
+  --volto-bg-surface-raised: #fcfcfc;
+  --volto-bg-control: #ffffff;
+  --volto-bg-control-hover: #f0f0f2;
+  --volto-bg-control-active: #e8e8eb;
+  --volto-tabs-bar-bg: #ececee;
+  --volto-tabs-pill-bg: #ffffff;
+  --volto-bg-overlay: rgba(245, 245, 246, 0.92);
+  --volto-dialog-overlay: rgba(20, 20, 20, 0.12);
+  --volto-dialog-ring: rgba(20, 20, 20, 0.1);
+  --volto-bg-glass: rgba(255, 255, 255, 0.76);
+  --volto-glass-surface: rgba(20, 20, 20, 0.04);
+  --volto-glass-surface-hover: rgba(20, 20, 20, 0.07);
+  --volto-glass-border: rgba(20, 20, 20, 0.12);
+  --volto-glass-highlight: rgba(255, 255, 255, 0.6);
+  --volto-glass-shadow: transparent;
+  --volto-scroll-edge-overlay: rgba(245, 245, 246, 0.72);
+
+  --volto-border: rgba(20, 20, 20, 0.07);
+  --volto-border-strong: rgba(20, 20, 20, 0.1);
+  --volto-image-outline: rgba(20, 20, 20, 0.1);
+  --volto-hover: rgba(20, 20, 20, 0.05);
+
+  /* Contrast on the canvas: primary 17:1, secondary 10:1, muted 4.9:1. Dim is for
+     marks and disabled text, as in the dark palette. */
+  --volto-text-primary: #141414;
+  --volto-text-secondary: #3a3a3c;
+  --volto-text-muted: #6b6b70;
+  --volto-text-dim: #8e8e93;
+  --volto-text-placeholder: #5c5c61;
+  --volto-text-readable: rgba(20, 20, 20, 0.6);
+  --volto-settings-text-muted: rgba(20, 20, 20, 0.6);
+
+  /* The on-light family is the high-contrast inverted element: the default button, a checked
+     switch, the user's bubble, the light tooltip. On a light canvas it turns dark. */
+  --volto-surface-light: #1c1c1e;
+  --volto-text-on-light: #ffffff;
+  --volto-text-muted-on-light: rgba(255, 255, 255, 0.64);
+  --volto-text-dim-on-light: rgba(255, 255, 255, 0.4);
+  --volto-border-on-light: rgba(255, 255, 255, 0.16);
+
+  /* The same hue 210 as the dark accent. The fill keeps its value, so a button looks the same
+     in both themes; text and hover go darker for contrast (accent-text 5.3:1 on the canvas). */
+  --volto-accent-hover: #006ad4;
+  --volto-accent-text: #0064c8;
+  --volto-accent-soft: rgba(0, 124, 247, 0.12);
+  --volto-accent-strong: rgba(0, 124, 247, 0.26);
+
+  /* Chart series: darker steps of the dark-palette hues, so each series reads on white.
+     Not yet checked with the dataviz palette validator in light mode. */
+  --volto-chart-series-codex: #8e4fc0;
+  --volto-chart-series-grok: #16849b;
+  --volto-chart-storage-workspaces: #2f74c9;
+  --volto-chart-storage-files: #c64d1d;
+  --volto-chart-storage-chats: #148a61;
+  --volto-chart-storage-downloads: #6f62d6;
+  --volto-chart-storage-runtimes: #a86f00;
+
+  /* Status fills keep their hue. Status text is darker, for AA on white. */
+  --volto-success: #1fa85a;
+  --volto-success-text: #187a41;
+  --volto-success-soft: rgba(31, 168, 90, 0.12);
+  --volto-success-wash: rgba(31, 168, 90, 0.06);
+  --volto-warning: #f08a00;
+  --volto-warning-text: #9c5200;
+  --volto-warning-soft: rgba(240, 138, 0, 0.14);
+  --volto-approval-badge-soft: rgba(240, 138, 0, 0.18);
+  --volto-danger: #e8222d;
+  --volto-danger-hover: #f04a53;
+  --volto-danger-text: #c0141d;
+  --volto-danger-soft: rgba(232, 34, 45, 0.12);
+  --volto-danger-soft-hover: rgba(232, 34, 45, 0.2);
+  --volto-danger-focus: rgba(232, 34, 45, 0.36);
+  --volto-danger-border: rgba(232, 34, 45, 0.45);
+
+  --volto-question-option: #16849b;
+  --volto-question-option-soft: rgba(22, 132, 155, 0.12);
+  --volto-question-option-hover: rgba(22, 132, 155, 0.18);
+  --volto-question-option-pressed: rgba(22, 132, 155, 0.24);
+  --volto-question-badge-text: #0f6a7d;
+  --volto-question-badge-soft: rgba(22, 132, 155, 0.14);
+  --volto-message-badge-text: #0a5fb8;
+  --volto-message-badge-soft: rgba(0, 124, 247, 0.12);
+  --volto-badge-new: #e0004a;
+  --volto-badge-new-soft: rgba(224, 0, 74, 0.12);
+
+  /* File references: the hues of the dark palette, darker so the name reads on white. */
+  --volto-file-blue: #1a66c4;
+  --volto-file-blue-soft: rgba(31, 111, 209, 0.12);
+  --volto-file-yellow: #9c5200;
+  --volto-file-yellow-soft: rgba(240, 138, 0, 0.14);
+  --volto-file-orange: #a8521a;
+  --volto-file-orange-soft: rgba(181, 90, 31, 0.12);
+  --volto-file-teal: #127589;
+  --volto-file-teal-soft: rgba(22, 132, 155, 0.12);
+  --volto-file-green: #187a41;
+  --volto-file-green-soft: rgba(31, 168, 90, 0.12);
+  --volto-file-red: #c0141d;
+  --volto-file-red-soft: rgba(232, 34, 45, 0.12);
+  --volto-file-pink: #a3478f;
+  --volto-file-pink-soft: rgba(163, 71, 143, 0.12);
+  --volto-file-default: #0064c8;
+  --volto-file-default-soft: rgba(0, 124, 247, 0.12);
+
+  --volto-data-table-border: #e3e3e6;
+  --volto-data-table-header-text: #6b6b70;
+  --volto-data-table-text: #1c1c1e;
+  --volto-data-table-outer-border: rgba(20, 20, 20, 0);
+  --volto-data-table-ring: rgba(20, 20, 20, 0.1);
+
+  /* No drop shadows: on the dark canvas they do not show, but on white they read as a halo.
+     A raised surface keeps its 1px ring. */
+  --volto-shadow-popover-ambient: transparent;
+  --volto-shadow-dialog: transparent;
+  --volto-shadow-menu: transparent;
+  --volto-shadow-ring: rgba(20, 20, 20, 0.04);
+  --volto-shadow-overlay: 0 0 0 transparent;
+}

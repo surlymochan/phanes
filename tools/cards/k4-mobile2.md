@@ -1,11 +1,11 @@
 # M10 #65: mobile file preview for other files, unread divider and day separators (mobile 4, 15)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
 
-Mobile parity findings 4 and 15 below, in apps/mobile (read apps/mobile/AGENTS.md). Client-side only: do NOT add or change any Team API route, capability, contract or IPC endpoint; use what the desktop and the existing mobile client already call. If a finding cannot be done without a new route, report it as not fixed with the reason. Do not edit the composer (another run owns it). User text from @openbot/i18n keys. Add or extend a mobile script under scripts/ with a case for each finding.
+Mobile parity findings 4 and 15 below, in apps/mobile (read apps/mobile/AGENTS.md). Client-side only: do NOT add or change any Team API route, capability, contract or IPC endpoint; use what the desktop and the existing mobile client already call. If a finding cannot be done without a new route, report it as not fixed with the reason. Do not edit the composer (another run owns it). User text from @volto/i18n keys. Add or extend a mobile script under scripts/ with a case for each finding.
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -49,7 +49,7 @@ Mobile parity findings 4 and 15 below, in apps/mobile (read apps/mobile/AGENTS.m
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

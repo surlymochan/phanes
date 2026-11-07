@@ -1,0 +1,324 @@
+/* Browser cards use captured images; only the expanded view owns a live surface. */
+.browser-preview-sidebar[hidden] {
+  display: none;
+}
+
+.browser-preview-header {
+  display: flex;
+  height: var(--left-header-height, 38px);
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--volto-space-1);
+  padding: 0 var(--volto-space-3);
+  color: var(--volto-text-secondary);
+}
+
+.browser-preview-header > span {
+  flex: 1;
+  font-size: var(--volto-text-sm);
+}
+
+.browser-preview-header > .ui-button,
+.browser-preview-close {
+  border-radius: var(--volto-radius-sm);
+}
+
+.browser-preview-header > .ui-button:focus-visible,
+.browser-preview-close:focus-visible {
+  outline: 1px solid var(--volto-text-muted);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+
+.browser-preview-sidebar .ui-button:active:not(:disabled):not([data-disabled]) {
+  background: var(--volto-bg-control-active);
+  color: var(--volto-text-primary);
+}
+
+.browser-preview-header > .ui-button > svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.browser-preview-list {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: var(--volto-space-2) var(--volto-space-4) var(--volto-space-4);
+}
+
+.browser-preview-list > .browser-empty-state {
+  height: auto;
+  justify-items: center;
+  gap: var(--volto-space-3);
+  padding: var(--volto-space-8) var(--volto-space-4);
+}
+
+.browser-preview-list > .browser-empty-state > svg,
+.browser-preview-image > svg {
+  width: var(--volto-icon-lg);
+  height: var(--volto-icon-lg);
+  color: var(--volto-text-muted);
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.browser-preview-list > .browser-empty-state > svg {
+  margin-bottom: var(--volto-space-1);
+}
+
+.browser-preview-list > .browser-empty-state > strong {
+  color: var(--volto-text-secondary);
+  font-size: var(--volto-text-md);
+  font-weight: 500;
+}
+
+.browser-preview-list > .browser-empty-state > .ui-button {
+  margin-top: var(--volto-space-1);
+}
+
+.browser-preview-card {
+  position: relative;
+  margin-bottom: var(--volto-space-4);
+}
+
+.browser-preview-open {
+  width: 100%;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-2);
+  padding: var(--volto-space-1);
+  color: var(--volto-text-secondary);
+  font-weight: 400;
+}
+
+.browser-preview-image {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--volto-border);
+  border-radius: var(--volto-radius-sm);
+  background: var(--volto-bg-surface);
+}
+
+.browser-preview-image img,
+.browser-preview-loading {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.browser-preview-title {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--volto-text-sm);
+}
+
+.browser-preview-open-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--volto-space-1);
+  padding: var(--volto-space-2) var(--volto-space-3);
+  border-radius: var(--volto-radius-pill);
+  background: var(--volto-bg-canvas);
+  color: var(--volto-text-primary);
+  font-size: var(--volto-text-sm);
+  line-height: 1;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.browser-preview-open-label > svg {
+  width: var(--volto-icon-xs);
+  height: var(--volto-icon-xs);
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.browser-preview-open:hover .browser-preview-open-label {
+  opacity: 1;
+}
+
+.browser-preview-close {
+  position: absolute;
+  top: var(--volto-space-2);
+  right: var(--volto-space-2);
+  opacity: 0;
+}
+
+.browser-preview-close > svg {
+  width: var(--volto-icon-xs);
+  height: var(--volto-icon-xs);
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.browser-preview-card:hover .browser-preview-close,
+.browser-preview-card:focus-within .browser-preview-close {
+  opacity: 1;
+}
+
+/* The code or the password the agent asks for: the site, the value and Submit. The inner parts are glass
+   in both variants; the timeline card keeps its frame, and the island has a denser glass of its own, so that
+   the page under it does not show through as dark shapes behind the code. */
+.browser-secret-card {
+  --otp-slot-border: var(--volto-glass-border);
+  --otp-slot-background: var(--volto-glass-surface);
+  --otp-slot-filled-background: var(--volto-glass-surface-hover);
+  --otp-slot-shadow: inset 0 1px 0 var(--volto-glass-highlight);
+
+  display: grid;
+  gap: var(--volto-space-4);
+  color: var(--volto-text-primary);
+}
+
+.browser-secret-card[data-variant="island"] {
+  box-sizing: border-box;
+  width: min(100%, 420px);
+  min-width: 0;
+  padding: var(--volto-space-4);
+  border: 1px solid var(--volto-glass-border);
+  border-radius: var(--volto-radius-xl);
+  background: color-mix(in srgb, var(--volto-bg-glass), var(--volto-bg-control) 60%);
+  box-shadow: var(--volto-shadow-raised);
+  backdrop-filter: blur(32px) saturate(1.4);
+}
+
+.browser-secret-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--volto-space-3);
+}
+
+.browser-secret-close {
+  flex: none;
+  margin-left: auto;
+}
+
+.browser-secret-icon {
+  display: grid;
+  width: var(--volto-control-md);
+  height: var(--volto-control-md);
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--volto-glass-border);
+  border-radius: var(--volto-radius-pill);
+  background: var(--volto-glass-surface);
+  box-shadow: inset 0 1px 0 var(--volto-glass-highlight);
+  color: var(--volto-text-primary);
+}
+
+.browser-secret-glyph {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+}
+
+.browser-secret-heading {
+  display: grid;
+  min-width: 0;
+  gap: var(--volto-space-0-5);
+}
+
+.browser-secret-heading h2 {
+  margin: 0;
+  font-size: var(--volto-text-md);
+  font-weight: var(--volto-weight-medium);
+  line-height: var(--volto-leading-md);
+}
+
+/* The site is never cut: the user checks it before the value goes there. */
+.browser-secret-heading p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+}
+
+.browser-secret-origin {
+  color: var(--volto-text-secondary);
+  font-weight: var(--volto-weight-medium);
+}
+
+.browser-secret-code,
+.browser-secret-password {
+  display: grid;
+  min-width: 0;
+  gap: var(--volto-space-1-5);
+}
+
+/* Below the focus and error borders of the field, which are one class strong. */
+:where(.browser-secret-password) > input {
+  border-color: var(--volto-glass-border);
+  background: var(--volto-glass-surface);
+}
+
+.browser-secret-save-option {
+  display: grid;
+  gap: var(--volto-space-0-5);
+}
+
+.browser-secret-save {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-1-5);
+  font-size: var(--volto-text-sm);
+}
+
+.browser-secret-save-server {
+  font-weight: var(--volto-weight-medium);
+}
+
+/* Under the label, past the box. */
+.browser-secret-save-hint {
+  margin: 0;
+  padding-left: calc(var(--volto-icon-sm) + var(--volto-space-1-5));
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+}
+
+.browser-secret-error {
+  margin: 0;
+  color: var(--volto-danger);
+  font-size: var(--volto-text-sm);
+}
+
+.browser-secret-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-1);
+  padding-top: var(--volto-space-3);
+  border-top: 1px solid var(--volto-glass-border);
+}
+
+.browser-secret-private {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: var(--volto-space-1-5);
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+}
+
+.browser-secret-glyph-sm {
+  width: var(--volto-icon-xs);
+  height: var(--volto-icon-xs);
+  flex: none;
+}
+
+.browser-secret-card .browser-takeover-preview-viewport {
+  width: 100%;
+  max-height: 280px;
+}
+
+.browser-secret-card .browser-takeover-preview-viewport img {
+  min-height: 0;
+  object-fit: contain;
+}

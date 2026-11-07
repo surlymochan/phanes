@@ -1,6 +1,6 @@
 # Read-only review: two proposed Team API additions from mobile parity work
 
-Repository: OpenBot. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md and docs/glossary.md.
+Repository: Volto. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md and docs/glossary.md.
 This is a REVIEW task. Do not change any file. Do not commit.
 
 Two executor commits added Team API protocol pieces although their task forbade it. Both are on local branches in
@@ -23,4 +23,4 @@ For each, answer with evidence (file:line):
 5. Verdict: ACCEPT as is / ACCEPT with listed fixes / REJECT, and the smallest fix list. Remember a released wire
    contract is permanent.
 
-Write the review to `.openbot-build/protocol-review/report.md` and put the verdicts in your final summary.
+Write the review to `.volto-build/protocol-review/report.md` and put the verdicts in your final summary.

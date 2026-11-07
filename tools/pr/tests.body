@@ -1,6 +1,6 @@
 ## Linked issue
 
-Refs nibiru-labs/openbot-roadmap#66 (M10 E2E coverage gaps, audit `docs/audits/openbot-tests.md`). Test gaps 1-10 and 12-14 and 15 are in this PR; gap 11 (`openbot login`) follows when its script passes.
+Refs nibiru-labs/volto-roadmap#66 (M10 E2E coverage gaps, audit `docs/audits/volto-tests.md`). Test gaps 1-10 and 12-14 and 15 are in this PR; gap 11 (`volto login`) follows when its script passes.
 
 ## Type of change
 
@@ -15,7 +15,7 @@ Refs nibiru-labs/openbot-roadmap#66 (M10 E2E coverage gaps, audit `docs/audits/o
 - `agent-profile-tools-e2e`, `local-skill-library-e2e`, `plugin-install-e2e` (link forms and the install), `provider-runtime-install-e2e` (against a local fixture server), `data-export-e2e` (secrets stay redacted).
 - `media-attachment-e2e` (MP3 and MOV, the per-file, per-message and file-count limits), `webhook-routine-e2e` (signed request starts the routine; bad signature and replay are refused), `telegram-messaging-e2e` (local fake Bot API).
 - `channel-service-e2e` (Stop, Resume, Reassign, Archive, Restore), `agent-import-e2e` (Grok Bot export), `host-publish-e2e` (local fake account service), `web-client-flow-e2e` (sign in, send, reply, stop, sign out), `update-service-e2e` (check, download, ready to relaunch, failed download), `connector-e2e` (1Password and GitHub against local fakes).
-- Each script writes a JSON report under `.openbot-build/` and uses local fakes: no internet, no real account, no real secret.
+- Each script writes a JSON report under `.volto-build/` and uses local fakes: no internet, no real account, no real secret.
 
 Surfaces: E2E scripts only, plus one helper for the host publish fake account service (`apps/auth-api/scripts/host-publish-server.ts`). No product code change.
 

@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       swrm: ${{ steps.detect.outputs.swrm }}
-      openbot: ${{ steps.detect.outputs.openbot }}
+      volto: ${{ steps.detect.outputs.volto }}
       scenario: ${{ steps.detect.outputs.scenario }}
     steps:
       - uses: actions/checkout@v4
@@ -27,20 +27,20 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "swrm=true" >> "$GITHUB_OUTPUT"
-            echo "openbot=true" >> "$GITHUB_OUTPUT"
+            echo "volto=true" >> "$GITHUB_OUTPUT"
             echo "scenario=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           swrm=false
-          openbot=false
+          volto=false
           scenario=false
           while IFS= read -r path; do
             case "$path" in
               swrm/*|tools/lane-autodispatch/*|tools/tests/*|tools/ci-swrm.*|.github/*) swrm=true ;;
             esac
             case "$path" in
-              openbot/*|.github/*) openbot=true ;;
+              volto/*|.github/*) volto=true ;;
             esac
             case "$path" in
               examples/org-health-local/*|.github/*) scenario=true ;;
@@ -50,7 +50,7 @@ jobs:
           # otherwise slip past the path based test selection of the Swrm gate.
           done < <(git diff --name-only --no-renames "$BASE_SHA...HEAD")
           echo "swrm=$swrm" >> "$GITHUB_OUTPUT"
-          echo "openbot=$openbot" >> "$GITHUB_OUTPUT"
+          echo "volto=$volto" >> "$GITHUB_OUTPUT"
           echo "scenario=$scenario" >> "$GITHUB_OUTPUT"
   example-json:
     name: Validate example JSON
@@ -82,7 +82,7 @@ jobs:
           GITHUB_BASE_REF: ${{ github.base_ref }}
         run: |
           python3 tools/upstream_drift.py --fail-on-unmarked || {
-            echo "::warning title=upstream drift (advisory)::PR touches generic swrm/openbot paths without 'upstream' in the title; add an upstream(<component>): prefix when convenient. Not a merge gate."
+            echo "::warning title=upstream drift (advisory)::PR touches generic swrm/volto paths without 'upstream' in the title; add an upstream(<component>): prefix when convenient. Not a merge gate."
             exit 1
           }
       - name: Write drift report to job summary
@@ -115,14 +115,14 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: bash tools/ci-swrm.sh
-  openbot:
-    name: OpenBot type and language checks
+  volto:
+    name: Volto type and language checks
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true' || needs.changes.outputs.scenario == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.volto == 'true' || needs.changes.outputs.scenario == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
-        working-directory: openbot
+        working-directory: volto
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -130,15 +130,15 @@ jobs:
           bun-version: '1.3.11'
       - run: bun install --frozen-lockfile
       - run: bun run typecheck:node
-        if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
+        if: github.event_name != 'pull_request' || needs.changes.outputs.volto == 'true'
       - run: bun run i18n:check --example-root ../examples/org-health-local
       - run: bun scripts/i18n-check-e2e.ts --example-root ../examples/org-health-local
       - run: bun run build
-        if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true'
-  openbot-scenario-tests:
-    name: OpenBot scenario tests (Python ${{ matrix.python }})
+        if: github.event_name != 'pull_request' || needs.changes.outputs.volto == 'true'
+  volto-scenario-tests:
+    name: Volto scenario tests (Python ${{ matrix.python }})
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.openbot == 'true' || needs.changes.outputs.scenario == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.volto == 'true' || needs.changes.outputs.scenario == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -150,7 +150,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Check D1 migration numbers
-        run: python openbot/apps/auth-api/scripts/check_migration_numbers.py openbot/apps/auth-api/migrations
+        run: python volto/apps/auth-api/scripts/check_migration_numbers.py volto/apps/auth-api/migrations
       - name: Run scenario unit tests
         run: |
           find examples/org-health-local -type f -name 'test_*.py' -print0 |

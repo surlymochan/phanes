@@ -1,0 +1,445 @@
+/* Interactive blocks an agent draws: confirm, choice, quick replies and form. Tokens only. */
+
+.ui-block-card {
+  display: flex;
+  max-width: 600px;
+  flex-direction: column;
+  gap: var(--volto-space-3);
+  border-color: var(--volto-border-strong);
+  background: var(--volto-bg-surface);
+  transition: border-color var(--volto-duration-slow) var(--volto-ease-out);
+}
+
+.ui-block-card[data-danger] {
+  border-color: var(--volto-danger-border);
+}
+
+.ui-block-card[data-status="expired"],
+.ui-block-card[data-status="closed"] {
+  color: var(--volto-text-muted);
+}
+
+.ui-block-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--volto-space-3);
+}
+
+.ui-block-heading {
+  min-width: 0;
+}
+
+.ui-block-title {
+  margin: 0;
+  color: var(--volto-text-primary);
+  font-size: var(--volto-text-xl);
+  font-weight: var(--volto-weight-semibold);
+  line-height: var(--volto-leading-xl);
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.ui-block-subtitle {
+  margin: var(--volto-space-0-5) 0 0;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+}
+
+.ui-block-status[data-slot="badge"] {
+  flex: 0 0 auto;
+  gap: var(--volto-space-1-5);
+  border-radius: var(--volto-radius-pill);
+  font-size: var(--volto-text-sm);
+  font-weight: var(--volto-weight-medium);
+}
+
+.ui-block-status svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+  flex: 0 0 auto;
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.ui-block-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--volto-space-3);
+}
+
+.ui-block-body:empty {
+  display: none;
+}
+
+/* The line a frozen block ends with. */
+.ui-block-outcome {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--volto-space-2);
+  margin: 0;
+  padding: var(--volto-space-2) var(--volto-space-3);
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-glass-surface);
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+}
+
+.ui-block-outcome[data-status="answered"] {
+  background: var(--volto-success-soft);
+  color: var(--volto-success-text);
+}
+
+.ui-block-outcome svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+  flex: 0 0 auto;
+}
+
+.ui-block-outcome-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The end of an open block: a failed answer and the skip button. */
+.ui-block-footer {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--volto-space-2);
+}
+
+.ui-block-error {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  color: var(--volto-danger-text);
+  font-size: var(--volto-text-sm);
+  line-height: var(--volto-leading-sm);
+  overflow-wrap: anywhere;
+}
+
+.ui-block-skip {
+  margin-inline-start: auto;
+}
+
+.ui-block-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--volto-space-2);
+}
+
+/* A block that answers itself has no Skip, so its last button, such as Cancel, sits at the far end. */
+.ui-block-actions-auto > button:last-of-type {
+  margin-inline-start: auto;
+}
+
+.ui-block-confirm-step {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ui-block-confirm-question {
+  padding: 0;
+  margin-bottom: var(--volto-space-2);
+  font-weight: var(--volto-weight-medium);
+}
+
+.ui-block-hint,
+.ui-block-counter,
+.ui-block-sending {
+  margin: 0;
+  color: var(--volto-text-dim);
+  font-size: var(--volto-text-sm);
+  line-height: var(--volto-leading-sm);
+}
+
+.ui-block-sending {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--volto-space-1-5);
+}
+
+/* Confirm */
+.ui-block-fields {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--volto-space-2) var(--volto-space-3);
+  margin: 0;
+  font-size: var(--volto-text-lg);
+}
+
+.ui-block-fields dt {
+  color: var(--volto-text-muted);
+}
+
+.ui-block-fields dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A long draft scrolls, so the user can read all of it before an answer. */
+.ui-block-preview {
+  max-height: 16em;
+  overflow-y: auto;
+  padding: var(--volto-space-3);
+  border: 1px solid var(--volto-border);
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-bg-surface-raised);
+  color: var(--volto-text-secondary);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-lg);
+}
+
+.ui-block-preview[data-expanded="true"] {
+  max-height: none;
+}
+
+/* The control that opens the rest of a long draft sits under it, at the start of the line. */
+.ui-block-preview-toggle {
+  align-self: flex-start;
+  margin-top: calc(var(--volto-space-2) * -1);
+}
+
+.ui-block-preview-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* A button held to press. The fill grows from the left while it is held. */
+.ui-block-hold {
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  touch-action: none;
+}
+
+.ui-block-hold-fill {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--volto-duration-fast) var(--volto-ease-out);
+  pointer-events: none;
+}
+
+.ui-block-hold[data-holding] .ui-block-hold-fill {
+  transform: scaleX(1);
+  transition: transform var(--ui-block-hold-duration) linear;
+}
+
+.ui-block-hold-label {
+  position: relative;
+}
+
+/* Choice */
+.ui-block-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-card);
+}
+
+.ui-block-option {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--volto-control-xs) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--volto-space-3);
+  padding: var(--volto-space-3);
+  cursor: pointer;
+  transition: background var(--volto-duration-fast) var(--volto-ease-out);
+}
+
+.ui-block-option + .ui-block-option {
+  border-top: 1px solid var(--volto-border-strong);
+}
+
+.ui-block-option:hover {
+  background: var(--volto-hover);
+}
+
+.ui-block-option[data-checked] {
+  background: var(--volto-question-option-soft);
+}
+
+.ui-block-option[data-disabled] {
+  cursor: default;
+}
+
+.ui-block-option[data-disabled]:not([data-checked]) {
+  opacity: 0.5;
+}
+
+.ui-block-option:focus-within {
+  outline: 2px solid var(--volto-border-focus);
+  outline-offset: -2px;
+}
+
+.ui-block-option .ui-block-option-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.ui-block-option-key {
+  display: grid;
+  width: var(--volto-control-xs);
+  height: var(--volto-control-xs);
+  place-items: center;
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-md);
+  background: var(--volto-bg-surface-raised);
+  color: var(--volto-text-muted);
+  font-family: var(--volto-font-sans);
+  font-size: var(--volto-text-sm);
+  font-weight: var(--volto-weight-semibold);
+}
+
+.ui-block-option[data-checked] .ui-block-option-key {
+  border-color: var(--volto-question-option);
+  background: var(--volto-question-option);
+  color: var(--volto-text-on-light);
+}
+
+.ui-block-option-label {
+  min-width: 0;
+  color: var(--volto-text-primary);
+  font-size: var(--volto-text-lg);
+  font-weight: var(--volto-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.ui-block-option-meta {
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Quick replies */
+.ui-block-quick {
+  display: flex;
+  max-width: 600px;
+  flex-direction: column;
+  gap: var(--volto-space-2);
+}
+
+.ui-block-quick-title {
+  margin: 0;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+}
+
+.ui-block-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--volto-space-2);
+}
+
+.ui-block-chip[data-faded] {
+  opacity: 0.35;
+}
+
+.ui-block-chip[data-chosen] {
+  border-color: var(--volto-accent);
+  background: var(--volto-accent-soft);
+  color: var(--volto-text-primary);
+  opacity: 1;
+}
+
+.ui-block-quick-text {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-2);
+}
+
+.ui-block-quick-text > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Form */
+.ui-block-form-fields {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--volto-space-3);
+}
+
+.ui-block-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-1-5);
+}
+
+.ui-block-field-label {
+  padding: 0;
+  margin-bottom: var(--volto-space-1-5);
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+}
+
+.ui-block-required {
+  margin-inline-start: var(--volto-space-0-5);
+  color: var(--volto-danger-text);
+}
+
+.ui-block-field-error {
+  margin: 0;
+  color: var(--volto-danger-text);
+  font-size: var(--volto-text-sm);
+  line-height: var(--volto-leading-sm);
+}
+
+.ui-block-segmented {
+  display: flex;
+  gap: var(--volto-space-0-5);
+  padding: var(--volto-space-0-5);
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-bg-surface-raised);
+}
+
+.ui-block-segment {
+  flex: 1 1 0;
+  min-width: 0;
+  color: var(--volto-text-muted);
+}
+
+.ui-block-segment[aria-pressed="true"] {
+  background: var(--volto-bg-control-active);
+  color: var(--volto-text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-block-card,
+  .ui-block-option,
+  .ui-block-hold-fill {
+    transition: none;
+  }
+}

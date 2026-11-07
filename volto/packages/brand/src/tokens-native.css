@@ -1,0 +1,154 @@
+/*
+ * The mobile theme layer. Only apps/mobile imports this file. The desktop app and
+ * the web client have their own light layer, tokens-light.css, which a root
+ * attribute turns on; the public site is always dark.
+ *
+ * It cannot be folded into tokens.css. `@variant light` is not a Tailwind v4
+ * variant at all; uniwind registers it as a custom variant, so desktop and web
+ * would fail to compile the block. And `@variant dark` in stock Tailwind means
+ * `prefers-color-scheme: dark`, which would turn the public site light for anyone
+ * running a light system.
+ *
+ * The dark block repeats the base values from tokens.css instead of inheriting
+ * them, which looks like something to tidy up. It is not. uniwind hard-codes its
+ * theme list to ['light', 'dark'] and discovers a theme's variables only by
+ * reading `@variant` at-rules, so a name present in one block and absent from the
+ * other is a theme that cannot resolve it. uniwind notices, but only writes a red
+ * line to the console - it does not fail the build. Keep every value here equal to
+ * the base, so that mobile dark does not drift away from desktop.
+ */
+
+:root {
+  @variant light {
+    --volto-bg-canvas: #f5f5f7;
+    --volto-bg-native-canvas: #f5f5f7;
+    --volto-bg-native-sidebar: #ffffff;
+    --volto-bg-sidebar: #ffffff;
+    --volto-bg-surface: #ffffff;
+    --volto-bg-surface-raised: #f0f0f3;
+    --volto-bg-control: #e9e9ed;
+    --volto-bg-control-active: #dedee4;
+    --volto-bg-overlay: rgba(20, 20, 20, 0.28);
+    --volto-border: rgba(20, 20, 20, 0.1);
+    --volto-border-strong: rgba(20, 20, 20, 0.16);
+    --volto-text-primary: #141414;
+    --volto-text-secondary: rgba(20, 20, 20, 0.72);
+    --volto-text-muted: rgba(20, 20, 20, 0.64);
+    --volto-text-dim: rgba(20, 20, 20, 0.34);
+    --volto-text-on-accent: #ffffff;
+    --volto-text-on-light: #141414;
+    --volto-text-on-status: #07130c;
+    --volto-action: #141414;
+    --volto-action-foreground: #f2f2f2;
+    --volto-accent: #6960f1;
+    --volto-accent-text: #5b52df;
+    --volto-logo-production: #cdadec;
+    --volto-logo-eye: #040007;
+    --volto-success: #32a85d;
+    --volto-warning: #c58a23;
+    --volto-danger: #d85f58;
+    --volto-success-text: #1e6f3b;
+    --volto-warning-text: #865700;
+    --volto-danger-text: #b02a2f;
+    --volto-drawer-scrim: #000000;
+    --volto-scroll-edge-overlay: rgba(245, 245, 247, 0.46);
+    --volto-shadow-card: 0 1px 2px rgba(20, 20, 20, 0.05);
+    --volto-shadow-overlay: 0 12px 32px rgba(20, 20, 20, 0.12);
+
+    /* Not a colour, and identical in both themes. uniwind only ever learns a
+     * variable from a @variant block, so a token @theme inline reaches through
+     * var() has to be declared here or the utility resolves to nothing on native.
+     * These two back tracking-volto-tight and tracking-volto-wide. */
+    --volto-tracking-tight: -0.1px;
+    --volto-tracking-wide: 0.02em;
+    --volto-bg-sheet: #fcfcfc;
+    --volto-bg-grouped: #f2f2f2;
+    --volto-text-grouped-secondary: #69696e;
+    --volto-border-grouped: #dddddf;
+    --volto-radius-grouped: 16px;
+    --volto-bg-chrome-glass: rgba(250, 250, 252, 0.94);
+    --volto-border-chrome-glass: rgba(20, 20, 20, 0.1);
+    --volto-bg-chrome-blur: rgba(255, 255, 255, 0.55);
+    /* File references: the same hues as dark, darker so the name reads on a light surface. */
+    --volto-file-blue: #1f6fd1;
+    --volto-file-blue-soft: rgba(31, 111, 209, 0.12);
+    --volto-file-yellow: #865700;
+    --volto-file-yellow-soft: rgba(197, 138, 35, 0.14);
+    --volto-file-orange: #b55a1f;
+    --volto-file-orange-soft: rgba(181, 90, 31, 0.12);
+    --volto-file-teal: #1c7f92;
+    --volto-file-teal-soft: rgba(28, 127, 146, 0.12);
+    --volto-file-green: #1e6f3b;
+    --volto-file-green-soft: rgba(50, 168, 93, 0.14);
+    --volto-file-red: #b02a2f;
+    --volto-file-red-soft: rgba(216, 95, 88, 0.14);
+    --volto-file-pink: #a3478f;
+    --volto-file-pink-soft: rgba(163, 71, 143, 0.12);
+    --volto-file-default: #5b52df;
+    --volto-file-default-soft: rgba(91, 82, 223, 0.12);
+  }
+
+  @variant dark {
+    /* biome-ignore lint/suspicious/noDuplicateCustomProperties: Theme variants intentionally share semantic token names. */
+    --volto-bg-canvas: #1a1a1a;
+    --volto-bg-native-canvas: #141414;
+    --volto-bg-native-sidebar: #141414;
+    --volto-bg-sidebar: #1a1a1a;
+    --volto-bg-surface: #212121;
+    --volto-bg-surface-raised: #242424;
+    --volto-bg-control: #212121;
+    --volto-bg-control-active: #2a2a2a;
+    --volto-bg-overlay: rgba(26, 26, 26, 0.92);
+    --volto-border: rgba(255, 255, 255, 0.035);
+    --volto-border-strong: rgba(255, 255, 255, 0.045);
+    --volto-text-primary: #ffffff;
+    --volto-text-secondary: #dcdcdc;
+    --volto-text-muted: #979797;
+    --volto-text-dim: #6a6a6a;
+    --volto-text-on-accent: #ffffff;
+    --volto-text-on-light: #141414;
+    --volto-text-on-status: #07130c;
+    --volto-action: #f0f0f0;
+    --volto-action-foreground: #141414;
+    --volto-accent: #007cf7;
+    --volto-accent-text: #42a0ff;
+    --volto-logo-production: #d6adf2;
+    --volto-logo-eye: #040007;
+    --volto-success: #31cf76;
+    --volto-warning: #ff9412;
+    --volto-danger: #fd2f3b;
+    --volto-success-text: #31cf76;
+    --volto-warning-text: #ff9412;
+    --volto-danger-text: #ff6069;
+    --volto-drawer-scrim: #000000;
+    --volto-scroll-edge-overlay: rgba(0, 0, 0, 0.72);
+    --volto-shadow-card: 0 0 0 transparent;
+    --volto-shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.48);
+    --volto-tracking-tight: -0.1px;
+    --volto-tracking-wide: 0.02em;
+    --volto-bg-sheet: #141414;
+    --volto-bg-grouped: #212121;
+    --volto-text-grouped-secondary: #96969b;
+    --volto-border-grouped: #333335;
+    --volto-radius-grouped: 16px;
+    --volto-bg-chrome-glass: rgba(38, 38, 40, 0.96);
+    --volto-border-chrome-glass: rgba(255, 255, 255, 0.08);
+    --volto-bg-chrome-blur: rgba(26, 26, 28, 0.62);
+    --volto-file-blue: #74b9ff;
+    --volto-file-blue-soft: rgba(116, 185, 255, 0.14);
+    --volto-file-yellow: #ff9412;
+    --volto-file-yellow-soft: rgba(255, 148, 18, 0.12);
+    --volto-file-orange: #f0a06a;
+    --volto-file-orange-soft: rgba(240, 160, 106, 0.14);
+    --volto-file-teal: #6bc7d9;
+    --volto-file-teal-soft: rgba(107, 199, 217, 0.14);
+    --volto-file-green: #31cf76;
+    --volto-file-green-soft: rgba(49, 207, 118, 0.12);
+    --volto-file-red: #fd2f3b;
+    --volto-file-red-soft: rgba(253, 47, 59, 0.16);
+    --volto-file-pink: #d98ac9;
+    --volto-file-pink-soft: rgba(217, 138, 201, 0.14);
+    --volto-file-default: #42a0ff;
+    --volto-file-default-soft: rgba(0, 124, 247, 0.14);
+  }
+}

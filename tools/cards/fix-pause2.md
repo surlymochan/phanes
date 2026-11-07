@@ -1,6 +1,6 @@
 # Fix the pause/continue Team API addition before it can ship
 
-Repository: OpenBot. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md and src/preload/AGENTS.md.
+Repository: Volto. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md and src/preload/AGENTS.md.
 Base: held-pause-continue (6769e66993). A read-only protocol review found the problems below. A released wire contract is permanent, so the
 contract must be right before it ships.
 
@@ -18,7 +18,7 @@ contract must be right before it ships.
 
 ## Continue
 
-Your base 98f259bdad already has: the optional codec and side-route registration, the chat authorization gate, client response validation, and HTTP access cases. Your earlier checks failed only because node_modules resolved @openbot/* to another checkout; this is fixed now (the worktree's @openbot/* point to its own sources). Now: add and run the WebRTC E2E cases (both trust boundaries, error behavior), then run every check below and fix what fails.
+Your base 98f259bdad already has: the optional codec and side-route registration, the chat authorization gate, client response validation, and HTTP access cases. Your earlier checks failed only because node_modules resolved @volto/* to another checkout; this is fixed now (the worktree's @volto/* point to its own sources). Now: add and run the WebRTC E2E cases (both trust boundaries, error behavior), then run every check below and fix what fails.
 
 ## Task
 

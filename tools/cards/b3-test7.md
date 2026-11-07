@@ -1,11 +1,11 @@
 # M10 #66: E2E for answering a Telegram chat (tests 7)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
 
-Test-coverage finding 7 below. First check existing messaging scripts under scripts/ (grep for telegram-transport and messaging) and report what they cover. Add one new E2E script that starts a local fake Telegram Bot API HTTP server inside the script (no internet, no real token), points the real Telegram transport at it, delivers one incoming message and asserts the reply that the transport sends. No product code change unless a test exposes a real bug; then report it. Temporary files only under $TMPDIR or .openbot-build/.
+Test-coverage finding 7 below. First check existing messaging scripts under scripts/ (grep for telegram-transport and messaging) and report what they cover. Add one new E2E script that starts a local fake Telegram Bot API HTTP server inside the script (no internet, no real token), points the real Telegram transport at it, delivers one incoming message and asserts the reply that the transport sends. No product code change unless a test exposes a real bug; then report it. Temporary files only under $TMPDIR or .volto-build/.
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -42,7 +42,7 @@ large file.
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

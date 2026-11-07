@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restricted SSH endpoint for OpenBot Hub fleet dispatch and result lookup."""
+"""Restricted SSH endpoint for volto Hub fleet dispatch and result lookup."""
 import json
 import os
 from pathlib import Path

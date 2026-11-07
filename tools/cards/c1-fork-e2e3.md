@@ -1,6 +1,6 @@
 # Fix two fork E2E regressions after the upstream sync (third attempt: make a code change)
 
-Repository: OpenBot desktop. Read AGENTS.md and src/backend/AGENTS.md. Base: your commit `2d8949daba`. Main is `fd5719fc7f`; the fork before the sync is `44c1e550da`.
+Repository: volto desktop. Read AGENTS.md and src/backend/AGENTS.md. Base: your commit `2d8949daba`. Main is `fd5719fc7f`; the fork before the sync is `44c1e550da`.
 
 ## What is already known
 

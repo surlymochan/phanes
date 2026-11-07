@@ -5,7 +5,7 @@ This directory exposes the Swrm executables used by the Phanes Hub integration:
 - `hub-fleet-gateway`: dispatch and retrieve results through a configured fleet.
 - `fleet-result-bundle`: package a completed remote run for local review.
 
-The Hub integration is implemented in `openbot/src/backend/`; Swrm routing and
+The Hub integration is implemented in `volto/src/backend/`; Swrm routing and
 execution live in `swrm/`. Use `swrm` for new CLI invocations. The legacy
 `swrm` executable remains available as a compatibility alias.
 

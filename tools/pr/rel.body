@@ -1,6 +1,6 @@
 ## Linked issue
 
-Refs nibiru-labs/openbot-roadmap#64 (M10 backend reliability, audit `docs/audits/openbot-reliability.md`). Findings 1 and 4-15 are in this PR; finding 2 was already fixed upstream; finding 3 follows in its own PR.
+Refs nibiru-labs/volto-roadmap#64 (M10 backend reliability, audit `docs/audits/volto-reliability.md`). Findings 1 and 4-15 are in this PR; finding 2 was already fixed upstream; finding 3 follows in its own PR.
 
 ## Type of change
 

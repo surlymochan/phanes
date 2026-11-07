@@ -14,9 +14,9 @@ on the same network could sign in to the local stack.
 - --lan refuses to start while AUTH_EXPOSE_DEVELOPMENT_CODE is on, both on
   the command line and where the bind is configured.
 - A LAN stack skips the throwaway development account role, which needs an
-  exposed sign-in code; setting OPENBOT_DEV_REMOTE_ROLE still wins.
+  exposed sign-in code; setting VOLTO_DEV_REMOTE_ROLE still wins.
 - scripts/dev-lan-guard-smoke.ts (bun run test:dev-lan-guard) covers the
-  defaults and refusals and writes .openbot-build/dev-lan-guard.json.
+  defaults and refusals and writes .volto-build/dev-lan-guard.json.
 ---
  README.md                               |   9 +-
  apps/auth-api/src/server/runtime-env.ts |   2 +-
@@ -38,8 +38,8 @@ index 290be7a0..9f464a22 100644
 @@ -321,10 +321,11 @@ See [web client delivery](docs/web-client.md) for the release gate and focused c
  | Command | Purpose |
  | --- | --- |
- | `bun run dev` | Start the local Auth API, Signal service, and Electron client with renderer HMR on its app profile. Ports are allocated through the dev registry, so a sibling worktree never takes one this stack won. It refuses a second stack in the same worktree unless you pass `--force`. Each worktree opens a profile of its own, keyed to its path; `--shared` opens the shared `OpenBot Dev` profile instead. `--isolated` is still accepted and changes nothing. A profile that you used before stays on disk unchanged. `--hosting=test` signs the app in to the `test` account Worker, on a profile that all worktrees share, so that a hosted server is a real VM; see [docs/hosted-servers.md](docs/hosted-servers.md#real-servers-from-a-development-build). A profile that does not exist yet is seeded with the showcase data of `bun run dev:seed` before the client starts, so a first start never opens an empty app; an existing profile is left as it is. An isolated profile still shares the computer's provider CLI store, so it does not download the pinned CLIs again. Before it starts, it runs `bun install --frozen-lockfile` and `bun run api:migrate:local` only when `bun.lock`, a workspace `package.json`, a patch, or a migration changed since their last successful run. The stamps are in `node_modules` and `apps/auth-api/.wrangler/state/v3/d1`, and each `bun install` writes the install stamp too; delete one to run its step again. |
-+| `bun run dev --lan` | Bind the local Auth API and Signal service to all network interfaces for phone clients. The default is `127.0.0.1`. Set `AUTH_EXPOSE_DEVELOPMENT_CODE=false` and configure email delivery before you use `--lan`; the command refuses to start on a LAN while the API returns sign-in codes. With `--lan` the desktop skips the throwaway development account (`OPENBOT_DEV_REMOTE_ROLE=none`) and shows the normal sign-in screen; set the variable yourself to choose a role. |
+ | `bun run dev` | Start the local Auth API, Signal service, and Electron client with renderer HMR on its app profile. Ports are allocated through the dev registry, so a sibling worktree never takes one this stack won. It refuses a second stack in the same worktree unless you pass `--force`. Each worktree opens a profile of its own, keyed to its path; `--shared` opens the shared `Volto Dev` profile instead. `--isolated` is still accepted and changes nothing. A profile that you used before stays on disk unchanged. `--hosting=test` signs the app in to the `test` account Worker, on a profile that all worktrees share, so that a hosted server is a real VM; see [docs/hosted-servers.md](docs/hosted-servers.md#real-servers-from-a-development-build). A profile that does not exist yet is seeded with the showcase data of `bun run dev:seed` before the client starts, so a first start never opens an empty app; an existing profile is left as it is. An isolated profile still shares the computer's provider CLI store, so it does not download the pinned CLIs again. Before it starts, it runs `bun install --frozen-lockfile` and `bun run api:migrate:local` only when `bun.lock`, a workspace `package.json`, a patch, or a migration changed since their last successful run. The stamps are in `node_modules` and `apps/auth-api/.wrangler/state/v3/d1`, and each `bun install` writes the install stamp too; delete one to run its step again. |
++| `bun run dev --lan` | Bind the local Auth API and Signal service to all network interfaces for phone clients. The default is `127.0.0.1`. Set `AUTH_EXPOSE_DEVELOPMENT_CODE=false` and configure email delivery before you use `--lan`; the command refuses to start on a LAN while the API returns sign-in codes. With `--lan` the desktop skips the throwaway development account (`VOLTO_DEV_REMOTE_ROLE=none`) and shows the normal sign-in screen; set the variable yourself to choose a role. |
  | `bun run preview` | Preview the built Electron client with the green preview icon. |
  | `bun run mobile:go` | Start the mobile app in Expo Go and clear the Metro cache. |
  | `bun mobile:ios` | Build and launch the iOS simulator app without RocketSim. |
@@ -60,7 +60,7 @@ index 290be7a0..9f464a22 100644
 +Restart the runner after changing networks so new QR codes contain the current address.
  
  Production mobile analytics setup and required OpenPanel credentials are documented in
- [OpenBot Mobile](apps/mobile/README.md#openpanel-product-analytics).
+ [Volto Mobile](apps/mobile/README.md#openpanel-product-analytics).
 diff --git a/apps/auth-api/src/server/runtime-env.ts b/apps/auth-api/src/server/runtime-env.ts
 index 77260842..bb8fa8ff 100644
 --- a/apps/auth-api/src/server/runtime-env.ts
@@ -104,7 +104,7 @@ index 00000000..768c6f14
 @@ -0,0 +1,185 @@
 +// Checks dev-service bind selection and the LAN login-code guard without starting services.
 +// Run: bun scripts/dev-lan-guard-smoke.ts
-+// It writes .openbot-build/dev-lan-guard.json and exits non-zero on a failure.
++// It writes .volto-build/dev-lan-guard.json and exits non-zero on a failure.
 +
 +import assert from "node:assert/strict";
 +import { spawnSync } from "node:child_process";
@@ -119,7 +119,7 @@ index 00000000..768c6f14
 +  servicesForTarget,
 +} from "./dev-services";
 +
-+const outputPath = join(import.meta.dirname, "..", ".openbot-build", "dev-lan-guard.json");
++const outputPath = join(import.meta.dirname, "..", ".volto-build", "dev-lan-guard.json");
 +const projectRoot = join(import.meta.dirname, "..");
 +const devServicesPath = join(import.meta.dirname, "dev-services.ts");
 +await mkdir(dirname(outputPath), { recursive: true });
@@ -140,7 +140,7 @@ index 00000000..768c6f14
 +check("default binds the API and Signal to loopback", () => {
 +  const invocation = parseDevelopmentTarget(["app"]);
 +  const environment: NodeJS.ProcessEnv = {
-+    OPENBOT_API_PORT: "3100",
++    VOLTO_API_PORT: "3100",
 +    REMOTE_SIGNAL_PORT: "3101",
 +  };
 +  configureMobileConnectDevelopmentNetwork(
@@ -149,22 +149,22 @@ index 00000000..768c6f14
 +    interfaces,
 +    invocation.lan,
 +  );
-+  assert.equal(environment.OPENBOT_API_HOST, "127.0.0.1");
++  assert.equal(environment.VOLTO_API_HOST, "127.0.0.1");
 +  assert.equal(environment.REMOTE_SIGNAL_HOST, "127.0.0.1");
 +  assert.equal(environment.REMOTE_SIGNAL_URL, "ws://127.0.0.1:3101/v1/signal");
-+  return { apiHost: environment.OPENBOT_API_HOST, signalHost: environment.REMOTE_SIGNAL_HOST };
++  return { apiHost: environment.VOLTO_API_HOST, signalHost: environment.REMOTE_SIGNAL_HOST };
 +});
 +
 +check("--lan skips the development account role that needs an exposed sign-in code", () => {
 +  const lan: NodeJS.ProcessEnv = {};
 +  applyLanSignInPolicy(true, lan);
-+  assert.equal(lan.OPENBOT_DEV_REMOTE_ROLE, "none");
-+  const chosen: NodeJS.ProcessEnv = { OPENBOT_DEV_REMOTE_ROLE: "host" };
++  assert.equal(lan.VOLTO_DEV_REMOTE_ROLE, "none");
++  const chosen: NodeJS.ProcessEnv = { VOLTO_DEV_REMOTE_ROLE: "host" };
 +  applyLanSignInPolicy(true, chosen);
-+  assert.equal(chosen.OPENBOT_DEV_REMOTE_ROLE, "host");
++  assert.equal(chosen.VOLTO_DEV_REMOTE_ROLE, "host");
 +  const loopback: NodeJS.ProcessEnv = {};
 +  applyLanSignInPolicy(false, loopback);
-+  assert.equal(loopback.OPENBOT_DEV_REMOTE_ROLE, undefined);
++  assert.equal(loopback.VOLTO_DEV_REMOTE_ROLE, undefined);
 +  return { lan: "none", chosen: "host", loopback: null };
 +});
 +
@@ -184,11 +184,11 @@ index 00000000..768c6f14
 +  assert.equal(developmentBindHost(false), "127.0.0.1");
 +  assert.equal(developmentBindHost(true), "0.0.0.0");
 +  const environment: NodeJS.ProcessEnv = {
-+    OPENBOT_API_PORT: "3100",
++    VOLTO_API_PORT: "3100",
 +    REMOTE_SIGNAL_PORT: "3101",
 +  };
 +  configureMobileConnectDevelopmentNetwork(servicesForTarget("app"), environment, interfaces, false);
-+  assert.equal(environment.OPENBOT_API_HOST, "127.0.0.1");
++  assert.equal(environment.VOLTO_API_HOST, "127.0.0.1");
 +  assert.equal(environment.REMOTE_SIGNAL_HOST, "127.0.0.1");
 +  return { loopback: developmentBindHost(false), lan: developmentBindHost(true) };
 +});
@@ -198,7 +198,7 @@ index 00000000..768c6f14
 +    () =>
 +      configureMobileConnectDevelopmentNetwork(
 +        servicesForTarget("app"),
-+        { OPENBOT_API_PORT: "3100", REMOTE_SIGNAL_PORT: "3101" },
++        { VOLTO_API_PORT: "3100", REMOTE_SIGNAL_PORT: "3101" },
 +        interfaces,
 +        true,
 +        { AUTH_EXPOSE_DEVELOPMENT_CODE: "true" },
@@ -214,7 +214,7 @@ index 00000000..768c6f14
 +  const invocation = parseDevelopmentTarget(["app", "--lan"]);
 +  const environment: NodeJS.ProcessEnv = {
 +    AUTH_EXPOSE_DEVELOPMENT_CODE: "false",
-+    OPENBOT_API_PORT: "3100",
++    VOLTO_API_PORT: "3100",
 +    REMOTE_SIGNAL_PORT: "3101",
 +  };
 +  assert.doesNotThrow(() => assertSafeDevelopmentNetwork(invocation.lan, environment));
@@ -224,14 +224,14 @@ index 00000000..768c6f14
 +    interfaces,
 +    invocation.lan,
 +  );
-+  assert.equal(environment.OPENBOT_API_HOST, "0.0.0.0");
++  assert.equal(environment.VOLTO_API_HOST, "0.0.0.0");
 +  assert.equal(environment.REMOTE_SIGNAL_HOST, "0.0.0.0");
-+  assert.equal(environment.OPENBOT_MOBILE_AUTH_API_URL, "http://192.168.1.24:3100");
++  assert.equal(environment.VOLTO_MOBILE_AUTH_API_URL, "http://192.168.1.24:3100");
 +  assert.equal(environment.REMOTE_SIGNAL_URL, "ws://192.168.1.24:3101/v1/signal");
 +  return {
-+    apiHost: environment.OPENBOT_API_HOST,
++    apiHost: environment.VOLTO_API_HOST,
 +    signalHost: environment.REMOTE_SIGNAL_HOST,
-+    mobileApiUrl: environment.OPENBOT_MOBILE_AUTH_API_URL,
++    mobileApiUrl: environment.VOLTO_MOBILE_AUTH_API_URL,
 +    signalUrl: environment.REMOTE_SIGNAL_URL,
 +    developmentCode: environment.AUTH_EXPOSE_DEVELOPMENT_CODE,
 +  };
@@ -239,7 +239,7 @@ index 00000000..768c6f14
 +
 +check("--lan requires a private IPv4 address for Mobile Connect", () => {
 +  const invocation = parseDevelopmentTarget(["app", "--lan"]);
-+  const environment: NodeJS.ProcessEnv = { OPENBOT_API_PORT: "3100" };
++  const environment: NodeJS.ProcessEnv = { VOLTO_API_PORT: "3100" };
 +  assert.throws(
 +    () =>
 +      configureMobileConnectDevelopmentNetwork(servicesForTarget(invocation.target), environment, {}, invocation.lan),
@@ -270,7 +270,7 @@ index 00000000..768c6f14
 +    env: {
 +      ...process.env,
 +      AUTH_EXPOSE_DEVELOPMENT_CODE: exposeCode,
-+      OPENBOT_DEV_REGISTRY_DIR: registryPath,
++      VOLTO_DEV_REGISTRY_DIR: registryPath,
 +    },
 +    encoding: "utf8",
 +  });
@@ -314,7 +314,7 @@ index e34018b4..d985cd46 100644
 @@ -6,6 +6,7 @@ import { type NetworkInterfaceInfo, networkInterfaces } from "node:os";
  import { dirname, join, resolve } from "node:path";
  import { fileURLToPath } from "node:url";
- import { createOpenBotLogger, toLogValue } from "@openbot/logging";
+ import { createVoltoLogger, toLogValue } from "@volto/logging";
 +import { normalizeBooleanFlag } from "../apps/auth-api/src/server/runtime-env";
  import { cliSpawnTarget } from "../src/backend/cli";
  import {
@@ -356,7 +356,7 @@ index e34018b4..d985cd46 100644
 +// A LAN stack cannot return sign-in codes, so the throwaway dev account of a "host" or "client" role cannot
 +// sign in. The desktop then uses the normal sign-in screen, unless the caller chose a role.
 +export function applyLanSignInPolicy(lan: boolean, environment: NodeJS.ProcessEnv): void {
-+  if (lan) environment.OPENBOT_DEV_REMOTE_ROLE ??= "none";
++  if (lan) environment.VOLTO_DEV_REMOTE_ROLE ??= "none";
 +}
 +
 +// The LAN is opened only when the caller asks for it by name. Every other
@@ -398,8 +398,8 @@ index e34018b4..d985cd46 100644
    const sharedEnvironment = developmentEnvironmentForTarget(target);
 +  applyLanSignInPolicy(lan, sharedEnvironment);
    if (hostingTest) {
-     sharedEnvironment.OPENBOT_AUTH_API_URL = TEST_ACCOUNT_API_URL;
-     sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL = TEST_ACCOUNT_API_URL;
+     sharedEnvironment.VOLTO_AUTH_API_URL = TEST_ACCOUNT_API_URL;
+     sharedEnvironment.VOLTO_MOBILE_AUTH_API_URL = TEST_ACCOUNT_API_URL;
 @@ -339,6 +379,7 @@ async function main(): Promise<void> {
        sharedEnvironment,
        heldDevStackPorts(records),
@@ -428,8 +428,8 @@ index e34018b4..d985cd46 100644
 +      ...developmentEnvironment,
 +      ...sharedEnvironment,
 +    });
-     if (sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL) {
-       logger.info(`Mobile Connect API: ${sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL}`);
+     if (sharedEnvironment.VOLTO_MOBILE_AUTH_API_URL) {
+       logger.info(`Mobile Connect API: ${sharedEnvironment.VOLTO_MOBILE_AUTH_API_URL}`);
      }
 @@ -641,17 +689,28 @@ export function configureMobileConnectDevelopmentNetwork(
    services: DevelopmentService[],
@@ -441,9 +441,9 @@ index e34018b4..d985cd46 100644
 +  accountEnvironment: NodeJS.ProcessEnv = environment,
  ): void {
    const hasMobileClient = services.some((service) => service === "app" || service === "test-client");
-   const apiPort = readPort(environment.OPENBOT_API_PORT);
+   const apiPort = readPort(environment.VOLTO_API_PORT);
    if (!apiPort) return;
--  const exposeToLan = hasMobileClient && environment.OPENBOT_API_HOST !== "127.0.0.1";
+-  const exposeToLan = hasMobileClient && environment.VOLTO_API_HOST !== "127.0.0.1";
 -  const address = exposeToLan ? selectMobileConnectLanAddress(interfaces) : null;
 +  // The LAN bind and an exposed sign-in code must not meet here either, so
 +  // the refusal holds for every caller and not only for the command line.
@@ -453,7 +453,7 @@ index e34018b4..d985cd46 100644
 +    throw new Error("Cannot use --lan: no private IPv4 address was found for Mobile Connect.");
 +  }
 +  const bindHost = developmentBindHost(lan);
-+  environment.OPENBOT_API_HOST = bindHost;
++  environment.VOLTO_API_HOST = bindHost;
  
    if (services.includes("remote")) {
      const signalPort = readPort(environment.REMOTE_SIGNAL_PORT) ?? DEFAULT_REMOTE_SIGNAL_PORT;
@@ -467,8 +467,8 @@ index e34018b4..d985cd46 100644
    }
  
    if (!address) return;
--  environment.OPENBOT_API_HOST ??= "0.0.0.0";
-   environment.OPENBOT_MOBILE_AUTH_API_URL ??= `http://${address}:${apiPort}`;
+-  environment.VOLTO_API_HOST ??= "0.0.0.0";
+   environment.VOLTO_MOBILE_AUTH_API_URL ??= `http://${address}:${apiPort}`;
  }
  
 diff --git a/scripts/development-environment.ts b/scripts/development-environment.ts
@@ -522,7 +522,7 @@ index 3b856ad9..b644fcf6 100644
    assertRegularPrivateFile(path, "development state");
    let parsed: unknown;
 @@ -183,7 +189,7 @@ function readStateIfPresent(path: string): DevelopmentState | undefined {
-       "The development state file has an invalid format. Restore .openbot/dev-state.json before continuing.",
+       "The development state file has an invalid format. Restore .volto/dev-state.json before continuing.",
      );
    }
 -  chmodSync(path, 0o600);

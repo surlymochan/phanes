@@ -1,6 +1,6 @@
 # Issue #21：模型额度限制作用域与未知状态处理核实
 
-范围：`openswarm/bin/openswarm`（行号为核查时的版本）。`openbot/` 下的 quota 字样均为 UI/i18n/账号用量展示，与路由切换无关，未纳入。
+范围：`openswarm/bin/openswarm`（行号为核查时的版本）。`volto/` 下的 quota 字样均为 UI/i18n/账号用量展示，与路由切换无关，未纳入。
 
 ## 1. 额度/限流状态的追踪位置
 
