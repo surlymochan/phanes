@@ -36,6 +36,7 @@ import copy
 import datetime
 import fnmatch
 import importlib.util
+import io
 import json
 import math
 import os
@@ -46,6 +47,7 @@ import subprocess
 import sys
 import threading
 import time
+import tokenize
 
 
 def _load_review_module(name):
@@ -446,6 +448,54 @@ else:
     os.replace(tmp,path)
     print("ok")
 '''
+
+
+# Version the heuristic so advisory metrics remain comparable across rule changes.
+TICK_ADVISORY_RULES_VERSION = "2"
+_TICK_RISK = re.compile(r"\b(?:dispatch|harvest|pause|paused|terminal|completed|failed|cancelled|canceled)\w*\b|派发|暂停|终态", re.I)
+def _added_tick_call(lines):
+    """Recognize added attribute calls, ignoring Python comments and literals."""
+    source = "\n".join(line[1:] for line in lines if line.startswith((" ", "+")))
+    added = [line.startswith("+") for line in lines if line.startswith((" ", "+"))]
+    tokens = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type in (tokenize.NAME, tokenize.OP):
+                tokens.append(token)
+                if (len(tokens) >= 4 and [t.string for t in tokens[-3:]] == [".", "tick", "("]
+                        and tokens[-4].type == tokenize.NAME and tokens[-4].string != "def"
+                        and added[tokens[-2].start[0] - 1]):
+                    return True
+    except (tokenize.TokenError, IndentationError):
+        pass
+    return False
+
+
+def tick_test_advisory(diff):
+    """Return an advisory event for risky changes without an added tick call in tests."""
+    risk = False
+    tick_test = False
+    test_file = False
+    test_lines = []
+    for line in (diff or "").splitlines():
+        if line.startswith(("diff --git ", "@@")) and test_lines:
+            tick_test |= _added_tick_call(test_lines)
+            test_lines = []
+        if line.startswith("diff --git "):
+            path = line.rsplit(" b/", 1)[-1]
+            test_file = bool(re.search(r"(?:^|/)(?:tests?/|test_[^/]*|[^/]*_test\.)", path))
+        elif line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+            if test_file:
+                test_lines.append(line)
+            elif _TICK_RISK.search(line[1:]):
+                risk = True
+        elif test_file and line.startswith(" "):
+            test_lines.append(line)
+    tick_test |= _added_tick_call(test_lines)
+    if risk and not tick_test:
+        return {"event": "tick_test_advisory", "rules_version": TICK_ADVISORY_RULES_VERSION,
+                "message": "派发、暂停或终态变更建议补充完整 tick 入口测试"}
+    return None
 
 
 class DryRun(Exception):
@@ -1774,6 +1824,15 @@ class Dispatcher:
                 self.log(f"{lane} #{n} run {run}: fetch failed: {(err or '').strip()[-200:]}")
                 return False
             st["fetch_fails"] = 0
+            # Advisory only: inspection and logging failures must never block a push.
+            try:
+                diff_rc, diff, _ = self.git("diff", "--no-color", st["base"], f"refs/fleet/{lane}", timeout=60)
+                event = tick_test_advisory(diff) if not diff_rc else None
+                if event:
+                    event.update({"lane": lane, "issue": n, "run": run})
+                    self.log(json.dumps(event, ensure_ascii=False), brain=False)
+            except Exception:
+                pass
             if st.get("rebase_pr"):
                 pr, ob = st["rebase_pr"], st["rebase_branch"]
                 anc = self.git("merge-base", "--is-ancestor", st["base"], f"refs/fleet/{lane}")[0]
