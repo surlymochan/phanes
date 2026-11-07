@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
-"""Atomic fleet admission. Reservations persist until explicitly released, even after a crash."""
+"""Atomic fleet admission. Reservations are leases: without a renewal they expire.
+
+A reservation is a lease which the owning host renews while its run lives.  The
+coordinator reclaims an expired lease on its own, so a crashed or lost run can
+never hold a slot forever (Refs #1792, docs/design/issue-34-authoritative-recovery.md).
+
+The reclaim does not wait for a request: the coordinator starts a sweeper of the
+expired leases next to itself, so a crashed run loses its slot even while the
+coordinator stays idle.  The sweeper belongs to the deployment of the
+coordinator: the request which took the slot starts it, so an operator does not
+have to wire a timer or a supervisor up (B1).
+"""
 import json
 import os
 import re
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -27,14 +39,377 @@ def _load_spawnable():
 _spawnable = _load_spawnable()
 
 
+import fcntl
 import time
 
 ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
 LIMITS = {'total': 8, 'host:broker': 2, 'host:worker': 2, 'host:local': 2,
           'codex': 1, 'pi': 1, 'cursor': 1, 'agy': 1, 'copilot': 1, 'minimax-cn': 1}
-if len(sys.argv) != 2 or sys.argv[1] not in ('broker', 'worker', 'local'):
+# Lease TTL of a reservation which does not ask for one itself (an old client).
+DEFAULT_LEASE_TTL = 900.0
+MAX_LEASE_TTL = 86400.0
+# Fallback expiry of a reservation which predates the lease rollout.  It covers
+# the longest run a client may hold (40 minutes), so a live old run keeps its
+# slot while the fleet rolls out, and a ghost is reclaimed with the same rule.
+DEFAULT_LEGACY_LEASE_TTL = 3600.0
+# How often the coordinator reclaims expired leases without a request.
+DEFAULT_SWEEP_INTERVAL = 30.0
+# The files of the sweeper next to the coordinator database.
+SWEEP_LOCK_NAME = 'sweep.lock'
+SWEEP_LOG_NAME = 'sweep.log'
+SWEEP_PID_NAME = 'sweep.pid'
+# The environment key which tells the sweeper on which pipe it announces that it
+# holds the lock of the coordinator.
+SWEEP_READY_FD = 'OPENSWARM_FLEET_CAPACITY_SWEEP_READY_FD'
+
+
+def _positive_env(name, fallback, limit=None):
+    """A positive float from the environment, else the fallback."""
+    value = os.environ.get(name)
+    if not value:
+        return fallback
+    try:
+        number = float(value)
+    except ValueError:
+        number = 0
+    if number <= 0:
+        print(json.dumps({'ok': False, 'error': f'invalid {name.lower()}'}))
+        sys.exit(1)
+    return min(number, limit) if limit else number
+
+
+LEASE_TTL = _positive_env('OPENSWARM_FLEET_LEASE_TTL_SECONDS', DEFAULT_LEASE_TTL, MAX_LEASE_TTL)
+LEGACY_LEASE_TTL = _positive_env('OPENSWARM_FLEET_LEASE_LEGACY_TTL_SECONDS',
+                                  DEFAULT_LEGACY_LEASE_TTL, MAX_LEASE_TTL)
+SWEEP_INTERVAL = _positive_env('OPENSWARM_FLEET_CAPACITY_SWEEP_INTERVAL', DEFAULT_SWEEP_INTERVAL)
+# `fleet-capacity --sweep-loop <host>` runs the reclaim of the expired leases
+# without any request; `fleet-capacity <host>` answers one request.
+sweep_loop = len(sys.argv) == 3 and sys.argv[1] == '--sweep-loop'
+if sweep_loop:
+    host = sys.argv[2]
+    if host not in ('broker', 'worker', 'local'):
+        sys.exit('invalid authenticated host')
+elif len(sys.argv) != 2 or sys.argv[1] not in ('broker', 'worker', 'local'):
     sys.exit('invalid authenticated host')
-host = sys.argv[1]
+else:
+    host = sys.argv[1]
+
+
+def coordinator_root():
+    """The directory of the coordinator database."""
+    return Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
+                (Path(_home()) / '.claude/swrm-fleet-capacity'))
+
+
+def lease_audit(db, event, **fields):
+    """Record one lease action (expire, release, recover) in the audit trail.
+
+    The record is written in the same transaction as the change it describes: a
+    rolled back transaction leaves no audit record, and a committed change always
+    has one.  The JSONL file next to the database is a mirror of that trail.
+    """
+    entry = {"at": round(time.time(), 3), "event": event}
+    entry.update(fields)
+    db.execute('INSERT INTO lease_audit (at,event,entry) VALUES (?,?,?)',
+               (entry['at'], event, json.dumps(entry, separators=(',', ':'), ensure_ascii=False)))
+    return entry
+
+
+def lease_audit_flush(root, entries):
+    """Mirror the audit records into the JSONL file after the commit.
+
+    The database holds the authoritative trail, so a file which cannot be
+    written never loses a record: the failure is reported instead of ignored.
+    """
+    if not entries:
+        return None
+    try:
+        fd = os.open(str(Path(root) / 'lease-audit.jsonl'), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            for entry in entries:
+                stream.write(json.dumps(entry, separators=(',', ':'), ensure_ascii=False) + "\n")
+    except OSError as error:
+        return str(error)
+    return None
+
+
+def lease_ttl(request):
+    """The TTL of a lease: the caller's own value, else the configured default."""
+    value = request.get('ttl_seconds')
+    if value is None:
+        return LEASE_TTL
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise ValueError('invalid lease ttl')
+    return min(float(value), MAX_LEASE_TTL)
+
+
+def open_coordinator(root):
+    """Open the coordinator database and bring its schema up to date.
+
+    The migration of a reservation without lease fields is conservative: its
+    fallback expiry starts at its creation, so a live old run keeps its slot
+    while the fleet rolls out, and an old ghost is reclaimed with it.
+    """
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    db = sqlite3.connect(str(root / 'capacity.sqlite'), timeout=10, isolation_level=None)
+    os.chmod(root / 'capacity.sqlite', 0o600)
+    db.execute('PRAGMA busy_timeout=10000')
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS lease_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, event TEXT NOT NULL, entry TEXT NOT NULL)')
+        # Lease columns.  An existing database keeps its rows: every reservation without
+        # a lease falls back to an expiry time, so an old row is reclaimed by the same
+        # rule instead of staying forever (migration, Refs #1792).
+        _columns = {row[1] for row in db.execute('PRAGMA table_info(reservations)')}
+        for _column in ('expires_at', 'lease_ttl', 'renewed_at'):
+            if _column not in _columns:
+                db.execute('ALTER TABLE reservations ADD COLUMN %s REAL' % _column)
+        now = time.time()
+        if db.execute('SELECT 1 FROM reservations WHERE expires_at IS NULL LIMIT 1').fetchone():
+            # A legacy row is delayed, never released early: its lease starts at its
+            # creation and lasts the migration window, so a long old run keeps its
+            # slot while an old ghost expires with it.
+            db.execute('UPDATE reservations SET expires_at = CASE WHEN created > 0 '
+                       'THEN created + ? ELSE ? + ? END WHERE expires_at IS NULL',
+                       (LEGACY_LEASE_TTL, now, LEGACY_LEASE_TTL))
+            db.execute('UPDATE reservations SET lease_ttl = ? WHERE lease_ttl IS NULL', (LEGACY_LEASE_TTL,))
+            db.execute('UPDATE reservations SET renewed_at = created WHERE renewed_at IS NULL')
+        db.execute('COMMIT')
+    except Exception:
+        db.execute('ROLLBACK')
+        raise
+    return db
+
+
+def reclaim_expired(db, root, now):
+    """Reclaim every lease whose expiry has passed.
+
+    The reclaim does not depend on any run state: a crashed, lost or forgotten
+    run loses its slot with the lease, never with a termination path.
+    """
+    rows = db.execute('SELECT token,host,run_id,backend,provider,created,expires_at '
+                      'FROM reservations WHERE expires_at IS NOT NULL AND expires_at <= ?',
+                      (now,)).fetchall()
+    entries = []
+    for row in rows:
+        db.execute('DELETE FROM reservations WHERE token=?', (row[0],))
+        entries.append(lease_audit(db, 'lease-expired', host=row[1], run_id=row[2], backend=row[3],
+                                   provider=row[4], created=row[5], expires_at=row[6]))
+    return [{'host': row[1], 'run_id': row[2], 'backend': row[3], 'provider': row[4],
+             'created': row[5], 'expires_at': row[6]} for row in rows], entries
+
+
+def sweep_once(db, root):
+    """Reclaim the expired leases of the coordinator and mirror the audit trail."""
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        expired, entries = reclaim_expired(db, root, time.time())
+        db.execute('COMMIT')
+    except Exception:
+        db.execute('ROLLBACK')
+        raise
+    return expired, lease_audit_flush(root, entries)
+
+
+def acquire_sweep_lock(root):
+    """The lock of the sweeper of a coordinator.
+
+    Only one sweeper sweeps a coordinator at a time: the lock is held for the
+    whole life of the sweeper, so a second one leaves instead of competing for
+    the same database.
+    """
+    try:
+        handle = open(str(Path(root) / SWEEP_LOCK_NAME), 'a+')
+    except OSError:
+        return None
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def release_sweep_lock(handle):
+    """Give the lock of the sweeper back."""
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
+
+
+def process_alive(pid):
+    """Whether a process of the coordinator is still alive."""
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def sweeper_state(root):
+    """Whether a sweeper of the expired leases runs for this coordinator."""
+    handle = acquire_sweep_lock(root)
+    locked = handle is None
+    if not locked:
+        release_sweep_lock(handle)
+    pid = None
+    try:
+        pid = int((Path(root) / SWEEP_PID_NAME).read_text().strip())
+    except (OSError, ValueError):
+        pid = None
+    # The sweeper holds the lock of the coordinator; its pid is known as soon as
+    # it is started, before it took the lock.
+    running = locked or (pid is not None and process_alive(pid))
+    return {'running': running, 'pid': pid if running else None,
+            'sweep_interval_seconds': SWEEP_INTERVAL}
+
+
+def ensure_sweeper(root, host):
+    """Keep the sweeper of the expired leases alive next to the coordinator.
+
+    The coordinator is deployed as the forced command of the fleet control
+    channel and answers one request per invocation.  The sweeper is started by
+    that entry point, so the reclaim of an expired lease belongs to the
+    deployment of the coordinator itself: it does not wait for a request and it
+    does not depend on an operator wiring a timer up (B1).
+
+    The sweeper announces on a pipe that it holds the lock of the coordinator
+    before it sweeps, so two requests never start two sweepers.
+    """
+    setting = (os.environ.get('OPENSWARM_FLEET_CAPACITY_SWEEP') or '1').strip().lower()
+    if setting in ('0', 'off', 'false', 'no'):
+        return None
+    handle = acquire_sweep_lock(root)
+    if handle is None:
+        # A sweeper of this coordinator is already running.
+        return None
+    ready_r, ready_w = os.pipe()
+    try:
+        log = open(str(Path(root) / SWEEP_LOG_NAME), 'a')
+        try:
+            env = dict(os.environ, **{SWEEP_READY_FD: str(ready_w)})
+            process = subprocess.Popen(
+                [sys.executable or 'python3', str(Path(__file__).resolve()), '--sweep-loop', host],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                pass_fds=(ready_w,), env=env)
+        finally:
+            log.close()
+    except OSError as error:
+        os.close(ready_r)
+        os.close(ready_w)
+        return {'error': str(error)}
+    finally:
+        release_sweep_lock(handle)
+    os.close(ready_w)
+    try:
+        import select
+        ready, _, _ = select.select([ready_r], [], [], 5)
+    except (OSError, ValueError):
+        ready = []
+    if not ready:
+        # The sweeper is slow to start (a busy database); it takes the lock by
+        # itself, so the request does not wait for it.
+        os.close(ready_r)
+        return {'pid': process.pid, 'pending': True}
+    try:
+        announced = os.read(ready_r, 1)
+    except OSError:
+        announced = b''
+    os.close(ready_r)
+    if announced != b'1':
+        # The sweeper left again (another one holds the lock): no error, the
+        # coordinator keeps serving its requests.
+        return {'pid': process.pid}
+    try:
+        (Path(root) / SWEEP_PID_NAME).write_text('%d\n' % process.pid)
+    except OSError:
+        pass
+    return {'pid': process.pid}
+
+
+def announce_sweep_ready():
+    """Tell the coordinator that the sweeper holds the lock of the coordinator."""
+    raw = os.environ.get(SWEEP_READY_FD)
+    if not raw:
+        return
+    try:
+        os.write(int(raw), b'1')
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def run_sweep_loop():
+    """Reclaim the expired leases on its own, without any request.
+
+    The coordinator stays idle between two sweeps: a crashed run loses its slot
+    within its TTL even when no client asks the coordinator for anything.  The
+    sweeper belongs to the life of the coordinator: it leaves when the
+    coordinator database is gone.
+    """
+    root = coordinator_root()
+    # The lock keeps one sweeper per coordinator: a second one sweeps the same
+    # database in its own transaction, which is safe but pointless.  It is taken
+    # before the database is opened, so the announcement of the sweeper does not
+    # wait for a busy database.
+    handle = acquire_sweep_lock(root)
+    if handle is None:
+        return
+    try:
+        (Path(root) / SWEEP_PID_NAME).write_text('%d\n' % os.getpid())
+    except OSError:
+        pass
+    announce_sweep_ready()
+    try:
+        db = open_coordinator(root)
+    except Exception as failure:
+        print('fleet-capacity: lease sweeper could not open the coordinator: %s' % failure, file=sys.stderr)
+        release_sweep_lock(handle)
+        return
+    stopping = {'now': False}
+    database = Path(root) / 'capacity.sqlite'
+
+    def stop(_signum, _frame):
+        stopping['now'] = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while not stopping['now']:
+        try:
+            expired, error = sweep_once(db, root)
+        except Exception as failure:
+            # A locked or unreadable database must not stop the sweep: the next
+            # round tries again.
+            print('fleet-capacity: lease sweep failed: %s' % failure, file=sys.stderr)
+            expired, error = [], str(failure)
+        answer = {'ok': True, 'expired': expired}
+        if error:
+            print('fleet-capacity: lease audit mirror failed: %s' % error, file=sys.stderr)
+            answer['audit_error'] = error
+        print(json.dumps(answer, separators=(',', ':')), flush=True)
+        deadline = time.monotonic() + SWEEP_INTERVAL
+        while not stopping['now'] and time.monotonic() < deadline:
+            if not database.exists():
+                # The coordinator is gone: the sweeper leaves with it.
+                stopping['now'] = True
+                break
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+    release_sweep_lock(handle)
+    db.close()
+
+
+if sweep_loop:
+    run_sweep_loop()
+    sys.exit(0)
+
+
 try:
     request = json.load(sys.stdin)
     op = request.get('op')
@@ -87,49 +462,117 @@ try:
             result = json.loads(bundle.stdout)
         print(json.dumps({'ok': process.returncode == 0, 'result': result}, separators=(',', ':')))
         sys.exit(0 if process.returncode == 0 else 1)
-    if op not in ('acquire', 'release', 'status', 'recover'):
+    if op not in ('acquire', 'release', 'renew', 'status', 'recover', 'sweep', 'token', 'audit'):
         raise ValueError('invalid operation')
-    root = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
-                (Path(_home()) / '.claude/swrm-fleet-capacity'))
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    db = sqlite3.connect(str(root / 'capacity.sqlite'), timeout=10, isolation_level=None)
-    os.chmod(root / 'capacity.sqlite', 0o600)
-    db.execute('PRAGMA busy_timeout=10000')
-    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
+    root = coordinator_root()
+    db = open_coordinator(root)
+    # The sweeper of the expired leases belongs to the deployment of the
+    # coordinator: the first request starts it, so a crashed run loses its slot
+    # within its TTL even when no further request reaches the coordinator (B1).
+    sweeper = ensure_sweeper(root, host)
     db.execute('BEGIN IMMEDIATE')
+    pending_audit = []
+    now = time.time()
+    expired, entries = reclaim_expired(db, root, now)
+    pending_audit.extend(entries)
     if op == 'status':
-        rows = db.execute('SELECT host,run_id,backend,provider,created FROM reservations ORDER BY created').fetchall()
-        out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created'), row)) for row in rows]}
+        rows = db.execute('SELECT host,run_id,backend,provider,created,expires_at,lease_ttl,renewed_at '
+                          'FROM reservations ORDER BY created').fetchall()
+        out = {'ok': True, 'reservations': [dict(zip(('host', 'run_id', 'backend', 'provider', 'created',
+                                                      'expires_at', 'lease_ttl', 'renewed_at'), row)) for row in rows],
+               'sweeper': sweeper_state(root)}
+    elif op == 'sweep':
+        out = {'ok': True, 'expired': expired}
+    elif op == 'audit':
+        # The authoritative trail of the lease actions of the coordinator: it
+        # holds the records of the committed transactions, also when the JSONL
+        # mirror next to the database could not be written.
+        limit = request.get('limit')
+        limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and 0 < limit <= 1000 else 200
+        rows = db.execute('SELECT entry FROM lease_audit ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+        out = {'ok': True, 'audit': [json.loads(row[0]) for row in reversed(rows)]}
     elif op == 'recover':
         # Local operator only, after independently confirming the runner and
-        # every executor descendant are stopped. Never automatically expire.
+        # every executor descendant are stopped.  A lease which did not expire
+        # is never taken away: its owner may still be working, and the slot
+        # belongs to it until the lease ends.
         if host != 'broker' or request.get('confirm') != 'all-executor-processes-stopped':
             raise ValueError('local explicit recovery confirmation required')
         owner, run_id = request.get('host'), request.get('run_id')
         if owner not in ('broker', 'worker', 'local') or not isinstance(run_id, str) or not run_id:
             raise ValueError('invalid reservation owner or run id')
-        count = db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner,run_id)).rowcount
-        out = {'ok': True, 'recovered': count}
+        row = db.execute('SELECT token,expires_at FROM reservations WHERE host=? AND run_id=?',
+                         (owner, run_id)).fetchone()
+        if row is None:
+            out = {'ok': True, 'recovered': 0, 'reason': 'unknown reservation'}
+        elif row[1] is not None and row[1] > now:
+            out = {'ok': True, 'recovered': 0, 'reason': 'lease not expired', 'expires_at': row[1]}
+        else:
+            count = db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner, run_id)).rowcount
+            if count:
+                pending_audit.append(lease_audit(db, 'recovered', host=owner, run_id=run_id, by=host))
+            out = {'ok': True, 'recovered': count}
+    elif op == 'token':
+        # The owner of a run asks for the token of its own reservation.  A local
+        # record which lost the token (a run admitted before the lease rollout)
+        # still releases its slot by the exact token of its own reservation; the
+        # fleet wide status keeps the token to itself.
+        run_id = request.get('run_id')
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
+            raise ValueError('invalid run id')
+        row = db.execute('SELECT token FROM reservations WHERE host=? AND run_id=?',
+                         (host, run_id)).fetchone()
+        out = {'ok': True, 'token': row[0] if row else None}
+    elif op == 'renew':
+        # Only the authenticated owner renews its own lease, and never for another
+        # run: the owner comes from the forced command, not from the request body.
+        token, run_id = request.get('token'), request.get('run_id')
+        if not isinstance(token, str) or len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
+            raise ValueError('invalid token')
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
+            raise ValueError('invalid run id')
+        ttl = lease_ttl(request)
+        row = db.execute('SELECT host,run_id,expires_at FROM reservations WHERE token=?', (token,)).fetchone()
+        if row is None:
+            # The lease was already reclaimed; a renewal must not resurrect it.
+            out = {'ok': True, 'renewed': False, 'reason': 'unknown reservation'}
+        elif row[0] != host or row[1] != run_id:
+            raise ValueError('reservation owner mismatch')
+        else:
+            # A renewal never shortens a lease: the migration window of an old
+            # reservation must not be cut short by a new client.
+            expires = max(now + ttl, row[2] or 0)
+            db.execute('UPDATE reservations SET expires_at=?, lease_ttl=?, renewed_at=? WHERE token=?',
+                       (expires, ttl, now, token))
+            out = {'ok': True, 'renewed': True, 'expires_at': expires}
     else:
         token, run_id = request.get('token'), request.get('run_id')
         if not isinstance(token, str) or len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
             raise ValueError('invalid token')
         if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
             raise ValueError('invalid run id')
-        old = db.execute('SELECT host,run_id,backend,provider FROM reservations WHERE token=?', (token,)).fetchone()
+        old = db.execute('SELECT host,run_id,backend,provider,expires_at FROM reservations WHERE token=?',
+                         (token,)).fetchone()
         if op == 'release':
             if old and (old[0] != host or old[1] != run_id):
                 raise ValueError('reservation owner mismatch')
             db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=?', (token,host,run_id))
+            if old:
+                pending_audit.append(lease_audit(db, 'released', host=host, run_id=run_id, backend=old[2]))
             out = {'ok': True, 'released': bool(old)}
         else:
             backend, provider = request.get('backend'), request.get('provider')
             if backend not in ALLOWED or provider not in (None, 'minimax-cn'):
                 raise ValueError('invalid backend/provider')
+            ttl = lease_ttl(request)
             if old:
-                if old != (host,run_id,backend,provider):
+                if old[:4] != (host,run_id,backend,provider):
                     raise ValueError('reservation token conflict')
-                out = {'ok': True, 'admitted': True, 'existing': True}
+                # The same token is idempotent and renews the lease of its run.
+                expires = max(now + ttl, old[4] or 0)
+                db.execute('UPDATE reservations SET expires_at=?, lease_ttl=?, renewed_at=? WHERE token=?',
+                           (expires, ttl, now, token))
+                out = {'ok': True, 'admitted': True, 'existing': True, 'expires_at': expires}
             else:
                 rows = db.execute('SELECT host,backend,provider FROM reservations').fetchall()
                 keys = {'total', 'host:' + host, backend} | ({provider} if provider else set())
@@ -141,9 +584,25 @@ try:
                 if blocked:
                     out = {'ok': True, 'admitted': False, 'blocked': blocked}
                 else:
-                    db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)', (token,host,run_id,backend,provider,time.time()))
-                    out = {'ok': True, 'admitted': True}
+                    expires = now + ttl
+                    db.execute('INSERT INTO reservations (token,host,run_id,backend,provider,created,expires_at,lease_ttl,renewed_at) '
+                               'VALUES (?,?,?,?,?,?,?,?,?)',
+                               (token,host,run_id,backend,provider,now,expires,ttl,now))
+                    out = {'ok': True, 'admitted': True, 'expires_at': expires}
+    if expired:
+        out['expired'] = expired
+    if isinstance(sweeper, dict) and sweeper.get('error'):
+        # A sweeper which could not be started does not fail the request: the
+        # reclaim of the expired leases still happens with the next request.
+        print('fleet-capacity: lease sweeper could not be started: %s' % sweeper['error'], file=sys.stderr)
+        out['sweeper_error'] = sweeper['error']
     db.execute('COMMIT')
+    # The audit trail is mirrored after the commit: a rolled back transaction
+    # leaves no record, and a committed change always has one in the database.
+    audit_error = lease_audit_flush(root, pending_audit)
+    if audit_error:
+        print('fleet-capacity: lease audit mirror failed: %s' % audit_error, file=sys.stderr)
+        out['audit_error'] = audit_error
     print(json.dumps(out, separators=(',',':')))
 except Exception as error:
     try: db.execute('ROLLBACK')

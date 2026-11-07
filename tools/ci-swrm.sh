@@ -52,9 +52,15 @@ if [[ "${1:-}" == "--print-changed-paths" ]]; then
   exit 0
 fi
 
-# Keep tests and offline probes away from the operator's control plane.
-mkdir -p "$root/.tmp/test-tmp"
-export TMPDIR="$root/.tmp/test-tmp"
+# Keep tests and offline probes away from the operator's control plane: the
+# scratch directory is a fresh one of this run, not the operator's TMPDIR.
+#
+# It is deliberately not inside the checkout: the lane control socket of a test
+# lives under it and AF_UNIX caps a socket path at 108 bytes, and the executor
+# risk checks resolve their worktree root with git, which would answer the
+# checkout root for a scratch directory inside it.
+test_tmp="$(mktemp -d)"
+export TMPDIR="$test_tmp"
 test_home="$(mktemp -d "$TMPDIR/ci.XXXXXX")"
 while IFS= read -r name; do
   unset "$name"

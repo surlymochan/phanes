@@ -264,6 +264,21 @@
     "agy": 2,
     "total": 10
   },
+  "fleet": {
+    "_doc": "fleet.lease describes the capacity reservation of a run: it is a lease, not a permanent hold (Refs #1792).",
+    "lease": {
+      "_doc": "A capacity reservation is a lease: the owning host renews it while its run lives and the coordinator reclaims it when the lease expires. tiers maps the budget of a run in minutes to its lease TTL in seconds; a run whose budget exceeds every tier gets its budget plus budget_grace_seconds. ttl_seconds overrides the tiers for every run, default_ttl_seconds is used for a run without a known budget, renew_interval_seconds is the heartbeat period (at most a third of the TTL) and stop_margin_seconds is the time before the expiry in which the executor of a run stops, so it is gone before the coordinator may hand its slot to another run.",
+      "tiers": [
+        {"budget_minutes": 5, "ttl_seconds": 600},
+        {"budget_minutes": 15, "ttl_seconds": 1200},
+        {"budget_minutes": 45, "ttl_seconds": 2700}
+      ],
+      "default_ttl_seconds": 900,
+      "budget_grace_seconds": 300,
+      "renew_interval_seconds": 60,
+      "stop_margin_seconds": 5
+    }
+  },
   "rate_limit": {
     "backoff_seconds": [30, 60, 120, 240],
     "max_retries": 4

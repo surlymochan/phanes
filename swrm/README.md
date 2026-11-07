@@ -531,6 +531,69 @@ Failed runs with commits are collected too. The batch exits nonzero if any card 
 branch, commit, seconds and a one-line summary. Review branches before integrating; run a combined test suite
 after integration. One-shot `run --base REV` is also supported.
 
+## Capacity leases: the coordinator reclaims what nobody renews
+
+A capacity reservation of the fleet coordinator (`swrm/bin/fleet-capacity`) is a **lease**, not a
+permanent hold. The owning host renews it while its run lives; the coordinator reclaims an expired
+lease on its own, so a crashed, killed or lost run can never keep a slot forever. The reclaim does
+not depend on any termination path of a run: `rebase`, `exec_error` and `budget_exceeded` all give
+their slot back with the lease (Refs #1792, `docs/design/issue-34-authoritative-recovery.md`).
+
+`fleet.lease` in `policy.json` describes the lease:
+
+| Key | Meaning |
+| --- | --- |
+| `tiers` | budget minutes of a run -> TTL of its lease in seconds (a run above every tier gets its budget plus `budget_grace_seconds`) |
+| `default_ttl_seconds` | TTL of a run without a known budget |
+| `renew_interval_seconds` | heartbeat period, at most a third of the TTL |
+| `stop_margin_seconds` | time before the expiry in which the executor of a run stops |
+
+The coordinator answers `acquire`, `release`, `renew`, `status`, `token`, `sweep` and `audit`. A
+reservation which predates the lease rollout has no expiry of its own: the coordinator gives it a
+fallback expiry at its creation (`OPENSWARM_FLEET_LEASE_LEGACY_TTL_SECONDS`, one hour by default),
+which covers the longest run a client may hold, so a live old run keeps its slot while the fleet
+rolls out and an old ghost is reclaimed with the same rule. A renewal never shortens a lease.
+
+Every reclaim and every release is recorded in `lease-audit.jsonl` next to the coordinator database;
+the database table `lease_audit` holds the authoritative trail of the committed transactions, so a
+mirror which cannot be written never loses a record (`{"op": "audit"}` reads it).
+
+### The sweeper belongs to the deployment of the coordinator
+
+The coordinator is the forced command of the fleet control channel and answers one request per
+invocation. It starts a sweeper of the expired leases next to itself (`--sweep-loop`, one sweeper
+per coordinator, `sweep.lock` next to the database): the request which took the slot starts it, so
+an expired lease is reclaimed every `OPENSWARM_FLEET_CAPACITY_SWEEP_INTERVAL` seconds (30 by
+default) even while the coordinator stays idle, and an operator does not have to wire a timer or a
+supervisor up. The sweeper leaves with the coordinator database and is reported by
+`{"op": "status"}` (`sweeper.running`, `sweeper.pid`).
+
+### A run which cannot prove its lease stops its executor
+
+The client counts the lease from the **start** of the request which took the slot: the coordinator
+computes the expiry from its own clock, so the response latency and a clock skew may only make the
+real expiry earlier, never later. The executor of the run therefore stops `stop_margin_seconds`
+before that conservative deadline, and a renewal call never outlives it. A network outage longer
+than the TTL thus ends the run before the coordinator may hand its slot to another run: the fleet
+never runs two runs on one slot.
+
+### Refs #1792 — review mapping of the open blockers
+
+| Blocker | Changed file:line | Test | Result |
+| --- | --- | --- | --- |
+| B1 (the sweep loop was not wired into the deployment of the coordinator) | `swrm/bin/fleet-capacity:275` (`ensure_sweeper`), `swrm/bin/fleet-capacity:349` (`run_sweep_loop`), `swrm/bin/fleet-capacity:185` (`reclaim_expired`), `swrm/bin/fleet-capacity:257` (`sweeper_state`) | `swrm/tests/test_fleet_capacity.py::FleetLeaseTests::test_the_coordinator_sweeps_the_expired_leases_without_any_request`, `::test_the_sweeper_belongs_to_the_deployment_of_the_coordinator`, `::test_sweep_loop_reclaims_an_expired_lease_without_any_request` | pass: the coordinator reclaims an expired lease and writes the audit trail with **no further request**; the sweeper is started by the coordinator itself and a later request starts no second one |
+| B2 (the executor of a lost lease kept running after the coordinator reclaimed the slot) | `swrm/bin/swrm:3695` (`FleetLeaseHeartbeat`), `swrm/bin/swrm:3673` (`stop_fleet_lease_lost_executor`), `swrm/bin/swrm:3565` (`fleet_guard_call` with a bounded timeout), `swrm/bin/swrm:3849` (`reserve_provider_slot` starts the heartbeat) | `swrm/tests/test_fleet_capacity.py::FleetLeaseTests::test_a_disconnected_client_stops_its_executor_before_a_new_run_takes_the_slot`, `::test_the_heartbeat_counts_the_lease_from_the_start_of_the_request`, `::test_the_renewal_call_never_outlives_the_deadline_of_the_lease`, `::test_lost_lease_stops_the_executor_of_the_run`, `::test_unreachable_coordinator_beyond_the_ttl_stops_the_executor` | pass: the run stops its executor **before** the expiry, the lease of the lost run expires and the next run takes the slot while the old executor is gone |
+
+The three terminal paths of a run are covered by real lane runs, not by a hand written
+status file: the guard of the test refuses the explicit release, so the lease of the
+coordinator is the only way which frees the slot.
+
+| Terminal path | Changed file:line | Test | Result |
+| --- | --- | --- | --- |
+| `rebase` | `swrm/bin/fleet-capacity:185` (`reclaim_expired`, the coordinator never reads the run state) | `swrm/tests/test_fleet_capacity.py::FleetLeaseLaneTests::test_rebase_run_gives_its_slot_back_with_the_lease` | pass: the slot of the rebase run is reclaimed by the lease within its TTL |
+| `exec_error` | `swrm/bin/fleet-capacity:185` (`reclaim_expired`) | `swrm/tests/test_fleet_capacity.py::FleetLeaseLaneTests::test_exec_error_run_gives_its_slot_back_with_the_lease` | pass: the slot of the crashed run is reclaimed by the lease within its TTL |
+| `budget_exceeded` | `swrm/bin/fleet-capacity:185` (`reclaim_expired`) | `swrm/tests/test_fleet_capacity.py::FleetLeaseLaneTests::test_budget_exceeded_run_gives_its_slot_back_with_the_lease` | pass: the slot of the run which hit its budget is reclaimed by the lease within its TTL |
+
 ## Verify a remote run elsewhere
 
 ```bash

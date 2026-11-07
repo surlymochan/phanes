@@ -13,6 +13,17 @@
 A、B 两步是旧 `phanes.yml` 的 "Unit tests" 与 "Offline CLI smoke test" 两步的逐字副本。
 脚本用运行器上的默认解释器跑一遍，并在开头打印「只覆盖当前单个 Python 版本」。
 
+## 暂存目录的位置（Refs #1792）
+
+门禁把 `TMPDIR` 指向本次运行新建的临时目录，而不是 checkout 里的目录：
+
+- lane 控制 socket 的路径在 `TMPDIR` 下面，AF_UNIX 的路径上限是 108 字节；checkout 路径一深，
+  lane 的测试就会因为路径长度而失败；
+- 执行器的风险检查用 git 解析 worktree 根目录，暂存目录在 checkout 里面时，git 会回答
+  checkout 根目录，`rm outside worktree` 的判定就变了。
+
+因此暂存目录在 checkout 之外，测试对 worktree 根目录的假设与本地直接跑 unittest 时一致。
+
 ## 按改动路径追加的 unittest
 
 | 改动路径 | 追加的 unittest |

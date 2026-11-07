@@ -189,7 +189,7 @@ slot_holder=None
 | 回收候选 | `swrm/bin/swrm:3668`（`run-finished`）、`:3670`（`dead-runner`） | `run-finished`：执行器异常退出后子进程已不在、名额被标 `retained after abnormal executor exit`，随后走 TTL 释放并落 `fleet_recovered_at`；`dead-runner`：`runner_pid` 已死（supervisor 被 kill） |
 | 谁来调用 | `swrm/bin/swrm:3817`（`reserve_provider_slot` 的排队重试）、`:3723` `lane_recover_expired_fleet_slots()` | 存活的 supervisor 每秒重试一次回收；**排队中的那条 lane 也能顺手把别人的名额收回来** |
 | 名额上限 | `swrm/bin/swrm:3826` 起 | 本地并发统计跳过已死的 runner，所以杀掉的 lane 不再占名额，排队的那条才被放行 |
-| 协调器 | `swrm/bin/fleet-capacity` | `status/acquire/release/recover`，名额是持久化的，崩溃不自动清 |
+| 协调器 | `swrm/bin/fleet-capacity` | `status/acquire/release/renew/recover`，名额是租约：续租停了就在 TTL 后自动回收，不再依赖终结路径释放（Refs #1792） |
 
 三条语义与 issue 的「kill 后回收并可再派」一一对应：
 
@@ -232,6 +232,6 @@ slot_holder=None
 |------|------|
 | `tools/quota-reclaim-drill.py` | 本次的故障名额回收演练（离线、可重复、只读生产） |
 | `swrm/bin/swrm` | 回收语义本体：`recover_expired_fleet_slots` / `reserve_provider_slot` / `lane_validate_socket_path` |
-| `swrm/bin/fleet-capacity` | 名额协调器（`status/acquire/release/recover`） |
+| `swrm/bin/fleet-capacity` | 名额协调器（`status/acquire/release/renew/recover`）；名额是租约，过期由协调器自己回收 |
 | `swrm/tests/fixtures/fake_pi_rpc.py` | 演练用的假 pi 执行器（`LANE_TEST_WAIT` 占住名额 20 s） |
 | `.gitignore` | 收走演练沙箱 `.swrm-tmp/` |

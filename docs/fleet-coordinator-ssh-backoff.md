@@ -50,9 +50,10 @@
    - 一旦协调器不可达或超时，立即捕获异常抛出 `fleet capacity coordinator unavailable`，采取严格的 **fail-closed** 策略。
    - 任务保留在排队或重试状态，绝不会在未取得协调器 reservation 的情况下误启动执行器。
 
-3. **TTL 超时回收对齐（600s）**：
-   - 依据 `swrm/bin/swrm:3370-3375`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。
-   - 该 600s TTL 与退避上限窗口一致。即使 runner 因隧道断开崩溃或长时间处于最大退避，协调器上的孤儿记录在 600s 超时后仍可经本地存活检测通过 `op: "recover"` 正常清理（`swrm/bin/fleet-capacity:103-115`），避免 slot 被永久占用。
+3. **租约到期自动回收（TTL）**：
+   - 依据 `swrm/bin/fleet-capacity:185`（`reclaim_expired`）与 `swrm/bin/fleet-capacity:343`（`run_sweep_loop`），协调器上的预约是租约：所属主机在 run 存活期间续租，租约到期后由协调器自己回收（Refs #1792）。
+   - 协调器随自身部署拉起清扫循环（`swrm/bin/fleet-capacity:275`），空闲时也会在 TTL 内回收孤儿记录并写审计（`lease-audit.jsonl`），不再依赖任何终结路径或人工 `op: "recover"`。
+   - 失联的客户端在保守截止时间前停掉自己的执行器（`swrm/bin/swrm:3695`），所以 slot 被回收时不会有第二个 run 与它重叠。
 
 4. **派发节拍平缓**：
    - box 上的 `lane-autodispatch` 循环按 60s 一 tick 运行（`brain/autopilot.md:10-11`），保证派发层不会对正在退避的主机产生密集连接冲击。
