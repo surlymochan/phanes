@@ -750,6 +750,10 @@ class ReviewGate(Base):
         self.runner.calls.clear()
         d.finish_review("M5", {"host": "box", "backend": "pi"}, st, info, {})
         self.assertTrue(self.runner.called("--add-label needs-human"))
+        # The moment the label went on is written down: the merge backlog counts
+        # the human wait from here, not from the verdict before it (Refs #1696).
+        self.assertRegex(d.load_reviews()["21"]["needs_human_at"],
+                         r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
     def test_moved_head_discards_verdict(self):
         d = self.make([("git -C", (0, "VERDICT: APPROVE\n", "")),

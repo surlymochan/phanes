@@ -24,6 +24,46 @@
 | `burn` | MiniMax 近 15 分钟烧量（liveness 口径：请求数、200/429、输入/输出 token） | MiniMax broker 请求日志 JSONL | 文件 mtime |
 | `needs_human` | needs-human 数量与 PR 号 | `gh pr list --label needs-human` | 文件 mtime / 取数时刻 |
 | `pauses` | 当前打开的 PAUSE 开关清单（含作用域、原因、年龄、剩余时长） | pause store `<home>/pauses/*.json` + 旧式 `PAUSE*` 标记 | 最新文件 mtime |
+| `merge_backlog`（可选，Refs #1696） | 合并积压：open 且**关联卡带 `lane-pr`** 的 PR，逐条标注当前阶段与停留时长 | `gh pr list --state open` + `gh issue list --label lane-pr` + 调度器 `reviews.json`（可选） | 两个口径各自的文件 mtime / 取数时刻 |
+
+## 合并积压分区（Refs #1696）
+
+`merge_backlog` 分区把「mergeable 却长期未合并」的 PR 显形：逐条写清**卡在哪一步**、**停了多久**。
+
+- **入队口径**：`lane-pr` 标签是打在**关联卡（issue）**上的（`tools/lane-autodispatch/autodispatch.py:629`、`openswarm/docs/EXTERNAL-LANES.md`），不是打在 PR 上。分区用 PR 正文 `Closes #N` 或分支 `fleet/<lane>-issue<N>-…` 找到关联卡，卡上带 `lane-pr` 才算入队；已合并 / 已关闭 / 草稿的 PR 不在清单里。同一个仓库里 issue 与 PR 共用一个编号空间，所以 PR #1632 的关联卡是 **#1626**，不是 #1632。
+- **阶段判定**（按优先级）：`needs-human` 标签 → **等人工裁决**（`external-lane/contract` 状态红时原因是**薄卡豁免**）；`needs-changes` 标签或最近一次 CHANGES 判决 → **审查 CHANGES 待修复**；CI 非绿 → **CI 未绿**；已批准且 CI 绿 → **已批待合并**；判决对应的 sha 与当前 head 不一致（head 变了）→ **等复审**；无判决记录 → **等首审**。
+- **判定不了就 unknown**：缺 review 记录、缺 CI rollup 时不臆测，阶段标 `unknown` 并把已有信号（`CI 状态缺失`、`review 记录缺失`、红灯检查名等）列出来。**空检查列表不是绿灯**：rollup 为空、或只有 `lane-review` 一条时没有 CI 成功证据，已批准的 PR 也标 `unknown`（信号 `CI 无检查项`）。
+- **停留时长**从**进入当前阶段的那一刻**起算，不从 PR 创建时间起算，每条都带 `dwell_source` 说明数字的来源：
+
+  | 阶段 | 起点 |
+  | --- | --- |
+  | 等首审 | PR 创建时间 |
+  | 等复审 | 头部移动（PR 最后变动时间，须不早于判决时间） |
+  | 审查 CHANGES 待修复 | CHANGES 判决时间（`reviews.json` 的 `at`） |
+  | CI 未绿 | 失败检查的完成时间 |
+  | 已批待合并 | **批准时间与 CI 转绿时间里较晚的那个** |
+  | 等人工裁决 | `needs-human` 标签贴上去的时刻（账本里的 `needs_human_at`） |
+
+  - **已批待合并**要「批准」和「CI 绿」同时成立，所以从**较晚**的那一刻起算：批准 3 小时后 CI 才转绿的 PR，进入这个阶段只有几分钟，不会被当成「已批待合并三小时」。
+  - **等人工裁决**从**贴标签**那一刻起算，不是从 CHANGES 判决那一刻：判决可能比贴标签早几个小时（复审一直失败）。调度器在贴 `needs-human` 标签时把时刻写进账本（`openswarm/lib/dispatch/engine.py`），账本里没有这个时刻时停留时长记为未知。
+  - 取不到起点时停留时长为未知（`dwell_s = null`），并在信号里说明缺哪样读数（`人工裁决标记时间缺失`、`批准时间缺失`、`CI 转绿时间缺失`、`头部移动时间缺失`…）。
+- **点名规则**：**已批待合并**停留超 **2 小时**、或任一阶段停留超 **24 小时**的条目，在脑日志里单独成行点名（`合并积压点名 #1632 等人工裁决（薄卡豁免） 停留26h02m（阈值 24h00m）`）。
+- **只显形**：不动合并循环、不代审、不代合。
+
+`--ci-policy` 传合并门禁同一套忽略规则（`openswarm/lib/ci/checks.py`），否则任何红灯都算红灯（保守方向）；本仓库的常规写法：
+
+```json
+{"ignore_red_re": "macos", "advisory_checks": ["Check upstream drift"]}
+```
+
+```bash
+# 单看积压清单（有超阈值的条目时退出码为 1）
+python3 tools/merge-backlog.py \
+  --prs /tmp/gh-lane-prs.json \
+  --issues /tmp/gh-lane-issues.json \
+  --reviews ~/.claude/openswarm-dispatch/reviews.json \
+  --now 2026-11-02T21:05:00+08:00 --tz +08:00
+```
 
 ## 时钟口径
 
@@ -54,6 +94,7 @@ python3 tools/fleet-status-page.py \
   --broker-log ~/.claude/openswarm/pi-broker.requests.jsonl \
   --pauses ~/.claude/openswarm/pauses \
   --markers ~/phanes-ctl/autodispatch \
+  --reviews ~/.claude/openswarm-dispatch/reviews.json \
   --tz +08:00 \
   --out ~/.claude/openswarm/fleet-status.json \
   --brain-log ~/phanes-ctl/brain/fleet-status.log
@@ -97,8 +138,34 @@ fleet status @ 2026-11-02T13:05:00+00:00  sections=7 unverified=0 stale=0
 
 3. **某个分区采不到**（把 `--hosts` 指向不存在的文件）：只有主机区变成 `未核实`，其余六个分区照常产出。
 
+### 合并积压回放（Refs #1696）
+
+回放数据在 `openswarm/tests/fixtures/merge-backlog-2026-11-02/`（来源说明见同目录的
+`PROVENANCE.md`；`--now 2026-11-02T21:05:00+08:00`）：
+
+```
+PR     STAGE                    DWELL     CARD  SIGNALS
+#1632  等人工裁决（薄卡豁免）    26h02m    #1626  CI 失败: external-lane/contract; external-lane/contract 失败（薄卡/契约门）
+#1633  已批待合并               3h00m     #1627  reviewDecision=APPROVED
+#1634  等首审                   30h05m    #1628
+#1637  unknown                 -         #1631  CI 状态缺失
+#1638  CI 未绿                  4h18m     #1625  CI 失败: Phanes components
+#1639  已批待合并               5m00s     #1624  reviewDecision=APPROVED
+合并积压点名 #1632 等人工裁决（薄卡豁免） 停留26h02m（阈值 24h00m）
+合并积压点名 #1633 已批待合并 停留3h00m（阈值 2h00m）
+合并积压点名 #1634 等首审 停留30h05m（阈值 24h00m）
+```
+
+- **#1632**（当晚的 external lane PR）落在**等人工裁决（薄卡豁免）**：关联卡 #1626 带 `lane-pr`、`external-lane/contract` 状态红（薄卡）、PR 带 `needs-human` 标签；停留时长从**贴上 `needs-human` 标签的那一刻**（账本里的 `needs_human_at`）起算，不是从更早的 CHANGES 判决起算，26h02m 超过 24h 阈值，被点名。
+- **#1633** 已批准且 CI 绿，停留时长从 **APPROVE 判决时间**与 **CI 转绿时间**里较晚的那个起算（不是 PR 创建时间），3h00m 超过 2h 阈值，被点名。
+- **#1639** 批准了 3 小时，但 CI 5 分钟前才转绿 → 进入「已批待合并」只有 5 分钟，**不被点名**；这正是「按阶段起点计时」与「按批准时间计时」的区别。
+- **#1635**（当晚已合并）不出现在清单里；**#1636**（卡还没进 `lane-pr`）也不在清单里。
+- **#1637** 没有 CI rollup 也没有判决记录 → 阶段 `unknown`，信号 `CI 状态缺失`，停留时长未知，不臆测。
+
 ## 实现位置
 
 - 聚合与渲染（纯函数，不读文件、不碰时钟）：[`openswarm/lib/dispatch/fleet_status.py`](../openswarm/lib/dispatch/fleet_status.py)
+- 合并积压判定（纯函数）：[`openswarm/lib/dispatch/merge_backlog.py`](../openswarm/lib/dispatch/merge_backlog.py)
 - 采集与落盘：[`tools/fleet-status-page.py`](../tools/fleet-status-page.py)
-- 测试：[`openswarm/tests/test_fleet_status.py`](../openswarm/tests/test_fleet_status.py)
+- 积压清单单跑：[`tools/merge-backlog.py`](../tools/merge-backlog.py)
+- 测试：[`openswarm/tests/test_fleet_status.py`](../openswarm/tests/test_fleet_status.py)、[`openswarm/tests/test_merge_backlog.py`](../openswarm/tests/test_merge_backlog.py)

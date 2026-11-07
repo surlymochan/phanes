@@ -143,6 +143,15 @@ class ReviewFailureSha(Base):
         self.assertEqual(review["needs_human_sha"], SHA)
         self.assertEqual(review["needs_human_reason"], "fails")
 
+    def test_the_needs_human_label_carries_its_own_moment(self):
+        """The wait for a human is counted from the label, not from the verdict (Refs #1696)."""
+        candidate = pr(1592, 159)
+        d = self.make()
+        d.put_review(1592, {"fails": 4, "fails_sha": SHA, "fail_classes": ["timeout"]})
+        self.dispatch_candidate(d, candidate)
+        review = d.load_reviews()["1592"]
+        self.assertRegex(review["needs_human_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
     def test_legacy_failure_record_without_sha_applies_to_current_head(self):
         candidate = pr(1593, 159)
         d = self.make([self.pr_list(candidate)])
@@ -181,6 +190,7 @@ class ReviewFailureSha(Base):
         review = d.load_reviews()["1594"]
         self.assertIsNone(review["needs_human_sha"])
         self.assertIsNone(review["needs_human_reason"])
+        self.assertIsNone(review["needs_human_at"])
 
     def test_needs_human_from_changes_rounds_is_kept(self):
         """A CHANGES-round escalation is for a human: it must not be lifted by the head moving."""
