@@ -25,7 +25,7 @@ import sys
 
 # Run as a script, Python puts this directory first on sys.path, where sibling modules (queue.py, ...) would
 # shadow the standard library (concurrent.futures needs the real `queue`). Drop it before any other import.
-if sys.path and os.path.abspath(sys.path[0] or ".") == os.path.dirname(os.path.abspath(__file__)):
+if sys.path and os.path.realpath(sys.path[0] or ".") == os.path.dirname(os.path.realpath(__file__)):
     del sys.path[0]
 
 import argparse  # noqa: E402

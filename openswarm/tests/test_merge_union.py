@@ -81,7 +81,7 @@ class UnionMergeTests(unittest.TestCase):
     def test_base_already_ancestor_is_noop(self):
         result = union.union_merge(str(self.repo), "feature", "base", ["docs/*.md"])
         self.assertEqual(result, {"status": "noop"})
-        self.assertEqual(self.worktree_paths(), [str(self.repo)])
+        self.assertEqual(self.worktree_paths(), [str(self.repo.resolve())])
 
     def test_fast_forward_base_reports_merged_with_new_head(self):
         self.branch_change("base", "from-base")

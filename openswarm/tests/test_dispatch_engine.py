@@ -1817,10 +1817,14 @@ class ScriptRun(unittest.TestCase):
         cfg = os.path.join(tmp, "c.txt")
         with open(cfg, "w") as f:
             f.write('{"repo": "a/b", "state_dir": "%s"}' % tmp)
-        r = subprocess.run([sys.executable, os.path.join(tmp, "engine.py"), "dispatch", "check-config", "--config", cfg],
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr[-500:])
-        self.assertIn('"repo": "a/b"', r.stdout)
+        alias = os.path.join(tmp, "alias")
+        os.symlink(tmp, alias)
+        for directory in (tmp, alias):
+            with self.subTest(directory=directory):
+                r = subprocess.run([sys.executable, os.path.join(directory, "engine.py"), "dispatch", "check-config", "--config", cfg],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-500:])
+                self.assertIn('"repo": "a/b"', r.stdout)
 
 
 class ThinDiff(unittest.TestCase):
