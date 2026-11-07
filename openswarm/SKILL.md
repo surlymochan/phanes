@@ -113,6 +113,8 @@ $XS lane abort C1                          # or $XS stop <run-id>
 $XS lane down C1 K1 M1
 $XS lane launchd-plist C1                  # print only; install the plist yourself if wanted
 $XS lane systemd-unit K1                   # print a system unit only; install it yourself if wanted
+$XS lane supervise K1 --print              # print a POSIX process supervisor script
+$XS lane supervise --broker --print        # print the Pi broker supervisor script
 ```
 
 `doctor` is the read-only preflight of a lane: the executor binary must exist and be executable, a Codex lane on
@@ -146,6 +148,9 @@ systemd unit uses `Restart=always`, `MemoryMax=900M`, `CPUQuota=150%`, and `Nice
 automatically. The `MemoryMax` ceiling is configurable per lane (`memory_max` in `lanes.json`, e.g. `700M`) or per
 host (`lane.memory_max` in `policy.local.json`); without either, the default stays `900M`. Per-lane `env_file` (absolute path(s), mode 600) and `env` (string map, overrides `env_file`) are applied by the lane supervisor under both systemd and launchd; units/plists carry `env` only, and `pi` lanes reject both. A lane entry may also set `"drain": true` (a JSON boolean): the lane keeps running and finishes its current turn but refuses new assignments, read live with no restart. On small Linux lane hosts, omit `--verify` to keep verification load off the agent host; the planner
 can verify elsewhere.
+
+The generated process supervisor stops a lane through `lane down` before its process fallback. The broker defaults to
+`~/Library/Caches/openswarm-pi-broker/broker.sock`; point the Pi runtime's `OPENSWARM_PI_BROKER_SOCKET` there as well.
 
 Cursor ACP selects an exact model value first; otherwise a base name such as `composer-2.5` resolves to a unique
 parameterized value (`composer-2.5[fast=true]`). Ambiguity fails with the matches. State and results record the resolved value.
