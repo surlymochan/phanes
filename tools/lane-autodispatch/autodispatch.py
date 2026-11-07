@@ -446,7 +446,9 @@ def start_autodispatch(command=None):
     os.replace(temporary, state_path)
     return state
 
-def host_ok(h): return time.time() >= BACKOFF.get(h, {}).get("until", 0)
+def host_ok(h):
+    return (not (h == "govpn2" and os.path.exists(f"{D}/.disk-watermark-blocked"))
+            and time.time() >= BACKOFF.get(h, {}).get("until", 0))
 def host_fail(h, why):
     b = BACKOFF.setdefault(h, {"n": 0, "until": 0}); b["n"] += 1
     wait = min(HOST_BACKOFF_MAX, HOST_BACKOFF_BASE * 2 ** (b["n"] - 1)); b["until"] = time.time() + wait
