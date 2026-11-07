@@ -21,8 +21,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODULE_PATHS = (
-    os.path.join(os.path.dirname(HERE), "openswarm", "lib", "review", "evidence.py"),
-    os.path.join(HERE, "..", "openswarm", "lib", "review", "evidence.py"),
+    os.path.join(os.path.dirname(HERE), "swrm", "lib", "review", "evidence.py"),
+    os.path.join(HERE, "..", "swrm", "lib", "review", "evidence.py"),
 )
 
 
@@ -30,11 +30,11 @@ def load_evidence_module():
     """Load lib/review/evidence.py by path (the review directory is a namespace package)."""
     for path in MODULE_PATHS:
         if os.path.exists(path):
-            spec = importlib.util.spec_from_file_location("openswarm_review_evidence", path)
+            spec = importlib.util.spec_from_file_location("swrm_review_evidence", path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
-    raise SystemExit("cannot find openswarm/lib/review/evidence.py")
+    raise SystemExit("cannot find swrm/lib/review/evidence.py")
 
 
 def report(parsed):

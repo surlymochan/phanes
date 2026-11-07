@@ -3,7 +3,7 @@ import type { messages as source } from "../../en/error/backend";
 
 export const messages = {
   "error.backend.dispatchCommand":
-    "Die openswarm-Anfrage konnte nicht abgeschlossen werden. Prüfe die Ausführer-Einstellungen und den Laufstatus, bevor du es erneut versuchst.",
+    "Die swrm-Anfrage konnte nicht abgeschlossen werden. Prüfe die Ausführer-Einstellungen und den Laufstatus, bevor du es erneut versuchst.",
   "error.backend.dispatchOwnChat": "Sende Code-Arbeit nur aus deinem eigenen Chat.",
   "error.backend.dispatchLaneOptions":
     "Eine Lane nutzt ihr konfiguriertes Backend und Modell. Lasse Backend und Modell weg, wenn du eine Lane auswählst.",
@@ -15,13 +15,13 @@ export const messages = {
   "error.backend.dispatchExecutorWorkspace":
     "Ein Agent mit „Nur Arbeitsbereich“ kann nur den Codex-Ausführer nutzen, weil andere Ausführer nicht begrenzen, wohin sie schreiben. Lasse Lane und Backend weg.",
   "error.backend.dispatchRepository":
-    "Trage in openswarm fleet.json übereinstimmende Pfade für lokale und Ausführer-Repositorys ein.",
-  "error.backend.dispatchSpawnFailed": "openswarm konnte nicht gestartet werden.",
-  "error.backend.dispatchExitCode": "openswarm wurde mit Code {code} beendet.",
-  "error.backend.dispatchExited": "openswarm wurde beendet, bevor ein Ergebnis zurückgegeben wurde.",
-  "error.backend.dispatchTimeout": "openswarm hat nicht innerhalb des Zeitlimits geantwortet.",
-  "error.backend.dispatchOutputUnreadable": "Die Ausgabe von openswarm konnte nicht gelesen werden.",
-  "error.backend.dispatchSaveFailed": "Die openswarm-Anfrage konnte nicht gespeichert werden.",
+    "Trage in swrm fleet.json übereinstimmende Pfade für lokale und Ausführer-Repositorys ein.",
+  "error.backend.dispatchSpawnFailed": "swrm konnte nicht gestartet werden.",
+  "error.backend.dispatchExitCode": "swrm wurde mit Code {code} beendet.",
+  "error.backend.dispatchExited": "swrm wurde beendet, bevor ein Ergebnis zurückgegeben wurde.",
+  "error.backend.dispatchTimeout": "swrm hat nicht innerhalb des Zeitlimits geantwortet.",
+  "error.backend.dispatchOutputUnreadable": "Die Ausgabe von swrm konnte nicht gelesen werden.",
+  "error.backend.dispatchSaveFailed": "Die swrm-Anfrage konnte nicht gespeichert werden.",
   "error.backend.dispatchApprovalDenied": "Die Person hat diesen Code-Auftrag abgelehnt. Es wurde nichts gestartet.",
   "error.backend.dispatchApprovalMissing": "Dieser Code-Auftrag hat keine Freigabe. Es wurde nichts gestartet.",
   "error.backend.eventsUnavailable": "Auf diesem Host sind keine Ereignisse verfügbar.",

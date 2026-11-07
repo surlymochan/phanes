@@ -7,9 +7,9 @@
 - `brain/autopilot.md:20-22,34`（10+ 路并行拓扑与状态监控脚本）
 - `docs/fleet-topology-expected.md:6-18`（Fleet topology 各主机并发限额约定）
 - `docs/dual-mode-ssh.md:32-41,53-75`（ControlMaster 配置与 SSH fleet 拓扑）
-- `openswarm/bin/openswarm:3345-3354`（`fleet_guard_call` 超时与 fail-closed 准入）
-- `openswarm/bin/openswarm:3370-3375`（`fleet_recovery_ttl_seconds` 600s 保护）
-- `openswarm/bin/fleet-capacity:12-34,90-115`（`fleet-capacity` 限额、status 与 recover 机制）
+- `swrm/bin/swrm:3345-3354`（`fleet_guard_call` 超时与 fail-closed 准入）
+- `swrm/bin/swrm:3370-3375`（`fleet_recovery_ttl_seconds` 600s 保护）
+- `swrm/bin/fleet-capacity:12-34,90-115`（`fleet-capacity` 限额、status 与 recover 机制）
 
 ---
 
@@ -46,13 +46,13 @@
    - 若连接持续失败，重试间隔按阶梯或指数退避倍增（30s → 60s → 120s → 240s → 600s），单次最大重试等待上限封顶为 **600 秒**（600s / 10 分钟）。
 
 2. **调用超时与 Fail-Closed 保证**：
-   - 依据 `openswarm/bin/openswarm:3345-3354`，单次 `fleet_guard_call` 设定了 15 秒（`timeout=15`）硬超时。
+   - 依据 `swrm/bin/swrm:3345-3354`，单次 `fleet_guard_call` 设定了 15 秒（`timeout=15`）硬超时。
    - 一旦协调器不可达或超时，立即捕获异常抛出 `fleet capacity coordinator unavailable`，采取严格的 **fail-closed** 策略。
    - 任务保留在排队或重试状态，绝不会在未取得协调器 reservation 的情况下误启动执行器。
 
 3. **TTL 超时回收对齐（600s）**：
-   - 依据 `openswarm/bin/openswarm:3370-3375`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。
-   - 该 600s TTL 与退避上限窗口一致。即使 runner 因隧道断开崩溃或长时间处于最大退避，协调器上的孤儿记录在 600s 超时后仍可经本地存活检测通过 `op: "recover"` 正常清理（`openswarm/bin/fleet-capacity:103-115`），避免 slot 被永久占用。
+   - 依据 `swrm/bin/swrm:3370-3375`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。
+   - 该 600s TTL 与退避上限窗口一致。即使 runner 因隧道断开崩溃或长时间处于最大退避，协调器上的孤儿记录在 600s 超时后仍可经本地存活检测通过 `op: "recover"` 正常清理（`swrm/bin/fleet-capacity:103-115`），避免 slot 被永久占用。
 
 4. **派发节拍平缓**：
    - box 上的 `lane-autodispatch` 循环按 60s 一 tick 运行（`brain/autopilot.md:10-11`），保证派发层不会对正在退避的主机产生密集连接冲击。
@@ -113,14 +113,14 @@ cat ~/phanes-ctl/autodispatch/lanes-status.json
 通过 box 上的受控 SSH 渠道向 `gocc` 主机查询协调器当前预约快照：
 
 ```bash
-ssh -F ~/.ssh/openswarm-hub/config gocc -- \
-  python3 ~/.claude/openswarm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'
+ssh -F ~/.ssh/swrm-hub/config gocc -- \
+  python3 ~/.claude/swrm-fleet-capacity/fleet-capacity gocc <<< '{"op":"status"}'
 ```
 
 若直接在 `gocc` 宿主机或本地测试环境下：
 
 ```bash
-python3 openswarm/bin/fleet-capacity gocc <<< '{"op":"status"}'
+python3 swrm/bin/fleet-capacity gocc <<< '{"op":"status"}'
 ```
 
 **返回结构与重点观察指标**：
@@ -143,7 +143,7 @@ python3 openswarm/bin/fleet-capacity gocc <<< '{"op":"status"}'
   - 检查是否存在 `host: "gorelay"` 的陈旧 reservation。
   - 计算 `created` 距离当前时间的秒数：若已超过 600s，需评估是否发生 runner 断开而未 release，可由 owner 进行 TTL recover。
 - **总数与限额对比**：
-  - 核对 `reservations` 总数是否达到 `LIMITS["total"]`（8 或 `topology.json` 中的配置值，见 `openswarm/bin/fleet-capacity:13-31`）。
+  - 核对 `reservations` 总数是否达到 `LIMITS["total"]`（8 或 `topology.json` 中的配置值，见 `swrm/bin/fleet-capacity:13-31`）。
   - 核对 `host:gorelay` 与 `host:gocc` 的实际占用数是否触顶导致后续任务被 `blocked`。
 
 ---
@@ -153,8 +153,8 @@ python3 openswarm/bin/fleet-capacity gocc <<< '{"op":"status"}'
 1. **测试 SSH 与 ControlMaster 状态**：
    在 box 上验证到 `gocc` 与 `gorelay` 的直接通道是否通畅：
    ```bash
-   ssh -F ~/.ssh/openswarm-hub/config -O check gocc
-   ssh -F ~/.ssh/openswarm-hub/config -O check gorelay
+   ssh -F ~/.ssh/swrm-hub/config -O check gocc
+   ssh -F ~/.ssh/swrm-hub/config -O check gorelay
    ```
 
 2. **临时暂停对应 Lane**：

@@ -10,7 +10,7 @@ Refs #6、#142（本文由 #142 新增）。
 与已有文档的关系：
 
 - `docs/scenario/org-diagnosis/README.md` 规定 Boss/DA/Builder 的**职责与验收清单**；
-- `docs/scenario/org-diagnosis/pipeline.md` 与 `openswarm/examples/org-diagnosis-pipeline.json`
+- `docs/scenario/org-diagnosis/pipeline.md` 与 `swrm/examples/org-diagnosis-pipeline.json`
   规定**编排方式**；
 - `docs/scenario/org-diagnosis/review-checklist.md` 规定**人工审查清单**；
 - `docs/scenario/org-diagnosis/data-definitions.md` 规定**diagnosis.json 的指标键名口径**
@@ -30,15 +30,15 @@ Refs #6、#142（本文由 #142 新增）。
 | Builder | `examples/org-health-local/builder/build_site.py` | `diagnosis.json` | `dist/`（静态站点 + `build-report.json`） | Reviewer、预览服务 |
 | Builder（自检） | `examples/org-health-local/builder/check_site.py` | `dist/` | 逐条 PASS/FAIL | Builder、Boss |
 | Reviewer | `examples/org-health-local/review/cross_check.py` | `brief.json` + `diagnosis.json`（+ `dist/`） | 逐条 PASS/FAIL（只读，不写文件） | Boss、编排 |
-| 编排 | `examples/org-health-local/run_e2e.py`、`openswarm run/review` | 上面各角色的产物 | 分支提交、`result.json`、`review.json` | 控制面（人） |
+| 编排 | `examples/org-health-local/run_e2e.py`、`swrm run/review` | 上面各角色的产物 | 分支提交、`result.json`、`review.json` | 控制面（人） |
 
 同一条流水线的两种入口：
 
 - **仓库内一键跑通（合成数据）**：`python3 examples/org-health-local/run_e2e.py --workdir <目录>`
   （`run_e2e.py:36-57`），依次跑 Boss → DA → Builder → 自检。
-- **OpenSwarm 三阶段编排（真实数据）**：`openswarm run` 每阶段一个独立 worktree，
-  下一阶段 `--base` 取上一阶段提交，阶段后 `openswarm review` 做跨族审查
-  （`openswarm/examples/org-diagnosis-pipeline.json`）。
+- **Swrm 三阶段编排（真实数据）**：`swrm run` 每阶段一个独立 worktree，
+  下一阶段 `--base` 取上一阶段提交，阶段后 `swrm review` 做跨族审查
+  （`swrm/examples/org-diagnosis-pipeline.json`）。
 
 ## 2. Boss 契约：`boss/make_brief.py`
 
@@ -309,30 +309,30 @@ python3 examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir>] [--bu
 传入 `--review` 后还会运行 Reviewer 并写出 `review.md`（`run_e2e.py:23-24`、`:79-83`）；默认不运行 Reviewer，
 也不产出 `da-method.md`。
 
-### 6.2 OpenSwarm 编排：`openswarm run` / `openswarm review`
+### 6.2 Swrm 编排：`swrm run` / `swrm review`
 
-示例编排：`openswarm/examples/org-diagnosis-pipeline.json`；说明：
+示例编排：`swrm/examples/org-diagnosis-pipeline.json`；说明：
 `docs/scenario/org-diagnosis/pipeline.md`。
 
-- `openswarm run` 的关键参数（`openswarm/bin/openswarm:11489-11531`）：
+- `swrm run` 的关键参数（`swrm/bin/swrm:11489-11531`）：
   `--cwd`、`--base`、`--backend`、`--type`（默认 `impl`）、`--difficulty`（默认 `3`）、
   `--budget-minutes`、`--title`、`--task-file`/`--prompt`、`--verify`、`--card-type`、`--rework-of`。
-- 每次运行在独立 worktree 中进行，分支名 `openswarm/<run-id>`
-  （`openswarm/bin/openswarm:4854`、`:4862`）；阶段产物提交在自己的分支上（`:5055-5059`）；
+- 每次运行在独立 worktree 中进行，分支名 `swrm/<run-id>`
+  （`swrm/bin/swrm:4854`、`:4862`）；阶段产物提交在自己的分支上（`:5055-5059`）；
   结果写 `$OPENSWARM_HOME/runs/<run-id>/result.json`（`:5383-5394`）。
-- 退出码：`0` = done，`1` = 未通过，`3` = 预算拒绝（`openswarm/bin/openswarm:5414`）。
+- 退出码：`0` = done，`1` = 未通过，`3` = 预算拒绝（`swrm/bin/swrm:5414`）。
 - `--verify` 在执行器结束、提交之后于宿主运行，超时上限 600 秒，其退出码覆盖执行器自报结果
-  （`openswarm/bin/openswarm:4996-5004`、`:5339`）。
-- verify 命令里仓库内路径用相对路径、仓库外路径用绝对路径：openswarm 只改写 base 仓库的绝对路径前缀
-  （`openswarm/bin/openswarm:4923-4926`）。
-- `openswarm review <run-id> --by <backend> [--json]`（`openswarm/bin/openswarm:11593-11597`）：
+  （`swrm/bin/swrm:4996-5004`、`:5339`）。
+- verify 命令里仓库内路径用相对路径、仓库外路径用绝对路径：swrm 只改写 base 仓库的绝对路径前缀
+  （`swrm/bin/swrm:4923-4926`）。
+- `swrm review <run-id> --by <backend> [--json]`（`swrm/bin/swrm:11593-11597`）：
   跨族审查，结果写 `$OPENSWARM_HOME/runs/<run-id>/review.json`
-  （`openswarm/bin/openswarm:5853-5856`）。**退出码与判定分离**：审查成功即 `0`，
-  `verdict=changes` 或 P0/P1 不会体现在退出码里（`openswarm/bin/openswarm:5916-5925`），
+  （`swrm/bin/swrm:5853-5856`）。**退出码与判定分离**：审查成功即 `0`，
+  `verdict=changes` 或 P0/P1 不会体现在退出码里（`swrm/bin/swrm:5916-5925`），
   门禁必须解析 `--json` 输出或 `review.json`；仅在出错（审查器不可用、跨族违规、无 diff）时退出 `2`
-  （`openswarm/bin/openswarm:11841-11845`）。
+  （`swrm/bin/swrm:11841-11845`）。
 - 交接：下一阶段 `--base` 取上一阶段 `result.json` 的 `commit`；上一阶段没有仓库内提交时回退到
-  `workspace.base`（`openswarm/examples/org-diagnosis-pipeline.json` 的 `handoff` 段）。
+  `workspace.base`（`swrm/examples/org-diagnosis-pipeline.json` 的 `handoff` 段）。
 
 ## 7. 关键字段与「谁写谁读」
 
@@ -390,8 +390,8 @@ python3 examples/org-health-local/run_e2e.py --workdir <dir> [--raw <dir>] [--bu
 
 | # | 缺口 | 修复证据 | 对应 issue |
 | --- | --- | --- | --- |
-| 5 | **编排 spec 的 `--verify` 命令曾与实际 CLI 不符** | DA 阶段已改为 `python3 examples/org-health-local/validate.py "${DIAGNOSIS}" && test -s ...`，使用位置参数（`openswarm/examples/org-diagnosis-pipeline.json:156-158`）；Builder 阶段已改为 `python3 -m unittest discover -s examples/org-health-local -p 'test_*.py'`（`:210-212`）。 | 本 issue #142 记录 |
-| 7 | **文档与仓库内容曾发生漂移** | `pipeline.md` 已说明 `validate.py`、`test_serve.py` 已在仓库内（`docs/scenario/org-diagnosis/pipeline.md:80-84`、`:102-105`）；`review-checklist.md` 已说明三个脚本均已在仓库内（`docs/scenario/org-diagnosis/review-checklist.md:51`）；编排 spec 的 `pending` 条目也写明仓库已有（`openswarm/examples/org-diagnosis-pipeline.json:268-275`）。 | 本 issue #142 记录 |
+| 5 | **编排 spec 的 `--verify` 命令曾与实际 CLI 不符** | DA 阶段已改为 `python3 examples/org-health-local/validate.py "${DIAGNOSIS}" && test -s ...`，使用位置参数（`swrm/examples/org-diagnosis-pipeline.json:156-158`）；Builder 阶段已改为 `python3 -m unittest discover -s examples/org-health-local -p 'test_*.py'`（`:210-212`）。 | 本 issue #142 记录 |
+| 7 | **文档与仓库内容曾发生漂移** | `pipeline.md` 已说明 `validate.py`、`test_serve.py` 已在仓库内（`docs/scenario/org-diagnosis/pipeline.md:80-84`、`:102-105`）；`review-checklist.md` 已说明三个脚本均已在仓库内（`docs/scenario/org-diagnosis/review-checklist.md:51`）；编排 spec 的 `pending` 条目也写明仓库已有（`swrm/examples/org-diagnosis-pipeline.json:268-275`）。 | 本 issue #142 记录 |
 
 ## 9. 复现命令与本地实测
 

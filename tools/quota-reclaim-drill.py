@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """故障名额回收演练（Refs #1477，Refs #1468）。
 
-在隔离沙箱内跑真实的 openswarm lane / 容量协调器路径，实测「lane/host 故障后名额回收」：
+在隔离沙箱内跑真实的 swrm lane / 容量协调器路径，实测「lane/host 故障后名额回收」：
 
 1. 起两条常驻 lane（L1/L2，pi 后端 + 仓内假执行器），容量上限设为 1 个并发名额；
 2. 两条 lane 各派一个长任务，唯一名额归谁由协调器决定（真的 running 的那条是 holder，
@@ -9,11 +9,11 @@
 3. 注入故障：
    - 场景 A `executor`：kill -9 holder 的执行器进程（模拟 lane 内执行器崩溃）；
    - 场景 B `supervisor`：kill -9 holder 所在 lane 的 supervisor（模拟宿主/进程组故障）；
-   - 场景 C `stop`：用既有 ``openswarm stop`` 优雅停止 holder（对照组，不算故障注入）；
-4. 观察 openswarm 回收名额：协调器 reservations 清空、run status 出现 fleet_recovered_at、
+   - 场景 C `stop`：用既有 ``swrm stop`` 优雅停止 holder（对照组，不算故障注入）；
+4. 观察 swrm 回收名额：协调器 reservations 清空、run status 出现 fleet_recovered_at、
    排队的任务被放行并跑完（可再派）。
 
-只使用既有语义：``lane up/down/assign``、``openswarm stop`` 与 TTL 回收
+只使用既有语义：``lane up/down/assign``、``swrm stop`` 与 TTL 回收
 （``fleet.recovery_ttl_seconds``）。不连生产主机、不碰凭据、不改 AD 代码。
 
 用法::
@@ -37,9 +37,9 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CLI = ROOT / "openswarm" / "bin" / "openswarm"
-CAPACITY = ROOT / "openswarm" / "bin" / "fleet-capacity"
-FAKE_PI = ROOT / "openswarm" / "tests" / "fixtures" / "fake_pi_rpc.py"
+CLI = ROOT / "swrm" / "bin" / "swrm"
+CAPACITY = ROOT / "swrm" / "bin" / "fleet-capacity"
+FAKE_PI = ROOT / "swrm" / "tests" / "fixtures" / "fake_pi_rpc.py"
 
 # 演练只用本机协调器，不冒充 gocc/gores1 等生产宿主。
 HOST = "local"
@@ -49,8 +49,8 @@ TASK = "LANE_TEST_WAIT hold the only fleet slot for the drill"
 # 沙箱标记：只有带这个标记（或空目录）的路径才允许被演练删除。
 SANDBOX_MARKER = ".quota-reclaim-drill-sandbox"
 # 默认沙箱放在仓库内（.gitignore 已收），路径要短，否则 AF_UNIX socket 会超限。
-DEFAULT_WORKDIR = ROOT / ".openswarm-tmp" / "q"
-# AF_UNIX sun_path 上限，与 openswarm/bin/openswarm 的 lane_validate_socket_path 一致：
+DEFAULT_WORKDIR = ROOT / ".swrm-tmp" / "q"
+# AF_UNIX sun_path 上限，与 swrm/bin/swrm 的 lane_validate_socket_path 一致：
 # macOS 104 字节、Linux 108 字节，都要给结尾的 NUL 留一字节。
 SOCKET_PATH_LIMIT = 103 if sys.platform == "darwin" else 107
 
@@ -80,7 +80,7 @@ class Drill:
             path.mkdir(parents=True, exist_ok=True)
         # 标记文件：下次重跑时这就是「这个目录确实是演练沙箱」的凭据。
         (self.workdir / SANDBOX_MARKER).write_text(
-            "openswarm quota reclaim drill sandbox; safe to delete\n", encoding="utf-8")
+            "swrm quota reclaim drill sandbox; safe to delete\n", encoding="utf-8")
         # 假执行器：仓内 fixture 的副本，避免改动仓内文件的可执行位。
         fake = self.workdir / "bin" / "fake_pi_rpc.py"
         shutil.copyfile(FAKE_PI, fake)
@@ -162,7 +162,7 @@ class Drill:
         result = subprocess.run([sys.executable, str(CLI), *map(str, args)], env=self.env,
                                 text=True, capture_output=True, timeout=timeout)
         if check and result.returncode:
-            raise RuntimeError(f"openswarm {' '.join(map(str, args))} failed: "
+            raise RuntimeError(f"swrm {' '.join(map(str, args))} failed: "
                                f"{result.stdout.strip()} {result.stderr.strip()}")
         return result
 
@@ -271,7 +271,7 @@ class Drill:
                                       "pid": pid, "run": holder, "lane": holder_lane})
             os.kill(int(pid), signal.SIGKILL)
         elif scenario == "stop":
-            record["events"].append({"at": stamp(), "action": "openswarm stop (既有语义：优雅停止)",
+            record["events"].append({"at": stamp(), "action": "swrm stop (既有语义：优雅停止)",
                                       "run": holder, "lane": holder_lane})
             self.cli("stop", holder, timeout=60)
         else:

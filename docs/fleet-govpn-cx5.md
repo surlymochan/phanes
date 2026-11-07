@@ -4,9 +4,9 @@
 
 - Host `govpn` has **2 GiB RAM**; the fleet status notes CX5 is memory-tight and
   should be watched for swap (`brain/dual-mode-status.md:41`).
-- The generated OpenSwarm lane systemd unit sets `MemoryMax=900M` by default
-  (`openswarm/bin/openswarm:8830`, default constant `LANE_DEFAULT_MEMORY_MAX`
-  at `openswarm/bin/openswarm:6831`). That default is the **high profile** and
+- The generated swrm lane systemd unit sets `MemoryMax=900M` by default
+  (`swrm/bin/swrm:8830`, default constant `LANE_DEFAULT_MEMORY_MAX`
+  at `swrm/bin/swrm:6831`). That default is the **high profile** and
   must stay untouched for normal hosts. On a low-memory host (~1 GiB class,
   such as `govpn`/`govpn2`) lower it instead of editing the generated unit.
 - No verified swap size or current swap-use measurement is recorded in this
@@ -15,10 +15,10 @@
 
 ## Per-lane memory ceiling (low-memory hosts)
 
-`openswarm lane systemd-unit` writes the ceiling of the lane it is asked about,
+`swrm lane systemd-unit` writes the ceiling of the lane it is asked about,
 so a low-memory host lowers it in its own configuration instead of patching the
 unit by hand. Precedence: lane entry → host policy → built-in default `900M`
-(`openswarm/bin/openswarm:6847`).
+(`swrm/bin/swrm:6847`).
 
 Per lane, in `$OPENSWARM_HOME/lanes.json`:
 
@@ -37,7 +37,7 @@ low, and the repo policy keeps the high default for everyone else):
 
 The value is a systemd size: an integer with an optional `K`, `M`, `G` or `T`
 suffix (`900M`, `2G`, `1048576`). Anything else is rejected when the lane
-config is read (`openswarm/bin/openswarm:6957`), so a typo fails loudly instead
+config is read (`swrm/bin/swrm:6957`), so a typo fails loudly instead
 of silently producing an unlimited unit.
 
 ### Recommended values
@@ -55,9 +55,9 @@ steady-state footprint — measure before and after a smoke task.
 
 ### launchd equivalent
 
-`openswarm lane launchd-plist` has no `MemoryMax=`; when a ceiling is
+`swrm lane launchd-plist` has no `MemoryMax=`; when a ceiling is
 configured it writes the closest launchd equivalent, `SoftResourceLimits` and
-`HardResourceLimits` with `Memory` in bytes (`openswarm/bin/openswarm:8808`).
+`HardResourceLimits` with `Memory` in bytes (`swrm/bin/swrm:8808`).
 `700M` becomes `734003200`. Without a configured ceiling the plist is
 unchanged and stays unlimited, because the launchd limit caps *address space*
 (`RLIMIT_AS`), not resident memory, and would kill a healthy lane. Review the
@@ -79,21 +79,21 @@ repository; it does not claim a live memory or swap measurement.
 ## Unprivileged observation and acceptance
 
 The following commands can be run without root before and during the smoke
-task. They select the first generated OpenSwarm lane unit when checking its
+task. They select the first generated swrm lane unit when checking its
 cap:
 
 ```sh
-UNIT="$(systemctl list-units --type=service --all 'openswarm*' --no-legend | awk 'NR==1 {print $1}')"
+UNIT="$(systemctl list-units --type=service --all 'swrm*' --no-legend | awk 'NR==1 {print $1}')"
 test -n "$UNIT" && systemctl show "$UNIT" -p MemoryMax --value
 free -h
 swapon --show
 ```
 
-The ceiling that `openswarm lane systemd-unit` would print can be checked
+The ceiling that `swrm lane systemd-unit` would print can be checked
 without touching the remote host at all:
 
 ```sh
-openswarm lane systemd-unit CX5 | grep -E '^MemoryMax='
+swrm lane systemd-unit CX5 | grep -E '^MemoryMax='
 ```
 
 Documentation acceptance also requires no root access:

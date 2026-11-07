@@ -56,7 +56,7 @@ const HIDDEN_ID_PATTERN = /^(models|agent):/;
 export function parseProviderDetectionSettings(input: unknown): ProviderDetectionSettings {
   if (!isObject(input) || !isBoolean(input.enabled)) throw new Error("Invalid detection settings.");
   if (input.openswarm !== undefined && !isOpenswarmSettings(input.openswarm))
-    throw new Error("Invalid openswarm settings.");
+    throw new Error("Invalid swrm settings.");
   return {
     ...(input.openswarm ? { openswarm: { ...input.openswarm } } : {}),
     enabled: input.enabled,

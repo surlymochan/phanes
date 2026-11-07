@@ -8,7 +8,7 @@ Epic: https://github.com/surlymochan/phanes/issues/223
 - SSH: `id_ed25519_phanes_ctl` + ControlMaster; hosts ib1–5 / gocc / gorelay / govpn / govpn2
 - Dispatch: `~/phanes-ctl/bin/lane-autodispatch` reading `lane-ready` issues
 - Boot: `~/phanes-ctl/bin/start-control-plane` (see [`docs/ctl-boot.md`](../docs/ctl-boot.md))
-- Status paths: `~/.claude/openswarm-executor-candidate/lanes/<L>/state.json` (see `tools/check-lane-status-paths.sh`)
+- Status paths: `~/.claude/swrm-executor-candidate/lanes/<L>/state.json` (see `tools/check-lane-status-paths.sh`)
 - Proof (earlier): run `20261101-031136-7a2856` → gorelay/agy
 
 ## Mode B — GitHub issue bus

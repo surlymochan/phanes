@@ -30,7 +30,7 @@
 车道与 AD 池口径的采集时间取**快照自带的 `_at`**，不取文件 mtime：
 
 - 文件 mtime 只说明「文件最后一次被写是什么时候」。快照被复制、被 `touch`、或者被别处的旧内容覆盖时，mtime 会跳到当下，而快照里的读数其实停在 21:00——停滞的 `_at` 会被当成新鲜的读数，正好掩盖 issue 里点出的那次故障。
-- `_at` 是 dispatcher 写进自己快照里的时钟（`tools/lane-autodispatch/autodispatch.py:421`、`openswarm/lib/dispatch/engine.py:2167`），复制和改写都改不动它。
+- `_at` 是 dispatcher 写进自己快照里的时钟（`tools/lane-autodispatch/autodispatch.py:421`、`swrm/lib/dispatch/engine.py:2167`），复制和改写都改不动它。
 - 快照没有 `_at`、或 `_at` 解析不出来时，该读数**没有时钟**：车道区直接标 `未核实`，AD 池口径标 `未核实`，数字仍然照给，但页面不假装它是新鲜的。
 - 池区有两个时钟，所以每个口径各带各的 `collected_at`，分区 envelope 取**最旧的那个**口径：任一口径停滞，整区即被标 `过期`。
 - 其余分区（容量、主机、烧量、待人工、开关）仍以文件 mtime 为采集时间，主机区另给每台的 `updated_at`。
@@ -49,13 +49,13 @@
 python3 tools/fleet-status-page.py \
   --lanes-status ~/phanes-ctl/autodispatch/lanes-status.json \
   --gh-live \
-  --capacity-dir ~/.claude/openswarm-fleet-capacity \
-  --hosts ~/.claude/openswarm/fleet-health.json \
-  --broker-log ~/.claude/openswarm/pi-broker.requests.jsonl \
-  --pauses ~/.claude/openswarm/pauses \
+  --capacity-dir ~/.claude/swrm-fleet-capacity \
+  --hosts ~/.claude/swrm/fleet-health.json \
+  --broker-log ~/.claude/swrm/pi-broker.requests.jsonl \
+  --pauses ~/.claude/swrm/pauses \
   --markers ~/phanes-ctl/autodispatch \
   --tz +08:00 \
-  --out ~/.claude/openswarm/fleet-status.json \
+  --out ~/.claude/swrm/fleet-status.json \
   --brain-log ~/phanes-ctl/brain/fleet-status.log
 
 # 离线回放（不联网、不碰运行中的目录）
@@ -66,7 +66,7 @@ python3 tools/fleet-status-page.py --self-test
 
 ## 2026-11-02 晚回放
 
-回放数据在 `openswarm/tests/fixtures/fleet-status-2026-11-02/`，回放结果（`--now 2026-11-02T21:05:00+08:00`）：
+回放数据在 `swrm/tests/fixtures/fleet-status-2026-11-02/`，回放结果（`--now 2026-11-02T21:05:00+08:00`）：
 
 ```
 fleet status @ 2026-11-02T13:05:00+00:00  sections=7 unverified=0 stale=0
@@ -99,6 +99,6 @@ fleet status @ 2026-11-02T13:05:00+00:00  sections=7 unverified=0 stale=0
 
 ## 实现位置
 
-- 聚合与渲染（纯函数，不读文件、不碰时钟）：[`openswarm/lib/dispatch/fleet_status.py`](../openswarm/lib/dispatch/fleet_status.py)
+- 聚合与渲染（纯函数，不读文件、不碰时钟）：[`swrm/lib/dispatch/fleet_status.py`](../swrm/lib/dispatch/fleet_status.py)
 - 采集与落盘：[`tools/fleet-status-page.py`](../tools/fleet-status-page.py)
-- 测试：[`openswarm/tests/test_fleet_status.py`](../openswarm/tests/test_fleet_status.py)
+- 测试：[`swrm/tests/test_fleet_status.py`](../swrm/tests/test_fleet_status.py)

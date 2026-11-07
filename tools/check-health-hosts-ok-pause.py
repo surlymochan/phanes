@@ -186,7 +186,7 @@ def assert_consistent(health: dict) -> None:
 
 def scratch_parent() -> str | None:
     """Parent dir of the fixtures: the checkout-local scratch dir when writable."""
-    scratch_root = ROOT / ".openswarm-tmp"
+    scratch_root = ROOT / ".swrm-tmp"
     try:
         scratch_root.mkdir(exist_ok=True)
         probe = scratch_root / ".write-probe"

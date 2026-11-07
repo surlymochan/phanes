@@ -2,7 +2,7 @@
 """Replay the harvest artifact filter on the local head of a PR (Refs #1835).
 
 The dispatcher drops the artifacts of a lane branch before it pushes it: the hidden
-build leftovers (``openswarm/tests/.dde4*-00000000.so``) and the review products
+build leftovers (``swrm/tests/.dde4*-00000000.so``) and the review products
 (``.lane-review/PR-N.md``).  This tool reports what the filter would drop on a head,
 so the head of a PR can be replayed offline; it only reads, no write access to the
 repository is needed.
@@ -19,7 +19,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 _spec = importlib.util.spec_from_file_location("harvest_filter",
-                                               os.path.join(ROOT, "openswarm", "lib", "dispatch", "harvest_filter.py"))
+                                               os.path.join(ROOT, "swrm", "lib", "dispatch", "harvest_filter.py"))
 H = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(H)
 

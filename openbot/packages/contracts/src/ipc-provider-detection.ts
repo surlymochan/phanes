@@ -29,7 +29,7 @@ export const DEFAULT_MODEL_SERVERS = {
 
 export type DefaultModelServerId = keyof typeof DEFAULT_MODEL_SERVERS;
 
-/** Coding executors on this computer or a named openswarm fleet host. No credentials. */
+/** Coding executors on this computer or a named swrm fleet host. No credentials. */
 export interface OpenswarmSettings {
   binaryPath: string;
   defaultLane: string;
@@ -37,7 +37,7 @@ export interface OpenswarmSettings {
 }
 
 export const DEFAULT_OPENSWARM_SETTINGS: OpenswarmSettings = {
-  binaryPath: "openswarm",
+  binaryPath: "swrm",
   defaultLane: "",
   defaultHost: "local",
 };

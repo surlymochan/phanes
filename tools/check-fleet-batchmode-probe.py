@@ -68,7 +68,7 @@ def main() -> None:
                 cert.write_text("fake certificate\n")
                 fleet_hosts.append({"name": name, "cert": str(cert)})
             ssh_config = root / "ssh_config"
-            ssh_config.write_text("Host ib1 ib2 ib3 ib4 gocc\n    User openswarm\n")
+            ssh_config.write_text("Host ib1 ib2 ib3 ib4 gocc\n    User swrm\n")
             fleet = root / "fleet.json"
             fleet.write_text(json.dumps({
                 "need_ok": 2,

@@ -50,14 +50,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-MODULE_PATH = ROOT / "openswarm" / "lib" / "dispatch" / "fleet_status.py"
+MODULE_PATH = ROOT / "swrm" / "lib" / "dispatch" / "fleet_status.py"
 
-spec = importlib.util.spec_from_file_location("openswarm_dispatch_fleet_status", MODULE_PATH)
+spec = importlib.util.spec_from_file_location("swrm_dispatch_fleet_status", MODULE_PATH)
 fleet_status = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fleet_status)
 
 GH_TIMEOUT = 60
-DEFAULT_HOME = Path(os.environ.get("OPENSWARM_HOME", Path.home() / ".claude/openswarm"))
+DEFAULT_HOME = Path(os.environ.get("OPENSWARM_HOME", Path.home() / ".claude/swrm"))
 
 
 def parse_offset(text):

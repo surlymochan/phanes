@@ -9,16 +9,16 @@ probe=0
 
 expect() {
   local host="$1" lane="$2"
-  echo "$host  ~/.claude/openswarm-executor-candidate/lanes/$lane/state.json"
-  echo "$host  ~/.claude/openswarm-executor-candidate/runs/<run>/status.json|result.json"
-  echo "$host  ~/tools/openswarm-executor-candidate/current  (release symlink)"
+  echo "$host  ~/.claude/swrm-executor-candidate/lanes/$lane/state.json"
+  echo "$host  ~/.claude/swrm-executor-candidate/runs/<run>/status.json|result.json"
+  echo "$host  ~/tools/swrm-executor-candidate/current  (release symlink)"
 }
 
 cat <<'TXT'
 Expected layout (all fleet hosts + box):
-  OPENSWARM_HOME-style state:  ~/.claude/openswarm-executor-candidate/lanes/<LANE>/state.json
-  run status/result:           ~/.claude/openswarm-executor-candidate/runs/<RUN>/{status,result}.json
-  release binary:              ~/tools/openswarm-executor-candidate/current -> releases/<sha>/openswarm
+  OPENSWARM_HOME-style state:  ~/.claude/swrm-executor-candidate/lanes/<LANE>/state.json
+  run status/result:           ~/.claude/swrm-executor-candidate/runs/<RUN>/{status,result}.json
+  release binary:              ~/tools/swrm-executor-candidate/current -> releases/<sha>/swrm
 
 Hosts / lanes:
 TXT
@@ -38,7 +38,7 @@ if [[ "$probe" -eq 1 ]]; then
   do
     host=${spec%%:*}; lane=${spec##*:}
     if timeout 12 ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-      "test -f \$HOME/.claude/openswarm-executor-candidate/lanes/$lane/state.json && test -L \$HOME/tools/openswarm-executor-candidate/current && echo OK" \
+      "test -f \$HOME/.claude/swrm-executor-candidate/lanes/$lane/state.json && test -L \$HOME/tools/swrm-executor-candidate/current && echo OK" \
       >/tmp/clsp-$host-$lane.out 2>/tmp/clsp-$host-$lane.err; then
       echo "OK $host $lane $(cat /tmp/clsp-$host-$lane.out)"
     else

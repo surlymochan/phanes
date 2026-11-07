@@ -2,12 +2,12 @@
 
 Refs #71、#54（#6「三 Bot 场景」的一部分）。
 
-本文给出用 OpenSwarm 编排「组织健康诊断」三阶段流水线的做法：每个阶段的角色、任务提示、产物路径和
+本文给出用 Swrm 编排「组织健康诊断」三阶段流水线的做法：每个阶段的角色、任务提示、产物路径和
 `--verify` 门禁；阶段之间用上一阶段的提交作为下一阶段的 `--base`；每阶段结束后做一次跨执行器交叉审查。
 真实组织数据不进入仓库：DA 读取仓库外的 `${DATA}`，Builder/预览只通过 `serve.py --data <diagnosis.json>` 接收仓库外的绝对路径。
 
-配套的可执行示例编排：[`openswarm/examples/org-diagnosis-pipeline.json`](../../../openswarm/examples/org-diagnosis-pipeline.json)
-（`python3 -m json.tool openswarm/examples/org-diagnosis-pipeline.json` 可解析）。
+配套的可执行示例编排：[`swrm/examples/org-diagnosis-pipeline.json`](../../../swrm/examples/org-diagnosis-pipeline.json)
+（`python3 -m json.tool swrm/examples/org-diagnosis-pipeline.json` 可解析）。
 从零跑通演示可参考：[运行手册 `runbook.md`](runbook.md) 和[常见问题 `faq.md`](faq.md)。
 
 ## 1. 场景与角色
@@ -30,22 +30,22 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
    │  Boss  │ ─────► │   DA   │ ─────► │ Builder  │
    └────────┘        └────────┘        └──────────┘
         │                 │                  │
-        └──── 交叉审查 ────┴──── 交叉审查 ────┘   （openswarm review，跨执行器族）
+        └──── 交叉审查 ────┴──── 交叉审查 ────┘   （swrm review，跨执行器族）
 
    真实数据：${DATA} ──DA──► ${DIAGNOSIS} ──Builder/预览──► serve.py --data （全程在仓库外）
 ```
 
-三个阶段都由 `openswarm run` 执行：每次运行在独立 worktree 里进行，分支名 `openswarm/<run-id>`
-（`openswarm/bin/openswarm:4854`），执行器结束后在分支上提交（`openswarm/bin/openswarm:5055-5059`），
-结果写进 `$OPENSWARM_HOME/runs/<run-id>/result.json`（`openswarm/bin/openswarm:5383-5394`）。
+三个阶段都由 `swrm run` 执行：每次运行在独立 worktree 里进行，分支名 `swrm/<run-id>`
+（`swrm/bin/swrm:4854`），执行器结束后在分支上提交（`swrm/bin/swrm:5055-5059`），
+结果写进 `$OPENSWARM_HOME/runs/<run-id>/result.json`（`swrm/bin/swrm:5383-5394`）。
 
 ## 2. 前置条件
 
 - Python 3.9+、git，以及至少一个已登录的执行器（本例用 `codex`）。
 - 一个**位于仓库之外**的工作目录（下文记作 `WORKSPACE`），放真实数据、任务提示文件和 DA 产物。
 - 审查执行器必须是另一个模型族：`codex` 的运行只能由 `agy` / `pi` / `cursor` 审查
-  （`openswarm/bin/openswarm:5487-5494`）。
-- openswarm 不合并、不推送：合入由人工评审后执行 `git -C <repo> merge --no-ff openswarm/<run-id>`。
+  （`swrm/bin/swrm:5487-5494`）。
+- swrm 不合并、不推送：合入由人工评审后执行 `git -C <repo> merge --no-ff swrm/<run-id>`。
 
 ## 3. 三个阶段
 
@@ -61,7 +61,7 @@ Refs #71、#54（#6「三 Bot 场景」的一部分）。
   （Python 标准库命令，当前仓库无需新增脚本）。
 
 ```bash
-openswarm run \
+swrm run \
   --cwd <repo> --base HEAD \
   --backend codex --type docs --difficulty 2 --budget-minutes 20 \
   --title 组织诊断任务书 \
@@ -83,7 +83,7 @@ openswarm run \
   `2` 表示输入不可读或不是合法 JSON。
 
 ```bash
-openswarm run \
+swrm run \
   --cwd <repo> --base <boss 阶段 commit> \
   --backend codex --type impl --difficulty 4 --budget-minutes 30 \
   --title 组织诊断数据分析 \
@@ -105,7 +105,7 @@ openswarm run \
   `1` 表示测试失败；参数错误等 unittest/解释器错误为非 `0`。
 
 ```bash
-openswarm run \
+swrm run \
   --cwd <repo> --base <da 阶段 commit> \
   --backend codex --type impl --difficulty 3 --budget-minutes 25 \
   --title 组织诊断站点接入 \
@@ -117,9 +117,9 @@ openswarm run \
 
 交接靠 git，不靠复制文件：
 
-1. 每个阶段用 `openswarm run --base <sha>` 起一个独立 worktree（`openswarm/bin/openswarm:4848-4862`），
-   阶段产物提交在自己的 `openswarm/<run-id>` 分支上。
-2. 阶段结束后从 `result.json` 取 `commit`（阶段提交）与 `branch`（`openswarm/<run-id>`），
+1. 每个阶段用 `swrm run --base <sha>` 起一个独立 worktree（`swrm/bin/swrm:4848-4862`），
+   阶段产物提交在自己的 `swrm/<run-id>` 分支上。
+2. 阶段结束后从 `result.json` 取 `commit`（阶段提交）与 `branch`（`swrm/<run-id>`），
    下一阶段的 `--base` 就取这个 `commit`。
 3. 上一阶段没有产生仓库内提交时（`commit` 为空），回退到它的 `workspace.base`，即该阶段实际使用的
    base 提交，流水线不中断。
@@ -127,15 +127,15 @@ openswarm run \
    所以最终合并 Builder 分支即可带上前两阶段的改动；也可以逐段合并：
 
 ```bash
-git -C <repo> merge --no-ff openswarm/<boss-run-id>
-git -C <repo> merge --no-ff openswarm/<da-run-id>
-git -C <repo> merge --no-ff openswarm/<builder-run-id>
+git -C <repo> merge --no-ff swrm/<boss-run-id>
+git -C <repo> merge --no-ff swrm/<da-run-id>
+git -C <repo> merge --no-ff swrm/<builder-run-id>
 ```
 
-5. 审查不通过时返工：`openswarm run --rework-of <run-id> ...`（README「Observe / Learn」一节）。
+5. 审查不通过时返工：`swrm run --rework-of <run-id> ...`（README「Observe / Learn」一节）。
 
-**每个阶段都必须留下仓库内提交**：`openswarm review` 要求分支存在且 diff 非空
-（`openswarm/bin/openswarm:5532-5543`），没有提交就谈不上交叉审查。因此 DA 阶段除了仓库外的诊断 JSON，
+**每个阶段都必须留下仓库内提交**：`swrm review` 要求分支存在且 diff 非空
+（`swrm/bin/swrm:5532-5543`），没有提交就谈不上交叉审查。因此 DA 阶段除了仓库外的诊断 JSON，
 还要在仓库内提交不含真实数字的 `da-method.md`。
 
 **真实数据不参与 git 交接**：它始终留在仓库外的 `${DIAGNOSIS}`，靠路径传递。
@@ -143,20 +143,20 @@ git -C <repo> merge --no-ff openswarm/<builder-run-id>
 ## 5. 交叉审查
 
 每阶段结束后跑一次跨执行器族的只读审查，审查结果落在 `$OPENSWARM_HOME/runs/<run-id>/review.json`
-（`openswarm/bin/openswarm:5853-5856`）：
+（`swrm/bin/swrm:5853-5856`）：
 
 ```bash
-openswarm review <run-id> --by pi --json
+swrm review <run-id> --by pi --json
 ```
 
 - 门禁：`verdict=changes` 或 findings 里出现 P0/P1 时**不进入下一阶段**，改用
-  `openswarm run --rework-of <run-id>` 返工。
+  `swrm run --rework-of <run-id>` 返工。
 - 审查执行器必须与阶段执行器不同族（`codex` → `agy`/`pi`/`cursor`，
-  `openswarm/bin/openswarm:5487-5494`）。
+  `swrm/bin/swrm:5487-5494`）。
 - 自动审查只在 `--card-type` 属于 `feature`/`fix`/`review-fix`/`migration` 时触发
-  （`openswarm/bin/openswarm:5905-5910`，`openswarm/policy.json` 的 `review.auto_card_types`），
+  （`swrm/bin/swrm:5905-5910`，`swrm/policy.json` 的 `review.auto_card_types`），
   本流水线不带 `--card-type`，所以交叉审查是显式的一步。
-- 想要两个执行器并行产出 DA 结论再对比时，可以用 `openswarm compare --task-file <card> --title <t>
+- 想要两个执行器并行产出 DA 结论再对比时，可以用 `swrm compare --task-file <card> --title <t>
   --a codex --b pi`。
 
 ## 6. 真实数据边界
@@ -167,8 +167,8 @@ openswarm review <run-id> --by pi --json
   `openbot/scripts/org-health-demo-e2e.ts:13-16` 也是把合成数据复制到临时目录再经 `--data` 传入，
   作为「数据不落库」的既有做法。
 - DA 阶段的诊断 JSON 写在仓库外，不随分支提交；仓库内只提交不含真实数字的说明文件。
-- `verify` 命令里，仓库内路径用相对路径（相对 worktree 根），仓库外路径用绝对路径：openswarm 只把
-  base 仓库的绝对路径前缀改写成 worktree 路径（`openswarm/bin/openswarm:4923-4926`），
+- `verify` 命令里，仓库内路径用相对路径（相对 worktree 根），仓库外路径用绝对路径：swrm 只把
+  base 仓库的绝对路径前缀改写成 worktree 路径（`swrm/bin/swrm:4923-4926`），
   仓库外路径不会被改写。
 - 建议加一道提交后检查：列出该阶段改动的文件，除合成示例外不应出现任何 `diagnosis*.json`：
 
@@ -182,18 +182,18 @@ git -C <repo> show --stat <stage-commit>
 
 ## 7. 运行示例编排
 
-示例编排 `openswarm/examples/org-diagnosis-pipeline.json` 描述了变量、三阶段、交接规则、审查门禁和
+示例编排 `swrm/examples/org-diagnosis-pipeline.json` 描述了变量、三阶段、交接规则、审查门禁和
 运行依赖。下面这段 runner 按顺序执行三个阶段，做完一个阶段就交叉审查，并把上一阶段的提交喂给
 下一阶段的 `--base`（可直接从仓库根目录运行）：
 
 ```bash
 export REPO="$PWD"                       # 仓库根目录
 export WORKSPACE="/path/to/org-diagnosis" # 必须在仓库之外
-export OPENSWARM=openswarm               # 未安装时可用 openswarm/bin/openswarm
+export OPENSWARM=swrm               # 未安装时可用 swrm/bin/swrm
 python3 - <<'PY'
 import json, os, pathlib, re, shutil, subprocess, sys
 
-SPEC = pathlib.Path("openswarm/examples/org-diagnosis-pipeline.json")
+SPEC = pathlib.Path("swrm/examples/org-diagnosis-pipeline.json")
 spec = json.loads(SPEC.read_text(encoding="utf-8"))
 variables = spec["variables"]
 
@@ -223,11 +223,11 @@ if workspace == repo or repo in workspace.parents:
     sys.exit("WORKSPACE 必须位于仓库之外")
 cli = values["OPENSWARM"]
 if shutil.which(cli) is None:
-    fallback = repo / "openswarm" / "bin" / "openswarm"
+    fallback = repo / "swrm" / "bin" / "swrm"
     if fallback.exists():
         cli = str(fallback)
 values["OPENSWARM"] = cli
-home = pathlib.Path(os.environ.get("OPENSWARM_HOME", str(pathlib.Path.home() / ".claude/openswarm")))
+home = pathlib.Path(os.environ.get("OPENSWARM_HOME", str(pathlib.Path.home() / ".claude/swrm")))
 policy = spec["data_policy"]
 
 base = values["BASE"]
@@ -271,12 +271,12 @@ PY
 
 说明：
 
-- `openswarm run` 的退出码：0 表示 `done`，1 表示未通过，3 表示预算拒绝
-  （`openswarm/bin/openswarm:5414`）；runner 遇到非 0 就停，不自动重试。
-- `--verify` 在执行器结束、提交之后于宿主上运行（`openswarm/bin/openswarm:5339`），超时上限 600 秒；
-  它的退出码覆盖执行器自报的结果（`openswarm/bin/openswarm:4996-5004`）。
-- `WORKSPACE` 必须在仓库之外：仓库内的绝对路径会被 openswarm 改写成 worktree 路径
-  （`openswarm/bin/openswarm:4923-4926`），真实数据放仓库内会被误改写。
+- `swrm run` 的退出码：0 表示 `done`，1 表示未通过，3 表示预算拒绝
+  （`swrm/bin/swrm:5414`）；runner 遇到非 0 就停，不自动重试。
+- `--verify` 在执行器结束、提交之后于宿主上运行（`swrm/bin/swrm:5339`），超时上限 600 秒；
+  它的退出码覆盖执行器自报的结果（`swrm/bin/swrm:4996-5004`）。
+- `WORKSPACE` 必须在仓库之外：仓库内的绝对路径会被 swrm 改写成 worktree 路径
+  （`swrm/bin/swrm:4923-4926`），真实数据放仓库内会被误改写。
 - runner 只做编排，不做合并；合并仍由人工评审后执行。
 
 ## 8. 运行依赖
@@ -293,15 +293,15 @@ PY
 - 本文档只描述编排方式，没有跑过真实组织数据：DA 的校验命令接收仓库外的 `${DIAGNOSIS}`，Builder 的
   `test_serve.py` 使用临时数据覆盖服务边界；真实组织数据仍须留在仓库外。
 - 示例编排固定使用 `codex` 执行、`pi` 审查；换执行器时要同时满足跨族审查约束
-  （`openswarm/bin/openswarm:5487-5494`）。
-- 审查是只读的第二意见，最终验收仍属控制面：`openswarm` 不合并、不推送，验收决定由人做出
-  （`openswarm ledger accept <run-id> --reason "..."` 可记录该决定）。
+  （`swrm/bin/swrm:5487-5494`）。
+- 审查是只读的第二意见，最终验收仍属控制面：`swrm` 不合并、不推送，验收决定由人做出
+  （`swrm ledger accept <run-id> --reason "..."` 可记录该决定）。
 - `WORKSPACE` 里的真实数据不进版本库，也不进 `$OPENSWARM_HOME` 的运行记录；流水线结束后按数据提供方的
   保留策略清理该目录。
 
 ## 10. 交接产物最小验收表
 
-本节由 #707 新增。上面第 3 节的三阶段编排用 OpenSwarm 交接产物；同一场景还有「仓库内一键跑通」这一个入口
+本节由 #707 新增。上面第 3 节的三阶段编排用 Swrm 交接产物；同一场景还有「仓库内一键跑通」这一个入口
 （`contract.md:33-39`）：`python3 examples/org-health-local/run_e2e.py --workdir <workdir> --review`
 一次跑完 Boss → DA → Builder → 站点自检 → Reviewer，产物全部落在 `<workdir>` 下
 （`examples/org-health-local/run_e2e.py:13`、`:146-148`、`:161`、`:173-179`）。

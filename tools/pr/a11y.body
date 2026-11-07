@@ -32,6 +32,6 @@ Surfaces: Desktop renderer and `packages/ui` shared controls. Mouse behavior and
 
 UI only. The shared keyboard helper sits on every context menu trigger, so it is the part to review for focus handling.
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-123638-eec71d 20261028-114016-24b527 20261028-114316-7f7bbf 20261028-114741-554bd6 20261028-115013-46e2af 20261028-115606-4d2135
+swrm-run: 20261028-123638-eec71d 20261028-114016-24b527 20261028-114316-7f7bbf 20261028-114741-554bd6 20261028-115013-46e2af 20261028-115606-4d2135

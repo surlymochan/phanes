@@ -4,8 +4,8 @@ import type { messages as source } from "../en/customProvider";
 export const messages = {
   "customProvider.dispatch.title": "コード実行エグゼキューター",
   "customProvider.dispatch.description":
-    "エージェントはコーディング作業を openswarm に送信できます。タスクカードとコードは実行ホストとそのモデルプロバイダーへ送られます。独立した実行では lane を空のままにします。",
-  "customProvider.dispatch.binary": "openswarm コマンドまたはパス",
+    "エージェントはコーディング作業を swrm に送信できます。タスクカードとコードは実行ホストとそのモデルプロバイダーへ送られます。独立した実行では lane を空のままにします。",
+  "customProvider.dispatch.binary": "swrm コマンドまたはパス",
   "customProvider.dispatch.host": "既定のフリートホスト",
   "customProvider.dispatch.lane": "既定の lane（省略可）",
   "customProvider.registry.title": "ACP レジストリ",

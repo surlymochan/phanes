@@ -32,6 +32,6 @@ Surfaces: `apps/mobile` and `@openbot/i18n`. No file under `packages/contracts`,
 
 Phone UI only; it uses existing Team API routes (the interrupt route for Stop and send).
 
-Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra, Cursor composer-2.5 and pi + MiniMax through swrm; planner Claude Code.
 
-openswarm-run: 20261028-120938-bf276c 20261028-120447-23ee55 20261028-120731-680e69 20261028-124249-d310fe
+swrm-run: 20261028-120938-bf276c 20261028-120447-23ee55 20261028-120731-680e69 20261028-124249-d310fe

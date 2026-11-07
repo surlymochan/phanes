@@ -12,7 +12,7 @@ function resultRecord(): DispatchRecord {
     agentId: "agent-1",
     threadId: "thread-1",
     title: "Task",
-    binary: "openswarm",
+    binary: "swrm",
     idempotencyKey: "idempotency-1",
     status: "done",
     branch: null,

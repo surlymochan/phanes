@@ -8,11 +8,11 @@
 
 ## 当前依据
 
-- `openswarm/bin/fleet-capacity:72-79`：协调器在本机 SQLite `reservations` 表存储 token、owner、run_id、backend、provider、created，并以 `BEGIN IMMEDIATE` 执行操作。
-- `openswarm/bin/fleet-capacity:83-94`：recover 接收调用者提供的 `confirm` 字符串；本机 owner 或 gocc 可据此删除 reservation。该字符串本身不是 liveness 证明。
-- `openswarm/bin/openswarm:3377-3418`：回收候选由本地 `status.json` 的 `fleet_reserved_at`、本地 PID 存活检查及 pending 状态构成。
-- `openswarm/bin/openswarm:3436-3451`：调用方检查/停止记录的 executor 后，再发送 recover；协调器无法独立确认远端进程已停止。
-- `openswarm/README.md:690-699`：现有部署通过专用 fleet-control SSH key 和限制的 forced-command endpoint；forced command 固定认证 owner，执行端记录并复用该 owner。
+- `swrm/bin/fleet-capacity:72-79`：协调器在本机 SQLite `reservations` 表存储 token、owner、run_id、backend、provider、created，并以 `BEGIN IMMEDIATE` 执行操作。
+- `swrm/bin/fleet-capacity:83-94`：recover 接收调用者提供的 `confirm` 字符串；本机 owner 或 gocc 可据此删除 reservation。该字符串本身不是 liveness 证明。
+- `swrm/bin/swrm:3377-3418`：回收候选由本地 `status.json` 的 `fleet_reserved_at`、本地 PID 存活检查及 pending 状态构成。
+- `swrm/bin/swrm:3436-3451`：调用方检查/停止记录的 executor 后，再发送 recover；协调器无法独立确认远端进程已停止。
+- `swrm/README.md:690-699`：现有部署通过专用 fleet-control SSH key 和限制的 forced-command endpoint；forced command 固定认证 owner，执行端记录并复用该 owner。
 
 ## 威胁与故障模型
 
@@ -47,13 +47,13 @@ forced-command 传入的 owner 是认证边界；请求体不得覆盖 owner。�
 
 1. SQLite 启动时检查旧 schema，并以事务增加 nullable `lease_expires`，避免破坏现有数据库。
 2. 对旧行采用保守迁移：填入 `created + configured_TTL`；若缺少有效 `created`，填入当前协调器时间 + TTL，延迟回收而不提前释放。完成填值后约束/代码路径要求非空。
-3. 部署顺序先更新协调器（兼容旧 acquire/release/status），再滚动更新 openswarm 客户端启用 renew 与精确 recover。兼容窗口内旧客户端不具备续租，应将旧记录按迁移规则延迟过期，避免旧 confirm 直接删除；拒绝无 token 或未到期 recover。
+3. 部署顺序先更新协调器（兼容旧 acquire/release/status），再滚动更新 swrm 客户端启用 renew 与精确 recover。兼容窗口内旧客户端不具备续租，应将旧记录按迁移规则延迟过期，避免旧 confirm 直接删除；拒绝无 token 或未到期 recover。
 4. 客户端启动后立即续租并按配置周期续租；每次 acquire 成功及响应丢失后的 reconcile 都必须恢复续租循环。释放仍按 token/host/run_id 精确匹配。
 5. 观测至少记录 renew/recover 的拒绝原因、owner/run_id、lease 边界和 SQLite 结果，不记录 SSH 私钥、凭据或 token。无需记录请求中的敏感 payload。
 
 ## 测试计划
 
-在 `openswarm/tests/test_fleet_capacity.py` 增加/调整：
+在 `swrm/tests/test_fleet_capacity.py` 增加/调整：
 
 - 迁移旧表：有效 `created` 转换为到期时间；缺失时间按保守规则延期；重复启动不重复迁移。
 - renew：owner/token/run_id 匹配时延长至协调器时间 + TTL；错误 owner、token、run_id 不改变记录；请求不能指定 owner 或到期时间。
@@ -61,4 +61,4 @@ forced-command 传入的 owner 是认证边界；请求体不得覆盖 owner。�
 - 并发 renew/recover：事务串行化，结果只能是成功续租且不可回收，或在租约先过期时成功回收，不能发生未到期删除。
 - 协调器时钟是 TTL 判断依据：模拟客户端时钟漂移不改变续租/回收结论。
 
-在 `openswarm/tests/test_lane.py` 验证 lane 对续租失败采取 fail-closed、重试恢复后续租继续、runner 崩溃且 executor 清理完成后仅在 coordinator lease 到期时回收。另以隔离的测试 SSH forced-command 配置做端到端协议测试，断言认证 owner 来自 forced command 且请求体伪造 owner 无效；不使用生产密钥或生产协调器。
+在 `swrm/tests/test_lane.py` 验证 lane 对续租失败采取 fail-closed、重试恢复后续租继续、runner 崩溃且 executor 清理完成后仅在 coordinator lease 到期时回收。另以隔离的测试 SSH forced-command 配置做端到端协议测试，断言认证 owner 来自 forced command 且请求体伪造 owner 无效；不使用生产密钥或生产协调器。
