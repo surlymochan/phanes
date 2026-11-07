@@ -11,14 +11,22 @@ directory, so both are read.
 The file name of a record is derived from its scope, and the derivation is
 injective: two different scopes never share a file (Refs #1829).  A scope that
 only uses letters, digits, ``_``, ``.`` and ``-`` keeps its name; every other
-byte is escaped reversibly (``lane:C1`` lives in ``lane~3aC1.json``).  A record
-is read by the scope it carries, so a file whose ``scope`` field is another
-scope is not that scope's record.  The records written before #1829 keep their
-pause: they are read by their recorded scope, and the next write of that scope
-moves the record to the current name.
+byte is escaped reversibly (``lane:C1`` becomes ``lane~3aC1``) and the stem
+ends in the digest of the scope.  The digest keeps two scopes apart even when
+their stems differ in case only, which a case-insensitive file system maps
+onto one file.  A record is read by the scope it carries, so a file whose
+``scope`` field names another scope is not that scope's record.
+
+Migration (Refs #1829): the records written before #1829 keep their pause.
+They are read by the scope they carry, wherever they live, and the next write
+of that scope moves the record to the current name.  A file that several
+scopes shared (the old name mapped every unsafe byte to ``_``) holds one
+record: the scope it carries wins, and every other scope gets a file of its
+own.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -54,15 +62,24 @@ def _time(value: Any, name: str) -> float:
 
 
 def _scope(value: Any) -> str:
+    """The normalized scope string.
+
+    A scope is ``all``, ``mint``, ``<kind>:<value>`` or the underscore form
+    ``<kind>_<value>``.  The underscore form is a scope of its own: it is the
+    name the store gave a scope before #1829, and it must not share a file
+    with the colon form, or one scope would clear the other (Refs #1829).
+    """
     if not isinstance(value, str):
         raise ValueError("scope must be a string, got {!r}".format(value))
     value = value.strip()
     if value in ("all", "mint"):
         return value
     match = re.fullmatch(r"(lane|host|backend):([^/\\]+)", value)
-    if not match or not match.group(2).strip():
-        raise ValueError("invalid pause scope: {!r}".format(value))
-    return "{}:{}".format(match.group(1), match.group(2).strip())
+    if match and match.group(2).strip():
+        return "{}:{}".format(match.group(1), match.group(2).strip())
+    if re.fullmatch(r"(lane|host|backend)_[A-Za-z0-9_.-]+", value):
+        return value
+    raise ValueError("invalid pause scope: {!r}".format(value))
 
 
 # The bytes a scope file name may carry verbatim; every other byte of a scope
@@ -70,14 +87,26 @@ def _scope(value: Any) -> str:
 _SAFE_NAME_BYTES = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
 
+# A file name holds 255 bytes at most; the stem keeps room for the ".json"
+# suffix and for the digest of the scope.
+_MAX_STEM_BYTES = 200
 
-def _scope_key(scope: str) -> str:
-    """The file name stem of one scope; the mapping is injective (Refs #1829).
+# The length of the digest that ends the stem of an escaped scope: two scopes
+# whose stems differ in case only must not land on one file, which a
+# case-insensitive file system would do (Refs #1829).
+_DIGEST_LENGTH = 12
 
-    A scope that only uses letters, digits, ``_``, ``.`` and ``-`` keeps its
-    name, so its record stays where it is.  Every other byte is escaped
-    reversibly as ``~`` plus two hex digits (``~`` itself as ``~7e``), so
-    ``lane:X`` and ``lane_X`` no longer land on the same file.
+
+def _digest(scope: str) -> str:
+    """A short digest of one scope; it tells two scopes apart."""
+    return hashlib.sha256(scope.encode("utf-8")).hexdigest()[:_DIGEST_LENGTH]
+
+
+def _escaped(scope: str) -> str:
+    """The scope with every byte a file name may not carry escaped.
+
+    An unsafe byte becomes ``~`` plus two hex digits (``~`` itself as ``~7e``),
+    so the escaping is reversible.
     """
     name = []
     for byte in scope.encode("utf-8"):
@@ -86,6 +115,35 @@ def _scope_key(scope: str) -> str:
         else:
             name.append("~{:02x}".format(byte))
     return "".join(name)
+
+
+def _scope_key(scope: str) -> str:
+    """The file name stem of one scope; the mapping is injective (Refs #1829).
+
+    A scope that only uses letters, digits, ``_``, ``.`` and ``-`` keeps its
+    name, so the records written before #1829 stay where they are.  Every
+    other scope is escaped (``lane:C1`` becomes ``lane~3aC1``) and its stem
+    ends in the digest of the scope: the digest keeps two scopes apart even
+    when their stems differ in case only, which a case-insensitive file
+    system maps onto one file.  A stem too long for a file name is cut short;
+    the digest still tells the scopes apart.
+    """
+    escaped = _escaped(scope)
+    if escaped == scope and len(scope.encode("utf-8")) <= _MAX_STEM_BYTES:
+        return scope
+    stem = escaped[:_MAX_STEM_BYTES].rstrip("~")
+    return "{}~{}".format(stem, _digest(scope))
+
+
+def _own_key(scope: str) -> str:
+    """A file name stem that belongs to one scope alone (Refs #1829).
+
+    It is the fallback for a scope whose own name is taken by another scope:
+    a case-insensitive file system maps two safe names that differ in case
+    only onto one file.
+    """
+    stem = _escaped(scope)[:_MAX_STEM_BYTES].rstrip("~")
+    return "{}-{}".format(stem, _digest(scope))
 
 
 def _legacy_scope_key(scope: str) -> str:
@@ -109,6 +167,29 @@ class PauseStore:
 
     def _legacy_path(self, scope: str) -> Path:
         return self.dir / (_legacy_scope_key(scope) + ".json")
+
+    def _write_path(self, scope: str) -> Path:
+        """The file the record of one scope is written to.
+
+        The name of a scope is its own.  A case-insensitive file system maps
+        two safe names that differ in case only onto one file, so the scope
+        that finds its name taken by another scope gets a name of its own
+        (Refs #1829).
+        """
+        path = self._path(scope)
+        record = self._read(path)
+        if record is None or record["scope"] == scope:
+            return path
+        own = self.dir / (_own_key(scope) + ".json")
+        other = self._read(own)
+        if other is None or other["scope"] == scope:
+            return own
+        for attempt in range(1, 16):
+            candidate = self.dir / ("{}-{}.json".format(_own_key(scope), attempt))
+            other = self._read(candidate)
+            if other is None or other["scope"] == scope:
+                return candidate
+        return path
 
     def _read(self, path: Path) -> Optional[Dict[str, Any]]:
         try:
@@ -146,22 +227,23 @@ class PauseStore:
         except OSError:
             return []
 
-    def _drop_legacy(self, scope: str) -> None:
-        """Remove the pre-#1829 copy of one scope's record.
+    def _drop_others(self, scope: str, keep: Path) -> None:
+        """Remove the other copies of one scope's record.
 
-        The old file name mapped several scopes onto one file, so the record
-        that survived under it belongs to the scope it carries: only that copy
-        is dropped when the scope is written again (Refs #1829).
+        The old file name mapped several scopes onto one file, so a record
+        written before the upgrade may still live under it; the record that
+        survived belongs to the scope it carries, and the next write of that
+        scope moves the record to the current name (Refs #1829).
         """
-        legacy = self._legacy_path(scope)
-        if legacy == self._path(scope):
-            return
-        if self._read_scope(legacy, scope) is None:
-            return
-        try:
-            legacy.unlink()
-        except OSError:
-            pass
+        for path in self._record_paths():
+            if path == keep:
+                continue
+            if self._read_scope(path, scope) is None:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def pause(self, scope: str, ttl_s: Any = None, reason: str = "", now: Any = None) -> Dict[str, Any]:
         """Create or replace a pause. ``now`` is required for deterministic expiry."""
@@ -179,45 +261,54 @@ class PauseStore:
             "reason": str(reason),
         }
         self.dir.mkdir(parents=True, exist_ok=True)
+        target = self._write_path(normalized)
         fd, temporary = tempfile.mkstemp(prefix=".pause-", dir=str(self.dir))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(record, stream, sort_keys=True)
                 stream.write("\n")
-            os.replace(temporary, self._path(normalized))
+            os.replace(temporary, target)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        self._drop_legacy(normalized)
+        self._drop_others(normalized, target)
         return dict(record)
 
     def resume(self, scope: str) -> bool:
-        """Remove one scope's pause; return whether a record existed."""
+        """Remove one scope's pause; return whether a record existed.
+
+        Every copy of the record goes: the file of the current name and the
+        leftovers of the old mapping (Refs #1829).
+        """
         normalized = _scope(scope)
-        for path in (self._path(normalized), self._legacy_path(normalized)):
-            if self._read_scope(path, normalized) is None:
-                continue
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                return False
-            return True
-        # a record under a name neither the current nor the old mapping gives:
-        # find it by the scope it carries
+        removed = False
         for path in self._record_paths():
             if self._read_scope(path, normalized) is None:
                 continue
             try:
                 path.unlink()
-            except FileNotFoundError:
+            except OSError:
                 continue
-            return True
-        return False
+            removed = True
+        return removed
+
+    def _rank(self, scope: str, path: Path) -> int:
+        """How current the file of one scope is; the lower the better.
+
+        The file of the current name wins over a leftover of the old mapping
+        (Refs #1829).
+        """
+        if path == self._path(scope):
+            return 0
+        if path == self._legacy_path(scope):
+            return 2
+        return 1
 
     def active(self, now: Any) -> List[Dict[str, Any]]:
         """Return unexpired pauses, sorted lexically by scope."""
         moment = _time(now, "now")
         records: Dict[str, Dict[str, Any]] = {}
+        paths: Dict[str, Path] = {}
         for path in self._record_paths():
             record = self._read(path)
             if record is None:
@@ -228,8 +319,9 @@ class PauseStore:
             scope = record["scope"]
             # one record per scope: the file of the current mapping wins over a
             # leftover of the old one (Refs #1829)
-            if scope not in records or path == self._path(scope):
+            if scope not in records or self._rank(scope, path) < self._rank(scope, paths[scope]):
                 records[scope] = record
+                paths[scope] = path
         return sorted(records.values(), key=lambda row: row["scope"])
 
     def is_paused(self, lane: Any = None, host: Any = None, backend: Any = None, now: Any = None) -> bool:

@@ -81,6 +81,17 @@ class ScopeKeyTests(unittest.TestCase):
         keys = [pause._scope_key(scope) for scope in scopes]
         self.assertEqual(len(keys), len(set(keys)))
 
+    def test_scopes_that_differ_in_case_only_get_different_file_names(self):
+        # a case-insensitive file system maps `lane~3aX` and `lane~3ax` onto
+        # one file, so the names must differ in more than case (Refs #1829)
+        self.assertNotEqual(pause._scope_key("lane:X"), pause._scope_key("lane:x"))
+        self.assertNotEqual(pause._scope_key("lane:X").lower(),
+                            pause._scope_key("lane:x").lower())
+
+    def test_a_long_scope_still_names_a_file(self):
+        key = pause._scope_key("lane:" + "é" * 50)
+        self.assertLessEqual(len(key.encode("utf-8")) + len(".json"), 255)
+
 
 class ScopeCollisionTests(unittest.TestCase):
     """Two scopes that shared a file must not affect each other (Refs #1829)."""
@@ -100,19 +111,47 @@ class ScopeCollisionTests(unittest.TestCase):
                         encoding="utf-8")
         return path
 
-    def test_two_scopes_of_one_kind_are_set_and_cleared_apart(self):
-        # the old mapping sent both scopes to the same file (lane_X / host_a_b)
-        self.store.pause("lane:X:Y", now=1)
-        self.store.pause("lane:X_Y", now=1)
+    def test_two_lane_scopes_are_set_and_cleared_apart(self):
+        # the old mapping sent both scopes to the same file (lane_X)
+        self.store.pause("lane:X", now=1)
+        self.store.pause("lane_X", now=1)
 
         self.assertEqual([row["scope"] for row in self.store.active(1)],
-                         ["lane:X:Y", "lane:X_Y"])
-        self.assertTrue(self.store.resume("lane:X_Y"))
-        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:X:Y"])
-        self.assertTrue(self.store.resume("lane:X:Y"))
+                         ["lane:X", "lane_X"])
+        self.assertTrue(self.store.resume("lane_X"))
+        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:X"])
+        self.assertTrue(self.store.resume("lane:X"))
         self.assertEqual(self.store.active(1), [])
 
-    def test_two_scopes_of_one_host_are_set_and_cleared_apart(self):
+    def test_two_scopes_that_differ_in_case_only_are_set_and_cleared_apart(self):
+        # a case-insensitive file system maps the two names onto one file
+        self.store.pause("lane:X", now=1)
+        self.store.pause("lane:x", now=1)
+
+        self.assertEqual([row["scope"] for row in self.store.active(1)],
+                         ["lane:X", "lane:x"])
+        self.assertTrue(self.store.resume("lane:x"))
+        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:X"])
+        self.assertTrue(self.store.resume("lane:X"))
+        self.assertEqual(self.store.active(1), [])
+
+    def test_a_long_scope_is_set_and_cleared(self):
+        scope = "lane:" + "é" * 50
+
+        self.store.pause(scope, now=1)
+
+        self.assertEqual([row["scope"] for row in self.store.active(1)], [scope])
+        self.assertTrue(self.store.resume(scope))
+        self.assertEqual(self.store.active(1), [])
+
+    def test_a_safe_scope_keeps_its_file_name_on_disk(self):
+        # the records written before #1829 stay where they are
+        self.store.pause("lane_X", now=1)
+
+        self.assertTrue((self.dir / "lane_X.json").exists())
+        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane_X"])
+
+    def test_two_host_scopes_are_set_and_cleared_apart(self):
         self.store.pause("host:a:b", now=1)
         self.store.pause("host:a_b", now=1)
 
@@ -126,11 +165,11 @@ class ScopeCollisionTests(unittest.TestCase):
 
     def test_every_scope_lives_in_its_own_file(self):
         self.store.pause("lane:X", now=1)
-        self.store.pause("lane:X_Y", now=1)
+        self.store.pause("lane_X", now=1)
 
         names = sorted(path.name for path in self.dir.glob("*.json"))
-        self.assertEqual(names, [pause._scope_key("lane:X") + ".json",
-                                 pause._scope_key("lane:X_Y") + ".json"])
+        self.assertEqual(names, sorted([pause._scope_key("lane:X") + ".json",
+                                         pause._scope_key("lane_X") + ".json"]))
 
     def test_a_record_of_another_scope_is_not_the_requested_scope(self):
         path = self.write_record(pause._scope_key("lane:X") + ".json", "lane:Y")
@@ -156,6 +195,28 @@ class ScopeCollisionTests(unittest.TestCase):
         self.assertFalse(legacy.exists())
         self.assertTrue((self.dir / (pause._scope_key("lane:M1") + ".json")).exists())
         self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:M1"])
+
+    def test_a_legacy_collision_file_is_honoured_and_moved_on_the_next_write(self):
+        # before #1829 the scopes `lane:X` and `lane_X` shared `lane_X.json`
+        legacy = self.write_record(pause._legacy_scope_key("lane:X") + ".json", "lane:X")
+
+        self.assertTrue(self.store.is_paused(lane="X", now=1))
+        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:X"])
+
+        self.store.pause("lane:X", now=1, reason="again")
+
+        self.assertFalse(legacy.exists())
+        self.assertTrue((self.dir / (pause._scope_key("lane:X") + ".json")).exists())
+        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:X"])
+
+    def test_the_underscore_scope_does_not_take_the_legacy_file_of_the_colon_scope(self):
+        legacy = self.write_record(pause._legacy_scope_key("lane:X") + ".json", "lane:X")
+
+        self.store.pause("lane_X", now=1)
+
+        self.assertTrue(legacy.exists())
+        self.assertEqual([row["scope"] for row in self.store.active(1)],
+                         ["lane:X", "lane_X"])
 
 
 if __name__ == "__main__":
