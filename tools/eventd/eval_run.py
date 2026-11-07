@@ -18,6 +18,7 @@ BUDGET = 2.0
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--env-file', type=Path, required=True)
+    parser.add_argument('--backend', choices=['openai', 'decisions'], default='openai')
     args = parser.parse_args()
     os.environ.pop('OPENAI_API_KEY', None)
     eventd.load_env_file(args.env_file)
@@ -27,7 +28,7 @@ def main():
     original = urllib.request.urlopen
     path = HERE / 'eval-raw.jsonl'
     prior = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-    completed = {(r['requested_model'], r['case_id']) for r in prior if 'case_id' in r and not r['decision_info']['fallback'] and not any(a.get('error') for a in r['attempts']) and not r['reason'].startswith('decision unavailable:')}
+    completed = {(r.get('requested_backend', 'openai'), r['requested_model'], r['case_id']) for r in prior if 'case_id' in r and not r['decision_info']['fallback'] and not any(a.get('error') for a in r['attempts']) and not r['reason'].startswith('decision unavailable:')}
     spent = 0.0
     for record in prior:
         for attempt in record.get('attempts', []):
@@ -39,7 +40,9 @@ def main():
     def bounded(req, timeout):
         nonlocal spent
         payload = json.loads(req.data)
-        payload['max_output_tokens'] = MAX_OUTPUT
+        is_decisions = req.full_url.endswith('/decisions')
+        if not is_decisions:
+            payload['max_output_tokens'] = MAX_OUTPUT
         data = json.dumps(payload).encode()
         model = payload['model']
         pin, pout = PRICES[model]
@@ -48,7 +51,7 @@ def main():
         if spent + reserve > BUDGET:
             raise RuntimeError('budget reservation exceeded')
         req.data = data
-        attempt = {'model': model, 'effort': payload['reasoning']['effort'], 'usage': None, 'response': None}
+        attempt = {'model': model, 'effort': payload.get('reasoning', {}).get('effort'), 'usage': None, 'response': None}
         calls.append(attempt)
         try:
             with original(req, timeout=timeout) as response:
@@ -71,19 +74,20 @@ def main():
 
     urllib.request.urlopen = bounded
     with path.open('a') as out:
-        for model, effort in [('gpt-6-luna', 'high'), ('gpt-6.1-terra', 'medium')]:
+        models = [('gpt-6-luna', None)] if args.backend == 'decisions' else [('gpt-6-luna', 'high'), ('gpt-6.1-terra', 'medium')]
+        for model, effort in models:
             for case in cases:
-                if (model, case['id']) in completed:
+                if (args.backend, model, case['id']) in completed:
                     continue
                 calls.clear()
                 info = {}
-                action, reason, elapsed, tokens = eventd.decide('openai', case['event'], case['context'], 60, model, effort, info)
-                record = {'case_id': case['id'], 'expected': case['expected'], 'requested_model': model, 'requested_effort': effort, 'action': action, 'reason': reason, 'elapsed_ms': elapsed, 'tokens': tokens, 'decision_info': info, 'attempts': list(calls)}
+                action, reason, elapsed, tokens = eventd.decide(args.backend, case['event'], case['context'], 60, model, effort, info)
+                record = {'requested_backend': args.backend, 'case_id': case['id'], 'expected': case['expected'], 'requested_model': model, 'requested_effort': effort, 'action': action, 'reason': reason, 'elapsed_ms': elapsed, 'tokens': tokens, 'decision_info': info, 'attempts': list(calls)}
                 out.write(json.dumps(record, ensure_ascii=False) + '\n')
                 out.flush()
                 if reason.startswith('decision unavailable:') or any(c.get('error') for c in calls):
                     raise SystemExit('Decision unavailable; stopped to avoid repeated failed requests.')
-    print(f'completed {len(cases) * 2} decisions; conservative accounted cost ${spent:.6f}')
+    print(f'completed {len(cases) * len(models)} decisions; conservative accounted cost ${spent:.6f}')
 
 
 if __name__ == '__main__':

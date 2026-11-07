@@ -71,6 +71,42 @@ class EventdTest(unittest.TestCase):
         record = json.loads((self.data / 'decisions.jsonl').read_text())
         self.assertEqual((record['model'], record['effort'], record['fallback']), ('gpt-6.1-terra', 'medium', True))
 
+    def test_decisions_choice_request_and_response(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({'answers': [{'type': 'choice', 'name': 'action', 'choice': 'defer'}], 'usage': {'total_tokens': 12}}).encode()
+        with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}), mock.patch('eventd.urllib.request.urlopen', return_value=response) as request:
+            action, _, _, tokens = eventd.decide('decisions', 'event', {}, 1)
+        payload = json.loads(request.call_args.args[0].data)
+        self.assertTrue(request.call_args.args[0].full_url.endswith('/v1/decisions'))
+        self.assertEqual([c['value'] for c in payload['questions'][0]['choices']], ['wake', 'defer', 'ignore'])
+        self.assertNotIn('tools', payload)
+        self.assertEqual((action, tokens), ('defer', 12))
+
+    def test_decisions_invalid_answer_falls_back_twice(self):
+        invalid = mock.MagicMock()
+        invalid.__enter__.return_value = invalid
+        invalid.read.return_value = b'{"answers":[{"type":"refusal","name":"action"}]}'
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({'output': [{'content': [{'type': 'output_text', 'text': json.dumps({'action': 'ignore', 'reason': 'ok', 'urgency': 'batch'})}]}]}).encode()
+        info = {}
+        with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}), mock.patch('eventd.urllib.request.urlopen', side_effect=[invalid, TimeoutError(), response]) as request:
+            action, _, _, _ = eventd.decide('decisions', 'x', {}, 1, audit_info=info)
+        self.assertEqual(action, 'ignore')
+        payloads = [json.loads(call.args[0].data) for call in request.call_args_list]
+        self.assertEqual([(p['model'], p.get('reasoning', {}).get('effort')) for p in payloads], [('gpt-6-luna', None), ('gpt-6-luna', 'high'), ('gpt-6.1-terra', 'medium')])
+        self.assertEqual(len(info['errors']), 2)
+        self.assertTrue(info['fallback'])
+
+    def test_decisions_all_fail_wakes(self):
+        info = {}
+        with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}), mock.patch('eventd.urllib.request.urlopen', side_effect=TimeoutError()) as request:
+            action, reason, _, _ = eventd.decide('decisions', 'x', {}, 1, audit_info=info)
+        self.assertEqual((action, request.call_count), ('wake', 3))
+        self.assertIn('decision unavailable', reason)
+        self.assertEqual(len(info['errors']), 3)
+
     def test_default_model_and_effort(self):
         with mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'test'}, clear=True), mock.patch('eventd.check_config', side_effect=lambda args: self.assertEqual((args.model, args.effort), ('gpt-6-luna', 'high'))), mock.patch('eventd.ingest', side_effect=KeyboardInterrupt):
             self.assertEqual(eventd.main(['--data-dir', str(self.data), 'serve']), 0)

@@ -12,7 +12,7 @@ tools/eventd/eventd --backend fake replay events.log
 
 `wait` 输出一行 JSON：`reason`、`events`、`groups`、`cursor`，有唤醒时退出 0；超时退出 1，错误退出 2。每个消费者使用不同名称。`serve` 不启动消费者；Claude Code 可后台运行 `wait`，Codex 可在当前轮次等待同一命令。
 
-`--log` / `EVENTD_LOG` 指定汇总日志；`--data-dir` / `EVENTD_DATA_DIR` 指定数据库、规则和审计目录。`--backend` / `EVENTD_BACKEND` 可设 `fake`、`openai`（默认）、`codex`。OpenAI 需设置环境变量 `OPENAI_API_KEY`，或通过 `--env-file` 加载该变量（已有环境变量优先），默认模型为 `gpt-6-luna`，effort 为 `high`；可用 `--model` / `EVENTD_MODEL` 和 `--effort` / `EVENTD_EFFORT` 配置。禁止使用 gpt-5.4 系列。决策失败时重试一次 `gpt-6.1-terra`、`medium`，仍失败则唤醒；审计记录实际模型、effort 和回退状态。缺少密钥时 `serve` 和 `wait` 会报错。文件仅解析密钥赋值，不执行 shell 命令。模型没有提供工具。当前 Codex CLI 无法验证禁用全部工具，因此 Codex 后端保守判定为不可用并唤醒，尚不执行模型调用。可调 `--decision-timeout`、`--hourly-limit`、`--max-silence`、`--health-timeout`（时间单位为秒）。超限及决策错误均唤醒。每条判断写入数据目录 `decisions.jsonl`。
+`--log` / `EVENTD_LOG` 指定汇总日志；`--data-dir` / `EVENTD_DATA_DIR` 指定数据库、规则和审计目录。`--backend` / `EVENTD_BACKEND` 可设 `fake`、`openai`、`decisions`（默认）、`codex`。OpenAI 需设置环境变量 `OPENAI_API_KEY`，或通过 `--env-file` 加载该变量（已有环境变量优先），默认模型为 `gpt-6-luna`，effort 为 `high`；可用 `--model` / `EVENTD_MODEL` 和 `--effort` / `EVENTD_EFFORT` 配置。禁止使用 gpt-5.4 系列。`decisions` 只用 gpt-6-luna 的 choice 判断，不提供工具；失败时依次回退 Responses API 的 `gpt-6-luna` / `high`、`gpt-6.1-terra` / `medium`，都失败则唤醒。`openai` 后端失败时回退 Terra；审计记录实际模型、effort 和回退状态。缺少密钥时 `serve` 和 `wait` 会报错。默认选择依据：53 个冻结案例中 decisions 漏唤醒 0 次、准确率 98.11%，Responses Luna high 分别为 2 次和 96.23%；样本有限，详见 [EVAL.md](EVAL.md)。文件仅解析密钥赋值，不执行 shell 命令。模型没有提供工具。当前 Codex CLI 无法验证禁用全部工具，因此 Codex 后端保守判定为不可用并唤醒，尚不执行模型调用。可调 `--decision-timeout`、`--hourly-limit`、`--max-silence`、`--health-timeout`（时间单位为秒）。超限及决策错误均唤醒。每条判断写入数据目录 `decisions.jsonl`。
 
 消费者规则文件为数据目录的 `consumers/NAME.json`，例如：
 
