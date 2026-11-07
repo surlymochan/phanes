@@ -143,7 +143,15 @@ GitHub Projects #6 和 #7 作为项目管理入口。实施前核对两个 Proje
 
 **状态**：提案，未实施。验证方案：挑 10 至 20 个 Issue 分两组，一组走现流程，一组走新流程，用同一冻结保留测试判通过，按卡配对比较。跟踪 Issue 见 GitHub。
 
-**模型约束**（用户 2026-11-07 定）：写代码的作者只用 codex gpt-6-luna high 或 MiniMax-M3.1-Flash，审查只用 codex gpt-6.1-terra high；总并发 20（codex 10、minimax 10）。
+**模型约束**（用户 2026-11-07 定）：
+
+| 步骤 | 模型 |
+|---|---|
+| Spec（新角色） | gpt-6.1-sol high |
+| Build（作者） | MiniMax-M3.1-Flash |
+| Reviewer | gpt-6.1-terra high |
+
+写代码的作者只用 codex gpt-6-luna high 或 MiniMax-M3.1-Flash；Spec 属新角色，不受作者白名单约束。总并发 20（codex 10、minimax 10）。sol 此前没有任何 run 数据，需先试跑核实可用性、速度和额度；Spec 经 terra high 的低成本核对（覆盖验收点、无歧义）再放行。验证实验可增加"Spec 模型"对比维度（如 sol high 对 terra high），用下游通过率决定是否调整。
 
 ## 9. 待确认事项
 
