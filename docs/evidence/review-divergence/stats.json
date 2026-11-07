@@ -1,0 +1,68 @@
+{
+  "agreement": {
+    "agreed": 1,
+    "agreement_rate": 0.3333333333333333,
+    "comparable": 3,
+    "diverged": 2,
+    "not_comparable": 2
+  },
+  "attribution": {
+    "both": 1,
+    "lane": 2,
+    "neither": 0,
+    "tester": 0,
+    "undecided": 2
+  },
+  "divergence": [
+    {
+      "count": 1,
+      "lane_verdict": "APPROVE",
+      "tester_verdict": "FAIL"
+    },
+    {
+      "count": 2,
+      "lane_verdict": "APPROVE",
+      "tester_verdict": "INSUFFICIENT"
+    },
+    {
+      "count": 1,
+      "lane_verdict": "CHANGES",
+      "tester_verdict": "FAIL"
+    },
+    {
+      "count": 1,
+      "lane_verdict": "CHANGES",
+      "tester_verdict": "PASS"
+    }
+  ],
+  "generated_at": "2026-11-03T08:22:34.755843Z",
+  "incomplete": [],
+  "inconsistent_backfills": [],
+  "log": "docs/evidence/review-divergence/divergence-log.jsonl",
+  "outcomes": {
+    "closed": 0,
+    "merged": 2,
+    "re_review": 3
+  },
+  "pending": [],
+  "rounds": {
+    "backfilled": 5,
+    "incomplete": 0,
+    "pending": 0,
+    "total": 5
+  },
+  "sides": {
+    "lane": {
+      "abstained": 0,
+      "accuracy": 0.8,
+      "correct": 4,
+      "samples": 5
+    },
+    "tester": {
+      "abstained": 2,
+      "accuracy": 0.3333333333333333,
+      "correct": 1,
+      "samples": 3
+    }
+  }
+}

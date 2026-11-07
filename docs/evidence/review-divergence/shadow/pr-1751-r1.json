@@ -1,0 +1,56 @@
+{
+  "base": "02024844989d835669995761dcd19480b7a68b5f",
+  "changed_files": [
+    "docs/fleet-status-page.md",
+    "openswarm/lib/dispatch/fleet_status.py",
+    "openswarm/tests/.dde4dddfeebef63b-00000000.so",
+    "openswarm/tests/.dde4dddffef7f474-00000000.so",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/broker-requests.jsonl",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/capacity.json",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/fleet-health.json",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/gh-issues.json",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/gh-prs.json",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/lanes-status.json",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/markers/PAUSE-MINT",
+    "openswarm/tests/fixtures/fleet-status-2026-11-02/pauses/lane_CX5.json",
+    "openswarm/tests/test_fleet_status.py",
+    "tools/fleet-status-page.py"
+  ],
+  "checks": [
+    {
+      "detail": "binary or build artifacts in the diff: openswarm/tests/.dde4dddfeebef63b-00000000.so, openswarm/tests/.dde4dddffef7f474-00000000.so",
+      "name": "diff-hygiene",
+      "role": "gate",
+      "status": "fail",
+      "subjects": 14
+    },
+    {
+      "detail": "2 changed Python file(s) compile",
+      "name": "python-syntax",
+      "role": "evidence",
+      "status": "pass",
+      "subjects": 2
+    },
+    {
+      "detail": "1 test file(s) green: openswarm/tests/test_fleet_status.py",
+      "name": "unit-tests",
+      "role": "evidence",
+      "status": "pass",
+      "subjects": 1
+    },
+    {
+      "detail": "1 entry point(s) start: tools/fleet-status-page.py starts",
+      "name": "cli-smoke",
+      "role": "evidence",
+      "status": "pass",
+      "subjects": 1
+    }
+  ],
+  "head": "e96ad25d2360e6961ad1f12a4bca536cc80e714f",
+  "pr": 1751,
+  "reason": "binary or build artifacts in the diff: openswarm/tests/.dde4dddfeebef63b-00000000.so, openswarm/tests/.dde4dddffef7f474-00000000.so",
+  "recorded_at": "2026-11-03T08:21:44.571030Z",
+  "schema": "phanes.review-shadow-tester/1",
+  "uncovered": [],
+  "verdict": "FAIL"
+}

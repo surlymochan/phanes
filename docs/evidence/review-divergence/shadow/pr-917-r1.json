@@ -1,0 +1,12 @@
+{
+  "base": null,
+  "changed_files": [],
+  "checks": [],
+  "head": "a141b7b371",
+  "pr": 917,
+  "reason": "the head object is not in the local object store, so the shadow run cannot inspect the reviewed head",
+  "recorded_at": "2026-11-03T08:21:44.342793Z",
+  "schema": "phanes.review-shadow-tester/1",
+  "uncovered": [],
+  "verdict": "INSUFFICIENT"
+}
