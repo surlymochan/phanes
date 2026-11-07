@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -46,6 +47,177 @@ class EventdTest(unittest.TestCase):
         self.add('[lane-b] status=done')
         result = eventd.wait_once(self.db, self.data, 'one', self.args)
         self.assertEqual(result['reason'], 'group complete')
+
+    def seed_unwoken_history(self):
+        eventd.save_json(self.data / 'groups.json', {'g': {'pattern': 'lane-', 'expect': 2}})
+        with self.db:
+            self.db.executemany('INSERT INTO events(line,text) VALUES (?,?)',
+                                ((i, '[lane-a] HEARTBEAT: idle') for i in range(1, 20_001)))
+        self.add('[lane-a] RISK: defer this')
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+
+    def test_large_unwoken_history_is_not_reprocessed(self):
+        cpu_start = time.process_time()
+        wall_start = time.monotonic()
+        self.seed_unwoken_history()
+        self.assertLess(time.monotonic() - wall_start, 15)
+        self.assertLess(time.process_time() - cpu_start, 10)
+        self.assertEqual(self.db.execute('SELECT cursor FROM consumers WHERE name="one"').fetchone()[0], 0)
+        self.assertEqual(self.db.execute('SELECT max(event_id) FROM evaluated WHERE consumer="one"').fetchone()[0], 20_001)
+        # A restarted waiter must use persisted evaluation state, not rescan history.
+        self.db.close()
+        self.db = eventd.connect(self.data)
+        cpu_start = time.process_time()
+        wall_start = time.monotonic()
+        with mock.patch('eventd.progress', wraps=eventd.progress) as progress, mock.patch('eventd.classify', wraps=eventd.classify) as classify:
+            for _ in range(5):
+                self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+            progress.assert_not_called()
+            classify.assert_not_called()
+        self.assertLess(time.monotonic() - wall_start, 1)
+        self.assertLess(time.process_time() - cpu_start, .2)
+        self.add('[lane-a] status=done')
+        cpu_start = time.process_time()
+        wall_start = time.monotonic()
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+        self.assertLess(time.monotonic() - wall_start, 1)
+        self.assertLess(time.process_time() - cpu_start, .5)
+        self.add('[lane-b] status=done')
+        result = eventd.wait_once(self.db, self.data, 'one', self.args)
+        self.assertEqual(result['reason'], 'group complete')
+        self.assertEqual(result['groups']['g']['done'], 2)
+        self.assertEqual([e['text'] for e in result['events']],
+                         ['[lane-a] RISK: defer this', '[lane-b] status=done'])
+        # Delivery remains at least once until the wake cursor is committed.
+        self.assertEqual(eventd.wait_once(self.db, self.data, 'one', self.args), result)
+
+    def test_idle_wait_with_unwoken_history_uses_negligible_cpu(self):
+        self.seed_unwoken_history()
+        cpu_start = time.process_time()
+        wall_start = time.monotonic()
+        self.assertEqual(eventd.main(['--data-dir', str(self.data), '--backend', 'fake',
+                                      'wait', '--consumer', 'one', '--timeout', '2.1']), 1)
+        self.assertGreaterEqual(time.monotonic() - wall_start, 2.1)
+        self.assertLess(time.process_time() - cpu_start, .2)
+
+    def test_large_history_with_distinct_terminal_lanes_is_bounded(self):
+        groups = {'g': {'pattern': 'lane-', 'expect': 20_001}}
+        eventd.save_json(self.data / 'groups.json', groups)
+        with self.db:
+            self.db.executemany('INSERT INTO events(line,text) VALUES (?,?)',
+                                ((i, f'[lane-{i}] DONE: status=done') for i in range(1, 20_001)))
+            self.db.execute('INSERT INTO consumers VALUES (?,?,?)', ('one', 16_000, time.time()))
+        self.assertEqual(eventd.progress(self.db, groups, 16_000, 'one')['g']['done'], 16_000)
+        cpu_start = time.process_time()
+        wall_start = time.monotonic()
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+        wall = time.monotonic() - wall_start
+        cpu = time.process_time() - cpu_start
+        self.assertLess(wall, 5, f'4,000 distinct lanes: wall={wall:.3f}s cpu={cpu:.3f}s')
+        self.assertLess(cpu, 3, f'4,000 distinct lanes: wall={wall:.3f}s cpu={cpu:.3f}s')
+        self.assertEqual(self.db.execute('SELECT max(event_id) FROM evaluated WHERE consumer="one"').fetchone()[0], 20_000)
+        self.db.close()
+        self.db = eventd.connect(self.data)
+        self.assertEqual(eventd.progress(self.db, groups, 20_000, 'one')['g']['done'], 20_000)
+        # Repeat completion for an existing lane must not increase the count.
+        self.add('[lane-20000 12:34] DONE: status=done')
+        eventd.setmeta(self.db, 'heartbeat', time.time())
+        self.db.commit()
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+        self.add('[lane-new] DONE: status=done')
+        result = eventd.wait_once(self.db, self.data, 'one', self.args)
+        self.assertEqual(result['reason'], 'group complete')
+        self.assertEqual(result['groups']['g']['done'], 20_001)
+        self.assertEqual(eventd.wait_once(self.db, self.data, 'one', self.args), result)
+
+    def test_legacy_group_progress_migrates_once(self):
+        groups = {'g': {'pattern': 'lane-', 'expect': 3}}
+        self.add('[lane-a] DONE: status=done')
+        self.add('[lane-b] DONE: status=done')
+        key = hashlib.sha256(json.dumps(['one', 'lane-']).encode()).hexdigest()
+        with self.db:
+            self.db.execute('INSERT INTO group_progress VALUES (?,?,?)',
+                            (key, 1, json.dumps({'lane-a': '[lane-a] DONE: status=done'})))
+        self.assertEqual(eventd.progress(self.db, groups, 2, 'one')['g']['done'], 2)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM group_progress').fetchone()[0], 0)
+        self.db.close()
+        self.db = eventd.connect(self.data)
+        self.add('[lane-a 12:34] DONE: status=done')
+        with mock.patch('eventd.json.loads', side_effect=AssertionError('full-state deserialization')):
+            self.assertEqual(eventd.progress(self.db, groups, 3, 'one')['g']['done'], 2)
+
+    def test_group_progress_rewinds_to_requested_snapshot(self):
+        groups = {'g': {'pattern': 'lane-', 'expect': 2}}
+        self.add('[lane-a] DONE: status=done')
+        self.add('[lane-b] DONE: status=done')
+        self.assertEqual(eventd.progress(self.db, groups, 2, 'one')['g']['done'], 2)
+        self.assertEqual(eventd.progress(self.db, groups, 1, 'one')['g']['done'], 1)
+        self.assertEqual(eventd.progress(self.db, groups, 2, 'one')['g']['done'], 2)
+
+    def test_group_lane_and_cursor_updates_are_atomic(self):
+        groups = {'g': {'pattern': 'lane-', 'expect': 2}}
+        self.add('[lane-a] DONE: status=done')
+        eventd.progress(self.db, groups, 0, 'one')
+        self.db.execute("CREATE TRIGGER fail_progress BEFORE INSERT ON group_counts "
+                        "WHEN NEW.cursor=1 BEGIN SELECT RAISE(ABORT, 'interrupted update'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            eventd.progress(self.db, groups, 1, 'one')
+        self.assertEqual(self.db.execute('SELECT count(*) FROM group_lanes').fetchone()[0], 0)
+        self.assertEqual(self.db.execute('SELECT cursor,done FROM group_counts').fetchone(), (0, 0))
+        self.db.execute('DROP TRIGGER fail_progress')
+        self.assertEqual(eventd.progress(self.db, groups, 1, 'one')['g']['done'], 1)
+
+    def test_interleaved_consumers_keep_independent_group_progress(self):
+        eventd.save_json(self.data / 'groups.json', {'g': {'pattern': 'lane-', 'expect': 2}})
+        self.add('[lane-a] status=done')
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+        self.add('[lane-a] HEARTBEAT: idle')
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'two', self.args))
+        with mock.patch('eventd.progress', wraps=eventd.progress) as progress:
+            self.assertIsNone(eventd.wait_once(self.db, self.data, 'two', self.args))
+            progress.assert_not_called()
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+        self.add('[lane-b] status=done')
+        for consumer in ('two', 'one'):
+            result = eventd.wait_once(self.db, self.data, consumer, self.args)
+            self.assertEqual(result['groups']['g']['done'], 2)
+            self.assertEqual(result['reason'], 'group complete')
+
+    def test_group_add_and_expect_change_after_evaluation(self):
+        eventd.save_json(self.data / 'groups.json', {'g': {'pattern': 'lane-', 'expect': 3}})
+        self.add('[lane-a] status=done')
+        self.assertIsNone(eventd.wait_once(self.db, self.data, 'one', self.args))
+        # Changing expect retains the count; a new pattern builds its own state.
+        eventd.save_json(self.data / 'groups.json', {
+            'g': {'pattern': 'lane-', 'expect': 2},
+            'new': {'pattern': 'lane-[ab]', 'expect': 2}})
+        self.add('[lane-b] status=done')
+        result = eventd.wait_once(self.db, self.data, 'one', self.args)
+        self.assertEqual(result['groups'], {'g': {'done': 2, 'expect': 2},
+                                           'new': {'done': 2, 'expect': 2}})
+        self.assertEqual(result['reason'], 'group complete')
+
+    def test_routine_ignore_can_be_overridden_but_mandatory_wakes_cannot(self):
+        eventd.save_json(self.data / 'groups.json', {'g': {'pattern': 'lane-', 'expect': 1}})
+        for i, kind in enumerate(('MSG', 'START', 'RESUME', 'HEARTBEAT')):
+            name = 'routine-' + str(i)
+            eventd.save_json(self.data / 'consumers' / (name + '.json'),
+                             {'overrides': [{'pattern': kind, 'action': 'wake'}]})
+            self.add('[lane] ' + kind + ': notice')
+            with mock.patch('eventd.decide') as decide:
+                result = eventd.wait_once(self.db, self.data, name, self.args)
+                self.assertEqual(result['reason'], 'consumer rule')
+                decide.assert_not_called()
+        for i, text in enumerate(('[lane] EXITED: error', '[lane-a] status=done', '[other] status=failed')):
+            name = 'mandatory-' + str(i)
+            eventd.save_json(self.data / 'consumers' / (name + '.json'),
+                             {'overrides': [{'pattern': '.*', 'action': 'ignore'}]})
+            with self.db:
+                self.db.execute('INSERT INTO consumers VALUES (?,?,?)',
+                                (name, self.db.execute('SELECT max(id) FROM events').fetchone()[0], time.time()))
+            self.add(text)
+            result = eventd.wait_once(self.db, self.data, name, self.args)
+            self.assertIn(result['reason'], ('group complete', 'failure or process error'))
 
     def test_untrusted_status_does_not_complete_group(self):
         self.add('[lane-a] MSG: status=failed')

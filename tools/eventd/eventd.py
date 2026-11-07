@@ -25,7 +25,11 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, line INTE
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS consumers (name TEXT PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0, last_wake REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS calls (at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS evaluated (consumer TEXT NOT NULL, event_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (consumer,event_id));'''
+CREATE TABLE IF NOT EXISTS evaluated (consumer TEXT NOT NULL, event_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (consumer,event_id));
+CREATE INDEX IF NOT EXISTS evaluated_action ON evaluated (consumer,action,event_id);
+CREATE TABLE IF NOT EXISTS group_progress (group_key TEXT PRIMARY KEY, cursor INTEGER NOT NULL, state TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS group_counts (group_key TEXT PRIMARY KEY, cursor INTEGER NOT NULL, done INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS group_lanes (group_key TEXT NOT NULL, lane TEXT NOT NULL, PRIMARY KEY (group_key,lane));'''
 
 
 def connect(data):
@@ -65,21 +69,42 @@ def lane(text):
     return re.sub(r'\s+\d\d:\d\d$', '', match.group(1)) if match else ''
 
 
-def progress(db, groups, upto):
+def progress(db, groups, upto, consumer=None):
     result = {}
-    rows = db.execute('SELECT text FROM events WHERE id<=? ORDER BY id', (upto,))
-    history = [r[0] for r in rows]
     for name, spec in groups.items():
-        regex = re.compile(spec['pattern'])
-        # The latest terminal status per lane counts once, including failures.
-        terminal = {}
-        for text in history:
-            event = re.sub(r'^\d\d:\d\d:\d\d\s+(?=\[)', '', text)
-            if re.match(r'^\[[^]]+\]\s+(MSG|START|RESUME|HEARTBEAT|RISK|STALL)\b', event, re.I):
-                continue
-            if regex.search(text) and re.search(r'\bstatus=(done|failed|partial|budget_exceeded)\b', text, re.I):
-                terminal[lane(text) or text] = text
-        result[name] = {'done': len(terminal), 'expect': spec['expect']}
+        pattern = spec['pattern']
+        regex = re.compile(pattern)
+        key = hashlib.sha256(json.dumps([consumer, pattern]).encode()).hexdigest()
+        with db:
+            cached = db.execute('SELECT cursor,done FROM group_counts WHERE group_key=?', (key,)).fetchone()
+            cursor, done = cached if cached else (0, 0)
+            if not cached:
+                # Import the old JSON cache once, never once per new event.
+                legacy = db.execute('SELECT cursor,state FROM group_progress WHERE group_key=?', (key,)).fetchone()
+                if legacy and legacy[0] <= upto:
+                    terminal = json.loads(legacy[1])
+                    db.executemany('INSERT OR IGNORE INTO group_lanes VALUES (?,?)',
+                                   ((key, name) for name in terminal))
+                    cursor, done = legacy[0], len(terminal)
+                db.execute('DELETE FROM group_progress WHERE group_key=?', (key,))
+            if cursor > upto:
+                # Recovery may request a snapshot before the cached position.
+                db.execute('DELETE FROM group_lanes WHERE group_key=?', (key,))
+                cursor, done = 0, 0
+            if cursor < upto:
+                rows = db.execute('SELECT id,text FROM events WHERE id>? AND id<=? ORDER BY id', (cursor, upto))
+                for event_id, text in rows:
+                    event = re.sub(r'^\d\d:\d\d:\d\d\s+(?=\[)', '', text)
+                    if re.match(r'^\[[^]]+\]\s+(MSG|START|RESUME|HEARTBEAT|RISK|STALL)\b', event, re.I):
+                        continue
+                    if regex.search(text) and re.search(r'\bstatus=(done|failed|partial|budget_exceeded)\b', text, re.I):
+                        added = db.execute('INSERT OR IGNORE INTO group_lanes VALUES (?,?)', (key, lane(text) or text))
+                        done += added.rowcount
+            # Lane changes, count and cursor commit together. No full-state scan
+            # or serialization is needed as the number of lanes grows.
+            if cached != (upto, done):
+                db.execute('INSERT OR REPLACE INTO group_counts VALUES (?,?,?)', (key, upto, done))
+        result[name] = {'done': done, 'expect': spec['expect']}
     return result
 
 
@@ -252,22 +277,33 @@ def wait_once(db, data, name, args):
         audit(data, {'line': 0, 'event_id': cursor, 'consumer': name, 'layer': 'fallback', 'backend': args.backend, 'action': 'wake', 'reason': 'consumer rules unavailable', 'elapsed_ms': 0, 'token': None})
         return {'reason': 'consumer rules unavailable', 'events': [], 'groups': {}, 'cursor': cursor}
     groups = load_json(data / 'groups.json', {})
-    pending = []
-    rows = db.execute('SELECT id,line,text FROM events WHERE id>? ORDER BY id', (cursor,)).fetchall()
+    # Evaluations persist independently of delivery, including ignore and defer.
+    evaluated_cursor = max(cursor, db.execute(
+        'SELECT coalesce(max(event_id),0) FROM evaluated WHERE consumer=?', (name,)).fetchone()[0])
+
+    def wake(reason, upto):
+        pending = [{'line': line, 'text': text} for line, text in db.execute(
+            'SELECT e.line,e.text FROM evaluated v JOIN events e ON e.id=v.event_id '
+            "WHERE v.consumer=? AND v.event_id>? AND v.event_id<=? AND v.action!='ignore' "
+            'ORDER BY v.event_id', (name, cursor, upto))]
+        return {'reason': reason, 'events': pending,
+                'groups': progress(db, groups, upto, name), 'cursor': upto}
+
+    # A wake may have been evaluated before a crash but not delivered/committed.
+    undelivered = db.execute(
+        "SELECT event_id,reason FROM evaluated WHERE consumer=? AND event_id>? AND action='wake' "
+        'ORDER BY event_id LIMIT 1', (name, cursor)).fetchone()
+    if undelivered:
+        return wake(undelivered[1], undelivered[0])
+    rows = db.execute('SELECT id,line,text FROM events WHERE id>? ORDER BY id', (evaluated_cursor,)).fetchall()
     for event_id, line, text in rows:
-        before, after = progress(db, groups, event_id - 1), progress(db, groups, event_id)
-        cached = db.execute('SELECT action,reason FROM evaluated WHERE consumer=? AND event_id=?', (name, event_id)).fetchone()
-        if cached:
-            action, reason = cached
-            if action != 'ignore': pending.append({'line': line, 'text': text})
-            if action == 'wake': return {'reason': reason, 'events': pending, 'groups': after, 'cursor': event_id}
-            continue
+        before, after = progress(db, groups, event_id - 1, name), progress(db, groups, event_id, name)
         action, reason = classify(text, before, after)
         layer, elapsed, tokens = 'rule', 0, None
         decision_info = {'model': None, 'effort': None, 'fallback': False}
-        if action is None:
-            layer = 'decision'
-            # Per-consumer optional regex overrides apply only after mandatory rules.
+        if action is None or (action, reason) == ('ignore', 'routine event'):
+            layer = 'decision' if action is None else 'rule'
+            # Mandatory wakes retain priority; routine ignores can be overridden.
             for override in rules.get('overrides', []):
                 if re.search(override['pattern'], text):
                     action, reason, layer = override['action'], 'consumer rule', 'rule'
@@ -291,18 +327,18 @@ def wait_once(db, data, name, args):
         audit(data, {'line': line, 'event_id': event_id, 'consumer': name, 'layer': layer, 'backend': args.backend, 'action': action, 'reason': reason, 'elapsed_ms': elapsed, 'token': tokens, **decision_info})
         with db:
             db.execute('INSERT OR REPLACE INTO evaluated VALUES (?,?,?,?)', (name, event_id, action, reason))
-        if action != 'ignore':
-            pending.append({'line': line, 'text': text})
+        evaluated_cursor = event_id
         if action == 'wake':
-            return {'reason': reason, 'events': pending, 'groups': after, 'cursor': event_id}
+            return wake(reason, event_id)
     heartbeat = float(getmeta(db, 'heartbeat', '0'))
     if now - heartbeat > args.health_timeout:
-        audit(data, {'line': 0, 'event_id': cursor, 'consumer': name, 'layer': 'fallback', 'backend': args.backend, 'action': 'wake', 'reason': 'eventd serve unavailable', 'elapsed_ms': 0, 'token': None})
-        return {'reason': 'eventd serve unavailable', 'events': pending, 'groups': progress(db, groups, rows[-1][0] if rows else cursor), 'cursor': rows[-1][0] if rows else cursor}
-    if now - last_wake >= args.max_silence:
-        audit(data, {'line': 0, 'event_id': cursor, 'consumer': name, 'layer': 'fallback', 'backend': args.backend, 'action': 'wake', 'reason': 'maximum silence exceeded', 'elapsed_ms': 0, 'token': None})
-        return {'reason': 'maximum silence exceeded', 'events': pending, 'groups': progress(db, groups, rows[-1][0] if rows else cursor), 'cursor': rows[-1][0] if rows else cursor}
-    return None
+        reason = 'eventd serve unavailable'
+    elif now - last_wake >= args.max_silence:
+        reason = 'maximum silence exceeded'
+    else:
+        return None
+    audit(data, {'line': 0, 'event_id': cursor, 'consumer': name, 'layer': 'fallback', 'backend': args.backend, 'action': 'wake', 'reason': reason, 'elapsed_ms': 0, 'token': None})
+    return wake(reason, evaluated_cursor)
 
 
 def consumer_name(value):
@@ -368,7 +404,13 @@ def main(argv=None):
                         db.execute('DELETE FROM evaluated WHERE consumer=? AND event_id<=?', (args.consumer, result['cursor']))
                     return 0
                 if args.timeout is not None and time.monotonic() - start >= args.timeout: return 1
-                time.sleep(.2)
+                # The ingestion service writes SQLite independently; one-second
+                # polling avoids a hot loop while keeping event latency bounded.
+                delay = 1.0
+                if args.timeout is not None:
+                    delay = min(delay, max(0.0, args.timeout - (time.monotonic() - start)))
+                if delay > 0:
+                    time.sleep(delay)
         else:
             # Isolated in-memory database: replay never changes live cursors.
             db.close()
