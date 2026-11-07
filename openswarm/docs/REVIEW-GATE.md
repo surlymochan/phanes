@@ -34,3 +34,39 @@ snapshot before applying it. The checker is independent of doctor wiring.
 fix, or union-merge, produces a new commit that needs another review. A successful
 review status on the previous SHA does not approve the new SHA. Keep the PR out
 of merge until the review and required checks apply to its current head.
+
+## The content check: a merge is not a delivery (Refs #1814)
+
+PR #1799 was merged with green checks, but the merged head carried only the
+review record `.lane-review/PR-1799.md`: the functional commits stayed on a side
+branch, so the merge delivered nothing. The merge gate (`openswarm merge-gate`)
+therefore judges the file list of the PR as well (`lib/merge/content.py`):
+
+- a changed code, test or tool path is a delivery;
+- a changed review or evidence artifact (`.lane-review/`, `docs/evidence/`) is
+  not;
+- a PR with neither is a suspected empty delivery: the merge is blocked with
+  `blocked:empty_delivery`, the PR is labelled `needs-human`, and a comment
+  explains it (`疑似空交付：PR 不含关卡功能变更`). The gate never closes a PR.
+
+A card declares the paths it delivers in its issue, and a changed file that
+matches a declared path counts as the delivery (the declaration wins over the
+artifact classification):
+
+```
+产物路径：docs/architecture-review-brief.md
+Expected-Paths: `tools/check_evidence.py`
+```
+
+The failure modes are explicit: when the file list is missing, null or cannot be
+read the merge stays blocked (`blocked:content_unreadable`, or
+`blocked:gh_error` when the PR itself cannot be read) and the gate warns on
+stderr; it never merges on a guess and never passes silently. A content check
+that cannot run at all (a missing or broken `lib/merge/content.py`) blocks the
+same way. A label or a comment that failed is reported on stderr and tried
+again in the next round.
+
+The gate lifts the `needs-human` label again when the delivery arrives, but
+only the label it added itself: an escalation of the dispatcher (a review that
+keeps failing, a CHANGES round that needs a human) stays untouched.
+`--no-content-check` turns the check off.

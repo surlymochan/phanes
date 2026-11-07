@@ -311,6 +311,26 @@ the first reason of the priority order `no_head_sha`, `label`, `ci`, `ci_pending
 reviewed one. A PR whose `gh pr view` call fails is reported as `blocked:gh_error`; the other PRs are still judged.
 The exit code is 0 when every PR passed the gate and 1 when a PR was blocked or could not be merged.
 
+The gate also checks the *content* of the PR: a PR that changes no code, test or tool path is a suspected empty
+delivery (merge != delivery, Refs #1814) and is blocked with `blocked:empty_delivery`. The gate labels such a PR
+`needs-human` and comments why (`疑似空交付：PR 不含关卡功能变更`); it never closes the PR. Review and evidence
+artifacts (`.lane-review/`, `docs/evidence/`) are not a delivery. A card declares the paths it delivers in its
+issue, and a changed file that matches a declared path counts as the delivery:
+
+```
+产物路径：docs/architecture-review-brief.md
+Expected-Paths: `tools/check_evidence.py`
+```
+
+The other content verdict is `blocked:content_unreadable`: the file list is missing, null or unusable, so the
+merge stays blocked and the gate warns on stderr. The gate never merges on a guess and never passes silently.
+A content check that cannot run at all (a missing or broken `lib/merge/content.py`) blocks the same way.
+`--no-content-check` turns the content check off.
+
+The gate lifts the `needs-human` label again when the delivery arrives, but only the label it added itself: an
+escalation of the dispatcher (a review that keeps failing, a CHANGES round that needs a human) stays. A label or a
+comment that failed is reported on stderr and tried again in the next round.
+
 The review records live in `$OPENSWARM_HOME/reviews.json`. One entry per pull request, keyed by `owner/name#number`:
 
 ```json

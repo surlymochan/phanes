@@ -30,9 +30,14 @@ MAIN_SHA = "c" * 40
 
 
 def pr_payload(head=HEAD_SHA, conclusion="FAILURE"):
-    """The `gh pr view --json` payload of a pull request with a red check."""
+    """The `gh pr view --json` payload of a pull request with a red check.
+
+    The file list is part of the payload since the content check (Refs #1814)
+    reads it: the changed code path makes the pull request a delivery.
+    """
     return {"number": PR, "headRefOid": head, "headRefName": "topic",
             "labels": [], "mergeable": "MERGEABLE",
+            "files": [{"path": "openswarm/lib/merge/content.py"}],
             "statusCheckRollup": [{"name": "build", "status": "COMPLETED",
                                     "conclusion": conclusion}]}
 

@@ -388,9 +388,18 @@ A ledger record carries the outcome and what the next run learns from it: `exec_
 
 `merge-gate` judges every open pull request of the repository (or `--pr N` only) and reports one verdict per PR:
 `mergeable` or `blocked:<reason>` (`no_head_sha`, `label`, `ci`, `ci_pending`, `conflict`, `no_checks`, `no_review`,
-`verdict`, `stale_review`, `gh_error`). The reviewed head sha and the review verdict come from
-`$OPENSWARM_HOME/reviews.json`; without `--dry-run` a `mergeable` PR is squash merged with
+`verdict`, `stale_review`, `empty_delivery`, `content_unreadable`, `gh_error`). The reviewed head sha and the review
+verdict come from `$OPENSWARM_HOME/reviews.json`; without `--dry-run` a `mergeable` PR is squash merged with
 `gh pr merge --squash --match-head-commit <sha>`. It is an explicit command: openswarm runs no merge loop.
+
+The gate also checks the content of the PR (Refs #1814): a PR that changes no code, test or tool path is a suspected
+empty delivery and is blocked with `blocked:empty_delivery`. Such a PR is labelled `needs-human` and commented
+(`疑似空交付：PR 不含关卡功能变更`); the gate never closes a PR. Review and evidence artifacts (`.lane-review/`,
+`docs/evidence/`) are not a delivery. A card declares the paths it delivers in its issue (a line
+`产物路径：docs/x.md` or `Expected-Paths: tools/y.py`), and a changed file that matches a declared path counts as
+the delivery. A missing or unusable file list blocks the merge (`blocked:content_unreadable`) instead of passing
+silently, and the gate lifts the `needs-human` label only when it added that label itself. `--no-content-check`
+turns that check off.
 
 Two optional flags cover what a hand written merge loop usually does: `--rerun-failed-once` reruns the failed CI run
 of a PR that is blocked by `ci` (once per run, remembered in `$OPENSWARM_HOME/merge-reruns.json`; the runs of the
