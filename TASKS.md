@@ -21,3 +21,17 @@
 - [x] Rebase the single rename commit onto `main-latest` and preserve main additions.
 - [x] Rename main-latest documentation and path references; refresh inventory and changed-file manifest.
 - [x] Run baseline and current Volto checks, plus focused Swrm tests.
+
+# Safe-storage review fixes
+
+- [x] Restrict environment detection and cover inactive values.
+- [x] Add flags to all six standalone browser harnesses.
+- [x] Run real Electron isolation probe and unit tests.
+- [x] Complete changed-file lint and node typecheck.
+- [x] Run browser user-control E2E: 27 cases passed.
+
+# Safe-storage second review fixes
+
+- [x] Add explicit basic storage and a test marker to both Linux package launches.
+- [x] Verify the macOS mock backend with independent evidence: 14 real Electron cases passed.
+- [x] Run isolated launch checks and changed-file lint; confirm 96 node type errors match the baseline. Full Linux package verification needs Linux.

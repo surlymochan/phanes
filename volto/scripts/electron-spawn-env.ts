@@ -1,3 +1,5 @@
+import { electronSafeStorageSwitches } from "../src/main/electron-safe-storage";
+
 /**
  * Environment flags the Electron runtime itself reads, which must never reach
  * a spawned Electron child.
@@ -19,4 +21,13 @@ export function withoutElectronRuntimeFlags(environment: NodeJS.ProcessEnv): Nod
   const child = { ...environment };
   for (const key of ELECTRON_RUNTIME_ENV_KEYS) delete child[key];
   return child;
+}
+/** Safe-storage switches for a spawned development or test Electron process. */
+export function electronSafeStorageLaunchArguments(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return electronSafeStorageSwitches(platform, false, environment).map(({ name, value }) =>
+    value === undefined ? `--${name}` : `--${name}=${value}`,
+  );
 }

@@ -307,6 +307,7 @@
     "test:transfer-upload-cleanup": "bun scripts/transfer-upload-cleanup-e2e.ts",
     "test:instance-transfer-roundtrip": "bun scripts/instance-transfer-roundtrip-e2e.ts",
     "test:central-auth-startup": "bun scripts/central-auth-startup-stall-e2e.ts",
+    "test:electron-safe-storage": "bun scripts/electron-safe-storage-e2e.ts",
     "test:exit-records": "bun scripts/exit-records-e2e.ts",
     "test:exit-watchdog": "bun scripts/exit-watchdog-e2e.ts",
     "test:zero-filled-settings": "bun scripts/zero-filled-settings-e2e.ts",

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { withoutElectronRuntimeFlags } from "./electron-spawn-env";
+import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 class FixtureProcessTimeout extends Error {}
 
@@ -30,6 +30,7 @@ try {
   await run(
     join(projectRoot, "node_modules/.bin/electron"),
     [
+      ...electronSafeStorageLaunchArguments(),
       ...(process.platform === "linux" ? ["--no-sandbox"] : []),
       entry,
       `--fixture-root=${buildRoot}`,

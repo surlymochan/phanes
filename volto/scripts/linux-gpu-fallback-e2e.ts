@@ -17,7 +17,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { withoutElectronRuntimeFlags } from "./electron-spawn-env";
+import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const OUT = join(ROOT, ".volto-build", "linux-gpu-fallback-e2e");
@@ -188,7 +188,14 @@ async function start(
   const log = openSync(join(OUT, `electron-${launchCount}.log`), "w");
   const child = spawn(
     electronPath,
-    [bundle, `--user-data=${userData}`, `--confirm-ms=${confirmMs}`, `--ready-file=${readyFile}`, ...extraArguments],
+    [
+      ...electronSafeStorageLaunchArguments(),
+      bundle,
+      `--user-data=${userData}`,
+      `--confirm-ms=${confirmMs}`,
+      `--ready-file=${readyFile}`,
+      ...extraArguments,
+    ],
     { env: { ...base, ...environment }, stdio: ["pipe", log, log] },
   );
   closeSync(log);

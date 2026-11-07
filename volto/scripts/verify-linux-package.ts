@@ -288,7 +288,7 @@ async function verifyLaunch(executable: string): Promise<void> {
     throw new Error("The launch check needs a display. Run it under `xvfb-run -a`.");
   }
   const userDataPath = await mkdtemp(join(tmpdir(), "openbot-package-smoke-"));
-  const child = spawn(executable, [`--user-data-dir=${userDataPath}`], {
+  const child = spawn(executable, ["--password-store=basic", `--user-data-dir=${userDataPath}`], {
     env: launchEnvironment(userDataPath),
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -347,6 +347,7 @@ async function verifyLaunch(executable: string): Promise<void> {
 function launchEnvironment(userDataPath: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
+    VOLTO_E2E: "1",
     CODEX_HOME: join(userDataPath, "codex-home"),
     CLAUDE_CONFIG_DIR: join(userDataPath, "claude-home"),
     VOLTO_CODEX_PATH: join(userDataPath, "missing-codex"),
@@ -409,7 +410,7 @@ async function verifySecondInstanceExits(
   userDataPath: string,
   launchExit: Promise<never>,
 ): Promise<void> {
-  const second = spawn(executable, [`--user-data-dir=${userDataPath}`], {
+  const second = spawn(executable, ["--password-store=basic", `--user-data-dir=${userDataPath}`], {
     env: launchEnvironment(userDataPath),
     stdio: ["ignore", "ignore", "pipe"],
   });
