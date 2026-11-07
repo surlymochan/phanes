@@ -58,6 +58,7 @@ import {
   writeProfile,
 } from '../src/core/policy-overlay.js';
 import { writeWorkflowRecommendation } from '../src/core/intake-recommendation.js';
+import { readRoleRequest, runRoleRequest, storeRoleResult } from '../src/roles/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -4366,6 +4367,23 @@ async function handleCoach(args) {
 async function handleRole(args) {
   if (args.some(isHelpRequest)) {
     printRoleHelp();
+    return;
+  }
+  if (args[0] === 'run') {
+    const parsed = parseCliArgs(args.slice(1));
+    if (!parsed.request || !parsed.output) {
+      console.error('Usage: xflow role run --request role-request.json --output role-result.json');
+      process.exit(2);
+    }
+    try {
+      const outcome = runRoleRequest(readRoleRequest(resolve(parsed.request)), { inputRoot: dirname(resolve(parsed.request)) });
+      storeRoleResult(parsed.output, outcome.result, outcome.files);
+      console.log(JSON.stringify(outcome.result, null, 2));
+      process.exitCode = outcome.rc;
+    } catch (error) {
+      console.error(error.message === 'output_exists' ? 'Output already exists; refusing to overwrite.' : `Role request failed: ${error.message}`);
+      process.exitCode = error.message === 'output_exists' || error instanceof SyntaxError ? 2 : 3;
+    }
     return;
   }
   const role = args[0] || 'developer';

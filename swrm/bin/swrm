@@ -72,7 +72,300 @@ import urllib.request
 import uuid
 import queue
 import random
+from dataclasses import replace
 from zoneinfo import ZoneInfo
+from pathlib import Path
+from typing import Callable, Optional, Sequence
+
+# Resolve the entrypoint itself so invocation through a symlink still finds
+# sibling modules, and SourceFileLoader-based tests get the same import path.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+import evalid_roles
+
+
+def build_evalid_command(xflow_bin: str, *, request_file: str, output_file: str,
+                         python: str = sys.executable) -> list[str]:
+    """Build the evalid role wrapper invocation using its machine-readable contract."""
+    if not xflow_bin or not request_file or not output_file:
+        raise evalid_roles.RoleError("xflow binary, request file, and output file are required")
+    return [python, xflow_bin, "role", "run", "--request", request_file, "--output", output_file]
+
+
+def run_evalid(command: Sequence[str], output_file: str, *, runner: Callable = subprocess.run,
+               timeout: Optional[float] = None) -> dict:
+    """Run evalid and preserve its documented machine exit classification."""
+    try:
+        completed = runner(list(command), capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise evalid_roles.RoleError(f"evalid subprocess failed: {error}") from error
+    if completed.returncode not in (0, 1, 2, 3):
+        raise evalid_roles.RoleError(f"evalid exited with undocumented status {completed.returncode}")
+    result = None
+    try:
+        result = json.loads(Path(output_file).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if completed.returncode == 0:
+            raise evalid_roles.RoleError("evalid passed without writing its role result")
+    except (OSError, json.JSONDecodeError) as error:
+        raise evalid_roles.RoleError(f"evalid wrote an invalid role result: {error}") from error
+    if result is not None and not isinstance(result, dict):
+        raise evalid_roles.RoleError("evalid role result must be a JSON object")
+    return {"returncode": completed.returncode, "result": result,
+            "stdout": completed.stdout, "stderr": completed.stderr}
+
+
+def validate_lane_profile(lane: dict, profile: evalid_roles.Profile) -> None:
+    """Require a resident lane to be explicitly provisioned for this role profile."""
+    if lane.get("role") is not None and lane["role"] != profile.role:
+        raise evalid_roles.RoleError("resident lane role does not match task role")
+    actual = (lane.get("backend"), lane.get("model"), lane.get("effort"))
+    expected = (profile.backend, profile.model, profile.effort)
+    if actual != expected:
+        raise evalid_roles.RoleError("resident lane model profile differs from the frozen role profile")
+    if lane.get("fallback_models"):
+        raise evalid_roles.RoleError("role lanes cannot use unapproved model fallback")
+
+
+
+def resolve_evalid_task(task, args, lane=None):
+    # Explicit evalid metadata opts in; ordinary YAML remains on the legacy path.
+    lines = task.splitlines()
+    header = ""
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), len(lines))
+        header = "\n".join(lines[1:end])
+    declared = bool(re.search(r"(?m)^\s*(?:evalid_version\s*:|role\s*:\s*[\"\']?evalid-)", header))
+    if not declared and not (lane or {}).get("role"):
+        return None, None, task
+    if not declared:
+        change = getattr(args, "evalid_change_id", None)
+        parents = getattr(args, "evalid_input_evidence", None)
+        if not change or not parents:
+            raise evalid_roles.RoleError("role lane requires controller-supplied change ID and intake parents")
+        task = (f"---\nevalid_version: 1\nrole: {lane['role']}\nchange_id: {change}\n"
+                f"input_evidence: {json.dumps(parents)}\n---\n" + task)
+    controlled = evalid_roles.parse_role_header(task) or {}
+    if not controlled.get("role") or set(controlled) - {"role", "evalid_version", "change_id", "input_evidence"}:
+        raise evalid_roles.RoleError("invalid controlled role header")
+    info = evalid_roles.resolve_role(task, (lane or {}).get("role"))
+    if not args.evalid_stage or not args.artifact_sink or not args.evalid_output:
+        raise evalid_roles.RoleError("role execution requires --evalid-stage, --artifact-sink and --evalid-output")
+    args.artifact_sink = os.path.abspath(os.path.expanduser(args.artifact_sink))
+    output = args.evalid_output
+    if os.path.isabs(output) or any(part in ("", ".", "..", ".git") for part in output.split("/")):
+        raise evalid_roles.RoleError("--evalid-output must be a repository-relative output directory")
+    if args.verify_baseline:
+        raise evalid_roles.RoleError("role execution cannot normalize verify failures against baseline")
+    if not getattr(args, "verify", None):
+        raise evalid_roles.RoleError("role execution requires a public --verify command")
+    overrides = {key: getattr(args, key, None) for key in ("backend", "model", "effort")} if lane is None else {}
+    repair = args.evalid_repair_round
+    if repair is not None:
+        if info["role"] != "evalid-tdd" or not getattr(args, "rework_of", None):
+            raise evalid_roles.RoleError("quality repair requires TDD role and --rework-of")
+        profile = evalid_roles.repair_profile(repair, **overrides)
+        if args.evalid_stage not in ("red", "green"):
+            raise evalid_roles.RoleError("TDD repair requires red or green stage")
+        profile = replace(profile, stage=args.evalid_stage)
+    else:
+        profile = evalid_roles.resolve_profile(
+            info["role"], args.evalid_stage, assignment_index=args.evalid_assignment_index,
+            minimax_available=not args.evalid_minimax_unavailable, agy_model=args.evalid_agy_model,
+            **overrides)
+    if lane is not None:
+        validate_lane_profile(lane, profile)
+    args.no_auto_review = True
+    if info["role"] == "evalid-review":
+        args.read_only = True
+    task += f"\nController artifact output directory: {output}. Preserve native reports, proofs and snapshots as well.\n"
+    return info, profile, task
+
+
+def evalid_evidence_path(name, output):
+    """Paths kept out of the implementation commit, including native atom output."""
+    path = Path(name)
+    if name == output or name.startswith(output + "/"):
+        return True
+    if any(part in (".xflow", ".evalid") for part in path.parts):
+        return True
+    # Test/source fixtures named spec.json or review.json are still code inputs.
+    if path.parts and path.parts[0] in ("src", "test", "tests"):
+        return False
+    return (any(part in ("proof", "proofs", "snapshot", "snapshots", "reports")
+                   for part in path.parts)
+            or (path.suffix in (".json", ".md", ".log", ".zip", ".gz")
+                and any(word in path.name for word in ("proof", "snapshot", "report", "review", "spec", "tdd"))))
+
+
+def collect_evalid_outputs(worktree, sink, output, run_id, phase, linked=(), extra=None, base=None):
+    """Inventory ALL dirty/untracked/ignored paths before cleanup, not just the sink.
+
+    Keep repository-relative names and immutable run/phase/content batches. Linked
+    dependencies are provisioned inputs, never followed into another filesystem.
+    The inventory also retains deleted paths and rename sources.
+    """
+    source, target = Path(worktree).resolve(), Path(sink).expanduser().resolve()
+    if target == source or source in target.parents:
+        raise evalid_roles.RoleError("artifact sink must be outside the execution worktree")
+    rc, status, _ = git(["status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=all"], str(source))
+    if rc:
+        raise evalid_roles.RoleError("cannot inventory role worktree")
+    names = set()
+    records = iter(status.split("\0"))
+    for record in records:
+        if not record:
+            continue
+        names.add(record[3:])
+        if "R" in record[:2] or "C" in record[:2]:
+            names.add(next(records))
+    # Executors may commit their output themselves; porcelain alone misses it.
+    if base:
+        rc, changed, _ = git(["diff", "--name-only", "--no-renames", "-z", base, "HEAD"], str(source))
+        if rc:
+            raise evalid_roles.RoleError("cannot inventory role commit chain")
+        names.update(name for name in changed.split("\0") if name)
+    # Also retain explicitly designated output that is already tracked/unchanged.
+    names.add(output)
+    files = {}
+    def read_path(path):
+        name = path.relative_to(source).as_posix()
+        if any(name == dep or name.startswith(dep.rstrip("/") + "/") for dep in linked):
+            return
+        if path.is_symlink():
+            raise evalid_roles.RoleError("artifact inventory contains a symlink")
+        if path.is_dir():
+            for child in sorted(path.iterdir()):
+                read_path(child)
+        elif path.is_file():
+            files[name] = path.read_bytes()
+        elif path.exists():
+            raise evalid_roles.RoleError("artifact inventory contains a special file")
+    for name in sorted(names):
+        if any(name.rstrip("/") == dep.rstrip("/") or name.startswith(dep.rstrip("/") + "/") for dep in linked):
+            continue
+        path = source / name
+        if source not in path.resolve().parents:
+            raise evalid_roles.RoleError("artifact inventory escapes worktree")
+        # Reject intermediate links as well as leaf links before reading bytes.
+        for parent in [path, *path.parents]:
+            if parent == source:
+                break
+            if parent.is_symlink():
+                raise evalid_roles.RoleError("artifact inventory contains a symlink")
+        read_path(path)
+    files.update(extra or {})
+    files["controller-inventory.json"] = json.dumps({"porcelain": status}, sort_keys=True).encode()
+    manifest = [{"name": name, "sha256": hashlib.sha256(payload).hexdigest()}
+                for name, payload in sorted(files.items())]
+    batch = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    destination = target / run_id / phase / batch
+    for entry in manifest:
+        path = destination / entry["name"]
+        if target not in path.resolve().parents:
+            raise evalid_roles.RoleError("artifact sink contains an escaping symlink")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if target not in path.resolve().parents:
+            raise evalid_roles.RoleError("artifact sink contains an escaping symlink")
+        payload = files[entry["name"]]
+        try:
+            with path.open("xb") as stream:
+                stream.write(payload)
+        except FileExistsError:
+            if path.read_bytes() != payload:
+                raise evalid_roles.RoleError("immutable artifact collision")
+    return [{**entry, "batch": f"{run_id}/{phase}/{batch}"} for entry in manifest]
+
+
+def collect_evalid_phase(ws, sink, output, run_id, phase, verify=None):
+    """Collection failure is data for the finalizer, never a recursive exception."""
+    try:
+        extra = ({"controller-verify.json": json.dumps(verify, sort_keys=True).encode()}
+                 if phase == "verify" else None)
+        return collect_evalid_outputs(ws["path"], sink, output, run_id, phase,
+                                      ws.get("linked") or (), extra, ws.get("base")), None
+    except (OSError, ValueError, subprocess.SubprocessError, evalid_roles.RoleError) as error:
+        return [], f"role evidence collection failed: {error}"
+
+
+def validate_evalid_collection(artifacts, sink, stage, verify):
+    """Require the stage package and referenced bytes; a nonempty directory is not proof.
+
+    Semantic/schema validation remains the public role wrapper's job. Here we
+    enforce transport completeness, including native TDD proofs and snapshots.
+    """
+    try:
+        if not isinstance(verify, dict) or type(verify.get("rc")) is not int:
+            raise evalid_roles.RoleError("role public verification is missing")
+        latest = {entry["name"]: entry for entry in artifacts}
+        required = "spec.json" if stage == "spec" else "tdd.json" if stage in ("red", "green") else "review.json"
+        matches = [entry for name, entry in latest.items() if Path(name).name == required]
+        if not matches:
+            raise evalid_roles.RoleError(f"missing required role artifact: {required}")
+        digests = {entry["sha256"] for entry in artifacts}
+        for entry in matches:
+            package = json.loads((Path(sink) / entry["batch"] / entry["name"]).read_bytes())
+            if not isinstance(package, dict) or not package:
+                raise evalid_roles.RoleError("role artifact must be a nonempty JSON object")
+            declared = package.get("artifacts", [])
+            if not isinstance(declared, list):
+                raise evalid_roles.RoleError("role artifacts must be an array")
+            for artifact in declared:
+                if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str):
+                    raise evalid_roles.RoleError("role artifact digest is missing")
+                if artifact["sha256"].removeprefix("sha256:") not in digests:
+                    raise evalid_roles.RoleError("role artifact references missing bytes")
+            if stage in ("red", "green"):
+                payload = package.get("payload", package)
+                if not isinstance(payload, dict):
+                    raise evalid_roles.RoleError("TDD payload must be an object")
+                refs = payload.get("proof_refs")
+                if not isinstance(refs, list) or not refs or any(
+                        not isinstance(ref, str) or ref.removeprefix("sha256:") not in digests for ref in refs):
+                    raise evalid_roles.RoleError("TDD proof references are missing or unresolved")
+                if not any(Path(name).name == f"{stage}-0.json" for name in latest):
+                    raise evalid_roles.RoleError("native TDD phase proof is missing")
+                if not any("snapshot" in name.lower() for name in latest):
+                    raise evalid_roles.RoleError("native TDD snapshot is missing")
+        return None
+    except (OSError, ValueError, KeyError, TypeError, evalid_roles.RoleError) as error:
+        return f"role evidence rejected: {error}"
+
+
+def run_role_verify(command, ws, timeout, output):
+    try:
+        return run_verify(command, ws["path"], timeout,
+                          artifact_log=str(Path(ws["path"]) / output / "controller-verify.log"))
+    except (OSError, subprocess.SubprocessError, evalid_roles.RoleError) as error:
+        return {"rc": None, "error": str(error)}
+
+
+def prepare_evalid_review(ws, sink, output, artifacts, git_command):
+    """Verify the frozen subject, with the collected reports restored for the wrapper."""
+    try:
+        for command in (["checkout", "--detach", "-f", ws["base"]],
+                        ["clean", "-ffdx", "-e", "/.swrm-tmp/"]):
+            rc, _, _ = git_command(command, ws["root"])
+            if rc:
+                raise evalid_roles.RoleError("review subject cleanup failed")
+        root = Path(ws["path"]).resolve()
+        for entry in artifacts:
+            if not evalid_evidence_path(entry["name"], output):
+                continue
+            path = root / entry["name"]
+            if root not in path.resolve().parents or any(p.is_symlink() for p in [path, *path.parents]):
+                raise evalid_roles.RoleError("review artifact restore escapes worktree")
+            payload = (Path(sink) / entry["batch"] / entry["name"]).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+                raise evalid_roles.RoleError("review artifact digest mismatch")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        ws["linked"] = link_dependency_dirs(ws["repo"], ws["root"])
+        exclude_dependency_links(ws["root"], ws["linked"])
+        return None
+    except (OSError, evalid_roles.RoleError) as error:
+        return f"role review preparation failed: {error}"
+
 
 HOME = os.path.expanduser("~")
 
@@ -4949,13 +5242,19 @@ def _link_missing_entries(src, dst, wt, depth):
     return out
 
 
-def run_verify(cmd, wd, timeout):
+def run_verify(cmd, wd, timeout, artifact_log=None):
     """Run the planner's acceptance command on the host, outside the executor sandbox."""
     try:
         p = subprocess.run(cmd, shell=True, cwd=wd, capture_output=True, text=True, timeout=timeout)
         rc, out = p.returncode, p.stdout + p.stderr
     except subprocess.TimeoutExpired:
         rc, out = 124, f"verify timed out after {timeout}s"
+    if artifact_log:
+        log = Path(artifact_log)
+        if log.is_symlink() or any(parent.is_symlink() for parent in log.parents):
+            raise evalid_roles.RoleError("verify log path contains a symlink")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(out)
     return {"cmd": cmd, "rc": rc, "tail": out[-1500:], "failing": sorted(failing_tests(out))}
 
 
@@ -5049,7 +5348,8 @@ def finalize_workspace(ws, title, backend, rdir, keep):
     patterns = (load_policy().get("workspace") or {}).get("never_commit", NEVER_COMMIT)
     changed = git(["diff", "HEAD", "--name-only", "-z"], root)[1].split("\0")
     untracked = git(["ls-files", "--others", "--exclude-standard", "-z"], root)[1].split("\0")
-    excluded = sorted({p for p in changed + untracked if p and executor_artifact(p, patterns)})
+    excluded = sorted({p for p in changed + untracked if p and (executor_artifact(p, patterns)
+                      or (ws.get("evalid_output") and evalid_evidence_path(p, ws["evalid_output"])))})
     # Excluding a path from add is insufficient if the executor already staged it.
     if excluded:
         git(["reset", "-q", "HEAD", "--", *excluded], root)
@@ -5142,6 +5442,9 @@ def cmd_run(args, policy):
         os.makedirs(rdir, exist_ok=True)
         with open(f"{rdir}/task.md", "w") as f:
             f.write(task)
+    role_info, role_profile, task = resolve_evalid_task(task, args)
+    if role_info:
+        args.backend, args.model, args.effort = role_profile.backend, role_profile.model, role_profile.effort
     title = args.title or task.strip().splitlines()[0][:72]
     set_status(rdir, scope=scope)
     prof = profile_from_args(args)
@@ -5326,24 +5629,34 @@ def cmd_run(args, policy):
     st_after = probe(policy) if decision["backend"] == "codex" else st
     attempts[-1]["quota_after"] = quota_used(st_after, decision)
     workspace_changed = ws["mode"] == "worktree" and bool(git(["status", "--porcelain"], ws["root"])[1].strip())
+    # Collect before staging/cleanup; preserve the executor batch even if verify overwrites it.
+    evidence_error = None
+    collected_artifacts = []
+    if role_info:
+        ws["evalid_output"] = args.evalid_output
+        collected_artifacts, evidence_error = collect_evalid_phase(
+            ws, args.artifact_sink, args.evalid_output, rid, "executor")
     # Commit first and verify the committed tree: some suites (release builders) refuse dirty sources.
     read_only = prof["read_only"]
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
-           if read_only else finalize_workspace(ws, title, decision["backend"], rdir, keep=True))
+           if read_only or evidence_error else finalize_workspace(ws, title, decision["backend"], rdir, keep=True))
     changed = changed_paths(ws.get("repo") or ws.get("path"), ws.get("base"), fin.get("commit"),
                             (result or {}).get("files_changed"))
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (result or {}).get("files_changed"))
-    if read_only:
+    if read_only and not role_info:
         for command in (["checkout", "--detach", "-f", ws["base"]], ["clean", "-ffdx"], ["branch", "-D", ws["branch"]]):
             cleanup_rc, _, cleanup_err = git(command, ws["root"])
             if cleanup_rc:
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
         ws["linked"] = link_dependency_dirs(ws["repo"], ws["root"])
         exclude_dependency_links(ws["root"], ws["linked"])
+    if read_only and role_info and not evidence_error:
+        evidence_error = prepare_evalid_review(ws, args.artifact_sink, args.evalid_output,
+                                               collected_artifacts, git)
     verify = None
     prepare_error = None
-    if args.verify and not budget_denial and attempts[-1]["error_class"] not in ("risk_blocked", "rate_limit") \
+    if args.verify and not evidence_error and not budget_denial and attempts[-1]["error_class"] not in ("risk_blocked", "rate_limit") \
             and (result is not None or workspace_changed or changed):
         if read_only or lockfiles_changed(ws):
             prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_verify")
@@ -5353,7 +5666,17 @@ def cmd_run(args, policy):
                     prepare_error = prepared
         if not prepare_error:
             set_status(rdir, state="verifying")
-            verify = run_verify(args.verify, ws["path"], max(60, min(600, int(deadline - NOW()) + 300)))
+            timeout = max(60, min(600, int(deadline - NOW()) + 300))
+            verify = (run_role_verify(args.verify, ws, timeout, args.evalid_output) if role_info
+                      else run_verify(args.verify, ws["path"], timeout))
+    if role_info:
+        batch, collection_error = collect_evalid_phase(
+            ws, args.artifact_sink, args.evalid_output, rid, "verify", verify)
+        collected_artifacts += batch
+        evidence_error = evidence_error or collection_error or validate_evalid_collection(
+            collected_artifacts, args.artifact_sink, args.evalid_stage, verify)
+        if read_only:
+            read_only_output = not evidence_error
     if verify and verify["rc"] not in (0, 124) and getattr(args, "verify_baseline", False) and ws["mode"] == "worktree":
         # Repos often carry known failures; judge the run by failures it introduced, not by the suite's exit code.
         base = verify_against_baseline(args.verify, ws, max(60, min(600, int(deadline - NOW()) + 300)))
@@ -5367,12 +5690,14 @@ def cmd_run(args, policy):
             verify["baseline"] = {"error": base.get("error")}
     has_changes = bool(fin.get("commit") or workspace_changed or (changed and not read_only))
     pass_fields = exec_pass_fields(has_changes, read_only_output, bool(args.verify), verify)
-    if read_only and args.keep_worktree and verify:
+    if evidence_error:
+        pass_fields.update(exec_pass=False, exec_pass_reason="role_evidence_infra")
+    if read_only and (args.keep_worktree or role_info) and verify and not evidence_error:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx"]):
             cleanup_rc, _, cleanup_err = git(command, ws["root"])
             if cleanup_rc:
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
-    if not args.keep_worktree:
+    if not args.keep_worktree and not evidence_error:
         cleanup_worktree(ws, fin.get("commit"))
         fin["worktree"] = None
     stopped = bool((jload(f"{rdir}/status.json", {}) or {}).get("stop_requested"))
@@ -5395,10 +5720,12 @@ def cmd_run(args, policy):
     status, verify_note = adjust_status_for_change_evidence(
         status, verify_note, commit=fin.get("commit"), workspace_changed=workspace_changed, changed=changed,
         read_only=read_only, verify=verify)
+    if evidence_error:
+        status, verify_note = "failed", evidence_error
     usage = (attempts[-1].get("meta") or {}).get("usage")
     wall_seconds = round(sum(a["seconds"] for a in attempts), 3)
     out = {
-        "id": rid, "status": status, "error_class": "budget_exceeded_daily" if budget_denial else "prepare_failed" if prepare_error else attempts[-1]["error_class"],
+        "id": rid, "status": status, "error_class": "evalid_evidence_infra" if evidence_error else "budget_exceeded_daily" if budget_denial else "prepare_failed" if prepare_error else attempts[-1]["error_class"],
         **({"budget_error": budget_denial, "error": "budget_exceeded_daily"} if budget_denial else {}),
         "title": title, "scope": scope, "prepare": prepare, "workspace_note": note, "verify": verify, "verify_note": verify_note,
         "backend": decision["backend"], "model": decision["model"], "effort": decision.get("effort"),
@@ -5408,6 +5735,11 @@ def cmd_run(args, policy):
         "result": result, "workspace": {k: v for k, v in ws.items() if k in ("mode", "path", "repo", "base", "note")},
         **fin, "attempts": attempts, "claude_review": decision.get("claude_review"),
         "decision_reasons": decision.get("reasons"), "run_dir": rdir, **routing_fields,
+        **({"evalid_role": role_info["role"], "evalid_stage": args.evalid_stage,
+            "evalid_repair_round": args.evalid_repair_round,
+            "artifacts": collected_artifacts, **pass_fields,
+            "evalid_receipt": {"status": "INFRA" if evidence_error else "COLLECTED",
+                               "reason": evidence_error}} if role_info else {}),
     }
     jsave(f"{rdir}/result.json", out)
     append_ledger({"id": rid, "ts": NOW(), "title": title, "profile": prof, "status": status, "scope": scope,
@@ -7940,11 +8272,17 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ancestor_rc, _, _ = git(["merge-base", "--is-ancestor", ws["base"], head.strip()], ws["root"])
             changed = changed or ancestor_rc == 0
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
+    evidence_error = None
+    collected_artifacts = []
+    if spec.get("evalid_role"):
+        ws["evalid_output"] = spec["evalid_output"]
+        collected_artifacts, evidence_error = collect_evalid_phase(
+            ws, spec["artifact_sink"], spec["evalid_output"], rid, "executor")
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
-           if read_only else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
+           if read_only or evidence_error else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (final or {}).get("files_changed"))
-    if read_only and ws.get("mode") == "worktree":
+    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role"):
         for command in (["checkout", "--detach", "-f", ws["base"]],
                         ["clean", "-ffdx", "-e", "/.swrm-tmp/"],
                         ["branch", "-D", ws["branch"]]):
@@ -7953,9 +8291,12 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
         ws["linked"] = link_dependency_dirs(ws["repo"], ws["root"])
         exclude_dependency_links(ws["root"], ws["linked"])
+    if read_only and spec.get("evalid_role") and not evidence_error:
+        evidence_error = prepare_evalid_review(ws, spec["artifact_sink"], spec["evalid_output"],
+                                               collected_artifacts, lane_git)
     verify = None
     prepare_error = None
-    if spec.get("verify") and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
+    if spec.get("verify") and not evidence_error and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
         if read_only or lockfiles_changed(ws):
             prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_verify")
             if prepared:
@@ -7965,7 +8306,16 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         if not prepare_error:
             set_status(rdir, state="verifying")
             timeout = max(60, min(600, int(spec["started"] + max(0, float(spec.get("budget_minutes") or 0)) * 60 - NOW()) + 300))
-            verify = run_verify(spec["verify"], ws["path"], timeout)
+            verify = (run_role_verify(spec["verify"], ws, timeout, spec["evalid_output"])
+                      if spec.get("evalid_role") else run_verify(spec["verify"], ws["path"], timeout))
+    if spec.get("evalid_role"):
+        batch, collection_error = collect_evalid_phase(
+            ws, spec["artifact_sink"], spec["evalid_output"], rid, "verify", verify)
+        collected_artifacts += batch
+        evidence_error = evidence_error or collection_error or validate_evalid_collection(
+            collected_artifacts, spec["artifact_sink"], spec["evalid_stage"], verify)
+        if read_only:
+            read_only_output = not evidence_error
     if verify and verify["rc"] not in (0, 124) and spec.get("verify_baseline"):
         base = verify_against_baseline(spec["verify"], ws, max(60, min(600, int(NOW() - spec["started"]) + 300)))
         if base.get("rc") is not None:
@@ -8004,12 +8354,14 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     status, verify_note = adjust_status_for_change_evidence(
         status, verify_note, commit=fin.get("commit"), workspace_changed=changed, changed=changed,
         read_only=read_only, verify=verify)
-    if read_only and verify:
+    if evidence_error:
+        status, verify_note, error_class = "failed", evidence_error, "evalid_evidence_infra"
+    if read_only and verify and not evidence_error:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx", "-e", "/.swrm-tmp/"]):
             cleanup_rc, _, cleanup_err = lane_git(command, ws["root"])
             if cleanup_rc:
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
-    if ws.get("mode") == "worktree" and not read_only:
+    if ws.get("mode") == "worktree" and not read_only and not evidence_error:
         detach_at = fin.get("commit") or ws["base"]
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
@@ -8022,13 +8374,26 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
            "queued_seconds": round(spec.get("queued_seconds", max(0, NOW() - spec.get("queued_at", NOW()))), 3),
            "result": final, "workspace":
            {k: v for k, v in ws.items() if k in ("mode", "path", "repo", "base", "note", "lane")},
-           **fin, "attempts": attempts, "run_dir": rdir}
+           **fin, "attempts": attempts, "run_dir": rdir,
+           **({"evalid_role": spec["evalid_role"], "evalid_stage": spec["evalid_stage"],
+              "evalid_repair_round": spec.get("evalid_repair_round"),
+              "artifacts": collected_artifacts,
+              "evalid_receipt": {"status": "INFRA" if evidence_error else "COLLECTED",
+                                 "reason": evidence_error}} if spec.get("evalid_role") else {})}
+    if spec.get("evalid_role"):
+        role_pass = exec_pass_fields(bool(fin.get("commit") or (changed and not read_only)), read_only_output,
+                                     True, verify)
+        if evidence_error:
+            role_pass.update(exec_pass=False, exec_pass_reason="role_evidence_infra")
+        out.update(role_pass)
     jsave(os.path.join(rdir, "result.json"), out)
     changed = changed_paths(ws.get("repo") or ws.get("root"), ws.get("base"), fin.get("commit"),
                             (final or {}).get("files_changed"))
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
     pass_fields = exec_pass_fields(bool(fin.get("commit") or (changed and not read_only)), read_only_output,
                                    bool(spec.get("verify")), verify)
+    if spec.get("evalid_role"):
+        pass_fields = role_pass
     append_ledger({"id": rid, "ts": NOW(), "title": title, "status": status, "lane": lane["name"],
                    "scope": spec.get("scope", "repo"),
                    "backend": lane["backend"], "model": model, "effort": lane.get("effort"),
@@ -8046,7 +8411,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
                scope=spec.get("scope", "repo"))
-    cleanup_executor_tmp(ws.get("root") or ws["path"])
+    if not evidence_error:
+        cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
 
@@ -8524,6 +8890,7 @@ def cmd_lane_assign(args):
     if not task.strip():
         print(json.dumps({"ok": False, "error": "empty task"}))
         sys.exit(1)
+    role_info, role_profile, task = resolve_evalid_task(task, args, lane)
     rid = new_run_id()
     title = args.title or task.strip().splitlines()[0][:72]
     budget = args.budget_minutes if args.budget_minutes is not None else load_policy()["run"]["timeout_seconds"] / 60
@@ -8541,6 +8908,12 @@ def cmd_lane_assign(args):
                                          "rework_of": getattr(args, "rework_of", None),
                                          "paths": getattr(args, "paths", None) or [],
                                          "read_only": getattr(args, "read_only", False),
+                                         "evalid_role": role_info["role"] if role_info else None,
+                                         "evalid_stage": args.evalid_stage if role_info else None,
+                                         "evalid_assignment_index": args.evalid_assignment_index if role_info else None,
+                                         "artifact_sink": args.artifact_sink if role_info else None,
+                                         "evalid_output": args.evalid_output if role_info else None,
+                                         "evalid_repair_round": args.evalid_repair_round if role_info else None,
                                          "scope": getattr(args, "scope", "repo")})
     if response.get("ok"):
         response.update({"lane": lane["name"], "watch": f"swrm watch {rid}",
@@ -11824,6 +12197,17 @@ def main():
                            verify_baseline_help="when verify fails, rerun it on the base commit and pass if no failures are new",
                            verify_help="acceptance command run on the host in the worktree after the executor finishes; "
                                        "its exit code overrides a sandbox-limited partial/done")
+    sp.add_argument("--evalid-stage", choices=("spec", "spec-check", "red", "green", "delivery"),
+                    help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-assignment-index", type=int,
+                    help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-minimax-unavailable", action="store_true", help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-agy-model", help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-change-id", help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-input-evidence", nargs="+", help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-output", help=argparse.SUPPRESS)
+    sp.add_argument("--evalid-repair-round", type=int, help=argparse.SUPPRESS)
+    sp.add_argument("--artifact-sink", help=argparse.SUPPRESS)
     sp.add_argument("--keep-worktree", action="store_true")
     sp.add_argument("--no-fallback", action="store_true")
     add_dispatch_arguments(sp, "budget", budget_help="hard wall-clock budget; executor is killed when exceeded")
@@ -12001,6 +12385,17 @@ def main():
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")
+    lp.add_argument("--evalid-stage", choices=("spec", "spec-check", "red", "green", "delivery"),
+                    help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-assignment-index", type=int,
+                    help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-minimax-unavailable", action="store_true", help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-agy-model", help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-change-id", help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-input-evidence", nargs="+", help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-output", help=argparse.SUPPRESS)
+    lp.add_argument("--evalid-repair-round", type=int, help=argparse.SUPPRESS)
+    lp.add_argument("--artifact-sink", help=argparse.SUPPRESS)
     lp = lane_sub.add_parser("steer", help="steer the active turn")
     lp.add_argument("name")
     lp.add_argument("--text", required=True)
