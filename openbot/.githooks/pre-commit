@@ -1,20 +1,22 @@
 #!/bin/sh
 set -eu
 
-# Git 只把 GIT_DIR 传给 hook，不传 GIT_WORK_TREE。linked worktree 里 GIT_DIR 指向 worktree
-# 自己的 git 目录，于是 git 把当前目录当成工作树根：脚本 cd openbot 之后，git add --
-# examples/x.json 会把文件按 openbot/examples/x.json 之外的路径再写回索引，提交里多出
-# 仓库根的 examples/x.json。清掉这两个变量后，git 按工作树正常发现仓库根，普通检出与
-# worktree 的行为一致。GIT_INDEX_FILE 保留：hook 必须操作同一个索引。
+# Git gives a hook GIT_DIR but not GIT_WORK_TREE. In a linked worktree GIT_DIR points at the
+# worktree's own git directory, so git takes the current directory as the top of the working tree.
+# After the hook changes into a project subdirectory, `git add -- <path>` would then stage the file
+# under a second path, relative to that subdirectory. Without both variables git finds the working
+# tree itself, as in a normal checkout. GIT_INDEX_FILE stays: the hook must use the same index.
 unset GIT_DIR GIT_WORK_TREE
 
-repository_root=$(git rev-parse --show-toplevel)
-project_root="$repository_root"
+# The project is the directory that holds this hook's .githooks. It is the repository root in a
+# normal checkout, and a subdirectory when OpenBot is checked out inside a larger repository.
+repository_root=$(cd -- "$(git rev-parse --show-toplevel)" && pwd -P)
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 project_path=""
-if [ -f "$repository_root/openbot/package.json" ]; then
-  project_root="$repository_root/openbot"
-  project_path="openbot"
-fi
+case "$project_root" in
+  "$repository_root"/*) project_path=${project_root#"$repository_root"/} ;;
+  *) project_root="$repository_root" ;;
+esac
 cd "$project_root"
 
 git_diff() {

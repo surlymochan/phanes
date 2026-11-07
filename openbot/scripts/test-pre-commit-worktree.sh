@@ -1,5 +1,6 @@
 #!/bin/bash
-# Regression test for #70: the pre-commit hook must not stage a file under a second path.
+# Regression test for #70 and #1374: the pre-commit hook must not stage a file under a second
+# path, and it must stage what the formatter changed.
 #
 # Git runs a hook with GIT_DIR set and without GIT_WORK_TREE. In a linked worktree GIT_DIR
 # points at the worktree's own git directory, so git treats the current directory as the top of
@@ -10,6 +11,11 @@
 # The test builds a throwaway repository with the real hooks, stubs `bun` so it needs no
 # runtime, and commits the same file in a normal checkout and in a linked worktree. Both
 # commits must contain exactly `openbot/examples/x.json`.
+#
+# The stub also stands in for Biome: it records the arguments of every `bun` call and, when the
+# test asks for it, rewrites the working-tree copy of the staged file. A file the author staged
+# completely must reach the commit in its rewritten form, and a file the author staged only
+# partly must stop the commit, because the rewrite would swallow the unstaged edits.
 #
 # Usage: bash openbot/scripts/test-pre-commit-worktree.sh
 set -euo pipefail
@@ -26,20 +32,27 @@ fail() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# The stub replaces `bun run check:staged`: it records the staged files the hook sees and
-# changes nothing, so the commit keeps the file the author staged.
+# The stub replaces `bun run check:staged`: it records the staged files the hook sees and the
+# arguments of every `bun` call. It rewrites the working-tree copy of the staged file only when
+# the test sets BUN_REWRITE, because the formatter runs on the working tree, not on the index.
 mkdir -p "$work/bin"
 cat >"$work/bin/bun" <<'STUB'
 #!/bin/sh
+printf '%s\n' "$*" >>"$BUN_ARGV_LOG"
 if [ "${1:-}" = "run" ] && [ "${2:-}" = "check:staged" ]; then
   git diff --cached --name-only >>"$BUN_STAGED_LOG"
+  if [ -n "${BUN_REWRITE:-}" ]; then
+    printf '{\n  "name": "rewritten"\n}\n' >"$BUN_REWRITE"
+  fi
 fi
 exit 0
 STUB
 chmod +x "$work/bin/bun"
 export PATH="$work/bin:$PATH"
 export BUN_STAGED_LOG="$work/staged.log"
+export BUN_ARGV_LOG="$work/argv.log"
 : >"$BUN_STAGED_LOG"
+: >"$BUN_ARGV_LOG"
 
 # The throwaway repository has the same layout as this one: the hook lives in the repository
 # root and hands over to the hook in the project directory.
@@ -90,4 +103,29 @@ fi
 
 git -C "$main" worktree remove --force "$worktree" || true
 
-echo "PASS: the pre-commit hook stages openbot/examples/x.json in a normal checkout and in a linked worktree."
+# The hook runs the staged checks through bun, with the project as the working directory.
+grep -Fxq "run check:staged" "$BUN_ARGV_LOG" || fail "the hook did not run the staged checks through bun"
+
+# Biome rewrites the working-tree copy of a staged file. A file the author staged completely
+# reaches the commit in its rewritten form, because the hook stages that copy again.
+export BUN_REWRITE="examples/x.json"
+printf '{\n  "name": "to rewrite"\n}\n' >"$main/openbot/examples/x.json"
+git -C "$main" add openbot/examples/x.json
+git -C "$main" commit -qm "stage an example" || fail "the commit with a rewritten file failed"
+rewritten=$(git -C "$main" show HEAD:openbot/examples/x.json)
+printf '%s\n' "$rewritten" | grep -Fxq '  "name": "rewritten"' ||
+  fail "the commit does not carry the rewritten file, it carries [$rewritten]"
+
+# A file the author staged only partly must stop the commit: the rewrite would swallow the
+# unstaged edits.
+printf '{\n  "name": "staged"\n}\n' >"$main/openbot/examples/x.json"
+git -C "$main" add openbot/examples/x.json
+printf '{\n  "name": "unstaged"\n}\n' >"$main/openbot/examples/x.json"
+status=0
+partly_output=$(git -C "$main" commit -qm "stage a partly staged example" 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "the commit of a partly staged file was not stopped"
+printf '%s\n' "$partly_output" | grep -Fq "Biome fixed files that also have unstaged changes" ||
+  fail "the hook did not report the rewritten partly staged file, it said [$partly_output]"
+unset BUN_REWRITE
+
+echo "PASS: the pre-commit hook stages openbot/examples/x.json in a normal checkout and in a linked worktree, and it stages what the formatter changed."
