@@ -15,7 +15,7 @@ depends on. 0034 already has two files for this reason.
   0034 pair stays allowed by name, so a third 0034 is refused.
 - scripts/auth-migration-numbers-smoke.ts (bun run
   test:api-migration-numbers) checks the repository migrations and the rules,
-  and writes .openbot-build/auth-migration-numbers.json.
+  and writes .volto-build/auth-migration-numbers.json.
 
 No migration is renamed or changed, and CI is not changed.
 ---
@@ -99,7 +99,7 @@ index 00000000..24983856
 @@ -0,0 +1,68 @@
 +// Checks the account database migration names and the rules of the checker.
 +// Run: bun scripts/auth-migration-numbers-smoke.ts
-+// It writes .openbot-build/auth-migration-numbers.json and exits non-zero on a failure.
++// It writes .volto-build/auth-migration-numbers.json and exits non-zero on a failure.
 +
 +import assert from "node:assert/strict";
 +import { readdirSync } from "node:fs";
@@ -107,7 +107,7 @@ index 00000000..24983856
 +import { dirname, join } from "node:path";
 +import { migrationNumberProblems, migrationsDirectory } from "../apps/auth-api/scripts/migration-numbers";
 +
-+const outputPath = join(import.meta.dirname, "..", ".openbot-build", "auth-migration-numbers.json");
++const outputPath = join(import.meta.dirname, "..", ".volto-build", "auth-migration-numbers.json");
 +const checks: { name: string; passed: boolean; detail?: unknown }[] = [];
 +
 +function check(name: string, run: () => unknown): void {

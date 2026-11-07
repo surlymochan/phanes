@@ -1,0 +1,76 @@
+/*
+ * The OpenCode Go key dialog. It opens on top of the settings modal, so its layer is one above
+ * the shared dialog layer rather than the same one -- both portals are children of `body`, and
+ * relying on insertion order alone would break the first time a caller mounts it from elsewhere.
+ *
+ * Minimal on purpose: left-aligned title with one dynamic description line instead of stacked
+ * notice cards, matching the small confirm dialogs.
+ */
+
+.opencode-key-backdrop {
+  z-index: calc(var(--volto-layer-dialog) + 1);
+}
+
+.opencode-key-dialog {
+  width: min(400px, 100%);
+  max-height: calc(100dvh - var(--volto-space-6) * 2);
+  overflow-y: auto;
+  outline: 0;
+  border-radius: var(--volto-radius-xl);
+  background: var(--volto-bg-control);
+  padding: var(--volto-space-6);
+  color: var(--volto-text-primary);
+  animation: opencode-key-dialog-in var(--volto-duration-slow) var(--volto-ease-out) both;
+}
+
+.opencode-key-header {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--volto-space-1);
+}
+
+.opencode-key-title {
+  margin: 0;
+  font-size: var(--volto-text-xl);
+  line-height: var(--volto-leading-xl);
+  font-weight: var(--volto-weight-semibold);
+  letter-spacing: var(--volto-tracking-tight);
+}
+
+.opencode-key-description {
+  margin: 0;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+}
+
+.opencode-key-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: var(--volto-space-2);
+  border-radius: var(--volto-radius-pill);
+  background: var(--volto-success);
+}
+
+.opencode-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-4);
+  margin: var(--volto-space-4) 0 0;
+}
+
+.opencode-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--volto-space-2);
+}
+
+@keyframes opencode-key-dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}

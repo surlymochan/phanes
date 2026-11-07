@@ -1,0 +1,91 @@
+@import "../styles.css";
+@source "../";
+
+.volto-playground-root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--volto-bg-canvas);
+}
+
+.volto-playground-loading {
+  width: 100%;
+  height: 100%;
+  background: var(--volto-bg-canvas);
+}
+
+.volto-playground-root .unread-messages-banner {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .volto-playground-root .app-frame,
+  .volto-playground-root .app-frame-with-server-rail {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 68px minmax(0, 1fr);
+  }
+
+  .volto-playground-root .server-rail,
+  .volto-playground-root .left-panel-resizer,
+  .volto-playground-root .sidebar-topbar,
+  .volto-playground-root .sidebar-search-wrap,
+  .volto-playground-root .sidebar-list-context-trigger,
+  .volto-playground-root .sidebar-chat-group > header {
+    display: none;
+  }
+
+  .volto-playground-root .sidebar {
+    grid-column: 1;
+    grid-row: 1;
+    flex-direction: row;
+    border-right: 0;
+    border-bottom: 1px solid var(--volto-border);
+  }
+
+  .volto-playground-root .agent-list,
+  .volto-playground-root .sidebar-compact .agent-list {
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    align-items: center;
+    justify-content: center;
+    gap: var(--volto-space-1-5);
+    padding: var(--volto-space-2) var(--volto-space-3);
+  }
+
+  /* Every wrapper between the list and the rows becomes one row of avatars. */
+  .volto-playground-root .agent-list-content,
+  .volto-playground-root .sidebar-chat-group,
+  .volto-playground-root .sidebar-section-collapse,
+  .volto-playground-root .sidebar-section-body {
+    display: flex;
+    align-items: center;
+    gap: var(--volto-space-1-5);
+    margin: 0;
+  }
+
+  .volto-playground-root .agent-row,
+  .volto-playground-root .sidebar-compact .agent-row {
+    width: 48px;
+    height: 48px;
+    flex: 0 0 48px;
+    margin: 0;
+    padding: 6px;
+  }
+
+  .volto-playground-root .sidebar-compact .agent-row-avatar {
+    transform: none;
+  }
+
+  .volto-playground-root .agent-row-copy {
+    display: none;
+  }
+
+  /* The chat is inside the panes wrapper, which the frame puts in the first row. */
+  .volto-playground-root .app-frame-panes,
+  .volto-playground-root .conversation-panel,
+  .volto-playground-root .app-frame-with-server-rail .conversation-panel {
+    grid-column: 1;
+    grid-row: 2;
+  }
+}

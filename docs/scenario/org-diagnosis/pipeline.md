@@ -164,7 +164,7 @@ swrm review <run-id> --by pi --json
 - 真实组织数据只经**仓库外的绝对路径**进入：`python3 examples/org-health-local/serve.py
   --data /absolute/path/to/diagnosis.json`（`examples/org-health-local/serve.py:49-66`）。
 - 仓库内只保留合成示例 `examples/org-health-local/data/diagnosis.json`；
-  `openbot/scripts/org-health-demo-e2e.ts:13-16` 也是把合成数据复制到临时目录再经 `--data` 传入，
+  `volto/scripts/org-health-demo-e2e.ts:13-16` 也是把合成数据复制到临时目录再经 `--data` 传入，
   作为「数据不落库」的既有做法。
 - DA 阶段的诊断 JSON 写在仓库外，不随分支提交；仓库内只提交不含真实数字的说明文件。
 - `verify` 命令里，仓库内路径用相对路径（相对 worktree 根），仓库外路径用绝对路径：swrm 只把
@@ -285,7 +285,7 @@ PY
 |---|---|---|
 | `examples/org-health-local/validate.py` | 仓库内 schema 校验器 | DA 阶段按位置参数传入仓库外的 `${DIAGNOSIS}`；退出码 `0`/`1`/`2` 分别表示通过/校验失败/输入不可读 |
 | `examples/org-health-local/test_serve.py` | 仓库内 unittest | Builder 阶段用 `python3 -m unittest discover ... -p 'test_serve.py'` 执行；退出码 `0` 表示通过，`1` 表示测试失败 |
-| `bun run test:org-health-demo`（`openbot/package.json:194`） | 仓库已有 | 需要 bun 与 Chrome，且只覆盖合成示例数据 |
+| `bun run test:org-health-demo`（`volto/package.json:194`） | 仓库已有 | 需要 bun 与 Chrome，且只覆盖合成示例数据 |
 | 真实组织数据文件 | 数据提供方 | 必须自行放在仓库外，流水线不提供真实数据 |
 
 ## 9. 已知限制

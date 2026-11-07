@@ -450,6 +450,6 @@ python3 run_e2e.py --workdir "$W/e2e" --bundle "$W/app.bundle.js" --review
 ## 10. 未决事项
 
 - 缺口 6 涉及结构定义与页面硬编码，改动面覆盖 `schema/diagnosis.schema.json`、`app.js` 与
-  `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts`，需要单独评估。
+  `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts`，需要单独评估。
 - `write_method.py` 的泄漏自检规则（哪些数字算「诊断数值」）目前按字符串匹配判定，
   与「口径文字里允许出现期间与单位」的规则冲突，需要先定义白名单再改实现。

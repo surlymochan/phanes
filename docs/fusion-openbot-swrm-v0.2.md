@@ -1,12 +1,12 @@
-# 融合方案定稿 v0.2：OpenBot 控制面 × swrm 执行
+# 融合方案定稿 v0.2：Volto 控制面 × swrm 执行
 
-一句话架构：OpenBot Cloud 做协商、选人、记忆与开卡，swrm 做合约与执行的唯一主人，nibiru 资产收编进 OpenBot 控制面，执行一律走 swrm。
+一句话架构：Volto Cloud 做协商、选人、记忆与开卡，swrm 做合约与执行的唯一主人，nibiru 资产收编进 Volto 控制面，执行一律走 swrm。
 
 ## 1. 唯一主人与硬约束
 
 - swrm 是合约与执行语义的唯一主人：lane 状态机、并发与额度、收割、
   薄卡门、review 与 merge 门、external check 与 tick，全部归 swrm。
-- OpenBot Cloud 只做协商、选人、记忆与开卡，不得再长出第二套调度器，
+- Volto Cloud 只做协商、选人、记忆与开卡，不得再长出第二套调度器，
   不得出现平行调度器与 swrm dispatcher 争执行权。
 - `autodispatch`（AD）只剩启动器：现有 `autodispatch.py` 禁止加新功能；
   新能力先进 swrm 上游 PR，再让 AD 变薄。本卡不碰 AD。
@@ -24,7 +24,7 @@
 
 冲突时以 swrm 为准；控制面只能发起请求，不能越权执行。
 
-| 字段 / 动作 | 唯一写者 | 控制面（OpenBot Cloud / external-muse）的权限 |
+| 字段 / 动作 | 唯一写者 | 控制面（Volto Cloud / external-muse）的权限 |
 |---|---|---|
 | issue 创建与初始标签 `lane-ready`、`backend:<name>`、优先级 | 派活方（移交后为 external-muse） | 写：这是开卡，不是状态推进 |
 | `lane-claimed` / `lane-pr` / `lane-failed` 状态迁移 | 认领 lane 本人（经合约工具）加 swrm dispatcher 对账 | 仅对自己认领的卡按合约迁移，不得替别人迁移 |
@@ -55,7 +55,7 @@
 - 新卡 mint：停止。控制面宕机等同派活方消失，语义等同 dispatcher 侧的
   PAUSE-MINT（在场时 replenish 跳过新卡生成）：控制面不新建卡；
   若宕机超过 30 分钟，builder 可在 box 侧置 PAUSE-MINT 阻止 starter 池自动补卡。
-- 新 claim 分开看：fleet 内部卡由 box 上 dispatcher 管辖，独立于 OpenBot Cloud
+- 新 claim 分开看：fleet 内部卡由 box 上 dispatcher 管辖，独立于 Volto Cloud
   存活，照常；external 卡的 claim 发生在 GitHub 侧，也照常。
   宕机只停控制面发起的新工作，不停执行面自治范围。
 - host pause 映射：单 host 故障或维护走 `paused_lane` / drain，只停该 host
@@ -93,8 +93,8 @@
   唤醒职能后退役；退役前只保留常驻成员实时通道，不再新增接入。
 - 公约瘦身：公约瘦身为一页机器可校验的授权策略（身份、授权来源、
   安全硬规则、保留人工确认项），其余治理内容降为知识库材料。
-- 许可证：OpenBot PolyForm Noncommercial 是硬风险，定稿明确走核心模块
-  可替换加 OpenBot 作壳：协商、角色、记忆等核心模块独立于 OpenBot 本体、
+- 许可证：Volto PolyForm Noncommercial 是硬风险，定稿明确走核心模块
+  可替换加 Volto 作壳：协商、角色、记忆等核心模块独立于 Volto 本体、
   可整体替换，商业叙事不绑死 PolyForm；P0–P2 不因此阻塞。
 - 待补缺口：除 SSH 外增加 websocket / stream 派活（不稳定或无公网 IP 场景），
   该缺口另卡跟进，不阻塞本定稿 v0.2 的生效。

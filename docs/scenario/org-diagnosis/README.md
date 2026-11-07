@@ -8,8 +8,8 @@
 
 - 目标：用一个只读本机 JSON 的静态站点复核组织健康诊断快照，页面不发送网络请求。
 - 三个角色：Boss（规划与派工）、DA（数据分析与证据）、Builder（建站与本机验证）。
-- 页面只描述聚合信号，不作个人、薪酬或编制判断（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:21`）；事实、推断与边界在页面上分标签展示（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:81-84`）。
-- 站点消费的数据结构固定为 schema v4，结构或指标顺序变化时页面直接判为"加载失败"，不做静默降级（`examples/org-health-local/app.js:73-82`、`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:59`）。
+- 页面只描述聚合信号，不作个人、薪酬或编制判断（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:21`）；事实、推断与边界在页面上分标签展示（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:81-84`）。
+- 站点消费的数据结构固定为 schema v4，结构或指标顺序变化时页面直接判为"加载失败"，不做静默降级（`examples/org-health-local/app.js:73-82`、`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:59`）。
 
 ## 2. 三角色职责、输入与输出
 
@@ -30,7 +30,7 @@
 
 - 证据包与快照的数值来源、期间与口径必须可回溯到任务书；无法回溯的数值不写入快照。
 - 快照顶层字段沿用合成示例：`scope`、`conclusion`、`origin`、`metrics`、`insights`、`definitions`、`risks`、`recommendations`（`examples/org-health-local/data/diagnosis.json:1-98`）。
-- 期间缺口用 `null` 表达，不填估算值；页面把 `null` 渲染为"未提供"（`examples/org-health-local/app.js:129`、`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:52`）。
+- 期间缺口用 `null` 表达，不填估算值；页面把 `null` 渲染为"未提供"（`examples/org-health-local/app.js:129`、`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:52`）。
 - 每条建议必须带依据、缺失证据和核实方式（`examples/org-health-local/data/diagnosis.json:89-98`）。
 
 ### 2.3 Builder（建站）
@@ -66,7 +66,7 @@
 | 场景任务书 | Boss | DA、Builder | `<scenario-workdir>/plan.md` | 否。含真实期间与口径，属敏感上下文 |
 | 诊断快照 | DA | Builder、交叉审查者 | `<scenario-workdir>/evidence/diagnosis.json` | 否。真实诊断数据禁止入仓 |
 | 证据包（口径、计算过程、来源引用、缺失证据） | DA | Boss、交叉审查者 | `<scenario-workdir>/evidence/` | 否 |
-| 站点工作副本 | Builder | Builder | `<scenario-workdir>/site/` | 仅当内容全部为合成示例时，才可放回仓库的 `openbot/examples/` |
+| 站点工作副本 | Builder | Builder | `<scenario-workdir>/site/` | 仅当内容全部为合成示例时，才可放回仓库的 `volto/examples/` |
 | 本机访问验证报告 | Builder | Boss、交叉审查者 | `<scenario-workdir>/verification/` | 否。含本机路径与运行细节；仓库内只留结论摘要 |
 | 独立交叉审查记录 | 交叉审查者 | Boss | `<scenario-workdir>/verification/review.md` | 否 |
 | 合成示例站点与合成快照 | 仓库维护者 | 全部角色 | `examples/org-health-local/` | 是。仅限人工构造数据（`examples/org-health-local/README.md:36-44`） |
@@ -96,15 +96,15 @@
 - [ ] `scope` 四项齐全且与任务书一致：观察月份、数据截止、来源、schema 版本（`examples/org-health-local/data/diagnosis.json:2-6`）。
 - [ ] 指标标题与顺序符合页面期望顺序，否则页面直接报错（`examples/org-health-local/app.js:74-82`）。
 - [ ] 各期数值为有限数值或显式 `null`；`null` 只用于真实缺口，不用于未取数（`examples/org-health-local/app.js:109-127`）。
-- [ ] 5 月缺少同口径整体成本与人头时保持 `null`，页面显示"未提供"并注明 5 月缺同口径值（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:28`、`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:52`）。
-- [ ] 成本单位、折算人头口径与成本率定义与任务书一致（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:30`、`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:33`）。
-- [ ] 事实、推断、边界分别标注，推断不写成事实（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:81-84`）。
-- [ ] 缺失领域显式列为证据缺口，不以成本或人数代替（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:48`）。
+- [ ] 5 月缺少同口径整体成本与人头时保持 `null`，页面显示"未提供"并注明 5 月缺同口径值（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:28`、`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:52`）。
+- [ ] 成本单位、折算人头口径与成本率定义与任务书一致（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:30`、`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:33`）。
+- [ ] 事实、推断、边界分别标注，推断不写成事实（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:81-84`）。
+- [ ] 缺失领域显式列为证据缺口，不以成本或人数代替（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:48`）。
 - [ ] 每条建议带依据、缺失证据与核实方式（`examples/org-health-local/data/diagnosis.json:89-98`）。
 
 ### 5.2 验证
 
-- [ ] 仓库内合成示例的回归脚本 `bun run test:org-health-demo` 通过（`openbot/package.json:194`），覆盖中英文与回退语言、无效数据、无效 Host 与私有路径（`openbot/scripts/org-health-demo-e2e.ts:107`、`openbot/scripts/org-health-demo-e2e.ts:189-193`）。
+- [ ] 仓库内合成示例的回归脚本 `bun run test:org-health-demo` 通过（`volto/package.json:194`），覆盖中英文与回退语言、无效数据、无效 Host 与私有路径（`volto/scripts/org-health-demo-e2e.ts:107`、`volto/scripts/org-health-demo-e2e.ts:189-193`）。
 - [ ] 从仓库根目录运行 `python3 examples/org-health-local/run_tests.py`，执行全量 Python 单测，覆盖 Boss、DA、Builder、Reviewer、服务与编排器测试（`examples/org-health-local/run_tests.py:9-22`）。
 - [ ] 站点在本机可访问：服务只绑定回环地址 `127.0.0.1`（`examples/org-health-local/serve.py:87`），启动后打印预览地址、站点根目录、诊断数据文件与路径白名单（`examples/org-health-local/serve.py:94-100`）。
 - [ ] 端口被占用时打印明确错误并以非 0 退出，不静默改用其他端口（`examples/org-health-local/serve.py:74-81`、`examples/org-health-local/serve.py:105-121`）。
@@ -116,9 +116,9 @@
 
 - [ ] 真实诊断数据只存在于 `<scenario-workdir>`；仓库、Issue、PR 内只有合成示例与脱敏摘要。
 - [ ] 快照只含聚合口径，不含人名、薪酬明细、编制明细等个人级字段。
-- [ ] 页面文案不作个人、薪酬或编制判断（`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:21`）。
+- [ ] 页面文案不作个人、薪酬或编制判断（`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:21`）。
 - [ ] 页面无第三方脚本与外链，内容安全策略为 `default-src 'self'`（`examples/org-health-local/index.html:7`、`examples/org-health-local/index.html:10`）。
-- [ ] 页面不发送网络请求，数据来自本机同源路由（`examples/org-health-local/app.js:234`、`openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts:51`）。
+- [ ] 页面不发送网络请求，数据来自本机同源路由（`examples/org-health-local/app.js:234`、`volto/packages/i18n/src/messages/zh/orgHealthDemo.ts:51`）。
 
 ### 5.4 独立交叉审查
 
@@ -148,17 +148,17 @@
 | `examples/org-health-local/data/diagnosis.json` | 1-9 | `scope` 四项、`conclusion`、`origin` |
 | `examples/org-health-local/data/diagnosis.json` | 10-74 | 四组指标的期间值与 `null` 缺口 |
 | `examples/org-health-local/data/diagnosis.json` | 75-98 | `insights`、`definitions`、`risks`、`recommendations` |
-| `openbot/scripts/org-health-demo-e2e.ts` | 16 | 以临时目录中的副本启动隔离服务 |
-| `openbot/scripts/org-health-demo-e2e.ts` | 189-193 | 无效 Host 403 与私有路径 404 断言 |
-| `openbot/package.json` | 194 | `test:org-health-demo` 脚本定义 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 15 | 历史快照提示，不等于当前组织结论 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 21 | 仅聚合信号，不作个人、薪酬或编制判断 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 28 | 5 月缺同口径值、年末值非已发生实际 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 30 | 成本单位与折算人头口径 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 33 | 技术人力成本率定义 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 48 | 缺失领域显示为缺失，不以成本或人数代替 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 51 | 本机静态数据，不发送网络请求 |
-| `openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 59-60 | 结构或数值格式变化的失败提示 |
+| `volto/scripts/org-health-demo-e2e.ts` | 16 | 以临时目录中的副本启动隔离服务 |
+| `volto/scripts/org-health-demo-e2e.ts` | 189-193 | 无效 Host 403 与私有路径 404 断言 |
+| `volto/package.json` | 194 | `test:org-health-demo` 脚本定义 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 15 | 历史快照提示，不等于当前组织结论 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 21 | 仅聚合信号，不作个人、薪酬或编制判断 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 28 | 5 月缺同口径值、年末值非已发生实际 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 30 | 成本单位与折算人头口径 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 33 | 技术人力成本率定义 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 48 | 缺失领域显示为缺失，不以成本或人数代替 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 51 | 本机静态数据，不发送网络请求 |
+| `volto/packages/i18n/src/messages/zh/orgHealthDemo.ts` | 59-60 | 结构或数值格式变化的失败提示 |
 
 ## 7. 未决事项
 

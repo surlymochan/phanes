@@ -1,6 +1,6 @@
 # Fix the context-usage-v1 Team API addition before it can ship
 
-Repository: OpenBot. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md and src/preload/AGENTS.md.
+Repository: volto. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md and src/preload/AGENTS.md.
 Base: held-context-usage (cb6db55189). A read-only protocol review found the problems below. A released wire contract is permanent, so the
 contract must be right before it ships.
 

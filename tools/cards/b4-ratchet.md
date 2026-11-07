@@ -1,6 +1,6 @@
 # Fix the ratcheted TypeScript errors in three new E2E scripts
 
-Repository: OpenBot desktop. Read AGENTS.md. Base: branch `pr51` (head `b8176f1c2b`), the E2E coverage pull request on top of main `fd5719fc7f`.
+Repository: volto desktop. Read AGENTS.md. Base: branch `pr51` (head `b8176f1c2b`), the E2E coverage pull request on top of main `fd5719fc7f`.
 
 ## Problem
 

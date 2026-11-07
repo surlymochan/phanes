@@ -1,6 +1,6 @@
-# Issue #21 / #110 调研审查：OpenBot 模型额度作用域与回退机制现状梳理
+# Issue #21 / #110 调研审查：Volto 模型额度作用域与回退机制现状梳理
 
-> **审查范围**：`openbot/` 后端、契约及调度链路中的额度、限流、429、模型家族、账号作用域与回退决策。  
+> **审查范围**：`volto/` 后端、契约及调度链路中的额度、限流、429、模型家族、账号作用域与回退决策。  
 > **关联 Issue**：Refs #21, Refs #110  
 > **性质**：只读调研与现状梳理，不修改任何业务生产代码。
 
@@ -8,28 +8,28 @@
 
 ## 1. 额度/限流相关的核心类型与传播路径
 
-在 `openbot/` 代码库中，模型额度限制并非仅停留在 UI/i18n 展示层，而是一套贯穿**契约层**、**驱动层**、**生命周期层**、**门禁层**与**调度编排层**的完整状态机。
+在 `volto/` 代码库中，模型额度限制并非仅停留在 UI/i18n 展示层，而是一套贯穿**契约层**、**驱动层**、**生命周期层**、**门禁层**与**调度编排层**的完整状态机。
 
 ### 1.1 核心类型定义（文件 + 行号）
 
 1. **契约层（IPC & 状态快照）**：
-   - `openbot/packages/contracts/src/ipc-agent-runtime.ts`
+   - `volto/packages/contracts/src/ipc-agent-runtime.ts`
      - `AccountUsage`（L148–158）：账号全局用量读数，包含 `limits: readonly AccountRateLimitWindow[]` 与 `usageLimitedModels: readonly UsageLimitedModel[]`。
      - `AccountRateLimitWindow` / `UsageLimitWindow`（L112–118）：单个配额窗口，包含 `usedPercent`、`resetsAt: number | null`（Unix 秒）以及 `windowSeconds`。
      - `AgentRuntimeSnapshot.usageLimits`（L171–174）：向前端广播的挂起 Agent 列表及对应的预期重置时间戳 `{ agentId: string; resetsAt: number | null }[]`。
      - `AgentRuntimeSnapshot.usageLimitedModels`（L175–183）：受限的 provider/model/providerAccountId 三元组列表。
-   - `openbot/packages/contracts/src/ipc-agents.ts`
+   - `volto/packages/contracts/src/ipc-agents.ts`
      - `AgentBackupModels`（L28–31）：备用模型配置 `{ automatic: boolean; order: readonly AgentModelChoice[] }`。
      - `AgentModelChoice`（L17–21）：模型选择项 `{ provider: AgentProvider; model: string; providerAccountId?: string | null }`。
      - `AgentUsageLimitReturn`（L33–37）：限流切走后记录的原路回退锚点，包含原始模型的 `reasoningEffort` 与可选的 `cause?: "provider-error"`。
      - `UpdateAgentInput`（L153–167）：包含 `backupModels` 与 `leaveUsageLimit?: boolean`（标记本次模型切换是否因限流暂离）。
-   - `openbot/packages/contracts/src/ipc-conversation-events.ts`
+   - `volto/packages/contracts/src/ipc-conversation-events.ts`
      - `AgentEvent` 中 `type: "usage-limit-reached"`（L48–54）：限流事件广播，携带 `provider`、`resetsAt` 及被 hold 的 `agentCount`。
      - `ChatActionMarker`（L85–97）：时间轴提示标记，包含 `usage-limit-switch`、`provider-error-switch`、`usage-limit-return`、`backup-models-card`。
 
 2. **后端门禁与状态类型（`UsageLimitGate`）**：
-   - `openbot/src/backend/agent/usage-limit-gate.ts`
-     - `USAGE_LIMIT_METHOD = "openbot/usageLimit"`（L9）：客户端或协议层通知限流的标准内部 RPC 方法名。
+   - `volto/src/backend/agent/usage-limit-gate.ts`
+     - `USAGE_LIMIT_METHOD = "volto/usageLimit"`（L9）：客户端或协议层通知限流的标准内部 RPC 方法名。
      - `UsageLimitKey`（L55–62）：限流键结构 `{ provider: AgentProvider; accountId: string | null; model: string; family: string | null }`。
      - `UsageLimit`（L68–72）：内存中维护的配额限制项，包含 `resetsAt: number | null` 和定时恢复句柄 `timer: ReturnType<typeof setTimeout> | null`。
      - `ProviderFailure`（L64–66）：非配额类的临时 Provider 报错记录（固定退避 10 分钟）。
@@ -38,7 +38,7 @@
      - `spentWindowReset()`（L403–413）：从 `AccountUsage` 读数中计算最近且用量达 100% 的窗口最远重置时间。
 
 3. **错误诊断与模式识别**：
-   - `openbot/src/backend/agent/provider-diagnostics.ts`
+   - `volto/src/backend/agent/provider-diagnostics.ts`
      - `isUsageLimitDiagnostic(message)`（L32–35）：正则匹配 HTTP 429、`resource has been exhausted`、`rate limit`、`quota ... exceeded/exhausted`。
      - `isPlanLimitDiagnostic(message)`（L40–45）：识别按时间周期的套餐限制（支持自动重置）。
      - `isBalanceDiagnostic(message)`（L50–55）：识别充值余额/点数耗尽（不自动重置，不可自愈）。
@@ -252,18 +252,18 @@
 
 ### 3.1 现有测试文件及覆盖点
 
-1. **`openbot/scripts/usage-limit-account-e2e.ts`**：
+1. **`volto/scripts/usage-limit-account-e2e.ts`**：
    - 测试了内存模式下 `UsageLimitGate` 的基本功能：
      - 账号级限流时，同账号其他模型受阻，跨账号/跨 Provider 模型不受影响；
      - 成功运行一次 Turn 会释放账号级限制；
      - `opus` 家族限流仅阻断 `c-opus`，不阻断同账号 `c-sonnet`；
      - `c-sonnet` 成功不会释放 `c-opus` 的家族锁；
      - 账号级限制与家族级限制复合时，两者的重叠与分步解封逻辑。
-2. **`openbot/scripts/backup-model-failover-e2e.ts`**：
+2. **`volto/scripts/backup-model-failover-e2e.ts`**：
    - 测试了遭遇限流或 Provider 报错时，开启 `automatic` 的 Agent 自动在 `backupModels.order` 中按序寻找就绪模型完成 failover，并在解除限流后切回原模型的流程。
-3. **`openbot/scripts/channel-usage-limit-e2e.ts`**：
+3. **`volto/scripts/channel-usage-limit-e2e.ts`**：
    - 测试了 Channel 协同工作区中，子任务遭遇限流后将任务交还 Channel 队列、避免锁死车道的行为。
-4. **`openbot/src/backend/agent/provider-diagnostics.test.ts`**：
+4. **`volto/src/backend/agent/provider-diagnostics.test.ts`**：
    - 正则级单元测试，覆盖了各类限流、配额耗尽与余额耗尽错误信息的文本归类。
 
 ### 3.2 测试覆盖缺口
@@ -284,11 +284,11 @@
 ### Issue 建议 1：修复 `drain-scheduler` 与 `turn-lifecycle` 中 model family 作用域丢失
 
 - **目标与改动点**：
-  1. 在 `openbot/src/backend/agent/drain-scheduler.ts:930, 934` 调用 `this.#usageLimits.reached` 时，补齐第 4 个参数 `modelFamily(requestedModel)`。
-  2. 在 `openbot/src/backend/agent/turn-lifecycle.ts:787–790` 捕获文本限流通知时，从当前 `errorTurnId` 的模型名中提取 `modelFamily(turnModel)`，避免单家族限流退化为全账号锁定。
+  1. 在 `volto/src/backend/agent/drain-scheduler.ts:930, 934` 调用 `this.#usageLimits.reached` 时，补齐第 4 个参数 `modelFamily(requestedModel)`。
+  2. 在 `volto/src/backend/agent/turn-lifecycle.ts:787–790` 捕获文本限流通知时，从当前 `errorTurnId` 的模型名中提取 `modelFamily(turnModel)`，避免单家族限流退化为全账号锁定。
 - **验收命令**：
   ```bash
-  cd openbot && bun scripts/usage-limit-account-e2e.ts
+  cd volto && bun scripts/usage-limit-account-e2e.ts
   ```
 
 ---
@@ -296,14 +296,14 @@
 ### Issue 建议 2：为 `UsageLimitGate` 补充 Vitest 单元测试集（覆盖定时轮询、时间宽限与状态清理）
 
 - **目标与改动点**：
-  - 新增 `openbot/src/backend/agent/usage-limit-gate.test.ts`，基于 Vitest + `@sinonjs/fake-timers` 验证：
+  - 新增 `volto/src/backend/agent/usage-limit-gate.test.ts`，基于 Vitest + `@sinonjs/fake-timers` 验证：
     1. `resetsAt === null` 触发的 15 分钟定时器及 `#fire` 主动探测分支；
     2. 到期后 `RESET_GRACE_MS`（30 秒）宽限期行为；
     3. `dispose()` 对未决定时器及 Effect Scope 的完整释放，杜绝内存泄漏；
     4. 独立验证 `failed()` 10 分钟临时退避与 `completed()` 提前解除机制。
 - **验收命令**：
   ```bash
-  cd openbot && bun test src/backend/agent/usage-limit-gate.test.ts
+  cd volto && bun test src/backend/agent/usage-limit-gate.test.ts
   ```
 
 ---
@@ -315,7 +315,7 @@
   2. 当 `generateWorkflowText` 捕获到 `GenerationUsageLimitError` 时，调用 `this.#usageLimits.reached` 将限制同步至全局门禁。
 - **验收命令**：
   ```bash
-  cd openbot && bun test src/backend/agent/workflow-decoding.test.ts
+  cd volto && bun test src/backend/agent/workflow-decoding.test.ts
   ```
 
 ---
@@ -327,5 +327,5 @@
   - 支持将 Gemini Pro vs Gemini Flash、OpenAI o-series vs 4o 等具有独立套餐窗口的模型映射至独立的 `family` 键，防止单个轻量模型触限导致全系列不可用。
 - **验收命令**：
   ```bash
-  cd openbot && bun scripts/usage-limit-account-e2e.ts
+  cd volto && bun scripts/usage-limit-account-e2e.ts
   ```

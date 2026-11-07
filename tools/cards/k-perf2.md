@@ -1,7 +1,7 @@
 # M10 #61: make the streaming parse change pay off, or revert it (perf finding 2)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and packages/ui/AGENTS.md first.
-Base: your commit 0592c3a977 (perf findings 1 and 2 on top of PR nibiru-labs/openbot#42).
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and packages/ui/AGENTS.md first.
+Base: your commit 0592c3a977 (perf findings 1 and 2 on top of PR nibiru-labs/volto#42).
 
 ## Problem
 

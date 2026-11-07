@@ -121,7 +121,7 @@ PYTHONPATH=tests python3 -m unittest test_lane.LaneTests.test_cursor_turn_withou
 - **任务卡路径**：
   - [`regression/dispatch-approval-gate/card.md`](file:///path/to/operator/work/agent-knowledge/regression/dispatch-approval-gate/card.md#L1-L4)
   - [`regression/dispatch-approval-gate/meta.yaml`](file:///path/to/operator/work/agent-knowledge/regression/dispatch-approval-gate/meta.yaml#L1-L10)
-- **所属仓库**：`openbot`
+- **所属仓库**：`volto`
 - **基线提交（base_commit）**：`5b37965fa1249ad6a41bbaf81bc7807f055d3da8` ("Read the real openswarm output and explain dispatch failures")
 - **修复/合入提交（source_commit）**：`317be65636c1c8ba6d7aec337d9119b5ab8fe2dd` ("Ask the person before a risky dispatch runs"，对应 source_run `20261026-194344-34dd4b`)
 - **当前配置验证命令**：
@@ -140,7 +140,7 @@ PYTHONPATH=tests python3 -m unittest test_lane.LaneTests.test_cursor_turn_withou
    - **结论**：验证命令在基线提交上直接通过，**完全无法证明**风险调度审批网关是否存在或生效。
 
 #### 建议验证命令（基线失败、修复后通过）
-在提交 `317be65636` 中引入了端到端行为测试脚本 [`openbot/scripts/dispatch-approval-e2e.ts`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/openbot/scripts/dispatch-approval-e2e.ts#L1-L25)：
+在提交 `317be65636` 中引入了端到端行为测试脚本 [`volto/scripts/dispatch-approval-e2e.ts`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/volto/scripts/dispatch-approval-e2e.ts#L1-L25)：
 ```bash
 bun scripts/dispatch-approval-e2e.ts
 ```
@@ -154,7 +154,7 @@ bun scripts/dispatch-approval-e2e.ts
 - **任务卡路径**：
   - [`regression/process-search-results/card.md`](file:///path/to/operator/work/agent-knowledge/regression/process-search-results/card.md#L1-L4)
   - [`regression/process-search-results/meta.yaml`](file:///path/to/operator/work/agent-knowledge/regression/process-search-results/meta.yaml#L1-L10)
-- **所属仓库**：`openbot`
+- **所属仓库**：`volto`
 - **基线提交（base_commit）**：`ef3993b73b0c155133da4a0b8197e0d3965389db` ("Show each turn's response process and animate the working avatar")
 - **修复/合入提交（source_commit）**：`00daa495dab431a9071af18885affc70789d9ce2` / `feeaba4ae0dc73afb043d34702b13dc8668881f2` ("Open the response process when a search hit selects a process note" / "Show the response process with a working avatar (fuses #18 and #23)"，对应 source_run `20261027-034107-457701`)
 - **当前配置验证命令**：
@@ -167,14 +167,14 @@ bun scripts/dispatch-approval-e2e.ts
    - `bun run typecheck:renderer` 执行 `bun scripts/type-checker.ts --noEmit -p tsconfig.web.json`。
    - 在基线提交 `ef3993b73b` 上，前端 renderer 代码类型检查本身即为通过状态（退出码 `0`）。
    - 该卡片目标是：修复 `AgentTasks.tsx` 的属性透传，并在搜索到思考过程（process note）结果时，将其映射到轮次分组并展开折叠（disclosure）。
-   - 静态类型检查既无法测试搜索结果选中时的展开行为（[`packages/ui/src/features/conversation/ResponseProcess.tsx`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/openbot/packages/ui/src/features/conversation/ResponseProcess.tsx#L8-L38)、[`src/renderer/src/features/conversation/stores/search-store.ts`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/openbot/src/renderer/src/features/conversation/stores/search-store.ts#L92-L134)），也无法作为证明该功能实现的有效手段。
+   - 静态类型检查既无法测试搜索结果选中时的展开行为（[`packages/ui/src/features/conversation/ResponseProcess.tsx`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/volto/packages/ui/src/features/conversation/ResponseProcess.tsx#L8-L38)、[`src/renderer/src/features/conversation/stores/search-store.ts`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/volto/src/renderer/src/features/conversation/stores/search-store.ts#L92-L134)），也无法作为证明该功能实现的有效手段。
    - [`tools/cards/c1-58.md`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/tools/cards/c1-58.md#L10-L12) 同样记录了：`process-search-results` 的 `verify`（`bun run typecheck:renderer`）在基线提交上早已通过。
 2. **测试结果**：
    - 在基线提交上执行 `bun run typecheck:renderer` 直接成功（exit code 0）。
    - **结论**：验证命令在基线提交上直接通过，**无法证明**搜索命中思考项后展开和高亮 disclosure 的交互逻辑已被实现。
 
 #### 建议验证命令（基线失败、修复后通过）
-在提交 `feeaba4ae0` 中引入了端到端行为验证脚本 [`openbot/scripts/response-process-e2e.ts`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/openbot/scripts/response-process-e2e.ts#L1-L35)：
+在提交 `feeaba4ae0` 中引入了端到端行为验证脚本 [`volto/scripts/response-process-e2e.ts`](file:///path/to/operator/.claude/openswarm-executor-candidate/lanes/A2/wt/volto/scripts/response-process-e2e.ts#L1-L35)：
 ```bash
 bun scripts/response-process-e2e.ts
 ```
@@ -189,8 +189,8 @@ bun scripts/response-process-e2e.ts
 | :--- | :--- | :--- | :--- | :--- | :---: | :--- | :---: | :---: |
 | **`cursor-acp-lane`** | `openswarm` | `9cbcb40404` | `355f284870` | `python3 -m unittest discover -s tests` | **通过 (0)** | `PYTHONPATH=tests python3 -m unittest test_lane.LaneTests.test_cursor_assign_selects_model_and_commits_without_verify` | 失败 (1) | 通过 (0) |
 | **`cursor-steer-report`** | `openswarm` | `355f284870` | `3715f5bd01` | `python3 -m unittest discover -s tests` | **通过 (0)** | `PYTHONPATH=tests python3 -m unittest test_lane.LaneTests.test_cursor_turn_without_report_is_partial` | 失败 (1) | 通过 (0) |
-| **`dispatch-approval-gate`** | `openbot` | `5b37965fa1` | `317be65636` | `bun run typecheck:node` | **通过 (0)** | `bun scripts/dispatch-approval-e2e.ts` | 失败 (1) | 通过 (0) |
-| **`process-search-results`** | `openbot` | `ef3993b73b` | `feeaba4ae0` | `bun run typecheck:renderer` | **通过 (0)** | `bun scripts/response-process-e2e.ts` | 失败 (1) | 通过 (0) |
+| **`dispatch-approval-gate`** | `volto` | `5b37965fa1` | `317be65636` | `bun run typecheck:node` | **通过 (0)** | `bun scripts/dispatch-approval-e2e.ts` | 失败 (1) | 通过 (0) |
+| **`process-search-results`** | `volto` | `ef3993b73b` | `feeaba4ae0` | `bun run typecheck:renderer` | **通过 (0)** | `bun scripts/response-process-e2e.ts` | 失败 (1) | 通过 (0) |
 
 ---
 

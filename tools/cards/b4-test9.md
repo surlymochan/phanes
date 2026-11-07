@@ -1,11 +1,11 @@
 # M10 #66: E2E for downloading a provider runtime (tests 9)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
 
-Test-coverage finding 9 below. First check existing scripts (grep scripts/ for provider-runtime-manager and runtime download) and report what they cover. Add one new E2E script for the uncovered path using a local HTTP fixture server inside the script (no internet). No product code change unless a test exposes a real bug; then report it. Temporary files only under $TMPDIR or .openbot-build/ in the worktree; never touch /tmp.
+Test-coverage finding 9 below. First check existing scripts (grep scripts/ for provider-runtime-manager and runtime download) and report what they cover. Add one new E2E script for the uncovered path using a local HTTP fixture server inside the script (no internet). No product code change unless a test exposes a real bug; then report it. Temporary files only under $TMPDIR or .volto-build/ in the worktree; never touch /tmp.
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -13,7 +13,7 @@ Test-coverage finding 9 below. First check existing scripts (grep scripts/ for p
 
 **Evidence**
 
-- `README.md:117` says that OpenBot can download a supported provider runtime when the user selects
+- `README.md:117` says that Volto can download a supported provider runtime when the user selects
   `Download` in onboarding, Settings, agent setup, or the model picker.
 - `src/main/provider-runtime-manager.ts:189` is `ProviderRuntimeManager`. It reads the hashes from
   `native-runtime.lock.json`.
@@ -42,7 +42,7 @@ and the update path that `scripts/provider-update-busy-e2e.ts` covers only durin
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

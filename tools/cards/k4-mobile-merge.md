@@ -1,6 +1,6 @@
 # Combine four mobile commits on the new main and resolve their conflicts
 
-Repository: OpenBot (mobile app in apps/mobile, Expo / React Native; read apps/mobile/AGENTS.md and AGENTS.md). Base: `fd5719fc7f` (new main).
+Repository: volto (mobile app in apps/mobile, Expo / React Native; read apps/mobile/AGENTS.md and AGENTS.md). Base: `fd5719fc7f` (new main).
 
 Four commits were written independently on the same old base. They change the phone chat and its text, so they conflict. They are all in this
 repository (names are branches):

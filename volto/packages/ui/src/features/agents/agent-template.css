@@ -1,0 +1,202 @@
+/* The publish dialog and the install dialog of an agent template. Both are one centred card: the
+ * agent's identity on top, its content below, and the actions in a footer on the right. */
+
+.agent-template-dialog {
+  position: relative;
+  display: flex;
+  width: min(420px, 100%);
+  max-height: calc(100dvh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+  outline: 0;
+  border: 1px solid var(--volto-border);
+  border-radius: var(--volto-radius-card);
+  background: var(--volto-bg-sidebar);
+  color: var(--volto-text-primary);
+}
+
+.agent-template-status {
+  position: absolute;
+  z-index: 1;
+  inset-block-start: var(--volto-space-3);
+  inset-inline-start: var(--volto-space-3);
+}
+
+.agent-template-corner-actions {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  gap: var(--volto-space-1);
+  inset-block-start: var(--volto-space-2);
+  inset-inline-end: var(--volto-space-2);
+  color: var(--volto-text-muted);
+}
+
+.agent-template-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--volto-space-4);
+  padding: var(--volto-space-6) var(--volto-space-4) var(--volto-space-4);
+}
+
+.agent-template-scroll {
+  overflow-y: auto;
+}
+
+.agent-template-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--volto-space-1);
+  text-align: center;
+}
+
+.agent-template-avatar {
+  width: 72px;
+  height: 72px;
+  margin-block-end: var(--volto-space-3);
+}
+
+.agent-template-name {
+  overflow-wrap: anywhere;
+}
+
+.agent-template-description {
+  display: -webkit-box;
+  margin-block-start: var(--volto-space-1);
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+}
+
+.agent-template-rows {
+  display: grid;
+  overflow: hidden;
+  border-radius: var(--volto-radius-grouped);
+}
+
+.agent-template-row {
+  display: grid;
+  width: 100%;
+  height: auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--volto-space-3);
+  border-radius: 0;
+  padding: var(--volto-space-3) var(--volto-space-4);
+  text-align: start;
+  color: var(--volto-text-muted);
+}
+
+.agent-template-row + .agent-template-row {
+  border-top: 1px solid var(--volto-border-grouped);
+}
+
+.agent-template-row-copy {
+  display: grid;
+  min-width: 0;
+  gap: var(--volto-space-0-5);
+}
+
+.agent-template-row-title {
+  color: var(--volto-text-primary);
+  font-size: var(--volto-text-md);
+  font-weight: var(--volto-weight-medium);
+}
+
+.agent-template-row-detail {
+  overflow: hidden;
+  color: var(--volto-text-grouped-secondary);
+  font-size: var(--volto-text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-template-actions {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: var(--volto-space-2);
+  border-top: 1px solid var(--volto-border);
+  padding: var(--volto-space-3) var(--volto-space-4);
+}
+
+.agent-template-copy {
+  margin-inline-end: auto;
+}
+
+.agent-template-detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--volto-space-2);
+  margin-block-start: calc(var(--volto-space-2) * -1);
+}
+
+.agent-template-detail {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--volto-space-4);
+  overflow-y: auto;
+}
+
+.agent-template-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-1);
+}
+
+/* The instructions as Markdown, at the body size of the dialog. Headings stay below the agent's name. */
+.agent-template-prose {
+  color: var(--volto-text-secondary);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+  overflow-wrap: anywhere;
+}
+
+.agent-template-prose .message-markdown-heading[data-level] {
+  color: var(--volto-text-primary);
+  font-size: var(--volto-text-lg);
+  line-height: var(--volto-leading-lg);
+}
+
+.agent-template-prose .message-markdown-heading:not([data-level="1"], [data-level="2"]) {
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+}
+
+.agent-template-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-template-list > li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-0-5);
+}
+
+.agent-template-skill-toggle {
+  justify-content: flex-start;
+  align-self: flex-start;
+  gap: var(--volto-space-1);
+  margin-inline-start: calc(var(--volto-space-2) * -1);
+}
+
+.agent-template-skill-text {
+  max-height: 240px;
+  margin: var(--volto-space-1) 0 0;
+  overflow: auto;
+  border-radius: var(--volto-radius-md);
+  background: var(--volto-bg-control);
+  padding: var(--volto-space-3);
+  font-family: var(--volto-font-mono);
+  font-size: var(--volto-text-sm);
+  white-space: pre-wrap;
+}

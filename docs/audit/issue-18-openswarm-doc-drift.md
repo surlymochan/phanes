@@ -159,7 +159,7 @@
 | 跨主机 provider 配额由规划方协调（`batch` 汇总各主机快照） | `openswarm/README.md:505` | `openswarm/bin/openswarm:9472-9520`（`batch_provider_slot_available`） |
 | fleet-capacity 的后端白名单与上限（total 8、host:broker 4、host:worker 4、host:local 2、codex 1、pi 4、cursor 2、agy 2、copilot 2、minimax-cn 4） | 文档未写 | `openswarm/bin/fleet-capacity:12-14` |
 | SWE-bench / 合成任务 / 路由配额基准表中的数值 | `openswarm/README.md:12-64` | `openswarm/bench/swebench/results/deepseek/tables.md`、`openswarm/bench/e2e/results/headline.json`、`openswarm/bench/results/summary.md:144` |
-| `agy-via-local-proxy` 的 Keychain/RAM disk 行为描述 | `openswarm/docs/agy-macos-runtime.md` | `openswarm/bin/agy-via-local-proxy`（Keychain 账号 `openswarm`、服务 `openbot-agy-nick-oauth`、RAM 卷 `/Volumes/OpenBotAgyVolatile`、仅在 refresh token 变化时回写） |
+| `agy-via-local-proxy` 的 Keychain/RAM disk 行为描述 | `openswarm/docs/agy-macos-runtime.md` | `openswarm/bin/agy-via-local-proxy`（Keychain 账号 `openswarm`、服务 `volto-agy-nick-oauth`、RAM 卷 `/Volumes/VoltoAgyVolatile`、仅在 refresh token 变化时回写） |
 
 ## 5. 不完整但不错误（未修改，建议后续处理）
 

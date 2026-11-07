@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:openbot:examples:org-health-local:brief.schema.json",
+  "$id": "urn:volto:examples:org-health-local:brief.schema.json",
   "title": "组织诊断任务书",
   "description": "brief.json 的结构定义：Boss 产出的任务书，只含口径、问题与字段映射，不含真实组织数据或真实数字。口径的键与 data/diagnosis.json 的 metrics 标题一一对应。",
   "$comment": "字段路径是逻辑路径：数据提供方的原始表与列名由 DA 按实际来源映射。",

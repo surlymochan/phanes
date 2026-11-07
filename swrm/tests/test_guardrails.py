@@ -153,7 +153,7 @@ class GuardrailsTests(unittest.TestCase):
     def test_computer_use_is_blocked_in_lane_and_exec_events(self):
         lane_event = {"method": "item/started", "params": {"item": {"type": "mcpToolCall", "server": "cua_repl", "tool": "js"}}}
         exec_event = {"type": "item.started", "item": {"type": "mcpToolCall", "server": "cua_repl", "tool": "js"}}
-        other = {"method": "item/started", "params": {"item": {"type": "mcpToolCall", "server": "openbot", "tool": "x"}}}
+        other = {"method": "item/started", "params": {"item": {"type": "mcpToolCall", "server": "volto", "tool": "x"}}}
         self.assertEqual(xs.enforced_risk(lane_event, {}, str(self.root))["risk"], "computer use")
         self.assertEqual(xs.enforced_risk(exec_event, {}, str(self.root))["risk"], "computer use")
         self.assertIsNone(xs.enforced_risk(other, {}, str(self.root)))

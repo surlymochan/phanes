@@ -1,0 +1,170 @@
+/*
+ * The code sign-in dialog. It opens from the provider rows, which appear inside the settings modal
+ * as well as on their own, so it sits one layer above the shared dialog layer for the same reason
+ * `opencode-key-dialog.css` does: both portals are children of `body`, and insertion order alone
+ * would decide it wrongly the first time a caller mounts it from elsewhere.
+ *
+ * The code itself is the largest thing on screen. It is about to be typed on another device from
+ * this screen alone, so it is set in the mono face at display size with the characters spaced
+ * apart: a code read wrong costs the whole round trip.
+ */
+
+.provider-code-login-backdrop {
+  z-index: calc(var(--volto-layer-dialog) + 1);
+}
+
+.provider-code-login-dialog {
+  position: relative;
+  width: min(420px, 100%);
+  max-height: calc(100dvh - var(--volto-space-6) * 2);
+  overflow-y: auto;
+  outline: 0;
+  border-radius: var(--volto-radius-xl);
+  background: var(--volto-bg-control);
+  padding: var(--volto-space-6);
+  color: var(--volto-text-primary);
+  animation: provider-code-login-dialog-in var(--volto-duration-slow) var(--volto-ease-out) both;
+}
+
+/* The host's sign-in page needs the width of a browser window. */
+.provider-code-login-dialog[data-page] {
+  width: min(720px, 100%);
+}
+
+.provider-code-login-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-1);
+  /* The close button sits in the corner the title would otherwise run into. */
+  padding-right: var(--volto-space-8);
+}
+
+.provider-code-login-title {
+  margin: 0;
+  font-size: var(--volto-text-xl);
+  line-height: var(--volto-leading-xl);
+  font-weight: var(--volto-weight-semibold);
+  letter-spacing: var(--volto-tracking-tight);
+}
+
+.provider-code-login-description {
+  margin: 0;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+}
+
+.provider-code-login-body {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--volto-space-6);
+}
+
+/* The two waits, which look the same because they are the same to the user: Volto is busy and
+   there is nothing to do. */
+.provider-code-login-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--volto-space-2);
+  padding: var(--volto-space-8) 0;
+  text-align: center;
+}
+
+.provider-code-login-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--volto-space-4);
+}
+
+.provider-code-login-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-1);
+  margin: 0;
+  padding-left: var(--volto-space-4);
+  list-style: decimal;
+  color: var(--volto-text-secondary);
+  font-size: var(--volto-text-md);
+  line-height: var(--volto-leading-md);
+  align-self: stretch;
+}
+
+/* The link is a button, so it needs the baseline of the sentence it sits in rather than a line of
+   its own. */
+.provider-code-login-url {
+  display: inline-flex;
+  height: auto;
+  gap: var(--volto-space-1-5);
+  padding: 0;
+}
+
+.provider-code-login-url > svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+  flex: 0 0 auto;
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.provider-code-login-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--volto-space-3);
+  align-self: stretch;
+  border: 1px solid var(--volto-border);
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-bg-surface);
+  padding: var(--volto-space-3) var(--volto-space-4);
+}
+
+/* The copy icon belongs to the label beside it, not to the code: the default icon size would make
+   it the second largest thing in the row. */
+.provider-code-login-copy > svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+  flex: 0 0 auto;
+  stroke-width: var(--volto-icon-stroke);
+}
+
+.provider-code-login-digits {
+  font-family: var(--volto-font-mono);
+  font-size: var(--volto-text-2xl);
+  line-height: var(--volto-leading-2xl);
+  font-weight: var(--volto-weight-semibold);
+  letter-spacing: var(--volto-tracking-wide);
+}
+
+/* The pasted code and its button, full width under the steps. */
+.provider-code-login-paste {
+  display: flex;
+  flex-direction: column;
+  gap: var(--volto-space-3);
+  align-self: stretch;
+}
+
+.provider-code-login-expiry {
+  margin: 0;
+  text-align: center;
+}
+
+/* The app hand-off has no phase to show: only its two actions, in the order of a dialog footer. */
+.provider-use-app-actions {
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: var(--volto-space-2);
+}
+
+.provider-code-login-close {
+  position: absolute;
+  top: var(--volto-space-3);
+  right: var(--volto-space-3);
+}
+
+@keyframes provider-code-login-dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}

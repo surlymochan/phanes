@@ -1,0 +1,498 @@
+/* The shared integration layout: see IntegrationLayout.tsx. */
+
+.integration-logo-tile {
+  --integration-tile: 36px;
+  display: inline-grid;
+  flex: none;
+  width: var(--integration-tile);
+  height: var(--integration-tile);
+  place-items: center;
+  border: 1px solid var(--volto-border);
+  border-radius: var(--volto-radius-md);
+  background: var(--volto-bg-surface-raised);
+  color: var(--volto-text-primary);
+}
+
+.integration-logo-tile[data-size="lg"] {
+  --integration-tile: 48px;
+  border-radius: var(--volto-radius-lg);
+}
+
+.integration-logo-tile > svg {
+  width: 55%;
+  height: 55%;
+}
+
+/* An app icon fills its tile. */
+.integration-logo-tile > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.integration-status {
+  gap: var(--volto-space-1);
+}
+
+.integration-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--volto-radius-pill);
+  background: currentColor;
+}
+
+.integration-status[data-status="unavailable"] .integration-status-dot {
+  background: var(--volto-transparent);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+/* ------------------------------------------------ page header */
+
+/* One gap between every part of an integration page. */
+.integration-page {
+  display: grid;
+  gap: var(--volto-space-6);
+}
+
+.integration-detail-header {
+  display: flex;
+  gap: var(--volto-space-3);
+  align-items: center;
+}
+
+.integration-detail-copy {
+  display: grid;
+  flex: 1;
+  gap: var(--volto-space-1);
+  min-width: 0;
+}
+
+.integration-detail-title {
+  display: flex;
+  gap: var(--volto-space-2);
+  align-items: center;
+}
+
+.integration-detail-actions {
+  display: flex;
+  flex: none;
+  gap: var(--volto-space-2);
+}
+
+/* ------------------------------------------------ connect dialog */
+
+.integration-wizard {
+  display: grid;
+  gap: var(--volto-space-4);
+  padding: var(--volto-space-6);
+  border-radius: var(--volto-radius-xl);
+  background: var(--volto-bg-sheet);
+  box-shadow: var(--volto-shadow-dialog);
+}
+
+.integration-wizard-head {
+  display: grid;
+  gap: var(--volto-space-2);
+  justify-items: center;
+  text-align: center;
+}
+
+.integration-wizard-logos {
+  display: flex;
+  gap: var(--volto-space-2);
+  align-items: center;
+  margin-bottom: var(--volto-space-2);
+}
+
+.integration-wizard-app {
+  width: 36px;
+  height: 36px;
+}
+
+/* Dots flow from Volto to the other app while the flow runs. */
+.integration-wizard-link {
+  width: 40px;
+  height: 2px;
+  border-radius: var(--volto-radius-pill);
+  background:
+    radial-gradient(circle, var(--volto-accent) 0 1px, var(--volto-transparent) 1.5px) 0 50% / 8px 2px repeat-x;
+  animation: integration-wizard-flow 0.6s linear infinite;
+}
+
+@keyframes integration-wizard-flow {
+  to {
+    background-position-x: 8px;
+  }
+}
+
+.integration-wizard-logos[data-link="connected"] .integration-wizard-link {
+  background: var(--volto-success);
+  animation: none;
+}
+
+.integration-wizard-logos[data-link="broken"] .integration-wizard-link {
+  background:
+    radial-gradient(circle, var(--volto-border-strong) 0 1px, var(--volto-transparent) 1.5px) 0 50% / 8px 2px
+    repeat-x;
+  animation: none;
+}
+
+/* The other app breathes while Volto waits for it. */
+.integration-wizard-target {
+  display: inline-grid;
+  border-radius: var(--volto-radius-md);
+}
+
+.integration-wizard-logos[data-link="connecting"] .integration-wizard-target {
+  animation: integration-wizard-pulse 1.8s var(--volto-ease-out) infinite;
+}
+
+.integration-wizard-logos[data-link="connected"] .integration-wizard-target {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--volto-success) 30%, var(--volto-transparent));
+}
+
+@keyframes integration-wizard-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--volto-accent) 45%, var(--volto-transparent));
+  }
+  100% {
+    box-shadow: 0 0 0 8px var(--volto-transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .integration-wizard-link,
+  .integration-wizard-logos[data-link="connecting"] .integration-wizard-target {
+    animation: none;
+  }
+}
+
+.integration-wizard-body {
+  display: grid;
+  gap: var(--volto-space-3);
+}
+
+/* A body whose parts are all hidden, such as a plugin dialog before a failure, takes no gap. */
+.integration-wizard-body:empty {
+  display: none;
+}
+
+.integration-wizard-form {
+  display: grid;
+  gap: var(--volto-space-4);
+}
+
+.integration-wizard-foot {
+  display: flex;
+  gap: var(--volto-space-2);
+  justify-content: flex-end;
+}
+
+/* CopyButton draws its icon at full size; match the 14px icons of the other footer buttons. */
+.integration-wizard-foot .ui-button > svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+}
+
+/* Above the settings window the flow opens from. */
+.integration-dialog-backdrop {
+  z-index: calc(var(--volto-layer-dialog) + 1);
+}
+
+.integration-wizard-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: calc(var(--volto-layer-dialog) + 1);
+  width: min(440px, calc(100vw - var(--volto-space-6) * 2));
+  max-height: calc(100dvh - var(--volto-space-6) * 2);
+  overflow-y: auto;
+  outline: 0;
+  transform: translate(-50%, -50%);
+}
+
+/* A page drawn in the dialog, such as a joined server's sign-in page, needs room to type in. */
+.integration-wizard-dialog[data-wide] {
+  width: min(720px, calc(100vw - var(--volto-space-6) * 2));
+}
+
+/* Over the Marketplace window and the menus it opens. Both portals are children of `body`, so the
+   order of insertion alone cannot put this one on top. */
+:is(.integration-dialog-backdrop, .integration-wizard-dialog)[data-nested] {
+  z-index: calc(var(--volto-layer-dialog-host) + 2);
+}
+
+.integration-wizard-dialog h2 {
+  margin: 0;
+}
+
+.integration-dialog-close {
+  position: absolute;
+  top: var(--volto-space-3);
+  right: var(--volto-space-3);
+}
+
+/* ------------------------------------------------ stepper */
+
+.integration-stepper {
+  display: flex;
+  align-items: center;
+  margin: 0 0 var(--volto-space-2);
+  padding: 0;
+  list-style: none;
+}
+
+.integration-step {
+  display: flex;
+  align-items: center;
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+}
+
+/* The line to a step: quiet until the flow reaches that step, then it fills from the left. */
+.integration-step + .integration-step::before {
+  display: block;
+  width: 24px;
+  height: 2px;
+  margin-inline: var(--volto-space-1);
+  border-radius: var(--volto-radius-pill);
+  background:
+    linear-gradient(to right, var(--volto-success), var(--volto-accent)) no-repeat,
+    var(--volto-border-strong);
+  background-size:
+    0% 100%,
+    auto;
+  content: "";
+}
+
+.integration-step + .integration-step[data-state="current"]::before {
+  background-size:
+    100% 100%,
+    auto;
+  animation: integration-step-fill 0.4s var(--volto-ease-out);
+}
+
+.integration-step + .integration-step[data-state="done"]::before {
+  background:
+    linear-gradient(var(--volto-success), var(--volto-success)) no-repeat,
+    var(--volto-border-strong);
+  background-size:
+    100% 100%,
+    auto;
+  animation: integration-step-fill 0.4s var(--volto-ease-out);
+}
+
+@keyframes integration-step-fill {
+  from {
+    background-size:
+      0% 100%,
+      auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .integration-step + .integration-step[data-state="current"]::before,
+  .integration-step + .integration-step[data-state="done"]::before {
+    animation: none;
+  }
+}
+
+.integration-step-index {
+  display: inline-grid;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid var(--volto-border-strong);
+  border-radius: var(--volto-radius-pill);
+  font-size: var(--volto-text-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--volto-weight-medium);
+  line-height: 1;
+}
+
+.integration-step[data-state="current"] {
+  color: var(--volto-text-primary);
+}
+
+.integration-step[data-state="current"] .integration-step-index {
+  border-color: var(--volto-accent);
+  background: var(--volto-accent);
+  color: var(--volto-text-on-accent);
+}
+
+.integration-step[data-state="done"] .integration-step-index {
+  border-color: var(--volto-success);
+  color: var(--volto-success);
+}
+
+/* ------------------------------------------------ card content */
+
+/* Content of a card that is not rows: a form, a list, information. One body, so no row divider cuts it. */
+.integration-card-body {
+  display: grid;
+  gap: var(--volto-space-3);
+  padding: var(--volto-space-3) var(--volto-space-4);
+}
+
+/* A field in a card has the size of the buttons beside it, as in Server settings. */
+.integration-card-body :where(.ui-input) {
+  font-size: var(--volto-text-lg);
+  line-height: var(--volto-leading-lg);
+}
+
+/* The last line of a card: what the rows above it mean. */
+.integration-card-note {
+  padding: var(--volto-space-3) var(--volto-space-4);
+}
+
+/* On the card fill, the danger tone needs its text step for contrast. */
+.integration-card-note[data-tone="danger"] {
+  color: var(--volto-danger-text);
+}
+
+/* ------------------------------------------------ disconnect dialog */
+
+/* What a disconnect removes and what it keeps, one line each. */
+.integration-effects {
+  display: grid;
+  margin: 0;
+  padding: var(--volto-space-1);
+  border-radius: var(--volto-radius-lg);
+  background: var(--volto-bg-surface);
+  list-style: none;
+  color: var(--volto-text-secondary);
+  font-size: var(--volto-text-sm);
+}
+
+.integration-effects li {
+  display: flex;
+  gap: var(--volto-space-3);
+  align-items: center;
+  padding: var(--volto-space-2);
+}
+
+.integration-effects li + li {
+  border-top: 1px solid var(--volto-border);
+}
+
+.integration-effect-icon {
+  display: inline-grid;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: var(--volto-radius-md);
+  background: var(--volto-bg-surface-raised);
+  color: var(--volto-text-muted);
+}
+
+.integration-effects .integration-effect-icon > svg {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+}
+
+.integration-effects li[data-tone="danger"] .integration-effect-icon {
+  background: var(--volto-danger-soft);
+  color: var(--volto-danger-text);
+}
+
+.integration-effects li[data-tone="success"] .integration-effect-icon {
+  background: var(--volto-success-soft);
+  color: var(--volto-success);
+}
+
+/* The label on the soft danger fill reads the text step, as the shared confirmation does for contrast. */
+.integration-confirm.ui-button-variant-destructive {
+  color: var(--volto-danger-text);
+}
+
+/* ------------------------------------------------ linked rows */
+
+/* The whole row opens the integration, as on Marketplace cards. Buttons in the row stay on top. */
+.integrations-hub-row {
+  position: relative;
+  border-radius: var(--volto-radius-md);
+  transition: background-color var(--volto-duration-hover) var(--volto-ease-out);
+}
+
+.integrations-hub-row:has(> .integrations-hub-hitarea:hover) {
+  background: var(--volto-hover);
+}
+
+.integrations-hub-hitarea {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: var(--volto-transparent);
+  cursor: pointer;
+  transition: none;
+}
+
+.integrations-hub-hitarea:hover:not(:disabled):not([data-disabled]) {
+  background: var(--volto-transparent);
+}
+
+.integrations-hub-hitarea:focus-visible {
+  outline: 2px solid var(--volto-border-focus);
+  outline-offset: -2px;
+}
+
+.integrations-hub-actions {
+  gap: var(--volto-space-3);
+}
+
+.integrations-hub-actions .ui-button {
+  position: relative;
+  z-index: 2;
+}
+
+.integrations-hub-chevron {
+  width: var(--volto-icon-sm);
+  height: var(--volto-icon-sm);
+  margin: 0 var(--volto-space-1-5);
+  color: var(--volto-text-muted);
+}
+
+.integrations-face-stack {
+  display: inline-flex;
+  gap: var(--volto-space-0-5);
+  align-items: center;
+}
+
+.integrations-face-more {
+  display: inline-grid;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 var(--volto-space-1);
+  place-items: center;
+  border-radius: var(--volto-radius-pill);
+  background: var(--volto-bg-control);
+  color: var(--volto-text-secondary);
+  font-size: var(--volto-text-sm);
+}
+
+.integrations-agent-face {
+  --integrations-agent-face-size: 32px;
+  display: inline-block;
+  flex: none;
+  width: var(--integrations-agent-face-size);
+  height: var(--integrations-agent-face-size);
+}
+
+.integrations-agent-face[data-size="sm"] {
+  --integrations-agent-face-size: 24px;
+}
+
+/* An agent avatar stands low in its box. Lift it to the middle, as the marketplace avatar does. */
+.integrations-agent-face > * {
+  --agent-avatar-optical-offset: calc(var(--integrations-agent-face-size) * -0.14);
+  width: 100%;
+  height: 100%;
+}

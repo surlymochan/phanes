@@ -12,8 +12,8 @@
 
 ```json
 {
-  "workspace": "/srv/phanes/openbot-workspace",
-  "repo": "/srv/phanes/openbot"
+  "workspace": "/srv/phanes/volto-workspace",
+  "repo": "/srv/phanes/volto"
 }
 ```
 
@@ -129,11 +129,11 @@ lane 数量不是 10，应先修正 fleet/topology 配置，再启用自动派�
 不含凭据的任务卡：
 
 ```bash
-cd /srv/phanes/openbot-workspace
+cd /srv/phanes/volto-workspace
 umask 077
 task=$(mktemp /tmp/swrm-ssh-smoke.XXXXXX.md)
 cat >"$task" <<'EOF'
-Repository: openbot
+Repository: volto
 Task type: docs
 只检查当前 checkout 的版本并返回，不修改文件。
 EOF

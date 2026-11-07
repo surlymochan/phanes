@@ -1,6 +1,6 @@
 # Combine two Team API capabilities and their phone UI on the new main
 
-Repository: OpenBot. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md, src/preload/AGENTS.md and apps/mobile/AGENTS.md.
+Repository: Volto. Read AGENTS.md, packages/contracts/AGENTS.md, src/main/AGENTS.md, src/preload/AGENTS.md and apps/mobile/AGENTS.md.
 Base: `fd5719fc7f` (new main). A released wire contract is permanent: both capabilities are additive and optional, and nothing released may change meaning.
 
 Two chains of commits were written independently on the same old base. All commits are in this repository.
@@ -9,7 +9,7 @@ Two chains of commits were written independently on the same old base. All commi
    `6769e66993` then `98f259bdad` then `364e2b6844`. The last two are fixes from a protocol review (chat authorization gate, frozen optional codec and side-route registration, strict client decoding, HTTP and signed WebRTC E2E).
 2. Context usage (`context-usage-v1`, a context usage meter and composer skill picker work on the phone): `cb6db55189` then `c0eeecfab0`. The second is the review fix (frozen wire categories, fail-closed client decoder, explicit send projection, Team API E2E).
 
-They conflict (for example `src/main/team-api/dependencies.ts`, the protocol lists in `packages/contracts/src/team-protocol`, `packages/contracts/package.json` exports, `packages/team-client`, and the phone chat files and `@openbot/i18n` locale files).
+They conflict (for example `src/main/team-api/dependencies.ts`, the protocol lists in `packages/contracts/src/team-protocol`, `packages/contracts/package.json` exports, `packages/team-client`, and the phone chat files and `@volto/i18n` locale files).
 
 ## Task
 

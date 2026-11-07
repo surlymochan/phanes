@@ -1,6 +1,6 @@
 ## Linked issue
 
-Refs nibiru-labs/openbot-roadmap#61 (M10 renderer performance, audit `docs/audits/openbot-perf.md`). Findings 1, 3, 4, 6-15 are in this PR. Finding 2 was tried and reverted because it was not reliably faster; finding 5 follows as a re-runnable codemod.
+Refs nibiru-labs/volto-roadmap#61 (M10 renderer performance, audit `docs/audits/volto-perf.md`). Findings 1, 3, 4, 6-15 are in this PR. Finding 2 was tried and reverted because it was not reliably faster; finding 5 follows as a re-runnable codemod.
 
 ## Type of change
 
@@ -24,7 +24,7 @@ Surfaces: Desktop renderer and `packages/ui`. Output and behavior are unchanged.
 
 ## Verification
 
-- [x] `scripts/renderer-conversation-perf-e2e.ts` measures each change over at least 5 runs and writes a JSON report under `.openbot-build/`; a change that was not clearly faster was reverted (finding 2). `bun run typecheck:renderer` passed for each run on the executor hosts (rc 0).
+- [x] `scripts/renderer-conversation-perf-e2e.ts` measures each change over at least 5 runs and writes a JSON report under `.volto-build/`; a change that was not clearly faster was reverted (finding 2). `bun run typecheck:renderer` passed for each run on the executor hosts (rc 0).
 - [x] Broad checks run in CI.
 - [x] Not measured yet: `scripts/sidebar-virtual-perf-e2e.ts` does not complete on the executor host (a Storybook dependency allow-list problem), so finding 10 (sidebar) has no median in this PR; its virtualizer is the shared one that the file list uses.
 - [x] The pre-commit hook passed.

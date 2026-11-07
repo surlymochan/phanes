@@ -134,8 +134,8 @@ Refs #6, Refs #173, Refs #416。
 
 - **路径**：`examples/org-health-local/demo/vendor/app.bundle.js`（随仓库提交，来源说明见 [`examples/org-health-local/demo/vendor/README.md`](../../../examples/org-health-local/demo/vendor/README.md)）。
 - **是什么**：`app.js` 的浏览器包，即 `bun build app.js --target=browser --minify` 的产物（`examples/org-health-local/demo/vendor/README.md:3`、`:9`）。
-- **用途**：供没有 `openbot/node_modules` 的 fleet lane 与没有 Bun 的本机环境在 Builder 棒直接产出可预览的静态站点——`builder/build_site.py --bundle <file>` 把该文件整包复制为 `<dist>/app.bundle.js`，不再现场打包（`examples/org-health-local/builder/build_site.py:107-119`）。
-- **体积与内容**：约 7.5 MB，主要是 `@openbot/i18n` 的全部语言文案；`app.js` 或 i18n 文案改动后，需按 `examples/org-health-local/demo/vendor/README.md:9` 的命令重建（`examples/org-health-local/demo/vendor/README.md:10`）。
+- **用途**：供没有 `volto/node_modules` 的 fleet lane 与没有 Bun 的本机环境在 Builder 棒直接产出可预览的静态站点——`builder/build_site.py --bundle <file>` 把该文件整包复制为 `<dist>/app.bundle.js`，不再现场打包（`examples/org-health-local/builder/build_site.py:107-119`）。
+- **体积与内容**：约 7.5 MB，主要是 `@volto/i18n` 的全部语言文案；`app.js` 或 i18n 文案改动后，需按 `examples/org-health-local/demo/vendor/README.md:9` 的命令重建（`examples/org-health-local/demo/vendor/README.md:10`）。
 - **数据边界**：只用于合成数据演示，**不包含任何数据**（`examples/org-health-local/demo/vendor/README.md:11`）；页面数据仍由站点目录里的 `data/diagnosis.json` 提供，真实组织数据必须在仓库外（`examples/org-health-local/builder/build_site.py:107-119`、`docs/scenario/org-diagnosis/README.md` 第 3.3 节）。
 
 ### 4.2 免 Bun 运行边界

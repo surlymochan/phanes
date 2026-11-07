@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "jsxImportSource": "@solidjs/web",
+    "paths": {
+      "@volto/renderer-preview": ["./src/types/renderer-preview.d.ts"],
+      "@volto/renderer-web": ["./src/types/renderer-web.d.ts"],
+      "@volto/ui/features/conversation/MarkdownMessageText": ["./src/types/markdown-message-text.d.ts"]
+    },
+    "types": ["@cloudflare/workers-types", "vite/client", "@testing-library/jest-dom"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "test/**/*.tsx",
+    "scripts/**/*.ts",
+    "vite.config.ts",
+    "renderer-preview-alias.ts",
+    "render-content-images.ts",
+    "vitest.config.ts"
+  ]
+}

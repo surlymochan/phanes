@@ -1,11 +1,11 @@
 # Issue #9：auth-api 本地运行可行性（workerd / miniflare）
 
 > 范围：仅静态代码审阅。未安装依赖、未执行网络安装、未运行 wrangler / vite，因此下列结论均标注为“已读代码确认”或“未验证”。
-> 路径均相对于仓库根目录；`openbot/` 为子目录。
+> 路径均相对于仓库根目录；`volto/` 为子目录。
 
 ## 1. 结论
 
-- auth-api 是 Cloudflare Worker（`openbot/apps/auth-api`），入口为 `src/worker-entry.ts`，由 `src/server/worker-handler.ts` 装配。
+- auth-api 是 Cloudflare Worker（`volto/apps/auth-api`），入口为 `src/worker-entry.ts`，由 `src/server/worker-handler.ts` 装配。
 - 需要本地模拟的绑定：D1 `DB`、R2 `AVATARS` / `SKILLS` / `SITES`、5 个必需 ratelimit（`LIVE_ACTIVITY` 可选）、Cron 触发器。Miniflare / wrangler 本地模式可以提供这些资源。
 - 阻塞项集中在两处：`vite dev` 路径无法把 `SERVER_CLAIMS_ADMIN_TOKEN` 传入运行时（B1），以及开发默认值会开启 `AUTH_EXPOSE_DEVELOPMENT_CODE`（B2）。两者都需要在运行前用 `.dev.vars` 或代码修正规避。
 - 结论：**在本地用 wrangler/miniflare 运行是可行的，但需要先解决 B1、B2，并在具备依赖的机器上实测。** 本次审阅未实测任何命令。
@@ -14,16 +14,16 @@
 
 | 项目 | 位置 |
 |---|---|
-| Worker 入口 | `openbot/apps/auth-api/src/worker-entry.ts:1-4` |
-| Worker 处理器 | `openbot/apps/auth-api/src/server/worker-handler.ts:23-38` |
-| Wrangler 配置 | `openbot/apps/auth-api/wrangler.jsonc`：`main` L6；cron L19-21；routes L22-36；`secrets.required` L37-46；顶层 vars L47-66；D1 `DB` L67-74；R2 L75-91；ratelimit L92-123；`env.test` L203，vars L227-242 |
-| Vite 配置 | `openbot/apps/auth-api/vite.config.ts`：端口默认 3100 与 host 127.0.0.1（L72-79，L136-140）；运行时变量白名单转发 L50-58 |
-| 绑定校验 | `openbot/apps/auth-api/src/server/types.ts:8-40`（绑定定义），`L102-149`（`isWorkerBindings` / `requireWorkerBindings`） |
-| 本地变量白名单 | `openbot/apps/auth-api/src/server/runtime-env.ts:5-50`、`L5-68` |
-| 开发密钥脚本 | `openbot/scripts/development-secrets.ts:49-56`（ticket 密钥对）、`L65-78`（默认值，`AUTH_EXPOSE_DEVELOPMENT_CODE` 在 L69 为 `"true"`） |
-| 开发启动脚本 | `openbot/scripts/run-development.ts:27-33` |
-| 部署脚本 | `openbot/scripts/deploy-auth-api.ts:42`（管理 token 为可选） |
-| 文档 | `openbot/docs/self-hosted-server.md` L25-53（claim 流程）、L51-53（token 风险）；`openbot/docs/self-hosting.md` L52-70、L172。两者均未描述本地运行方式。 |
+| Worker 入口 | `volto/apps/auth-api/src/worker-entry.ts:1-4` |
+| Worker 处理器 | `volto/apps/auth-api/src/server/worker-handler.ts:23-38` |
+| Wrangler 配置 | `volto/apps/auth-api/wrangler.jsonc`：`main` L6；cron L19-21；routes L22-36；`secrets.required` L37-46；顶层 vars L47-66；D1 `DB` L67-74；R2 L75-91；ratelimit L92-123；`env.test` L203，vars L227-242 |
+| Vite 配置 | `volto/apps/auth-api/vite.config.ts`：端口默认 3100 与 host 127.0.0.1（L72-79，L136-140）；运行时变量白名单转发 L50-58 |
+| 绑定校验 | `volto/apps/auth-api/src/server/types.ts:8-40`（绑定定义），`L102-149`（`isWorkerBindings` / `requireWorkerBindings`） |
+| 本地变量白名单 | `volto/apps/auth-api/src/server/runtime-env.ts:5-50`、`L5-68` |
+| 开发密钥脚本 | `volto/scripts/development-secrets.ts:49-56`（ticket 密钥对）、`L65-78`（默认值，`AUTH_EXPOSE_DEVELOPMENT_CODE` 在 L69 为 `"true"`） |
+| 开发启动脚本 | `volto/scripts/run-development.ts:27-33` |
+| 部署脚本 | `volto/scripts/deploy-auth-api.ts:42`（管理 token 为可选） |
+| 文档 | `volto/docs/self-hosted-server.md` L25-53（claim 流程）、L51-53（token 风险）；`volto/docs/self-hosting.md` L52-70、L172。两者均未描述本地运行方式。 |
 
 依赖版本（来自 `bun.lock`）：wrangler 4.152.0，@cloudflare/vite-plugin 1.65.0，miniflare 5.20261019.2-beta，workerd 1.20261019.1；`compatibility_date` 为 2026-08-18。
 
@@ -31,7 +31,7 @@
 
 | 类型 | 名称 | 本地处理 |
 |---|---|---|
-| D1 | `DB`（L67-74） | `wrangler d1 migrations apply DB --local`，迁移目录 `openbot/apps/auth-api/migrations/`（含 `0034_server_claims.sql`） |
+| D1 | `DB`（L67-74） | `wrangler d1 migrations apply DB --local`，迁移目录 `volto/apps/auth-api/migrations/`（含 `0034_server_claims.sql`） |
 | R2 | `AVATARS`、`SKILLS`、`SITES`（L75-91） | wrangler 本地模式自动创建 |
 | Ratelimit | 6 个，必需 5 个（L92-123） | miniflare 本地实现 |
 | Cron | L19-21 | 本地不会自动触发，需要时手动调用 |
@@ -56,7 +56,7 @@
 
 ```bash
 # 1. 依赖（仅在本机已有 lockfile 时执行，不做网络安装）
-cd openbot && bun install --frozen-lockfile
+cd volto && bun install --frozen-lockfile
 
 # 2. 本地 .dev.vars（不得提交；SMTP 五项留空；AUTH_EXPOSE_DEVELOPMENT_CODE=false）
 cd apps/auth-api
@@ -83,7 +83,7 @@ npx vite dev --host 127.0.0.1 --port 3100
 
 | 验收项 | 代码位置 | 预期结果 | 验证命令 |
 |---|---|---|---|
-| `/health/live` 返回 200 | `src/routes/health/live.ts:4-10` | 200，`{"service":"openbot-auth-api","status":"ok"}` | `curl -i http://127.0.0.1:8787/health/live` |
+| `/health/live` 返回 200 | `src/routes/health/live.ts:4-10` | 200，`{"service":"volto-auth-api","status":"ok"}` | `curl -i http://127.0.0.1:8787/health/live` |
 | `/.well-known/jwks.json` 返回 200 | `src/routes/[.]well-known/jwks[.]json.ts:67-75` | 需要 ticket 密钥变量，否则会失败 | `curl -i http://127.0.0.1:8787/.well-known/jwks.json` |
 | 无 token 访问 `/v2/admin/server-claims` 返回 401 | `src/routes/v2/admin/server-claims.ts:25-41`（401 在 L31-32）；`src/server/request-auth.ts:282-284`；`src/server/admin-token.ts:9`（未设置时返回 false） | 401 | `curl -i -X POST http://127.0.0.1:8787/v2/admin/server-claims` |
 | 持 token 签发 claim | `server-claims.ts` 的同一路由；`auth-service.ts:34`（TTL 15 分钟）；`auth-service.ts:456-500`（创建 claim）；`migrations/0034_server_claims.sql` | 返回 claim 信息 | `curl -X POST ... -H "Authorization: Bearer $SERVER_CLAIMS_ADMIN_TOKEN"`（token 从 `.dev.vars` 读取，不要写入命令行） |

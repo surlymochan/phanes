@@ -1,6 +1,6 @@
 ## Linked issue
 
-Refs nibiru-labs/openbot-roadmap#63 (M10 error handling, audit `docs/audits/openbot-errors.md`). Findings 1-9 and 11-15 are in this PR. Finding 10 is not fixed by decision: the released Team API codec rejects error codes outside its fixed list, so a code field needs a new versioned protocol.
+Refs nibiru-labs/volto-roadmap#63 (M10 error handling, audit `docs/audits/volto-errors.md`). Findings 1-9 and 11-15 are in this PR. Finding 10 is not fixed by decision: the released Team API codec rejects error codes outside its fixed list, so a code field needs a new versioned protocol.
 
 ## Type of change
 
@@ -21,7 +21,7 @@ Refs nibiru-labs/openbot-roadmap#63 (M10 error handling, audit `docs/audits/open
 - The remote-server classifier keeps refusals that are not 401 as `request_failed` (11); the preload decoder accepts that code (see risk).
 - A failed queued message stores a catalog sentence in `error`, the redacted provider text in `errorDetail`, and an optional `reference`. Old rows keep their raw `error` and are localized when shown (15). No migration.
 
-Surfaces: Backend, main (IPC handlers, remote server status), preload (one decoder value), renderer, `@openbot/i18n` (all locales), E2E scripts. No Team API wire change.
+Surfaces: Backend, main (IPC handlers, remote server status), preload (one decoder value), renderer, `@volto/i18n` (all locales), E2E scripts. No Team API wire change.
 
 ## Verification
 
