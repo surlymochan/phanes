@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "kind": "tdd",
+  "role": "evalid-tdd",
+  "stage": "green",
+  "change_id": "feature-example",
+  "attempt": 0,
+  "run_id": "run-build-0008",
+  "issue_ref": "issue#1887",
+  "base_commit": "1111111111111111111111111111111111111111",
+  "head_commit": "2222222222222222222222222222222222222222",
+  "parents": [
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "producer": {
+    "backend": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tool_commit": "3333333333333333333333333333333333333333"
+  },
+  "artifacts": [
+    {
+      "name": "spec.json",
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media_type": "application/json"
+    }
+  ],
+  "payload": {
+    "spec_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "phase": "green",
+    "source_commit": "2222222222222222222222222222222222222222",
+    "test_manifest": {
+      "test/cli.test.js": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "package.json": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "proof_refs": [
+      {
+        "kind": "proof",
+        "phase": "green",
+        "artifact_ref": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "path": "specs/changes/feature-example/tdd/green-0.json"
+      },
+      {
+        "kind": "snapshot",
+        "phase": "green",
+        "artifact_ref": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ],
+    "scenario_tests": {
+      "S1": [
+        "test/cli.test.js#S1"
+      ]
+    },
+    "gate_results": [
+      {
+        "command": "node --test test/cli.test.js",
+        "exit_code": 0,
+        "report_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    ]
+  },
+  "evidence_id": "sha256:e381d91569d7a9d964f81f97eb30f5f6d313e71af379dad3848c83802dbd61eb"
+}

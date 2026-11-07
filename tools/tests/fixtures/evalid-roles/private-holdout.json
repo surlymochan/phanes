@@ -1,0 +1,9 @@
+{
+  "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+  "expected_exit": 0,
+  "timeout_s": 30,
+  "canary": "PRIVATE_HOLDOUT_CANARY_7f2c9",
+  "files": {
+    "reserved_checks/test_holdout_boundary.py": "def test_reserved_boundary_case():\n    assert reserved_value == 'reserved boundary sample'\n    assert reserved_limit == 739281\n"
+  }
+}

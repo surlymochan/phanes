@@ -1,0 +1,86 @@
+{
+  "phase": "red",
+  "change_id": "fixture-change",
+  "attempt": 0,
+  "base_commit": "1111111111111111111111111111111111111111",
+  "spec": {
+    "spec_digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "scenarios": [
+      {
+        "id": "S1",
+        "requirement_ref": "REQ-1",
+        "given": "a feature module",
+        "when": "the module is asked to add two numbers",
+        "then": "the sum is returned",
+        "command_id": "C1"
+      }
+    ],
+    "scope": {
+      "allowed_files": ["src/feature.js", "test/feature.test.js"],
+      "excluded_files": []
+    },
+    "tdd_mode": "red-green"
+  },
+  "scenario_tests": {
+    "S1": "test/feature.test.js#adds"
+  },
+  "red": {
+    "source_commit": "2222222222222222222222222222222222222222",
+    "changed_paths": ["test/feature.test.js"],
+    "manifest": {
+      "package.json": "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "test/feature.test.js": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"
+    },
+    "assertions": {
+      "test/feature.test.js": 1
+    },
+    "snapshot": {
+      "present": true,
+      "files": ["test/feature.test.js"]
+    },
+    "receipt": {
+      "ok": true,
+      "verdict": "valid",
+      "source": "I6b.tdd.proof_validate"
+    },
+    "proof": {
+      "phase": "red",
+      "attempt": 0,
+      "command": "node --test test/feature.test.js",
+      "exit_code": 1,
+      "passed": false,
+      "expected": "fail",
+      "expectation_met": true,
+      "failure_kind": "assertion",
+      "stdout_tail": "TAP version 13\n# Subtest: adds\nnot ok 1 - adds\n  ---\n  duration_ms: 1.402\n  ...\n1..1\n# tests 1\n# suites 0\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n",
+      "stderr_tail": "",
+      "git_head": "2222222222222222222222222222222222222222",
+      "file_hashes": {
+        "test/feature.test.js": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"
+      }
+    }
+  },
+  "gates": [
+    {
+      "id": "I6a.tdd.run",
+      "command": "python3 xflow/atoms/i6a_tdd_run.py --phase red --attempt 0 --test-command node --test test/feature.test.js",
+      "rc": 0,
+      "report_digest": "2b3c4d5e6f708192a3b4c5d6e7f80912b3c4d5e6f708192a3b4c5d6e7f80912",
+      "ok": true
+    },
+    {
+      "id": "I6b.tdd.proof_validate",
+      "command": "python3 xflow/atoms/i6b_tdd_proof_validate.py --phase red --attempt 0 --tdd-mode red-green",
+      "rc": 0,
+      "report_digest": null,
+      "ok": true
+    }
+  ],
+  "proof_refs": [
+    {
+      "name": "red-0.json",
+      "sha256": "3c4d5e6f708192a3b4c5d6e7f809123c4d5e6f708192a3b4c5d6e7f809123c",
+      "media_type": "application/json"
+    }
+  ]
+}

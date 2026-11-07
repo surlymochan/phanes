@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "role": "evalid-review",
+  "stage": "delivery",
+  "change_id": "feature-example",
+  "attempt": 1,
+  "run_id": "run-review-0004",
+  "base_commit": "1111111111111111111111111111111111111111",
+  "head_commit": "2222222222222222222222222222222222222222",
+  "inputs": [
+    {
+      "name": "spec.json",
+      "sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    {
+      "name": "tdd.json",
+      "sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  ],
+  "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

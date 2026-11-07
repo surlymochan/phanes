@@ -1,0 +1,7 @@
+{
+  "spec": {"run_id": "fixture-spec-run", "status": "done", "model": "mock-spec"},
+  "spec-check": {"run_id": "fixture-spec-check-run", "status": "done", "model": "mock-review"},
+  "red": {"run_id": "fixture-red-run", "status": "done", "model": "mock-build"},
+  "green": {"run_id": "fixture-green-run", "status": "done", "model": "mock-build"},
+  "review": {"run_id": "fixture-delivery-review-run", "status": "done", "model": "mock-review"}
+}

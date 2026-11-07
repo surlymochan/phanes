@@ -1,0 +1,9 @@
+{
+  "evalid_version": 1,
+  "role": "evalid-tdd",
+  "change_id": "feature-example",
+  "input_evidence": [
+    "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+  ],
+  "stage": "green"
+}
