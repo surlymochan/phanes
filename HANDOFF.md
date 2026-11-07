@@ -1,32 +1,20 @@
 # HANDOFF — 通用接手框架（公仓）
 
-> 本仓只放**通用**的交接框架：角色模板、协作协议、工具脚本。个性化状态（目标进度、队列、规则、机器、路径、实验报告）在**私有仓库** `phanes-handoff`。不要在本仓写 token、IP、私有链接、PII。
+本仓只保存通用交接框架；目标进度、队列和机器信息在私仓。不要在本仓写 IP、token、私有路径或个人信息。
 
-## 一条命令起步（新机器/新会话）
+## 接手
 
-```bash
-# 本框架尚在 PR #1876（分支 handoff-framework），合入 main 前用带分支的版本；合入后去掉 -b
-git clone -b handoff-framework https://github.com/surlymochan/phanes ~/workspace/phanes 2>/dev/null; cd ~/workspace/phanes && git pull -q --ff-only; bash tools/ingest.sh
-```
-
-它会体检、自动取得私仓，并在末尾打印完整的**接手指令**，照着做即可。对新会话你只需说一句："执行 HANDOFF.md 里的那条命令，然后照输出的接手指令做。"
-
-## 接手流程（新 AI 会话 = 主会话/统筹）
-
-1. 取得私仓：`git clone https://github.com/surlymochan/phanes-handoff ~/workspace/phanes-handoff`（需要该账号的 gh 登录；没有权限就向用户索取）。
-2. 在本仓运行 `bash tools/ingest.sh`：打印实时体检 + 私仓入口摘要 + 未完成队列。以实时输出为准。
-3. 读私仓 `HANDOFF-PRIVATE.md` → `STATE.md` → `QUEUE.md`（目标、事实、下一步）。
-4. 读 `handoff/ROLES.md` 和 `handoff/PROTOCOL.md`。Boss 兼任 RSI，按任务需要派出并复用 builder/tester/ops 等 subagent；不再调用平级角色聊天。
-5. 从队列第一个未完成项开始推进，不等批准（授权边界见 PROTOCOL §5）。
+1. 在已取得本仓和私仓的环境中设置 `PHANES_PRIVATE` 指向私仓；需要自动取得私仓时另设 `PHANES_PRIVATE_URL`。
+2. 在本仓运行 `bash tools/ingest.sh`，以实时体检和输出的接手指令为准。
+3. 依次读私仓 `HANDOFF-PRIVATE.md`、`STATE.md`、`QUEUE.md`，再读 `handoff/ROLES.md` 和 `handoff/PROTOCOL.md`。
+4. Boss 兼 RSI，通过 swrm（命令名 `openswarm`）按需派 build lane 和独立 review lane；从队列第一项未完成任务开始，遵守 PROTOCOL §5 的授权边界。
 
 ## 文件
 
 | 文件 | 作用 |
 |---|---|
-| `handoff/ROLES.md` | 角色职责、可复制的子会话提示词、不同宿主的拉起方式 |
-| `handoff/PROTOCOL.md` | 少防御原则、星型协作、事件触发与定时、评审门禁分档、授权规则、变更记录格式 |
-| `tools/ingest.sh` | 接手体检（含私仓定位/拉取） |
-| `tools/watch.sh` | 通用事件等待器：输出一变就退出，免轮询 |
-| `tools/msg.sh` | 共享信箱（宿主无 session 工具时的角色间通信） |
-
-私仓位置：环境变量 `PHANES_PRIVATE`，默认 `~/workspace/phanes-handoff`。
+| `handoff/ROLES.md` | Boss 职责、lane 派发与宿主等待方式 |
+| `handoff/PROTOCOL.md` | 协作、评审门禁、授权与隔离规则 |
+| `tools/ingest.sh` | 接手体检与私仓入口 |
+| `tools/review_run.py` | 受控测试执行与证据记录 |
+| `tools/isolation_probe.sh` | Linux 主机隔离探针 |

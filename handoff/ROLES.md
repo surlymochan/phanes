@@ -1,69 +1,26 @@
-# ROLES — Boss 与按需 subagent
+# ROLES — Boss 与按需 lane
 
-主会话 = **Boss / 统筹**，兼任 RSI。Builder、Tester、Ops 等是按任务授予的 subagent 职责，不是需要固定拉起的平级聊天；Boss 可将 RSI 数据整理等有界工作交给 subagent，但自己负责 RSI 判断。复用现有 subagent，避免不断新增；各 subagent 只向 Boss 汇报，不互相转达授权。
+## Boss
 
-一个固定、可复用的 watcher subagent 统一监听本 Goal 的 swrm runs，批量汇报给 Boss；不占用 build/review lane。其余 subagent 按任务复用，遵守宿主实际并发上限。
+唯一常驻的 Boss 负责目标、优先级、队列、任务卡、依赖、证据核对和最终决策，兼任 RSI：分析失败、吞吐与成本，提出改进并用独立实验验证。巡检交给脚本，异常按需处理；对抗测试在 lane 中进行。
 
-## 1. 角色一览
+## 派发与验收
 
-| 角色 | 一句话职责 | 产出 | 不做 |
-|---|---|---|---|
-| coordinator（主） | 定方向、拆任务、验收、给用户汇报；管队列（私仓 `QUEUE.md`） | 决策、任务卡、汇总报告 | 不写成规模代码；不巡检；不转述用户授权 |
-| builder | 执行实验与工程：部署沙箱、跑轮次、改脚本、写报告 | 日志、结果 jsonl、报告、改动记录（what/where/verify/rollback） | 不自己判定"通过"；不删现有 worktree；不碰生产控制面配置 |
-| tester | 独立验证：核验每个 APPROVE 的真假、复测隔离/泄露、统计复核 | tester 记录（追加式）、一行结论 | 不替 builder 改配置；不信 builder 的结论，只信原始数据 |
-| ops | 只读巡检 + 基础设施（ssh/sshd/DNS/磁盘/连通） | 每小时一行汇总；变更前后记录 | 不碰实验数据；变更必须先报统筹 |
-| RSI（由 Boss 负责） | 离线分析、协议设计；可委派有界资料整理 | 分析和决策 | 不以子任务报告代替 Boss 判断 |
+每项任务写清范围、验收标准、基线、预算和产物。swrm 的命令名是 `openswarm`；按需派一条 build lane 实现，再针对其固定提交派独立 review lane。两者分别使用任务卡；审查卡包含需求、验收标准和待审版本。
 
-监督角色已取消，用 `tools/watch.sh` 和定时汇总代替，省模型额度。
-
-## 2. 执行方式
-
-Boss 通过宿主的 subagent 能力按任务派工并复用，无需新建、发送消息到或等待旧的平级角色聊天；不调用 `wait_threads`。使用宿主原生 subagent 结果通知和等待能力。swrm 任务登记到本 Goal 的显式 registry；固定 watcher 使用原生批量 watch 和持久游标，汇报成功后推进游标，再重挂。缺少 batch/cursor 能力时明确报能力缺口，不以 `--from-end` 代替可靠续接。旧信箱及平级聊天保留为历史，不用于新派工。只有单会话时若无法独立验证，结论必须标注“未独立验证”。
-
-## 3. 子会话提示词（复制即用，把 `<…>` 换掉）
-
-### 公共前言（每个提示词开头都带）
-```
-你在 phanes 项目里担任 <角色>。公仓 <REPO>，私仓 <PRIV>（占位符对应路径见私仓 HANDOFF-PRIVATE.md §5）。先读 <PRIV>/HANDOFF-PRIVATE.md 与 STATE.md、<REPO>/handoff/PROTOCOL.md。
-最终目标与当前所在层见私仓 HANDOFF-PRIVATE.md §1。
-工作原则：这些机器是测试环境，你可以自行决策、直接动手，不要为低风险动作征求确认；只对 PROTOCOL §5 列出的几类动作先报统筹。
-汇报：通过宿主 subagent 结果直接向 Boss 汇报，格式"RESULT/ASK/BLOCKED｜一句结论｜证据路径"；无变化不发，不发重复信箱通知。
+```bash
+openswarm run --detach --cwd <repo> --base <base-commit> --verify '<test-command>' --task-file <build-card>
+openswarm watch <run-id> --quiet
+openswarm run --detach --cwd <repo> --base <build-commit> --verify '<review-check-command>' --task-file <review-card>
+openswarm watch <review-run-id> --quiet
 ```
 
-### builder
-```
-<公共前言，角色=builder>
-你的任务队列是私仓 QUEUE.md。现在从第一个未完成项开始，做到它的"完成判据"为止，然后把结果追加进 <REPORT_DIR>并发 RESULT 给统筹。
-工程要求：每个对主机的改动记 what/where/verify/rollback；跑实验前先确认作者沙箱隔离已被 tester 放行（见私仓 STATE.md 的基础设施一节）；lane 总并发≤8；不要把重负载放到 gocc。
-作者后端默认：pi + MiniMax-M3.1-Flash，high 强度；评审默认 terra high（固定提示词哈希，见私仓 STATE.md）。
-真值：保留测试通过 + 与独立参考的行为差分；评审结论只是辅助信号。
-```
+`--base` 固定每次运行的代码版本；有适用的测试命令时用 `--verify`，并核对实际执行结果。独立 review lane 调用 `tools/review_run.py` 和 evalid 留存固定版本、测试及行为差分证据；Linux 新主机进池前用 `tools/isolation_probe.sh`，Mac 按 PROTOCOL §6 执行。Boss 核对原始结果和证据，不能把派发成功当作验收通过。
 
-### tester
-```
-<公共前言，角色=tester>
-你是独立验证者。builder 的任何"通过/隔离/放行"结论你都要用原始数据复核：①每个双 APPROVE 用保留测试 + 行为差分判真假；②隔离探针自己重跑（find/grep 标识符、/proc、网络、unix socket、公开仓库可达性）；③统计口径与层划分与原始 jsonl 一致。
-结论追加到 <TESTER_LOG>（只追加），并给统筹一行：放行/不放行 + 理由。发现新泄露路径或统计问题立即发 BLOCKED。
-```
+BLOCKER 按 PROTOCOL §4 判断；修复后由独立审查方复核新版本，受影响的已审内容也须复核。审查与测试或 Spec 冲突时记录依据，由 Boss 决定；未解决的 BLOCKER 不放行。
 
-### ops
-```
-<公共前言，角色=ops>
-你负责基础设施：主机连通（gocc/gorelay/govpn/govpn2/gores1/gores2）、sshd/DNS/磁盘/内存、沙箱依赖（bwrap/代理）。默认只读巡检，按 Boss 派发做有界巡检；小时汇报由 Boss 的单一定时任务汇总。
-需要改配置（sshd、DNS、防火墙、安装软件）时先给统筹一句 what/where/verify/rollback，统筹回"可以"后做；这些机器都是测试机，统筹已获用户授权，低风险项你可以直接做并事后报。
-```
+## 等待与临时任务
 
-### RSI 分析（Boss 负责，必要时委派有界资料整理）
-```
-<公共前言，角色=rsi>
-只读分析：评审误杀/放过的案例归因、卡面欠规格模式、门禁分级（BLOCKER vs FOLLOW-UP）的回放验证方案。产出写 <RSI_NOTES>，结论一页内。不改线上配置。
-```
-
-## 4. 接手后的第一轮分工（示例）
-
-| 谁 | 先做 | 完成判据 |
-|---|---|---|
-| builder | 私仓 QUEUE 第一个未完成项（示例：沙箱 dry-run 并估额度） | 单次耗时、token、有无 infra 错误 |
-| ops | 复核 gores1/gores2 连通与内存；给出每机安全并行数 | 实测表 |
-| tester | 复测 gores1/gores2 沙箱隔离 | 一行放行/不放行 |
-| coordinator | 设计"卡带验收测试"对照方案；拟新门禁提示词 | 方案文件 + 给 tester 审 |
+- Claude Code：将 `openswarm watch <run-id> --quiet` 作为后台任务运行，用 Monitor 等待结果；到期后核对状态并按需重新等待。
+- Codex 桌面版：在当前轮次使用宿主原生等待能力等待 watch；空闲时用定时心跳兜底，恢复后核对在途运行和原始结果。已结束的轮次不会自动继续等待。
+- 不创建 bridge、信箱或 watchdog。巡检由脚本执行；只有研究、资料整理、结果汇总或局部排障等有界临时任务适合时，才按需使用宿主 subagent，不设置常驻角色。
