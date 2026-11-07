@@ -129,6 +129,22 @@ class HubBridgeTests(unittest.TestCase):
         ])
         self.assertEqual(command.call_args_list[2].args[2], 210)
 
+    def test_configured_box_host_routes_local_lifecycle_directly(self):
+        responses = [{'id': 'box-run', 'result': {}}, {'ok': True}, {'bundle': 'AA=='}]
+        command = mock.Mock(side_effect=responses)
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER': '1',
+                                          'OPENSWARM_AUTO_LOCAL_HOST': 'box',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gores2"]'}), \
+                mock.patch.dict(G, {'local_command': command}):
+            for op in ('info', 'stop', 'bundle'):
+                self.assertEqual(MOD['dispatch_gateway']({'op': op, 'id': 'box-run', 'host': 'box'}),
+                                 responses[('info', 'stop', 'bundle').index(op)])
+        self.assertEqual([call.args[0] for call in command.call_args_list], [
+            [G['native'], 'fleet', '_run-info', 'box-run'],
+            [G['native'], 'stop', 'box-run'],
+            [G['native'], 'fleet', '_bundle', 'box-run'],
+        ])
+
     def test_remote_bundle_is_built_on_its_executor_host(self):
         command = mock.Mock(return_value={'branch': 'openswarm/gocc-a1', 'bundle': 'AA=='})
         with mock.patch.dict(os.environ, {'OPENSWARM_AUTO_FLEET_HOSTS': '["gores1","gocc"]'}), \

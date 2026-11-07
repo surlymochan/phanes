@@ -12,16 +12,16 @@ SPEC.loader.exec_module(IB_REFRESH)
 
 
 def main():
-    # ib1/ib2 are in cooldown; only the reachable ib3-ib5 rows are written.
+    # gores1/gores2 are in cooldown; reachable current hosts remain usable.
     rows = [
-        {"host": "ib1", "status": "cooldown"},
-        {"host": "ib2", "status": "skipped_cooldown"},
-        {"host": "ib3", "status": "valid", "final_status": "valid"},
-        {"host": "ib4", "status": "valid", "final_status": "valid"},
-        {"host": "ib5", "status": "valid", "final_status": "valid"},
+        {"host": "gores1", "status": "cooldown"},
+        {"host": "gores2", "status": "skipped_cooldown"},
+        {"host": "govpn", "status": "valid", "final_status": "valid"},
+        {"host": "govpn2", "status": "valid", "final_status": "valid"},
+        {"host": "gorelay", "status": "valid", "final_status": "valid"},
     ]
     usable = IB_REFRESH._usable_hosts(rows)
-    assert [row["host"] for row in usable] == ["ib3", "ib4", "ib5"]
+    assert [row["host"] for row in usable] == ["govpn", "govpn2", "gorelay"]
     assert IB_REFRESH._need_ok(len(usable), 2, 3)
     assert IB_REFRESH._status_line(True, len(usable), 2, 1800, 1735689600).startswith(
         "ok=1 hosts_ok=3 skipped_cooldown=2"

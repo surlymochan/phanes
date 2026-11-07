@@ -13,13 +13,13 @@ SPEC.loader.exec_module(IB_REFRESH)
 
 
 def main() -> None:
-    topology = [{"name": "ib1"}]
+    topology = [{"name": host} for host in ("gores1", "gores2", "govpn", "govpn2", "gorelay", "gocc")]
     result = IB_REFRESH._status_for(
         {
             "ok": True,
             "start_lane_autodispatch": True,
             "hosts": [
-                {"host": "ib1", "status": "valid", "final_status": "valid"},
+                {"host": "gores1", "status": "valid", "final_status": "valid"},
                 {"host": "mystery", "status": "valid", "final_status": "valid"},
             ],
         },
@@ -36,7 +36,7 @@ def main() -> None:
     assert fields["hosts_ok"] == "1"
     assert result["status_line"].split()[1] == "hosts_ok=1"
     assert any(error["host"] == "mystery" and error.get("status") == "unknown" for error in result["errors"])
-    assert [row["host"] for row in IB_REFRESH._usable_hosts(result["hosts"], {"ib1"})] == ["ib1"]
+    assert [row["host"] for row in IB_REFRESH._usable_hosts(result["hosts"], {"gores1"})] == ["gores1"]
 
     # Unknown hosts with cooldown must not be counted in hosts_ok or skipped_cooldown
     result_cooldown = IB_REFRESH._status_for(
@@ -44,7 +44,7 @@ def main() -> None:
             "ok": True,
             "start_lane_autodispatch": True,
             "hosts": [
-                {"host": "ib1", "status": "valid", "final_status": "valid"},
+                {"host": "gores1", "status": "valid", "final_status": "valid"},
                 {"host": "mystery_cd", "status": "cooldown", "final_status": "valid"},
             ],
         },

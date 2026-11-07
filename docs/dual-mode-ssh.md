@@ -96,27 +96,25 @@ ssh config 的 `IdentityFile` 负责）。
 
 ## Fleet 主机和十 lane 拓扑
 
-自动路由的主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、
-`govpn2`；不加入 `local`、`gores1` 或 copilot。当前十 lane 的容量分配为：
+自动路由的远程主机集合为 `gores1`、`gores2`、`gocc`、`gorelay`、`govpn`、
+`govpn2`；box 是控制面本机，不属于受控 fleet host。当前十 lane 容量分配为：
 
 | 主机 | lane 容量 | 允许的 backend |
 |---|---:|---|
-| ib1 | 2 | pi |
-| ib2 | 1 | pi |
-| ib3 | 1 | pi |
-| ib4 | 1 | pi |
-| ib5 | 1 | pi |
-| gocc | 1 | agy |
+| gores1 | 2 | pi |
+| gores2 | 2 | pi |
+| gocc | 2 | agy |
 | gorelay | 1 | codex |
 | govpn | 1 | codex |
-| govpn2 | 1 | codex |
+| govpn2 | 2 | codex |
 
-因此总容量是 10，`gocc` 最多 1 个 lane；配置中不得出现 `copilot` 或
-`gores1`。在 box 的 bridge/service 环境中设置（JSON 的引号要保留）：
+因此总容量是 10。Copilot 仅远程可选，不进入受控 fleet host 且受控限额为 0。
+在 box 的 bridge/service 环境中设置（JSON 的引号要保留）：
 
 ```bash
-export OPENSWARM_AUTO_FLEET_HOSTS='["ib1","ib2","ib3","ib4","ib5","gocc","gorelay","govpn","govpn2"]'
-export OPENSWARM_AUTO_HOST_BACKENDS='{"local":[],"ib1":["pi"],"ib2":["pi"],"ib3":["pi"],"ib4":["pi"],"ib5":["pi"],"gocc":["agy"],"gorelay":["codex"],"govpn":["codex"],"govpn2":["codex"]}'
+export OPENSWARM_AUTO_LOCAL_HOST=box
+export OPENSWARM_AUTO_FLEET_HOSTS='["gores1","gores2","gocc","gorelay","govpn","govpn2"]'
+export OPENSWARM_AUTO_HOST_BACKENDS='{"box":[],"gores1":["pi"],"gores2":["pi"],"gocc":["agy"],"gorelay":["codex"],"govpn":["codex"],"govpn2":["codex"]}'
 ```
 
 `OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置。部署后
