@@ -45,6 +45,7 @@ import {
   readDevelopmentRemoteDebuggingPort,
   shouldAutoStartHost,
 } from "./development-profile";
+import { configureElectronSafeStorage } from "./electron-safe-storage";
 import { stopStuckExitAfterLimit } from "./exit-watchdog";
 import { filePreviewPages } from "./file-preview-pages";
 import { hostAllowsTenantLaunch } from "./host-update-coordinator";
@@ -127,6 +128,9 @@ import { setIpcCallObserver } from "./trusted-ipc";
 import { setWindowAppearance } from "./window-appearance";
 
 const logger = createVoltoLogger("main");
+
+// Prevent development and test runs from opening an operating-system keychain prompt.
+configureElectronSafeStorage(app.commandLine, process.platform, app.isPackaged, process.env);
 
 // Electron keeps running after both events: an unhandled rejection only prints a warning, and a
 // monitor leaves the default exception handling in place. These add a redacted log line and a

@@ -42,6 +42,16 @@ The desktop application stays at the repository root. Its package metadata is al
 metadata used by Electron Builder and GitHub releases. Moving it into `apps/desktop` would create a
 second version source and add package-signing risk without adding a useful runtime boundary.
 
+Unpackaged and test Electron runs isolate `safeStorage` from the OS keychain (`use-mock-keychain` on
+macOS and `password-store=basic` on Linux), including standalone browser E2E launches. Packaged
+production runs keep the platform default. Test mode requires `1` or `true` for `CI`, `VOLTO_E2E`,
+`OPENBOT_E2E`, or `PLAYWRIGHT_TEST`, a numeric `PLAYWRIGHT_WORKER_INDEX`, or a non-empty
+`OPENSWARM_RUN_ID` / `SWRM_RUN_ID`. Empty values, false flags, and Playwright browser cache settings
+do not enable test mode.
+Both Linux package-verification launches also pass `--password-store=basic` and set `VOLTO_E2E=1`.
+The macOS safe-storage probe verifies the mock backend by matching ciphertext against Chromium's
+mock key, because the backend query is available only on Linux.
+
 ## Dependency direction
 
 Dependencies point toward stable boundaries:

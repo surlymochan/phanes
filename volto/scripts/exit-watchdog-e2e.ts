@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDynamicRecord } from "@volto/contracts/runtime-values";
-import { withoutElectronRuntimeFlags } from "./electron-spawn-env";
+import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const OUT = join(ROOT, ".volto-build", "exit-watchdog-e2e");
@@ -142,7 +142,13 @@ async function launch(userData: string) {
   const log = openSync(join(OUT, "electron.log"), "a");
   const child = spawn(
     electronPath,
-    [bundle, `--user-data=${userData}`, `--ready-file=${readyFile}`, `--fifo=${fifo}`],
+    [
+      ...electronSafeStorageLaunchArguments(),
+      bundle,
+      `--user-data=${userData}`,
+      `--ready-file=${readyFile}`,
+      `--fifo=${fifo}`,
+    ],
     {
       env: withoutElectronRuntimeFlags(process.env),
       stdio: ["pipe", log, log],

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { withoutElectronRuntimeFlags } from "./electron-spawn-env";
+import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 const scriptsRoot = dirname(fileURLToPath(import.meta.url));
 const projectRoot = dirname(scriptsRoot);
@@ -28,7 +28,10 @@ try {
   // Ubuntu CI runners block unprivileged user namespaces, so Chromium's
   // sandbox cannot start there. The smoke test proves browser behavior, not
   // sandboxing, so it disables the sandbox on Linux only.
-  const electronFlags = process.platform === "linux" ? ["--no-sandbox"] : [];
+  const electronFlags = [
+    ...electronSafeStorageLaunchArguments(),
+    ...(process.platform === "linux" ? ["--no-sandbox"] : []),
+  ];
   const exitCode = await run(
     electron,
     [...electronFlags, outputPath, `--smoke-root=${smokeRoot}`, ...process.argv.slice(2)],

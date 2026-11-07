@@ -1,0 +1,1 @@
+Fix development and browser test launches to use isolated credential storage. Packaged applications keep system credential storage when CI flags are false or empty, or only Playwright browser settings are present.

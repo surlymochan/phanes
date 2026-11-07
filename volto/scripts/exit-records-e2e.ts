@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDynamicRecord } from "@volto/contracts/runtime-values";
-import { withoutElectronRuntimeFlags } from "./electron-spawn-env";
+import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const OUT = join(ROOT, ".volto-build", "exit-records-e2e");
@@ -56,10 +56,14 @@ try {
 
   const readyFile = join(root, "ready.json");
   const log = openSync(join(OUT, "electron.log"), "w");
-  const app = spawn(electronPath, [bundle, `--user-data=${userData}`, `--ready-file=${readyFile}`], {
-    env: withoutElectronRuntimeFlags(process.env),
-    stdio: ["pipe", log, log],
-  });
+  const app = spawn(
+    electronPath,
+    [...electronSafeStorageLaunchArguments(), bundle, `--user-data=${userData}`, `--ready-file=${readyFile}`],
+    {
+      env: withoutElectronRuntimeFlags(process.env),
+      stdio: ["pipe", log, log],
+    },
+  );
   child = app;
   closeSync(log);
   const exited = new Promise<number | null>((done) => app.once("exit", (code) => done(code)));
