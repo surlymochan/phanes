@@ -9309,6 +9309,393 @@ def lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
     return True
 
 
+# ---------------------------------------------------------------- session context compaction
+# A long run keeps one conversation alive for the whole budget, so the context grows until it
+# overflows the model window. The executor follows the size of that context and compacts the
+# running session before it gets there (Refs #1716).
+
+CONTEXT_FILE_KEYS = ("path", "file_path", "filePath", "file", "filename", "file_name")
+# A tool output is the part of the context that repeats itself; the executor keeps a bounded
+# excerpt of it, the summary drops it.
+CONTEXT_TOOL_OUTPUT_CHARS = 2000
+# The prompt that continues a session after its context was compacted.
+CONTEXT_COMPACT_RESUME_PROMPT = (
+    "The context of this session was compacted to stay inside the model window. The summary "
+    "above holds the decisions, the changed files and the open todos of the compacted part. "
+    "Continue the task from where it stopped, do not start over."
+)
+
+
+def session_compaction_module():
+    """The session compaction engine (lib/session/compaction.py), loaded by path."""
+    name = "openswarm_session_compaction"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "session", "compaction.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def session_compaction_policy(policy):
+    """The compaction policy of the session context (policy.session_compaction)."""
+    config = (policy or {}).get("session_compaction") or {}
+    return session_compaction_module().CompactionPolicy.from_config(config)
+
+
+def context_tool_files(tool, args):
+    """The files a tool call touched, so the summary can list the changed files."""
+    files = []
+    if not isinstance(args, dict):
+        return files
+    for key in CONTEXT_FILE_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            files.append(value.strip())
+    for key in ("changes", "edits", "files"):
+        items = args.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                files.append(item.strip())
+            elif isinstance(item, dict):
+                for name in CONTEXT_FILE_KEYS:
+                    value = item.get(name)
+                    if isinstance(value, str) and value.strip():
+                        files.append(value.strip())
+    return files
+
+
+def lane_context_message(lane, msg):
+    """Normalize one executor event into a session context message (None when it carries none)."""
+    if not isinstance(msg, dict):
+        return None
+    backend = lane.get("backend")
+    if backend == "pi":
+        kind = msg.get("type")
+        if kind == "message_end":
+            message = msg.get("message") or {}
+            text = "".join(block.get("text", "") for block in message.get("content") or []
+                           if isinstance(block, dict) and block.get("type") == "text")
+            if not text:
+                return None
+            return {"role": message.get("role") or "assistant", "kind": "text", "text": text}
+        if kind == "tool_execution_start":
+            tool = msg.get("toolName") or msg.get("tool") or "tool"
+            args = msg.get("args") or msg.get("arguments") or {}
+            text = "%s %s" % (tool, json.dumps(args, ensure_ascii=False, sort_keys=True, default=str))
+            return {"role": "assistant", "kind": "tool_call", "text": text, "tool": tool,
+                    "files": context_tool_files(tool, args)}
+        if kind == "tool_execution_end":
+            output = msg.get("result") or msg.get("output") or ""
+            text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+            return {"role": "tool", "kind": "tool_result", "text": text[:CONTEXT_TOOL_OUTPUT_CHARS]}
+        return None
+    if backend == "codex":
+        if msg.get("method") != "item/completed":
+            return None
+        item = (msg.get("params") or {}).get("item") or {}
+        kind = item.get("type")
+        if kind in ("agentMessage", "agent_message"):
+            text = item.get("text") or "".join(block.get("text", "") for block in item.get("content") or []
+                                               if isinstance(block, dict))
+            if not text:
+                return None
+            return {"role": "assistant", "kind": "text", "text": text}
+        if kind in ("commandExecution", "mcpToolCall", "webSearch", "toolCall"):
+            command = item.get("command") or item.get("text") or ""
+            return {"role": "assistant", "kind": "tool_call", "text": str(command)[:CONTEXT_TOOL_OUTPUT_CHARS],
+                    "tool": kind, "files": context_tool_files(kind, item)}
+        if kind in ("fileChange", "patchChange"):
+            changes = item.get("changes") or []
+            paths = []
+            for change in changes if isinstance(changes, list) else []:
+                if isinstance(change, dict):
+                    paths.extend(context_tool_files(kind, change))
+            return {"role": "assistant", "kind": "tool_call", "text": json.dumps(changes, ensure_ascii=False,
+                                                                                  default=str)[:CONTEXT_TOOL_OUTPUT_CHARS],
+                    "tool": kind, "files": paths}
+        return None
+    # ACP backends (cursor, copilot, hermes): the session updates carry the conversation.
+    if msg.get("method") != "session/update":
+        return None
+    update = (msg.get("params") or {}).get("update") or {}
+    kind = update.get("sessionUpdate")
+    content = update.get("content") or {}
+    if kind in ("agent_message_chunk", "user_message_chunk"):
+        text = content.get("text") if isinstance(content, dict) else ""
+        if not text:
+            return None
+        role = "user" if kind == "user_message_chunk" else "assistant"
+        return {"role": role, "kind": "text", "text": text}
+    if kind == "tool_call":
+        title = update.get("title") or update.get("kind") or "tool"
+        raw = update.get("rawInput") if isinstance(update.get("rawInput"), dict) else {}
+        text = "%s %s" % (title, json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str))
+        return {"role": "assistant", "kind": "tool_call", "text": text, "tool": str(title),
+                "files": context_tool_files(title, raw)}
+    if kind == "tool_call_update":
+        output = update.get("content") or []
+        text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+        return {"role": "tool", "kind": "tool_result", "text": text[:CONTEXT_TOOL_OUTPUT_CHARS]}
+    return None
+
+
+def context_usage_tokens(usage, keys):
+    """Sum the usage fields that describe the prompt the backend sent."""
+    if not isinstance(usage, dict):
+        return None
+    total, found = 0, False
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total += int(value)
+            found = True
+    return total if found else None
+
+
+def lane_context_tokens(lane, msg):
+    """The context size the backend reported for its last request (None when it reports none)."""
+    if not isinstance(msg, dict):
+        return None
+    backend = lane.get("backend")
+    if backend == "pi":
+        if msg.get("type") == "message_end":
+            usage = (msg.get("message") or {}).get("usage") or {}
+            return context_usage_tokens(usage, ("input", "cacheRead", "cacheWrite"))
+        # A pi compaction reports the size it replaced, not the size the session has now:
+        # counting it as the current context would keep the executor above the threshold.
+        return None
+    if backend == "codex" and msg.get("method") == "turn/completed":
+        usage = (msg.get("params") or {}).get("usage") or {}
+        return context_usage_tokens(usage, ("input_tokens", "cached_input_tokens"))
+    return None
+
+
+def context_compaction_instructions(facts, policy):
+    """The instructions the compaction of the live session gets.
+
+    The summary of the compacted part has to keep the decisions, the changed files and the
+    open todos: they are what the rest of the session still needs.
+    """
+    lines = ["Keep the decisions, the changed files and the open todos of the compacted part. "
+             "Drop the repeated tool output and the redundant details, keep the file paths exact."]
+    for name, title in (("decisions", "decisions"), ("files_changed", "changed files"),
+                        ("todos", "open todos")):
+        items = (facts or {}).get(name) or []
+        if not items:
+            continue
+        lines.append("%s so far:" % title)
+        lines.extend("- " + str(item) for item in items)
+    return "\n".join(lines)
+
+
+def pi_rpc_command(child, command, event_file, timeout=60, **params):
+    """Send one command to the pi RPC and return its data; a failure raises."""
+    req_id = "ctx-" + uuid.uuid4().hex
+    payload = {"id": req_id, "type": command}
+    payload.update(params)
+    child.send(payload)
+    reply = child.wait_response(req_id, timeout, event_file)
+    if not isinstance(reply, dict):
+        return {}
+    if reply.get("success") is False:
+        raise RuntimeError("pi %s failed: %s" % (command, short(reply.get("error"), 250)))
+    return reply.get("data") or {}
+
+
+def pi_compaction_model(child, policy, event_file):
+    """Select the model that writes the summary; True when the session model is used.
+
+    The configured summary model is only used when the session can reach it. Otherwise the
+    session model writes the summary and the run log records the fallback.
+    """
+    if not policy.summary_model:
+        return True, None
+    wanted = policy.summary_model.strip()
+    provider, model_id = (wanted.split("/", 1) if "/" in wanted else (None, wanted))
+    try:
+        data = pi_rpc_command(child, "get_available_models", event_file, timeout=30) or {}
+    except Exception:
+        data = {}
+    models = [model for model in (data.get("models") or []) if isinstance(model, dict)]
+    match = None
+    for model in models:
+        if model.get("id") == model_id and (provider is None or model.get("provider") == provider):
+            match = model
+            break
+    if match is None:
+        for model in models:
+            if model.get("id") == model_id:
+                match = model
+                break
+    if match is None:
+        return False, "the summary model %r is not available in this session" % wanted
+    try:
+        selected = pi_rpc_command(child, "set_model", event_file, timeout=30,
+                                   provider=match.get("provider"), modelId=match.get("id")) or {}
+    except Exception as error:
+        return False, "the summary model %r could not be selected: %s" % (wanted, short(str(error), 200))
+    if selected.get("id") and selected.get("id") != match.get("id"):
+        return False, "the summary model %r could not be selected" % wanted
+    return True, None
+
+
+def pi_restore_model(child, model, event_file):
+    """Put the session model back after the compaction wrote the summary."""
+    if not isinstance(model, dict) or not model.get("id"):
+        return
+    try:
+        pi_rpc_command(child, "set_model", event_file, timeout=30,
+                       provider=model.get("provider"), modelId=model.get("id"))
+    except Exception:
+        pass
+
+
+class PiSessionCompactor:
+    """Compacts the live pi session and reports the real token counts.
+
+    The compaction runs in the session itself, so the model that continues the run carries
+    the compacted context instead of the full one. The numbers the run log gets are the ones
+    pi reported, not an estimate of the executor's own record.
+    """
+
+    def __init__(self, child, lane=None, event_file=None, timeout=180):
+        self.child = child
+        self.lane = lane or {}
+        self.event_file = event_file
+        self.timeout = timeout
+
+    def current_model(self):
+        """The model the session uses now (None when pi does not report one)."""
+        try:
+            state = pi_rpc_command(self.child, "get_state", self.event_file, timeout=30) or {}
+        except Exception:
+            return None
+        model = state.get("model")
+        return model if isinstance(model, dict) else None
+
+    def context_tokens(self):
+        """The context size pi reports for the session (None when it reports none)."""
+        try:
+            stats = pi_rpc_command(self.child, "get_session_stats", self.event_file, timeout=30) or {}
+        except Exception:
+            return None
+        usage = stats.get("contextUsage") or {}
+        tokens = usage.get("tokens")
+        if isinstance(tokens, (int, float)) and not isinstance(tokens, bool):
+            return int(tokens)
+        return None
+
+    def compact(self, facts, policy):
+        """Compact the running session; the returned numbers are the real ones."""
+        outcome = {"applied": False, "tokens_before": 0, "tokens_after": None, "summary": "",
+                   "summary_model": policy.summary_model, "summary_model_applied": False,
+                   "error": None, "warning": None}
+        original = self.current_model()
+        if policy.summary_model and not original:
+            outcome["error"] = "cannot select summary model without knowing the session model"
+            return outcome
+        switched = False
+        data = None
+        try:
+            applied, error = pi_compaction_model(self.child, policy, self.event_file)
+            outcome["summary_model_applied"] = applied
+            if error:
+                # The summary model is not reachable: the session model writes the summary.
+                outcome["warning"] = error
+            switched = applied and bool(policy.summary_model)
+            data = pi_rpc_command(self.child, "compact", self.event_file, timeout=self.timeout,
+                                  customInstructions=context_compaction_instructions(facts, policy))
+        except Exception as error:
+            outcome["error"] = ("%s: %s" % (type(error).__name__, error))[:300]
+        finally:
+            if switched:
+                pi_restore_model(self.child, original, self.event_file)
+        if not data:
+            outcome["error"] = outcome["error"] or "pi did not compact the session"
+            return outcome
+        summary = (data.get("summary") or "").strip()
+        if not summary:
+            outcome["error"] = "pi returned an empty summary"
+            return outcome
+        outcome["applied"] = True
+        outcome["summary"] = summary
+        tokens_before = data.get("tokensBefore")
+        if isinstance(tokens_before, (int, float)) and not isinstance(tokens_before, bool):
+            outcome["tokens_before"] = int(tokens_before)
+        tokens_after = self.context_tokens()
+        if tokens_after is not None:
+            outcome["tokens_after"] = tokens_after
+        return outcome
+
+
+def session_context_maybe_compact(context, policy, turn):
+    """True when the session context crossed the threshold and a compaction is due."""
+    if context is None or not policy.enabled:
+        return False
+    if turn.get("context_compact_request"):
+        return False
+    if context.tokens <= policy.max_context_tokens:
+        return False
+    if context.tokens < context.last_compaction_tokens + policy.min_growth_tokens:
+        # The session did not grow since the last compaction: compacting again would only
+        # rewrite the same summary.
+        return False
+    return True
+
+
+def session_context_compact(spec, context, policy, event_file, child=None, lane=None,
+                            summarizer=None):
+    """Compact the session context when it crosses the threshold; never interrupt the run.
+
+    With a live pi child the compaction is applied to the running session: the context the
+    model carries shrinks and the real token counts go into the run log (Refs #1716). A
+    failed compaction keeps the context the session had and the run continues.
+    """
+    if context is None or not policy.enabled:
+        return None
+    module = session_compaction_module()
+    backend = None
+    if child is not None and (lane or {}).get("backend") == "pi":
+        backend = PiSessionCompactor(child, lane=lane, event_file=event_file)
+    result = module.compact_context(context, policy, summarizer=summarizer, backend=backend)
+    if not result.triggered:
+        return None
+    lane_record_event(event_file, result.event())
+    rdir = os.path.dirname(event_file)
+    if result.failed:
+        context.note_failed_compaction(result.tokens_before)
+        set_status(rdir, context_compaction_failed=result.error,
+                   context_compaction_tokens=result.tokens_before)
+        return result
+    context.apply(result, now=NOW())
+    if result.tokens_source == "backend" and result.tokens_after:
+        # The backend reported the size of the compacted session: keep that number.
+        context.set_tokens(result.tokens_after)
+        context.awaiting_context_report = False
+    else:
+        # The backend did not report the size of the compacted session yet (pi reports it
+        # with the next assistant turn): the real number follows into the run log.
+        context.awaiting_context_report = True
+    set_status(rdir, context_compaction_tokens=result.tokens_after,
+               context_compaction_summary_lines=result.summary_lines,
+               context_compactions=context.compaction_count)
+    return result
+
+
+def session_context_prompt(context, prompt):
+    """Hand the compacted session summary to an attempt that starts a new session."""
+    summary = getattr(context, "summary", None) if context is not None else None
+    if not summary:
+        return prompt
+    return ("The earlier part of this session was compacted. These facts still hold:\n"
+            f"{summary}\n\n{prompt}")
+
+
 def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, attempt=1, continuation=False):
     event_file = (spec.get("_event_file") if attempt == 1 else None) or \
                  os.path.join(rdir, f"events.{attempt}.{lane['backend']}.jsonl")
@@ -9318,6 +9705,12 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     deadline = spec["started"] + max(0, float(spec["budget_minutes"] or 0)) * 60
     policy = load_policy()
     provider = execution_provider(lane["backend"], policy=policy, lane=lane)
+    # The session context outlives a turn: a later attempt of the same run continues it.
+    context = spec.get("_session_context")
+    if context is None:
+        context = session_compaction_module().SessionContext()
+        spec["_session_context"] = context
+    compaction = session_compaction_policy(policy)
     set_status(rdir, state="running", lane=lane["name"], backend=lane["backend"], model=lane["model"],
                effort=lane.get("effort"), provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
                workspace=ws["path"], events=event_file, attempt=attempt, deadline=deadline,
@@ -9578,6 +9971,33 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     final = extract_json(text) or final
                     if message.get("errorMessage") or message.get("stopReason") == "error":
                         errors.append(short(message.get("errorMessage") or "provider returned stopReason=error", 400))
+            # Session context: follow the size of the running conversation and compact it
+            # before it overflows the model window (Refs #1716).
+            note = lane_context_message(lane, msg)
+            if note is not None:
+                context.add(note)
+            observed = lane_context_tokens(lane, msg)
+            if observed:
+                context.note_tokens(observed)
+                if context.awaiting_context_report:
+                    # The session reported the size of the compacted context: the run log
+                    # gets the real number of the token curve (Refs #1716).
+                    context.awaiting_context_report = False
+                    lane_record_event(event_file, {"type": "context_compaction_tokens_after",
+                                                   "tokens": observed,
+                                                   "tokens_before": context.last_compaction_tokens,
+                                                   "threshold": compaction.max_context_tokens})
+                    set_status(os.path.dirname(event_file), context_compaction_tokens=observed)
+            if session_context_maybe_compact(context, compaction, turn):
+                # pi compacts an idle session: stop the agent, compact the session once it
+                # stopped and continue the same session with the summary.
+                lane_record_event(event_file, {"type": "context_compaction_requested",
+                                               "tokens": context.tokens,
+                                               "threshold": compaction.max_context_tokens})
+                turn["context_compact_request"] = True
+                lane_abort_child(lane, child, turn)
+                abort_deadline = abort_deadline or NOW() + 30
+                continue
             if msg.get("type") == "agent_end":
                 last_err = ""
                 for message in msg.get("messages") or []:
@@ -9586,6 +10006,17 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                                        if isinstance(b, dict) and b.get("type") == "text")
                         final = extract_json(text) or final
                         last_err = (message.get("errorMessage") or "") if message.get("stopReason") == "error" else ""
+                if turn.pop("context_compact_request", None) and not budget_hit \
+                        and not spec.get("abort_requested") and child.alive():
+                    # The agent is idle now: compact the live session and continue it. The
+                    # session keeps its context when the compaction fails, so the run goes on.
+                    session_context_compact(spec, context, compaction, event_file,
+                                             child=child, lane=lane)
+                    turn["abort_sent"] = False
+                    turn.pop("abort_pending", None)
+                    lane_record_event(event_file, {"type": "context_compaction_resume"})
+                    lane_continue_turn(lane, child, CONTEXT_COMPACT_RESUME_PROMPT, event_file, turn)
+                    continue
                 if lane_risk_resume(lane, child, turn, event_file, spec, budget_hit):
                     continue
                 retry, quota_class, quota_summary = pi_retry_action(last_err)
@@ -9675,6 +10106,16 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 else:
                     final = extract_json("".join(turn.get("cursor_text") or [])) or final
                     ended = True
+        if lane["backend"] != "pi":
+            # The backends without a compaction command keep the executor's own record of the
+            # session; its summary is handed to the next attempt of the run.
+            note = lane_context_message(lane, msg)
+            if note is not None:
+                context.add(note)
+            observed = lane_context_tokens(lane, msg)
+            if observed:
+                context.note_tokens(observed)
+            session_context_compact(spec, context, compaction, event_file)
         if not child.alive() and not ended:
             if lane_headless(lane):
                 # Drain buffered events and EOF before deciding whether to resume a steer.
@@ -10049,8 +10490,13 @@ def lane_do_run(lane, spec, child, server, current):
                 started = NOW()
                 spec.pop("_turn_completed", None)
                 spec.pop("_agy_finished_early", None)
+                # An attempt that starts a new session gets the compacted summary of the
+                # earlier one, so the decisions and the changed files survive the hand-off.
+                attempt_prompt = retry_prompt
+                if not continuation:
+                    attempt_prompt = session_context_prompt(spec.get("_session_context"), attempt_prompt)
                 final, usage, error_class, rc, evp, error_tail = lane_run_turn(
-                    attempt_lane, child, spec, retry_prompt, ws, rdir, server, turn, pending,
+                    attempt_lane, child, spec, attempt_prompt, ws, rdir, server, turn, pending,
                     attempt=attempt_number, continuation=continuation)
                 if lane["backend"] == "agy" and error_class is None:
                     lane_write_state(lane["name"], quota_model=None, quota_until=None)
