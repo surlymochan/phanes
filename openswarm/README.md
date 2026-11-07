@@ -258,6 +258,16 @@ itself. The legacy `PAUSE`, `PAUSE-<LANE>`, `PAUSE-HOST-<HOST>`, `PAUSE-BACKEND-
 `PAUSE-MINT` marker files are still read, so both places can be used side by side while the fleet
 migrates to the store.
 
+The record of a scope lives in `$OPENSWARM_HOME/pauses/<name>.json`. The name is derived from the
+scope so that two scopes never share one file: a scope made only of letters, digits, `_`, `.` and `-`
+keeps its name (the records written before #1829 stay where they are), every other character is
+escaped (`lane:C1` becomes `lane~3aC1`) and the name ends in a short digest of the scope. A record is
+read by the scope it carries, so a file whose `scope` field names another scope is not that scope's
+pause. The records written before #1829 keep their pause: they are read wherever they live, and the
+next write of that scope moves the record to the current name. A file that several scopes shared
+(the old name mapped every unsafe character to `_`) holds one record: the scope it carries wins, and
+every other scope gets a file of its own. Nothing has to be migrated by hand.
+
 ### Learn
 
 | Command | Purpose | Example |

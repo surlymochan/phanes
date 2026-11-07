@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 
@@ -70,6 +71,13 @@ class ScopeKeyTests(unittest.TestCase):
     def test_a_safe_scope_keeps_its_file_name(self):
         for scope in ("all", "mint", "lane_X", "host_worker-a", "backend.pi"):
             self.assertEqual(pause._scope_key(scope), scope)
+
+    def test_a_safe_scope_keeps_the_name_the_old_mapping_gave_it(self):
+        # the records written before #1829 must stay where they are
+        old = lambda scope: re.sub(r"[^A-Za-z0-9_.-]", "_", scope)
+        for scope in ("all", "mint", "lane_X", "lane-M1", "lane.M1",
+                      "host_worker-a", "backend.pi"):
+            self.assertEqual(pause._scope_key(scope), old(scope))
 
     def test_the_colliding_scopes_get_different_file_names(self):
         self.assertNotEqual(pause._scope_key("lane:X"), pause._scope_key("lane_X"))
@@ -150,6 +158,18 @@ class ScopeCollisionTests(unittest.TestCase):
 
         self.assertTrue((self.dir / "lane_X.json").exists())
         self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane_X"])
+
+    def test_two_colon_scopes_that_shared_the_old_file_are_set_and_cleared_apart(self):
+        # before #1829 `lane:a_b` and `lane:a:b` both landed in `lane_a_b.json`
+        self.store.pause("lane:a_b", now=1)
+        self.store.pause("lane:a:b", now=1)
+
+        self.assertEqual([row["scope"] for row in self.store.active(1)],
+                         ["lane:a:b", "lane:a_b"])
+        self.assertTrue(self.store.resume("lane:a_b"))
+        self.assertEqual([row["scope"] for row in self.store.active(1)], ["lane:a:b"])
+        self.assertTrue(self.store.resume("lane:a:b"))
+        self.assertEqual(self.store.active(1), [])
 
     def test_two_host_scopes_are_set_and_cleared_apart(self):
         self.store.pause("host:a:b", now=1)

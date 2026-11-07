@@ -22,7 +22,7 @@ They are read by the scope they carry, wherever they live, and the next write
 of that scope moves the record to the current name.  A file that several
 scopes shared (the old name mapped every unsafe byte to ``_``) holds one
 record: the scope it carries wins, and every other scope gets a file of its
-own.
+own.  Nothing has to be migrated by hand.
 """
 from __future__ import annotations
 
