@@ -4547,13 +4547,41 @@ def executor_descendants_fields(pid):
     return records
 
 
-def record_executor_descendants(rdir, pid):
+def dispatch_usage_module():
+    """The token usage module (lib/dispatch/usage.py), loaded by path."""
+    name = "openswarm_dispatch_usage"
+    module = sys.modules.get(name)
+    if module is None:
+        path = os.path.join(SKILL_DIR, "lib", "dispatch", "usage.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def run_usage_counts(raw):
+    """The canonical token counts of a run: input, output, cache read, cache write.
+
+    A run that reported no usable count has no counts at all: the caller must
+    report it as "not collected" instead of as a zero burn (Refs #1690).
+    """
+    return dispatch_usage_module().normalize(raw)
+
+
+def record_executor_descendants(rdir, pid, usage=None):
     known = jload(os.path.join(rdir, "status.json"), {}) or {}
     old = known.get("executor_descendants") if isinstance(known.get("executor_descendants"), list) else []
     merged = {(row.get("pid"), row.get("identity")): row for row in old if isinstance(row, dict)}
     for row in executor_descendants_fields(pid):
         merged[(row["pid"], row["identity"])] = row
-    set_status(rdir, executor_descendants=list(merged.values()))
+    fields = {"executor_descendants": list(merged.values())}
+    # The running turn's last usage sample: the control plane can read a partial
+    # burn of a run that is still going (Refs #1690).
+    counts = run_usage_counts(usage)
+    if counts is not None:
+        fields["usage"] = counts
+    set_status(rdir, **fields)
 
 
 _SUBREAPER = False
@@ -9418,7 +9446,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         # and during the first seconds of a turn, record as before.
         mono = time.monotonic()
         if child.pid and (idle_tick or mono < desc_eager_until or mono - desc_recorded_at >= 5.0) and pid_alive(child.pid):
-            record_executor_descendants(rdir, child.pid)
+            # The usage of the running turn rides along with the descendant scan:
+            # it is the sample the control plane reads while the run goes on.
+            record_executor_descendants(rdir, child.pid, usage)
             desc_recorded_at = time.monotonic()
         lane_control_messages(server, lane, spec, child, turn, pending)
         now = NOW()
@@ -9955,8 +9985,13 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
+    # The run end writes the canonical token counts of the session into the run
+    # status: the control plane reads them to attribute the burn of the lane
+    # (Refs #1690).  A run without a reading keeps the status free of usage.
+    counts = run_usage_counts(usage)
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
-               timings=timings, **({"error": error_detail} if error_detail else {}))
+               timings=timings, **({"usage": counts} if counts is not None else {}),
+               **({"error": error_detail} if error_detail else {}))
     cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -12160,6 +12195,38 @@ def dispatch_pause_module():
     return module
 
 
+def dispatch_lanes_status_path(state_dir=None):
+    """The dispatcher's lane status snapshot: ``<state_dir>/lanes-status.json``.
+
+    The state directory is the one the dispatcher really uses (the configured
+    one, else the default ``~/.claude/openswarm-dispatch``), so the health
+    check reads the snapshot the dispatcher wrote (Refs #1690).
+    """
+    return os.path.join(state_dir or dispatch_state_dir(), "lanes-status.json")
+
+
+def fleet_burn_report(state_dir=None, now=None):
+    """The fleet burn table of the dispatcher's lane status snapshot.
+
+    The snapshot holds the per lane burn the dispatcher collected (the last
+    run and the 15 minute and one hour windows).  The table adds the per host
+    subtotals and the fleet total, with the input and the cache share of the
+    hour, so the reading lines up with the MiniMax console.
+    """
+    module = dispatch_usage_module()
+    source = dispatch_lanes_status_path(state_dir)
+    snapshot = jload(source, None)
+    table = module.fleet_table(snapshot) if isinstance(snapshot, dict) else None
+    report = {"source": source, "at": (snapshot or {}).get("_at") if isinstance(snapshot, dict) else None,
+              "table": table, "lanes": (table or {}).get("lanes") or [],
+              "hosts": (table or {}).get("hosts") or [],
+              "window_15m": (table or {}).get("window_15m"), "window_1h": (table or {}).get("window_1h"),
+              "collected": table is not None}
+    if now is not None:
+        report["now"] = now
+    return report
+
+
 def fleet_health_lane_hosts(home=None):
     """The host names the lanes.json names, in the order they appear.
 
@@ -12362,11 +12429,14 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
                                                   row["status"], moment)
         rows.append(row)
     fleet_health_state_save(remembered, home)
+    # The burn of the lanes: the table the dispatcher wrote, with the per host
+    # subtotals and the hour total (Refs #1690).
+    burn = fleet_burn_report(now=moment)
     report = {"ok": all(row["status"] == "ok" for row in rows),
               "status": fleet_health_status(rows),
               "applied": bool(getattr(args, "apply", False)),
               "thresholds": limits, "recent_failure_reasons": recent_failures,
-              "hosts": rows}
+              "hosts": rows, "burn": burn}
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return report
@@ -12382,6 +12452,11 @@ def cmd_fleet_health(args, policy=None, runner=None, hosts=None, now=None, home=
         print("recent failure reasons (last 20):")
         for reason, count in sorted(recent_failures.items(), key=lambda item: (-item[1], item[0])):
             print(f"  {reason}: {count}")
+    print("")
+    for line in dispatch_usage_module().render_table(burn.get("table"), "fleet burn"):
+        print(line)
+    if not burn.get("collected"):
+        print(f"  (no lane status snapshot: {burn.get('source')})")
     return report
 
 
