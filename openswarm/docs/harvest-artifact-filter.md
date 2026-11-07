@@ -5,6 +5,15 @@ leftovers of the test suite (`openswarm/tests/.dde4*-00000000.so`, ~4.4 MB each)
 the review products (`.lane-review/PR-N.md`). The dispatcher rebuilds the branch
 without those paths **before** it pushes it, so a PR only holds the real change.
 
+## The leftovers of the tree itself (Refs #1738)
+
+The leftovers that had been tracked in the tree (four copies of
+`openswarm/tests/.dde4*-00000000.so`, swept in by a `git add -A` that ran before the
+ignore rules existed) are removed from the repo. A tracked path escapes both layers:
+the ignore rules do not apply to a tracked file, and the filter only rewrites a
+branch. `openswarm/tests/test_tracked_artifacts.py` guards the tree, so a leftover
+that is tracked again fails the test suite instead of reaching a PR.
+
 ## What runs where
 
 | Where | What |
