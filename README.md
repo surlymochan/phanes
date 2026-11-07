@@ -4,6 +4,7 @@
 
 - [`openbot/`](openbot/)：OpenBot Hub 和界面。
 - [`openswarm/`](openswarm/)：执行器、路由与跨主机并发。
+- [`phanes/evalid/`](phanes/evalid/)：运行验证与证据封存。
 - [`integrations/`](integrations/)：Hub 与执行网络的连接入口。
 - Issue、PR 和 Discussions 以本仓库为入口；当前执行看板为 [phanes RSI 异构 Agent 网络](https://github.com/users/surlymochan/projects/6)（SSH fleet + GitHub issue bus）。既有 Phanes / Agent Task Project 保留历史与跨项目视图。
 
