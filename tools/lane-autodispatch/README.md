@@ -8,12 +8,10 @@ box is the deployed runtime the control plane syncs from it (sync steps:
 [`../autodispatch-backend-fallback.md`](../autodispatch-backend-fallback.md)); a change here is
 only live on the box after that sync.
 
-**审查派发不在这个镜像里**：带 PR 审查派发（`review_item` / `finish_review` / `reviews.json`）的那份
-AD 在仓内是 [`swrm/lib/dispatch/engine.py`](../../swrm/lib/dispatch/engine.py)（box 运行副本
-`~/phanes-ctl/bin/autodispatch.py` 是它加上控制面热修的运行版）；本镜像没有审查派发，
-`tools/check-ad-review-pause-uncounted.py` 的契约对它不成立。#1828（审查任务不嵌 diff、沙箱本地读全量、
-TOOL_FAIL 证据不足不放行）因此改在 engine 上，详见
-[`swrm/docs/review-evidence-pack.md`](../../swrm/docs/review-evidence-pack.md)。
+**旧 dispatcher 已退役**：上游已删除 `lib/dispatch/engine.py`；本轮一并移除无生产调用方的
+phanes_only dispatch 扩展及其测试。当前自动派发使用 swrm 原生 batch/fleet。
+本目录仍保留独立的旧控制面镜像和离线测试，不包含旧 engine 的审查派发实现。
+`tools/check-ad-review-pause-uncounted.py` 的运行副本契约不适用于本镜像。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
 (`git -C <repo> cat-file -e <base>^{commit}`). A missing base is fetched into the target repo and

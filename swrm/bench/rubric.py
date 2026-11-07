@@ -16,7 +16,7 @@ TIER_RANK = {"fast": 0, "balanced": 1, "deep": 2}
 # - difficulty 4 -> unspecified-high.
 # - difficulty 5 debug -> deep-high (the cause is treated as not settleable from one read).
 # - other difficulty 5 -> deep-low (OmO's default deep lane).
-# research is a large-context read. openswarm has no special case for it.
+# research is a large-context read. swrm has no special case for it.
 
 
 def min_tier(type_, difficulty):

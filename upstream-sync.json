@@ -12,19 +12,7 @@
     "swrm": {
       "upstream_repo": "https://github.com/surlymochan/swrm.git",
       "base_sha": "b9c0b5831ea9f58aefed479f649d2673429c3fc5",
-      "phanes_only": [
-        "lib/dispatch/burn.py",
-        "lib/dispatch/fallback.py",
-        "lib/dispatch/issue_meta.py",
-        "lib/dispatch/retry.py",
-        "lib/procboundary.py",
-        "tests/test_autodispatch.py",
-        "tests/test_dispatch_burn.py",
-        "tests/test_dispatch_fallback.py",
-        "tests/test_dispatch_issue_meta.py",
-        "tests/test_dispatch_retry.py",
-        "tests/test_procboundary.py"
-      ],
+      "phanes_only": [],
       "source_of_truth": "phanes"
     }
   }

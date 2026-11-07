@@ -17,7 +17,7 @@ import _load
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "bin" / "openswarm"
+CLI = ROOT / "bin" / "swrm"
 GOLDEN = Path(__file__).with_name("golden")
 xs = _load.load()
 
@@ -50,20 +50,20 @@ class CliGoldenTests(unittest.TestCase):
             with self.subTest(service=filename):
                 output = io.StringIO()
                 with contextlib.ExitStack() as stack:
-                    stack.enter_context(mock.patch.object(xs, "DATA", "/var/lib/openswarm"))
-                    stack.enter_context(mock.patch.object(xs, "__file__", "/opt/openswarm/bin/openswarm"))
+                    stack.enter_context(mock.patch.object(xs, "DATA", "/var/lib/swrm"))
+                    stack.enter_context(mock.patch.object(xs, "__file__", "/opt/swrm/bin/swrm"))
                     stack.enter_context(mock.patch.object(xs, "lanes_by_name", return_value=[lane]))
                     stack.enter_context(mock.patch.object(
                         xs, "envvar",
-                        side_effect=lambda name, default=None: "/etc/openswarm/lanes.json"
+                        side_effect=lambda name, default=None: "/etc/swrm/lanes.json"
                         if name == "LANES_FILE" else default))
                     stack.enter_context(mock.patch.dict(os.environ, {
-                        "HOME": "/home/openswarm", "PATH": "/usr/bin:/bin",
+                        "HOME": "/home/swrm", "PATH": "/usr/bin:/bin",
                     }))
                     stack.enter_context(mock.patch.object(xs.sys, "executable", "/usr/bin/python3"))
                     stack.enter_context(mock.patch.object(xs.os, "getuid", return_value=1000))
                     stack.enter_context(mock.patch.object(
-                        pwd, "getpwuid", return_value=SimpleNamespace(pw_name="openswarm")))
+                        pwd, "getpwuid", return_value=SimpleNamespace(pw_name="swrm")))
                     stack.enter_context(contextlib.redirect_stdout(output))
                     command(SimpleNamespace(name="L1"))
                 self.assertEqual(output.getvalue().encode(), (GOLDEN / filename).read_bytes())

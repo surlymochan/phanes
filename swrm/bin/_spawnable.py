@@ -4,9 +4,9 @@ Windows cannot CreateProcess a script directly (WinError 193): when the
 target is a file with a python shebang, re-invoke it with this interpreter.
 POSIX executes shebangs natively and never takes the fallback branch.
 
-Loaded by bin/openswarm, bin/openswarm_consult.py, bin/hub-fleet-gateway
+Loaded by bin/swrm, bin/swrm_consult.py, bin/hub-fleet-gateway
 and bin/fleet-capacity via a script-directory importlib load (the same
-pattern bin/openswarm uses for openswarm_consult.py), so every script in
+pattern bin/swrm uses for swrm_consult.py), so every script in
 bin/ shares this one implementation instead of carrying its own copy.
 Deployments ship the whole bin/ tree, so the sibling module is always
 present next to its consumers.

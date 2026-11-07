@@ -43,7 +43,7 @@ class ReviewOneShotTests(unittest.TestCase):
             env = dict(os.environ, OPENSWARM_HOME=str(root / "data"), OPENSWARM_COPILOT_BIN=str(fake),
                        OPENSWARM_STATE_FILE=str(ROOT / "tests/fixtures/state.json"),
                        OPENSWARM_FLEET_GUARD_CONFIG=str(root / "no-guard"))
-            run = subprocess.run([sys.executable, str(ROOT / "bin/openswarm"), "run", "--backend", "copilot",
+            run = subprocess.run([sys.executable, str(ROOT / "bin/swrm"), "run", "--backend", "copilot",
                                   "--difficulty", "3", "--cwd", str(repo), "--read-only", "--no-worktree",
                                   "--keep-worktree", "--verify", "test -f node_modules/ready && test ! -d nested && sh verify.sh", "--prompt", "review"], env=env, capture_output=True,
                                  text=True, timeout=45)

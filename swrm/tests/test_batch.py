@@ -14,12 +14,12 @@ from unittest import mock
 import _load
 
 xs = _load.load()
-STUB = Path(_load.HERE) / "fixtures" / "fake_fleet_openswarm.py"
+STUB = Path(_load.HERE) / "fixtures" / "fake_fleet_swrm.py"
 
 
 class FakeFleetFixture:
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-batch-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-batch-")
         self.root = Path(self.tmp.name)
         self.data = self.root / "planner"
         self.cards = self.root / "cards"
@@ -47,7 +47,7 @@ class FakeFleetFixture:
             self.git(repo, "fetch", str(bundle), "HEAD")
             self.git(repo, "checkout", "-q", "--detach", "FETCH_HEAD")
             self.hosts[name] = {"name": name, "kind": "instabox", "box": name + "-box",
-                                "openswarm": str(STUB), "repos": {"project": str(repo)}}
+                                "swrm": str(STUB), "repos": {"project": str(repo)}}
         (self.repo / "new-base").write_text("local only")
         self.git(self.repo, "add", "new-base")
         self.git(self.repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "new base")
@@ -261,7 +261,7 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         for name in ("b1", "b2"):
             self.hosts[name]["kind"] = "local"
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
-        proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "openswarm"), "batch",
+        proc = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "batch",
                                "--repo", "project", "--cards", str(self.cards), "--hosts", "b1,b2", "--detach",
                                "--poll-seconds", "0.01"], capture_output=True, text=True, timeout=10,
                               env={**os.environ, "OPENSWARM_HOME": str(self.data)})

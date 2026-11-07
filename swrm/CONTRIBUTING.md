@@ -15,8 +15,8 @@ Try the CLI without any backend installed:
 
 ```bash
 export OPENSWARM_HOME="$(mktemp -d)" OPENSWARM_STATE_FILE=examples/demo-state.json
-bin/openswarm status
-bin/openswarm route --type review --difficulty 3
+bin/swrm status
+bin/swrm route --type review --difficulty 3
 ```
 
 ## What a good PR looks like
@@ -33,12 +33,12 @@ bin/openswarm route --type review --difficulty 3
 ## Adding a backend
 
 1. Add `backends/<id>.json` (invoke line, quota source, data boundary).
-2. Add `probe_<id>`, `plan_<id>` and an executor in `bin/openswarm`, and register it in `PLANNERS` / `EXECUTORS`.
+2. Add `probe_<id>`, `plan_<id>` and an executor in `bin/swrm`, and register it in `PLANNERS` / `EXECUTORS`.
 3. Add fixture data and routing scenarios.
 
 ## Reporting bugs
 
-Open an issue with `openswarm status` output (it contains no secrets) and, for run problems, the run's
+Open an issue with `swrm status` output (it contains no secrets) and, for run problems, the run's
 `result.json` with anything private removed. Security issues: please use GitHub's private vulnerability
 reporting instead of a public issue.
 

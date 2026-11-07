@@ -1,20 +1,20 @@
-# 融合方案定稿 v0.2：OpenBot 控制面 × OpenSwarm 执行
+# 融合方案定稿 v0.2：OpenBot 控制面 × swrm 执行
 
-一句话架构：OpenBot Cloud 做协商、选人、记忆与开卡，openswarm 做合约与执行的唯一主人，nibiru 资产收编进 OpenBot 控制面，执行一律走 openswarm。
+一句话架构：OpenBot Cloud 做协商、选人、记忆与开卡，swrm 做合约与执行的唯一主人，nibiru 资产收编进 OpenBot 控制面，执行一律走 swrm。
 
 ## 1. 唯一主人与硬约束
 
-- openswarm 是合约与执行语义的唯一主人：lane 状态机、并发与额度、收割、
-  薄卡门、review 与 merge 门、external check 与 tick，全部归 openswarm。
+- swrm 是合约与执行语义的唯一主人：lane 状态机、并发与额度、收割、
+  薄卡门、review 与 merge 门、external check 与 tick，全部归 swrm。
 - OpenBot Cloud 只做协商、选人、记忆与开卡，不得再长出第二套调度器，
-  不得出现平行调度器与 openswarm dispatcher 争执行权。
+  不得出现平行调度器与 swrm dispatcher 争执行权。
 - `autodispatch`（AD）只剩启动器：现有 `autodispatch.py` 禁止加新功能；
-  新能力先进 openswarm 上游 PR，再让 AD 变薄。本卡不碰 AD。
+  新能力先进 swrm 上游 PR，再让 AD 变薄。本卡不碰 AD。
 - 事实基线以 2026-11-02 为准：Instabox 已删；控制面在 box；远端主机为
   gores1、gores2、govpn、gorelay、gocc；配比 MiniMax 50%、Codex 30%、
   agy 10%、Copilot 10%（Copilot 仅远程、超额为 0）。
 - 证据大于自报：拆卡须含四要素，派单前做名册与 duty 校验，还价只落卡上。
-- 控制面与执行面的状态以 openswarm 与 GitHub 上的合约状态为准；
+- 控制面与执行面的状态以 swrm 与 GitHub 上的合约状态为准；
   控制面的视图只是投影，冲突时重建投影，不得反向覆盖合约状态。
 - builder 在 box 与控制面做的一切须可完整复制、无本地隐状态：
   配置进 git 或白名单备份仓，启动靠声明式脚本，不依赖不可迁移的一次性状态；
@@ -22,16 +22,16 @@
 
 ## 2. 边界表（boundary）
 
-冲突时以 openswarm 为准；控制面只能发起请求，不能越权执行。
+冲突时以 swrm 为准；控制面只能发起请求，不能越权执行。
 
 | 字段 / 动作 | 唯一写者 | 控制面（OpenBot Cloud / external-muse）的权限 |
 |---|---|---|
 | issue 创建与初始标签 `lane-ready`、`backend:<name>`、优先级 | 派活方（移交后为 external-muse） | 写：这是开卡，不是状态推进 |
-| `lane-claimed` / `lane-pr` / `lane-failed` 状态迁移 | 认领 lane 本人（经合约工具）加 openswarm dispatcher 对账 | 仅对自己认领的卡按合约迁移，不得替别人迁移 |
-| `in-progress`、收割、超时回收、requeue | openswarm dispatcher | 只读 |
-| Run / Attempt 状态与结果 | openswarm lane supervisor / dispatcher | 只读；可引用为证据 |
-| 并发名额、额度、host 白名单、lane pause | openswarm（部署配置与 dispatcher） | 不可写；只能经卡的优先级与 backend 钉选提建议 |
-| stop 一个 Run | 执行侧 supervisor 执行 | 控制面与 builder 均可发起 stop 请求，走 openswarm 既有 stop / pause 语义；不得绕过 supervisor 直接杀进程 |
+| `lane-claimed` / `lane-pr` / `lane-failed` 状态迁移 | 认领 lane 本人（经合约工具）加 swrm dispatcher 对账 | 仅对自己认领的卡按合约迁移，不得替别人迁移 |
+| `in-progress`、收割、超时回收、requeue | swrm dispatcher | 只读 |
+| Run / Attempt 状态与结果 | swrm lane supervisor / dispatcher | 只读；可引用为证据 |
+| 并发名额、额度、host 白名单、lane pause | swrm（部署配置与 dispatcher） | 不可写；只能经卡的优先级与 backend 钉选提建议 |
+| stop 一个 Run | 执行侧 supervisor 执行 | 控制面与 builder 均可发起 stop 请求，走 swrm 既有 stop / pause 语义；不得绕过 supervisor 直接杀进程 |
 | review / merge | fleet review lane 与 merge 门 | 无权；不自审，不合自己的 PR |
 | 协商记录、选人理由、记忆 | 控制面 | 写自己的投影与记忆，不回写合约状态 |
 
@@ -50,7 +50,7 @@
 ## 4. 控制面宕机映射
 
 - 已 claim 的 lane：继续跑完当前 Run，不冻结、不回收；lane 执行由
-  supervisor 自治，证据照常落 GitHub；控制面恢复后按 openswarm 状态对账重建投影。
+  supervisor 自治，证据照常落 GitHub；控制面恢复后按 swrm 状态对账重建投影。
 - claim 超时仍由 dispatcher 按合约计时，不因控制面宕机暂停或延长。
 - 新卡 mint：停止。控制面宕机等同派活方消失，语义等同 dispatcher 侧的
   PAUSE-MINT（在场时 replenish 跳过新卡生成）：控制面不新建卡；
@@ -70,10 +70,10 @@
   PR 合并仍走 fleet review / merge 门，谁都不自合。
 - 移交终点：定稿加首批拆卡后，日常派活与场景推进归 external-muse；
   builder 仅红线否决。整套系统须完全脱离 phanes builder 也能运行：
-  openswarm 加 AD 启动器加 external-muse 日常开卡加 fleet review / merge，
+  swrm 加 AD 启动器加 external-muse 日常开卡加 fleet review / merge，
   box 仍作计算资源，不走 Grok Bot。
 - 红线否决五类：安全、凭据、许可证、破坏性动作、合约被绕过；
-  否决必须落卡说明理由。builder 另保留 openswarm 合约所有权、
+  否决必须落卡说明理由。builder 另保留 swrm 合约所有权、
   禁止 AD 加功能、薄卡门、merge 前 lane review、PolyForm 核心可替换。
 - 第一周（2026-11-02 – 11-08）：external-muse 以 external lane 为入口实跑
   派活闭环，至少独立开 3 张合规卡（四要素齐全）并跟到验收关单；

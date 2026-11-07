@@ -14,7 +14,7 @@ xs = _load.load()
 
 class ResumeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-resume-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-resume-")
         self.root = pathlib.Path(self.tmp.name)
         self.runs = self.root / "runs"
         self.runs.mkdir()
@@ -53,8 +53,8 @@ class ResumeTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual([row["id"] for row in result["active_runs"]], ["live-running", "live-queued"])
         self.assertEqual([row["watch"] for row in result["active_runs"]],
-                         ["openswarm watch live-running", "openswarm watch live-queued"])
-        self.assertEqual(result["busy_lanes"][0]["watch"], "openswarm watch live-running")
+                         ["swrm watch live-running", "swrm watch live-queued"])
+        self.assertEqual(result["busy_lanes"][0]["watch"], "swrm watch live-running")
         self.assertEqual([row["id"] for row in result["recent_finished"]], ["recent"])
         self.assertEqual(result["recent_finished"][0]["status"], "done")
         self.assertEqual(result["recent_finished"][0]["result_path"],
@@ -70,7 +70,7 @@ class ResumeTests(unittest.TestCase):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 xs.cmd_resume(argparse.Namespace(since_hours=6, json=False))
-        self.assertIn("openswarm watch active", output.getvalue())
+        self.assertIn("swrm watch active", output.getvalue())
         self.assertIn("C1 run=active", output.getvalue())
         self.assertIn(str(self.runs / "finished" / "result.json"), output.getvalue())
         self.assertIn("partial", output.getvalue())

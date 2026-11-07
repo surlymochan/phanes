@@ -1,5 +1,5 @@
 set -u
-R=$(python3 -c "import json,os;print([l['repo'] for l in json.load(open(os.path.expanduser('~/.claude/openswarm/lanes.json')))['lanes']][0])")
+R=$(python3 -c "import json,os;print([l['repo'] for l in json.load(open(os.path.expanduser('~/.claude/swrm/lanes.json')))['lanes']][0])")
 cd "$R" || exit 9
 export PATH=$HOME/.openbot-task-tools/bin:$HOME/.openbot-task-tools/node-v24.20.0-linux-x64/bin:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then echo "DIRTY $R"; git status --short | head -5; exit 3; fi

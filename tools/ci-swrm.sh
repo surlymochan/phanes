@@ -52,6 +52,23 @@ if [[ "${1:-}" == "--print-changed-paths" ]]; then
   exit 0
 fi
 
+# Keep tests and offline probes away from the operator's control plane.
+mkdir -p "$root/.tmp/test-tmp"
+export TMPDIR="$root/.tmp/test-tmp"
+test_home="$(mktemp -d "$TMPDIR/ci.XXXXXX")"
+while IFS= read -r name; do
+  unset "$name"
+done < <(compgen -v | grep -E '^(OPENSWARM_|XSWARM_)' || true)
+export HOME="$test_home/home"
+export OPENSWARM_HOME="$test_home/state"
+export OPENSWARM_FLEET_GUARD_CONFIG="$test_home/fleet-guard.disabled.json"
+export OPENSWARM_FLEET_CAPACITY_DIR="$test_home/capacity"
+export XDG_CONFIG_HOME="$test_home/config"
+export XDG_CACHE_HOME="$test_home/cache"
+export XDG_DATA_HOME="$test_home/data"
+export GH_CONFIG_DIR="$test_home/gh"
+mkdir -p "$HOME" "$OPENSWARM_HOME" "$OPENSWARM_FLEET_CAPACITY_DIR" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$GH_CONFIG_DIR"
+
 echo "Swrm gate: only the current Python version is covered ($(python --version))."
 
 # Step A: unit tests (phanes.yml "Unit tests", working directory swrm).

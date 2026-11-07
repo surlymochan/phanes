@@ -23,8 +23,8 @@ bin/pi-fleet-bridge --broker-host gocc --worker gores1 --minutes 120
 
 The command prints the worker socket path. On the worker, set
 `OPENSWARM_PI_BROKER_SOCKET` to that path and `OPENSWARM_PI_RUNTIME` to the isolated
-Pi installation prefix, then run the candidate's `bin/openswarm-fleet`. This uses a
-separate OpenSwarm state directory, preserving the existing fleet configuration. Keep the bridge
+Pi installation prefix, then run the candidate's `bin/swrm-fleet`. This uses a
+separate swrm state directory, preserving the existing fleet configuration. Keep the bridge
 alive for the run. Interrupting it or reaching its time limit closes its SSH sessions
 and removes its private sockets. It is a transport process, not an executor.
 

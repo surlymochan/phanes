@@ -1,4 +1,4 @@
-"""Regression runner cards reuse openswarm's normal isolated run path."""
+"""Regression runner cards reuse swrm's normal isolated run path."""
 import contextlib
 import copy
 import io
@@ -16,7 +16,7 @@ xs = _load.load()
 
 class RegressTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-regress-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-regress-")
         self.root = Path(self.tmp.name)
         self.knowledge = self.root / "knowledge"
         self.regression = self.knowledge / "regression"
@@ -40,7 +40,7 @@ class RegressTests(unittest.TestCase):
             "guard_level: L2\napplies_to:\n  card_types: [fix]\n  paths: []\n  backends: [codex]\n",
             encoding="utf-8")
         self.policy = {"knowledge": {"repo": str(self.knowledge)},
-                       "regress": {"repos": {"openswarm": str(self.repo)}},
+                       "regress": {"repos": {"swrm": str(self.repo)}},
                        "run": {"timeout_seconds": 600, "fallback": False},
                        "budget": {"timezone": "UTC"}, "concurrency": {"total": 4},
                        "workspace": {"sibling_worktrees": True}}
@@ -61,7 +61,7 @@ class RegressTests(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "card.md").write_text(f"Fix regression {card_id}.\n", encoding="utf-8")
         (directory / "meta.yaml").write_text(
-            f"id: {card_id}\ncard_type: fix\nrepo: openswarm\nbase_commit: {self.base}\n"
+            f"id: {card_id}\ncard_type: fix\nrepo: swrm\nbase_commit: {self.base}\n"
             f"verify: '{verify}'\nexpected_outcome: pass\ndifficulty: 2\nest_minutes: 1\n"
             f"verify_fails_on_base: {'true' if fails_on_base else 'false'}\n", encoding="utf-8")
 

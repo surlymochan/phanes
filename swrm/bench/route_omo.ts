@@ -352,7 +352,7 @@ async function main(): Promise<void> {
       max: Number(Math.max(...samples).toFixed(4)),
     },
     cli_cold_start: null,
-    note: "model-core has no standalone route CLI. The figure is in-process time around resolveModelPipeline plus the exhaustion walk, after bun has loaded the module. It is not comparable to openswarm's process cold start.",
+    note: "model-core has no standalone route CLI. The figure is in-process time around resolveModelPipeline plus the exhaustion walk, after bun has loaded the module. It is not comparable to swrm's process cold start.",
     omo_commit: (commit.stdout || "").trim(),
     omo_dir: "<omo-dir>",
   }

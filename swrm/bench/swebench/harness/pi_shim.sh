@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# openswarm's pi backend calls `$OPENSWARM_PI_BIN -p --mode json [...] --tools ... <prompt>`.
+# swrm's pi backend calls `$OPENSWARM_PI_BIN -p --mode json [...] --tools ... <prompt>`.
 # This shim sends the same prompt through run_pi.sh (the only allowed entry to the model) in the
-# worktree openswarm chose, then prints Pi's json events so openswarm parses them as usual.
+# worktree swrm chose, then prints Pi's json events so swrm parses them as usual.
 set -uo pipefail
 PROMPT="${!#}"
 N=$(ls "$SHIM_EVENTS"/executor-*-prompt.md 2>/dev/null | wc -l)

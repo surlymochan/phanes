@@ -10,9 +10,9 @@
 **swrm** is a distributed, heterogeneous agent task dispatcher: executors claim tasks
 under lease and return with evidence, routed by live quota across model families.
 
-> **Renamed in v0.3.1:** openswarm is now **swrm**. Old GitHub links redirect here.
-> The CLI command, the skill name and install path, and the `OPENSWARM_*` environment
-> variables keep the old name for now, so existing setups keep working.
+> The CLI, skill install path and default runtime home now use `swrm`.
+> `OPENSWARM_*` / `XSWARM_*` remain compatible with upstream. Existing installations
+> must update their command links, install paths and explicit path settings.
 
 ## Benchmarks: swrm vs oh-my-openagent (2026-10-17)
 
@@ -120,7 +120,7 @@ Routing decisions use live quota data, not guesses.
   - At the soft limit, easy work spills to other enabled backends.
   - A hard limit skips the backend.
   - Quota that is about to expire unused gets spent at higher effort.
-- **Isolated execution.** Each run gets its own `git worktree` and `openswarm/<id>` branch.
+- **Isolated execution.** Each run gets its own `git worktree` and `swrm/<id>` branch.
   - Dependency dirs (`node_modules`, `.venv`) are symlinked in and never committed.
   - For a workspace that must install dependencies inside each worktree, set `workspace.prepare`; it runs before
     execution and again before verification when a lockfile changed, and replaces configured dependency links.
@@ -131,11 +131,11 @@ Routing decisions use live quota data, not guesses.
   - `--verify-baseline` ignores failures that already exist on the base commit.
 - **Automatic fallback.** One-shot Pi, Codex and Cursor runs retry visible 429s in the same session; other fallback-eligible rate limits and model-at-capacity errors can move to another backend.
 - **Rate-limit recovery and provider caps.** Resident lanes retry visible provider 429s in the same session using `rate_limit.backoff_seconds` (default `[30, 60, 120, 240]`) and `rate_limit.max_retries` (default `4`). `concurrency` accepts provider/backend caps plus `total`; defaults are `{"codex": 4, "minimax-cn": 6, "total": 10}`. Excess local turns queue across lanes and runs.
-- **Risk alerts.** `openswarm watch` streams progress and flags dangerous executor commands (push, `rm -rf ..`, secret prints, `sudo`, publish). It also reports stalls and heartbeats.
+- **Risk alerts.** `swrm watch` streams progress and flags dangerous executor commands (push, `rm -rf ..`, secret prints, `sudo`, publish). It also reports stalls and heartbeats.
 - **Planner-friendly.**
   - `SKILL.md` teaches Claude Code the whole loop.
-  - `templates/openswarm-workflow.js` fans tasks out in parallel.
-  - `openswarm report` gives scheduled check-ins.
+  - `templates/swrm-workflow.js` fans tasks out in parallel.
+  - `swrm report` gives scheduled check-ins.
 - **GitHub issue bus.** Routes tasks to uncontrolled external executors through a dedicated repository, while controlled hosts continue to use SSH fleet lanes.
 - **Learning loop.** The ledger records the pass decision, the injected lessons and patterns, and the routing advice of every run. `lessons propose`, `patterns propose`, and `retro` turn those records into reviewable drafts.
 - **Zero dependencies.** One Python file using only the standard library.
@@ -147,37 +147,37 @@ OpenCode Go plan, or a DeepSeek API key.
 
 ```bash
 # 1. Install as a Claude Code skill
-git clone https://github.com/surlymochan/swrm.git ~/.claude/skills/openswarm
-alias openswarm=~/.claude/skills/openswarm/bin/openswarm
+git clone https://github.com/surlymochan/swrm.git ~/.claude/skills/swrm
+alias swrm=~/.claude/skills/swrm/bin/swrm
 
 # 2. See what you have: plans, quotas, models, recommended concurrency
-openswarm status --refresh
+swrm status --refresh
 
 # 3. Ask where a task would go, without running anything
-openswarm route --type impl --difficulty 3
+swrm route --type impl --difficulty 3
 
 # 4. Run a task in an isolated worktree with a 15-minute budget and a host-side test gate
 cat > /tmp/task.md <<'TASK'
 Add input validation to src/parse.ts: reject empty strings with a ParseError.
 Acceptance: new unit test in test/parse.test.ts passes; existing tests still pass.
 TASK
-openswarm run --cwd ~/code/myrepo --type impl --difficulty 2 --budget-minutes 15 \
+swrm run --cwd ~/code/myrepo --type impl --difficulty 2 --budget-minutes 15 \
   --verify 'npm test' --task-file /tmp/task.md
 
-# 5. Review and merge (openswarm never merges or pushes for you)
-git -C ~/code/myrepo merge --no-ff openswarm/<run-id>
+# 5. Review and merge (swrm never merges or pushes for you)
+git -C ~/code/myrepo merge --no-ff swrm/<run-id>
 ```
 
 For longer work, detach and watch:
 
 ```bash
-openswarm run --detach --cwd ~/code/myrepo --verify 'pytest -q' --task-file /tmp/task.md   # prints {"id": ...}
-openswarm watch <id1> <id2>          # one line per actionable event; exits on DONE or after 28 min
-openswarm watch <id1> <id2> --quiet  # alerts, heartbeats and terminal events only
-openswarm resume                     # recover live runs, busy lanes and recent results after planner restart
-openswarm resume --since-hours 12 --json
-openswarm report --since-minutes 60  # one-screen digest for scheduled check-ins
-openswarm stop <id>                  # kill the executor; partial work is still committed to its branch
+swrm run --detach --cwd ~/code/myrepo --verify 'pytest -q' --task-file /tmp/task.md   # prints {"id": ...}
+swrm watch <id1> <id2>          # one line per actionable event; exits on DONE or after 28 min
+swrm watch <id1> <id2> --quiet  # alerts, heartbeats and terminal events only
+swrm resume                     # recover live runs, busy lanes and recent results after planner restart
+swrm resume --since-hours 12 --json
+swrm report --since-minutes 60  # one-screen digest for scheduled check-ins
+swrm stop <id>                  # kill the executor; partial work is still committed to its branch
 ```
 
 Pi messages appear once at `message_end`; Cursor chunks are merged until a prompt turn ends or a tool call starts.
@@ -188,69 +188,69 @@ still expires with `--quiet`; re-arm with `--from-end` if needed.
 
 ## Command reference
 
-Every subcommand, grouped by what it does. `openswarm <command> --help` lists all flags.
+Every subcommand, grouped by what it does. `swrm <command> --help` lists all flags.
 
 ### Execute
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `openswarm route` | Pick backend, model, and effort for a task profile without running anything. | `openswarm route --type impl --difficulty 3 --card-type fix` |
-| `openswarm run` | Route a task, execute it in an isolated worktree, verify it on the host, and record the ledger entry. | `openswarm run --cwd ~/code/myrepo --type impl --difficulty 2 --budget-minutes 15 --verify 'pytest -q' --task-file /tmp/task.md` |
-| `openswarm run --detach` | Run in the background and print the run id to watch. | `openswarm run --detach --cwd ~/code/myrepo --verify 'pytest -q' --task-file /tmp/task.md` |
-| `openswarm stop` | Kill a running executor; partial work stays on its branch. | `openswarm stop <run-id>` |
-| `openswarm lane up` | Start the configured lane supervisors. | `openswarm lane up C1 K1` |
-| `openswarm lane assign` | Give one task to an idle lane; returns the run id. | `openswarm lane assign C1 --task-file /tmp/task.md --title "Parser fix" --verify 'pytest -q' --budget-minutes 30` |
-| `openswarm lane steer` | Send a correction to the lane's active turn. | `openswarm lane steer C1 --text "Add a regression test before finishing"` |
-| `openswarm lane abort` | Abort the lane's active turn. | `openswarm lane abort C1` |
-| `openswarm lane status` | Show the configured lane state. | `openswarm lane status` |
-| `openswarm lane down` | Stop lane turns, children, and supervisors. | `openswarm lane down C1 K1` |
-| `openswarm lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `openswarm lane launchd-plist C1` |
-| `openswarm lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `openswarm lane systemd-unit K1` |
-| `openswarm batch` | Queue task cards across fleet hosts and collect their branches. | `openswarm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
-| `openswarm batch status` | Show the state of one batch. | `openswarm batch status <batch-id>` |
-| `openswarm bus init` | Create the bus labels, issue template, and protocol README. | `openswarm bus init acme/openswarm-bus` |
-| `openswarm bus status` | Show open bus issues with their executor and age. | `openswarm bus status --json` |
-| `openswarm bus-worker` | Run the reference bus executor; `--once` claims at most one queued issue. | `openswarm bus-worker --bus acme/openswarm-bus --name runner-1 --backend codex --once` |
-| `openswarm verify-remote` | Verify a fleet run's commit in a temporary worktree on another host. | `openswarm verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'` |
+| `swrm route` | Pick backend, model, and effort for a task profile without running anything. | `swrm route --type impl --difficulty 3 --card-type fix` |
+| `swrm run` | Route a task, execute it in an isolated worktree, verify it on the host, and record the ledger entry. | `swrm run --cwd ~/code/myrepo --type impl --difficulty 2 --budget-minutes 15 --verify 'pytest -q' --task-file /tmp/task.md` |
+| `swrm run --detach` | Run in the background and print the run id to watch. | `swrm run --detach --cwd ~/code/myrepo --verify 'pytest -q' --task-file /tmp/task.md` |
+| `swrm stop` | Kill a running executor; partial work stays on its branch. | `swrm stop <run-id>` |
+| `swrm lane up` | Start the configured lane supervisors. | `swrm lane up C1 K1` |
+| `swrm lane assign` | Give one task to an idle lane; returns the run id. | `swrm lane assign C1 --task-file /tmp/task.md --title "Parser fix" --verify 'pytest -q' --budget-minutes 30` |
+| `swrm lane steer` | Send a correction to the lane's active turn. | `swrm lane steer C1 --text "Add a regression test before finishing"` |
+| `swrm lane abort` | Abort the lane's active turn. | `swrm lane abort C1` |
+| `swrm lane status` | Show the configured lane state. | `swrm lane status` |
+| `swrm lane down` | Stop lane turns, children, and supervisors. | `swrm lane down C1 K1` |
+| `swrm lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `swrm lane launchd-plist C1` |
+| `swrm lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `swrm lane systemd-unit K1` |
+| `swrm batch` | Queue task cards across fleet hosts and collect their branches. | `swrm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
+| `swrm batch status` | Show the state of one batch. | `swrm batch status <batch-id>` |
+| `swrm bus init` | Create the bus labels, issue template, and protocol README. | `swrm bus init acme/swrm-bus` |
+| `swrm bus status` | Show open bus issues with their executor and age. | `swrm bus status --json` |
+| `swrm bus-worker` | Run the reference bus executor; `--once` claims at most one queued issue. | `swrm bus-worker --bus acme/swrm-bus --name runner-1 --backend codex --once` |
+| `swrm verify-remote` | Verify a fleet run's commit in a temporary worktree on another host. | `swrm verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'` |
 
 ### Observe
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `openswarm watch` | Stream one line per actionable event for one or more runs. | `openswarm watch <run-id> --label parser-fix` |
-| `openswarm watch --quiet` | Keep only terminal, risk, stall, error, budget, attempt, and heartbeat events. | `openswarm watch <run-id> --quiet` |
-| `openswarm watch --from-end` | Resume a watch whose window expired; events already written are skipped. | `openswarm watch <run-id> --from-end` |
-| `openswarm status` | Show plans, quota windows, models, breakers, and recommended concurrency. | `openswarm status --refresh` |
-| `openswarm probe` | Discover models, plans, and quotas into `$OPENSWARM_HOME/state.json`. | `openswarm probe --quiet` |
-| `openswarm runs` | Snapshot recent or active runs. | `openswarm runs --active --json` |
-| `openswarm resume` | Recover live runs, busy lanes and recent results after a planner restart. | `openswarm resume --since-hours 12 --json` |
-| `openswarm report` | One-screen check-in for scheduled updates: quotas, active runs, recently finished. | `openswarm report --since-minutes 60` |
-| `openswarm budget status` | Show today's executor budget usage. | `openswarm budget status --json` |
-| `openswarm ingest-claude` | Record Claude plan usage from the statusline hook or from flags. | `openswarm ingest-claude --five-hour 80 --seven-day 40` |
-| `openswarm fleet status` | Show reachability, paused hosts, lanes, and active runs. | `openswarm fleet status --json` |
-| `openswarm fleet exec` | Run an swrm command on another host; stdout and the exit code are forwarded. | `openswarm fleet exec worker -- lane status` |
-| `openswarm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `openswarm fleet ledger pull --hosts worker,sandbox` |
-| `openswarm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `openswarm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
+| `swrm watch` | Stream one line per actionable event for one or more runs. | `swrm watch <run-id> --label parser-fix` |
+| `swrm watch --quiet` | Keep only terminal, risk, stall, error, budget, attempt, and heartbeat events. | `swrm watch <run-id> --quiet` |
+| `swrm watch --from-end` | Resume a watch whose window expired; events already written are skipped. | `swrm watch <run-id> --from-end` |
+| `swrm status` | Show plans, quota windows, models, breakers, and recommended concurrency. | `swrm status --refresh` |
+| `swrm probe` | Discover models, plans, and quotas into `$OPENSWARM_HOME/state.json`. | `swrm probe --quiet` |
+| `swrm runs` | Snapshot recent or active runs. | `swrm runs --active --json` |
+| `swrm resume` | Recover live runs, busy lanes and recent results after a planner restart. | `swrm resume --since-hours 12 --json` |
+| `swrm report` | One-screen check-in for scheduled updates: quotas, active runs, recently finished. | `swrm report --since-minutes 60` |
+| `swrm budget status` | Show today's executor budget usage. | `swrm budget status --json` |
+| `swrm ingest-claude` | Record Claude plan usage from the statusline hook or from flags. | `swrm ingest-claude --five-hour 80 --seven-day 40` |
+| `swrm fleet status` | Show reachability, paused hosts, lanes, and active runs. | `swrm fleet status --json` |
+| `swrm fleet exec` | Run an swrm command on another host; stdout and the exit code are forwarded. | `swrm fleet exec worker -- lane status` |
+| `swrm fleet ledger pull` | Merge the host ledgers into one fleet ledger file. | `swrm fleet ledger pull --hosts worker,sandbox` |
+| `swrm run --rework-of` | Resume an earlier run's task as a rework, linked in the ledger as `rework_of`. | `swrm run --rework-of <run-id> --cwd ~/code/myrepo --task-file /tmp/task.md` |
 
 ### Learn
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `openswarm ledger` | List recent ledger records. | `openswarm ledger -n 20 --json` |
-| `openswarm ledger --fleet` | List the merged fleet ledger. | `openswarm ledger --fleet -n 50` |
-| `openswarm ledger ingest` | Link GitHub PR reviews and defect results into the fleet ledger. | `openswarm ledger ingest --repo acme/project --since 30` |
-| `openswarm ledger accept` | Record a manual accept or reject decision for a finished run. | `openswarm ledger accept <run-id> --reason "Verified on host"` |
-| `openswarm ledger backfill-pass` | Compute `exec_pass` for older ledger records. | `openswarm ledger backfill-pass --fleet --recompute` |
-| `openswarm lessons preview` | Print the lesson and pattern block a dispatch would inject. | `openswarm lessons preview --card-type fix --backend codex --paths src/file.py` |
-| `openswarm lessons propose` | Draft lessons from linked P0/P1 findings of recent runs. | `openswarm lessons propose --fleet --since 30 --dry-run` |
-| `openswarm lessons escalate` | Draft L3 guard proposals for recurring lessons. | `openswarm lessons escalate --dry-run` |
-| `openswarm patterns propose` | Draft patterns from compare winners and repeated peer-review findings. | `openswarm patterns propose --since 30` |
-| `openswarm patterns retire-check` | Propose retirement when active patterns do not improve outcomes. | `openswarm patterns retire-check` |
-| `openswarm routing weights` | Compute per-backend routing metrics and write the weights file. | `openswarm routing weights --fleet` |
-| `openswarm routing compare` | Compare recorded routing advice with the actual run outcomes. | `openswarm routing compare --days 30 --fleet` |
-| `openswarm retro` | Run the weekly retrospective: pull, ingest, backfill, weights, proposals, report. | `openswarm retro --days 7 --repos acme/project` |
-| `openswarm regress run` | Run the regression card suite on a backend, a lane, or a routing mode. | `openswarm regress run --backend codex --cards card-a,card-b --label nightly --parallel 2` |
-| `openswarm regress compare` | Compare two regression result files card by card. | `openswarm regress compare before.json after.json` |
+| `swrm ledger` | List recent ledger records. | `swrm ledger -n 20 --json` |
+| `swrm ledger --fleet` | List the merged fleet ledger. | `swrm ledger --fleet -n 50` |
+| `swrm ledger ingest` | Link GitHub PR reviews and defect results into the fleet ledger. | `swrm ledger ingest --repo acme/project --since 30` |
+| `swrm ledger accept` | Record a manual accept or reject decision for a finished run. | `swrm ledger accept <run-id> --reason "Verified on host"` |
+| `swrm ledger backfill-pass` | Compute `exec_pass` for older ledger records. | `swrm ledger backfill-pass --fleet --recompute` |
+| `swrm lessons preview` | Print the lesson and pattern block a dispatch would inject. | `swrm lessons preview --card-type fix --backend codex --paths src/file.py` |
+| `swrm lessons propose` | Draft lessons from linked P0/P1 findings of recent runs. | `swrm lessons propose --fleet --since 30 --dry-run` |
+| `swrm lessons escalate` | Draft L3 guard proposals for recurring lessons. | `swrm lessons escalate --dry-run` |
+| `swrm patterns propose` | Draft patterns from compare winners and repeated peer-review findings. | `swrm patterns propose --since 30` |
+| `swrm patterns retire-check` | Propose retirement when active patterns do not improve outcomes. | `swrm patterns retire-check` |
+| `swrm routing weights` | Compute per-backend routing metrics and write the weights file. | `swrm routing weights --fleet` |
+| `swrm routing compare` | Compare recorded routing advice with the actual run outcomes. | `swrm routing compare --days 30 --fleet` |
+| `swrm retro` | Run the weekly retrospective: pull, ingest, backfill, weights, proposals, report. | `swrm retro --days 7 --repos acme/project` |
+| `swrm regress run` | Run the regression card suite on a backend, a lane, or a routing mode. | `swrm regress run --backend codex --cards card-a,card-b --label nightly --parallel 2` |
+| `swrm regress compare` | Compare two regression result files card by card. | `swrm regress compare before.json after.json` |
 
 A ledger record carries the outcome and what the next run learns from it: `exec_pass` and `exec_pass_reason`
 (change evidence plus host verification decide the pass, not the executor's own report), `accepted`,
@@ -262,9 +262,9 @@ A ledger record carries the outcome and what the next run learns from it: `exec_
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `openswarm consult` | Ask several executors the same question in read-only mode and compare the answers. | `openswarm consult --question "Which parser change is safest?" --ask codex --ask pi --json` |
-| `openswarm review` | Review a finished run's branch with a read-only executor from another model family. | `openswarm review <run-id> --by codex --json` |
-| `openswarm compare` | Run one card on two executor families and record the best-of-two comparison. | `openswarm compare --task-file /tmp/task.md --title "Parser fix" --a codex --b pi --verify 'pytest -q'` |
+| `swrm consult` | Ask several executors the same question in read-only mode and compare the answers. | `swrm consult --question "Which parser change is safest?" --ask codex --ask pi --json` |
+| `swrm review` | Review a finished run's branch with a read-only executor from another model family. | `swrm review <run-id> --by codex --json` |
+| `swrm compare` | Run one card on two executor families and record the best-of-two comparison. | `swrm compare --task-file /tmp/task.md --title "Parser fix" --a codex --b pi --verify 'pytest -q'` |
 
 ## Learning loop
 
@@ -275,48 +275,48 @@ reviewable drafts instead of editing the lesson or pattern catalog.
    accept or reject decision:
 
    ```bash
-   openswarm fleet ledger pull --hosts worker,sandbox
-   openswarm ledger ingest --repo acme/project --since 30
-   openswarm ledger accept <run-id> --reason "Verified on host"
+   swrm fleet ledger pull --hosts worker,sandbox
+   swrm ledger ingest --repo acme/project --since 30
+   swrm ledger accept <run-id> --reason "Verified on host"
    ```
 
 2. **Inject.** `run`, `lane assign`, `batch`, and `bus-worker` add matching L2 lessons and L3 reminders to the
    executor prompt, plus up to three active patterns. Preview the block before dispatching:
 
    ```bash
-   openswarm lessons preview --card-type fix --backend codex --paths src/file.py
+   swrm lessons preview --card-type fix --backend codex --paths src/file.py
    ```
 
 3. **Review.** Let a second executor look at the finished branch:
 
    ```bash
-   openswarm review <run-id> --by codex --json
-   openswarm compare --task-file /tmp/task.md --title "Parser fix" --a codex --b pi
-   openswarm consult --question "Is this retry safe?" --ask codex --ask pi
+   swrm review <run-id> --by codex --json
+   swrm compare --task-file /tmp/task.md --title "Parser fix" --a codex --b pi
+   swrm consult --question "Is this retry safe?" --ask codex --ask pi
    ```
 
 4. **Lessons.** Turn review findings into lesson, guard, and pattern drafts:
 
    ```bash
-   openswarm lessons propose --fleet --since 30
-   openswarm lessons escalate --dry-run
-   openswarm patterns propose --since 30
-   openswarm patterns retire-check
+   swrm lessons propose --fleet --since 30
+   swrm lessons escalate --dry-run
+   swrm patterns propose --since 30
+   swrm patterns retire-check
    ```
 
 5. **Weekly retro.** One command runs the loop over the last week and writes the report:
 
    ```bash
-   openswarm retro --days 7 --repos acme/project
-   openswarm routing weights --fleet
-   openswarm routing compare --days 30 --fleet
+   swrm retro --days 7 --repos acme/project
+   swrm routing weights --fleet
+   swrm routing compare --days 30 --fleet
    ```
 
    Measure a fixed card suite the same way when an executor or a prompt changes:
 
    ```bash
-   openswarm regress run --backend codex --label nightly
-   openswarm regress compare before.json after.json
+   swrm regress run --backend codex --label nightly
+   swrm regress compare before.json after.json
    ```
 
 Drafts land in `<knowledge.repo>/proposals/<date>/`, the retro report in `<knowledge.repo>/retro/<YYYY>-W<ww>.md`,
@@ -332,7 +332,7 @@ repository adds no block. Use `--paths src/file.py` on `run`, `lane assign`, `ba
 path hints alongside paths named in the task card. Preview a selection with:
 
 ```bash
-openswarm lessons preview --card-type fix --backend codex --paths src/file.py
+swrm lessons preview --card-type fix --backend codex --paths src/file.py
 ```
 
 Injected lesson ids are recorded in the run ledger's `lessons_injected` field.
@@ -340,7 +340,7 @@ Injected lesson ids are recorded in the run ledger's `lessons_injected` field.
 Propose review-derived lessons from recent ledger runs linked to P0/P1 Codex inline findings with:
 
 ```bash
-openswarm lessons propose [--fleet] [--since DAYS] [--out DIR] [--dry-run]
+swrm lessons propose [--fleet] [--since DAYS] [--out DIR] [--dry-run]
 ```
 
 New lesson and recurrence proposals are written under `knowledge.repo/proposals/<date>/` by default. The command
@@ -350,7 +350,7 @@ tracks processed inline comment ids in `knowledge.repo/proposals/seen.json`; it 
 Escalate recurring lessons into reviewable L3 guard drafts with:
 
 ```bash
-openswarm lessons escalate [--out DIR] [--dry-run]
+swrm lessons escalate [--out DIR] [--dry-run]
 ```
 
 The command writes `guard-<lesson-id>.md` proposals for non-L3 lessons with at least one recurrence, including
@@ -368,13 +368,13 @@ characters total. `lessons preview` shows both selected lessons and patterns. In
 Draft candidates from compare winner proposals and repeated peer-review findings with:
 
 ```bash
-openswarm patterns propose [--since DAYS]
+swrm patterns propose [--since DAYS]
 ```
 
 Check active patterns against similar runs from the last 30 days with:
 
 ```bash
-openswarm patterns retire-check
+swrm patterns retire-check
 ```
 
 Retirement proposals require at least eight injected and eight control runs for the same card type and backend, with
@@ -383,14 +383,14 @@ both `exec_pass` and `accepted` rates available. Both commands write reviewable 
 
 ## Routing weights (record-only)
 
-`openswarm routing weights` summarizes ledger runs by backend, model and card type. It writes
+`swrm routing weights` summarizes ledger runs by backend, model and card type. It writes
 `<knowledge.repo>/routing/weights.json` (default sample threshold: 8); use `--fleet` to read the merged fleet
 ledger or `--out PATH` to choose another output path. The effective pass rate uses manual `accepted` decisions
 when present and otherwise uses `exec_pass`; the report also includes each source rate and its record count,
 first-try, rework and P1+ review rates, plus median tokens and seconds. Groups below `routing.min_samples` scored
 runs are marked `enough: false`.
 
-Run `openswarm review <run_id> [--by BACKEND[:MODEL]] [--json]` to review a finished run's branch against its base
+Run `swrm review <run_id> [--by BACKEND[:MODEL]] [--json]` to review a finished run's branch against its base
 with a read-only executor from another model family. Review output is saved to `runs/<id>/review.json`; the ledger
 stores its reviewer, verdict, and P0/P1/P2 counts under `peer_review`, separate from GitHub's `review_findings`.
 The default `review.auto_card_types` (`feature`, `fix`, `review-fix`, `migration`) starts reviews asynchronously
@@ -400,7 +400,7 @@ automatic review jobs, while `review.timeout_seconds` and `review.max_diff_chars
 Run the same card on two executor families with:
 
 ```bash
-openswarm compare --task-file TASK.md --title TITLE \
+swrm compare --task-file TASK.md --title TITLE \
   [--a BACKEND[:MODEL]] [--b BACKEND[:MODEL]] [--verify CMD] \
   [--card-type TYPE] [--budget-minutes N]
 ```
@@ -413,22 +413,22 @@ seconds; an exact tie has no winner. Results are saved under `runs/<compare-id>/
 `compare.md`; a winner also creates a `pattern-<compare-id>.md` proposal under
 `knowledge.repo/proposals/<date>/`.
 
-Review completed runs with `openswarm ledger accept <run_id> [--reject] [--reason TEXT] [--fleet]`. The decision,
-reason and timestamp are recorded atomically. `openswarm ledger ingest` sets acceptance from merged or closed
-without merge PRs unless a manual decision is already present. Use `openswarm ledger backfill-pass [--fleet]` to
+Review completed runs with `swrm ledger accept <run_id> [--reject] [--reason TEXT] [--fleet]`. The decision,
+reason and timestamp are recorded atomically. `swrm ledger ingest` sets acceptance from merged or closed
+without merge PRs unless a manual decision is already present. Use `swrm ledger backfill-pass [--fleet]` to
 compute `exec_pass` for eligible older records.
 
-`openswarm route --card-type fix` and `openswarm run --card-type fix` attach `routing_advice` when enough historical
+`swrm route --card-type fix` and `swrm run --card-type fix` attach `routing_advice` when enough historical
 samples exist for currently eligible backends. Advice ranks pass, first-try, rework and P1+ rates, then uses median
 tokens and seconds as cost tie-breakers. It is recorded alongside the real route and does not change the selected
 backend or model; `routing.weighted` remains false and reserved for future routing behavior. Compare recorded advice
-with actual outcomes using `openswarm routing compare --days 30`. An advice outcome is shown as `not run` when the
+with actual outcomes using `swrm routing compare --days 30`. An advice outcome is shown as `not run` when the
 actual route used a different backend or model, because that counterfactual was not executed.
 
 Run the weekly fleet retrospective in one command:
 
 ```bash
-openswarm retro [--days 7] [--out DIR] [--repos owner/name ...] [--no-pull]
+swrm retro [--days 7] [--out DIR] [--repos owner/name ...] [--no-pull]
 ```
 
 By default it pulls fleet ledgers, ingests GitHub PR data for the selected repositories, backfills `exec_pass`,
@@ -452,18 +452,18 @@ steered or aborted while working. Cursor lanes run the local `cursor-agent acp` 
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
 ```bash
-openswarm lane up C1 K1 M1               # no names starts every configured lane; safe to repeat
-openswarm lane status
-openswarm lane assign C1 --task-file /tmp/task.md --title "Parser fix" --verify 'pytest -q' --budget-minutes 30
-openswarm watch <run-id>
-openswarm lane steer C1 --text "Add a regression test before finishing"
-openswarm lane abort C1                  # openswarm stop <run-id> also aborts a lane turn
-openswarm lane down C1 K1 M1
-openswarm lane launchd-plist C1           # prints a KeepAlive LaunchAgent plist; does not install it
-openswarm lane systemd-unit K1             # prints a system systemd unit; does not install it
+swrm lane up C1 K1 M1               # no names starts every configured lane; safe to repeat
+swrm lane status
+swrm lane assign C1 --task-file /tmp/task.md --title "Parser fix" --verify 'pytest -q' --budget-minutes 30
+swrm watch <run-id>
+swrm lane steer C1 --text "Add a regression test before finishing"
+swrm lane abort C1                  # swrm stop <run-id> also aborts a lane turn
+swrm lane down C1 K1 M1
+swrm lane launchd-plist C1           # prints a KeepAlive LaunchAgent plist; does not install it
+swrm lane systemd-unit K1             # prints a system systemd unit; does not install it
 ```
 
-Lane runs use the normal `runs/<id>` files, `openswarm/<id>` commit branch, host verification, ledger, `watch`,
+Lane runs use the normal `runs/<id>` files, `swrm/<id>` commit branch, host verification, ledger, `watch`,
 `runs`, and `report` paths. `--base REV` selects the commit used to reset a lane worktree for one assignment.
 An optional lane `binary` absolute path overrides the detected executable, which is useful for wrappers and offline
 protocol testing. Cursor defaults to model `composer-2.5`; its binary is `cursor-agent` on `PATH`, then
@@ -486,9 +486,9 @@ and an authenticated executor on each host. `repos` maps the same logical repo n
 ```json
 {"hosts":[
   {"name":"local","kind":"local","repos":{"project":"~/code/project"}},
-  {"name":"worker","kind":"ssh","ssh":"worker-alias","openswarm":"~/.local/bin/openswarm",
+  {"name":"worker","kind":"ssh","ssh":"worker-alias","swrm":"~/.local/bin/swrm",
    "repos":{"project":"~/work/project"}},
-  {"name":"sandbox","kind":"instabox","box":"task-box","openswarm":"~/.local/bin/openswarm",
+  {"name":"sandbox","kind":"instabox","box":"task-box","swrm":"~/.local/bin/swrm",
    "repos":{"project":"~/work/project"}}
 ]}
 ```
@@ -497,10 +497,10 @@ Local hosts use subprocesses; remote commands use `ssh <alias> --` or `instabox 
 Without a local repo mapping, the planner uses its current checkout. A missing fleet config defaults to local only.
 
 ```bash
-openswarm fleet status                   # reachability, paused hosts, lanes and active runs
-openswarm fleet status --json
-openswarm fleet exec worker -- lane status
-openswarm fleet exec --timeout 120 worker -- runs --active --json
+swrm fleet status                   # reachability, paused hosts, lanes and active runs
+swrm fleet status --json
+swrm fleet exec worker -- lane status
+swrm fleet exec --timeout 120 worker -- runs --active --json
 ```
 
 Status uses `instabox ls` and never connects to a paused box. Unknown box states also remain uncontacted.
@@ -509,10 +509,10 @@ Status uses `instabox ls` and never connects to a paused box. Unknown box states
 Write one self-contained task per regular file in a cards directory, then dispatch:
 
 ```bash
-openswarm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
+swrm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 \
   --backend pi --model cheap-model --verify 'python3 -m unittest discover -s tests' \
   --budget-minutes 20 --detach
-openswarm batch status <batch-id>
+swrm batch status <batch-id>
 ```
 
 The batch wakes each selected instabox once, checks swrm and the checkout, and makes `--base REV` available
@@ -524,7 +524,7 @@ through to each `run --detach`. One line is printed per state change; detached o
 Provider caps in `policy.local.json` also constrain batch dispatch across the hosts listed in `fleet.json`. The planner checks fleet status before each launch and leaves excess cards queued until a provider slot frees. This fleet-wide coordination is planner-owned and uses no `concurrency_url`; direct `fleet exec ... lane assign` only observes the target host's local cap, so use `batch` when multiple hosts share one provider account.
 
 Base synchronization and result collection use git bundles through the transport: no git remotes or pushes.
-Each completed run's `openswarm/<run-id>` branch is fetched into the planner checkout, then removed on the
+Each completed run's `swrm/<run-id>` branch is fetched into the planner checkout, then removed on the
 executor host after its commit is confirmed locally. Local runs in the planner checkout retain their branches.
 Failed runs with commits are collected too. The batch exits nonzero if any card is not `done`.
 `summary.json` and `summary.md` under `$OPENSWARM_HOME/batches/<id>/` list card, host, status, verify exit code,
@@ -534,8 +534,8 @@ after integration. One-shot `run --base REV` is also supported.
 ## Verify a remote run elsewhere
 
 ```bash
-openswarm verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'
-openswarm verify-remote --from worker --run <run-id> --on sandbox --verify 'npm test'
+swrm verify-remote --from worker --run <run-id> --on local --verify 'pytest -q'
+swrm verify-remote --from worker --run <run-id> --on sandbox --verify 'npm test'
 ```
 
 The source host's `repos` mapping identifies the logical repo for another executor; `--on local` uses the matching
@@ -552,11 +552,11 @@ has removed the source branch, as long as the source host retains the run and it
 You can try routing with no backend installed:
 
 ```bash
-OPENSWARM_HOME=$(mktemp -d) OPENSWARM_STATE_FILE=examples/demo-state.json bin/openswarm status
+OPENSWARM_HOME=$(mktemp -d) OPENSWARM_STATE_FILE=examples/demo-state.json bin/swrm status
 ```
 
 In Claude Code, just say things like *"dispatch this to Codex"*, *"swarm these five refactors"*, or *"use
-openswarm"*. The skill takes it from there.
+swrm"*. The skill takes it from there.
 
 ## GitHub issue bus
 
@@ -565,11 +565,11 @@ Use the issue bus for executors you do not control, such as a cloud agent, anoth
 Initialize a dedicated bus repository and set its allowlist in `$OPENSWARM_HOME/policy.local.json`:
 
 ```sh
-openswarm bus init <bus-owner>/<bus-repo>
+swrm bus init <bus-owner>/<bus-repo>
 ```
 
 ```json
-{"bus":{"repo":"<bus-owner>/<bus-repo>","allowed_executors":["<github-login>"],"allowed_planners":["<planner-login>"],"poll_seconds":60,"labels_prefix":"openswarm"}}
+{"bus":{"repo":"<bus-owner>/<bus-repo>","allowed_executors":["<github-login>"],"allowed_planners":["<planner-login>"],"poll_seconds":60,"labels_prefix":"swrm"}}
 ```
 
 Both bus allowlists default to deny. `allowed_planners` must include the GitHub login used by the planner to create issues and digest comments.
@@ -577,13 +577,13 @@ Both bus allowlists default to deny. `allowed_planners` must include the GitHub 
 Dispatch from a target GitHub repository after the base commit has been pushed:
 
 ```sh
-openswarm run --backend github-issue --cwd <target-repo> --base <commit> \
+swrm run --backend github-issue --cwd <target-repo> --base <commit> \
   --budget-minutes 40 --verify '<acceptance-command>' --task-file task.md
-openswarm bus status
-openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
+swrm bus status
+swrm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
 ```
 
-See [docs/BUS.md](docs/BUS.md) for the issue/result schema and worker setup. The planner accepts comments only from allowlisted GitHub logins, validates the reported branch and commit, fetches and verifies locally, and never pushes or merges into the target repository. Workers stop on the `openswarm:cancelled` label.
+See [docs/BUS.md](docs/BUS.md) for the issue/result schema and worker setup. The planner accepts comments only from allowlisted GitHub logins, validates the reported branch and commit, fetches and verifies locally, and never pushes or merges into the target repository. Workers stop on the `swrm:cancelled` label.
 
 ## How routing works
 
@@ -610,7 +610,7 @@ The full rules are in [`SKILL.md`](SKILL.md#7-routing-rules-what-route-does). Ev
         ┌──────────── planner (Claude Code + SKILL.md) ────────────┐
         │  decompose → acceptance criteria → review → integrate    │
         └───────┬──────────────────────────────────────▲───────────┘
-                │ openswarm run / route / watch           │ result.json, diff, verify
+                │ swrm run / route / watch           │ result.json, diff, verify
         ┌───────▼──────────────────────────────────────┴───────────┐
         │ swrm                                                        │
         │  probe ─► state.json (models, tiers, quotas, breakers)   │
@@ -626,13 +626,13 @@ Cursor CLI is a fourth executor, opt-in only (`--backend cursor`).
 
 | Path | What |
 | --- | --- |
-| `bin/openswarm` | The CLI: `probe`, `status`, `route`, `run`, `lane`, `batch`, `bus`, `bus-worker`, `verify-remote`, `watch`, `runs`, `resume`, `report`, `budget`, `stop`, `fleet`, `consult`, `review`, `compare`, `regress`, `routing`, `lessons`, `patterns`, `retro`, `ingest-claude`, `ledger` |
+| `bin/swrm` | The CLI: `probe`, `status`, `route`, `run`, `lane`, `batch`, `bus`, `bus-worker`, `verify-remote`, `watch`, `runs`, `resume`, `report`, `budget`, `stop`, `fleet`, `consult`, `review`, `compare`, `regress`, `routing`, `lessons`, `patterns`, `retro`, `ingest-claude`, `ledger` |
 | `SKILL.md` | Claude Code skill: the planner's operating manual |
 | `policy.json` | Defaults: thresholds, difficulty map, model caps, local data sources |
 | `backends/*.json` | One manifest per executor: invocation, quota source, data boundary |
-| `templates/openswarm-workflow.js` | Parallel fan-out template for Claude Code workflows |
+| `templates/swrm-workflow.js` | Parallel fan-out template for Claude Code workflows |
 | `examples/demo-state.json` | Synthetic state for offline demos |
-| `~/.claude/openswarm/` (`$OPENSWARM_HOME`) | Runtime data: `state.json`, `ledger.jsonl`, `breakers.json`, `lanes.json`, `lanes/<name>/`, `fleet.json`, `batches/<id>/`, `remote-results/<id>.json`, `runs/<id>/` |
+| `~/.claude/swrm/` (`$OPENSWARM_HOME`) | Runtime data: `state.json`, `ledger.jsonl`, `breakers.json`, `lanes.json`, `lanes/<name>/`, `fleet.json`, `batches/<id>/`, `remote-results/<id>.json`, `runs/<id>/` |
 
 ## Configuration
 
@@ -643,7 +643,7 @@ Override any key in `$OPENSWARM_HOME/policy.local.json`. It is deep-merged over 
   "codex": {"plan": "plus"},
   "claude": {"plan": "pro"},
   "thresholds": {"window_soft": 0.8},
-  "deepseek": {"keychain_items": ["openswarm-deepseek-api-key"]},
+  "deepseek": {"keychain_items": ["swrm-deepseek-api-key"]},
   "workspace": {
     "sibling_worktrees": false,
     "link_dirs": ["node_modules", ".venv"],
@@ -660,7 +660,7 @@ link behavior.
 
 | Environment variable | Purpose |
 | --- | --- |
-| `OPENSWARM_HOME` | Runtime data dir (default `~/.claude/openswarm`) |
+| `OPENSWARM_HOME` | Runtime data dir (default `~/.claude/swrm`) |
 | `OPENSWARM_CODEX_PLAN`, `OPENSWARM_CLAUDE_PLAN` | Declare your plans explicitly (recommended) |
 | `DEEPSEEK_API_KEY` | DeepSeek key, used only for the balance and model-list API |
 | `OPENSWARM_OPENCODE_BIN`, `OPENSWARM_OPENCODE_DB` | Non-standard OpenCode install locations |
@@ -688,7 +688,7 @@ Prompts and diffs go to the executor's model provider. Each backend's data bound
 ## Safety model
 
 - Codex runs with `-s workspace-write`. OpenCode gets edit and bash permission scoped to the worktree with `external_directory: deny`.
-- Executors never commit; swrm commits on `openswarm/<id>`. Nothing is pushed or merged automatically.
+- Executors never commit; swrm commits on `swrm/<id>`. Nothing is pushed or merged automatically.
 - If a worktree can't be created, the run fails. It never falls back to editing your checkout in place.
 - Codex `ultra` effort is never used, because it self-delegates and blows budgets.
 
@@ -701,7 +701,7 @@ are listed in `result.json` as `excluded_files`, including files staged by an ex
 
 Daily guardrails: set `budget.daily_executor_minutes`, optional `budget.per_backend`
 (backend → minutes), `budget.per_run_max_minutes`, and `budget.timezone` (IANA name;
-defaults to the local timezone) in policy. Caps are optional. `openswarm budget status --json`
+defaults to the local timezone) in policy. Caps are optional. `swrm budget status --json`
 shows today's ledger usage. Admission reserves requested minutes for live runs; runs,
 lane assignments and batches refuse excess work with `budget_exceeded_daily` (exit 3).
 Budgets apply to the ledger on each host; remote runs also check that host's policy.
@@ -713,7 +713,7 @@ and `risk_blocks` with redacted commands. An empty list disables enforcement.
 This is event-based containment: backends that emit commands after execution cannot
 prevent the command's initial side effects. Executor sandbox restrictions still matter.
 
-`openswarm report --daily --date YYYY-MM-DD --html report.html --json` writes one
+`swrm report --daily --date YYYY-MM-DD --html report.html --json` writes one
 self-contained HTML page with light/dark styling and emits the same day's JSON.
 Omit `--date` for today in the policy timezone. Reports read local ledger data without
 probing providers: backend/lane outcomes, executor minutes, reported tokens, budgets,
@@ -725,7 +725,7 @@ usage counts as zero; verification time is excluded from executor minutes.
 
 - Developed and used on macOS; Linux and Windows are covered by CI (Windows: the lane control plane needs AF_UNIX, so lane serving is POSIX-only for now; other commands run natively — CPython on Windows also needs `pip install tzdata` for IANA timezone names).
 - Model names, plan caps and the OpenCode Go price table in `policy.json` change often, so PRs are welcome.
-- The Claude quota comes from Claude Code's statusline hook or `openswarm ingest-claude`. Without either, reviews default to `light`.
+- The Claude quota comes from Claude Code's statusline hook or `swrm ingest-claude`. Without either, reviews default to `light`.
 
 ## Contributing
 
@@ -742,5 +742,5 @@ python3 -m unittest discover -s tests -v
 ### Legacy CLI compatibility
 
 The project directory and preferred executable are named `swrm`. The `bin/swrm`
-entry forwards to the upstream `bin/openswarm` CLI, which remains available for
+entry forwards to the upstream `bin/swrm` CLI, which remains available for
 existing integrations.

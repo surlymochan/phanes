@@ -221,7 +221,7 @@ class WorkspaceTest(unittest.TestCase):
         for rid in ("a1", "b2"):
             os.makedirs(os.path.join(runs, rid))
             xs.jsave(os.path.join(runs, rid, "status.json"), {"state": "finished", "status": "done", "title": rid})
-        out = subprocess.run([sys.executable, os.path.join(HERE, "..", "bin", "openswarm"), "watch", "a1", "b2",
+        out = subprocess.run([sys.executable, os.path.join(HERE, "..", "bin", "swrm"), "watch", "a1", "b2",
                               "--max-minutes", "0.2"], capture_output=True, text=True, timeout=60,
                              env={**os.environ, "OPENSWARM_HOME": home})
         self.assertNotIn("error: argument", out.stderr)
@@ -367,7 +367,7 @@ class CredentialOptInTest(unittest.TestCase):
 
 class OfflineStateTest(unittest.TestCase):
     def test_route_cli_with_state_file_needs_no_backends(self):
-        out = subprocess.run([sys.executable, os.path.join(HERE, "..", "bin", "openswarm"), "route", "--type", "impl",
+        out = subprocess.run([sys.executable, os.path.join(HERE, "..", "bin", "swrm"), "route", "--type", "impl",
                               "--difficulty", "3"], capture_output=True, text=True, timeout=60,
                              env={**os.environ, "OPENSWARM_STATE_FILE": _load.FIXTURE_STATE})
         self.assertEqual(out.returncode, 0, out.stderr)

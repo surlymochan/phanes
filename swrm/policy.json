@@ -1,12 +1,12 @@
 {
-  "_doc": "openswarm default policy. Override any key in ~/.claude/openswarm/policy.local.json (deep-merged). Fractions are 0..1.",
+  "_doc": "swrm default policy. Override any key in ~/.claude/swrm/policy.local.json (deep-merged). Fractions are 0..1.",
   "_meta": {
-    "_doc": "tables_last_updated is when the hand-maintained price/quota tables below (ocgo.monthly_limits from ocgo.monthly_limits_source, deepseek tiers, codex tier keywords) were last retrieved from the provider docs. `openswarm status` warns once the tables are older than stale_after_days; bump the date whenever the tables are refreshed.",
+    "_doc": "tables_last_updated is when the hand-maintained price/quota tables below (ocgo.monthly_limits from ocgo.monthly_limits_source, deepseek tiers, codex tier keywords) were last retrieved from the provider docs. `swrm status` warns once the tables are older than stale_after_days; bump the date whenever the tables are refreshed.",
     "tables_last_updated": "2026-11-06",
     "stale_after_days": 30
   },
   "local_sources": {
-    "_doc": "What openswarm may read from other tools on this machine. Usage metadata only; see README 'What openswarm reads'. Auth-file reads are opt-in.",
+    "_doc": "What swrm may read from other tools on this machine. Usage metadata only; see README 'What swrm reads'. Auth-file reads are opt-in.",
     "codex_sessions": true,
     "opencode_db": true,
     "codex_auth_plan": false,
@@ -221,7 +221,7 @@
     "default_effort": "medium"
   },
   "agy": {
-    "_doc": "Opt-in executor: Antigravity CLI (agy -p --model <slug> --output-format stream-json --dangerously-skip-permissions). Not in routing.default_order. The default model is a Flash model; pick another slug with --model. print_timeout is passed to agy as --print-timeout when set (null keeps openswarm's own budget as the only deadline).",
+    "_doc": "Opt-in executor: Antigravity CLI (agy -p --model <slug> --output-format stream-json --dangerously-skip-permissions). Not in routing.default_order. The default model is a Flash model; pick another slug with --model. print_timeout is passed to agy as --print-timeout when set (null keeps swrm's own budget as the only deadline).",
     "default_model": "gemini-3.8-flash-medium",
     "print_timeout": null
   },
@@ -232,7 +232,7 @@
     "require_isolation": true
   },
   "deepseek": {
-    "_doc": "API key: DEEPSEEK_API_KEY env, or list macOS Keychain items you created for openswarm, e.g. [\"openswarm-deepseek-api-key\"].",
+    "_doc": "API key: DEEPSEEK_API_KEY env, or list macOS Keychain items you created for swrm, e.g. [\"swrm-deepseek-api-key\"].",
     "keychain_items": [],
     "tiers": {
       "deep": "deepseek-v4-pro",
@@ -286,7 +286,7 @@
     "allowed_executors": [],
     "allowed_planners": [],
     "poll_seconds": 60,
-    "labels_prefix": "openswarm",
+    "labels_prefix": "swrm",
     "open_pr": false
   },
   "workspace": {

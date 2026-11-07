@@ -388,10 +388,10 @@ def environment_record(args: argparse.Namespace) -> dict:
         "commits": {
             "superpowers": git_rev(Path(os.environ.get("SUPERPOWERS_DIR", "<superpowers-dir>"))),
             "openflow": git_rev(Path("<openflow-dir>")),
-            "openswarm": git_rev(Path(os.environ["OPENSWARM_DIR"])) if os.environ.get("OPENSWARM_DIR") else None,
+            "swrm": git_rev(Path(os.environ["OPENSWARM_DIR"])) if os.environ.get("OPENSWARM_DIR") else None,
         },
         "openflow_tgz": os.environ.get("OPENFLOW_TGZ"),
-        "openswarm_dir": os.environ.get("OPENSWARM_DIR"),
+        "swrm_dir": os.environ.get("OPENSWARM_DIR"),
         "superpowers_dir": os.environ.get("SUPERPOWERS_DIR", "<superpowers-dir>"),
         "model": MODEL,
         "cursor_flags": ["-p", "--trust", "--force", "--model", MODEL, "--output-format", "stream-json"],

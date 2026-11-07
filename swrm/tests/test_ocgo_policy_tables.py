@@ -4,7 +4,7 @@ The limits table is hand-maintained from https://opencode.ai/docs/go/; this
 test pins it to a dated snapshot of that page (tests/fixtures/
 ocgo_go_docs_snapshot.json) so a policy edit that invents a model or a
 limit — or a docs refresh that forgets a tabled model — fails loudly
-instead of silently mispricing quota headroom in `openswarm status`.
+instead of silently mispricing quota headroom in `swrm status`.
 
 Run: python3 -m unittest discover -s tests   (or: python3 tests/test_ocgo_policy_tables.py)
 """

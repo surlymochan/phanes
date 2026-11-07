@@ -4,6 +4,7 @@ import runpy
 import contextlib
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -12,13 +13,24 @@ import threading
 import unittest
 from unittest import mock
 
-MOD = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'openswarm-auto'))
+MOD = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'swrm-auto'))
 preference = MOD['preference']
 G = MOD['main'].__globals__
 
 class FleetAutoTests(unittest.TestCase):
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {'OPENSWARM_AUTO_SSH_HOST':'gateway.example.invalid'})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_remote_dispatch_requires_configured_target(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(G['subprocess'], 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'OPENSWARM_AUTO_SSH_HOST'):
+                G['remote']({'op':'lanes'})
+        run.assert_not_called()
+
     def test_remote_discovery_timeout_keeps_local_lane_available(self):
-        args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task', '--dry-run']
+        args = ['swrm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task', '--dry-run']
         lanes = [{'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'}]
         def remote(_request):
             raise subprocess.TimeoutExpired('ssh', 35)
@@ -45,16 +57,16 @@ class FleetAutoTests(unittest.TestCase):
                 return [{'name':'GH1','state':'idle','backend':'copilot','model':'haiku'}]
             self.assertTrue(req['read_only'])
             return {'id':'review-1','state':'queued'}
-        args = ['openswarm-auto','--type','review','--difficulty','2','--base','abcdef0',
+        args = ['swrm-auto','--type','review','--difficulty','2','--base','abcdef0',
                 '--prompt','review','--verify','true']
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes':lambda: [], 'remote':remote}), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             MOD['main']()
         result = json.loads(out.getvalue())
-        self.assertEqual((result['lane'], result['host'], result['read_only']), ('GH1','gocc',True))
+        self.assertEqual((result['lane'], result['host'], result['read_only']), ('GH1','gateway.example.invalid',True))
 
     def test_review_uses_available_local_lane_and_marks_read_only(self):
-        args = ['openswarm-auto','--type','review','--difficulty','2','--base','abcdef0','--prompt','review']
+        args = ['swrm-auto','--type','review','--difficulty','2','--base','abcdef0','--prompt','review']
         lanes = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'}]
         completed = mock.Mock(returncode=0, stdout=json.dumps({'ok':True,'id':'review-2','state':'queued'}))
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes':lambda: lanes, 'remote':lambda req: []}), \
@@ -62,10 +74,10 @@ class FleetAutoTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as out:
             MOD['main']()
         self.assertIn('--read-only', run.call_args.args[0])
-        self.assertEqual(json.loads(out.getvalue())['host'], 'gores1')
+        self.assertEqual(json.loads(out.getvalue())['host'], 'local')
 
     def test_review_with_only_pi_uses_isolated_one_shot(self):
-        args = ['openswarm-auto','--type','review','--difficulty','2','--base','abcdef0','--prompt','review']
+        args = ['swrm-auto','--type','review','--difficulty','2','--base','abcdef0','--prompt','review']
         lanes = [{'name':'M1','state':'idle','backend':'pi','model':'MiniMax'}]
         completed = mock.Mock(returncode=0, stdout=json.dumps({'id':'review-3','state':'started'}))
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes':lambda: lanes, 'remote':lambda req: []}), \
@@ -83,9 +95,9 @@ class FleetAutoTests(unittest.TestCase):
             calls.append(req['op'])
             if req['op'] == 'lanes':
                 return [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'gemini'}]
-            raise RuntimeError('gocc dispatch gateway unavailable')
+            raise RuntimeError('remote dispatch gateway unavailable')
         local = [{'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'}]
-        args = ['openswarm-auto', '--type', 'migration', '--difficulty', '3', '--base', 'abcdef0', '--prompt', 'task']
+        args = ['swrm-auto', '--type', 'migration', '--difficulty', '3', '--base', 'abcdef0', '--prompt', 'task']
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes': lambda: local, 'remote': remote}), \
                 mock.patch.object(G['subprocess'], 'run') as run, self.assertRaisesRegex(RuntimeError, 'unavailable'):
             MOD['main']()
@@ -95,7 +107,7 @@ class FleetAutoTests(unittest.TestCase):
     def test_lost_local_ack_does_not_try_another_lane(self):
         lanes = [{'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'},
                  {'name': 'M1', 'state': 'idle', 'backend': 'pi', 'model': 'minimax'}]
-        args = ['openswarm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task']
+        args = ['swrm-auto', '--type', 'test', '--difficulty', '2', '--base', 'abcdef0', '--prompt', 'task']
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes': lambda: lanes, 'remote': lambda req: []}), \
                 mock.patch.object(G['subprocess'], 'run', return_value=mock.Mock(stdout='', returncode=0)) as run, \
                 self.assertRaisesRegex(RuntimeError, 'acknowledgement unavailable'):
@@ -108,7 +120,7 @@ class FleetAutoTests(unittest.TestCase):
                 return [{'name': 'A1', 'state': 'idle', 'backend': 'agy', 'model': 'gemini'}]
             raise G['LaneBusy']('remote lane is busy')
         local = [{'name': 'K1', 'state': 'idle', 'backend': 'cursor', 'model': 'composer'}]
-        args = ['openswarm-auto', '--type', 'migration', '--difficulty', '3', '--base', 'abcdef0', '--prompt', 'task']
+        args = ['swrm-auto', '--type', 'migration', '--difficulty', '3', '--base', 'abcdef0', '--prompt', 'task']
         reply = mock.Mock(stdout=json.dumps({'ok': True, 'id': 'fallback-1', 'state': 'queued'}), returncode=0)
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes': lambda: local, 'remote': remote}), \
                 mock.patch.object(G['subprocess'], 'run', return_value=reply) as run, \
@@ -130,7 +142,7 @@ class FleetAutoTests(unittest.TestCase):
     def test_local_closed_socket_does_not_dispatch_next_lane(self):
         local = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'},
                  {'name':'M1','state':'idle','backend':'pi','model':'minimax'}]
-        args = ['openswarm-auto','--type','test','--difficulty','2','--base','abcdef0','--prompt','task']
+        args = ['swrm-auto','--type','test','--difficulty','2','--base','abcdef0','--prompt','task']
         reply = mock.Mock(returncode=1, stdout=json.dumps({'ok':False, 'error':'lane closed control socket'}))
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes':lambda: local, 'remote':lambda req: []}), \
              mock.patch.object(G['subprocess'], 'run', return_value=reply) as run, \
@@ -140,7 +152,7 @@ class FleetAutoTests(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "exercises a raw AF_UNIX lane socket, unavailable on this platform")
     def test_real_lane_socket_close_keeps_dispatch_uncertain(self):
-        lane = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'openswarm'))
+        lane = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'swrm'))
         with tempfile.TemporaryDirectory(prefix='ack-', dir=tempfile.gettempdir()) as directory:
             sockpath = str(pathlib.Path(directory) / 'lane.sock')
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -162,7 +174,7 @@ class FleetAutoTests(unittest.TestCase):
         self.assertEqual(reply, {'ok':False, 'error':'lane closed control socket'})
         local = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'},
                  {'name':'M1','state':'idle','backend':'pi','model':'minimax'}]
-        args = ['openswarm-auto','--type','test','--difficulty','2','--base','abcdef0','--prompt','task']
+        args = ['swrm-auto','--type','test','--difficulty','2','--base','abcdef0','--prompt','task']
         result = mock.Mock(returncode=1, stdout=json.dumps(reply))
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes':lambda: local, 'remote':lambda req: []}), \
              mock.patch.object(G['subprocess'], 'run', return_value=result) as run, \
@@ -173,7 +185,7 @@ class FleetAutoTests(unittest.TestCase):
     def test_local_explicit_busy_falls_back(self):
         local = [{'name':'K1','state':'idle','backend':'cursor','model':'composer'},
                  {'name':'M1','state':'idle','backend':'pi','model':'minimax'}]
-        args = ['openswarm-auto','--type','test','--difficulty','2','--base','abcdef0','--prompt','task']
+        args = ['swrm-auto','--type','test','--difficulty','2','--base','abcdef0','--prompt','task']
         busy = mock.Mock(returncode=1, stdout=json.dumps({'ok':False, 'error':'lane K1 is busy (busy)'}))
         accepted = mock.Mock(returncode=0, stdout=json.dumps({'ok':True, 'id':'next-run', 'state':'queued'}))
         with mock.patch.object(sys, 'argv', args), mock.patch.dict(G, {'local_lanes':lambda: local, 'remote':lambda req: []}), \

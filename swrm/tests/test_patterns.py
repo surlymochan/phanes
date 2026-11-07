@@ -18,7 +18,7 @@ xs = _load.load()
 
 class PatternsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-patterns-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-patterns-")
         self.root = Path(self.tmp.name)
         self.knowledge = self.root / "knowledge"
         self.skills = self.knowledge / "skills"
@@ -52,7 +52,7 @@ class PatternsTests(unittest.TestCase):
         old_argv = sys.argv
         output = io.StringIO()
         try:
-            sys.argv = ["openswarm", *args]
+            sys.argv = ["swrm", *args]
             with mock.patch.object(xs, "load_policy", return_value=self.policy), contextlib.redirect_stdout(output):
                 xs.main()
         finally:

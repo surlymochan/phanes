@@ -171,7 +171,7 @@ class GuardrailsTests(unittest.TestCase):
         root = str(self.root.resolve())
         self.assertFalse(xs.rm_outside_worktree("cd nested && rm -rf file", str(self.root)))
         self.assertFalse(xs.rm_outside_worktree("rm -rf $TMPDIR/cache", str(self.root)))
-        self.assertFalse(xs.rm_outside_worktree("rm -rf .openswarm-tmp/cache", str(self.root)))
+        self.assertFalse(xs.rm_outside_worktree("rm -rf .swrm-tmp/cache", str(self.root)))
         self.assertTrue(xs.rm_outside_worktree("rm -rf $TMPDIR/../../outside", str(self.root)))
         self.assertTrue(xs.rm_outside_worktree("rm -rf /outside/file", str(self.root)))
         self.assertEqual(xs.rm_target_path_class("nested/file", root, root), "inside")
@@ -199,13 +199,13 @@ class GuardrailsTests(unittest.TestCase):
         self.assertFalse(xs.rm_outside_worktree("cd nested && rm -rf file", str(repo)))
 
         tmpdir, env = xs.configure_executor_environment(str(repo), {"PATH": os.environ.get("PATH", "")})
-        self.assertEqual(tmpdir, str(repo.resolve() / ".openswarm-tmp"))
+        self.assertEqual(tmpdir, str(repo.resolve() / ".swrm-tmp"))
         self.assertTrue(Path(tmpdir).is_dir())
         self.assertEqual([env[name] for name in ("TMPDIR", "TMP", "TEMP")], [tmpdir] * 3)
         exclude = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=repo,
                                  check=True, capture_output=True, text=True).stdout.strip()
         exclude_path = Path(exclude) if os.path.isabs(exclude) else repo / exclude
-        self.assertIn("/.openswarm-tmp/", exclude_path.read_text())
+        self.assertIn("/.swrm-tmp/", exclude_path.read_text())
 
         result_path = self.root / "executor-env.json"
         script = self.root / "check_executor_env.py"
@@ -260,7 +260,7 @@ class GuardrailsTests(unittest.TestCase):
         self.report_fixture()
         (self.root / "policy.local.json").write_text(json.dumps({"budget": self.policy["budget"]}))
         target = self.root / "report.html"
-        result = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "openswarm"), "report", "--daily",
+        result = subprocess.run([sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "report", "--daily",
                                  "--date", "2026-10-27", "--html", str(target), "--json"],
                                 env={**os.environ, "OPENSWARM_HOME": str(self.root)}, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)

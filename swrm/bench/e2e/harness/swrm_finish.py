@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Read an openswarm run result, record executor token usage, merge the branch.
+"""Read an swrm run result, record executor token usage, merge the branch.
 
-Usage: openswarm_finish.py <stdout-path> <events-dir> <workdir>
+Usage: swrm_finish.py <stdout-path> <events-dir> <workdir>
 Exit status is 0 when the branch was merged or the run already landed in place.
 A missing branch after a failed run exits 1. This script does not call a model.
 """
@@ -72,7 +72,7 @@ def executor_calls(result: dict) -> list[dict]:
             continue
         attempt_calls.append(
             {
-                "source": "openswarm-result:attempts.meta.usage",
+                "source": "swrm-result:attempts.meta.usage",
                 "session_id": meta.get("session_id") or meta.get("thread_id") or session_from_events(attempt.get("events")),
                 "model": attempt.get("model"),
                 "usage": normalize_usage(usage),
@@ -86,7 +86,7 @@ def executor_calls(result: dict) -> list[dict]:
     if looks_like_usage(usage):
         return [
             {
-                "source": "openswarm-result:usage",
+                "source": "swrm-result:usage",
                 "session_id": result.get("session_id"),
                 "model": result.get("model"),
                 "usage": normalize_usage(usage),
@@ -111,7 +111,7 @@ def merge_branch(repo: Path, result: dict) -> tuple[bool, str]:
     run_id = result.get("id")
     if not run_id:
         return False, "result has no id"
-    branch = f"openswarm/{run_id}"
+    branch = f"swrm/{run_id}"
     mode = ((result.get("workspace") or {}).get("mode")) or ""
     exists = _git(repo, "rev-parse", "--verify", "--quiet", branch).returncode == 0
     if mode == "in-place":
@@ -127,7 +127,7 @@ def merge_branch(repo: Path, result: dict) -> tuple[bool, str]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 4:
-        print("usage: openswarm_finish.py <stdout> <events-dir> <workdir>", file=sys.stderr)
+        print("usage: swrm_finish.py <stdout> <events-dir> <workdir>", file=sys.stderr)
         return 2
     stdout_path, events, workdir = Path(argv[1]), Path(argv[2]), Path(argv[3])
     text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.is_file() else ""
@@ -139,7 +139,7 @@ def main(argv: list[str]) -> int:
     if run_dir:
         result_path = Path(run_dir) / "result.json"
         if result_path.is_file():
-            shutil.copyfile(result_path, events / "openswarm-result.json")
+            shutil.copyfile(result_path, events / "swrm-result.json")
             try:
                 loaded = json.loads(result_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
@@ -156,7 +156,7 @@ def main(argv: list[str]) -> int:
         ok, detail = merge_branch(workdir, result)
         (events / "merge.txt").write_text(detail + "\n", encoding="utf-8")
         return 0 if ok else 1
-    (events / "merge.txt").write_text("no openswarm result object on stdout\n", encoding="utf-8")
+    (events / "merge.txt").write_text("no swrm result object on stdout\n", encoding="utf-8")
     return 1
 
 

@@ -64,7 +64,7 @@ if len(sys.argv) == 3 and sys.argv[1] == '--worker':
 
 if sys.platform != 'darwin':
     sys.exit('Copilot GUI bridge requires macOS')
-label = 'app.openswarm.copilot.oneshot.' + uuid.uuid4().hex
+label = 'app.swrm.copilot.oneshot.' + uuid.uuid4().hex
 domain = 'gui/' + str(os.getuid())
 with tempfile.TemporaryDirectory(prefix='os-copilot-', dir='/tmp') as directory:
     root = pathlib.Path(directory)
@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix='os-copilot-', dir='/tmp') as directory:
     server.settimeout(30)
     home = pathlib.Path.home()
     plist = {'Label': label, 'ProgramArguments': [str(pathlib.Path(__file__).resolve()), '--worker', directory],
-             'EnvironmentVariables': {'HOME': str(home), 'COPILOT_HOME': str(home / 'Library/Application Support/openswarm-copilot-secure'),
+             'EnvironmentVariables': {'HOME': str(home), 'COPILOT_HOME': str(home / 'Library/Application Support/swrm-copilot-secure'),
                                       'PATH': str(home / '.local/node-v24.14.1/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'},
              'RunAtLoad': True}
     with (root / 'agent.plist').open('wb') as stream:

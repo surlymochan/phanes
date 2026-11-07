@@ -5,7 +5,7 @@ Every TICK seconds: finish runs that ended (push branch + open PR, relabel issue
 lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 < p1 < p2 < unlabelled,
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
-Pause: the openswarm pause store ($OPENSWARM_HOME/pauses, written by `openswarm pause <scope>`) and the
+Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
@@ -89,8 +89,8 @@ def ctl_state_dir():
     return directory
 
 def pause_store_dir():
-    """The openswarm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
-    home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/openswarm"
+    """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
+    home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm"
     return os.path.join(os.path.expanduser(home), "pauses")
 
 def marker_scope(name):
@@ -103,7 +103,7 @@ def marker_scope(name):
     return None
 
 def pause_records(now=None):
-    """The active pause records: the openswarm pause store plus the legacy PAUSE markers.
+    """The active pause records: the swrm pause store plus the legacy PAUSE markers.
 
     A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy marker
     carries no clock, so it never expires. The result is sorted by scope."""
@@ -606,7 +606,7 @@ def dispatchable_issue(issue):
 
 REMOTE_STATUS = r'''
 import json,os,sys
-O=os.path.expanduser("~/.claude/openswarm-executor-candidate"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
+O=os.path.expanduser("~/.claude/swrm-executor-candidate"); L=sys.argv[1]; R=sys.argv[2] if len(sys.argv)>2 else ""
 out={"lane":None,"run":None}
 try:
   ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
@@ -901,7 +901,7 @@ def dispatch_failed(lane, cfg, item, error):
 def dispatch(lane, cfg, item, base):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
-    h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/openswarm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
+    h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/swrm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
     with open(path) as task_file:
         rc, _, err = sh(ssh_argv(ssh_opts(h), h, f"cat > /tmp/task-{lane}.md"), timeout=60, inp=task_file.read())
     if rc: raise RuntimeError(f"task upload: {err.strip()[-200:]}")
@@ -1009,7 +1009,7 @@ def handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures):
 RUN_RECORD_SNIPPET = r'''
 import base64,json,os,sys
 run, payload = sys.argv[1], sys.argv[2]
-d = os.path.expanduser("~/.claude/openswarm-executor-candidate/runs") + "/" + run
+d = os.path.expanduser("~/.claude/swrm-executor-candidate/runs") + "/" + run
 os.makedirs(d, exist_ok=True)
 rec = json.loads(base64.b64decode(payload).decode("utf-8"))
 with open(d + "/pr-validation.json", "w") as f: json.dump(rec, f, ensure_ascii=False, indent=1)
@@ -1061,10 +1061,10 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
             "missing": list(missing)}
 
 # The artifacts that never enter a harvested branch (Refs #1835): the hidden build
-# leftovers (openswarm/tests/.dde4*-00000000.so) and the review products
+# leftovers (swrm/tests/.dde4*-00000000.so) and the review products
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern.  The same rules live in the dispatch engine
-# (openswarm/lib/dispatch/harvest_filter.py); both copies must stay in sync.
+# (swrm/lib/dispatch/harvest_filter.py); both copies must stay in sync.
 HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)\.[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
 
 def filter_harvest(ref, base):
@@ -1174,7 +1174,7 @@ def finish(lane, cfg, st, info, state):
 
 def tick(lanes, state, last_warn):
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
-    scopes = paused_scopes()  # the openswarm pause store and the legacy PAUSE markers (Refs #1366)
+    scopes = paused_scopes()  # the swrm pause store and the legacy PAUSE markers (Refs #1366)
     if "all" in scopes: return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
@@ -1293,7 +1293,7 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 验收：`<一条在仓库根或 cd 子目录后可直接运行、只用 python3 标准库/现有脚本的命令>`
 ```
 
-要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 openswarm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
+要求：{k} 条里 backend:pi / backend:agy / backend:codex / 无 backend 标签 大约 2:1:2:1（至少 3 条无 backend 标签供饥饿兜底）；优先 #6 三 Bot 组织诊断 e2e（examples/org-health-local）的测试覆盖、文档、健壮性小修，其次 swrm 的纯单元测试（不需要 Unix socket 的可标 codex，需要的标 pi）；每条 15 分钟内可完成；不要写安全加固、不要改 CI 的 macOS 矩阵、不要碰签名；不要与下列已有 issue 重复：
 
 {open}
 

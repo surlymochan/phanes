@@ -159,10 +159,10 @@ const commandJson = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, out
     try {
       return Schema.decodeUnknownSync(schema)(JSON.parse(line));
     } catch {
-      // Login shell profiles can print text before openswarm's final JSON line.
+      // Login shell profiles can print text before swrm's final JSON line.
     }
   }
-  throw new Error("openswarm returned invalid JSON");
+  throw new Error("swrm returned invalid JSON");
 };
 const parseCommandJson = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, command: DispatchCommandOutput) =>
   Effect.try({
@@ -270,7 +270,7 @@ export class DispatchService {
         );
         if (existing) return { runId: existing.runId, host: existing.host };
         const settings = this.#options.settings();
-        const binary = expandHome(settings.binaryPath || "openswarm");
+        const binary = expandHome(settings.binaryPath || "swrm");
         const host = input.host ?? (settings.defaultHost || "local");
         // A Workspace-only agent may not choose an executor that has no write confinement.
         if (caller.workspaceOnly && (input.lane || (input.backend && input.backend !== "codex"))) {
@@ -340,7 +340,7 @@ export class DispatchService {
             if (localCard) return this.#command(binary, host, makeArgs(cardPath));
             if (!transport) {
               return Effect.fail(
-                new DispatchFailed({ cause: new Error(`OpenSwarm host ${host} has no supported file transport.`) }),
+                new DispatchFailed({ cause: new Error(`swrm host ${host} has no supported file transport.`) }),
               );
             }
             return Effect.acquireUseRelease(
@@ -479,7 +479,7 @@ export class DispatchService {
   }
 
   #fleet() {
-    const root = process.env.OPENSWARM_HOME || join(homedir(), ".claude", "openswarm");
+    const root = process.env.OPENSWARM_HOME || join(homedir(), ".claude", "swrm");
     return io(() => readFile(join(root, "fleet.json"), "utf8")).pipe(
       Effect.flatMap((contents) => step(() => Schema.decodeUnknownSync(fleetSchema)(JSON.parse(contents)))),
     );
@@ -533,7 +533,7 @@ export class DispatchService {
     let finished = current;
     let exitCode: number | null = null;
     if (!isTerminal(current)) {
-      // _run-info is openswarm's fleet result endpoint; runs --json omits summary and verify.
+      // _run-info is swrm's fleet result endpoint; runs --json omits summary and verify.
       const output = yield* this.#command(current.binary, current.host, ["fleet", "_run-info", runId]);
       exitCode = output.exitCode;
       const info = yield* parseCommandJson(infoSchema, output);

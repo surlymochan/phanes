@@ -15,14 +15,14 @@ try:
     branch, commit = result['branch'], result['commit']
     repo = result['workspace']['repo']
     base = result['workspace']['base']
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id) or branch != 'openswarm/' + run_id:
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', run_id) or branch != 'swrm/' + run_id:
         raise ValueError('run has no matching branch')
     if not re.fullmatch(r'[0-9a-f]{40,64}', commit) or not re.fullmatch(r'[0-9a-f]{40,64}', base) or not Path(repo).is_dir():
         raise ValueError('run has no completed commit')
     actual = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'refs/heads/' + branch], text=True).strip()
     if actual != commit:
         raise ValueError('run branch does not match its recorded commit')
-    with tempfile.TemporaryDirectory(prefix='openswarm-result-') as directory:
+    with tempfile.TemporaryDirectory(prefix='swrm-result-') as directory:
         bundle = Path(directory) / 'result.bundle'
         subprocess.run(['git', '-C', repo, 'bundle', 'create', str(bundle), 'refs/heads/' + branch, '^' + base],
                        check=True, capture_output=True, timeout=120)

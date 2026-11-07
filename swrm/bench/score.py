@@ -302,7 +302,7 @@ def esc(text):
 
 
 DISPLAY = {
-    "openswarm": "openswarm",
+    "swrm": "swrm",
     "omo": "OmO",
     "baseline_codex": "Codex default",
     "baseline_strongest": "strongest",
@@ -530,7 +530,7 @@ def coverage_lines(coverage):
         lines.append("Coverage was not measured for this run.")
         lines.append("")
         return lines
-    sw = coverage.get("openswarm") or {}
+    sw = coverage.get("swrm") or {}
     om = coverage.get("omo") or {}
     lines.append(
         "These counts are read from the source trees at the commits in the environment section. "
@@ -541,7 +541,7 @@ def coverage_lines(coverage):
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
     backends = ", ".join(sw.get("backend_names") or [])
     lines.append(
-        f"| openswarm | — | — | {sw.get('backends', 'n/a')} ({backends}) | — | {sw.get('model_ids_in_policy', 'n/a')} in policy.json |"
+        f"| swrm | — | — | {sw.get('backends', 'n/a')} ({backends}) | — | {sw.get('model_ids_in_policy', 'n/a')} in policy.json |"
     )
     if om:
         lines.append(
@@ -551,7 +551,7 @@ def coverage_lines(coverage):
         lines.append("| OmO model-core | not measured | | | | |")
     lines.append("")
     lines.append(
-        "openswarm's backends are `routing.default_order` in `policy.json`. "
+        "swrm's backends are `routing.default_order` in `policy.json`. "
         "Its model ids are the OpenCode Go monthly-cap keys plus `deepseek.tiers` values. "
         "Codex slugs are not listed in `policy.json`, so they are not in that count."
     )
@@ -573,7 +573,7 @@ def write_summary(path, blocks, env, latency_notes, breakdown, coverage):
     lines.append("")
     lines.append("All dollar amounts and window shares are computed from `bench/prices.json` times the trace's estimated tokens. They are not measured invoices.")
     lines.append("")
-    lines.append("A wasted first attempt is a decision whose first try targeted a quota the tool only learns is exhausted by a usage-limit (or insufficient-balance) error. openswarm skips those backends before the call, so its wasted-attempt count stays at zero by construction.")
+    lines.append("A wasted first attempt is a decision whose first try targeted a quota the tool only learns is exhausted by a usage-limit (or insufficient-balance) error. swrm skips those backends before the call, so its wasted-attempt count stays at zero by construction.")
     lines.append("")
     lines.append("Subscription shares are reported two ways. The sum adds every scenario. The per-pass figure is the mean of the per-scenario shares, and each scenario is one pass over the 80-task trace. Read the per-pass number as the share of the nominal 5h budget one pass of the trace would use. OpenCode Go's 5h share can exceed 1 because it sums per-model fractions of small windows.")
     lines.append("")
@@ -648,7 +648,7 @@ def write_summary(path, blocks, env, latency_notes, breakdown, coverage):
     lines.append("")
     lines.append("## Review model-level independence by scenario")
     lines.append("")
-    lines.append("Model level: the review ran on a different model than the reference implementer, even inside the same family. Reviews that stay in the reference family are degraded (single-family); openswarm flags the ones it knowingly degrades with `degraded: single-family` on the decision itself.")
+    lines.append("Model level: the review ran on a different model than the reference implementer, even inside the same family. Reviews that stay in the reference family are degraded (single-family); swrm flags the ones it knowingly degrades with `degraded: single-family` on the decision itself.")
     lines.append("")
     lines.extend(scenario_table(blocks, lambda s: fmt_pct(s["review_model_independent_rate"])))
     lines.append("")
@@ -666,8 +666,8 @@ def write_summary(path, blocks, env, latency_notes, breakdown, coverage):
     lines.append("This section is not a quality score and it is not the headline.")
     lines.append("")
     lines.append(
-        "`min_tier` comes from openswarm's own difficulty map (difficulty 1–2 fast, 3–4 balanced, 5 deep, architecture deep). "
-        "openswarm agrees with that map by construction whenever quota still allows the tier it would have picked on a fresh window. "
+        "`min_tier` comes from swrm's own difficulty map (difficulty 1–2 fast, 3–4 balanced, 5 deep, architecture deep). "
+        "swrm agrees with that map by construction whenever quota still allows the tier it would have picked on a fresh window. "
         "The rows below show how each router deviates from the rubric when a window is under pressure."
     )
     lines.append("")
@@ -702,7 +702,7 @@ def write_summary(path, blocks, env, latency_notes, breakdown, coverage):
         lines.append("")
         for key in (
             "date", "os", "kernel", "cpu", "cores", "python", "bun",
-            "openswarm_commit", "omo_dir", "omo_commit",
+            "swrm_commit", "omo_dir", "omo_commit",
         ):
             if key in env and env[key] != "":
                 value = env[key]
@@ -743,11 +743,11 @@ def latency_lines(path, label):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--openswarm", required=True)
+    ap.add_argument("--swrm", required=True)
     ap.add_argument("--omo", default="")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--env", default="")
-    ap.add_argument("--latency-openswarm", default="")
+    ap.add_argument("--latency-swrm", default="")
     ap.add_argument("--latency-omo", default="")
     ap.add_argument("--coverage", default="")
     args = ap.parse_args()
@@ -758,7 +758,7 @@ def main():
     trace = load_jsonl(os.path.join(BENCH, "trace.jsonl"))
     os.makedirs(args.out_dir, exist_ok=True)
 
-    series = [("openswarm", load_jsonl(args.openswarm))]
+    series = [("swrm", load_jsonl(args.swrm))]
     if args.omo and os.path.exists(args.omo):
         series.append(("omo", load_jsonl(args.omo)))
     base = baseline_rows(catalogue, scenarios, trace)
@@ -782,7 +782,7 @@ def main():
     write_csv(os.path.join(args.out_dir, "scores.csv"), blocks)
     write_chart(os.path.join(args.out_dir, "chart.svg"), blocks)
     env = load_json(args.env) if args.env and os.path.exists(args.env) else {}
-    notes = latency_lines(args.latency_openswarm, "openswarm") + latency_lines(args.latency_omo, "OmO")
+    notes = latency_lines(args.latency_swrm, "swrm") + latency_lines(args.latency_omo, "OmO")
     write_summary(os.path.join(args.out_dir, "summary.md"), blocks, env, notes, breakdown, coverage)
     print("wrote scores to bench/results")
 

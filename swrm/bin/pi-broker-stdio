@@ -5,7 +5,7 @@ import pathlib
 import select
 import socket
 
-path = pathlib.Path.home() / 'Library' / 'Caches' / 'openswarm-pi-broker' / 'broker.sock'
+path = pathlib.Path.home() / 'Library' / 'Caches' / 'swrm-pi-broker' / 'broker.sock'
 sock = socket.socket(socket.AF_UNIX)
 sock.connect(str(path))
 stdin_open = True

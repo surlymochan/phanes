@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from harness.metrics import parse_agent_stream, quantile, summarise, usage_total  # noqa: E402
-from harness.openswarm_finish import executor_calls, extract_result_object  # noqa: E402
+from harness.swrm_finish import executor_calls, extract_result_object  # noqa: E402
 from run import existing_keys  # noqa: E402
 
 
@@ -70,7 +70,7 @@ class MetricsTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
-    def test_openswarm_usage_is_not_double_counted(self):
+    def test_swrm_usage_is_not_double_counted(self):
         usage = {"inputTokens": 8, "outputTokens": 2, "cacheReadTokens": 1, "cacheWriteTokens": 0}
         result = {
             "id": "abc",

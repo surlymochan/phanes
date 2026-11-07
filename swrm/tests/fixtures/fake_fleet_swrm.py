@@ -49,7 +49,7 @@ elif sys.argv[1:3] == ["fleet", "_run-info"]:
         if result_path.exists():
             result = json.loads(result_path.read_text())
         else:
-            repo, branch = spec["repo"], "openswarm/" + rid
+            repo, branch = spec["repo"], "swrm/" + rid
             git(repo, "checkout", "-q", "-b", branch, spec["base"])
             (Path(repo) / (rid + ".txt")).write_text(spec["card"])
             git(repo, "add", rid + ".txt")

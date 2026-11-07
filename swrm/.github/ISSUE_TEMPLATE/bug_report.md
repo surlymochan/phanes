@@ -26,9 +26,9 @@ assignees: ""
 - Python version (`python3 --version`):
 - Backend(s) involved (codex / opencode / deepseek / cursor / pi / agy / none):
 
-## `openswarm status` output
+## `swrm status` output
 
-<!-- Paste the output of `bin/openswarm status`. It contains no secrets.
+<!-- Paste the output of `bin/swrm status`. It contains no secrets.
      If you used the offline fixture, say so instead. -->
 
 ```text

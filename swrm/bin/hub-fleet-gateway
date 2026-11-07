@@ -9,8 +9,8 @@ import sys
 import tempfile
 
 home = Path(os.environ.get("HOME") or os.path.expanduser("~"))  # Windows Path.home() ignores $HOME
-cli = str(home / '.local/bin/openswarm')
-ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/openswarm-fleet/config'), 'openswarm-pi-broker']
+cli = str(home / '.local/bin/swrm')
+ssh = ['/usr/bin/ssh', '-T', '-F', str(home / '.ssh/swrm-fleet/config'), 'swrm-pi-broker']
 
 def _load_spawnable():
     import importlib.util
@@ -54,7 +54,7 @@ def main():
             raise ValueError('invalid budget')
         if not isinstance(base,str) or not re.fullmatch(r'[0-9a-f]{7,64}',base): raise ValueError('invalid base')
         if verify is not None and (not isinstance(verify,str) or len(verify)>4096): raise ValueError('invalid verify')
-        with tempfile.TemporaryDirectory(prefix='openswarm-hub-card-') as directory:
+        with tempfile.TemporaryDirectory(prefix='swrm-hub-card-') as directory:
             os.chmod(directory,0o700)
             card = Path(directory)/'task.md'; card.write_text(prompt); card.chmod(0o600)
             cmd = [cli,'auto','--type',kind,'--difficulty',str(difficulty),'--task-file',str(card),

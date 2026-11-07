@@ -3,7 +3,7 @@ import type { messages as source } from "../../en/error/backend";
 
 export const messages = {
   "error.backend.dispatchCommand":
-    "Impossible de terminer la requête openswarm. Vérifiez les paramètres de l’exécuteur et l’état de l’exécution avant de réessayer.",
+    "Impossible de terminer la requête swrm. Vérifiez les paramètres de l’exécuteur et l’état de l’exécution avant de réessayer.",
   "error.backend.dispatchOwnChat": "Envoyez le travail de programmation uniquement depuis votre propre discussion.",
   "error.backend.dispatchLaneOptions":
     "Une lane utilise le backend et le modèle qu’elle a configurés. Omettez le backend et le modèle quand vous sélectionnez une lane.",
@@ -15,13 +15,13 @@ export const messages = {
   "error.backend.dispatchExecutorWorkspace":
     "Un agent « Espace de travail uniquement » ne peut utiliser que l’exécuteur Codex, car les autres exécuteurs ne limitent pas où ils écrivent. Omettez la lane et le backend.",
   "error.backend.dispatchRepository":
-    "Configurez dans openswarm fleet.json des chemins de dépôt locaux et d’exécuteur identiques.",
-  "error.backend.dispatchSpawnFailed": "Impossible de démarrer openswarm.",
-  "error.backend.dispatchExitCode": "La commande openswarm s’est terminée avec le code {code}.",
-  "error.backend.dispatchExited": "La commande openswarm s’est arrêtée avant de renvoyer un résultat.",
-  "error.backend.dispatchTimeout": "openswarm n’a pas répondu avant la fin du délai.",
-  "error.backend.dispatchOutputUnreadable": "La sortie d’openswarm n’a pas pu être lue.",
-  "error.backend.dispatchSaveFailed": "La demande openswarm n’a pas pu être enregistrée.",
+    "Configurez dans swrm fleet.json des chemins de dépôt locaux et d’exécuteur identiques.",
+  "error.backend.dispatchSpawnFailed": "Impossible de démarrer swrm.",
+  "error.backend.dispatchExitCode": "La commande swrm s’est terminée avec le code {code}.",
+  "error.backend.dispatchExited": "La commande swrm s’est arrêtée avant de renvoyer un résultat.",
+  "error.backend.dispatchTimeout": "swrm n’a pas répondu avant la fin du délai.",
+  "error.backend.dispatchOutputUnreadable": "La sortie d’swrm n’a pas pu être lue.",
+  "error.backend.dispatchSaveFailed": "La demande swrm n’a pas pu être enregistrée.",
   "error.backend.dispatchApprovalDenied": "La personne a refusé cet envoi de code. Rien n’a été lancé.",
   "error.backend.dispatchApprovalMissing": "Cet envoi de code n’a pas d’approbation. Rien n’a été lancé.",
   "error.backend.eventsUnavailable": "Les événements ne sont pas disponibles sur cet hôte.",

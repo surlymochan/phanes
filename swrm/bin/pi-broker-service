@@ -6,7 +6,7 @@ import socket
 import stat
 import sys
 
-root = pathlib.Path.home() / 'Library' / 'Caches' / 'openswarm-pi-broker'
+root = pathlib.Path.home() / 'Library' / 'Caches' / 'swrm-pi-broker'
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
 info = root.lstat()
 if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():

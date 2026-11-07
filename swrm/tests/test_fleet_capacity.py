@@ -92,7 +92,7 @@ class FleetCapacityTests(unittest.TestCase):
 
     def test_remote_review_assignment_passes_read_only_to_lane(self):
         root = pathlib.Path(self.temp.name)
-        binary = root / '.local/bin/openswarm'
+        binary = root / '.local/bin/swrm'
         binary.parent.mkdir(parents=True)
         binary.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
                           'open(os.environ["FAKE_ARGS"],"w").write(json.dumps(sys.argv))\n'
@@ -116,13 +116,13 @@ class FleetCapacityTests(unittest.TestCase):
         git('add', 'file')
         git('-c', 'user.name=test', '-c', 'user.email=test@test', 'commit', '-qm', 'base')
         base = git('rev-parse', 'HEAD')
-        git('checkout', '-qb', 'openswarm/run-1')
+        git('checkout', '-qb', 'swrm/run-1')
         (repo / 'file').write_text('after')
         git('-c', 'user.name=test', '-c', 'user.email=test@test', 'commit', '-qam', 'result')
         commit = git('rev-parse', 'HEAD')
-        fake = root / '.local/bin/openswarm'
+        fake = root / '.local/bin/swrm'
         fake.parent.mkdir(parents=True)
-        info = {'id':'run-1', 'result':{'branch':'openswarm/run-1', 'commit':commit,
+        info = {'id':'run-1', 'result':{'branch':'swrm/run-1', 'commit':commit,
                                        'workspace':{'repo':str(repo), 'base':base}}}
         fake.write_text('#!' + sys.executable + '\nimport json\nprint(' + repr(json.dumps(info)) + ')\n')
         fake.chmod(0o755)

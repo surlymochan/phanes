@@ -18,7 +18,7 @@ with open(_load.FIXTURE_STATE) as stream:
 
 class RoutingWeightsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-routing-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-routing-")
         self.root = Path(self.tmp.name)
         self.data = self.root / "data"
         self.ledger = self.data / "ledger.jsonl"
@@ -171,7 +171,7 @@ class RoutingWeightsTests(unittest.TestCase):
         output_path = self.root / "custom" / "weights.json"
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "routing", "weights", "--out", str(output_path)]
+            sys.argv = ["swrm", "routing", "weights", "--out", str(output_path)]
             result = io.StringIO()
             with mock.patch.object(xs, "load_policy", return_value=policy), contextlib.redirect_stdout(result):
                 xs.main()
@@ -188,7 +188,7 @@ class RoutingWeightsTests(unittest.TestCase):
         knowledge = self.root / "knowledge"
         policy.setdefault("knowledge", {})["repo"] = str(knowledge)
         try:
-            sys.argv = ["openswarm", "routing", "weights", "--fleet"]
+            sys.argv = ["swrm", "routing", "weights", "--fleet"]
             result = io.StringIO()
             with mock.patch.object(xs, "load_policy", return_value=policy), contextlib.redirect_stdout(result):
                 xs.main()

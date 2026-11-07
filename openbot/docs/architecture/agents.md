@@ -1,13 +1,13 @@
 # Agents
 
-## Coding work with openswarm
+## Coding work with swrm
 
 An agent can send an independent coding task from its own chat with `dispatch_work`. The task card
 names the goal, files, constraints, acceptance checks, and verify command. OpenBot starts an
-openswarm lane or detached run and returns its run id and host. `dispatch_status` reads the saved
+swrm lane or detached run and returns its run id and host. `dispatch_status` reads the saved
 result, and `dispatch_abort` requests cancellation.
 
-Before it starts openswarm, OpenBot checks all text arguments against a fixed keyword rule set.
+Before it starts swrm, OpenBot checks all text arguments against a fixed keyword rule set.
 Database migrations, schema changes, dropping or truncating databases or tables, deleting production
 data, production deployments or rollbacks, system-path permission or owner changes, sudo, service
 restarts, DNS or firewall changes, payment or billing changes, releases or version bumps or tags,
@@ -40,7 +40,11 @@ not merge, push, or publish a result.
 
 The binary path, default lane, and default fleet host use the local provider detection settings
 file. A blank lane starts a detached run. Lane settings use the backend and model saved on that lane.
-Remote runs need matching local and remote repository entries in the openswarm fleet configuration.
+Remote runs need matching local and remote repository entries in the swrm fleet configuration.
+
+The saved executor settings retain the `openswarm` field for compatibility with existing
+installations. The default command is `swrm`; the default fleet configuration is
+`~/.claude/swrm/fleet.json`. `OPENSWARM_HOME` still overrides that directory.
 
 `bun scripts/dispatch-approval-e2e.ts` checks the approval gate with the real registry, grant store,
 dispatch service and a local executor stub. It writes `.openbot-build/dispatch-approval-e2e.json`.

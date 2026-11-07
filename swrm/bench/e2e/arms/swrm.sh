@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Planner cursor-agent writes a task file. openswarm run --backend cursor executes it.
-# Executor token usage is read from the openswarm result, not re-parsed here.
+# Planner cursor-agent writes a task file. swrm run --backend cursor executes it.
+# Executor token usage is read from the swrm result, not re-parsed here.
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-  echo "usage: openswarm.sh <workdir> <task.md> <events-dir>" >&2
+  echo "usage: swrm.sh <workdir> <task.md> <events-dir>" >&2
   exit 2
 fi
 
@@ -13,10 +13,10 @@ TASK_MD=$2
 EVENTS=$3
 # shellcheck source=common.sh
 source "$(dirname "$(readlink -f "$0")")/common.sh"
-HARNESS="$(dirname "$(readlink -f "$0")")/../harness/openswarm_finish.py"
+HARNESS="$(dirname "$(readlink -f "$0")")/../harness/swrm_finish.py"
 
-if [[ -z "${OPENSWARM_DIR:-}" || ! -f "$OPENSWARM_DIR/bin/openswarm" ]]; then
-  echo "OPENSWARM_DIR must be an openswarm checkout containing bin/openswarm" >&2
+if [[ -z "${OPENSWARM_DIR:-}" || ! -f "$OPENSWARM_DIR/bin/swrm" ]]; then
+  echo "OPENSWARM_DIR must be an swrm checkout containing bin/swrm" >&2
   exit 2
 fi
 if [[ -z "${BENCH_VISIBLE_CMD:-}" ]]; then
@@ -35,7 +35,7 @@ python3 - "$EVENTS/tool-version.json" "$COMMIT" "$OPENSWARM_DIR" << 'PY'
 import json, sys
 path, commit, directory = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
-    json.dump({"name": "openswarm", "version": None, "commit": commit, "dir": directory}, handle)
+    json.dump({"name": "swrm", "version": None, "commit": commit, "dir": directory}, handle)
     handle.write("\n")
 PY
 
@@ -44,7 +44,7 @@ python3 - "$TASK_FILE" "$SKILL" "$TASK_MD" "$BENCH_VISIBLE_CMD" "$EVENTS/planner
 import pathlib, sys
 task_file, skill, task_md, visible, dest = sys.argv[1:]
 text = (
-    "You are the planner in an openswarm workflow. Read the skill and the engineering task.\n"
+    "You are the planner in an swrm workflow. Read the skill and the engineering task.\n"
     "Write one self-contained task file for an executor that has none of this conversation.\n\n"
     "Write that file, and only that file, to:\n"
     f"{task_file}\n\n"
@@ -52,7 +52,7 @@ text = (
     "and this visible test command:\n"
     f"{visible}\n\n"
     "Do not modify any file inside the repository. Do not commit. The executor starts from a clean worktree.\n\n"
-    "## openswarm skill\n\n"
+    "## swrm skill\n\n"
     + pathlib.Path(skill).read_text(encoding="utf-8")
     + "\n\n## engineering task\n\n"
     + pathlib.Path(task_md).read_text(encoding="utf-8")
@@ -75,25 +75,25 @@ fi
 git reset --hard HEAD
 git clean -fd
 
-export OPENSWARM_HOME="$EVENTS/openswarm-home"
+export OPENSWARM_HOME="$EVENTS/swrm-home"
 mkdir -p "$OPENSWARM_HOME"
-# Do not forward provider API keys into openswarm's probe. Cursor auth stays with cursor-agent.
+# Do not forward provider API keys into swrm's probe. Cursor auth stays with cursor-agent.
 unset DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY || true
 set +e
-python3 "$OPENSWARM_DIR/bin/openswarm" run \
+python3 "$OPENSWARM_DIR/bin/swrm" run \
   --backend cursor \
   --model "$BENCH_MODEL" \
   --cwd "$WORKDIR" \
   --task-file "$TASK_FILE" \
   --verify "$BENCH_VISIBLE_CMD" \
   --budget-minutes 15 \
-  > "$EVENTS/openswarm-stdout.txt" \
-  2> "$EVENTS/openswarm.err"
+  > "$EVENTS/swrm-stdout.txt" \
+  2> "$EVENTS/swrm.err"
 swarm_rc=$?
 set -e
 
 set +e
-python3 "$HARNESS" "$EVENTS/openswarm-stdout.txt" "$EVENTS" "$WORKDIR"
+python3 "$HARNESS" "$EVENTS/swrm-stdout.txt" "$EVENTS" "$WORKDIR"
 finish_rc=$?
 set -e
 if [[ "$swarm_rc" -ne 0 ]]; then

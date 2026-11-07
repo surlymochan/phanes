@@ -1,18 +1,18 @@
 [Unit]
-Description=openswarm lane L1
+Description=swrm lane L1
 After=network.target
 
 [Service]
 Type=simple
-User=openswarm
-ExecStart="/usr/bin/python3" "/opt/openswarm/bin/openswarm" "lane" "serve" "L1"
-Environment="OPENSWARM_HOME=/var/lib/openswarm"
-Environment="PATH=/usr/bin:/bin:/home/openswarm/.local/bin"
+User=swrm
+ExecStart="/usr/bin/python3" "/opt/swrm/bin/swrm" "lane" "serve" "L1"
+Environment="OPENSWARM_HOME=/var/lib/swrm"
+Environment="PATH=/usr/bin:/bin:/home/swrm/.local/bin"
 Restart=always
 MemoryMax=900M
 CPUQuota=150%
 Nice=10
-Environment="OPENSWARM_LANES_FILE=/etc/openswarm/lanes.json"
+Environment="OPENSWARM_LANES_FILE=/etc/swrm/lanes.json"
 
 [Install]
 WantedBy=multi-user.target

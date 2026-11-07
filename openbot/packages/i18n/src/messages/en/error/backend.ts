@@ -2,7 +2,7 @@ import { defineMessages } from "../../../message";
 
 export const messages = defineMessages("error.backend", {
   "error.backend.dispatchCommand":
-    "Could not complete the openswarm request. Check the executor settings and run status before trying again.",
+    "Could not complete the swrm request. Check the executor settings and run status before trying again.",
   "error.backend.dispatchOwnChat": "Dispatch coding work from your own chat only.",
   "error.backend.dispatchLaneOptions":
     "A lane uses its configured backend and model. Omit backend and model when you select a lane.",
@@ -13,13 +13,13 @@ export const messages = defineMessages("error.backend", {
     "The verify command runs on the executor host, outside this agent's workspace limit. A Workspace-only agent cannot set verify.",
   "error.backend.dispatchExecutorWorkspace":
     "A Workspace-only agent can only use the Codex executor, because other executors do not limit where they write. Omit lane and backend.",
-  "error.backend.dispatchRepository": "Configure matching local and executor repository paths in openswarm fleet.json.",
-  "error.backend.dispatchSpawnFailed": "openswarm could not be started.",
-  "error.backend.dispatchExitCode": "openswarm exited with code {code}.",
-  "error.backend.dispatchExited": "openswarm stopped before it returned a result.",
-  "error.backend.dispatchTimeout": "openswarm did not respond before the time limit.",
-  "error.backend.dispatchOutputUnreadable": "openswarm output could not be read.",
-  "error.backend.dispatchSaveFailed": "The openswarm request could not be saved.",
+  "error.backend.dispatchRepository": "Configure matching local and executor repository paths in swrm fleet.json.",
+  "error.backend.dispatchSpawnFailed": "swrm could not be started.",
+  "error.backend.dispatchExitCode": "swrm exited with code {code}.",
+  "error.backend.dispatchExited": "swrm stopped before it returned a result.",
+  "error.backend.dispatchTimeout": "swrm did not respond before the time limit.",
+  "error.backend.dispatchOutputUnreadable": "swrm output could not be read.",
+  "error.backend.dispatchSaveFailed": "The swrm request could not be saved.",
   "error.backend.dispatchApprovalDenied": "The person denied this coding dispatch. Nothing was started.",
   "error.backend.dispatchApprovalMissing": "This coding dispatch has no approval. Nothing was started.",
   "error.backend.eventsUnavailable": "Events are not available on this host.",

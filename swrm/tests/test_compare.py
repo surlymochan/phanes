@@ -15,7 +15,7 @@ xs = _load.load()
 
 class CompareTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-compare-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-compare-")
         self.root = Path(self.tmp.name)
         self.data = self.root / "data"
         self.runs = self.data / "runs"
@@ -127,7 +127,7 @@ class CompareTests(unittest.TestCase):
             model = command[command.index("--model") + 1] if "--model" in command else None
             result = {"id": run_id, "title": "Same task", "status": "done", "backend": backend,
                       "model": model, "seconds": 3 if backend == "codex" else 4, "verify": {"rc": 0},
-                      "workspace": {"repo": str(self.repo), "base": self.base}, "branch": f"openswarm/{run_id}",
+                      "workspace": {"repo": str(self.repo), "base": self.base}, "branch": f"swrm/{run_id}",
                       "result": {"summary": f"{backend} completed"}}
             run_dir = self.runs / run_id
             (run_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")

@@ -17,7 +17,7 @@ DEPS = Path(os.environ.get("BENCH_DEPS", "<agents>/gity/bench-deps"))
 SUPERPOWERS = DEPS / "superpowers"
 OPENFLOW_PREFIX = E.ROOT / "deps" / "openflow-prefix"
 OPENFLOW_TGZ = E.ROOT / "deps" / "surlymochan-openflow-0.2.1.tgz"
-OPENSWARM_DIR = Path(os.environ.get("OPENSWARM_DIR", "<openswarm>"))
+OPENSWARM_DIR = Path(os.environ.get("OPENSWARM_DIR", "<swrm>"))
 NODE22_BIN = "<node22>/bin"
 CAP_S = 20 * 60
 GIT = E.GIT
@@ -224,7 +224,7 @@ def arm_openflow(inst, repo, venv, events, tid):
     return [run_pi(tid, repo, prompt, events, CAP_S, env)]
 
 
-PLANNER = """You are the planner in an openswarm workflow. Read the skill and the engineering task.
+PLANNER = """You are the planner in an swrm workflow. Read the skill and the engineering task.
 Write one self-contained task file for an executor that has none of this conversation.
 
 Write that file, and only that file, to:
@@ -237,7 +237,7 @@ relevant existing test file, run from the repository root with {python}) to:
 
 The repository is {repo}. Do not modify any file inside the repository. Do not commit. The executor starts from a clean worktree.
 
-## openswarm skill
+## swrm skill
 
 {skill}
 
@@ -247,13 +247,13 @@ The repository is {repo}. Do not modify any file inside the repository. Do not c
 """
 
 
-def arm_openswarm(inst, repo, venv, events, tid):
+def arm_swrm(inst, repo, venv, events, tid):
     rundir = repo.parent
     pdir = rundir / "planner"
     pdir.mkdir(exist_ok=True)
     task_file, verify_file = pdir / "executor-task.md", pdir / "verify.txt"
     commit = E.sh(["git", "-C", str(OPENSWARM_DIR), "rev-parse", "HEAD"]).stdout.strip()
-    (events / "tool-version.json").write_text(json.dumps({"name": "openswarm", "commit": commit, "backend": "pi"}))
+    (events / "tool-version.json").write_text(json.dumps({"name": "swrm", "commit": commit, "backend": "pi"}))
     t0 = time.time()
     plan = PLANNER.format(task_file=task_file, verify_file=verify_file, python=f"{venv}/bin/python", repo=repo,
                           skill=(OPENSWARM_DIR / "SKILL.md").read_text(), task=base_prompt(inst, repo, venv))
@@ -269,15 +269,15 @@ def arm_openswarm(inst, repo, venv, events, tid):
         return calls
     remaining = CAP_S - (time.time() - t0)
     budget_min = max(1, int(remaining // 60) - 1)
-    home = events / "openswarm-home"
+    home = events / "swrm-home"
     home.mkdir(exist_ok=True)
     shim = Path(__file__).resolve().parent / "pi_shim.sh"
     env = dict(os.environ, **path_env(venv), OPENSWARM_HOME=str(home), OPENSWARM_PI_BIN=str(shim),
                SHIM_TASK_ID=tid + "-exec", SHIM_EVENTS=str(events), SHIM_TIMEOUT=str(budget_min * 60 + 30))
-    # Keep DEEPSEEK_API_KEY: openswarm is forced to --backend pi, so the Pi wrapper run_pi.sh it calls through the shim needs it and cannot route to its own deepseek backend.
+    # Keep DEEPSEEK_API_KEY: swrm is forced to --backend pi, so the Pi wrapper run_pi.sh it calls through the shim needs it and cannot route to its own deepseek backend.
     for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
         env.pop(k, None)
-    cmd = ["python3", str(OPENSWARM_DIR / "bin" / "openswarm"), "run", "--backend", "pi", "--cwd", str(repo),
+    cmd = ["python3", str(OPENSWARM_DIR / "bin" / "swrm"), "run", "--backend", "pi", "--cwd", str(repo),
            "--task-file", str(task_file), "--title", inst["instance_id"], "--budget-minutes", str(budget_min),
            "--no-worktree"]
     verify = verify_file.read_text().strip().splitlines()[0].strip() if verify_file.exists() and verify_file.read_text().strip() else ""
@@ -285,8 +285,8 @@ def arm_openswarm(inst, repo, venv, events, tid):
         cmd += ["--verify", verify]
     t1 = time.time()
     p = subprocess.run(cmd, env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=CAP_S + 120)
-    (events / "openswarm-stdout.txt").write_text(p.stdout)
-    (events / "openswarm.err").write_text(p.stderr[-8000:])
+    (events / "swrm-stdout.txt").write_text(p.stdout)
+    (events / "swrm.err").write_text(p.stderr[-8000:])
     ex = {"label": "executor", "rc": p.returncode, "wall_s": round(time.time() - t1, 1), "record": None}
     usage = pi_events_usage(None)
     for f in sorted(events.glob("executor-*-events.jsonl")):
@@ -295,8 +295,8 @@ def arm_openswarm(inst, repo, venv, events, tid):
             usage[k] += u[k]
         usage["errors"] += u["errors"]
     ex["usage"] = usage
-    # merge the openswarm branch back so grading sees the executor's commit
-    branches = E.sh(GIT + ["for-each-ref", "--format=%(refname:short)", "refs/heads/openswarm/"], cwd=repo).stdout.split()
+    # merge the swrm branch back so grading sees the executor's commit
+    branches = E.sh(GIT + ["for-each-ref", "--format=%(refname:short)", "refs/heads/swrm/"], cwd=repo).stdout.split()
     ex["branches"] = branches
     for b in branches:
         m = E.sh(GIT + ["merge", "-q", "--no-edit", b], cwd=repo, check=False)
@@ -304,4 +304,4 @@ def arm_openswarm(inst, repo, venv, events, tid):
     return calls + [ex]
 
 
-ARMS = {"baseline": arm_baseline, "superpowers": arm_superpowers, "openflow": arm_openflow, "openswarm": arm_openswarm}
+ARMS = {"baseline": arm_baseline, "superpowers": arm_superpowers, "openflow": arm_openflow, "swrm": arm_swrm}

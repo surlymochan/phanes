@@ -10,13 +10,13 @@ import threading
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-broker-stdio'
-SOCKET_REL = pathlib.Path('Library') / 'Caches' / 'openswarm-pi-broker' / 'broker.sock'
+SOCKET_REL = pathlib.Path('Library') / 'Caches' / 'swrm-pi-broker' / 'broker.sock'
 
 
 def _temp_home():
     """Short temp HOME so the broker socket path stays under the AF_UNIX
     limit (104 chars on macOS): the default macOS temp dir is too long
-    once Library/Caches/openswarm-pi-broker/broker.sock is appended."""
+    once Library/Caches/swrm-pi-broker/broker.sock is appended."""
     if os.name == 'nt':
         return tempfile.TemporaryDirectory(prefix='os-')
     return tempfile.TemporaryDirectory(prefix='os-', dir='/tmp')

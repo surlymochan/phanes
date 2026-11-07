@@ -16,7 +16,7 @@ xs = _load.load()
 
 class RetroTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-retro-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-retro-")
         self.root = Path(self.tmp.name)
         self.knowledge = self.root / "knowledge"
         self.knowledge.mkdir()
@@ -68,7 +68,7 @@ class RetroTests(unittest.TestCase):
             return True
 
         try:
-            sys.argv = ["openswarm", "retro", *args]
+            sys.argv = ["swrm", "retro", *args]
             with mock.patch.object(xs, "load_policy", return_value=policy or self.policy), \
                     mock.patch.object(xs, "NOW", return_value=self.now), \
                     mock.patch.object(xs, "retro_step", side_effect=fake_step), \

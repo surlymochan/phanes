@@ -1,7 +1,7 @@
-"""openswarm side of the routing benchmark.
+"""swrm side of the routing benchmark.
 
-Decisions are produced in-process, the same way tests/_load.py loads bin/openswarm.
-A separate loop measures CLI cold-start of `bin/openswarm route`.
+Decisions are produced in-process, the same way tests/_load.py loads bin/swrm.
+A separate loop measures CLI cold-start of `bin/swrm route`.
 """
 import importlib.machinery
 import importlib.util
@@ -32,14 +32,14 @@ def load_jsonl(path):
     return rows
 
 
-def load_openswarm(home):
+def load_swrm(home):
     os.environ["OPENSWARM_HOME"] = home
     for key in list(os.environ):
         if key.startswith(("OPENSWARM_", "XSWARM_")) and key != "OPENSWARM_HOME":
             os.environ.pop(key)
-    name = "openswarm_bench"
+    name = "swrm_bench"
     sys.modules.pop(name, None)
-    loader = importlib.machinery.SourceFileLoader(name, os.path.join(ROOT, "bin", "openswarm"))
+    loader = importlib.machinery.SourceFileLoader(name, os.path.join(ROOT, "bin", "swrm"))
     spec = importlib.util.spec_from_loader(name, loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
@@ -159,7 +159,7 @@ def decision(task, scenario, routed, index):
     row = {
         "task_id": task["id"],
         "scenario": scenario["id"],
-        "tool": "openswarm",
+        "tool": "swrm",
         "backend": backend,
         "provider": PROVIDER.get(backend) if backend else None,
         "model": model,
@@ -215,14 +215,14 @@ def summarize_latency(samples, kind):
 
 
 def cli_cold_starts(state_path, runs):
-    home = tempfile.mkdtemp(prefix="openswarm-bench-cli-")
+    home = tempfile.mkdtemp(prefix="swrm-bench-cli-")
     env = os.environ.copy()
     for key in list(env):
         if key.startswith(("OPENSWARM_", "XSWARM_")):
             env.pop(key)
     env["OPENSWARM_HOME"] = home
     env["OPENSWARM_STATE_FILE"] = state_path
-    cmd = [sys.executable, os.path.join(ROOT, "bin", "openswarm"), "route",
+    cmd = [sys.executable, os.path.join(ROOT, "bin", "swrm"), "route",
            "--type", "impl", "--difficulty", "3", "--context-tokens", "24000"]
     samples = []
     for _ in range(runs):
@@ -230,10 +230,10 @@ def cli_cold_starts(state_path, runs):
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
         samples.append((time.perf_counter() - t0) * 1000.0)
         if proc.returncode != 0:
-            raise SystemExit(f"openswarm route failed: {proc.stderr[-400:]}")
+            raise SystemExit(f"swrm route failed: {proc.stderr[-400:]}")
     return {
         **summarize_latency(samples, "cli_cold_start"),
-        "command": "python3 bin/openswarm route --type impl --difficulty 3 --context-tokens 24000",
+        "command": "python3 bin/swrm route --type impl --difficulty 3 --context-tokens 24000",
         "note": "Each sample is a new Python process. OPENSWARM_STATE_FILE points at a temporary copy of the fresh-quota state. This is the product route CLI.",
     }
 
@@ -248,15 +248,15 @@ def write_jsonl(path, rows):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=os.path.join(BENCH, "results", "openswarm.jsonl"))
-    ap.add_argument("--latency-out", default=os.path.join(BENCH, "results", "latency_openswarm.json"))
+    ap.add_argument("--out", default=os.path.join(BENCH, "results", "swrm.jsonl"))
+    ap.add_argument("--latency-out", default=os.path.join(BENCH, "results", "latency_swrm.json"))
     ap.add_argument("--decisions", type=int, default=1000)
     ap.add_argument("--cli-runs", type=int, default=25)
     ap.add_argument("--skip-cli", action="store_true")
     args = ap.parse_args()
 
-    home = tempfile.mkdtemp(prefix="openswarm-bench-home-")
-    xs = load_openswarm(home)
+    home = tempfile.mkdtemp(prefix="swrm-bench-home-")
+    xs = load_swrm(home)
     policy = xs.jload(os.path.join(ROOT, "policy.json"), {})
     # The bench's premise is the three connected backends (see README,
     # "Fairness rules"); the shipped policy defaults to Codex only, so enable
@@ -283,7 +283,7 @@ def main():
     latency = {"in_process": summarize_latency(samples, "in_process")}
     if not args.skip_cli:
         state = build_state(xs, policy, catalogue, scenarios["scenarios"][0])
-        fd, state_path = tempfile.mkstemp(prefix="openswarm-bench-state-", suffix=".json")
+        fd, state_path = tempfile.mkstemp(prefix="swrm-bench-state-", suffix=".json")
         with os.fdopen(fd, "w") as f:
             json.dump(state, f)
         latency["cli_cold_start"] = cli_cold_starts(state_path, args.cli_runs)
@@ -292,7 +292,7 @@ def main():
     with open(args.latency_out, "w") as f:
         json.dump(latency, f, indent=2, sort_keys=True)
         f.write("\n")
-    print(f"openswarm decisions {len(rows)} -> {args.out}")
+    print(f"swrm decisions {len(rows)} -> {args.out}")
     print(f"in-process n={latency['in_process']['n']} median={latency['in_process']['median']}ms "
           f"p95={latency['in_process']['p95']}ms")
     if "cli_cold_start" in latency:

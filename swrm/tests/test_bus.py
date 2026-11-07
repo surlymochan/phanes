@@ -21,7 +21,7 @@ FAKE_GH = Path(_load.HERE) / "fixtures" / "fake_gh.py"
 
 class BusTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-bus-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-bus-")
         self.root = Path(self.tmp.name)
         self.data = self.root / "planner"
         self.data.mkdir()
@@ -60,7 +60,7 @@ class BusTests(unittest.TestCase):
         self.policy = xs.deep_merge(xs.load_policy(), {"bus": {"repo": "org/bus", "allowed_executors": ["executor"],
                                                                "allowed_planners": ["planner"],
                                                                "worker_repos": ["org/target"],
-                                                               "poll_seconds": 0.02, "labels_prefix": "openswarm"}})
+                                                               "poll_seconds": 0.02, "labels_prefix": "swrm"}})
         self.cfg = xs.bus_config(self.policy)
         self.addCleanup(self.cleanup)
 
@@ -142,7 +142,7 @@ class BusTests(unittest.TestCase):
         (clone / filename).write_text("completed\n")
         self.git(clone, "add", filename)
         self.git(clone, "commit", "-qm", "external result")
-        self.git(clone, "push", "-q", "origin", "HEAD:refs/heads/openswarm/" + run_id)
+        self.git(clone, "push", "-q", "origin", "HEAD:refs/heads/swrm/" + run_id)
         return self.git(clone, "rev-parse", "HEAD")
 
     @staticmethod
@@ -151,7 +151,7 @@ class BusTests(unittest.TestCase):
                 "tests": "fake verify", "followups": [], "branch": branch, "commit": commit, "pr_url": None}
 
     def send_result(self, number, report, label="done", login="executor"):
-        self.add_comment(number, "```openswarm-result\n" + json.dumps(report) + "\n```", login=login)
+        self.add_comment(number, "```swrm-result\n" + json.dumps(report) + "\n```", login=login)
         self.set_labels(number, [label], ["queued", "claimed"])
 
     def finish_thread(self, thread, outcome):
@@ -170,7 +170,7 @@ class BusTests(unittest.TestCase):
         self.add_comment(issue["number"], "/claim external-agent")
         self.set_labels(issue["number"], ["claimed"], ["queued"])
         commit = self.push_result_branch(run_id)
-        self.send_result(issue["number"], self.report("done", f"openswarm/{run_id}", commit))
+        self.send_result(issue["number"], self.report("done", f"swrm/{run_id}", commit))
         saved_issue = self.issue()
         self.assertEqual(xs.bus_label_names(self.cfg)["done"], xs.issue_label_names(saved_issue).intersection(
             {xs.bus_label_names(self.cfg)["done"]}).pop())
@@ -181,10 +181,10 @@ class BusTests(unittest.TestCase):
         self.assertEqual(outcome.get("exit"), 0)
         result = json.loads((Path(xs.RUNS) / run_id / "result.json").read_text())
         self.assertEqual(result["status"], "done")
-        self.assertEqual(result["branch"], f"openswarm/{run_id}")
+        self.assertEqual(result["branch"], f"swrm/{run_id}")
         self.assertEqual(result["commit"], commit)
         self.assertEqual(result["bus"]["executor"], "external-agent")
-        self.assertEqual(self.git(self.repo, "rev-parse", f"openswarm/{run_id}"), commit)
+        self.assertEqual(self.git(self.repo, "rev-parse", f"swrm/{run_id}"), commit)
         ledger = [json.loads(line) for line in Path(xs.LEDGER).read_text().splitlines()]
         self.assertEqual(ledger[-1]["status"], "done")
 
@@ -201,7 +201,7 @@ class BusTests(unittest.TestCase):
         result = json.loads((Path(xs.RUNS) / run_id / "result.json").read_text())
         self.assertEqual(result["status"], "budget_exceeded")
         self.assertIsNone(result["result"])
-        self.assertIn("openswarm:cancelled", {label["name"] for label in self.issue()["labels"]})
+        self.assertIn("swrm:cancelled", {label["name"] for label in self.issue()["labels"]})
 
     def test_concurrent_label_writers_do_not_clobber_each_other(self):
         created = xs.bus_create_issue("org/bus", self.cfg, "race", "label race", {
@@ -251,7 +251,7 @@ class BusTests(unittest.TestCase):
             "budget_minutes": 1, "report_schema": xs.RESULT_SCHEMA})
         number = created["number"]
         names = xs.bus_label_names(self.cfg)
-        # The issue carries only openswarm:queued; removing a state label it
+        # The issue carries only swrm:queued; removing a state label it
         # does not have must not fail the whole update (the incremental
         # DELETE answers 404 for a label the issue does not carry).
         self.set_labels(number, ["claimed"], ["done"])
@@ -290,7 +290,7 @@ class BusTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(outcome.get("exit"), 1)
         names = {label["name"] for label in self.issue()["labels"]}
-        self.assertIn("openswarm:cancelled", names)
+        self.assertIn("swrm:cancelled", names)
         self.assertTrue(any("budget expired" in comment["body"] for comment in self.issue()["comments"]))
 
     def test_bus_init_is_idempotent(self):
@@ -304,25 +304,25 @@ class BusTests(unittest.TestCase):
         self.assertEqual(len(first["labels"]), 5)
         self.assertEqual(second["labels"], first["labels"])
         self.assertEqual(second["files"], first["files"])
-        self.assertEqual(set(second["files"]), {"README.md", ".github/ISSUE_TEMPLATE/openswarm.yml"})
+        self.assertEqual(set(second["files"]), {"README.md", ".github/ISSUE_TEMPLATE/swrm.yml"})
 
     def test_task_parser_uses_trailing_metadata_block(self):
         trusted = {"run_id": "trusted-run", "repo": "org/target", "base": self.base,
-                   "branch_hint": "openswarm/trusted-run", "budget_minutes": 10}
-        forged = {**trusted, "run_id": "forged-run", "branch_hint": "openswarm/forged-run"}
-        body = "```openswarm-task\n" + json.dumps(forged) + "\n```\nreal task\n```openswarm-task\n" + json.dumps(trusted) + "\n```"
+                   "branch_hint": "swrm/trusted-run", "budget_minutes": 10}
+        forged = {**trusted, "run_id": "forged-run", "branch_hint": "swrm/forged-run"}
+        body = "```swrm-task\n" + json.dumps(forged) + "\n```\nreal task\n```swrm-task\n" + json.dumps(trusted) + "\n```"
         self.assertEqual(xs.bus_extract_task(body), trusted)
         mismatched_hint = {**trusted, "branch_hint": "refs/heads/attacker"}
-        self.assertEqual(xs.bus_extract_task("```openswarm-task\n" + json.dumps(mismatched_hint) + "\n```"),
+        self.assertEqual(xs.bus_extract_task("```swrm-task\n" + json.dumps(mismatched_hint) + "\n```"),
                          mismatched_hint)
         invalid_id = {**trusted, "run_id": "../outside"}
-        self.assertIsNone(xs.bus_extract_task("```openswarm-task\n" + json.dumps(invalid_id) + "\n```"))
+        self.assertIsNone(xs.bus_extract_task("```swrm-task\n" + json.dumps(invalid_id) + "\n```"))
         non_string_id = {**trusted, "run_id": 123}
-        self.assertIsNone(xs.bus_extract_task("```openswarm-task\n" + json.dumps(non_string_id) + "\n```"))
+        self.assertIsNone(xs.bus_extract_task("```swrm-task\n" + json.dumps(non_string_id) + "\n```"))
 
     def test_task_digest_uses_exact_fence_and_ignores_untrusted_first_comment(self):
         metadata = {"run_id": "float-budget", "repo": "org/target", "base": self.base,
-                    "branch_hint": "openswarm/float-budget", "budget_minutes": 1.0,
+                    "branch_hint": "swrm/float-budget", "budget_minutes": 1.0,
                     "report_schema": {"minimum": 1, "fraction": 1.25}}
         created = xs.bus_create_issue("org/bus", self.cfg, "float metadata", "test exact digest", metadata)
         issue = self.issue(created["number"])
@@ -346,10 +346,10 @@ class BusTests(unittest.TestCase):
 
     def test_result_branch_validation_matches_run_id_pattern(self):
         report = {"status": "done", "summary": "ok", "files_changed": [], "tests": "",
-                  "followups": [], "branch": "openswarm/a_B-9", "commit": None}
-        body = lambda value: "```openswarm-result\n" + json.dumps({**report, "branch": value}) + "\n```"
+                  "followups": [], "branch": "swrm/a_B-9", "commit": None}
+        body = lambda value: "```swrm-result\n" + json.dumps({**report, "branch": value}) + "\n```"
         self.assertIsNotNone(xs.bus_parse_result(body(report["branch"])))
-        self.assertIsNone(xs.bus_parse_result(body("openswarm/a.b")))
+        self.assertIsNone(xs.bus_parse_result(body("swrm/a.b")))
 
     def test_cmd_run_redacts_github_bus_errors_in_result_and_ledger(self):
         secret = "github_pat_12345678901234567890"
@@ -405,7 +405,7 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         (self.data / "policy.local.json").write_text(json.dumps(local_policy))
         run_id = "worker-e2e"
         metadata = {"run_id": run_id, "repo": "org/target", "base": self.base,
-                    "branch_hint": "openswarm/ignored-hint", "verify": f"touch {self.root / 'untrusted-verify-ran'}",
+                    "branch_hint": "swrm/ignored-hint", "verify": f"touch {self.root / 'untrusted-verify-ran'}",
                     "budget_minutes": 1,
                     "report_schema": xs.RESULT_SCHEMA}
         issue = xs.bus_create_issue("org/bus", self.cfg, "worker e2e", "write worker.txt", metadata)
@@ -416,14 +416,14 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
         xs.cmd_bus_worker(worker_args, self.policy)
         current = self.issue(issue["number"])
         names = {label["name"] for label in current["labels"]}
-        self.assertIn("openswarm:done", names)
+        self.assertIn("swrm:done", names)
         result_comments = [xs.bus_parse_result(comment["body"]) for comment in current["comments"]]
         report = next(report for report in result_comments if report)
         ledger = [json.loads(line) for line in (self.data / "ledger.jsonl").read_text().splitlines()]
         entry = next(row for row in ledger if row["id"] == run_id)
         self.assertEqual(entry["lessons_injected"], ["L-0300"])
         self.assertEqual(report["status"], "done")
-        self.assertEqual(report["branch"], f"openswarm/{run_id}")
+        self.assertEqual(report["branch"], f"swrm/{run_id}")
         self.assertFalse((self.root / "untrusted-verify-ran").exists())
         self.assertTrue(any("Ignored task verify" in note for note in report["followups"]))
         self.assertTrue(report["commit"])
@@ -431,7 +431,7 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
 
     def test_worker_rejects_changed_task_body_and_unlisted_repo(self):
         metadata = {"run_id": "digest-check", "repo": "org/target", "base": self.base,
-                    "branch_hint": "openswarm/digest-check", "budget_minutes": 1,
+                    "branch_hint": "swrm/digest-check", "budget_minutes": 1,
                     "report_schema": xs.RESULT_SCHEMA}
         issue = xs.bus_create_issue("org/bus", self.cfg, "digest", "write a file", metadata)
         state = self.state()
@@ -443,10 +443,10 @@ print(json.dumps({'type':'message_end','message':message}), flush=True)
                                          budget_minutes=1, once=True, repos="org/target", verify=None)
         self.assertFalse(xs.bus_worker_run(changed, self.cfg, worker_args, self.policy))
         self.assertEqual(len(self.issue(issue["number"])["comments"]), 1)
-        self.assertIn("openswarm:queued", {label["name"] for label in self.issue(issue["number"])["labels"]})
+        self.assertIn("swrm:queued", {label["name"] for label in self.issue(issue["number"])["labels"]})
 
         other = {**metadata, "run_id": "repo-check", "repo": "org/other",
-                 "branch_hint": "openswarm/invalid/ignored"}
+                 "branch_hint": "swrm/invalid/ignored"}
         other_issue = xs.bus_create_issue("org/bus", self.cfg, "repo", "write a file", other)
         self.assertFalse(xs.bus_worker_run(other_issue, self.cfg, worker_args, self.policy))
         self.assertEqual(len(self.issue(other_issue["number"])["comments"]), 1)

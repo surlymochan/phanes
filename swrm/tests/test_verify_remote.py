@@ -46,15 +46,15 @@ class VerifyRemoteTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), self.base)
         self.assertFalse((self.repo / (rid + ".txt")).exists())
         self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before)
-        self.assertEqual(self.git(self.repo, "for-each-ref", "refs/openswarm-verify"), "")
+        self.assertEqual(self.git(self.repo, "for-each-ref", "refs/swrm-verify"), "")
         source = self.root / "b1" / "repo"
-        self.assertEqual(self.git(source, "rev-parse", "openswarm/" + rid), original["commit"])
+        self.assertEqual(self.git(source, "rev-parse", "swrm/" + rid), original["commit"])
         self.assertEqual(json.loads((self.root / "b1" / "data" / "runs" / rid / "result.json").read_text()), original)
 
     @unittest.skipIf(os.name == "nt", 'executor verify/prepare commands are POSIX shell strings run through the platform shell (cmd.exe on Windows)')
     def test_verify_on_second_host_records_failure_without_printing_output(self):
         rid, original = self.start_source_run()
-        self.hosts["b2"]["openswarm"] = str(Path(_load.ROOT) / "bin" / "openswarm")
+        self.hosts["b2"]["swrm"] = str(Path(_load.ROOT) / "bin" / "swrm")
         (self.data / "fleet.json").write_text(json.dumps({"hosts": list(self.hosts.values())}))
         target = self.root / "b2" / "repo"
         before = self.git(target, "worktree", "list", "--porcelain")
@@ -67,7 +67,7 @@ class VerifyRemoteTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(self.git(target, "cat-file", "-t", original["commit"]), "commit")
         self.assertEqual(self.git(target, "rev-parse", "HEAD"), self.initial)
         self.assertEqual(self.git(target, "worktree", "list", "--porcelain"), before)
-        self.assertEqual(self.git(target, "for-each-ref", "refs/openswarm-verify"), "")
+        self.assertEqual(self.git(target, "for-each-ref", "refs/swrm-verify"), "")
         self.assertEqual(xs.sh.call_count, 0)
 
     def test_branchless_run_is_rejected_without_creating_result(self):

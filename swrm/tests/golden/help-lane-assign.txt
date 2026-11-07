@@ -1,10 +1,9 @@
-usage: openswarm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
-                             [--title TITLE] [--verify VERIFY]
-                             [--verify-baseline]
-                             [--budget-minutes BUDGET_MINUTES] [--base BASE]
-                             [--card-type CARD_TYPE] [--rework-of REWORK_OF]
-                             [--paths PATHS [PATHS ...]] [--read-only]
-                             name
+usage: swrm lane assign [-h] (--task-file TASK_FILE | --prompt PROMPT)
+                        [--title TITLE] [--verify VERIFY] [--verify-baseline]
+                        [--budget-minutes BUDGET_MINUTES] [--base BASE]
+                        [--card-type CARD_TYPE] [--rework-of REWORK_OF]
+                        [--paths PATHS [PATHS ...]] [--read-only]
+                        name
 
 positional arguments:
   name

@@ -10,8 +10,8 @@ import subprocess
 import sys
 import threading
 
-path = pathlib.Path(os.environ.get('OPENSWARM_PI_WORKER_SOCKET', '/run/openswarm-pi/broker.sock'))
-config = pathlib.Path.home() / '.ssh' / 'openswarm-pi' / 'config'
+path = pathlib.Path(os.environ.get('OPENSWARM_PI_WORKER_SOCKET', '/run/swrm-pi/broker.sock'))
+config = pathlib.Path.home() / '.ssh' / 'swrm-pi' / 'config'
 if not path.parent.is_dir() or not config.is_file():
     sys.exit('worker proxy configuration unavailable')
 if path.exists() or path.is_symlink():
@@ -41,7 +41,7 @@ lock = threading.Lock()
 def serve(client):
     proc = None
     try:
-        proc = subprocess.Popen(['ssh', '-F', str(config), '-T', 'openswarm-pi-broker'],
+        proc = subprocess.Popen(['ssh', '-F', str(config), '-T', 'swrm-pi-broker'],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 start_new_session=True, bufsize=0)
         with lock:

@@ -7,7 +7,7 @@ This directory exposes the Swrm executables used by the Phanes Hub integration:
 
 The Hub integration is implemented in `openbot/src/backend/`; Swrm routing and
 execution live in `swrm/`. Use `swrm` for new CLI invocations. The legacy
-`openswarm` executable remains available as a compatibility alias.
+`swrm` executable remains available as a compatibility alias.
 
 Configure fleet hosts and local paths in the consuming deployment. Keep host
 names, account names, credentials, and machine-specific paths out of this public

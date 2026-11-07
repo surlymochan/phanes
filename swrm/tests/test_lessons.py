@@ -17,7 +17,7 @@ xs = _load.load()
 
 class LessonsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-lessons-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-lessons-")
         self.root = Path(self.tmp.name)
         self.lessons = self.root / "lessons"
         self.lessons.mkdir()
@@ -85,7 +85,7 @@ class LessonsTests(unittest.TestCase):
     def run_propose(self, *args):
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "lessons", "propose", *args]
+            sys.argv = ["swrm", "lessons", "propose", *args]
             output = io.StringIO()
             with mock.patch.object(xs, "load_policy", return_value=self.policy), \
                     mock.patch.dict(os.environ, self.gh or {}), contextlib.redirect_stdout(output):
@@ -97,7 +97,7 @@ class LessonsTests(unittest.TestCase):
     def run_escalate(self, *args):
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "lessons", "escalate", *args]
+            sys.argv = ["swrm", "lessons", "escalate", *args]
             output = io.StringIO()
             with mock.patch.object(xs, "load_policy", return_value=self.policy), \
                     contextlib.redirect_stdout(output):
@@ -182,7 +182,7 @@ class LessonsTests(unittest.TestCase):
         self.write_lesson("preview.yaml", "L-0013", "protect src path", paths="[src/*.py]", backends="[codex]")
         old_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "lessons", "preview", "--card-type", "fix", "--backend", "codex",
+            sys.argv = ["swrm", "lessons", "preview", "--card-type", "fix", "--backend", "codex",
                         "--paths", "src/widget.py"]
             output = io.StringIO()
             with mock.patch.object(xs, "load_policy", return_value=self.policy), \

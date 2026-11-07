@@ -1,14 +1,13 @@
-usage: openswarm run [-h] [--type TYPE] [--difficulty DIFFICULTY]
-                     [--context-tokens CONTEXT_TOKENS]
-                     [--backend {codex,ocgo,deepseek,cursor,agy,gemini,pi,hermes,copilot,github-issue}]
-                     [--model MODEL] [--effort EFFORT] [--card-type CARD_TYPE]
-                     [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
-                     [--prompt PROMPT] [--task-file TASK_FILE] [--title TITLE]
-                     [--cwd CWD] [--base BASE] [--no-worktree]
-                     [--verify-baseline] [--verify VERIFY] [--keep-worktree]
-                     [--no-fallback] [--budget-minutes BUDGET_MINUTES]
-                     [--detach] [--dry-run] [--read-only]
-                     [--executor EXECUTOR]
+usage: swrm run [-h] [--type TYPE] [--difficulty DIFFICULTY]
+                [--context-tokens CONTEXT_TOKENS]
+                [--backend {codex,ocgo,deepseek,cursor,agy,gemini,pi,hermes,copilot,github-issue}]
+                [--model MODEL] [--effort EFFORT] [--card-type CARD_TYPE]
+                [--rework-of REWORK_OF] [--paths PATHS [PATHS ...]]
+                [--prompt PROMPT] [--task-file TASK_FILE] [--title TITLE]
+                [--cwd CWD] [--base BASE] [--no-worktree] [--verify-baseline]
+                [--verify VERIFY] [--keep-worktree] [--no-fallback]
+                [--budget-minutes BUDGET_MINUTES] [--detach] [--dry-run]
+                [--read-only] [--executor EXECUTOR]
 
 options:
   -h, --help            show this help message and exit
@@ -46,7 +45,7 @@ options:
   --budget-minutes BUDGET_MINUTES
                         hard wall-clock budget; executor is killed when
                         exceeded
-  --detach              run in background; monitor with `openswarm watch <id>`
+  --detach              run in background; monitor with `swrm watch <id>`
   --dry-run
   --read-only           review task: allow status=done without repo changes or
                         commits

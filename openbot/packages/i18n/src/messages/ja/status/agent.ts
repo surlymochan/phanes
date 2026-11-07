@@ -7,7 +7,7 @@ export const messages = {
   "status.agent.dispatchStarted": "コーディング作業を開始しました: {title}。ホスト: {host}。実行: {runId}。",
   "status.agent.dispatchFinished":
     "コーディング作業が終了しました: {title}。ホスト: {host}。結果: {status}。成功を報告する前に結果を確認してください。",
-  "status.agent.dispatchNoResult": "openswarm の実行は結果ファイルなしで終了しました。",
+  "status.agent.dispatchNoResult": "swrm の実行は結果ファイルなしで終了しました。",
   "status.agent.claudeWriteOutside":
     "{path} に書き込みます。これはエージェントのワークスペース、共有フォルダー、一時フォルダーの外です。",
   "status.agent.contextCleared": "コンテキストを消去しました。ここから新しいチャットが始まります。",

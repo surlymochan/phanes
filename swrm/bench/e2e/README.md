@@ -48,7 +48,7 @@ Eight tasks: four JavaScript (`node --test`) and four Python (`unittest`).
 
 The prompt is the text of `TASK.md` plus one shared line, `Implement it; run the visible tests.` Superpowers adds `Use the installed skills for this change.` evalid adds `Use the installed workflow tool for this change.` Baseline adds nothing else. The prompt does not mention `hidden/`.
 
-Raw cursor-agent streams are `results/raw/<run>/agent-*.jsonl`. swrm also stores `executor-usage.json` and `openswarm-result.json`.
+Raw cursor-agent streams are `results/raw/<run>/agent-*.jsonl`. swrm also stores `executor-usage.json` and `swrm-result.json`.
 
 ## Arms
 
@@ -65,7 +65,7 @@ stdin is `/dev/null`. The shared function is `arms/common.sh` (`cursor_invoke`).
 | `baseline` | That invocation and the shared prompt. |
 | `superpowers` | `--plugin-dir` set to the pinned checkout `<superpowers-dir>` (tag `v7.0.0`). The arm refuses any other tag. One extra prompt line. |
 | `openflow` | `npm install` of `$OPENFLOW_TGZ` into a prefix **outside** the repo, `xflow` on `PATH`, `xflow init --project-root`, and a Cursor project rule `.cursor/rules/openflow.mdc` that points at the installed `docs/tooling-matrix.md` and the `xflow/` skill docs. That is the Cursor entry in `docs/tooling-matrix.md` and `docs/compatibility.md`: a project rule, `.as-xflow/config.json`, not a copy of the workflow prose. Node >= 22.5 is required (`$HOME/.local/node22/bin/node` on this machine). The install commit is excluded from the solution diff via `measure-from.txt`. |
-| `openswarm` | A planner `cursor-agent` call receives `TASK.md` and `$OPENSWARM_DIR/SKILL.md` and must write only `events/executor-task.md`. The repo is reset to `HEAD`. Then `bin/openswarm run --backend cursor --model grok-4.7-high --cwd <repo> --task-file <f> --verify <visible cmd> --budget-minutes 15`. The arm merges `openswarm/<id>` back. `$OPENSWARM_HOME` is the events directory for that cell. Provider API keys are unset before `openswarm` so its probe does not call DeepSeek or similar. |
+| `swrm` | A planner `cursor-agent` call receives `TASK.md` and `$OPENSWARM_DIR/SKILL.md` and must write only `events/executor-task.md`. The repo is reset to `HEAD`. Then `bin/swrm run --backend cursor --model grok-4.7-high --cwd <repo> --task-file <f> --verify <visible cmd> --budget-minutes 15`. The arm merges `swrm/<id>` back. `$OPENSWARM_HOME` is the events directory for that cell. Provider API keys are unset before `swrm` so its probe does not call DeepSeek or similar. |
 | `omo` | Not executed. See `arms/omo.md`. `run.py` writes a skipped row and does not call a model. |
 
 ### Superpowers plugin check
@@ -90,7 +90,7 @@ Running `hooks/session-start` with `CURSOR_PLUGIN_ROOT` set to that checkout pri
 
 ```bash
 python3 run.py \
-  --arms baseline,superpowers,openflow,openswarm \
+  --arms baseline,superpowers,openflow,swrm \
   --tasks all \
   --repeats 3 \
   --concurrency 4 \
@@ -130,7 +130,7 @@ One real smoke is in `results/e2e-2026-10-17-smoke.jsonl` (report under `results
 
 ## Fairness
 
-- Same model flag and the same cursor-agent flags on every real call. Superpowers only adds `--plugin-dir`. swrm's executor is cursor-agent with those flags; `--model grok-4.7-high` is passed into `openswarm run` so the policy default cannot drift.
+- Same model flag and the same cursor-agent flags on every real call. Superpowers only adds `--plugin-dir`. swrm's executor is cursor-agent with those flags; `--model grok-4.7-high` is passed into `swrm run` so the policy default cannot drift.
 - Same task text. The only prompt difference is the one neutral line on superpowers and evalid.
 - Same hidden tests, applied only after the arm exits, from outside the workspace copy.
 - Repeats are independent fresh copies. Concurrency does not share a worktree or an `OPENSWARM_HOME`.

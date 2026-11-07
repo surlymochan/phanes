@@ -36,8 +36,8 @@ def run(host, command, **kwargs):
     return subprocess.run([*ssh, host, command], check=True, timeout=20, **kwargs)
 
 def remote_dir(host):
-    out = run(host, 'umask 077; mktemp -d /tmp/openswarm-pi-XXXXXXXX', capture_output=True, text=True).stdout.strip()
-    if not re.fullmatch(r'/tmp/openswarm-pi-[A-Za-z0-9]{8}', out):
+    out = run(host, 'umask 077; mktemp -d /tmp/swrm-pi-XXXXXXXX', capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r'/tmp/swrm-pi-[A-Za-z0-9]{8}', out):
         raise RuntimeError('remote temporary directory was invalid')
     dirs[host] = out
     return out
@@ -71,7 +71,7 @@ try:
     processes.append(broker)
     wait_ready(lambda: subprocess.run([*ssh, args.broker_host, 'test -S ' + shlex.quote(broker_socket)],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0, [broker])
-    with tempfile.TemporaryDirectory(prefix='openswarm-pi-bridge-') as local_dir:
+    with tempfile.TemporaryDirectory(prefix='swrm-pi-bridge-') as local_dir:
         local_socket = local_dir + '/bridge.sock'
         forward = subprocess.Popen([*ssh, '-o', 'ExitOnForwardFailure=yes', '-N', '-L',
                                     local_socket + ':' + broker_socket, args.broker_host],

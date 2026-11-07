@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only, multi-backend consultation for openswarm."""
+"""Read-only, multi-backend consultation for swrm."""
 import argparse
 import json
 import math
@@ -411,8 +411,8 @@ def _ask_one(core, profile, prompt, run_dir, deadline, policy, reservation_id):
             init = subprocess.run(["git", "init", "-q", worktree_repo], capture_output=True, timeout=30)
             if init.returncode:
                 raise RuntimeError("could not initialize consult workspace")
-            commit = subprocess.run(["git", "-C", worktree_repo, "-c", "user.name=OpenSwarm",
-                                     "-c", "user.email=openswarm@localhost", "commit", "--allow-empty", "-qm", "consult workspace"],
+            commit = subprocess.run(["git", "-C", worktree_repo, "-c", "user.name=swrm",
+                                     "-c", "user.email=swrm@localhost", "commit", "--allow-empty", "-qm", "consult workspace"],
                                     capture_output=True, timeout=30)
             if commit.returncode:
                 raise RuntimeError("could not initialize consult workspace")
@@ -689,16 +689,16 @@ def cmd_consult(args, core, policy):
     try:
         return consult(args, core, policy)
     except (OSError, ValueError) as error:
-        print(f"openswarm consult: {error}", file=sys.stderr)
+        print(f"swrm consult: {error}", file=sys.stderr)
         return 2
 
 
 def main(argv=None, core=None):
-    parser = argparse.ArgumentParser(prog="openswarm consult", description="Ask multiple read-only executors the same question.")
+    parser = argparse.ArgumentParser(prog="swrm consult", description="Ask multiple read-only executors the same question.")
     add_arguments(parser)
     args = parser.parse_args(argv)
     if core is None:
-        parser.error("consult must be invoked through bin/openswarm")
+        parser.error("consult must be invoked through bin/swrm")
     return cmd_consult(args, core, core.load_policy())
 
 

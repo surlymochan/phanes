@@ -17,7 +17,7 @@ xs = _load.load()
 
 class PeerReviewTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-review-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-review-")
         self.root = Path(self.tmp.name)
         self.data = self.root / "data"
         self.runs = self.data / "runs"
@@ -32,13 +32,13 @@ class PeerReviewTests(unittest.TestCase):
         self.git("add", "module.py")
         self.git("commit", "-q", "-m", "base")
         self.base = self.git("rev-parse", "HEAD").strip()
-        self.git("checkout", "-qb", "openswarm/run-1")
+        self.git("checkout", "-qb", "swrm/run-1")
         (self.repo / "module.py").write_text("value = 2\n", encoding="utf-8")
         self.git("commit", "-qam", "change")
         self.run_dir = self.runs / "run-1"
         self.run_dir.mkdir(parents=True)
         self.result = {"id": "run-1", "status": "done", "backend": "codex", "model": "codex-test",
-                       "branch": "openswarm/run-1", "commit": self.git("rev-parse", "HEAD").strip(),
+                       "branch": "swrm/run-1", "commit": self.git("rev-parse", "HEAD").strip(),
                        "workspace": {"repo": str(self.repo), "base": self.base}}
         (self.run_dir / "result.json").write_text(json.dumps(self.result), encoding="utf-8")
         self.ledger_entry = {"id": "run-1", "run_id": "run-1", "review_findings": {"p0": 0, "p1": 1, "p2": 0}}

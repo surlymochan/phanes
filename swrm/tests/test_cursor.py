@@ -49,7 +49,7 @@ def ns(**kw):
 
 class CursorBackend(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="openswarm-cursor-")
+        self.tmp = tempfile.mkdtemp(prefix="swrm-cursor-")
         self.script = os.path.join(self.tmp, "cursor-agent")
         with open(self.script, "w") as f:
             f.write(textwrap.dedent(FAKE))

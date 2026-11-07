@@ -1,8 +1,8 @@
 # swrm GitHub issue bus
 
-> The project was renamed from openswarm to **swrm** in v0.3.1. The bus wire format
-> deliberately keeps its `openswarm` identifiers (`openswarm:` labels, the
-> `openswarm-task` / `openswarm-result` blocks, branch prefix `openswarm/`) so cards
+> The project was renamed from swrm to **swrm** in v0.3.1. The bus wire format
+> deliberately keeps its `swrm` identifiers (`swrm:` labels, the
+> `swrm-task` / `swrm-result` blocks, branch prefix `swrm/`) so cards
 > and workers created before the rename keep interoperating.
 
 Use the issue bus only for executors outside the controlled fleet, such as another person's agent, a cloud agent, or an agent on an unmanaged host. For hosts you control, use SSH fleet lanes so execution stays on the known machines.
@@ -14,7 +14,7 @@ Create a dedicated GitHub repository for task cards. The planner host and every 
 Initialize labels, an issue template, and this protocol README:
 
 ```sh
-openswarm bus init <bus-owner>/<bus-repo>
+swrm bus init <bus-owner>/<bus-repo>
 ```
 
 Configure `policy.local.json` under `$OPENSWARM_HOME`:
@@ -28,7 +28,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
     "worker_repos": ["<target-owner>/<target-repo>"],
     "worker_verify_allow": ["<exact-verify-command>"],
     "poll_seconds": 60,
-    "labels_prefix": "openswarm",
+    "labels_prefix": "swrm",
     "open_pr": false
   }
 }
@@ -37,7 +37,7 @@ Configure `policy.local.json` under `$OPENSWARM_HOME`:
 `allowed_executors` is the allowlist of GitHub logins. Workers can be started on an executor host with:
 
 ```sh
-openswarm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
+swrm bus-worker --bus <bus-owner>/<bus-repo> --name <executor-name> --backend codex --once
 ```
 
 Pass `--repos owner/repo[,owner/repo]` to set a worker-local target repository allowlist, or configure `bus.worker_repos`; with neither configured the worker refuses every task. Omit `--once` for a resident worker. `--backend` may be `codex`, `ocgo`, `deepseek`, `cursor`, or `pi`; `--model` is optional. A task's `verify` command runs only when it exactly matches `worker_verify_allow` or the worker's own `--verify`; other task commands are ignored and reported in the result followups. Set `open_pr` to `true` to have the worker open a draft PR after pushing its branch.
@@ -45,31 +45,31 @@ Pass `--repos owner/repo[,owner/repo]` to set a worker-local target repository a
 Dispatch a task from a target repository whose `origin` is its GitHub remote. The selected base commit must already be advertised by a remote branch or tag; push it first if necessary:
 
 ```sh
-openswarm run --backend github-issue --cwd <target-repo> --base <commit> \
+swrm run --backend github-issue --cwd <target-repo> --base <commit> \
   --budget-minutes 40 --verify '<acceptance-command>' --task-file task.md
 ```
 
-Use `--detach` for a background planner run and `openswarm watch <run-id>` to follow it. `openswarm bus status` shows open issue state, claimant, and age.
+Use `--detach` for a background planner run and `swrm watch <run-id>` to follow it. `swrm bus status` shows open issue state, claimant, and age.
 
 ## Task card protocol
 
-An issue is one task card. Its title is `[openswarm] <run title>`. The task description is followed by a fenced `openswarm-task` JSON block:
+An issue is one task card. Its title is `[swrm] <run title>`. The task description is followed by a fenced `swrm-task` JSON block:
 
 ```json
 {
   "run_id": "<run-id>",
   "repo": "<target-owner>/<target-repo>",
   "base": "<base-commit-sha>",
-  "branch_hint": "openswarm/<run-id>",
+  "branch_hint": "swrm/<run-id>",
   "verify": "<optional acceptance command>",
   "budget_minutes": 40,
   "report_schema": {"type": "object"}
 }
 ```
 
-The state labels are `openswarm:queued`, `openswarm:claimed`, `openswarm:done`, and `openswarm:failed`; they are display labels and do not authorize planner state transitions. The planner acts on `openswarm:cancelled` only as a stop signal. An optional `executor:<name>` label routes a card to one worker name. A worker claims by adding `openswarm:claimed` and commenting `/claim <executor-name>`. The earliest `/claim` comment authored by an allowlisted GitHub account wins. The planner posts an `openswarm-task-digest: sha256:<hex>` first comment over the canonical task JSON.
+The state labels are `swrm:queued`, `swrm:claimed`, `swrm:done`, and `swrm:failed`; they are display labels and do not authorize planner state transitions. The planner acts on `swrm:cancelled` only as a stop signal. An optional `executor:<name>` label routes a card to one worker name. A worker claims by adding `swrm:claimed` and commenting `/claim <executor-name>`. The earliest `/claim` comment authored by an allowlisted GitHub account wins. The planner posts an `swrm-task-digest: sha256:<hex>` first comment over the canonical task JSON.
 
-The worker checks out the requested base, runs openswarm's regular local run machinery with a hard budget and optional verify command, pushes `openswarm/<run-id>` to the target repository, then posts a fenced `openswarm-result` JSON comment:
+The worker checks out the requested base, runs swrm's regular local run machinery with a hard budget and optional verify command, pushes `swrm/<run-id>` to the target repository, then posts a fenced `swrm-result` JSON comment:
 
 ```json
 {
@@ -78,16 +78,16 @@ The worker checks out the requested base, runs openswarm's regular local run mac
   "files_changed": ["<path>"],
   "tests": "<commands and outcomes>",
   "followups": [],
-  "branch": "openswarm/<run-id>",
+  "branch": "swrm/<run-id>",
   "commit": "<commit-sha>",
   "pr_url": null
 }
 ```
 
-`status`, `summary`, `files_changed`, `tests`, and `followups` follow openswarm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. The planner takes the terminal status from a valid `openswarm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `openswarm/<run_id>`; `branch_hint` is informational and ignored.
+`status`, `summary`, `files_changed`, `tests`, and `followups` follow swrm's regular result schema. The bus result adds `branch`, `commit`, and optional `pr_url`. The planner takes the terminal status from a valid `swrm-result` comment authored by the winning claimer, regardless of done or failed labels. It fetches the reported result branch, verifies it locally when requested, writes the usual run result and ledger entry, and never merges or pushes to the target repository. The worker always pushes `swrm/<run_id>`; `branch_hint` is informational and ignored.
 
 ## Trust and cancellation
 
-Issue content and comments are untrusted input. The worker accepts a card only when its issue author and first digest comment are both from `bus.allowed_planners` and the digest matches the task JSON in the current body. Workers require a target repository in their worker-local `--repos` or `bus.worker_repos` allowlist. The planner accepts claims and results only from `bus.allowed_executors`; only the earliest allowed claimer's result is used. The planner treats comments as data, never runs comment text, validates the result fields and branch name, and checks the fetched commit against the reported SHA. Workers must stop when an issue is labelled `openswarm:cancelled`.
+Issue content and comments are untrusted input. The worker accepts a card only when its issue author and first digest comment are both from `bus.allowed_planners` and the digest matches the task JSON in the current body. Workers require a target repository in their worker-local `--repos` or `bus.worker_repos` allowlist. The planner accepts claims and results only from `bus.allowed_executors`; only the earliest allowed claimer's result is used. The planner treats comments as data, never runs comment text, validates the result fields and branch name, and checks the fetched commit against the reported SHA. Workers must stop when an issue is labelled `swrm:cancelled`.
 
 Do not put secrets in issue bodies or comments. Do not grant bus workers more target repository access than needed to push their task branch. The planner never merges PRs and never pushes to the target repository itself. Revoke executor access when a worker is retired.

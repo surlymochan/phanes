@@ -34,8 +34,8 @@ if [[ ! -x "$BUN" ]]; then
   fi
 fi
 
-OS_CMD="$PYTHON $BENCH/route_openswarm.py --out $RES/openswarm.jsonl --latency-out $RES/latency_openswarm.json --decisions 1000 --cli-runs 25"
-echo "running openswarm harness"
+OS_CMD="$PYTHON $BENCH/route_swrm.py --out $RES/swrm.jsonl --latency-out $RES/latency_swrm.json --decisions 1000 --cli-runs 25"
+echo "running swrm harness"
 # shellcheck disable=SC2086
 $OS_CMD
 
@@ -63,10 +63,10 @@ else
   "$PYTHON" "$BENCH/coverage.py" --out "$RES/coverage.json"
 fi
 
-REL_OS="python3 bench/route_openswarm.py --out bench/results/openswarm.jsonl --latency-out bench/results/latency_openswarm.json --decisions 1000 --cli-runs 25"
+REL_OS="python3 bench/route_swrm.py --out bench/results/swrm.jsonl --latency-out bench/results/latency_swrm.json --decisions 1000 --cli-runs 25"
 REL_COV="python3 bench/coverage.py --out bench/results/coverage.json"
 REL_OMO="OmO skipped"
-REL_SCORE="python3 bench/score.py --openswarm bench/results/openswarm.jsonl --out-dir bench/results --env bench/results/environment.json --latency-openswarm bench/results/latency_openswarm.json --latency-omo bench/results/latency_omo.json --coverage bench/results/coverage.json"
+REL_SCORE="python3 bench/score.py --swrm bench/results/swrm.jsonl --out-dir bench/results --env bench/results/environment.json --latency-swrm bench/results/latency_swrm.json --latency-omo bench/results/latency_omo.json --coverage bench/results/coverage.json"
 if [[ "$RAN_OMO" -eq 1 ]]; then
   REL_OMO="bun bench/route_omo.ts --omo-dir <omo-dir> --out bench/results/omo.jsonl --latency-out bench/results/latency_omo.json --decisions 1000"
   REL_COV="python3 bench/coverage.py --omo-dir <omo-dir> --out bench/results/coverage.json"
@@ -98,7 +98,7 @@ env = {
     "cores": os.cpu_count(),
     "python": py.replace("Python ", "") if py.startswith("Python ") else py,
     "bun": sh([bun, "--version"]) if bun else "",
-    "openswarm_commit": sh(["git", "-C", root, "rev-parse", "HEAD"]),
+    "swrm_commit": sh(["git", "-C", root, "rev-parse", "HEAD"]),
     "omo_dir": "<omo-dir>" if ran_omo == "1" and omo else "",
     "omo_commit": sh(["git", "-C", omo, "rev-parse", "HEAD"]) if omo else "",
     "commands": [rel_os, rel_omo, rel_cov, rel_score],
@@ -110,10 +110,10 @@ PY
 
 echo "scoring"
 SCORE_CMD=("$PYTHON" "$BENCH/score.py"
-  --openswarm "$RES/openswarm.jsonl"
+  --swrm "$RES/swrm.jsonl"
   --out-dir "$RES"
   --env "$RES/environment.json"
-  --latency-openswarm "$RES/latency_openswarm.json"
+  --latency-swrm "$RES/latency_swrm.json"
   --latency-omo "$RES/latency_omo.json"
   --coverage "$RES/coverage.json")
 if [[ "$RAN_OMO" -eq 1 ]]; then

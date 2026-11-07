@@ -106,7 +106,7 @@ A script can send the data elsewhere under its own configuration.
 ## Agent and host usage
 
 When an agent dispatches coding work, OpenBot sends the task card and the local repository path to
-the selected openswarm executor host. A local run uses this computer. A remote run uses the named
+the selected swrm executor host. A local run uses this computer. A remote run uses the named
 fleet host over its configured transport. The executor can read and change files in its worktree,
 and its selected model provider receives the task and the code context that it needs. The run id,
 host, status, branch, commit, summary, and verify result stay in the local OpenBot app data and chat.

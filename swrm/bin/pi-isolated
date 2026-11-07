@@ -45,7 +45,7 @@ config = {'providers': {'minimax-sandbox': {'baseUrl': 'http://127.0.0.1:18765',
               'id': model, 'name': model, 'reasoning': True, 'input': ['text'],
               'contextWindow': 204800, 'maxTokens': 65536,
               'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}}]}}}
-with tempfile.TemporaryDirectory(prefix='openswarm-pi-config-') as config_dir:
+with tempfile.TemporaryDirectory(prefix='swrm-pi-config-') as config_dir:
     pathlib.Path(config_dir, 'models.json').write_text(json.dumps(config))
     script = '''set -eu
 mkdir -p /tmp/agent /home/pi

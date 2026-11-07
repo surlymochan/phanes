@@ -60,7 +60,7 @@ def ns(**kw):
 
 class PiBackend(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="openswarm-pi-")
+        self.tmp = tempfile.mkdtemp(prefix="swrm-pi-")
         self.script = os.path.join(self.tmp, "pi")
         with open(self.script, "w") as f:
             f.write(textwrap.dedent(FAKE))

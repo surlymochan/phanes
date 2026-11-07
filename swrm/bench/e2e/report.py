@@ -11,12 +11,12 @@ from pathlib import Path
 
 from harness.metrics import summarise
 
-ARM_ORDER = ["baseline", "superpowers", "openflow", "openswarm", "omo"]
+ARM_ORDER = ["baseline", "superpowers", "openflow", "swrm", "omo"]
 ARM_COLORS = {
     "baseline": "#3d5a80",
     "superpowers": "#ee6c4d",
     "openflow": "#2a9d8f",
-    "openswarm": "#e9c46a",
+    "swrm": "#e9c46a",
     "omo": "#6d597a",
 }
 
@@ -125,7 +125,7 @@ def write_summary(path: Path, env: dict | None, by_arm, by_task, by_cell) -> Non
         commits = env.get("commits") or {}
         lines.append(f"- superpowers: {commits.get('superpowers')} ({env.get('superpowers_dir')})")
         lines.append(f"- openflow: {commits.get('openflow')} tarball={env.get('openflow_tgz')}")
-        lines.append(f"- openswarm: {commits.get('openswarm')} ({env.get('openswarm_dir')})")
+        lines.append(f"- swrm: {commits.get('swrm')} ({env.get('swrm_dir')})")
         lines.append(f"- Model flag: {env.get('model')}")
         lines.append(f"- cursor-agent flags: {' '.join(env.get('cursor_flags') or [])}")
         lines.append(f"- Per-run timeout: {env.get('run_timeout_s')}s")

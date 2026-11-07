@@ -64,7 +64,7 @@ def ns(**kw):
 
 class AgyBackend(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="openswarm-agy-")
+        self.tmp = tempfile.mkdtemp(prefix="swrm-agy-")
         self.script = os.path.join(self.tmp, "agy")
         with open(self.script, "w") as f:
             f.write(textwrap.dedent(FAKE))
@@ -251,7 +251,7 @@ class AgyBackend(unittest.TestCase):
         self.assertEqual(xs.agy_login_state(), "unknown")
 
     def test_fleet_status_works_with_and_without_agy(self):
-        cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "openswarm")
+        cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "swrm")
         env = dict(os.environ, OPENSWARM_HOME=os.path.join(self.tmp, "fleet-home"))
         with_agy = subprocess.run([sys.executable, cli, "fleet", "status"], env=env, text=True,
                                   capture_output=True, timeout=60)

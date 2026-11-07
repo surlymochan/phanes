@@ -19,7 +19,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 import _load  # noqa: E402
-import openswarm_consult as consult  # noqa: E402
+import swrm_consult as consult  # noqa: E402
 
 xs = _load.load()
 POLICY = xs.load_policy()
@@ -94,7 +94,7 @@ else:
 
 class ConsultTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="openswarm-consult-")
+        self.tmp = tempfile.mkdtemp(prefix="swrm-consult-")
         self.script = os.path.join(self.tmp, "fake-executor")
         with open(self.script, "w") as stream:
             stream.write(textwrap.dedent(FAKE))
@@ -127,7 +127,7 @@ class ConsultTests(unittest.TestCase):
         os.environ.pop("FAKE_CONSULT_SLEEP_SECONDS", None)
         os.environ.pop("FAKE_CONSULT_AGY_EARLY", None)
         os.environ.pop("FAKE_CONSULT_BARRIER", None)
-        self.cwd_patch = mock.patch("openswarm_consult.os.getcwd", return_value=self.repo)
+        self.cwd_patch = mock.patch("swrm_consult.os.getcwd", return_value=self.repo)
         self.cwd_patch.start()
 
     def tearDown(self):
@@ -170,7 +170,7 @@ class ConsultTests(unittest.TestCase):
     def test_consult_outside_git_uses_temporary_worktrees(self):
         outside = os.path.join(self.tmp, "outside")
         os.mkdir(outside)
-        with mock.patch("openswarm_consult.os.getcwd", return_value=outside):
+        with mock.patch("swrm_consult.os.getcwd", return_value=outside):
             code, result = self.run_consult(["codex", "agy"])
         self.assertEqual(code, 0)
         self.assertTrue(all(row["valid"] for row in result["answers"]))
@@ -284,7 +284,7 @@ class ConsultTests(unittest.TestCase):
         os.makedirs(self.data, exist_ok=True)
         with open(os.path.join(self.data, "policy.local.json"), "w", encoding="utf-8") as stream:
             json.dump({"pi": {"require_isolation": False}}, stream)
-        command = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "openswarm"),
+        command = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "swrm"),
                    "consult", "--question", "Should this contract change?", "--ask", "agy", "--ask", "pi", "--json"]
         result = subprocess.run(command, cwd=self.repo, env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -356,7 +356,7 @@ class WorktreeAdminLockTests(unittest.TestCase):
         # exact pattern). Consult serializes the administration calls
         # through _WORKTREE_ADMIN_LOCK; hammer the helpers the same way and
         # require zero failures.
-        tmp = tempfile.mkdtemp(prefix="openswarm-consult-wt-")
+        tmp = tempfile.mkdtemp(prefix="swrm-consult-wt-")
         try:
             repo = os.path.join(tmp, "repo")
             os.makedirs(repo)

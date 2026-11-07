@@ -167,7 +167,7 @@ After the agent exits: test files touched by the official `test_patch` are resto
 | baseline | The shared prompt only. |
 | superpowers v7.0.0 (`bb92a77`) | superpowers ships a Pi package that registers its `skills/` directory and injects the `using-superpowers` bootstrap at session start. The wrapper runs Pi with extensions and skill discovery off, so the arm puts the same two pieces of text at the top of the prompt: Pi's own `<available_skills>` list for the 15 superpowers skills (name, description, path) and the bootstrap message built exactly as `.pi/extensions/superpowers.ts` builds it. Plus the line "Use the installed skills for this change." |
 | evalid 0.2.1 (npm tarball sha256 `49d17f9af87c04a85fe4fb4395da7b64249da65a5701fe22f1f44600e171b03f`) | `xflow` on PATH, `xflow init --project-root`, and an `AGENTS.md` project entry (Pi loads `AGENTS.md` from the working directory; this is the Pi counterpart of the Cursor project rule used in `bench/e2e/`). The install commit is excluded from the solution diff. Plus "Use the installed workflow tool for this change." |
-| swrm (new opt-in `--backend pi`) | A planner Pi call (5-minute cap) reads `SKILL.md` and the task and writes an executor task file and one check command; then `openswarm run --backend pi --no-worktree --verify <check>` runs the executor with the rest of the 20 minutes. A small shim (`harness/pi_shim.sh`) sends swrm's Pi call through the same wrapper. `--no-worktree` is used because the editable install points at the checkout, so tests run in a separate worktree would import the unmodified code; each run already has its own checkout. |
+| swrm (new opt-in `--backend pi`) | A planner Pi call (5-minute cap) reads `SKILL.md` and the task and writes an executor task file and one check command; then `swrm run --backend pi --no-worktree --verify <check>` runs the executor with the rest of the 20 minutes. A small shim (`harness/pi_shim.sh`) sends swrm's Pi call through the same wrapper. `--no-worktree` is used because the editable install points at the checkout, so tests run in a separate worktree would import the unmodified code; each run already has its own checkout. |
 | oh-my-openagent v5.1.35 (`0777686`) | Not run. It is an OpenCode plugin with its own provider logins; it cannot be routed through the Pi wrapper that every arm must use, and paid APIs were out of scope. |
 
 ## Cost
@@ -219,15 +219,15 @@ Host paths are replaced by placeholders such as `<run>/` and `<bench>/`.
 uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python pandas pyarrow "swebench==3.0.17"
 # fetch data/verified.parquet at the pinned revision and mirror the three repos into repos/
 .venv/bin/python harness/validate.py <instance ids>
-.venv/bin/python run.py --arms baseline,superpowers,openflow,openswarm --reps 3 --jobs 6
+.venv/bin/python run.py --arms baseline,superpowers,openflow,swrm --reps 3 --jobs 6
 .venv/bin/python report.py results/runs.jsonl
 
 # DeepSeek matrix (the wrapper's default provider is deepseek).
 # --only: pylint-dev__pylint-8898,pytest-dev__pytest-10356,pytest-dev__pytest-5787,pytest-dev__pytest-6197,sympy__sympy-14248,sympy__sympy-17630
-.venv/bin/python run.py --arms baseline,superpowers,openflow,openswarm --reps 1 --jobs 6 --only <the 6 ids> --out $PWD/results/runs-deepseek.jsonl --raw-root $PWD/results/raw-deepseek --label ds
+.venv/bin/python run.py --arms baseline,superpowers,openflow,swrm --reps 1 --jobs 6 --only <the 6 ids> --out $PWD/results/runs-deepseek.jsonl --raw-root $PWD/results/raw-deepseek --label ds
 .venv/bin/python report.py results/runs-deepseek.jsonl --out results/deepseek --raw results/raw-deepseek --price deepseek --model-label "<label>"
 
 # MiniMax subset: classify validity, then report only the 4 instances where both arms finished cleanly.
-python3 validity.py --runs results/runs.jsonl --pi-log <wrapper log> --raw results/raw --out results/minimax/validity.jsonl --expected-arms baseline,superpowers,openflow,openswarm --expected-instances <the 6 ids>
+python3 validity.py --runs results/runs.jsonl --pi-log <wrapper log> --raw results/raw --out results/minimax/validity.jsonl --expected-arms baseline,superpowers,openflow,swrm --expected-instances <the 6 ids>
 .venv/bin/python report.py results/runs.jsonl --out results/minimax --price minimax --only-instances pytest-dev__pytest-10356,pytest-dev__pytest-5787,sympy__sympy-14248,sympy__sympy-17630 --exclude results/minimax/validity.jsonl --model-label "<label>"
 ```

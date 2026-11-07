@@ -1,4 +1,4 @@
-"""openswarm bench is deterministic and matches the checked-in rubric. No OmO required."""
+"""swrm bench is deterministic and matches the checked-in rubric. No OmO required."""
 import json
 import os
 import sys
@@ -9,7 +9,7 @@ BENCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BENCH)
 
 import make_trace  # noqa: E402
-import route_openswarm as harness  # noqa: E402
+import route_swrm as harness  # noqa: E402
 
 
 def _rows(path):
@@ -17,7 +17,7 @@ def _rows(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
-class BenchOpenswarm(unittest.TestCase):
+class BenchSwrm(unittest.TestCase):
     def test_trace_matches_rubric(self):
         expected = make_trace.build()
         on_disk = _rows(os.path.join(BENCH, "trace.jsonl"))
@@ -28,8 +28,8 @@ class BenchOpenswarm(unittest.TestCase):
     def test_catalogue_tiers_match_live_classifiers(self):
         old = os.environ.copy()
         try:
-            home = tempfile.mkdtemp(prefix="openswarm-bench-test-")
-            xs = harness.load_openswarm(home)
+            home = tempfile.mkdtemp(prefix="swrm-bench-test-")
+            xs = harness.load_swrm(home)
             policy = xs.jload(os.path.join(harness.ROOT, "policy.json"), {})
             catalogue = harness.load_json(os.path.join(BENCH, "catalogue.json"))
             scenarios = harness.load_json(os.path.join(BENCH, "scenarios.json"))
@@ -53,8 +53,8 @@ class BenchOpenswarm(unittest.TestCase):
         import score  # bench/score.py
         old = os.environ.copy()
         try:
-            home = tempfile.mkdtemp(prefix="openswarm-bench-test-")
-            xs = harness.load_openswarm(home)
+            home = tempfile.mkdtemp(prefix="swrm-bench-test-")
+            xs = harness.load_swrm(home)
             policy = xs.jload(os.path.join(harness.ROOT, "policy.json"), {})
             policy["routing"]["default_order"] = ["codex", "ocgo", "deepseek"]
             policy["codex"]["require_default_model"] = False
@@ -63,7 +63,7 @@ class BenchOpenswarm(unittest.TestCase):
             trace = harness.load_jsonl(os.path.join(BENCH, "trace.jsonl"))
             prices = harness.load_json(os.path.join(BENCH, "prices.json"))
             rows, _ = harness.route_all(xs, policy, catalogue, scenarios, trace)
-            block = score.accumulate("openswarm", rows, trace, scenarios, catalogue, prices)
+            block = score.accumulate("swrm", rows, trace, scenarios, catalogue, prices)
             mlw = block["scenarios"]["mixed_late_week"]
             self.assertEqual(mlw["review_independent_rate"], 0.0)
             self.assertEqual(mlw["review_model_independent_rate"], round(8 / 12, 4))
@@ -78,8 +78,8 @@ class BenchOpenswarm(unittest.TestCase):
     def test_decisions_are_deterministic(self):
         old = os.environ.copy()
         try:
-            home = tempfile.mkdtemp(prefix="openswarm-bench-test-")
-            xs = harness.load_openswarm(home)
+            home = tempfile.mkdtemp(prefix="swrm-bench-test-")
+            xs = harness.load_swrm(home)
             policy = xs.jload(os.path.join(harness.ROOT, "policy.json"), {})
             catalogue = harness.load_json(os.path.join(BENCH, "catalogue.json"))
             scenarios = harness.load_json(os.path.join(BENCH, "scenarios.json"))

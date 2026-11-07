@@ -17,7 +17,7 @@ xs = _load.load()
 
 class FleetTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-fleet-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-fleet-")
         self.root = pathlib.Path(self.tmp.name)
         self.patch = mock.patch.object(xs, "DATA", str(self.root))
         self.patch.start()
@@ -113,11 +113,11 @@ class FleetTests(unittest.TestCase):
         self.config([{"name": "host", "kind": "local"}])
         output = io.StringIO()
         snapshot = {"lanes": [], "active_runs": [], "lane_config_valid": False,
-                    "lane_config_error": "invalid lane config /etc/openswarm/lanes.json: bad JSON"}
+                    "lane_config_error": "invalid lane config /etc/swrm/lanes.json: bad JSON"}
         with mock.patch.object(xs, "host_json", return_value=snapshot), contextlib.redirect_stdout(output):
             xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=False))
         self.assertIn("host  config invalid  lanes=0 active=0", output.getvalue())
-        self.assertIn("invalid lane config /etc/openswarm/lanes.json: bad JSON", output.getvalue())
+        self.assertIn("invalid lane config /etc/swrm/lanes.json: bad JSON", output.getvalue())
 
     def test_transport_argv_binary_input_and_timeout(self):
         for host, prefix in [({"kind": "ssh", "ssh": "alias"}, ["ssh", "alias", "--"]),
@@ -132,8 +132,8 @@ class FleetTests(unittest.TestCase):
         binary = self.root / "stub"
         binary.write_text("#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit(7)\n")
         binary.chmod(0o755)
-        self.config([{"name": "local", "kind": "local", "openswarm": str(binary)}])
-        proc = subprocess.run([sys.executable, str(pathlib.Path(_load.ROOT) / "bin" / "openswarm"),
+        self.config([{"name": "local", "kind": "local", "swrm": str(binary)}])
+        proc = subprocess.run([sys.executable, str(pathlib.Path(_load.ROOT) / "bin" / "swrm"),
                                "fleet", "exec", "local", "--", "run", "--prompt", "$(false); literal"],
                               env={**xs.os.environ, "OPENSWARM_HOME": str(self.root)}, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 7)
@@ -179,7 +179,7 @@ class FleetTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         ledger_output = io.StringIO()
         try:
-            sys.argv = ["openswarm", "fleet", "ledger", "pull"]
+            sys.argv = ["swrm", "fleet", "ledger", "pull"]
             with mock.patch.dict(xs.os.environ, {
                 "PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
                 "OPENSWARM_TEST_SSH_ROOT": str(self.root),
@@ -187,7 +187,7 @@ class FleetTests(unittest.TestCase):
                 xs.main()
             rows = [json.loads(line) for line in destination.read_text().splitlines()]
             first_pull = destination.read_bytes()
-            sys.argv = ["openswarm", "fleet", "ledger", "pull"]
+            sys.argv = ["swrm", "fleet", "ledger", "pull"]
             with mock.patch.dict(xs.os.environ, {
                 "PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
                 "OPENSWARM_TEST_SSH_ROOT": str(self.root),
@@ -196,7 +196,7 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), first_pull)
 
             custom_destination = self.root / "custom.jsonl"
-            sys.argv = ["openswarm", "fleet", "ledger", "pull", "--hosts", "remote",
+            sys.argv = ["swrm", "fleet", "ledger", "pull", "--hosts", "remote",
                         "--into", str(custom_destination)]
             with mock.patch.dict(xs.os.environ, {
                 "PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", ""),
@@ -206,7 +206,7 @@ class FleetTests(unittest.TestCase):
             self.assertEqual([json.loads(line)["run_id"] for line in custom_destination.read_text().splitlines()],
                              ["shared", "remote-run"])
 
-            sys.argv = ["openswarm", "ledger", "--fleet", "--json"]
+            sys.argv = ["swrm", "ledger", "--fleet", "--json"]
             with contextlib.redirect_stdout(ledger_output):
                 xs.main()
         finally:
@@ -230,7 +230,7 @@ class FleetTests(unittest.TestCase):
         self.config([{"name": "down", "kind": "ssh", "ssh": "down"}])
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "fleet", "ledger", "pull", "--into", str(self.root / "out.jsonl")]
+            sys.argv = ["swrm", "fleet", "ledger", "pull", "--into", str(self.root / "out.jsonl")]
             with mock.patch.dict(xs.os.environ, {"PATH": str(fake_bin) + os.pathsep + xs.os.environ.get("PATH", "")}):
                 with self.assertRaises(SystemExit) as error, contextlib.redirect_stderr(io.StringIO()):
                     xs.main()

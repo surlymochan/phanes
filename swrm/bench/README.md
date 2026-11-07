@@ -20,7 +20,7 @@ The catalogue now includes the configured `gpt-6-luna` default for offline routi
 
 ## What each router actually does
 
-swrm `route()` (`bin/openswarm`) picks a backend order from the task type, then a model inside that backend:
+swrm `route()` (`bin/swrm`) picks a backend order from the task type, then a model inside that backend:
 
 - `review`, `second-opinion`, and `audit` try OpenCode Go, then Codex, then DeepSeek. Inside an OpenCode Go tier, a review pick spreads off the router's workhorse family (the family the newest-first pick would take) when the tier offers another family, so the review does not repeat the family implementation work itself uses after a spill.
 - `mechanical`, `docs`, `test`, `format`, `rename`, and `migration` at difficulty ≤ 2 try OpenCode Go first.
@@ -41,7 +41,7 @@ OmO does not read a quota window. Exhaustion is simulated the way the runtime le
 
 A Codex window ≥ 95% exhausts every `chatgpt-subscription` model. An OpenCode Go model is exhausted only when its max window usage is ≥ 1.0 (the budget is gone). Usage of 0.90 is above swrm's 85% skip and is not an OmO error. DeepSeek is exhausted below ¥10.
 
-model-core has no standalone route command. OmO latency is in-process, after bun has loaded the module. It is not comparable to `openswarm route` cold start.
+model-core has no standalone route command. OmO latency is in-process, after bun has loaded the module. It is not comparable to `swrm route` cold start.
 
 ## Rubric
 
@@ -142,12 +142,12 @@ Outputs in `bench/results/`:
 
 | File | Contents |
 | --- | --- |
-| `openswarm.jsonl`, `omo.jsonl` | One decision per task per scenario |
+| `swrm.jsonl`, `omo.jsonl` | One decision per task per scenario |
 | `baselines.jsonl` | Naive baselines: everything on `gpt-6.1-sol`, everything on `gpt-6-astra`, everything on `glm-5.3-flash` |
 | `scores.json`, `scores.csv`, `summary.md` | Metrics, including the unrouted breakdown |
 | `coverage.json` | Providers and model ids named in the pinned sources |
 | `chart.svg`, `chart.png` | Grouped bars for the objective metrics |
-| `latency_openswarm.json`, `latency_omo.json` | Median and p95 |
+| `latency_swrm.json`, `latency_omo.json` | Median and p95 |
 | `environment.json` | CPU, core count, OS, kernel, Python, bun, both commits, date, commands |
 
 A decision carries `task_id`, `scenario`, `tool`, `backend`, `provider`, `model`, `effort`, `variant`, `tier`, `attempts`, `failed_attempts`, and `reasons`. `attempts` includes failed attempts on an exhausted quota. A swrm review that stays in the implementer's family also carries `degraded: "single-family"`.
@@ -162,7 +162,7 @@ Baselines have no fallback. If the single model is exhausted they record one fai
 - Computed cost: metered USD (DeepSeek), OpenCode Go accounting USD, and Codex token totals. Subscription usage is the sum across scenarios and the mean per scenario. Each scenario is one pass over the 80-task trace, so the per-pass figure is the share of the nominal 5h budget one pass would use. Failed attempts add no token cost. The call was rejected before generation.
 - Coverage: distinct providers and model ids referenced by OmO model-core category and agent fallback chains, and the number of categories, counted from the pinned commit. Compared with swrm's three backends and the model ids in `policy.json`.
 - Agreement with the difficulty→tier rubric: exact, over, under against `min_tier`. This is not a quality score and it is not the headline. swrm agrees by construction when quota allows. Unrouted is included in under.
-- Latency: in-process per decision, at least 1000 samples, median and p95. swrm also reports CLI cold start over 25 runs of `bin/openswarm route --type impl --difficulty 3`.
+- Latency: in-process per decision, at least 1000 samples, median and p95. swrm also reports CLI cold start over 25 runs of `bin/swrm route --type impl --difficulty 3`.
 
 ## Environment
 
@@ -181,10 +181,10 @@ Recorded by `bench/run.sh` into `bench/results/environment.json` on 2026-10-17T1
 Commands, from the repository root:
 
 ```bash
-python3 bench/route_openswarm.py --out bench/results/openswarm.jsonl --latency-out bench/results/latency_openswarm.json --decisions 1000 --cli-runs 25
+python3 bench/route_swrm.py --out bench/results/swrm.jsonl --latency-out bench/results/latency_swrm.json --decisions 1000 --cli-runs 25
 bun bench/route_omo.ts --omo-dir <omo-dir> --out bench/results/omo.jsonl --latency-out bench/results/latency_omo.json --decisions 1000
 python3 bench/coverage.py --omo-dir <omo-dir> --out bench/results/coverage.json
-python3 bench/score.py --openswarm bench/results/openswarm.jsonl --out-dir bench/results --env bench/results/environment.json --latency-openswarm bench/results/latency_openswarm.json --latency-omo bench/results/latency_omo.json --coverage bench/results/coverage.json --omo bench/results/omo.jsonl
+python3 bench/score.py --swrm bench/results/swrm.jsonl --out-dir bench/results --env bench/results/environment.json --latency-swrm bench/results/latency_swrm.json --latency-omo bench/results/latency_omo.json --coverage bench/results/coverage.json --omo bench/results/omo.jsonl
 ```
 
 ## Results
@@ -311,7 +311,7 @@ Latency is the only non-deterministic section.
 | Measurement | n | median | p95 |
 | --- | ---: | ---: | ---: |
 | swrm in-process `route()` | 1120 | 0.0075 ms | 0.0215 ms |
-| swrm `bin/openswarm route` cold start | 25 | 74.0 ms | 86.9 ms |
+| swrm `bin/swrm route` cold start | 25 | 74.0 ms | 86.9 ms |
 | OmO in-process, module already loaded | 1120 | 0.0292 ms | 0.1027 ms |
 
 OmO has no route CLI, so there is no cold-start number for it. Both in-process medians are well under a tenth of a millisecond. The number a person would feel for swrm is the CLI cold start.

@@ -39,7 +39,7 @@ export function assertDispatchInputValues(
     }
   }
   if (windowsScript && WINDOWS_SCRIPT_FORBIDDEN.test(executable)) {
-    throw new Error("The openswarm command path contains a character that is not safe for a Windows command wrapper.");
+    throw new Error("The swrm command path contains a character that is not safe for a Windows command wrapper.");
   }
 }
 
@@ -71,7 +71,7 @@ export function assertDispatchArgs(
     }
   }
   if (windowsScript && WINDOWS_SCRIPT_FORBIDDEN.test(executable)) {
-    throw new Error("The openswarm command path contains a character that is not safe for a Windows command wrapper.");
+    throw new Error("The swrm command path contains a character that is not safe for a Windows command wrapper.");
   }
 }
 
@@ -118,7 +118,7 @@ export const writeRemoteDispatchCard = Effect.fn("DispatchProcess.writeRemoteCar
   return path;
 });
 
-/** Remove a remote card after openswarm has read it. */
+/** Remove a remote card after swrm has read it. */
 export const removeRemoteDispatchCard = Effect.fn("DispatchProcess.removeRemoteCard")(function* (
   transport: DispatchFileTransport,
   path: string,
@@ -138,7 +138,7 @@ export const dispatchFailure = (options: {
 }) => {
   const exitCode = options.exitCode ?? null;
   const timedOut = options.timedOut ?? false;
-  logger.warn("The openswarm request failed.", { step: options.step, exitCode, timedOut });
+  logger.warn("The swrm request failed.", { step: options.step, exitCode, timedOut });
   return new DispatchFailed({
     cause: options.cause,
     reason: options.reason,
@@ -154,11 +154,11 @@ export interface DispatchCommandOutput {
 }
 
 export interface DispatchCommandOptions {
-  /** Optional input for the OpenSwarm host file transport. */
+  /** Optional input for the swrm host file transport. */
   stdin?: string;
 }
 
-/** Owns one bounded CLI request. The detached executor belongs to openswarm. */
+/** Owns one bounded CLI request. The detached executor belongs to swrm. */
 export const dispatchCommand = Effect.fn("DispatchProcess.command")(function* (
   binary: string,
   args: string[],
@@ -213,7 +213,7 @@ export const dispatchCommand = Effect.fn("DispatchProcess.command")(function* (
             finish(
               Effect.fail(
                 dispatchFailure({
-                  cause: new Error("openswarm output exceeded the size limit"),
+                  cause: new Error("swrm output exceeded the size limit"),
                   reason: sourceText("error.backend.dispatchOutputUnreadable"),
                   step: "parse",
                 }),
@@ -239,7 +239,7 @@ export const dispatchCommand = Effect.fn("DispatchProcess.command")(function* (
             finish(
               Effect.fail(
                 dispatchFailure({
-                  cause: new Error("openswarm exited unsuccessfully"),
+                  cause: new Error("swrm exited unsuccessfully"),
                   reason:
                     code === null
                       ? sourceText("error.backend.dispatchExited")
@@ -263,7 +263,7 @@ export const dispatchCommand = Effect.fn("DispatchProcess.command")(function* (
           orElse: () =>
             Effect.fail(
               dispatchFailure({
-                cause: new Error("openswarm command timed out"),
+                cause: new Error("swrm command timed out"),
                 reason: sourceText("error.backend.dispatchTimeout"),
                 step: "exit code",
                 timedOut: true,

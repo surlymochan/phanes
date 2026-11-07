@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-MOD = runpy.run_path(str(ROOT / 'bin/hub-openswarm-bridge'))
+MOD = runpy.run_path(str(ROOT / 'bin/hub-swrm-bridge'))
 G = MOD['run_submit'].__globals__
 
 class HubBridgeTests(unittest.TestCase):
@@ -26,7 +26,9 @@ class HubBridgeTests(unittest.TestCase):
         git('add','a'); git('-c','user.name=test','-c','user.email=test@test','commit','-qm','init')
         self.card = self.path/'card'; self.card.write_text('Repository: openbot\nExecutor-Type: mechanical\nDifficulty: 1\nAdd a function.\n')
         self.config = self.path/'config.json'
-        self.config.write_text(json.dumps({'workspace':str(self.workspace),'repo':str(self.repo)}))
+        self.config.write_text(json.dumps({'workspace':str(self.workspace),'repo':str(self.repo),
+                                                'hosts':['executor-local','executor-remote'],
+                                                'ssh_host':'gateway.example.invalid'}))
         self.args = ['--detach','--cwd',str(self.workspace),'--task-file',str(self.card),'--title','test',
                      '--budget-minutes','4']
         self.patches = [mock.patch.dict(G, {'config_path':self.config, 'store':self.path/'store'})]
@@ -36,30 +38,39 @@ class HubBridgeTests(unittest.TestCase):
         def fake(req):
             if req['op']=='submit':
                 self.assertEqual((req['type'],req['difficulty']),('mechanical',1))
-                return {'id':'run-1','state':'queued','host':'gores1','backend':'pi','model':'MiniMax'}
+                return {'id':'run-1','state':'queued','host':'executor-local','backend':'pi','model':'MiniMax'}
             return {'id':'run-1','result':{'result':{'summary':'done'}}}
         with mock.patch.dict(G, {'gateway':fake}), contextlib.redirect_stdout(io.StringIO()) as output:
             MOD['run_submit'](self.args)
-            self.assertEqual(json.loads(output.getvalue())['executor_host'],'gores1')
+            self.assertEqual(json.loads(output.getvalue())['executor_host'],'executor-local')
             output.seek(0); output.truncate()
             self.assertTrue(MOD['mapped']('run-1','info'))
-            self.assertIn('Executor host: gores1',json.loads(output.getvalue())['result']['result']['summary'])
+            self.assertIn('Executor host: executor-local',json.loads(output.getvalue())['result']['result']['summary'])
+
+    def test_submit_rejects_unconfigured_executor_host(self):
+        reply = {'id':'run-1', 'state':'queued', 'host':'unconfigured.example.invalid'}
+        with mock.patch.dict(G, {'gateway':mock.Mock(return_value=reply)}):
+            with self.assertRaisesRegex(RuntimeError, 'invalid acknowledgement'):
+                MOD['run_submit'](self.args)
+        db = MOD['db_open']()
+        self.assertEqual(db.execute('select state from handoffs').fetchone(), ('pending',))
+        db.close()
 
     def test_finished_remote_commit_is_fetched_for_local_review(self):
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)
         base = subprocess.check_output(['git', '-C', str(remote), 'rev-parse', 'HEAD'], text=True).strip()
-        subprocess.run(['git', '-C', str(remote), 'checkout', '-qb', 'openswarm/run-1'], check=True)
+        subprocess.run(['git', '-C', str(remote), 'checkout', '-qb', 'swrm/run-1'], check=True)
         (remote / 'a').write_text('remote result')
         subprocess.run(['git', '-C', str(remote), '-c', 'user.name=test', '-c', 'user.email=test@test',
                         'commit', '-qam', 'result'], check=True)
         commit = subprocess.check_output(['git', '-C', str(remote), 'rev-parse', 'HEAD'], text=True).strip()
-        info = {'id': 'run-1', 'result': {'branch': 'openswarm/run-1', 'commit': commit,
+        info = {'id': 'run-1', 'result': {'branch': 'swrm/run-1', 'commit': commit,
                                            'workspace': {'repo': str(remote), 'base': base},
                                            'result': {'summary': 'done'}}}
         def gateway(req):
             if req['op'] == 'submit':
-                return {'id':'run-1','state':'queued','host':'gores1','backend':'pi','model':'MiniMax'}
+                return {'id':'run-1','state':'queued','host':'executor-local','backend':'pi','model':'MiniMax'}
             if req['op'] == 'info':
                 return info
             bundle = subprocess.run([sys.executable, str(ROOT / 'bin/fleet-result-bundle')],
@@ -70,18 +81,18 @@ class HubBridgeTests(unittest.TestCase):
             output.seek(0); output.truncate()
             self.assertTrue(MOD['mapped']('run-1', 'info'))
             result = json.loads(output.getvalue())['result']
-        self.assertEqual(result['local_review_ref'], 'refs/openswarm/run-1')
-        actual = subprocess.check_output(['git', '-C', str(self.repo), 'show', 'refs/openswarm/run-1:a'], text=True)
+        self.assertEqual(result['local_review_ref'], 'refs/swrm/run-1')
+        actual = subprocess.check_output(['git', '-C', str(self.repo), 'show', 'refs/swrm/run-1:a'], text=True)
         self.assertEqual(actual, 'remote result')
         self.assertEqual((self.repo / 'a').read_text(), 'x')
 
     def test_result_fetch_failure_keeps_completed_result_visible(self):
         def gateway(req):
             if req['op'] == 'submit':
-                return {'id':'run-1','state':'queued','host':'gores1','backend':'pi','model':'MiniMax'}
+                return {'id':'run-1','state':'queued','host':'executor-local','backend':'pi','model':'MiniMax'}
             if req['op'] == 'bundle':
                 raise RuntimeError('transport unavailable')
-            return {'id':'run-1', 'result':{'branch':'openswarm/run-1', 'commit':'f' * 40,
+            return {'id':'run-1', 'result':{'branch':'swrm/run-1', 'commit':'f' * 40,
                                             'result':{'summary':'done'}}}
         with mock.patch.dict(G, {'gateway':gateway}), contextlib.redirect_stdout(io.StringIO()) as output:
             MOD['run_submit'](self.args)
@@ -106,7 +117,7 @@ class HubBridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'no available fleet lane.*retry'):
                 MOD['run_submit'](self.args)
         with mock.patch.dict(G, {'gateway':mock.Mock(return_value={'id':'run-after-busy','state':'queued',
-                                                                  'host':'gocc','backend':'agy','model':'x'})}), \
+                                                                  'host':'executor-remote','backend':'agy','model':'x'})}), \
              contextlib.redirect_stdout(io.StringIO()):
             MOD['run_submit'](self.args)
         db = MOD['db_open']()
@@ -145,13 +156,13 @@ class HubBridgeTests(unittest.TestCase):
 
     def test_no_lane_through_gateway_then_retry(self):
         fake_home = self.path / 'gateway-home'
-        fake_cli = fake_home / '.local/bin/openswarm'
+        fake_cli = fake_home / '.local/bin/swrm'
         fake_cli.parent.mkdir(parents=True)
         marker = self.path / 'called'
         fake_cli.write_text('#!' + sys.executable + '\n' +
             'import json,pathlib,sys\np=pathlib.Path(' + repr(str(marker)) + ')\n' +
             'if not p.exists():\n p.touch(); print(json.dumps({"ok":False,"error":"no available fleet lane"})); sys.exit(1)\n' +
-            'print(json.dumps({"ok":True,"id":"run-after-busy","state":"queued","host":"gocc","backend":"agy","model":"x"}))\n')
+            'print(json.dumps({"ok":True,"id":"run-after-busy","state":"queued","host":"executor-remote","backend":"agy","model":"x"}))\n')
         fake_cli.chmod(0o755)
         tunnel = self.path / 'gateway-tunnel.py'
         tunnel.write_text('import os,sys\nos.environ["HOME"]=' + repr(str(fake_home)) + '\n' +
@@ -169,7 +180,7 @@ class HubBridgeTests(unittest.TestCase):
 
     def test_review_profile_reaches_gateway(self):
         self.card.write_text('Repository: openbot\nExecutor-Type: review\nDifficulty: 2\nReview the code.\n')
-        gateway = mock.Mock(return_value={'id':'run-review','state':'queued','host':'gocc','backend':'copilot','model':'x'})
+        gateway = mock.Mock(return_value={'id':'run-review','state':'queued','host':'executor-remote','backend':'copilot','model':'x'})
         with mock.patch.dict(G, {'gateway':gateway}), contextlib.redirect_stdout(io.StringIO()):
             MOD['run_submit'](self.args)
         self.assertEqual(gateway.call_args.args[0]['type'], 'review')
@@ -213,7 +224,7 @@ class HubBridgeTests(unittest.TestCase):
         db = MOD['db_open']()
         request_id = db.execute("select request_id from handoffs where state='pending'").fetchone()[0]
         db.close()
-        args = ['bridge', 'reconcile', '--request-id', request_id, '--host', 'gores1', '--run-id', 'run-1',
+        args = ['bridge', 'reconcile', '--request-id', request_id, '--host', 'executor-local', '--run-id', 'run-1',
                 '--confirm', 'matching-terminal-run-verified']
         with mock.patch.object(sys, 'argv', ['bridge', *args]), \
              mock.patch.dict(G, {'gateway':mock.Mock(return_value={'id':'run-1','result':None})}):

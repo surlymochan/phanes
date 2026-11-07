@@ -3,7 +3,7 @@ import type { messages as source } from "../../en/error/backend";
 
 export const messages = {
   "error.backend.dispatchCommand":
-    "Nie udało się ukończyć żądania openswarm. Sprawdź ustawienia wykonawcy i stan uruchomienia przed ponowną próbą.",
+    "Nie udało się ukończyć żądania swrm. Sprawdź ustawienia wykonawcy i stan uruchomienia przed ponowną próbą.",
   "error.backend.dispatchOwnChat": "Wysyłaj pracę programistyczną tylko z własnego czatu.",
   "error.backend.dispatchLaneOptions":
     "Lane używa skonfigurowanych backendu i modelu. Pomiń backend i model, gdy wybierasz lane.",
@@ -15,13 +15,13 @@ export const messages = {
   "error.backend.dispatchExecutorWorkspace":
     "Agent w trybie „Tylko obszar roboczy” może używać tylko wykonawcy Codex, bo pozostali wykonawcy nie ograniczają miejsca zapisu. Pomiń lane i backend.",
   "error.backend.dispatchRepository":
-    "Skonfiguruj w openswarm fleet.json pasujące ścieżki repozytoriów lokalnych i wykonawcy.",
-  "error.backend.dispatchSpawnFailed": "Nie udało się uruchomić openswarm.",
-  "error.backend.dispatchExitCode": "openswarm zakończył działanie z kodem {code}.",
-  "error.backend.dispatchExited": "openswarm zakończył działanie przed zwróceniem wyniku.",
-  "error.backend.dispatchTimeout": "openswarm nie odpowiedział przed upływem limitu czasu.",
-  "error.backend.dispatchOutputUnreadable": "Nie udało się odczytać danych wyjściowych openswarm.",
-  "error.backend.dispatchSaveFailed": "Nie udało się zapisać żądania openswarm.",
+    "Skonfiguruj w swrm fleet.json pasujące ścieżki repozytoriów lokalnych i wykonawcy.",
+  "error.backend.dispatchSpawnFailed": "Nie udało się uruchomić swrm.",
+  "error.backend.dispatchExitCode": "swrm zakończył działanie z kodem {code}.",
+  "error.backend.dispatchExited": "swrm zakończył działanie przed zwróceniem wyniku.",
+  "error.backend.dispatchTimeout": "swrm nie odpowiedział przed upływem limitu czasu.",
+  "error.backend.dispatchOutputUnreadable": "Nie udało się odczytać danych wyjściowych swrm.",
+  "error.backend.dispatchSaveFailed": "Nie udało się zapisać żądania swrm.",
   "error.backend.dispatchApprovalDenied": "Osoba odrzuciła tę wysyłkę kodową. Nic nie zostało uruchomione.",
   "error.backend.dispatchApprovalMissing": "Ta wysyłka kodowa nie ma zatwierdzenia. Nic nie zostało uruchomione.",
   "error.backend.eventsUnavailable": "Zdarzenia nie są dostępne na tym hoście.",

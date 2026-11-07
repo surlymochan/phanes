@@ -47,3 +47,12 @@ workflow（`.github/workflows/phanes.yml` 的 `changes` 任务）与脚本
 | `python -m unittest discover -s tools/tests -p 'test_ci_swrm_gate.py' -v` | `Ran 6 tests … OK` |
 | `python -m unittest discover -s tools/tests -p 'test_*.py' -v` | `Ran 144 tests … OK` |
 | `bash tools/ci-swrm.sh` | 门禁脚本本身可执行；Swrm 套件 `Ran 1959 tests`，本机只剩 8 个与本改动无关的环境失败（`test_fleet_refresh` 缺 `/usr/lib/ssl/openssl.cnf`、`test_pi_isolation` 缺 bwrap 用户命名空间）。本 PR 对 `swrm/` 目录零改动，CI 的 ubuntu/macOS 运行器上这两个依赖都在。 |
+
+## 测试隔离
+
+测试及离线探针的 `TMPDIR` 固定在 worktree 的 `.tmp/test-tmp`。门禁先清除继承的
+`OPENSWARM_*` / `XSWARM_*` 覆盖项，再把 `HOME`、`OPENSWARM_HOME`、XDG 目录和
+`GH_CONFIG_DIR` 指向新建临时目录，不读取操作者的真实控制面配置。
+测试加载器清理环境后，会重新设置隔离的 `OPENSWARM_FLEET_GUARD_CONFIG`，
+避免回退到 `/etc` 下的机器级协调器；门禁也为离线探针设置该覆盖项及容量目录。
+`OPENSWARM_*` 保留为 swrm 上游兼容环境接口；命令和默认目录已使用 `swrm`。

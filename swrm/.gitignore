@@ -10,7 +10,7 @@ venv/
 /policy.local.json
 /state.json
 /ledger.jsonl
-.openswarm-wt-*/
+.swrm-wt-*/
 # run outputs are runtime artefacts (result/review/events per run); keep only the placeholder
 /runs/*
 !/runs/.gitkeep

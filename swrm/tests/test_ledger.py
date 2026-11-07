@@ -18,7 +18,7 @@ xs = _load.load()
 
 class LedgerTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="openswarm-ledger-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="swrm-ledger-")
         self.root = Path(self.tmp.name)
         self.constants = {key: getattr(xs, key) for key in ("DATA", "LEDGER", "RUNS", "HOME")}
         xs.DATA = str(self.root / "data")
@@ -87,7 +87,7 @@ class LedgerTests(unittest.TestCase):
     def run_ingest(self, *args):
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "ledger", "ingest", *args]
+            sys.argv = ["swrm", "ledger", "ingest", *args]
             output = io.StringIO()
             with mock.patch.dict(os.environ, self.gh_env), contextlib.redirect_stdout(output):
                 xs.main()
@@ -98,7 +98,7 @@ class LedgerTests(unittest.TestCase):
     def run_ingest_result(self, *args):
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "ledger", "ingest", *args]
+            sys.argv = ["swrm", "ledger", "ingest", *args]
             output, error = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, self.gh_env), contextlib.redirect_stdout(output), \
                     contextlib.redirect_stderr(error):
@@ -113,7 +113,7 @@ class LedgerTests(unittest.TestCase):
     def run_ledger_command(self, *args):
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "ledger", *args]
+            sys.argv = ["swrm", "ledger", *args]
             output = io.StringIO()
             with mock.patch.object(xs, "load_policy", return_value={}), contextlib.redirect_stdout(output):
                 xs.main()
@@ -135,7 +135,7 @@ class LedgerTests(unittest.TestCase):
 
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "ledger", "--json"]
+            sys.argv = ["swrm", "ledger", "--json"]
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 xs.main()
@@ -177,7 +177,7 @@ class LedgerTests(unittest.TestCase):
 
         original_argv = sys.argv
         try:
-            sys.argv = ["openswarm", "ledger", "--json"]
+            sys.argv = ["swrm", "ledger", "--json"]
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 xs.main()
@@ -282,8 +282,8 @@ class LedgerTests(unittest.TestCase):
         repo, sha = "octo/project", "a" * 40
         pulls = [
             self.matched_pr(repo, 14, body="Created for run body-run"),
-            self.matched_pr(repo, 22, head={"ref": "openswarm/branch-run", "sha": "b" * 40,
-                                             "label": "octo:openswarm/branch-run"}),
+            self.matched_pr(repo, 22, head={"ref": "swrm/branch-run", "sha": "b" * 40,
+                                             "label": "octo:swrm/branch-run"}),
             self.matched_pr(repo, 31, head={"ref": "another", "sha": sha}),
         ]
         fixtures = {self.pull_list_endpoint(repo): pulls}
@@ -292,7 +292,7 @@ class LedgerTests(unittest.TestCase):
         calls = self.make_gh(fixtures)
         path = self.put_fleet_ledger(
             {"id": "body-run", "ts": xs.NOW(), "future_field": {"kept": True}},
-            {"id": "branch-run", "ts": xs.NOW(), "branch": "refs/heads/openswarm/branch-run"},
+            {"id": "branch-run", "ts": xs.NOW(), "branch": "refs/heads/swrm/branch-run"},
             {"id": "sha-run", "ts": xs.NOW(), "commit": sha},
         )
 

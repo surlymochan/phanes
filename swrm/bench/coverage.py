@@ -1,7 +1,7 @@
 """Count routing coverage from the pinned sources.
 
 OmO numbers come from importing packages/model-core at --omo-dir (category and
-agent fallback chains). openswarm numbers come from policy.json.
+agent fallback chains). swrm numbers come from policy.json.
 """
 import json
 import os
@@ -27,7 +27,7 @@ def policy_model_ids(policy):
     return sorted(found)
 
 
-def openswarm_side(policy):
+def swrm_side(policy):
     backends = list((policy.get("routing") or {}).get("default_order") or [])
     models = policy_model_ids(policy)
     return {
@@ -60,12 +60,12 @@ def main():
     with open(os.path.join(ROOT, "policy.json")) as f:
         policy = json.load(f)
     report = {
-        "openswarm": openswarm_side(policy),
+        "swrm": swrm_side(policy),
         "omo": None,
         "omo_dir": "<omo-dir>" if args.omo_dir else "",
         "note": (
             "OmO providers and model ids are the union of category and agent "
-            "fallback chains in packages/model-core. openswarm model ids are the "
+            "fallback chains in packages/model-core. swrm model ids are the "
             "OpenCode Go monthly-cap keys plus deepseek.tiers values in policy.json. "
             "Codex slugs are not listed in policy.json."
         ),
@@ -86,9 +86,9 @@ def main():
     with open(args.out, "w") as f:
         json.dump(report, f, indent=2, sort_keys=True)
         f.write("\n")
-    sw = report["openswarm"]
+    sw = report["swrm"]
     print(
-        f"openswarm backends={sw['backends']} policy_model_ids={sw['model_ids_in_policy']}"
+        f"swrm backends={sw['backends']} policy_model_ids={sw['model_ids_in_policy']}"
     )
     if report["omo"]:
         om = report["omo"]

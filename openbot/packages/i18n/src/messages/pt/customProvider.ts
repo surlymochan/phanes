@@ -4,8 +4,8 @@ import type { messages as source } from "../en/customProvider";
 export const messages = {
   "customProvider.dispatch.title": "Executores de código",
   "customProvider.dispatch.description":
-    "Os agentes podem enviar trabalho de programação para o openswarm. Os cartões de tarefa e o código vão para o computador anfitrião executor e seu provedor de modelos. Deixe a lane vazia para uma execução separada.",
-  "customProvider.dispatch.binary": "Comando ou caminho do openswarm",
+    "Os agentes podem enviar trabalho de programação para o swrm. Os cartões de tarefa e o código vão para o computador anfitrião executor e seu provedor de modelos. Deixe a lane vazia para uma execução separada.",
+  "customProvider.dispatch.binary": "Comando ou caminho do swrm",
   "customProvider.dispatch.host": "Computador anfitrião de frota padrão",
   "customProvider.dispatch.lane": "Lane padrão (opcional)",
   "customProvider.registry.title": "Registro ACP",

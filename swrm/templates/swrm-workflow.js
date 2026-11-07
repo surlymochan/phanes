@@ -1,19 +1,19 @@
 export const meta = {
-  name: 'openswarm-dispatch',
-  description: 'Fan out planned tasks to Codex / OpenCode Go / DeepSeek via openswarm, watch with budgets, review diffs',
-  whenToUse: 'After Claude has split work into independent tasks with acceptance criteria. args = {repo, openswarm, maxParallel, tasks:[{id,title,prompt,type,difficulty,budgetMinutes?,backend?}], review: "light"|"full"|"delegate"}',
+  name: 'swrm-dispatch',
+  description: 'Fan out planned tasks to Codex / OpenCode Go / DeepSeek via swrm, watch with budgets, review diffs',
+  whenToUse: 'After Claude has split work into independent tasks with acceptance criteria. args = {repo, swrm, maxParallel, tasks:[{id,title,prompt,type,difficulty,budgetMinutes?,backend?}], review: "light"|"full"|"delegate"}',
   phases: [
-    { title: 'Dispatch', detail: 'thin haiku dispatchers run openswarm (Codex etc. do the coding)', model: 'haiku' },
+    { title: 'Dispatch', detail: 'thin haiku dispatchers run swrm (Codex etc. do the coding)', model: 'haiku' },
     { title: 'Review', detail: 'Claude checks each diff against its acceptance criteria' },
   ],
 }
 
 // ---- args ----------------------------------------------------------------
 const A = args || {}
-const XS = A.openswarm || '~/.claude/skills/openswarm/bin/openswarm'
+const XS = A.swrm || '~/.claude/skills/swrm/bin/swrm'
 const REPO = A.repo
 const TASKS = A.tasks || []
-const MAX = Math.max(1, A.maxParallel || 3)   // take from `openswarm status` concurrency recommendation
+const MAX = Math.max(1, A.maxParallel || 3)   // take from `swrm status` concurrency recommendation
 const REVIEW = A.review || 'light'            // from route().claude_review
 
 if (!REPO || !TASKS.length) throw new Error('args.repo and args.tasks are required')
@@ -71,7 +71,7 @@ function dispatchPrompt(t) {
    Collect any lines tagged RISK / STALL / BUDGET / ERROR / EXITED.
    If the last line is WATCH-EXPIRED, run the watch again. Stop when you see DONE or EXITED.
    If a RISK line shows something destructive outside the worktree (push, rm -rf of home paths, secrets), run \`${XS} stop <id>\` immediately.
-3. Read ~/.claude/openswarm/runs/<id>/result.json and return run_id, status, backend, model, branch, commit,
+3. Read ~/.claude/swrm/runs/<id>/result.json and return run_id, status, backend, model, branch, commit,
    summary (result.summary), tests (result.tests), and the collected event lines.
 
 TASK:

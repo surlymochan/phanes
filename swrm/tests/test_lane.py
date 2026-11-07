@@ -12,7 +12,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CLI = ROOT / "bin" / "openswarm"
+CLI = ROOT / "bin" / "swrm"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 
@@ -140,7 +140,7 @@ class LaneTests(unittest.TestCase):
         original = self.data / "lanes" / self.lane_name / "ctl.sock"
         self.assertGreater(len(os.fsencode(original)), 103)
         digest = hashlib.sha256(os.fsencode(os.path.realpath(original))).hexdigest()[:32]
-        short = pathlib.Path(f"/tmp/openswarm-{os.getuid()}-{digest}.sock")
+        short = pathlib.Path(f"/tmp/swrm-{os.getuid()}-{digest}.sock")
         self.start_lane()
         self.assertTrue(short.exists())
         self.assertTrue(json.loads(self.cli("lane", "status").stdout))
@@ -158,7 +158,7 @@ class LaneTests(unittest.TestCase):
         alias_socket = alias / "lanes" / self.lane_name / "ctl.sock"
         self.assertGreater(len(os.fsencode(alias_socket)), 103)
         digest = hashlib.sha256(os.fsencode(os.path.realpath(original))).hexdigest()[:32]
-        short = pathlib.Path(f"/tmp/openswarm-{os.getuid()}-{digest}.sock")
+        short = pathlib.Path(f"/tmp/swrm-{os.getuid()}-{digest}.sock")
         self.start_lane()
         self.assertTrue(short.exists())
         alias_env = dict(self.env, OPENSWARM_HOME=str(alias))
@@ -186,7 +186,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(state["status"], "done")
         self.assertEqual(result["lane"], self.lane_name)
         self.assertTrue(result["commit"])
-        self.assertEqual(result["branch"], f"openswarm/{run_id}")
+        self.assertEqual(result["branch"], f"swrm/{run_id}")
         ledger = [json.loads(line) for line in (self.data / "ledger.jsonl").read_text().splitlines()]
         entry = next(row for row in ledger if row["id"] == run_id)
         self.assertEqual(entry["card_type"], "feature")
@@ -197,7 +197,7 @@ class LaneTests(unittest.TestCase):
         prompt = next(row["message"] for row in messages if row.get("type") == "prompt")
         self.assertIn("[L-0200] Keep lane edits covered by tests.", prompt)
         self.assertEqual((self.data / "lanes" / self.lane_name / "wt" / "lane_result.txt").read_text(), "completed")
-        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"), "completed")
+        self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"), "completed")
         self.assertFalse((self.repo / "lane_result.txt").exists())
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual(self.git("-C", str(self.data / "lanes" / self.lane_name / "wt"), "branch", "--show-current"), "")
@@ -346,8 +346,8 @@ class LaneTests(unittest.TestCase):
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(state["status"], "done")
         self.assertTrue(result["commit"])
-        self.assertEqual(result["branch"], f"openswarm/{run_id}")
-        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"), "completed")
+        self.assertEqual(result["branch"], f"swrm/{run_id}")
+        self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"), "completed")
 
     def test_pi_session_leak_is_excluded_even_when_staged(self):
         self.set_config("pi")
@@ -423,7 +423,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(state["status"], "done")
         self.assertIsNone(result["verify"])
         self.assertTrue(result["commit"])
-        self.assertEqual(result["branch"], f"openswarm/{run_id}")
+        self.assertEqual(result["branch"], f"swrm/{run_id}")
         self.assertIn("add the cursor fixture change",
                       (self.data / "lanes" / self.lane_name / "wt" / "lane_result.txt").read_text())
         methods = [entry.get("method") for entry in self.cursor_log()]
@@ -440,7 +440,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(initialize["params"]["clientCapabilities"], {})
         new_session = next(entry for entry in self.cursor_log() if entry.get("method") == "session/new")
         self.assertEqual(new_session["params"]["mcpServers"], [])
-        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"),
+        self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"),
                          (self.data / "lanes" / self.lane_name / "wt" / "lane_result.txt").read_text().rstrip("\n"))
         watched = self.cli("watch", run_id).stdout
         self.assertIn("Plan: Apply the requested change", watched)
@@ -456,10 +456,10 @@ class LaneTests(unittest.TestCase):
         state = self.wait_run(run_id)
         result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
         self.assertEqual(state["status"], "done")
-        self.assertEqual(result["branch"], f"openswarm/{run_id}")
+        self.assertEqual(result["branch"], f"swrm/{run_id}")
         self.assertTrue(result["commit"])
         self.assertIn("lane_result.txt", result["diffstat"])
-        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"),
+        self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"),
                          (self.data / "lanes" / self.lane_name / "wt" / "lane_result.txt").read_text().rstrip("\n"))
 
     def test_cursor_systemd_unit_is_printed_not_installed(self):
@@ -562,7 +562,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["model"], "gemini-3.8-flash-medium")
         self.assertEqual(result["usage"]["input_tokens"], 120)
         self.assertTrue(result["commit"])
-        self.assertEqual(self.git("show", f"openswarm/{run_id}:lane_result.txt"),
+        self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"),
                          "completed by the fake Antigravity CLI")
         calls = [json.loads(line) for line in pathlib.Path(self.env["FAKE_AGY_LOG"]).read_text().splitlines()]
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "gemini-3.8-flash-medium")
@@ -638,7 +638,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["attempts"][0]["error_class"], "no_report")
         self.assertIn("executor ended without a final report", result["verify_note"])
         self.assertTrue(result["commit"])
-        self.assertIn("lane_result.txt", self.git("ls-tree", "--name-only", f"openswarm/{run_id}"))
+        self.assertIn("lane_result.txt", self.git("ls-tree", "--name-only", f"swrm/{run_id}"))
         ledger = [json.loads(line) for line in (self.data / "ledger.jsonl").read_text().splitlines()]
         self.assertTrue(any(entry["id"] == run_id and entry["status"] == "partial" for entry in ledger))
 

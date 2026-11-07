@@ -30,9 +30,9 @@ def _temp_dir():
 def _install_config(home):
     """Fake ssh config: the relay's ssh spawn fails fast (port 1
     refuses immediately) instead of resolving a real broker host."""
-    cfg = pathlib.Path(home) / '.ssh' / 'openswarm-pi' / 'config'
+    cfg = pathlib.Path(home) / '.ssh' / 'swrm-pi' / 'config'
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text('Host openswarm-pi-broker\n'
+    cfg.write_text('Host swrm-pi-broker\n'
                    '  HostName 127.0.0.1\n'
                    '  Port 1\n'
                    '  ConnectTimeout 2\n')
@@ -53,7 +53,7 @@ class PiWorkerProxyTests(unittest.TestCase):
                               **kwargs)
 
     def test_missing_config_exits_nonzero(self):
-        # No ~/.ssh/openswarm-pi/config: the proxy must refuse to start
+        # No ~/.ssh/swrm-pi/config: the proxy must refuse to start
         # instead of binding a socket nobody can reach.
         with _temp_dir() as home:
             sock_path = pathlib.Path(home) / 'broker.sock'

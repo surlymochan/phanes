@@ -3,7 +3,7 @@ import type { messages as source } from "../../en/error/backend";
 
 export const messages = {
   "error.backend.dispatchCommand":
-    "openswarm isteği tamamlanamadı. Tekrar denemeden önce yürütücü ayarlarını ve çalıştırma durumunu kontrol edin.",
+    "swrm isteği tamamlanamadı. Tekrar denemeden önce yürütücü ayarlarını ve çalıştırma durumunu kontrol edin.",
   "error.backend.dispatchOwnChat": "Kodlama işini yalnızca kendi sohbetinden gönderin.",
   "error.backend.dispatchLaneOptions":
     "Bir lane kendi için yapılandırılmış backend ve modeli kullanır. Bir lane seçtiğinizde backend ve modeli belirtmeyin.",
@@ -15,13 +15,13 @@ export const messages = {
   "error.backend.dispatchExecutorWorkspace":
     "“Yalnızca çalışma alanı” modundaki bir ajan yalnızca Codex yürütücüsünü kullanabilir, çünkü diğer yürütücüler nereye yazacaklarını sınırlamaz. Lane ve backend belirtmeyin.",
   "error.backend.dispatchRepository":
-    "openswarm fleet.json içinde yerel ve yürütücü depo yollarını eşleşecek şekilde yapılandırın.",
-  "error.backend.dispatchSpawnFailed": "openswarm başlatılamadı.",
-  "error.backend.dispatchExitCode": "openswarm {code} koduyla kapandı.",
-  "error.backend.dispatchExited": "openswarm sonuç döndürmeden durdu.",
-  "error.backend.dispatchTimeout": "openswarm süre sınırı içinde yanıt vermedi.",
-  "error.backend.dispatchOutputUnreadable": "openswarm çıktısı okunamadı.",
-  "error.backend.dispatchSaveFailed": "openswarm isteği kaydedilemedi.",
+    "swrm fleet.json içinde yerel ve yürütücü depo yollarını eşleşecek şekilde yapılandırın.",
+  "error.backend.dispatchSpawnFailed": "swrm başlatılamadı.",
+  "error.backend.dispatchExitCode": "swrm {code} koduyla kapandı.",
+  "error.backend.dispatchExited": "swrm sonuç döndürmeden durdu.",
+  "error.backend.dispatchTimeout": "swrm süre sınırı içinde yanıt vermedi.",
+  "error.backend.dispatchOutputUnreadable": "swrm çıktısı okunamadı.",
+  "error.backend.dispatchSaveFailed": "swrm isteği kaydedilemedi.",
   "error.backend.dispatchApprovalDenied": "Bu kod gönderimini kişi reddetti. Hiçbir şey başlatılmadı.",
   "error.backend.dispatchApprovalMissing": "Bu kod gönderiminin onayı yok. Hiçbir şey başlatılmadı.",
   "error.backend.eventsUnavailable": "Bu ana makinede etkinlikler kullanılamıyor.",

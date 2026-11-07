@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-broker-service'
-CACHE_REL = pathlib.Path('Library') / 'Caches' / 'openswarm-pi-broker'
+CACHE_REL = pathlib.Path('Library') / 'Caches' / 'swrm-pi-broker'
 NODE_REL = pathlib.Path('.local') / 'node-v24.14.1' / 'bin' / 'node'
 AUTH_REL = pathlib.Path('.local/node-v24.14.1/lib/node_modules/@mariozechner'
                         '/pi-coding-agent/dist/core/auth-storage.js')
@@ -30,7 +30,7 @@ FAKE_NODE = ("#!/usr/bin/env python3\n"
 def _temp_home():
     """Short temp HOME so the broker socket path stays under the AF_UNIX
     limit (104 chars on macOS): the default macOS temp dir is too long
-    once Library/Caches/openswarm-pi-broker/broker.sock is appended."""
+    once Library/Caches/swrm-pi-broker/broker.sock is appended."""
     if os.name == 'nt':
         return tempfile.TemporaryDirectory(prefix='os-')
     return tempfile.TemporaryDirectory(prefix='os-', dir='/tmp')

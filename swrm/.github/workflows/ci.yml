@@ -42,8 +42,8 @@ jobs:
           OPENSWARM_STATE_FILE: examples/demo-state.json
         run: |
           export OPENSWARM_HOME="$(mktemp -d)"
-          python bin/openswarm status
-          python bin/openswarm route --type impl --difficulty 3
+          python bin/swrm status
+          python bin/swrm route --type impl --difficulty 3
 
   secrets:
     runs-on: ubuntu-latest

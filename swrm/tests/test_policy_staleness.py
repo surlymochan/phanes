@@ -1,4 +1,4 @@
-"""policy.json price/quota table staleness check (openswarm status warning).
+"""policy.json price/quota table staleness check (swrm status warning).
 
 Run: python3 -m unittest discover -s tests   (or: python3 tests/test_policy_staleness.py)
 """

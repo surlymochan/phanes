@@ -16,7 +16,7 @@ python3 -m unittest discover -s tests
 - [ ] Full test suite run locally (stdlib only, no backends needed)
 - [ ] New or changed behaviour has a test (routing changes: a scenario in `tests/test_route.py`; workspace / verify / watch / risk-rule changes: `tests/test_workspace.py`)
 - [ ] Tests do not depend on my machine: no real `~/.codex`, `~/.claude`, OpenCode DB, Keychain, or network (fixtures and temp dirs only)
-- [ ] Offline demo still works, if CLI behaviour changed: `OPENSWARM_STATE_FILE=examples/demo-state.json bin/openswarm status` and `bin/openswarm route --type review --difficulty 3`
+- [ ] Offline demo still works, if CLI behaviour changed: `OPENSWARM_STATE_FILE=examples/demo-state.json bin/swrm status` and `bin/swrm route --type review --difficulty 3`
 
 ## Constraints
 
