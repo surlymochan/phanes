@@ -24,7 +24,7 @@ pattern.
 
 ```python
 HARVEST_EXCLUDE_PATTERNS = [
-    re.compile(r"(^|/)\.[^/]*\.so$"),        # hidden shared objects (build leftovers)
+    HIDDEN_SHARED_OBJECT,                   # hidden shared objects (build leftovers)
     re.compile(r"(^|/)\.lane-review/"),      # the review products of the lane
 ]
 ```
@@ -46,6 +46,35 @@ expressions); the default (`null`) keeps the constant.
   run record (`harvest_failure_reason`) and the harvest retries on the next tick.
 - The excluded paths are written as one line of the brain log:
   `<lane> #<n> run <run> harvest excluded: [...]`.
+
+## The artifacts in the repository (Refs #1773)
+
+The follow-up cards of the lane reviews (#1745, #1753, #1763, #1773) named the
+hidden shared objects of `openswarm/tests/`. The verification of the four files
+that `main` still tracked:
+
+- They were **the same file four times**: one blob (`35a1bdb`, 4,446,904 bytes) under
+  four hashed names (`.dde4fddfefb6d431-00000000.so` and its siblings).
+- They are **not a library and not a build product of the repository**: an ELF x86-64
+  static-pie executable (the `.so` suffix is a lie) that Zig 0.15.2 built for the
+  `uucode-0.1.0` package of the `opentui` project on a GitHub Actions runner
+  (`/Users/runner/work/opentui/opentui/...`). It is the native TUI library the agent
+  runtime unpacks into the working directory, named after a temporary hash.
+- **Nothing in the repository uses them**: no source file, test, fixture or tool
+  reads, loads or builds them. The mentions of the name pattern are the rules of this
+  filter, the docs and the tests of the filter.
+
+So they were build leftovers of the lane tooling, not part of any feature: they are
+removed from the tracking, and three guards keep them out.
+
+| Guard | What it does |
+|---|---|
+| `openswarm/.gitignore` (`*.so`) and the root `.gitignore` (`openswarm/tests/.*.so`) | a rebuilt artifact stays untracked, so `git add -A` cannot sweep it in |
+| the filter of this document | an artifact that a lane branch carries is dropped before the push |
+| `test_the_repository_tracks_no_hidden_shared_object` (`openswarm/tests/test_dispatch_harvest_filter.py`) | the repository itself must not track one: the test fails when it does |
+
+`lib/dispatch/harvest_filter.py` exposes `tracked_artifacts(repo)`: the artifacts
+among the files the repository tracks, with the same rules the harvest uses.
 
 ## The proof
 

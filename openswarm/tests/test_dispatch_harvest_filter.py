@@ -1,5 +1,5 @@
 """The artifact filter of the harvest (lib/dispatch/harvest_filter.py): the artifacts of the
-lane never enter a PR (Refs #1835)."""
+lane never enter a PR (Refs #1835) and the repository never keeps them (Refs #1773)."""
 import importlib.util
 import json
 import os
@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
 _spec = importlib.util.spec_from_file_location("harvest_filter_under_test",
                                                os.path.join(os.path.dirname(HERE), "lib", "dispatch", "harvest_filter.py"))
 H = importlib.util.module_from_spec(_spec)
@@ -119,6 +120,46 @@ class FilterTest(unittest.TestCase):
         # the default rules do not touch it
         head, removed, empty = H.filter_branch(self.repo, "HEAD", self.base)
         self.assertEqual(removed, [])
+
+    def test_an_artifact_of_the_base_keeps_the_version_of_the_base(self):
+        """The base tracks the artifact (the repository did until #1773): the rebuilt
+        branch restores the base version, so the PR holds no change of the artifact."""
+        self.write("openswarm/tests/.dde4base-00000000.so", "the artifact of the base\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "the artifact of the base")
+        base = self.git("rev-parse", "HEAD")
+        self.commit({"openswarm/tests/.dde4base-00000000.so": "a changed artifact\n"})
+        head, removed, empty = H.filter_branch(self.repo, "HEAD", base)
+        self.assertEqual(removed, ["openswarm/tests/.dde4base-00000000.so"])
+        self.assertTrue(empty)
+        # the raw branch holds the changed artifact, the rebuilt one the base version
+        self.assertEqual(self.git("show", "HEAD:openswarm/tests/.dde4base-00000000.so"),
+                         "a changed artifact")
+        self.assertEqual(self.git("show", "%s:openswarm/tests/.dde4base-00000000.so" % head),
+                         "the artifact of the base")
+
+
+class RepositoryArtifactTest(unittest.TestCase):
+    """The artifacts of the lane never stay in the repository itself (Refs #1773)."""
+
+    def setUp(self):
+        if not os.path.exists(os.path.join(REPO, ".git")):
+            self.skipTest("not a git checkout")
+
+    def test_the_repository_tracks_no_hidden_shared_object(self):
+        tracked = H.tracked_artifacts(REPO, patterns=[H.HIDDEN_SHARED_OBJECT])
+        self.assertEqual(tracked, [], "the repository must not track the build artifacts")
+
+    def test_a_rebuilt_artifact_stays_untracked(self):
+        proc = subprocess.run(["git", "-C", REPO, "check-ignore", "-q",
+                               "openswarm/tests/.dde4check-00000000.so"])
+        self.assertEqual(proc.returncode, 0, "the ignore rules must cover a rebuilt artifact")
+
+    def test_the_artifact_names_of_the_follow_up_cards_match_the_rule(self):
+        names = ["openswarm/tests/.dde4dd5ffefed6fb-00000000.so",     # #1773
+                 "openswarm/tests/.dde4df7ffebedc3d-00000000.so",     # the PR #1755
+                 "openswarm/tests/.dde4dfdfefbefe71-00000000.so"]     # #1745
+        self.assertEqual(H.excluded_paths(names), sorted(names))
 
 
 if __name__ == "__main__":
