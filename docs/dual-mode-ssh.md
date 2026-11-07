@@ -97,6 +97,15 @@ ssh config 的 `IdentityFile` 负责）。
 受控 SSH 主机为 `gocc`、`gorelay`、`govpn`、`govpn2`。实际 lane 和容量以
 `openswarm-fleet fleet status --json` 与部署配置为准。
 
+自动派发的主机集合和 backend 白名单可在 bridge/service 环境中配置：
+
+```bash
+export OPENSWARM_AUTO_FLEET_HOSTS='["gocc","gorelay","govpn","govpn2"]'
+export OPENSWARM_AUTO_HOST_BACKENDS='{"local":[],"gocc":["agy"],"gorelay":["codex"],"govpn":["codex"],"govpn2":["codex"]}'
+```
+
+backend 列表是示例，部署时应按实际配置调整；它不是凭据配置。
+
 ## 从 box 手动冒烟
 
 以下步骤不经过 Hub，适合验证 SSH、fleet 路由和单个 lane。使用一个临时、
