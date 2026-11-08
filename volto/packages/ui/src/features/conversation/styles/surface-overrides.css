@@ -1,0 +1,76 @@
+.settings-panel,
+.browser-panel,
+.remote-desktop-workspace {
+  background: var(--volto-bg-canvas);
+}
+
+.composer-reply-preview {
+  border-color: var(--volto-border);
+  background: var(--volto-bg-surface);
+  color: var(--volto-text-primary);
+}
+
+.message-reaction-pill {
+  border-color: var(--volto-border);
+  background: transparent;
+  color: var(--volto-text-primary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-reaction-pill:not(.message-reaction-pill-readonly):hover {
+    background: var(--volto-hover);
+  }
+}
+
+.composer,
+.direct-composer {
+  background: var(--volto-bg-surface);
+}
+
+.direct-composer > button:hover:not(:disabled) {
+  background: var(--volto-accent-hover);
+}
+
+.remote-desktop-stage,
+.remote-desktop-viewer {
+  background: var(--volto-bg-canvas);
+  color: var(--volto-text-secondary);
+}
+
+.remote-desktop-header {
+  background: var(--volto-bg-sidebar);
+}
+
+.voice-button:active,
+.voice-button-active:active {
+  transform: scale(0.97);
+}
+
+/* A filled field with no border, in the menu item shape. */
+.provider-model-search {
+  height: var(--volto-control-md);
+  flex-shrink: 0;
+  margin-bottom: var(--ui-menu-padding);
+  border-color: transparent;
+  border-radius: var(--ui-menu-item-radius);
+  background: var(--ui-menu-item-hover);
+  padding-inline: var(--ui-menu-inset);
+  font-size: var(--volto-text-md);
+}
+
+.provider-model-search:focus-visible {
+  border-color: var(--ui-menu-edge);
+}
+
+.provider-model-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.provider-model-group {
+  padding: var(--volto-space-2) var(--ui-menu-inset) var(--volto-space-1);
+  color: var(--volto-text-muted);
+  font-size: var(--volto-text-sm);
+  font-weight: 500;
+}

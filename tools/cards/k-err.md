@@ -1,6 +1,6 @@
 # M10 #63: keep error codes through runCauseEffect and agent error events (errors 1-2)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/openbot#42,
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/volto#42,
 the upstream sync). Read AGENTS.md and the AGENTS.md of every directory you change, and follow them.
 
 ## Scope
@@ -30,7 +30,7 @@ The typed error is the thing that names the failure. `errorReference` reads its 
 (`packages/user-errors/src/reference.ts:107`). `runCauseEffect` throws `.cause` instead, so the
 `_tag` and the `operation` are gone before the error reaches `withReference`.
 
-A probe on this checkout (`.openbot-build/probe-ref.ts`, Effect 4.0.0):
+A probe on this checkout (`.volto-build/probe-ref.ts`, Effect 4.0.0):
 
 ```
 tagged _tag: StoredStateFailure
@@ -71,7 +71,7 @@ additive, so an older client keeps working.
 
 - First confirm each finding against the current code. If upstream already fixed one, do not change it: report
   "already fixed" with the file and line that show it. That is a valid result.
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`.

@@ -1,0 +1,19 @@
+[Unit]
+Description=swrm lane L1
+After=network.target
+
+[Service]
+Type=simple
+User=swrm
+ExecStart="/usr/bin/python3" "/opt/swrm/bin/swrm" "lane" "serve" "L1"
+Environment="OPENSWARM_HOME=/var/lib/swrm"
+Environment="PATH=/usr/bin:/bin:/home/swrm/.local/bin"
+Restart=always
+MemoryMax=900M
+CPUQuota=150%
+Nice=10
+Environment="OPENSWARM_LANES_FILE=/etc/swrm/lanes.json"
+
+[Install]
+WantedBy=multi-user.target
+

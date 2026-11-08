@@ -1,6 +1,6 @@
 # M10 #66: E2E for creating an agent and editing its profile (tests 4)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/openbot#42,
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Base commit: b50d5ce925 (head of PR nibiru-labs/volto#42,
 the upstream sync). Read AGENTS.md and the AGENTS.md of every directory you change, and follow them.
 
 ## Scope
@@ -30,7 +30,7 @@ defect leaves a half-made agent, a lost instruction, or an agent that a restart 
 Add `scripts/agent-profile-tools-e2e.ts`. It runs the real tool router on a temporary profile with a
 fake provider. It creates an agent, reads it back, updates the profile, restarts the agent store, and
 checks that the change is still there. It checks that an invalid profile is refused with a message
-from `sourceText`. It writes `.openbot-build/agent-profile-tools-e2e/report.json`.
+from `sourceText`. It writes `.volto-build/agent-profile-tools-e2e/report.json`.
 
 **Size: M**
 
@@ -40,7 +40,7 @@ from `sourceText`. It writes `.openbot-build/agent-profile-tools-e2e/report.json
 
 - First confirm each finding against the current code. If upstream already fixed one, do not change it: report
   "already fixed" with the file and line that show it. That is a valid result.
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`.

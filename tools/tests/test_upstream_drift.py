@@ -53,7 +53,7 @@ class UpstreamDriftTests(unittest.TestCase):
         self.assertEqual(unmarked_paths(report, changed, "upstream: sync"), [])
         self.assertEqual(unmarked_paths(report, changed, "fix: upstream: sync"), [])
         self.assertEqual(
-            unmarked_paths(report, changed, "openswarm(codex): #1372 upstream(openbot): sync"), [])
+            unmarked_paths(report, changed, "swrm(codex): #1372 upstream(openbot): sync"), [])
         self.assertEqual(unmarked_paths(report, set(), "fix: unrelated"), [])
 
     def test_snapshot_rejects_missing_base_sha(self):

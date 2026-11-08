@@ -1,11 +1,11 @@
 # M10 #66: E2E for importing a Grok Bot export (tests 2)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
 
-Test-coverage finding 2 below. First check existing import scripts under scripts/ (grep for agent-import-service and legacy-import) and report what they cover. Add one new E2E script for the uncovered path: build a small synthetic Grok Bot export fixture under .openbot-build/, import it through the real import service, and read the result back. No product code change unless a test exposes a real bug; then report it instead of fixing it. Temporary files only under $TMPDIR or .openbot-build/ in the worktree; never touch /tmp.
+Test-coverage finding 2 below. First check existing import scripts under scripts/ (grep for agent-import-service and legacy-import) and report what they cover. Add one new E2E script for the uncovered path: build a small synthetic Grok Bot export fixture under .volto-build/, import it through the real import service, and read the result back. No product code change unless a test exposes a real bug; then report it instead of fixing it. Temporary files only under $TMPDIR or .volto-build/ in the worktree; never touch /tmp.
 
 ## Findings (from an audit written before the upstream sync; file and line references may have moved)
 
@@ -24,7 +24,7 @@ Test-coverage finding 2 below. First check existing import scripts under scripts
 
 The import writes agents, skill revisions, routines, memories, and files. A defect can duplicate an
 agent, drop a skill, or lose a memory. A user has one export file and no other way to move an agent
-set to OpenBot.
+set to Volto.
 
 **Fix**
 
@@ -44,7 +44,7 @@ of the same zip does not duplicate an agent. Cover the legacy `bots.json` path a
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

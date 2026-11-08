@@ -1,13 +1,13 @@
 {
-  "输入路径": "/root/.claude/openswarm-executor-candidate/lanes/CX2/wt/openbot/examples/org-health-local/demo/diagnosis.json",
+  "输入路径": "/path/to/executor-state/lanes/CX2/wt/volto/examples/org-health-local/demo/diagnosis.json",
   "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f",
   "输入摘要": {
     "diagnosis": {
-      "路径": "../openbot/examples/org-health-local/demo/diagnosis.json",
+      "路径": "../volto/examples/org-health-local/demo/diagnosis.json",
       "sha256": "51028209dda55c8f11795ec50ff1482c48af3e025355f2889b4f8b028a16b18f"
     },
     "brief": {
-      "路径": "../openbot/examples/org-health-local/demo/brief.json",
+      "路径": "../volto/examples/org-health-local/demo/brief.json",
       "sha256": "857a824c0d90244b46c5c02170dd2030130bca4b4cef3db2fba1ed280b1fcd38"
     }
   },

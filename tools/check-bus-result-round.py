@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-RESULT_RE = re.compile(r"```openswarm-result\s*\n(.*?)\n```", re.S)
+RESULT_RE = re.compile(r"```swrm-result\s*\n(.*?)\n```", re.S)
 
 
 def result_key(issue: int, claim_id: int, run_id: str) -> str:
@@ -32,7 +32,7 @@ def fake_result(claim: dict[str, Any], status: str = "done") -> dict[str, Any]:
 
 
 def result_comment(payload: dict[str, Any]) -> str:
-    return "```openswarm-result\n" + json.dumps(payload, sort_keys=True) + "\n```"
+    return "```swrm-result\n" + json.dumps(payload, sort_keys=True) + "\n```"
 
 
 def parse_result_for_claim(comment: str, claim: dict[str, Any]) -> dict[str, Any] | None:

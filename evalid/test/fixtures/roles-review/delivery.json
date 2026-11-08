@@ -1,0 +1,37 @@
+{
+  "baseCommit": "1111111111111111111111111111111111111111",
+  "headCommit": "2222222222222222222222222222222222222222",
+  "commits": [
+    "2222222222222222222222222222222222222222"
+  ],
+  "approvedSpec": {
+    "approved": true,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "tdd": {
+    "phase": "green",
+    "status": "PASS",
+    "spec_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "review": {
+    "spec_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tdd_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "reviewed_base": "1111111111111111111111111111111111111111",
+    "reviewed_head": "2222222222222222222222222222222222222222",
+    "commits": [
+      "2222222222222222222222222222222222222222"
+    ],
+    "verdict": "PASS",
+    "findings": [],
+    "holdout_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "holdout": {
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "status": "PASS",
+    "required": true,
+    "isolation": "verified",
+    "subject_head": "2222222222222222222222222222222222222222",
+    "spec_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

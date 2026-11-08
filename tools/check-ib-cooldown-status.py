@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for ib-refresh cooldown status accounting (Refs #1262)."""
+"""Offline contract using 2026-11-02 fleet hosts for ib-refresh cooldown status accounting (Refs #1262)."""
 
 import datetime as dt
 import importlib.util
@@ -13,15 +13,16 @@ SPEC.loader.exec_module(IB_REFRESH)
 
 
 def main():
-    hosts = [{"name": f"ib{i}", "cert": f"certs/ib{i}.crt"} for i in range(1, 6)]
+    names = ["gores1", "gores2", "govpn", "gorelay", "gocc"]
+    hosts = [{"name": name, "cert": f"certs/{name}.crt"} for name in names]
     rows = [
         # A cooldown host may still have a valid certificate; it is not reachable
         # for this refresh and must remain outside hosts_ok.
-        {"host": "ib1", "status": "cooldown", "final_status": "valid"},
-        {"host": "ib2", "status": "skipped_cooldown"},
-        {"host": "ib3", "status": "valid", "final_status": "valid"},
-        {"host": "ib4", "status": "valid", "final_status": "valid"},
-        {"host": "ib5", "status": "valid", "final_status": "valid"},
+        {"host": "gores1", "status": "cooldown", "final_status": "valid"},
+        {"host": "gores2", "status": "skipped_cooldown"},
+        {"host": "govpn", "status": "valid", "final_status": "valid"},
+        {"host": "gorelay", "status": "valid", "final_status": "valid"},
+        {"host": "gocc", "status": "valid", "final_status": "valid"},
     ]
     result = IB_REFRESH._status_for(
         {"ok": True, "start_lane_autodispatch": True, "hosts": rows},
@@ -33,7 +34,7 @@ def main():
     assert result["ok"] is True
     assert result["start_lane_autodispatch"] is True
     assert [row["host"] for row in IB_REFRESH._usable_hosts(rows, {host["name"] for host in hosts})] == [
-        "ib3", "ib4", "ib5"
+        "govpn", "gorelay", "gocc"
     ]
     fields = dict(field.split("=", 1) for field in result["status_line"].split())
     assert fields["ok"] == "1"

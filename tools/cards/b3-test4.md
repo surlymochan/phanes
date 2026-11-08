@@ -1,11 +1,11 @@
 # M10 #66: E2E for a signed webhook request that starts a routine (tests 1)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Continue
 
-Your base 0a4085dcd4 already has scripts/webhook-routine-e2e.ts (412 lines). The earlier run was stopped because it ran `rm -f` on a path outside the worktree: never remove anything outside this worktree; put temporary files under `.openbot-build/` inside the worktree. Also delete the stray empty file `scripts/sed7y033F` (a sed temporary file). Then run `bun scripts/webhook-routine-e2e.ts`, fix it until it passes, run the checks below, and add the release note.
+Your base 0a4085dcd4 already has scripts/webhook-routine-e2e.ts (412 lines). The earlier run was stopped because it ran `rm -f` on a path outside the worktree: never remove anything outside this worktree; put temporary files under `.volto-build/` inside the worktree. Also delete the stray empty file `scripts/sed7y033F` (a sed temporary file). Then run `bun scripts/webhook-routine-e2e.ts`, fix it until it passes, run the checks below, and add the release note.
 
 ## Scope
 
@@ -41,7 +41,7 @@ Add `scripts/webhook-routine-e2e.ts`. It starts the real `HostEventsService` on 
 with a fake account service and a fake routine scheduler. It sends signed requests for: a matching
 event, a wrong event type, a wrong filter value, a repeated delivery ID, a bad signature, an old
 timestamp, a body over 64 KiB, and a wrong content type. It asserts the status code, the receipt
-row, and the run instruction. It writes `.openbot-build/webhook-routine-e2e/report.json`. Add the
+row, and the run instruction. It writes `.volto-build/webhook-routine-e2e/report.json`. Add the
 same script to the `reverse-actions-e2e` job in `.github/workflows/ci.yml`.
 
 **Size: M**
@@ -54,13 +54,13 @@ same script to the `reverse-actions-e2e` job in `.github/workflows/ci.yml`.
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own
   E2E scripts, Electron ones included, is allowed.
 - Do not change released Team API wire meaning, IPC contract names, or migrations. No database migration.
-- Temporary files go ONLY under `$TMPDIR` or `.openbot-build/` inside the worktree. Never write to or remove anything in `/tmp` or any other path outside the worktree: the guard stops the run (it did twice).
+- Temporary files go ONLY under `$TMPDIR` or `.volto-build/` inside the worktree. Never write to or remove anything in `/tmp` or any other path outside the worktree: the guard stops the run (it did twice).
 - Never read or print `.env*`, `.env.keys`, `.dev.vars`, auth or credential files. Read one file per command.
 - Stay inside this worktree. Do not use Computer Use or drive other desktop apps. Do not commit (the runner
   commits) and do not push.

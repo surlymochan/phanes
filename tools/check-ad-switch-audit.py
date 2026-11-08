@@ -24,7 +24,7 @@ def load_autodispatch():
 
 def main():
     autodispatch = load_autodispatch()
-    scratch = Path(__file__).resolve().parents[1] / ".openswarm-tmp"  # gitignored scratch root
+    scratch = Path(__file__).resolve().parents[1] / ".swrm-tmp"  # gitignored scratch root
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=str(scratch)) as fixture:
         root = Path(fixture)

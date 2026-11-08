@@ -1,0 +1,56 @@
+name: Evalid
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'evalid/**'
+      - '.github/workflows/evalid.yml'
+  pull_request:
+    paths:
+      - 'evalid/**'
+      - '.github/workflows/evalid.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: evalid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: evalid/package-lock.json
+      - run: npm ci
+      - name: Check home path redactions
+        run: python3 scripts/redact-home-paths.py --check
+      - name: Check IP redactions
+        run: python3 scripts/redact-ip-addresses.py --check
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - name: Drift Scan
+        run: npm run drift:scan
+      - name: Package Readiness
+        run: npm run pack:check
+      - name: Minimal External Adoption Example
+        run: |
+          npm install -g .
+          project_root="$(mktemp -d)"
+          cd "$project_root"
+          cat > package.json <<'JSON'
+          {
+            "name": "xflow-adoption-smoke",
+            "version": "0.0.0",
+            "private": true
+          }
+          JSON
+          xflow guide
+          xflow init --project-root .
+          xflow doctor --project-root .
+          xflow workflow validate yolo --project-root .

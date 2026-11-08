@@ -70,7 +70,7 @@ gh project field-list 6 --owner surlymochan --format json
 | issue 标签 | 建议看板 Status | 谁负责打/换这个标签 | 依据 |
 |---|---|---|---|
 | `lane-ready` | `Todo` | 建 issue 时人工或规划侧打上 | `brain/autopilot.md:17`（标签 `lane-ready` + `p0\|p1\|p2`）、`brain/autopilot.md:35` |
-| `in-progress` | `In Progress` | `lane-autodispatch` 派活成功后打上 | 建议；对应 lane 状态 `busy`（`openswarm/bin/openswarm:7384`）与 run 状态 `running`（`openswarm/bin/openswarm:3626`、`openswarm/bin/openswarm:7698`） |
+| `in-progress` | `In Progress` | `lane-autodispatch` 派活成功后打上 | 建议；对应 lane 状态 `busy`（`swrm/bin/swrm:7384`）与 run 状态 `running`（`swrm/bin/swrm:3626`、`swrm/bin/swrm:7698`） |
 | `lane-pr` | `In Review` | lane 完成后推分支并开 PR 时打上 | `brain/autopilot.md:11`（推 `fleet/<L>-issue<N>-<run>` 并开 PR，Closes #N）、`brain/autopilot.md:12`（`lane-merge` 合并 `fleet/*` 与 `brain/*` PR） |
 | 无上述标签，且 issue 已关闭 | `Done` | PR 合并后 issue 自动关闭 | `brain/autopilot.md:11-12` |
 
@@ -83,11 +83,11 @@ gh project field-list 6 --owner surlymochan --format json
 3. **没打 lane 类标签的 issue**（例如只写了 `p2,backend:pi` 的 backlog 条目）建议留在 `Todo` 或不入板，
    不要占用 `In Progress` / `In Review`。
 
-### 3.3 与 openswarm issue bus 标签的区别
+### 3.3 与 swrm issue bus 标签的区别
 
-`openswarm:queued` / `openswarm:claimed` / `openswarm:done` / `openswarm:failed` /
-`openswarm:cancelled` 是 issue bus 协议的显示标签，作用在 bus 仓的卡片 issue 上
-（`openswarm/docs/BUS.md:65`、`openswarm/bin/openswarm:5951`），与本看板的 `lane-*` 三标签**不是同一套**，
+`swrm:queued` / `swrm:claimed` / `swrm:done` / `swrm:failed` /
+`swrm:cancelled` 是 issue bus 协议的显示标签，作用在 bus 仓的卡片 issue 上
+（`swrm/docs/BUS.md:65`、`swrm/bin/swrm:5951`），与本看板的 `lane-*` 三标签**不是同一套**，
 不要互相替换。`brain/dual-mode-status.md:26` 已写明这条边界：`lane-ready → autodispatch → PR` 是受控
 SSH lane 的闭环，不是 `github-issue` bus 协议。
 
@@ -97,7 +97,7 @@ SSH lane 的闭环，不是 `github-issue` bus 协议。
 
 ```sh
 # 建缺失的标签（幂等：已存在时加 --force 更新颜色与描述）
-# 颜色沿用 openswarm issue bus 状态标签的同一套色板（openswarm/bin/openswarm:6460）
+# 颜色沿用 swrm issue bus 状态标签的同一套色板（swrm/bin/swrm:6460）
 gh label create in-progress --description "已被 lane 领走，执行中" --color fbca04 --repo surlymochan/phanes
 gh label create lane-pr     --description "已开 PR，等待审查合并" --color 1d76db --repo surlymochan/phanes
 
@@ -127,7 +127,7 @@ gh project item-edit 6 --owner surlymochan \
 - **本文件第 1–5 节只是口径文档，不是自动化实现。** 仓库内没有把 `lane-*` 标签同步到看板 Status 的脚本；
   `lane-autodispatch` 与 `lane-merge` 跑在 box 控制面上（`~/phanes-ctl/bin/...`），不在本仓库
   （`brain/autopilot.md:11-12`、`brain/autopilot.md:39-40`）。要自动化，得改 box 侧脚本。
-  唯一的例外是第 7 节：assignee 与 Lane 字段由 openswarm dispatcher 在派发时自动写。
+  唯一的例外是第 7 节：assignee 与 Lane 字段由 swrm dispatcher 在派发时自动写。
 - `brain/dual-mode-status.md:24` 的「与 phanes Project / lane-ready 标签体系衔接说明」条目即本文；
   issue bus 一侧的落地仍是 #238 / backlog rsi-08。
 - 看板是视图，issue 才是队列真相来源；看板状态与标签冲突时，以 issue 标签为准并修正看板。
@@ -136,11 +136,13 @@ gh project item-edit 6 --owner surlymochan \
 
 ## 7. 派发时自动落 assigner 与 Lane 字段（Refs #1761）
 
-2026-11-03 起，AD（openswarm dispatcher，`openswarm/lib/dispatch/engine.py`）在**派发成功**的同一点
+> 历史实现说明：旧 dispatcher 及 issue metadata 扩展已退役；以下不是当前 batch/fleet 的功能承诺。
+
+旧 AD 曾在**派发成功**的同一点
 （issue 贴上 `in-progress`、lane 领到卡之后）自动写两样东西：
 
 1. **assigner**：`gh issue edit <N> --add-assignee <assignee>`，**只增不删**既有 assignee。
-   默认取仓库 owner（`surlymochan`）；OpenBot 层架设后改为 bot name，由配置给出。
+   默认取仓库 owner（`surlymochan`）；volto 层架设后改为 bot name，由配置给出。
 2. **Project 6 的 Lane 字段**：`gh project item-edit --field-id <Lane 字段 id> --text <lane id>`。
    字段**按名 `Lane` 解析 id，不写死**；issue 不在 Project 6 时先 `gh project item-add` 再设值，
    与看板同步脚本不冲突。
@@ -175,8 +177,7 @@ gh project item-edit 6 --owner surlymochan \
 
 待写清单落在 `<state_dir>/meta-debt.json`（与 lane state 分开），由下一 tick 的 `replay_meta_debt()` 重试一次。
 
-代码：`openswarm/lib/dispatch/issue_meta.py`（写入逻辑）、`openswarm/lib/dispatch/engine.py`
-（`stamp_claim` / `replay_meta_debt` 与两个调用点）、`openswarm/tests/test_dispatch_issue_meta.py`（回归）。
+旧写入逻辑、engine 接入点及其回归测试已删除（Refs #1886）。
 
 ---
 
@@ -187,6 +188,6 @@ gh project item-edit 6 --owner surlymochan \
   `:35` —— 加任务方式；`:39-40` —— box 上手动启动循环
 - `brain/dual-mode-status.md:3` —— Project URL；`:15` —— `lane-ready` 作为派活入口；`:24` —— 衔接说明条目；
   `:26` —— 与 issue bus 的边界
-- `openswarm/docs/BUS.md:65`、`openswarm/bin/openswarm:5951` —— issue bus 状态标签
-- `openswarm/bin/openswarm:3626`、`:7384`、`:7698` —— lane/run 的 `running`、`busy` 状态写入点
-- `openswarm/bin/openswarm:6460` —— issue bus 状态标签的色板（本文标签颜色沿用）
+- `swrm/docs/BUS.md:65`、`swrm/bin/swrm:5951` —— issue bus 状态标签
+- `swrm/bin/swrm:3626`、`:7384`、`:7698` —— lane/run 的 `running`、`busy` 状态写入点
+- `swrm/bin/swrm:6460` —— issue bus 状态标签的色板（本文标签颜色沿用）

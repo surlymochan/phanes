@@ -98,7 +98,10 @@ def reconcile_mem_health(
         host_pause = state_dir / f"PAUSE-HOST-{host}"
         lane_pauses = [state_dir / f"PAUSE-{lane}" for lane in lanes]
         if available < HEALTH_MEM_HARD_MB:
-            host_pause.write_text(f"auto:host_hard mem_avail_mb={available}\n")
+            # A host pause may already represent an independent hard limit such as
+            # disk pressure. Memory health must not replace or later clear it.
+            if not host_pause.exists() or host_pause.read_text().startswith("auto:host_hard"):
+                host_pause.write_text(f"auto:host_hard mem_avail_mb={available}\n")
             for pause in lane_pauses:
                 pause.write_text(f"auto:mem_hard host={host} mem_avail_mb={available}\n")
             changed.extend([host_pause.name, *(pause.name for pause in lane_pauses)])
@@ -128,17 +131,17 @@ def main() -> None:
         assert clear_auto(state_dir, now, []) == ["pi"]
         assert dispatchable(state_dir, "pi"), "cleared backend must be dispatchable"
 
-        cooldown_pause = state_dir / "PAUSE-HOST-ib1"
+        cooldown_pause = state_dir / "PAUSE-HOST-node-1.example.invalid"
         until = now + 600
         assert set_host_cooldown(
-            state_dir, "ib1", f"machine_cooldown until={until}"
+            state_dir, "node-1.example.invalid", f"machine_cooldown until={until}"
         )
         assert cooldown_until(f"SSH: cooling down until {until}") == str(until)
         assert cooldown_pause.read_text() == f"auto:cooldown:until={until}\n"
         os.utime(cooldown_pause, (old, old))
         assert clear_auto(state_dir, now, []) == [], "cooldown host must be held until deadline"
         assert cooldown_pause.exists()
-        assert clear_auto(state_dir, until + 1, []) == ["ib1"]
+        assert clear_auto(state_dir, until + 1, []) == ["node-1.example.invalid"]
         assert not cooldown_pause.exists()
 
         manual_pause = state_dir / "PAUSE-BACKEND-pi"
@@ -147,20 +150,20 @@ def main() -> None:
         assert clear_auto(state_dir, now, []) == []
         assert not dispatchable(state_dir, "pi"), "manual pause must remain a gate"
 
-        # Fake health.json snapshots for a govpn2-like host. This contract only
+        # Fake health.json snapshots for a worker-b.example.invalid-like host. This contract only
         # touches the temporary fixture, never the live autodispatch directory.
-        host_lanes = {"govpn2": ["CX2", "CX4"]}
-        low = {"govpn2": {"mem_avail_mb": HEALTH_MEM_HARD_MB - 1}}
-        recovered = {"govpn2": {"mem_avail_mb": HEALTH_MEM_SOFT_MB}}
+        host_lanes = {"worker-b.example.invalid": ["CX2", "CX4"]}
+        low = {"worker-b.example.invalid": {"mem_avail_mb": HEALTH_MEM_HARD_MB - 1}}
+        recovered = {"worker-b.example.invalid": {"mem_avail_mb": HEALTH_MEM_SOFT_MB}}
         assert reconcile_mem_health(state_dir, {}, low, host_lanes) == [
-            "PAUSE-HOST-govpn2", "PAUSE-CX2", "PAUSE-CX4"
+            "PAUSE-HOST-worker-b.example.invalid", "PAUSE-CX2", "PAUSE-CX4"
         ]
-        assert (state_dir / "PAUSE-HOST-govpn2").read_text().startswith("auto:host_hard")
+        assert (state_dir / "PAUSE-HOST-worker-b.example.invalid").read_text().startswith("auto:host_hard")
         assert (state_dir / "PAUSE-CX2").read_text().startswith("auto:mem_hard")
         assert reconcile_mem_health(state_dir, low, recovered, host_lanes) == [
-            "PAUSE-HOST-govpn2", "PAUSE-CX2", "PAUSE-CX4"
+            "PAUSE-HOST-worker-b.example.invalid", "PAUSE-CX2", "PAUSE-CX4"
         ]
-        assert not (state_dir / "PAUSE-HOST-govpn2").exists()
+        assert not (state_dir / "PAUSE-HOST-worker-b.example.invalid").exists()
         assert not (state_dir / "PAUSE-CX2").exists()
         assert not (state_dir / "PAUSE-CX4").exists()
 
@@ -173,7 +176,7 @@ def main() -> None:
         print("OK: SSH machine_cooldown writes PAUSE-HOST-* and holds until its deadline")
         print("OK: manual PAUSE-BACKEND pause is never auto-cleared")
         print("OK: cleared backend is dispatchable again")
-        print("OK: govpn2 mem_hard sets host and same-host lane pauses")
+        print("OK: worker-b.example.invalid mem_hard sets host and same-host lane pauses")
         print("OK: mem_hard recovery to soft clears only auto pauses")
 
 

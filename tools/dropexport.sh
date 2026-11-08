@@ -1,8 +1,8 @@
 #!/bin/bash
-# Runs on gocc. Usage: dropexport.sh <worktree-dir-name> <file> <function-name>
+# Runs on the publish host. Usage: dropexport.sh <worktree-dir-name> <file> <function-name>
 set -uo pipefail
 export PATH=$HOME/.bun/bin:$HOME/.local/node-v24.14.1/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH
-cd ~/work/"$1" || exit 9
+cd "${PHANES_WORKTREE_ROOT:?Set PHANES_WORKTREE_ROOT}/$1" || exit 9
 python3 - "$2" "$3" <<'PY'
 import re,sys
 p,name=sys.argv[1],sys.argv[2]; s=open(p).read()

@@ -23,4 +23,4 @@ Surfaces: backend agent runtime. No IPC, Team API wire, or migration change.
 
 Scope of a usage-limit hold is narrower. An explicit account-wide or family limit still holds as before.
 
-Model and harness: Codex gpt-6.1-terra through openswarm; planner Claude Code.
+Model and harness: Codex gpt-6.1-terra through swrm; planner Claude Code.

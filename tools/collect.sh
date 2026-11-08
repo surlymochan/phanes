@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run on an executor host (REPO env var = its openbot repo). Writes a git bundle of every openswarm/* branch
+# Run on an executor host (REPO env var = its openbot repo). Writes a git bundle of every swrm/* branch
 # committed on or after SINCE (default: the M10 batch start) to stdout; prints the branch list to stderr.
 REPO=${REPO:?}
 SINCE=${SINCE:-2026-10-28T11:00:00Z}
@@ -11,7 +11,7 @@ while read -r ref date; do
     refs="$refs $ref"
     echo "$ref $(git rev-parse --short "$ref") $date" >&2
   fi
-done < <(git for-each-ref --format='%(refname) %(committerdate:iso-strict)' --sort=committerdate refs/heads/openswarm/ | python3 -c "
+done < <(git for-each-ref --format='%(refname) %(committerdate:iso-strict)' --sort=committerdate refs/heads/swrm/ | python3 -c "
 import sys,datetime
 for l in sys.stdin:
     ref,d=l.split()

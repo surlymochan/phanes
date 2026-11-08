@@ -1,0 +1,174 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://openflow/schemas/evalid-role.schema.json",
+  "title": "EValid Role Declaration",
+  "description": "Declarations for the three evalid roles (evalid-spec, evalid-tdd, evalid-review). A document validates as exactly one declaration: a role card header, a lane role declaration, or a controller stage request. The role to stage mapping is fixed by this schema, so an author cannot move a run to another stage to skip a gate. All digests are content addresses (sha256:<64 lowercase hex>); all commits are full Git OIDs.",
+  "oneOf": [
+    { "$ref": "#/definitions/role_card" },
+    { "$ref": "#/definitions/lane_declaration" },
+    { "$ref": "#/definitions/role_request" }
+  ],
+  "definitions": {
+    "role": {
+      "type": "string",
+      "enum": ["evalid-spec", "evalid-tdd", "evalid-review"]
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["spec", "red", "green", "spec-check", "delivery"]
+    },
+    "change_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    },
+    "content_address": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "git_oid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "logical_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "role_card": {
+      "type": "object",
+      "title": "EValid role card header",
+      "description": "Front matter of an author task card. evalid_version, role, change_id and input_evidence are mandatory; input_evidence lists the content addresses of the already accepted parent evidence, so a card can never start without a parent record. The stage is deliberately not part of the card: only the controller issues a stage request, therefore a card that tries to set or change a stage is rejected as an unknown field.",
+      "additionalProperties": false,
+      "required": ["evalid_version", "role", "change_id", "input_evidence"],
+      "properties": {
+        "evalid_version": { "const": 1 },
+        "role": { "$ref": "#/definitions/role" },
+        "change_id": { "$ref": "#/definitions/change_id" },
+        "input_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/content_address" }
+        },
+        "model_override": {
+          "type": "object",
+          "title": "Optional author declared model",
+          "description": "Optional and never required: the role itself does not ask the author for a model. The controller rejects an override that conflicts with the frozen policy digest.",
+          "additionalProperties": false,
+          "required": ["backend", "model"],
+          "properties": {
+            "backend": { "$ref": "#/definitions/text" },
+            "model": { "$ref": "#/definitions/text" },
+            "effort": {
+              "anyOf": [
+                { "type": "string", "enum": ["low", "medium", "high"] },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "lane_declaration": {
+      "type": "object",
+      "title": "EValid lane role declaration",
+      "description": "One entry of the lanes[] array of an existing lane configuration. A lane only declares its role; repository and budget settings stay in the common lane configuration.",
+      "additionalProperties": false,
+      "required": ["name", "role"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "role": { "$ref": "#/definitions/role" }
+      }
+    },
+    "role_request": {
+      "type": "object",
+      "title": "EValid role stage request",
+      "description": "Immutable authorization request written by the controller for one stage of one attempt. It carries the already completed stage packages and the public commands; it never carries hidden material.",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "role",
+        "stage",
+        "change_id",
+        "attempt",
+        "run_id",
+        "base_commit",
+        "head_commit",
+        "inputs",
+        "policy_digest"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "role": { "$ref": "#/definitions/role" },
+        "stage": { "$ref": "#/definitions/stage" },
+        "change_id": { "$ref": "#/definitions/change_id" },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "run_id": { "$ref": "#/definitions/text" },
+        "base_commit": { "$ref": "#/definitions/git_oid" },
+        "head_commit": { "$ref": "#/definitions/git_oid" },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "sha256"],
+            "properties": {
+              "name": { "$ref": "#/definitions/logical_name" },
+              "sha256": { "$ref": "#/definitions/content_address" }
+            }
+          }
+        },
+        "policy_digest": { "$ref": "#/definitions/content_address" }
+      },
+      "allOf": [
+        {
+          "type": "object",
+          "if": {
+            "type": "object",
+            "required": ["role"],
+            "properties": { "role": { "const": "evalid-spec" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": { "stage": { "const": "spec" } }
+          }
+        },
+        {
+          "type": "object",
+          "if": {
+            "type": "object",
+            "required": ["role"],
+            "properties": { "role": { "const": "evalid-tdd" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": { "stage": { "enum": ["red", "green"] } }
+          }
+        },
+        {
+          "type": "object",
+          "if": {
+            "type": "object",
+            "required": ["role"],
+            "properties": { "role": { "const": "evalid-review" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": { "stage": { "enum": ["spec-check", "delivery"] } }
+          }
+        }
+      ]
+    }
+  }
+}

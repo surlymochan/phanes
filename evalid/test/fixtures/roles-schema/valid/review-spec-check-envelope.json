@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "kind": "review",
+  "role": "evalid-review",
+  "stage": "spec-check",
+  "change_id": "feature-example",
+  "attempt": 0,
+  "run_id": "run-review-0003",
+  "issue_ref": "issue#1887",
+  "base_commit": "1111111111111111111111111111111111111111",
+  "head_commit": "2222222222222222222222222222222222222222",
+  "parents": [
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "producer": {
+    "backend": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tool_commit": "3333333333333333333333333333333333333333"
+  },
+  "artifacts": [
+    {
+      "name": "spec.json",
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media_type": "application/json"
+    }
+  ],
+  "payload": {
+    "subject": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "verdict": "PASS",
+    "findings": [
+      {
+        "severity": "FOLLOW-UP",
+        "requirement_ref": "issue#1887",
+        "artifact_ref": "spec.json",
+        "reason": "the timeout budget is documented in the command list"
+      }
+    ]
+  },
+  "evidence_id": "sha256:8f02ac4cc72667b0de411ad70542f3abc9697994e7077501e65dc14f0a0d926c"
+}

@@ -1,6 +1,6 @@
 # M10 #64: the watcher of a dispatch run never ends (reliability 3)
 
-Repository: OpenBot desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
+Repository: Volto desktop (Electron, Bun, TypeScript, SolidJS). Read AGENTS.md and the AGENTS.md of every
 directory you change, and follow them.
 
 ## Scope
@@ -22,7 +22,7 @@ Evidence:
 - `src/backend/dispatch/dispatch-service.ts:240` — `for (const record of this.#runs) if (!record.delivered) yield* this.#watch(record.host, record.runId);`
 
 Why it matters: a run that never reaches a terminal state keeps a poll loop for the life of the
-app. Every poll spawns an `openswarm` process. A restart of the app watches every record that was
+app. Every poll spawns an `swrm` process. A restart of the app watches every record that was
 not delivered again. The remote host then sees one process every two seconds, for as long as the
 app runs. The row of the run in the interface also stays "running" for ever.
 
@@ -35,7 +35,7 @@ unknown when the limit passes. The user can then stop the run.
 - First confirm each finding against the current code. If upstream already fixed or covered it, do not change it:
   report "already fixed" with the file and line that show it. That is a valid result.
 - Do every finding in scope before you finish; report each one as fixed / already fixed / not fixed (why).
-- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@openbot/i18n` catalog
+- Smallest change that fixes the behavior. No new dependency. User-visible text comes from `@volto/i18n` catalog
   keys (read docs/i18n.md before adding a key; add it to every locale). Errors that main/backend send use `sourceText(key)`.
 - Tests: E2E scripts under `scripts/` only (repository rule); vitest only for the protected areas named in AGENTS.md.
   Do not add a package.json script; run a new script with `bun scripts/<name>.ts`. Running this repository's own

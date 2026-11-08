@@ -45,7 +45,7 @@ REQUIRED_IDS = (
 )
 
 # 卡片顺序、单位文案与 app.js render() 中的 metricCard 调用一一对应；
-# 单位文案取自 openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts 的同名 i18n 键。
+# 单位文案取自 volto/packages/i18n/src/messages/zh/orgHealthDemo.ts 的同名 i18n 键。
 CARD_TITLES = (
     "整体技术人力成本",
     "整体折算人头",
@@ -69,7 +69,7 @@ METRIC_TITLES = (
     "营收业务（含共享平台）技术人力成本与折算人头",
     "收入与成本率",
 )
-# index.html 时间条上写死的期次标签，取自 openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts。
+# index.html 时间条上写死的期次标签，取自 volto/packages/i18n/src/messages/zh/orgHealthDemo.ts。
 TIME_LABELS = {
     "orgHealthDemo.yearStart": "年初实际",
     "orgHealthDemo.h1": "H1 冻结参考",
@@ -411,7 +411,7 @@ def render_summary(data: dict[str, Any], html: str, page_path: Path, data_path: 
         f"- 参考期次 `{periods['reference']}`：{len(missing_reference)}/{len(cards)} 张卡片显示“未提供”"
         f"（{'、'.join(missing_reference)}）。"
     )
-    lines.append("- 卡片单位文案取自 openbot/packages/i18n/src/messages/zh/orgHealthDemo.ts。")
+    lines.append("- 卡片单位文案取自 volto/packages/i18n/src/messages/zh/orgHealthDemo.ts。")
     lines.append("")
     return "\n".join(lines)
 

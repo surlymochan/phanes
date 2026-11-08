@@ -15,13 +15,13 @@ def claim_snapshot(task):
 
 
 def claim_is_unchanged(snapshot, task, digest_comment):
-    expected = f"openswarm-task-digest: sha256:{snapshot['digest']}"
+    expected = f"swrm-task-digest: sha256:{snapshot['digest']}"
     return task == snapshot["task"] and digest_comment == expected
 
 
 def assert_abort_on_mutation(before, after):
     snapshot = claim_snapshot(before)
-    changed_digest_comment = f"openswarm-task-digest: sha256:{digest(after)}"
+    changed_digest_comment = f"swrm-task-digest: sha256:{digest(after)}"
     assert not claim_is_unchanged(snapshot, after, changed_digest_comment)
     result = {"status": "failed", "aborted": True, "error_class": "claim_task_mutated"}
     assert result["aborted"] is True
@@ -34,7 +34,7 @@ def main():
     after = {**before, "budget_minutes": 11}
     snapshot = claim_snapshot(before)
     assert claim_is_unchanged(snapshot, before,
-                              f"openswarm-task-digest: sha256:{snapshot['digest']}")
+                              f"swrm-task-digest: sha256:{snapshot['digest']}")
     assert_abort_on_mutation(before, after)
     print("ok: claim task JSON/digest mutation aborts with error_class=claim_task_mutated")
 

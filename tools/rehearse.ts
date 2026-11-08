@@ -1,10 +1,10 @@
 // Hub upgrade rehearsal: migrate a copy of the fork-45 hub database with the code of this checkout.
-// Usage: bun .openbot-build/hub-upgrade-rehearsal/rehearse.ts <backup.db> <out-dir>
+// Usage: bun .volto-build/hub-upgrade-rehearsal/rehearse.ts <backup.db> <out-dir>
 import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { migrateOpenBotDatabase } from "../../src/backend/openbot-database-schema";
+import { migrateVoltoDatabase } from "../../src/backend/volto-database-schema";
 
 const [source, outDir] = process.argv.slice(2);
 if (!source || !outDir) throw new Error("usage: rehearse.ts <backup.db> <out-dir>");
@@ -95,7 +95,7 @@ const before = snapshot(db, new Set(["schema_migrations"]));
 const backoffBefore = db.prepare("SELECT * FROM routine_backoff ORDER BY routine_id").all();
 
 const started = Date.now();
-migrateOpenBotDatabase(db, { closedCleanly: true });
+migrateVoltoDatabase(db, { closedCleanly: true });
 const migrateMs = Date.now() - started;
 
 const afterVersions = versions(db);
@@ -126,14 +126,14 @@ const foreignKeys = db.prepare("PRAGMA foreign_key_check").all();
 
 // A second start must change nothing.
 const secondBefore = snapshot(db, new Set());
-migrateOpenBotDatabase(db, { closedCleanly: true });
+migrateVoltoDatabase(db, { closedCleanly: true });
 const secondAfter = snapshot(db, new Set());
 const idempotent = [...secondBefore].every(([name, value]) => secondAfter.get(name)?.hash === value.hash);
 
 // The upgraded schema must match the schema of a new database.
 const fresh = new DatabaseSync(":memory:");
 fresh.exec("PRAGMA foreign_keys = ON");
-migrateOpenBotDatabase(fresh);
+migrateVoltoDatabase(fresh);
 const upgradedColumns = columns(db);
 const freshColumns = columns(fresh);
 const schemaDiff = [...new Set([...Object.keys(upgradedColumns), ...Object.keys(freshColumns)])]

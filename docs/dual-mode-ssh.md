@@ -1,19 +1,19 @@
 # Box 上的双模式 SSH
 
-本文档记录 #224 的 box 部署约定。Hub bridge、`openswarm-fleet` 和 SSH
+本文档记录 #224 的 box 部署约定。Hub bridge、`swrm-fleet` 和 SSH
 客户端都运行在 box；Mac 不参与派发。下面的路径是示例，部署时替换为 box
 上的实际绝对路径。
 
 ## Bridge 配置
 
-`hub-openswarm-bridge` 默认读取
-`~/.claude/openswarm-hub-bridge/config.json`。文件只保存工作区映射，不保存
+`hub-swrm-bridge` 默认读取
+`~/.claude/swrm-hub-bridge/config.json`。文件只保存工作区映射，不保存
 密码、token、私钥内容或其他凭据：
 
 ```json
 {
-  "workspace": "/srv/phanes/openbot-workspace",
-  "repo": "/srv/phanes/openbot"
+  "workspace": "/srv/phanes/volto-workspace",
+  "repo": "/srv/phanes/volto"
 }
 ```
 
@@ -24,18 +24,19 @@
 
 ## Box SSH 配置
 
-在 box 的 `~/.ssh/openswarm-hub/config` 中使用已经部署的控制面 key
-`~/.ssh/id_ed25519_phanes_ctl`。这里只引用 key 路径，不复制或打印 key 内容。
+在 box 的 `~/.ssh/swrm-hub/config` 中使用已经部署的控制面 key
+`~/.ssh/id_ed25519_fleet_operator`。这里只引用 key 路径，不复制或打印 key 内容。
 `ControlMaster` 复用同一个控制连接，减少 fleet 查询和 lane assignment 的
-重复握手：
+重复握手。在 `~/.ssh/config` 中加入 `Include ~/.ssh/swrm-hub/config`，
+使原生 `fleet exec` 和结果 bundle 使用的 `ssh` 都能读取这些 alias：
 
 ```sshconfig
-Host ib1 ib2 ib3 ib4 ib5 gocc gorelay govpn govpn2
-    IdentityFile ~/.ssh/id_ed25519_phanes_ctl
+Host gores1 gores2 govpn govpn2 gorelay gocc
+    IdentityFile ~/.ssh/id_ed25519_fleet_operator
     IdentitiesOnly yes
     ControlMaster auto
     ControlPersist 10m
-    ControlPath ~/.ssh/openswarm-hub/cm-%C
+    ControlPath ~/.ssh/swrm-hub/cm-%C
     ServerAliveInterval 15
     ConnectTimeout 10
 ```
@@ -43,26 +44,29 @@ Host ib1 ib2 ib3 ib4 ib5 gocc gorelay govpn govpn2
 首次部署后只在 box 上验证连通性和远端命令，例如：
 
 ```bash
-ssh -F ~/.ssh/openswarm-hub/config ib1 -- true
-ssh -F ~/.ssh/openswarm-hub/config gocc -- true
+ssh -F ~/.ssh/swrm-hub/config gores1 -- true
+ssh -F ~/.ssh/swrm-hub/config gocc -- true
 ```
 
 不要把私钥、密码、known-hosts 内容或 agent socket 放进仓库或 bridge 配置。
 
-box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持该循环。
+Instabox fleet 及其证书续签循环随 2026-11-02 基线一起退役，派发机不再
+需要维持该循环。
 
 ## 跳板 / ProxyCommand 拓扑
 
 跳板拓扑的事实来源是 box 端真正生效的 ssh config：AD 用 `~/.ssh/config`
 （AD 的 `ssh` 不带 `-F`，见 `tools/lane-autodispatch/autodispatch.py`），
-`openswarm-fleet` 用上面那段 `~/.ssh/openswarm-hub/config`。仓库里能核对到的
+`swrm-fleet` 也通过 `~/.ssh/config` 的 `Include` 读取上面那段
+`~/.ssh/swrm-hub/config`。仓库里能核对到的
 只有这几点：
 
-- 受控 fleet 主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、`govpn2`
-  （`docs/fleet-topology-expected.md:12-14`）。`bastion` **不是** fleet 主机，
+- 受控 fleet 主机集合固定为 `gores1`、`gores2`、`govpn`、`govpn2`、
+  `gorelay`、`gocc`
+  （`docs/fleet-topology-expected.md:15-17`）。`bastion` **不是** fleet 主机，
   在本仓库里只作为引用回归样例出现（`tools/check-ssh-opts-quote.py:18`、
-  `openswarm/tests/test_autodispatch.py:17`），不是可核对的跳板拓扑。
-- 上面那段示例 ssh config 对这 9 台主机只配了 `IdentityFile` 与 ControlMaster，
+  `swrm/tests/test_autodispatch.py:17`），不是可核对的跳板拓扑。
+- 上面那段示例 ssh config 对这 6 台主机只配了 `IdentityFile` 与 ControlMaster，
   没有 `ProxyJump` / `ProxyCommand`；真实跳板链以 box 上实际生效的 ssh config 为准。
 - 方向：coordinator 部署在 `gocc`，是 `gorelay` 通过反向隧道连 `gocc`
   （gorelay→gocc，见 `docs/fleet-coordinator-ssh-backoff.md:21-22`）；
@@ -82,7 +86,7 @@ box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持
 
 ```json
 {
-  "ib1": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
+  "gocc": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
 }
 ```
 
@@ -94,34 +98,50 @@ box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持
 `python3 tools/check-ad-ssh-command.py`）。表里只放跳板路由，不要放凭据（key 路径由
 ssh config 的 `IdentityFile` 负责）。
 
-## Fleet 主机和十 lane 拓扑
+## Fleet 主机和十一 lane 拓扑（2026-11-02 基线）
 
-自动路由的主机集合固定为 `ib1`–`ib5`、`gocc`、`gorelay`、`govpn`、
-`govpn2`；不加入 `local`、`gores1` 或 copilot。当前十 lane 的容量分配为：
+事实基线以 2026-11-02 为准：Instabox 主机已退役，自动路由的远端主机集合
+固定为 `gores1`、`gores2`、`govpn`、`govpn2`、
+`gorelay`、`gocc`；控制面在 **box**，box 是本机，不加入受控
+fleet host。当前十一 lane 的容量分配为：
 
 | 主机 | lane 容量 | 允许的 backend |
 |---|---:|---|
-| ib1 | 2 | pi |
-| ib2 | 1 | pi |
-| ib3 | 1 | pi |
-| ib4 | 1 | pi |
-| ib5 | 1 | pi |
-| gocc | 1 | agy |
-| gorelay | 1 | codex |
+| gores1 | 3 | pi |
+| gores2 | 2 | pi |
 | govpn | 1 | codex |
 | govpn2 | 1 | codex |
+| gorelay | 2 | codex |
+| gocc | 2 | agy |
 
-因此总容量是 10，`gocc` 最多 1 个 lane；配置中不得出现 `copilot` 或
-`gores1`。在 box 的 bridge/service 环境中设置（JSON 的引号要保留）：
+因此总容量是 11，`gocc` 最多 2 个 lane；配置中不得出现 `copilot` 或
+box 本机 lane backend。限额与 backend 配比的机器可读约定见
+[`docs/fleet-topology-expected.md`](fleet-topology-expected.md)。在 box 的
+bridge/service 环境中设置（JSON 的引号要保留）：
 
 ```bash
-export OPENSWARM_AUTO_FLEET_HOSTS='["ib1","ib2","ib3","ib4","ib5","gocc","gorelay","govpn","govpn2"]'
-export OPENSWARM_AUTO_HOST_BACKENDS='{"local":[],"ib1":["pi"],"ib2":["pi"],"ib3":["pi"],"ib4":["pi"],"ib5":["pi"],"gocc":["agy"],"gorelay":["codex"],"govpn":["codex"],"govpn2":["codex"]}'
+export OPENSWARM_AUTO_CLI=/absolute/path/to/swrm-fleet
+export OPENSWARM_HUB_LOCAL_ROUTER=1
+export OPENSWARM_AUTO_LOCAL_HOST=box
+export OPENSWARM_AUTO_FLEET_HOSTS='["gores1","gores2","govpn","govpn2","gorelay","gocc"]'
+export OPENSWARM_AUTO_HOST_BACKENDS='{"box":[],"gores1":["pi"],"gores2":["pi"],"govpn":["codex"],"govpn2":["codex"],"gorelay":["codex"],"gocc":["agy"]}'
 ```
 
-`OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置。部署后
-以 `openswarm-fleet fleet status --json` 观察实际 lane 名称和状态；若实际
-lane 数量不是 10，应先修正 fleet/topology 配置，再启用自动派发。
+`OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置；box 的
+空白名单确保控制面本机的 lane 不被探测或接收自动派发。
+受控 host 还须登记在 `swrm-fleet` 的 `$OPENSWARM_HOME/fleet.json` 中
+（默认 `~/.claude/swrm-executor-candidate/fleet.json`），使用 `kind: "ssh"`
+及已经配置好的 `ssh` alias；环境中的 host 名称按该 inventory 查找。
+`OPENSWARM_HUB_LOCAL_ROUTER=1` 使 bridge 直接使用本机 fleet inventory，
+无需旧 gateway 的 `ssh_host` 配置；交接记录保存路由，后续状态、停止及结果
+bundle 都发往原执行主机。旧 gateway 的交接记录继续使用原路由。部署后
+以 `swrm-fleet fleet status --json` 观察实际 lane 名称和状态；若实际
+lane 数量不是 11，应先修正 fleet/topology 配置，再启用自动派发。
+
+已退役主机（2026-11-02 起不再探测、不再派发）：Instabox fleet
+`node-1.example.invalid`–`node-5.example.invalid`，以及
+`worker-b.example.invalid`（其容量由 `gores1` 承接）。这些名字只作为退役
+记录出现，不得写进自动派发配置。
 
 ## 从 box 手动冒烟
 
@@ -129,18 +149,18 @@ lane 数量不是 10，应先修正 fleet/topology 配置，再启用自动派�
 不含凭据的任务卡：
 
 ```bash
-cd /srv/phanes/openbot-workspace
+cd /srv/phanes/volto-workspace
 umask 077
-task=$(mktemp /tmp/openswarm-ssh-smoke.XXXXXX.md)
+task=$(mktemp /tmp/swrm-ssh-smoke.XXXXXX.md)
 cat >"$task" <<'EOF'
-Repository: openbot
+Repository: volto
 Task type: docs
 只检查当前 checkout 的版本并返回，不修改文件。
 EOF
 
-openswarm-fleet fleet status --json
-openswarm-fleet fleet exec ib1 -- lane status
-openswarm-fleet fleet exec ib1 -- lane assign M1 --task-file "$task" \
+swrm-fleet fleet status --json
+swrm-fleet fleet exec gores1 -- lane status
+swrm-fleet fleet exec gores1 -- lane assign M1 --task-file "$task" \
   --title "SSH fleet smoke" --budget-minutes 5
 ```
 
@@ -149,17 +169,17 @@ openswarm-fleet fleet exec ib1 -- lane assign M1 --task-file "$task" \
 示例）：
 
 ```bash
-scp -q -F ~/.ssh/openswarm-hub/config "$task" ib1:/tmp/openswarm-ssh-smoke.md
-ssh -F ~/.ssh/openswarm-hub/config ib1 -- \
-  openswarm-fleet lane assign M1 --task-file /tmp/openswarm-ssh-smoke.md \
+scp -q -F ~/.ssh/swrm-hub/config "$task" gores1:/tmp/swrm-ssh-smoke.md
+ssh -F ~/.ssh/swrm-hub/config gores1 -- \
+  swrm-fleet lane assign M1 --task-file /tmp/swrm-ssh-smoke.md \
   --title "SSH fleet smoke" --budget-minutes 5
 ```
 
 `lane assign` 返回 run id 后，用同一 host 查询并等待结果：
 
 ```bash
-openswarm-fleet fleet exec ib1 -- runs --active --json
-openswarm-fleet fleet exec ib1 -- lane status
+swrm-fleet fleet exec gores1 -- runs --active --json
+swrm-fleet fleet exec gores1 -- lane status
 ```
 
 也可针对当前空闲 lane，把上例中的 `M1` 替换为 `fleet status` 显示的 lane
@@ -175,7 +195,7 @@ rm -f -- "$task"
 
 ## Harvest 的 fetch 失败计数
 
-`openswarm-fleet fleet harvest` 从各 fleet host 收回 lane 结果时，每次远端 fetch 最多
+`swrm-fleet fleet harvest` 从各 fleet host 收回 lane 结果时，每次远端 fetch 最多
 尝试 **3 次**（初次 + 2 次重试），间隔 20 秒；只有 `Connection closed`、`broken pipe`、
 banner 超时、`bad pack header` 等 SSH/git 瞬时错误才会重试（与 autodispatch harvest
 同一分类），非瞬时错误直接判失败（退避约定见
@@ -190,8 +210,8 @@ banner 超时、`bad pack header` 等 SSH/git 瞬时错误才会重试（与 aut
 健康巡检读这个字段即可判断 SSH 是否在抖动：
 
 ```bash
-openswarm-fleet fleet harvest --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["fetch_fails"])'
-grep -h '"fetch_fails"' ~/.claude/openswarm-executor-candidate/harvest/*/*.json
+swrm-fleet fleet harvest --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["fetch_fails"])'
+grep -h '"fetch_fails"' ~/.claude/swrm-executor-candidate/harvest/*/*.json
 ```
 
 `fetch_fails` 为 0 表示远端结果一次就抓回来了；大于 0 表示该 host 的 SSH 抓取发生过
@@ -201,8 +221,8 @@ grep -h '"fetch_fails"' ~/.claude/openswarm-executor-candidate/harvest/*/*.json
 
 fleet 探活（probe）与容量汇总统一使用 `ssh -o BatchMode=yes` 探测受控 host。
 探测开关在 `ib-refresh`（生产汇总路径）：fleet JSON 里写
-`"ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/openswarm-hub/config"}`，
-或命令行 `--ssh-probe --ssh-config ~/.ssh/openswarm-hub/config`。
+`"ssh_probe": {"enabled": true, "ssh_config": "~/.ssh/swrm-hub/config"}`，
+或命令行 `--ssh-probe --ssh-config ~/.ssh/swrm-hub/config`。
 
 若探测非零退出（含 `Permission denied` / `Connection closed` / 超时），该 host 记为
 `probe_status: failed`，并且**不计入** `hosts_ok`；只有退出码 0 才 +1 `hosts_ok`。

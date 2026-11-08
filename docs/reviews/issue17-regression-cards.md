@@ -36,7 +36,7 @@ Refs #17（子任务 #112）。
 - `openswarm/bin/openswarm:11089-11126` — `regress_card_meta()`：卡片元数据字段与校验
 - `tools/cards/c1-58.md:3-4` — "Cards live in `regression/<id>/{card.md,meta.yaml}`"（同一约定）
 
-本工作树（phanes）里**没有** `agent-knowledge` 仓库的副本（`ls` 无 `regression/` 目录，`find . -name "*.yaml"` 只有 openbot 自带的
+本工作树（phanes）里**没有** `agent-knowledge` 仓库的副本（`ls` 无 `regression/` 目录，`find . -name "*.yaml"` 只有 volto 自带的
 yml/toml），因此四张卡的 `card.md` / `meta.yaml` 原文无法在此直接读到；下面引用的 verify 命令来自本仓库内的权威记录：
 
 - `docs/audit/issue-17-card-baselines.md:6-9` — 四张卡 id 的清单
@@ -50,7 +50,7 @@ yml/toml），因此四张卡的 `card.md` / `meta.yaml` 原文无法在此直�
 - `tools/cards/c1-58b.md:14-16` — 同上问题陈述（重复记录）
 
 > 说明：`docs/audit/issue-17-card-baselines.md` 是本仓库已有的 Issue #17 审计稿；本文件是对它的**复核 + 实测补强**
-> （原审计稿里的 openbot 结论是推理，本文件补了 git 对象级的证据；openswarm 结论本文件重跑并复现）。
+> （原审计稿里的 volto 结论是推理，本文件补了 git 对象级的证据；openswarm 结论本文件重跑并复现）。
 
 ### 1.2 `meta.yaml` 里 `verify` 字段的语义（代码依据）
 
@@ -230,13 +230,13 @@ PYTHONPATH=tests python3 -m unittest \
 
 ### 2.3 `dispatch-approval-gate`
 
-- 目标仓库：`openbot`
+- 目标仓库：`volto`
 - `base_commit`：`5b37965fa1`（"Read the real openswarm output and explain dispatch failures"）
 - `source_commit`：`317be65636`（"Ask the person before a risky dispatch runs"）
   （见 `docs/audit/issue-17-card-baselines.md:125-126`、`:192`）
 - 当前 verify：`bun run typecheck:node`（`docs/audit/issue-17-card-baselines.md:129`、`:192`；
   问题陈述见 `tools/cards/c1-58.md:10-12`）
-- 该脚本定义：`openbot/package.json:165` → `"typecheck:node": "bun scripts/type-checker.ts --noEmit -p tsconfig.node.json"`
+- 该脚本定义：`volto/package.json:165` → `"typecheck:node": "bun scripts/type-checker.ts --noEmit -p tsconfig.node.json"`
 
 **基线是否通过：是。** 依据：
 
@@ -252,7 +252,7 @@ PYTHONPATH=tests python3 -m unittest \
    而修复提交新增了它（`git show --stat 317be65636` → `scripts/dispatch-approval-e2e.ts | 317 +++++++++++++++++++++`）。
 
 **本地未能实跑（如实说明）**：本机没有 `bun`（`bun --version` → `command not found`），
-`openbot/node_modules` 也不存在，且不允许联网安装依赖，因此 `bun run typecheck:node` 与
+`volto/node_modules` 也不存在，且不允许联网安装依赖，因此 `bun run typecheck:node` 与
 `bun scripts/dispatch-approval-e2e.ts` 均未在此环境执行；上述结论为代码阅读 + git 对象级证据。
 
 **改成"基线失败、修复后通过"：**
@@ -263,24 +263,24 @@ bun scripts/dispatch-approval-e2e.ts
 
 - 基线行为：脚本文件不存在 → `bun` 报脚本找不到、退出码非 0 → **base 失败**；
   即便把脚本搬到基线跑，基线的 `handleDispatchTool` 也没有 `approve` 门禁，会直接启动调度 → 断言失败。
-- 修复后行为：脚本断言"未获批准前不得启动 executor"（现 HEAD `openbot/scripts/dispatch-approval-e2e.ts:143`
+- 修复后行为：脚本断言"未获批准前不得启动 executor"（现 HEAD `volto/scripts/dispatch-approval-e2e.ts:143`
   `an executor started before approval`）、"拒绝/缺失时返回 `error.backend.dispatchApprovalDenied` /
   `error.backend.dispatchApprovalMissing`"（`:165-171`）、"不残留待批项"（`:173`），退出码 0。
 - 配套动作（`tools/cards/c1-58.md:18-20` 已要求）：
   1. 把该 E2E 脚本列入卡片的"预期变更"（executor 需要把脚本一起提交，否则修复后 verify 也跑不起来）；
   2. `meta.yaml` 置 `verify_fails_on_base: true`；
-  3. 证据写入 `.openbot-build/rc58/<card-id>.json`（`tools/cards/c1-58.md:25-26`）。
+  3. 证据写入 `.volto-build/rc58/<card-id>.json`（`tools/cards/c1-58.md:25-26`）。
 
 ### 2.4 `process-search-results`
 
-- 目标仓库：`openbot`
+- 目标仓库：`volto`
 - `base_commit`：`ef3993b73b`（"Show each turn's response process and animate the working avatar"）
 - `source_commit`：`00daa495da` / `feeaba4ae0`（"Open the response process when a search hit selects a process note" /
   "Show the response process with a working avatar (fuses #18 and #23)"）
   （见 `docs/audit/issue-17-card-baselines.md:158-159`、`:193`）
 - 当前 verify：`bun run typecheck:renderer`（`docs/audit/issue-17-card-baselines.md:162`、`:193`；
   问题陈述见 `tools/cards/c1-58.md:10-12`）
-- 该脚本定义：`openbot/package.json:166` → `"typecheck:renderer": "bun scripts/type-checker.ts --noEmit -p tsconfig.web.json"`
+- 该脚本定义：`volto/package.json:166` → `"typecheck:renderer": "bun scripts/type-checker.ts --noEmit -p tsconfig.web.json"`
 
 **基线是否通过：是。** 依据：
 
@@ -288,11 +288,11 @@ bun scripts/dispatch-approval-e2e.ts
    response process 折叠块"这一 DOM 运行时行为，类型检查测不到。
 2. 修复的实际代码（`git diff efb269907 feeaba4ae -- src/renderer/src/features/conversation/stores/search-store.ts`）：
    - 命中判定从只认 `dataset.chatSearchMessage` 扩展为同时认 `dataset.chatSearchGroup` +
-     `[data-chat-search-item]`（现 HEAD `openbot/src/renderer/src/features/conversation/stores/search-store.ts:94-100`）；
+     `[data-chat-search-item]`（现 HEAD `volto/src/renderer/src/features/conversation/stores/search-store.ts:94-100`）；
    - 命中后如果消息是 `.response-process` 且存在折叠按钮，则 `disclosure?.click()` 自动展开
      （现 HEAD 同文件 `:131-134`）。
    这两处都是运行时 DOM 操作，类型检查不覆盖。
-3. 数据属性侧：`openbot/packages/ui/src/features/conversation/ResponseProcess.tsx:25`
+3. 数据属性侧：`volto/packages/ui/src/features/conversation/ResponseProcess.tsx:25`
    （`data-chat-search-group={props.message.itemIds?.join(" ")}`）、`:46`（`data-chat-search-item`）、
    `:32`（`aria-expanded`）。
 
@@ -303,9 +303,9 @@ git cat-file -t ef3993b73b0c155133da4a0b8197e0d3965389db
 fatal: git cat-file: could not get object info
 ```
 
-它是上游 `nightly-labs/openbot` 的提交号（openbot 已被 subtree 并入 phanes，见
-`db82b6adc Add 'openbot/' from commit 'afcc320667907bdda4b57ac876cc90885b1ffc7a'`）。
-若卡片配置的 `regress.repos.openbot` 指向本仓库，基线解析会直接失败，
+它是上游 `nightly-labs/openbot` 的提交号（volto 已被 subtree 并入 phanes，见
+`db82b6adc Add 'volto/' from commit 'afcc320667907bdda4b57ac876cc90885b1ffc7a'`）。
+若卡片配置的 `regress.repos.volto` 指向本仓库，基线解析会直接失败，
 报错来自 `openswarm/bin/openswarm:11145-11148`（`base_commit is unavailable for <id>`）——卡片连跑都跑不起来。
 本仓库里可用的等价锚点：
 
@@ -324,14 +324,14 @@ bun scripts/response-process-e2e.ts
 
 - 基线行为：`scripts/response-process-e2e.ts` 在 `efb269907^`（`aa65229c1`）不存在
   （`git cat-file -e efb269907^:scripts/response-process-e2e.ts` → 不存在），基线跑必然非 0；
-- 修复后行为：现 HEAD 的 `openbot/scripts/response-process-e2e.ts`（281 行）断言
+- 修复后行为：现 HEAD 的 `volto/scripts/response-process-e2e.ts`（281 行）断言
   `processNotesAreSearchable`（`:261-265`）、`reopenedHistoryKeepsProcessAndAnswer`（`:257`）等并写出
-  `.openbot-build/response-process-e2e/report.json`（`:271`），退出码 0。
+  `.volto-build/response-process-e2e/report.json`（`:271`），退出码 0。
 
 **覆盖度缺口（如实记录）**：该 E2E 脚本只覆盖**后端**（process note 落库后可被搜索）；
 renderer 侧的"搜索命中后自动展开折叠块"（`search-store.ts:97-99`、`:133`）目前**没有任何脚本覆盖**
-（`grep -rl "createSearchStore" openbot/scripts/` 无结果）。要完整覆盖本卡，需要再补一个
-`scripts/*-e2e.ts` 驱动 renderer 的脚本；按 `openbot/AGENTS.md:226-230`（"Use E2E tests only. Do not add unit
+（`grep -rl "createSearchStore" volto/scripts/` 无结果）。要完整覆盖本卡，需要再补一个
+`scripts/*-e2e.ts` 驱动 renderer 的脚本；按 `volto/AGENTS.md:226-230`（"Use E2E tests only. Do not add unit
 tests… Vitest files are permitted only for these protected areas"），不能用 Vitest fixture 绕过，
 这正是 `tools/cards/c1-58b.md:8` 要求做的转换。
 
@@ -353,14 +353,14 @@ tests… Vitest files are permitted only for these protected areas"），不能�
 1. **改 meta.yaml 的 `verify`**：把四张卡的 `verify` 换成上面"建议 verify"列的命令。
 2. **置 `verify_fails_on_base: true`**：否则运行器根本不会去基线跑一次
    （`openswarm/bin/openswarm:11252-11254`、`:11312-11313`）。
-3. **把新增的检查脚本纳入卡片的"预期变更"**：openbot 两张卡必须让 executor 一并提交
+3. **把新增的检查脚本纳入卡片的"预期变更"**：volto 两张卡必须让 executor 一并提交
    `scripts/dispatch-approval-e2e.ts` / `scripts/response-process-e2e.ts`
-   （`tools/cards/c1-58.md:18-20`；`openbot/AGENTS.md:226-230` 只允许 `scripts/` 下的 E2E）。
+   （`tools/cards/c1-58.md:18-20`；`volto/AGENTS.md:226-230` 只允许 `scripts/` 下的 E2E）。
 4. **openswarm 两张卡注意目录布局**：verify 必须在"基线树根"和"运行工作树"两个 cwd 下都能定位测试目录
    （§2.1 末尾），否则会得到"因路径错而失败"的假反证。
-5. **修 `process-search-results` 的 `base_commit`**：改成 `regress.repos.openbot` 实际检出的仓库里能解析的哈希
+5. **修 `process-search-results` 的 `base_commit`**：改成 `regress.repos.volto` 实际检出的仓库里能解析的哈希
    （本仓库可用 `aa65229c1` / `6b72597d4` / `efb269907`），否则卡片直接报 `base_commit is unavailable`。
-6. **留证**：按 `tools/cards/c1-58.md:25-26`，把 base rc 与 candidate rc 写进 `.openbot-build/rc58/<card-id>.json`。
+6. **留证**：按 `tools/cards/c1-58.md:25-26`，把 base rc 与 candidate rc 写进 `.volto-build/rc58/<card-id>.json`。
 7. **入库标准（长期）**：卡片入库必须满足"verify 在 `base_commit` 非 0、在 `source_commit` 为 0"；
    禁止用大范围静态类型检查或空泛的 `unittest discover` 作为单点功能变更的验证命令
    （与 `docs/audit/issue-17-card-baselines.md:197-202` 的建议一致）。
@@ -371,14 +371,14 @@ tests… Vitest files are permitted only for these protected areas"），不能�
 
 | 项 | 结果 |
 | :--- | :--- |
-| 运行环境 | `python3 3.13.5`；`node v22.23.3`；**无 `bun`**；`openbot/node_modules` 不存在；无网络安装 |
+| 运行环境 | `python3 3.13.5`；`node v22.23.3`；**无 `bun`**；`volto/node_modules` 不存在；无网络安装 |
 | 只读导出基线树 | `git archive <rev> \| tar -x -C $SCRATCH/<rev>`（未改 git 状态、未建 worktree、未提交） |
 | 实测通过 | `9cbcb4040` 整包 discover → exit 0（56 tests）；`9cbcb4040` 靶向用例 → exit 1；`355f28487` 靶向用例 → exit 0；`355f28487` 靶向（steer-report 用例）→ exit 1；`3715f5bd0` 靶向 → exit 0；`355f28487` `test_cursor_steer_cancels_then_continues_same_session` → exit 0（说明该用例单独无法反证） |
-| 未能实测 | `bun run typecheck:node`、`bun run typecheck:renderer`、`bun scripts/dispatch-approval-e2e.ts`、`bun scripts/response-process-e2e.ts`（本机无 bun / 无依赖）；openbot 侧结论来自代码阅读与 git 对象级证据（`git cat-file -e` / `git diff` / `git show --stat`） |
+| 未能实测 | `bun run typecheck:node`、`bun run typecheck:renderer`、`bun scripts/dispatch-approval-e2e.ts`、`bun scripts/response-process-e2e.ts`（本机无 bun / 无依赖）；volto 侧结论来自代码阅读与 git 对象级证据（`git cat-file -e` / `git diff` / `git show --stat`） |
 | 顺带发现 | `process-search-results` 的 `base_commit ef3993b73b` 在本仓库不可解析；整包 `unittest discover` 在本沙箱会因 `pwd.getpwuid()` 缺宿主用户而误报失败 |
 
 ## 6. 建议的后续项（不属于本只读任务）
 
 - 修 `process-search-results` 卡的 `base_commit`（见 §4.5）。
-- 为 renderer 侧"搜索命中自动展开 response process"补一个 `scripts/*-e2e.ts`（受 `openbot/AGENTS.md:226-230` 约束）。
+- 为 renderer 侧"搜索命中自动展开 response process"补一个 `scripts/*-e2e.ts`（受 `volto/AGENTS.md:226-230` 约束）。
 - 把 §1.3 的"verify 必须基线非 0"写进回归卡入库规范（现有审计稿 `docs/audit/issue-17-card-baselines.md:197-202` 已有建议）。
