@@ -1457,14 +1457,13 @@ def tick(lanes, state, last_warn):
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
             eligible = [lane for lane in [L, *remaining] if lane in review_ids
                         and lane in idle_lane_names(lanes, state, res, scopes)
-                        and running[lane] < REVIEW_MAX_IN_FLIGHT
                         and can_take(lanes[lane]["backend"], pick, lane)]
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Rank and log the full backlog, but enforce capacity on admitted reviews
-            # above. These waiting cards have no assigned lane yet: their forecast
-            # must not fill every idle lane's cap and prevent the queue from draining.
+            # Admission and logging use the same running + waiting backlog. Even an
+            # idle lane must wait when its share of the queue already reaches the cap.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
+                                             max_in_flight=REVIEW_MAX_IN_FLIGHT,
                                              pr=review_target_pr(pick),
                                              log=lambda row: log(row, brain=False))
             if chosen is None: continue
