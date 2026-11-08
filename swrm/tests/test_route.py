@@ -122,6 +122,12 @@ class RoutingScenarios(unittest.TestCase):
         policy["routing"]["default_order"] = ["ocgo", "codex"]
         self.check(prof("mechanical", 1), scenario(), {"backend": "ocgo"}, policy)
 
+    def test_26_disabled_backend_is_skipped_during_automatic_routing(self):
+        st = scenario()
+        st["codex"]["disabled"] = True
+        self.check(prof(d=3), st, {"backend": "ocgo",
+                                    "skipped": lambda s: "codex" in s}, OPT_IN_POLICY)
+
     def test_20_review_spreads_off_the_workhorse_family(self):
         # Two balanced ocgo families: the newer one is the router's workhorse
         # pick for implementation. A review must not land on that same family
