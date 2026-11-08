@@ -630,7 +630,7 @@ def read_pause(path):
         with open(path, encoding="utf-8", errors="replace") as stream: return stream.read()
     except OSError: return ""
 
-def pause_reason(body):
+def pause_body_reason(body):
     """The reason of an `auto:` pause body (None for a manual hold)."""
     text = (body or "").strip()
     if not text.startswith("auto:"): return None
@@ -641,7 +641,7 @@ def normalized_pause_reason(body):
 
     The counters are dropped ("ssh streak 3" becomes "ssh streak"), the case and the
     whitespace do not matter."""
-    reason = pause_reason(body)
+    reason = pause_body_reason(body)
     if reason is None: return None
     return re.sub(r"\s+", " ", re.sub(r"\s+\d+\b", "", reason)).strip().lower()
 
