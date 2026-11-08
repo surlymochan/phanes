@@ -3792,8 +3792,8 @@ RATE_LIMIT_RE = re.compile(r"(\b429\b|resource[_ -]?exhausted|rate.?limit|usage 
 AUTH_ERROR_RE = re.compile(r"(authentication required|not authenticated|unauthenticated|not logged in|please log ?in|login required|auth(?:entication)? error|FatalAuthenticationError)", re.I)
 # #1535: the Token Plan is exhausted.  A quota class error is not transient: retrying the request
 # only burns the run budget, so the lane reports the quota instead of asking for a retry.
-QUOTA_EXHAUSTED_RE = re.compile(r"token plan|用量上限|\b2056\b|\(2056\)|usage limit|insufficient (?:balance|quota)|"
-                                r"insufficient_quota|quota (?:exceeded|exhausted)", re.I)
+QUOTA_EXHAUSTED_RE = re.compile(r"token plan|用量上限|\b2056\b|\(2056\)|usage limit|insufficient balance|"
+                                r"insufficient.?quota|quota.?(?:exceeded|exhausted)", re.I)
 # #1594: the upstream stream broke before the answer was complete (a VM pause makes the broker
 # answer 502).  Such a turn is transient and may be retried.
 PI_STREAM_RETRY_RE = re.compile(r"stream ended before|message_stop|provider unavailable|ECONNRESET|premature close", re.I)

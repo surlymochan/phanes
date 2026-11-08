@@ -98,6 +98,8 @@ for line in sys.stdin:
         send({"id": request.get("id"), "type": "response", "command": "prompt", "success": True})
         if mode == "quota":
             fail_turn(QUOTA_ERROR)
+        elif mode == "quota_hyphen":
+            fail_turn("HTTP 429 insufficient-quota: message_stop")
         elif mode == "stream_always":
             fail_turn(STREAM_ERROR)
         elif mode == "stream" and prompts == 1:
@@ -172,6 +174,16 @@ class PiStreamRetryContractTests(unittest.TestCase):
     def test_quota_error_is_never_retried(self):
         action, _, _ = self.decide("exec_error", QUOTA_SAMPLE, 0)
         self.assertEqual(action, "stop")
+
+    def test_quota_separators_take_precedence_over_stream_errors(self):
+        for separator in ("", " ", "_", "-"):
+            for error in (f"insufficient{separator}quota", f"quota{separator}exceeded",
+                          f"quota{separator}exhausted"):
+                sample = f"HTTP 429 {error}: message_stop"
+                with self.subTest(sample=sample):
+                    self.assertTrue(self.quota_exhausted(sample))
+                    self.assertEqual(self.retry_kind(sample), "quota")
+                    self.assertEqual(self.decide("exec_error", sample, 0)[0], "stop")
 
 
 class PiStreamRetryLaneTests(unittest.TestCase):
@@ -281,6 +293,17 @@ class PiStreamRetryLaneTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed", self.error_classes(result))
         self.assertEqual(len(self.prompts()), 1, "an exhausted Token Plan must not be retried")
         self.assertIn("Token Plan", json.dumps(result, ensure_ascii=False))
+
+    def test_hyphenated_quota_with_stream_marker_is_not_retried(self):
+        self.set_config("quota_hyphen")
+        self.start_lane()
+        run_id = self.assign("the quota is exhausted despite a stream marker")
+        self.wait_run(run_id)
+        result = self.result(run_id)
+        self.assertEqual(result["status"], "failed", self.error_classes(result))
+        self.assertEqual(result["error_class"], "rate_limit")
+        self.assertEqual(len(self.prompts()), 1, "an exhausted quota must not be retried")
+        self.assertIn("insufficient-quota", json.dumps(result))
 
     def test_stream_retry_budget_stops_the_run_with_the_counter(self):
         self.set_config("stream_always")
