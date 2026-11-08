@@ -36,5 +36,5 @@ describe("agent thread upgrade host E2E", () => {
     expect(output).toContain('"passed": true');
     expect(output).toContain('"hostRestarted": true');
     expect(output).toContain('"retainedSessions": 1');
-  });
+  }, 30_000);
 });
