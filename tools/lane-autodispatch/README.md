@@ -128,7 +128,7 @@ fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head
 获取；`gh pr view --json` 不提供 `baseRefOid`。API 失败或元数据解析失败同样拒绝收割。
 实际推送的过滤后 head 必须包含 fix 前 head（越界产物过滤重建提交后仍须通过祖先检查），
 且相对 base 的变更文件数和增删行数分别不得下降超过
-`AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败，
+`AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败（含祖先检查超时、启动异常），
 均不推送、不改 PR、标记 `lane-failed`，并把 PR、前后 SHA、体量和原因写入 brain 日志和
 `$D/runs/<run>.log`（失败台账线索）。卡正文明确写 `整体重写：是` 可豁免。
 

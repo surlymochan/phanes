@@ -96,3 +96,18 @@ AD_HARVEST_COLLAPSE_MANIFEST=<清单路径> AD_LOCAL=<真实对象仓库> python
 tools/lane-autodispatch/test_harvest_filter.py tools/tests/test_lane_pr_validation.py`
 为 49 passed、1 skipped、20 subtests passed（skip 为真实事故清单缺失）；
 `python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。
+
+## 第三轮审查 BLOCKER 修复映射（基于 e4ddcdee6）
+
+- B1（祖先检查超时绕过拒绝流程）：`harvest_collapse_guard()` 捕获祖先检查的
+  `subprocess.SubprocessError`（含 `TimeoutExpired`）及 `OSError`，返回拒绝判定，
+  由 `finish()` 完成 `lane-failed` 标记、brain 日志和失败台账记录。异常和非零退出判定
+  均附 PR 号、前后 SHA、已计算的前后体量及错误原因。
+- 回归：`test_ancestry_check_errors_use_the_rejection_flow` 经公开 `finish()` 入口注入超时、
+  启动异常和非零退出，检查无 push、远端 PR 分支不变、无 PR 写入、标记 `lane-failed`、
+  brain/失败台账完整记因，结束状态只增加 `_done`，不消耗 review 轮次。
+  修复前测试因 `TimeoutExpired` 外抛失败；既有复现测试全部保留。
+- 本轮验证：上述护栏、过滤器和 PR 校验三套测试为 50 passed、1 skipped；
+  `python3 -m pytest -q swrm/tests/test_lane_busy_stale.py` 为 15 passed；
+  `python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。
+- 真实六例 SHA 回放继续使用上述宿主机清单与对象库命令，不将合成测试作为真实回放证据。

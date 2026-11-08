@@ -207,7 +207,7 @@ class HarvestFixture:
     # --- the harvest ----------------------------------------------------------------
 
     def harvest(self, old, new, *, card=CARD, body_error=None, pr_payload=None, pr_error=None,
-                harvest_ref=None, lane_ref=True, real_filter=False):
+                harvest_ref=None, lane_ref=True, real_filter=False, ancestry_error=None):
         """Run the harvest of a lane result and return (result, gh calls, sh calls)."""
         self.old_head = old
         self.new_head = new
@@ -239,6 +239,10 @@ class HarvestFixture:
         def spy_sh(cmd, timeout=120, inp=None):
             """Run the command for real (the git reads of the guard need it) and record it."""
             sh_calls.append(cmd)
+            if isinstance(cmd, list) and "--is-ancestor" in cmd and ancestry_error is not None:
+                if isinstance(ancestry_error, Exception):
+                    raise ancestry_error
+                return ancestry_error
             if isinstance(cmd, list) and cmd[:2] == ["gh", "api"]:
                 # gh api has no -R option; the endpoint must identify the repo.
                 target = card.split("重基PR：#", 1)[1].split()[0]
@@ -394,6 +398,29 @@ class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
         result, gh_calls, sh_calls = self.harvest(
             old, new, pr_payload={"head": {"sha": missing}, "base": {"sha": self.base}})
         self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_ancestry_check_errors_use_the_rejection_flow(self):
+        errors = (subprocess.TimeoutExpired("git merge-base --is-ancestor", 120),
+                  OSError("git ancestry check unavailable"),
+                  (128, "", "git ancestry check failed"))
+        for error in errors:
+            with self.subTest(error=error):
+                self.build_repo()
+                old, new = self.scenario_grown()
+                with mock.patch.object(ad, "mark_done", wraps=ad.mark_done) as mark_done:
+                    result, gh_calls, sh_calls = self.harvest(old, new, ancestry_error=error)
+                self.assert_refused(result, gh_calls, sh_calls)
+                self.assertEqual(result["status"], "harvest-collapse-rejected")
+                self.assertTrue(result["done"])
+                self.assertIn("ancestry check failed", result["error"])
+                self.assertIn(str(error) if isinstance(error, Exception) else error[2], result["error"])
+                for evidence in (f"PR #{PR}", old[:12], new[:12], "(1, 10)->(2, 20)"):
+                    self.assertIn(evidence, result["error"])
+                    self.assertIn(evidence, self.brain())
+                ledger = (self.state / "runs" / "run.log").read_text(encoding="utf-8")
+                self.assertIn("harvest-collapse-guard: " + result["error"], ledger)
+                mark_done.assert_called_once()
+                self.assertEqual(mark_done.call_args.args[0], {"_done": [ISSUE]})
 
     def test_rest_pr_metadata_allows_a_normal_fix(self):
         self.build_repo()

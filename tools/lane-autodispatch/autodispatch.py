@@ -1207,12 +1207,17 @@ def harvest_collapse_guard(issue, ref):
         after_size = diff_size(base, ref)
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         return False, f"PR #{pr} cannot be checked: {error}"
-    rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, new_sha])
+    ancestry_failure = (f"PR #{pr}: the ancestry check failed, refusing the push "
+                        f"({old[:12]}->{new_sha[:12]}, sizes {before_size}->{after_size})")
+    try:
+        rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, new_sha])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"{ancestry_failure}: {error}"
     if rc == 1:
         return False, (f"PR #{pr}: the new head {new_sha[:12]} does not contain "
                        f"the head the PR had {old[:12]} (sizes {before_size}->{after_size})")
     if rc:
-        return False, f"PR #{pr}: the ancestry check failed, refusing the push: {err.strip()[-160:]}"
+        return False, f"{ancestry_failure}: {err.strip()[-160:]}"
     reasons = []
     for name, index in (("files", 0), ("lines", 1)):
         before, after = before_size[index], after_size[index]
