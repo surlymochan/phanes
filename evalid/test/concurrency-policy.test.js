@@ -94,6 +94,15 @@ describe('concurrency policy — workflow max_agents', () => {
 });
 
 describe('concurrency policy — mission override', () => {
+  test('treats the executor default null override as unset', () => {
+    const policy = createConcurrencyPolicy({
+      workflow: { parallel: { max_agents: 5 } },
+      maxParallelAgentsOverride: null,
+    });
+    assert.equal(policy.maxAgents, 5);
+    assert.equal(policy.source, 'workflow');
+  });
+
   test('accepts a positive integer override', () => {
     const policy = createConcurrencyPolicy({
       workflow: { parallel: { max_agents: 5 } },
@@ -113,6 +122,7 @@ describe('concurrency policy — mission override', () => {
   });
 
   for (const { label, value } of INVALID_LIMITS) {
+    if (value === null) continue;
     test(`rejects ${label} mission override`, () => {
       assert.throws(
         () => createConcurrencyPolicy({
@@ -189,9 +199,18 @@ describe('concurrency policy — budget and charges', () => {
     assert.equal(policy.chargeFor({ id: 'TEST.weighted.1', parallel_weight: 2 }, { atoms: {} }), 1);
   });
 
+  test('fixed policy rejects an invalid atom weight before charging', () => {
+    const policy = createConcurrencyPolicy({
+      workflow: { parallel: { max_agents: 3, policy: 'fixed' } },
+    });
+    assert.throws(
+      () => policy.chargeFor({ id: 'TEST.weighted.1', parallel_weight: 2.9 }, { atoms: {} }),
+      /parallel_weight/,
+    );
+  });
+
   test('rejection errors name the offending field', () => {
     assert.throws(() => policyWithMaxAgents(null), /max_agents/);
-    assert.throws(() => createConcurrencyPolicy({ maxParallelAgentsOverride: null }), /override/);
     const nullPolicy = createConcurrencyPolicy();
     assert.throws(() => nullPolicy.weightFor({ parallel_weight: null }), /parallel_weight/);
     assert.throws(

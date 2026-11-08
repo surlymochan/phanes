@@ -47,7 +47,8 @@ export function createConcurrencyPolicy({ workflow = {}, maxParallelAgentsOverri
   const configuredMaxAgents = isUnset(workflowParallel.max_agents)
     ? DEFAULT_MAX_AGENTS
     : parsePositiveInteger(workflowParallel.max_agents, 'max_agents');
-  const hasOverride = !isUnset(maxParallelAgentsOverride);
+  // WorkflowExecutor uses null as its default when no mission override is set.
+  const hasOverride = maxParallelAgentsOverride !== undefined && maxParallelAgentsOverride !== null;
   const maxAgents = hasOverride
     ? parsePositiveInteger(maxParallelAgentsOverride, 'override')
     : configuredMaxAgents;
@@ -68,10 +69,11 @@ export function createConcurrencyPolicy({ workflow = {}, maxParallelAgentsOverri
       return parsePositiveInteger(rawWeight, 'parallel_weight');
     },
     chargeFor(atomRef = {}, registry = {}) {
+      const weight = this.weightFor(atomRef, registry);
       if (mode === 'fixed') {
         return 1;
       }
-      return Math.min(this.weightFor(atomRef, registry), maxAgents);
+      return Math.min(weight, maxAgents);
     },
   };
 }
