@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract for ib-refresh's partial-fleet readiness gate."""
+"""Offline contract using 2026-11-02 fleet hosts for ib-refresh's partial-fleet readiness gate."""
 
 import importlib.util
 from pathlib import Path
@@ -12,16 +12,16 @@ SPEC.loader.exec_module(IB_REFRESH)
 
 
 def main():
-    # worker/gores2 are in cooldown; the reachable current hosts remain usable.
+    # gores1/gores2 are in cooldown; the reachable current hosts remain usable.
     rows = [
-        {"host": "worker", "status": "cooldown"},
+        {"host": "gores1", "status": "cooldown"},
         {"host": "gores2", "status": "skipped_cooldown"},
-        {"host": "worker-a.example.invalid", "status": "valid", "final_status": "valid"},
-        {"host": "relay.example.invalid", "status": "valid", "final_status": "valid"},
-        {"host": "broker", "status": "valid", "final_status": "valid"},
+        {"host": "govpn", "status": "valid", "final_status": "valid"},
+        {"host": "gorelay", "status": "valid", "final_status": "valid"},
+        {"host": "gocc", "status": "valid", "final_status": "valid"},
     ]
     usable = IB_REFRESH._usable_hosts(rows)
-    assert [row["host"] for row in usable] == ["worker-a.example.invalid", "relay.example.invalid", "broker"]
+    assert [row["host"] for row in usable] == ["govpn", "gorelay", "gocc"]
     assert IB_REFRESH._need_ok(len(usable), 2, 3)
     assert IB_REFRESH._status_line(True, len(usable), 2, 1800, 1735689600).startswith(
         "ok=1 hosts_ok=3 skipped_cooldown=2"

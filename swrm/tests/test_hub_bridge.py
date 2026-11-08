@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -17,7 +19,7 @@ G = MOD['run_submit'].__globals__
 
 class HubBridgeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir=ROOT.parent)
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
         self.repo = self.path / 'repo'; self.repo.mkdir()
@@ -34,6 +36,91 @@ class HubBridgeTests(unittest.TestCase):
                      '--budget-minutes','4']
         self.patches = [mock.patch.dict(G, {'config_path':self.config, 'store':self.path/'store'})]
         for p in self.patches: p.start(); self.addCleanup(p.stop)
+
+    def test_configured_box_host_routes_local_lifecycle_directly(self):
+        info = {'id':'box-run', 'result':{}}
+        replies = [info, {'ok':True}, info, {'bundle':'AA=='}]
+        command = mock.Mock(side_effect=replies)
+        legacy = mock.Mock(side_effect=AssertionError('box routed to legacy gateway'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER':'1',
+                                          'OPENSWARM_AUTO_LOCAL_HOST':'box',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]'}), \
+             mock.patch.dict(G, {'local_command':command, 'gateway':legacy}):
+            for op in ('info', 'stop', 'bundle'):
+                MOD['dispatch_gateway']({'op':op,'id':'box-run','host':'box'})
+        self.assertEqual([call.args[0] for call in command.call_args_list], [
+            [G['native'],'fleet','_run-info','box-run'],
+            [G['native'],'stop','box-run'],
+            [G['native'],'fleet','_run-info','box-run'],
+            [sys.executable,str(ROOT / 'bin/fleet-result-bundle')],
+        ])
+        self.assertEqual(command.call_args.args[1], info)
+        legacy.assert_not_called()
+
+    def test_direct_submit_and_mapped_lifecycle_preserve_remote_host(self):
+        reply = {'id':'remote-run','state':'queued','host':'gores2','backend':'pi','model':'MiniMax'}
+        def command(argv, payload=None, timeout=100):
+            if argv[:2] == [G['native'],'auto']:
+                self.assertEqual(Path(argv[argv.index('--task-file') + 1]).read_text(), self.card.read_text())
+                self.assertGreater(timeout, 2 * 35 + 45)
+                return reply
+            self.assertEqual(argv[:5], [G['native'],'fleet','exec','gores2','--'])
+            self.assertIn(argv[5:], [['fleet','_run-info','remote-run'], ['stop','remote-run']])
+            return {'id':'remote-run','result':{'result':{'summary':'done'}}}
+        legacy = mock.Mock(side_effect=AssertionError('direct handoff reached legacy gateway'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER':'1',
+                                          'OPENSWARM_AUTO_LOCAL_HOST':'box',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]'}), \
+             mock.patch.dict(G, {'local_command':command, 'gateway':legacy}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            MOD['run_submit'](self.args)
+            self.assertEqual(json.loads(output.getvalue())['executor_host'], 'gores2')
+            for op in ('info','stop'):
+                output.seek(0); output.truncate()
+                self.assertTrue(MOD['mapped']('remote-run', op))
+        db = MOD['db_open']()
+        self.assertEqual(db.execute('select host,route,state from handoffs').fetchone(), ('gores2','fleet','accepted'))
+        db.close()
+        legacy.assert_not_called()
+
+    def test_direct_rejection_allows_retry_but_lost_ack_keeps_pending(self):
+        env = {'OPENSWARM_HUB_LOCAL_ROUTER':'1', 'OPENSWARM_AUTO_LOCAL_HOST':'box',
+               'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]'}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.dict(G, {'local_command':mock.Mock(side_effect=MOD['NoAvailableLane']('no available fleet lane'))}):
+            with self.assertRaisesRegex(RuntimeError, 'no available fleet lane.*retry'):
+                MOD['run_submit'](self.args)
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.dict(G, {'local_command':mock.Mock(side_effect=MOD['PreDispatchRejected']('fleet lane discovery unavailable: gores1,gores2'))}):
+            with self.assertRaisesRegex(RuntimeError, 'fleet lane discovery unavailable:'):
+                MOD['run_submit'](self.args)
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.dict(G, {'local_command':mock.Mock(side_effect=RuntimeError('lost acknowledgement'))}):
+            with self.assertRaisesRegex(RuntimeError, 'unresolved'):
+                MOD['run_submit'](self.args)
+            with self.assertRaisesRegex(RuntimeError, 'unresolved'):
+                MOD['run_submit'](self.args)
+        db = MOD['db_open']()
+        self.assertEqual(db.execute('select state,route from handoffs order by created').fetchall(),
+                         [('rejected','fleet'), ('rejected','fleet'), ('pending','fleet')])
+        db.close()
+
+    def test_old_journal_keeps_legacy_route_when_direct_routing_is_enabled(self):
+        store = G['store']; store.mkdir()
+        db = sqlite3.connect(str(store / 'dispatch.sqlite'))
+        db.execute('CREATE TABLE handoffs (request_id TEXT PRIMARY KEY, state TEXT NOT NULL, run_id TEXT, host TEXT, created REAL NOT NULL)')
+        db.execute("INSERT INTO handoffs VALUES ('old-request','accepted','old-run','gores1',0)")
+        db.commit(); db.close()
+        gateway = mock.Mock(return_value={'id':'old-run','result':None})
+        direct = mock.Mock(side_effect=AssertionError('old handoff changed routes'))
+        with mock.patch.dict(os.environ, {'OPENSWARM_HUB_LOCAL_ROUTER':'1',
+                                          'OPENSWARM_AUTO_LOCAL_HOST':'box',
+                                          'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]'}), \
+             mock.patch.dict(G, {'gateway':gateway, 'local_gateway':direct}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(MOD['mapped']('old-run', 'info'))
+        gateway.assert_called_once_with({'op':'info','id':'old-run','host':'gores1'})
+        direct.assert_not_called()
 
     def test_submit_and_result_keep_executor_host(self):
         def fake(req):
@@ -58,6 +145,12 @@ class HubBridgeTests(unittest.TestCase):
         db.close()
 
     def test_finished_remote_commit_is_fetched_for_local_review(self):
+        self.check_finished_remote_commit_is_fetched(direct=False)
+
+    def test_direct_fleet_result_bundle_is_fetched_for_local_review(self):
+        self.check_finished_remote_commit_is_fetched(direct=True)
+
+    def check_finished_remote_commit_is_fetched(self, direct):
         remote = self.path / 'remote'
         subprocess.run(['git', 'clone', '-q', str(self.repo), str(remote)], check=True)
         base = subprocess.check_output(['git', '-C', str(remote), 'rev-parse', 'HEAD'], text=True).strip()
@@ -71,13 +164,35 @@ class HubBridgeTests(unittest.TestCase):
                                            'result': {'summary': 'done'}}}
         def gateway(req):
             if req['op'] == 'submit':
-                return {'id':'run-1','state':'queued','host':'executor-local','backend':'pi','model':'MiniMax'}
+                return {'id':'run-1','state':'queued','host':'gores1' if direct else 'executor-local','backend':'pi','model':'MiniMax'}
             if req['op'] == 'info':
                 return info
             bundle = subprocess.run([sys.executable, str(ROOT / 'bin/fleet-result-bundle')],
                                     input=json.dumps(info), text=True, capture_output=True, check=True)
             return json.loads(bundle.stdout)
-        with mock.patch.dict(G, {'gateway': gateway}), contextlib.redirect_stdout(io.StringIO()) as output:
+        runtime = self.path / 'runtime'; runtime.mkdir()
+        (runtime / 'fleet.json').write_text(json.dumps({'hosts': [
+            {'name': 'gores1', 'kind': 'ssh', 'ssh': 'configured-executor.example.invalid'}]}))
+        def local_command(command, payload=None, timeout=100):
+            if command[:2] == [G['native'], 'auto']:
+                return gateway({'op':'submit'})
+            if command[:6] == [G['native'], 'fleet', 'exec', 'gores1', '--', 'fleet']:
+                self.assertEqual(command[6:], ['_run-info', 'run-1'])
+                return info
+            self.assertEqual(command[:3], ['/usr/bin/ssh', 'configured-executor.example.invalid', '--'])
+            self.assertEqual(payload, info)
+            # Execute the remote helper locally against the fixture repository;
+            # transport itself is mocked, bundle creation and fetch are real.
+            bundle = subprocess.run(shlex.split(command[3]), input=json.dumps(payload),
+                                    text=True, capture_output=True, check=True)
+            return json.loads(bundle.stdout)
+        env = {'OPENSWARM_HUB_LOCAL_ROUTER':'1' if direct else '0',
+               'OPENSWARM_AUTO_LOCAL_HOST':'box', 'OPENSWARM_AUTO_FLEET_HOSTS':'["gores1","gores2"]',
+               'OPENSWARM_HOME': str(runtime)}
+        legacy = mock.Mock(side_effect=AssertionError('direct handoff reached legacy gateway')) if direct else gateway
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.dict(G, {'gateway':legacy, 'local_command':local_command}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
             MOD['run_submit'](self.args)
             output.seek(0); output.truncate()
             self.assertTrue(MOD['mapped']('run-1', 'info'))

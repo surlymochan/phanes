@@ -74,6 +74,8 @@ class FleetTopologyDocumentationTests(unittest.TestCase):
 
     def test_environment_example_matches_runbook(self):
         environment = ENV_EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("OPENSWARM_HUB_LOCAL_ROUTER=1", environment)
+        self.assertIn("export OPENSWARM_HUB_LOCAL_ROUTER=1", self.dual_mode_text)
         for variable in ("OPENSWARM_AUTO_FLEET_HOSTS", "OPENSWARM_AUTO_HOST_BACKENDS"):
             self.assertEqual(
                 exported_json(environment, variable),

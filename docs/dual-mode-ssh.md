@@ -27,7 +27,8 @@
 在 box 的 `~/.ssh/swrm-hub/config` 中使用已经部署的控制面 key
 `~/.ssh/id_ed25519_fleet_operator`。这里只引用 key 路径，不复制或打印 key 内容。
 `ControlMaster` 复用同一个控制连接，减少 fleet 查询和 lane assignment 的
-重复握手：
+重复握手。在 `~/.ssh/config` 中加入 `Include ~/.ssh/swrm-hub/config`，
+使原生 `fleet exec` 和结果 bundle 使用的 `ssh` 都能读取这些 alias：
 
 ```sshconfig
 Host gores1 gores2 govpn govpn2 gorelay gocc
@@ -56,7 +57,8 @@ Instabox fleet 及其证书续签循环随 2026-11-02 基线一起退役，派�
 
 跳板拓扑的事实来源是 box 端真正生效的 ssh config：AD 用 `~/.ssh/config`
 （AD 的 `ssh` 不带 `-F`，见 `tools/lane-autodispatch/autodispatch.py`），
-`swrm-fleet` 用上面那段 `~/.ssh/swrm-hub/config`。仓库里能核对到的
+`swrm-fleet` 也通过 `~/.ssh/config` 的 `Include` 读取上面那段
+`~/.ssh/swrm-hub/config`。仓库里能核对到的
 只有这几点：
 
 - 受控 fleet 主机集合固定为 `gores1`、`gores2`、`govpn`、`govpn2`、
@@ -118,13 +120,21 @@ box 本机 lane backend。限额与 backend 配比的机器可读约定见
 bridge/service 环境中设置（JSON 的引号要保留）：
 
 ```bash
+export OPENSWARM_AUTO_CLI=/absolute/path/to/swrm-fleet
+export OPENSWARM_HUB_LOCAL_ROUTER=1
 export OPENSWARM_AUTO_LOCAL_HOST=box
 export OPENSWARM_AUTO_FLEET_HOSTS='["gores1","gores2","govpn","govpn2","gorelay","gocc"]'
 export OPENSWARM_AUTO_HOST_BACKENDS='{"box":[],"gores1":["pi"],"gores2":["pi"],"govpn":["codex"],"govpn2":["codex"],"gorelay":["codex"],"gocc":["agy"]}'
 ```
 
 `OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置；box 的
-空白名单确保控制面本机的 lane 不被探测或接收自动派发。部署后
+空白名单确保控制面本机的 lane 不被探测或接收自动派发。
+受控 host 还须登记在 `swrm-fleet` 的 `$OPENSWARM_HOME/fleet.json` 中
+（默认 `~/.claude/swrm-executor-candidate/fleet.json`），使用 `kind: "ssh"`
+及已经配置好的 `ssh` alias；环境中的 host 名称按该 inventory 查找。
+`OPENSWARM_HUB_LOCAL_ROUTER=1` 使 bridge 直接使用本机 fleet inventory，
+无需旧 gateway 的 `ssh_host` 配置；交接记录保存路由，后续状态、停止及结果
+bundle 都发往原执行主机。旧 gateway 的交接记录继续使用原路由。部署后
 以 `swrm-fleet fleet status --json` 观察实际 lane 名称和状态；若实际
 lane 数量不是 11，应先修正 fleet/topology 配置，再启用自动派发。
 
