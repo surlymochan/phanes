@@ -48,6 +48,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -144,6 +145,8 @@ def parse_unit_list(output: str) -> List[str]:
     units: List[str] = []
     for line in (output or "").splitlines():
         fields = line.split()
+        if fields and fields[0] == "●":
+            fields = fields[1:]  # systemctl marks failed units before their name
         if not fields:
             continue
         name = fields[0]
@@ -395,8 +398,11 @@ def collect(host: str, run: Optional[Callable[[str], str]] = None,
         return payload, ""
     try:
         cgroup_map = parse_cgroup_map(runner(CGROUP_MAP_COMMAND))
-    except Exception:  # noqa: BLE001 - the dump is a bonus, not a requirement
-        cgroup_map = {}
+    except Exception as error:  # noqa: BLE001 - incomplete attribution is not healthy
+        payload = empty_payload(host, "uncollected")
+        payload["error"] = str(error)
+        payload["services"] = [unavailable(unit, error) for unit in units]
+        return payload, ps_output
 
     services = [collect_service(runner, unit, ps_output, cgroup_map) for unit in units]
     payload = {
@@ -450,12 +456,18 @@ def write_health_payload(health_path: Path, host: str,
         # failed write/replace, preserve the existing summary and remove the temp.
         temporary = None
         try:
+            try:
+                mode = stat.S_IMODE(health_path.stat().st_mode)
+            except FileNotFoundError:
+                mode = None
             with tempfile.NamedTemporaryFile(
                     mode="w", dir=health_path.parent, prefix=health_path.name + ".",
                     suffix=".tmp", delete=False) as handle:
                 temporary = Path(handle.name)
                 handle.write(json.dumps(data, indent=2) + "\n")
                 handle.flush()
+                if mode is not None:
+                    os.fchmod(handle.fileno(), mode)
                 os.fsync(handle.fileno())
             os.replace(temporary, health_path)
         finally:

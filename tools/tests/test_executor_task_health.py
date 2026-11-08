@@ -121,6 +121,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -784,6 +785,66 @@ class ExecutorProbeCommandLineTests(ProbeTestCase):
 
 class ExecutorReviewRegressionTests(ProbeTestCase):
     """Regressions for the blockers of the implementation reviews."""
+
+    def test_failed_cgroup_map_marks_each_service_uncollected_without_alerting(self):
+        host = self.soft_host()
+        host.services[SERVICE]["pids"] = []
+        host.service(SERVICE2, tasks_current=900, tasks_max=1000, pids=[])
+        host.ps += sweep_ps(count=3)
+
+        def runner(command):
+            if command == MODULE.CGROUP_MAP_COMMAND:
+                raise subprocess.CalledProcessError(1, command, stderr="permission denied")
+            return host.run(command)
+
+        health = self.root / "health.json"
+        alert = self.root / "health.alert"
+        payload = MODULE.update(HOST, health, alert, self.root / "snapshots", run=runner)
+        self.assertEqual(payload["status"], "uncollected")
+        self.assertIn("error", payload)
+        self.assertEqual({entry["service"] for entry in payload["services"]},
+                         {SERVICE, SERVICE2})
+        for entry in payload["services"]:
+            self.assertFalse(entry["collected"])
+            self.assertEqual(entry["level"], "uncollected")
+            self.assertIsNone(entry["zombie_count"])
+            self.assertIn("error", entry)
+        self.assertEqual(json.loads(health.read_text())["executor_tasks"][HOST], payload)
+        self.assertEqual(MODULE.build_alerts(payload), [])
+        self.assertFalse(alert.exists())
+        self.assertFalse(self.snapshots())
+
+    def test_failed_unit_marker_is_parsed_and_the_service_is_sampled(self):
+        listing = ("  " + SERVICE2 + " loaded active running Executor\n"
+                   "● " + SERVICE + " loaded failed failed Executor\n"
+                   "● unrelated.service loaded failed failed Other\n")
+        self.assertEqual(MODULE.parse_unit_list(listing), [SERVICE2, SERVICE])
+        host = self.soft_host()
+        host.service(SERVICE2, tasks_current=50, tasks_max=1000, pids=[])
+
+        def runner(command):
+            if command == MODULE.LIST_COMMAND:
+                return listing
+            return host.run(command)
+
+        alert = self.root / "health.alert"
+        payload = MODULE.update(HOST, self.root / "health.json", alert,
+                                self.root / "snapshots", run=runner)
+        services = {entry["service"]: entry for entry in payload["services"]}
+        self.assertEqual(set(services), {SERVICE, SERVICE2})
+        self.assertEqual(services[SERVICE]["zombie_count"], 51)
+        self.assertEqual(services[SERVICE]["level"], "soft")
+        self.assertIn(SERVICE, alert.read_text())
+
+    def test_health_atomic_replace_preserves_existing_permissions(self):
+        health = self.root / "health.json"
+        for mode in (0o644, 0o640, 0o600):
+            with self.subTest(mode=oct(mode)):
+                health.write_text(json.dumps({"hosts": {HOST: "ok"}}))
+                health.chmod(mode)
+                MODULE.write_health_payload(health, HOST, {"status": "skipped"})
+                self.assertEqual(stat.S_IMODE(health.stat().st_mode), mode)
+                self.assertEqual(json.loads(health.read_text())["hosts"][HOST], "ok")
 
     def test_nested_cgroup_zombies_alert_without_root_cgroup_pids(self):
         host = self.soft_host()

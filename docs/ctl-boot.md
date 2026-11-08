@@ -636,6 +636,8 @@ itself or delete the sidecar, since replacement would let writers lock different
 inodes. A malformed or unreadable existing summary fails the probe write instead of
 being overwritten with an empty summary. Temporary JSON files are created beside the
 target, flushed and replaced atomically, and removed if writing fails.
+Replacement preserves the existing JSON file's permission bits; a newly created
+summary keeps the temporary file's default `0600` permissions.
 
 | watermark | level | condition |
 |---|---|---|
@@ -650,6 +652,9 @@ Rules of the probe:
   not sampled at all;
 - a failed sample (ssh error, missing `systemctl show`) is recorded as **not collected**
   (`"level": "uncollected"`) and never alerts;
+- a failed bulk `/proc` cgroup mapping marks the host and every enumerated service
+  **not collected**, without alerts, because descendant cgroup zombies cannot be
+  counted reliably without that mapping;
 - when an alert fires, the full `ps -eo pid,ppid,stat,etimes,args` table is written to the
   snapshot directory **before** the alert is appended to `health.alert`; if the snapshot
   cannot be saved, no alert is written (no evidence, no alert);
@@ -746,6 +751,14 @@ Second implementation review (baseline `42425ead7`), regressions in `ExecutorRev
 |---|---|---|
 | 1 - zombies in descendant cgroups are missed when the root PID list is empty | match the service cgroup itself or descendants separated by `/`, excluding similarly prefixed sibling paths | `test_nested_cgroup_zombies_alert_without_root_cgroup_pids` verifies 51 zombies, parent PID, snapshot and soft alert; `test_similarly_prefixed_cgroup_is_not_part_of_the_service` excludes unrelated paths |
 | 2 - different sweep commands combine into a false alert | group by the full command line and apply the threshold to each group, with only its own parent PIDs and run IDs in its alert | `test_different_sweep_commands_do_not_combine_into_an_alert`, `test_only_duplicate_sweep_commands_alert_with_their_own_parents` |
+
+Third implementation review (baseline `a22027eaa`), regressions in `ExecutorReviewRegressionTests`:
+
+| finding | fix | regression |
+|---|---|---|
+| B1 - failed bulk cgroup mapping silently becomes an empty mapping | record the host and every enumerated service as `uncollected`, persist the error in `health.json`, and suppress alerts for the failed sample | `test_failed_cgroup_map_marks_each_service_uncollected_without_alerting` covers an empty root cgroup, 51 zombies, a second service above the hard task threshold, and duplicate sweep loops |
+| B2 - systemd's failed-unit marker hides executor services | accept the optional leading `●` in `list-units` output and sample the unit normally | `test_failed_unit_marker_is_parsed_and_the_service_is_sampled` covers marked and unmarked executor services and verifies the marked service's zombie alert |
+| follow-up - atomic replacement changes existing summary permissions to `0600` | copy the existing permission bits to the temporary file before replacement | `test_health_atomic_replace_preserves_existing_permissions` covers `0644`, `0640`, and `0600` |
 
 
 ## ctl-loop child reaping and restart (Refs #951)
