@@ -121,10 +121,10 @@ def ensure_marker(path, host, used_pct, state):
             current = ""
         if not owns_marker(current):
             return "foreign"        # somebody else owns the pause: never take it over
-        path.write_text(body)
+        write_atomic(path, body)
         return "refreshed"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    write_atomic(path, body)
     return "created"
 
 
@@ -142,14 +142,38 @@ def release_marker(path):
     return True
 
 
+def write_atomic(path, text):
+    """Write a file in one step: a reader never sees a half written file.
+
+    The dispatcher reads the state file and the pause marker of this guard
+    while the guard writes them.  A torn write would be read as "no state" and
+    would open the dispatch gate for one tick, so the files are replaced
+    atomically.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The hidden name keeps the temporary file out of the scans of the pause
+    # directory (the health sweep globs `PAUSE-HOST-*`, the dispatcher globs
+    # `disk-watermark-*.json`).
+    temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        temp.write_text(text)
+        os.replace(temp, path)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def write_state(path, host, state, blocked, usage):
     """Write the state file the dispatcher reads as an independent disk gate."""
     record = {"host": host, "state": state, "blocked": bool(blocked),
               "used_pct": usage.get("used_pct"), "used_bytes": usage.get("used_bytes"),
               "free_bytes": usage.get("free_bytes"), "guard": GUARD_VERSION,
               "updated_at": time.time()}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    write_atomic(path, json.dumps(record, sort_keys=True) + "\n")
     return record
 
 

@@ -19,7 +19,7 @@ That script starts (if not already running):
 
 ## Key loops: startup commands & heartbeats
 
-The `start-control-plane` suite manages five resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`), with their startup commands and heartbeat/status files:
+The `start-control-plane` suite manages the five core resident loops (五件套: `ib-refresh-loop`, `lane-autodispatch`, `lane-merge`, `bus-worker-loop`, `health-loop`) plus the `disk-watermark` guard loop (Refs #1666), with their startup commands and heartbeat/status files:
 
 1. **`ib-refresh-loop`** / **`ib-refresh`** (instabox SSH certificate preflight & renewal loop):
    - **Startup command**: `~/phanes-ctl/bin/ctl-loop` (supervises `ib-refresh`) or manual preflight `~/phanes-ctl/bin/ib-refresh`  
@@ -106,6 +106,12 @@ The `start-control-plane` suite manages five resident loops (五件套: `ib-refr
      (or background one-shot: `setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &`; probe: `python3 ~/phanes-ctl/bin/health-check.py`)
    - **Heartbeat path**: `~/phanes-ctl/autodispatch/health.heartbeat`
    - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/health.json`, `health.alert`
+
+6. **`disk-watermark`** (remote lane host disk watermark guard, Refs #1666):
+   - **Startup command**: `~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log ~/phanes-ctl/brain.log --host govpn2`
+     (installed by `bash tools/install-disk-watermark-guard.sh`)
+   - **Heartbeat path**: none; the guard writes its state into `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`
+   - **Status / alert snapshot**: `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `~/phanes-ctl/brain.log`
 
 ### Reboot pid-state helper scope (Refs #887)
 

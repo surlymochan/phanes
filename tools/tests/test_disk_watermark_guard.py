@@ -440,6 +440,43 @@ class DispatchGateTests(unittest.TestCase):
             self.assertFalse(dispatcher.lane_paused("CX2", {"host": HOST}),
                              "the gate must open again after the recovery")
 
+    def test_the_gate_holds_even_when_the_pause_marker_was_cleared(self):
+        # The health sweep clears the stale `auto:` host pauses
+        # (tools/check-health-pause.py), so the marker alone is not a gate: the
+        # independent state file of the guard must hold the host in the window
+        # between the clearing and the next guard tick.
+        with scratch() as tmp, control_plane_home(tmp):
+            home = Path(tmp)
+            pause_dir = home / "phanes-ctl" / "autodispatch"
+            brain_log = home / "phanes-ctl" / "brain.log"
+            marker = pause_dir / PAUSE_MARKER
+            fake = FakeSsh(home)
+
+            fake.set_df(DF_BLOCKED)
+            done = run_guard(pause_dir, brain_log, fake.env)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue(marker.exists(), "the blocked run must pause the lane host")
+
+            # another sweep removes the marker, the disk is still too full
+            marker.unlink()
+            dispatcher = load_autodispatch()
+            self.assertFalse((pause_dir / PAUSE_MARKER).exists(),
+                             "the marker must be gone for this test")
+            self.assertIn(f"host:{HOST}", dispatcher.paused_scopes(),
+                          "the independent disk gate must hold the host without the marker")
+            self.assertTrue(dispatcher.lane_paused("CX2", {"host": HOST}),
+                            "the dispatcher must hold the host even without the pause marker")
+            self.assertTrue(dispatcher.disk_watermark_blocked(HOST),
+                            "the independent disk gate must report the block")
+
+            # and the recovery opens the gate again
+            fake.set_df(DF_RECOVERED)
+            done = run_guard(pause_dir, brain_log, fake.env)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            dispatcher = load_autodispatch()
+            self.assertFalse(dispatcher.lane_paused("CX2", {"host": HOST}),
+                             "the gate must open again after the recovery")
+
 
 class DispatchTickTests(unittest.TestCase):
     """The real dispatch tick must not hand a card to a host the guard blocks."""
@@ -480,6 +517,44 @@ class DispatchTickTests(unittest.TestCase):
                              "the dispatch tick must not dispatch to a blocked host")
             self.assertIn("CX9", state,
                           "a lane on a healthy host must still get its card")
+
+    def test_the_tick_dispatches_no_card_after_the_marker_was_cleared(self):
+        # The health sweep clears the `auto:` host pause, so the tick must not
+        # hand a card out in the window between the clearing and the next tick
+        # of the guard: the independent disk gate holds the host.
+        with scratch() as tmp, control_plane_home(tmp):
+            home = Path(tmp)
+            pause_dir = home / "phanes-ctl" / "autodispatch"
+            brain_log = home / "phanes-ctl" / "brain.log"
+            fake = FakeSsh(home)
+            fake.set_df(DF_BLOCKED)
+            done = run_guard(pause_dir, brain_log, fake.env)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            (pause_dir / PAUSE_MARKER).unlink()
+
+            dispatcher = load_autodispatch()
+            dispatcher.BRAIN_LOG = str(brain_log)
+            dispatched = []
+            card = {"n": 1666, "title": "card", "body": "body", "labels": [], "prio": 3,
+                    "backend": None, "strict": False, "verify": False}
+            lanes = {"CX2": {"host": HOST, "backend": "pi"},
+                     "CX9": {"host": "other-host", "backend": "pi"}}
+            dispatcher.remote = lambda lane, cfg, run="": {"lane": "idle"}
+            dispatcher.queue = lambda: [dict(card)]
+            dispatcher.label_state = lambda number, cache=None: ("fresh", "")
+            dispatcher.prefetch_labels = lambda numbers, cache=None: {}
+            dispatcher.replenish = lambda count, state: []
+            dispatcher.gh = lambda *args, **kwargs: (0, "", "")
+            dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
+            dispatcher.dispatch = (lambda lane, cfg, item, base:
+                                    (dispatched.append(lane) or "run-1", False))
+            state = {}
+            dispatcher.tick(lanes, state, time.time())
+            self.assertNotIn("CX2", state,
+                             "the tick must not give a card to a blocked host whose pause "
+                             f"marker was cleared by another sweep: {state}")
+            self.assertNotIn("CX2", dispatched,
+                             "the tick must not dispatch to a blocked host without its marker")
 
 
 class InstallerTests(unittest.TestCase):
