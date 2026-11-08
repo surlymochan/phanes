@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import platform
 import shutil
@@ -118,7 +119,6 @@ def run_shell(command: str, cwd: Path, timeout: int) -> dict:
         command,
         cwd=cwd,
         shell=True,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
@@ -133,6 +133,13 @@ def run_shell(command: str, cwd: Path, timeout: int) -> dict:
         code = 124
         kill_process_group(proc.pid)
         stdout, stderr = proc.communicate()
+    if timed_out:
+        stdout = stdout.decode("utf-8", "replace")
+        stderr = stderr.decode("utf-8", "replace")
+    else:
+        encoding = locale.getpreferredencoding(False)
+        stdout = stdout.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+        stderr = stderr.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
     return {
         "command": command,
         "exit_code": code,

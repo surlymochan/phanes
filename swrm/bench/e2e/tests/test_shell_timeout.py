@@ -134,6 +134,19 @@ class ShellTimeoutTests(unittest.TestCase):
         self.assertIn("stdout-line", result["stdout_tail"])
         self.assertIn("stderr-line", result["stderr_tail"])
 
+    def test_timeout_keeps_output_with_incomplete_utf8(self):
+        source = (
+            "import os, time; "
+            "os.write(1, b'prefix\\n\\xe4\\xb8'); "
+            "os.write(2, b'err\\n'); time.sleep(30)"
+        )
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+        result = run_shell(command, self.workdir, 0.3)
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["exit_code"], 124)
+        self.assertEqual(result["stdout_tail"], "prefix\n\ufffd")
+        self.assertEqual(result["stderr_tail"], "err\n")
+
 
 if __name__ == "__main__":
     unittest.main()
