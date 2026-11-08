@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -261,6 +262,98 @@ class LaneTests(unittest.TestCase):
             "lane worktree git metadata must be writable from the executor's sandbox; "
             "a linked worktree points .git outside its writable root",
         )
+
+    def test_lane_history_survives_source_object_pruning(self):
+        original = self.git("rev-parse", "HEAD")
+        (self.repo / "temporary.txt").write_text("temporary source object\n")
+        self.git("add", "temporary.txt")
+        self.git("commit", "-q", "-m", "temporary source commit")
+        base = self.git("rev-parse", "HEAD")
+        wt = self.root / "wt"
+        functions = runpy.run_path(str(CLI))
+        functions["lane_rebuild_worktree"](str(self.repo), str(wt), base)
+        (wt / "result.txt").write_text("in-flight result\n")
+        self.git("-C", str(wt), "add", "result.txt")
+        self.git("-C", str(wt), "-c", "user.name=Lane Test", "-c",
+                 "user.email=lane-test@example.invalid", "commit", "-q", "-m", "lane result")
+        head = self.git("-C", str(wt), "rev-parse", "HEAD")
+
+        self.git("reset", "--hard", original)
+        self.git("reflog", "expire", "--expire=now", "--all")
+        self.git("gc", "--prune=now")
+        missing = subprocess.run(["git", "cat-file", "-e", base], cwd=self.repo, capture_output=True)
+        self.assertNotEqual(missing.returncode, 0, "source must actually prune the lane's base")
+
+        self.git("-C", str(wt), "fsck", "--full")
+        self.assertEqual(self.git("-C", str(wt), "show", f"{head}:temporary.txt"), "temporary source object")
+        self.assertEqual(self.git("-C", str(wt), "show", f"{head}:result.txt"), "in-flight result")
+        self.assertTrue(functions["lane_worktree_matches"](str(self.repo), str(wt)))
+
+    def test_lane_matches_only_an_independent_clone_of_configured_repo(self):
+        wt = self.root / "wt"
+        self.git("clone", "--shared", "-q", str(self.repo), str(wt))
+        functions = runpy.run_path(str(CLI))
+        self.assertFalse(functions["lane_worktree_matches"](str(self.repo), str(wt)))
+        functions["lane_rebuild_worktree"](str(self.repo), str(wt), self.git("rev-parse", "HEAD"))
+        self.assertTrue(functions["lane_worktree_matches"](str(self.repo), str(wt)))
+        other = self.root / "other"
+        self.git("clone", "-q", str(self.repo), str(other))
+        self.assertFalse(functions["lane_worktree_matches"](str(other), str(wt)))
+
+    def test_lane_clone_dissociates_source_alternates(self):
+        source = self.root / "shared-source"
+        self.git("clone", "--shared", "-q", str(self.repo), str(source))
+        wt = self.root / "wt"
+        functions = runpy.run_path(str(CLI))
+        functions["lane_rebuild_worktree"](str(source), str(wt), self.git("rev-parse", "HEAD"))
+        self.assertFalse((wt / ".git" / "objects" / "info" / "alternates").exists())
+        shutil.rmtree(self.repo / ".git" / "objects")
+        self.git("-C", str(wt), "fsck", "--full")
+        self.assertEqual(self.git("-C", str(wt), "show", "HEAD:README.md"), "base")
+
+    def test_independent_lane_fetches_new_base_without_rebuilding(self):
+        with mock.patch.dict(os.environ, self.env):
+            prepare = runpy.run_path(str(CLI))["lane_prepare_workspace"]
+            lane = {"repo": str(self.repo), "name": self.lane_name}
+            first = prepare(lane, "first")
+            wt = pathlib.Path(first["root"])
+            self.git("-C", str(wt), "config", "lane.test-marker", "keep")
+            (self.repo / "new-base.txt").write_text("new base\n")
+            self.git("add", "new-base.txt")
+            self.git("commit", "-q", "-m", "advance source")
+
+            second = prepare(lane, "second")
+
+        self.assertEqual(second["base"], self.git("rev-parse", "HEAD"))
+        self.assertEqual((wt / "new-base.txt").read_text(), "new base\n")
+        self.assertEqual(self.git("-C", str(wt), "config", "lane.test-marker"), "keep")
+        self.assertEqual(list(wt.parent.glob("wt.backup-*")), [])
+
+    def test_upgrade_preserves_shared_clone_history_and_index_after_source_gc(self):
+        base = self.git("rev-parse", "HEAD")
+        (self.repo / "temporary.txt").write_text("borrowed object\n")
+        self.git("add", "temporary.txt")
+        self.git("commit", "-q", "-m", "temporary source commit")
+        wt = self.root / "wt"
+        self.git("clone", "--shared", "-q", str(self.repo), str(wt))
+        head = self.git("-C", str(wt), "rev-parse", "HEAD")
+        (wt / "README.md").write_text("staged\n")
+        self.git("-C", str(wt), "add", "README.md")
+        (wt / "README.md").write_text("unstaged\n")
+        (wt / "untracked.txt").write_text("unfinished\n")
+        functions = runpy.run_path(str(CLI))
+        functions["lane_rebuild_worktree"](str(self.repo), str(wt), base)
+        backup, = self.root.glob("wt.backup-*/wt")
+
+        self.git("reset", "--hard", base)
+        self.git("reflog", "expire", "--expire=now", "--all")
+        self.git("gc", "--prune=now")
+        self.git("-C", str(backup), "fsck", "--full")
+        self.assertEqual(self.git("-C", str(backup), "show", f"{head}:temporary.txt"), "borrowed object")
+        self.assertEqual(self.git("-C", str(backup), "show", ":README.md"), "staged")
+        self.assertEqual((backup / "README.md").read_text(), "unstaged\n")
+        self.assertEqual((backup / "untracked.txt").read_text(), "unfinished\n")
+        self.assertFalse((backup / ".git" / "objects" / "info" / "alternates").exists())
 
     def test_rebuild_preserves_legacy_linked_worktree_changes(self):
         wt = self.root / "wt"

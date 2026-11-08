@@ -7241,19 +7241,13 @@ def lane_worktree_matches(repo, wt):
     rc, git_dir, _ = lane_git(["rev-parse", "--absolute-git-dir"], wt)
     if rc or os.path.realpath(git_dir) != os.path.realpath(os.path.join(wt, ".git")):
         return False
-    # Lane workspaces keep their writable Git metadata locally while sharing only
-    # immutable objects with the configured repository.
+    # Both metadata and objects must be local: source GC must not invalidate
+    # an in-flight lane's history. Reject older shared clones on upgrade.
     alternates = os.path.join(git_dir, "objects", "info", "alternates")
-    if not os.path.isfile(alternates):
+    if os.path.lexists(alternates):
         return False
-    with open(alternates) as stream:
-        paths = [os.path.realpath(line.strip()) for line in stream if line.strip()]
-    rc, repo_objects, _ = lane_git(["rev-parse", "--git-path", "objects"], repo)
-    if rc:
-        return False
-    if not os.path.isabs(repo_objects):
-        repo_objects = os.path.join(repo, repo_objects)
-    return os.path.realpath(repo_objects) in paths
+    rc, origin, _ = lane_git(["remote", "get-url", "origin"], wt)
+    return rc == 0 and os.path.realpath(origin) == os.path.realpath(repo)
 
 
 def lane_rebuild_worktree(repo, wt, base):
@@ -7273,9 +7267,19 @@ def lane_rebuild_worktree(repo, wt, base):
             if rc:
                 raise RuntimeError(f"cannot preserve lane worktree at {backup}: {err[:250]}")
         else:
+            # Preserve old shared clones independently too, including their
+            # committed history and index, before moving them out of the way.
+            alternates = os.path.join(wt, ".git", "objects", "info", "alternates")
+            if not rc and os.path.isfile(alternates):
+                rc, _, err = lane_git(["repack", "-a", "-d"], wt, timeout=300)
+                if rc:
+                    raise RuntimeError(f"cannot preserve lane objects at {wt}: {err[:250]}")
+                os.unlink(alternates)
             os.rename(wt, backup)
         print(f"lane: preserved previous workspace at {backup}", file=sys.stderr)
-    rc, _, err = lane_git(["clone", "--shared", "--no-checkout", "-q", repo, wt], repo, timeout=300)
+    # Copy local objects and dissociate any alternates inherited from the source.
+    rc, _, err = lane_git(["clone", "--no-hardlinks", "--dissociate", "--no-checkout", "-q", repo, wt],
+                          repo, timeout=300)
     if rc:
         raise RuntimeError(f"lane worktree clone failed: {err[:250]}")
     rc, _, err = lane_git(["checkout", "--detach", base], wt, timeout=300)
@@ -7308,7 +7312,8 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
                 dirnames.remove(d)
     for p in links:
         os.unlink(p)
-    steps = (["reset", "--hard", base], ["clean", "-fdx"], ["checkout", "-B", f"swrm/{rid}", base])
+    steps = (["fetch", "--no-tags", repo, base], ["reset", "--hard", base],
+             ["clean", "-fdx"], ["checkout", "-B", f"swrm/{rid}", base])
     for attempt in range(2):
         failed = None
         for args in steps:
