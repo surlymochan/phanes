@@ -7331,13 +7331,24 @@ def lane_codex_sandbox_policy(worktree):
     """Build the turn sandbox policy with this worktree's actual gitdir writable."""
     policy = load_policy().get("codex", {})
     mode = policy.get("sandbox", "workspace-write")
+    network_access = policy.get("network_access", policy.get("networkAccess", False)) is True
+    if mode == "read-only":
+        return {"type": "readOnly", "networkAccess": network_access}
+    if mode == "danger-full-access":
+        return {"type": "dangerFullAccess"}
     if mode != "workspace-write":
-        return mode
+        raise ValueError(f"unsupported codex sandbox mode: {mode}")
     rc, gitdir, err = lane_git(["rev-parse", "--absolute-git-dir"], worktree)
     if rc:
         raise RuntimeError(f"cannot resolve lane worktree gitdir: {err[:250]}")
-    network_access = policy.get("network_access", policy.get("networkAccess", False))
-    return {"type": "workspaceWrite", "writableRoots": [gitdir], "networkAccess": network_access is True}
+    # Linked worktrees keep their index/HEAD in gitdir, but objects and branch
+    # refs in the common directory. Both are needed for an actual git commit.
+    rc, common, err = lane_git(["rev-parse", "--git-common-dir"], worktree)
+    if rc:
+        raise RuntimeError(f"cannot resolve lane common gitdir: {err[:250]}")
+    common = os.path.realpath(os.path.join(worktree, common))
+    roots = list(dict.fromkeys([gitdir, common]))
+    return {"type": "workspaceWrite", "writableRoots": roots, "networkAccess": network_access}
 
 
 def lane_worktree_matches(repo, wt):
