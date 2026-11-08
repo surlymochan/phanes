@@ -4,6 +4,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -79,10 +80,13 @@ class DispatchPriorityTest(unittest.TestCase):
             "pool_entered_at": "2026-11-08T23:39:59Z",
         }
 
-        ordered = sorted(
-            [newly_admitted_old_small, waiting_large],
-            key=lambda card: AUTODISPATCH.rank("codex", card),
-        )
+        # rank() reads the clock internally; keep the new arrival one second old
+        # regardless of when this regression test is run.
+        with patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
+            ordered = sorted(
+                [newly_admitted_old_small, waiting_large],
+                key=lambda card: AUTODISPATCH.rank("codex", card),
+            )
 
         self.assertIs(
             ordered[0],
