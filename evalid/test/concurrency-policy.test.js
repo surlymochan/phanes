@@ -31,6 +31,7 @@ const DEFAULT_MAX_AGENTS = 3;
 const DEFAULT_WEIGHT = 1;
 
 const INVALID_LIMITS = [
+  { label: 'null', value: null },
   { label: 'boolean true', value: true },
   { label: 'boolean false', value: false },
   { label: 'fractional number', value: 2.9 },
@@ -189,6 +190,14 @@ describe('concurrency policy — budget and charges', () => {
   });
 
   test('rejection errors name the offending field', () => {
+    assert.throws(() => policyWithMaxAgents(null), /max_agents/);
+    assert.throws(() => createConcurrencyPolicy({ maxParallelAgentsOverride: null }), /override/);
+    const nullPolicy = createConcurrencyPolicy();
+    assert.throws(() => nullPolicy.weightFor({ parallel_weight: null }), /parallel_weight/);
+    assert.throws(
+      () => nullPolicy.weightFor({ id: 'test' }, { atoms: { test: { parallel_weight: null } } }),
+      /parallel_weight/,
+    );
     assert.throws(() => policyWithMaxAgents(2.9), /max[_ ]?agents/i);
     assert.throws(
       () => createConcurrencyPolicy({

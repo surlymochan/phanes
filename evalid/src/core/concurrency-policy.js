@@ -39,10 +39,10 @@ function parsePositiveInteger(value, field) {
 }
 
 function isUnset(value) {
-  return value === undefined || value === null;
+  return value === undefined;
 }
 
-export function createConcurrencyPolicy({ workflow = {}, maxParallelAgentsOverride = null } = {}) {
+export function createConcurrencyPolicy({ workflow = {}, maxParallelAgentsOverride } = {}) {
   const workflowParallel = workflow.parallel || {};
   const configuredMaxAgents = isUnset(workflowParallel.max_agents)
     ? DEFAULT_MAX_AGENTS
@@ -59,7 +59,9 @@ export function createConcurrencyPolicy({ workflow = {}, maxParallelAgentsOverri
     source: hasOverride ? 'mission_override' : 'workflow',
     weightFor(atomRef = {}, registry = {}) {
       const atomDef = registry.atoms?.[atomRef.id] || {};
-      const rawWeight = atomRef.parallel_weight ?? atomDef.parallel_weight;
+      const rawWeight = isUnset(atomRef.parallel_weight)
+        ? atomDef.parallel_weight
+        : atomRef.parallel_weight;
       if (isUnset(rawWeight)) {
         return DEFAULT_WEIGHT;
       }
