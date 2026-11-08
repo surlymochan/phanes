@@ -70,10 +70,17 @@ def existing_keys(path: Path) -> set[tuple]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("type") not in (None, "run"):
+        if not isinstance(row, dict) or row.get("type") not in (None, "run"):
             continue
-        if "task" in row and "arm" in row and "repeat" in row:
-            keys.add((row["task"], row["arm"], int(row["repeat"])))
+        task, arm, repeat = row.get("task"), row.get("arm"), row.get("repeat")
+        if not isinstance(task, str) or not isinstance(arm, str):
+            continue
+        if type(repeat) not in (int, str):
+            continue
+        try:
+            keys.add((task, arm, int(repeat)))
+        except ValueError:
+            continue
     return keys
 
 
