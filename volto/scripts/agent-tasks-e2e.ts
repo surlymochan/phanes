@@ -23,6 +23,7 @@ import {
   type VoltoDesktopApi,
 } from "@volto/contracts/ipc";
 import { createVoltoLogger } from "@volto/logging";
+import { decodeAgentTasks } from "../src/preload/conversation-decoding";
 import { assertMutationAllowed, connectToDevApp } from "./dev-automation/cdp-client";
 import { readDevInstanceRecords } from "./dev-automation/instance-registry";
 
@@ -58,6 +59,7 @@ interface Report {
     pendingModel?: string | null;
   };
   errorField?: { present: boolean };
+  completion?: { running: number; completed: number; invalidRejected: boolean };
   restored?: { taskLimit: number | null };
   passed: boolean;
 }
@@ -134,6 +136,8 @@ const taskIn = (snapshot: AgentTasksSnapshot, taskId: string): AgentTask => {
   return task;
 };
 
+const taskCompletion = (task: AgentTask): unknown => Reflect.get(task, "completion");
+
 const before = await readAgent();
 report.provider = before.provider;
 assert.ok(
@@ -146,7 +150,18 @@ try {
   // 1. With a limit of 1, the second task waits for the first one, and says why.
   await setTaskLimit(1);
   const first = await startTask(LONG_PROMPT);
-  await waitForTasks("the first task runs", (snapshot) => taskIn(snapshot, first.id).state === "running");
+  const progressing = await waitForTasks(
+    "the first task reports progress",
+    (snapshot) => taskIn(snapshot, first.id).state === "running" && taskIn(snapshot, first.id).progress !== null,
+  );
+  const runningCompletion = taskCompletion(taskIn(progressing, first.id));
+  assert.ok(
+    typeof runningCompletion === "number" &&
+      Number.isInteger(runningCompletion) &&
+      runningCompletion > 0 &&
+      runningCompletion < 100,
+    `A running task with progress must report an integer completion from 1 to 99. Got ${String(runningCompletion)}.`,
+  );
   const second = await startTask(SHORT_PROMPT);
   const held = await waitForTasks(
     "the second task waits",
@@ -161,6 +176,16 @@ try {
   assert.equal(held.limit, 1);
   assert.equal(taskIn(held, second.id).hold, "task-limit");
 
+  assert.throws(
+    () =>
+      decodeAgentTasks({
+        ...held,
+        tasks: held.tasks.map((task) => (task.id === first.id ? { ...task, completion: 101 } : task)),
+      }),
+    /Invalid task list response\./,
+    "A task completion above 100 must be rejected by the preload IPC decoder.",
+  );
+
   // 2. A higher limit starts the waiting task while the first one still runs.
   await setTaskLimit(2);
   const raised = await waitForTasks(
@@ -169,6 +194,18 @@ try {
   );
   report.raisedLimit = { second: taskIn(raised, second.id).state, limit: raised.limit };
   assert.equal(raised.limit, 2);
+
+  const completed = await waitForTasks(
+    "the short task completes",
+    (snapshot) => taskIn(snapshot, second.id).state === "idle" && taskIn(snapshot, second.id).outcome === "completed",
+  );
+  const completedCompletion = taskCompletion(taskIn(completed, second.id));
+  assert.equal(completedCompletion, 100, "A completed task must report 100 percent completion.");
+  report.completion = {
+    running: runningCompletion as number,
+    completed: completedCompletion as number,
+    invalidRejected: true,
+  };
 
   // 3. A provider switch while a task runs is queued for the next turn.
   const models = await page.evaluate(() => window.volto.agent.listModels());
