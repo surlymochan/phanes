@@ -145,7 +145,9 @@ class RoleController:
         self._swrm, self._evidence, self._review_run = swrm, evidence, review_run
         self._events = self._read_log()
         self._changes: dict[tuple[str, int], dict[str, Any]] = {}
-        self._event_keys: dict[tuple[str, int, str, str, str | None], dict[str, Any]] = {}
+        self._event_keys: dict[
+            tuple[str, int, str, str, str | None, int | None], dict[str, Any]
+        ] = {}
         for event in self._events:
             self._reduce(event)
 
@@ -265,17 +267,18 @@ class RoleController:
                 "review": "delivery", "delivery": "complete"}.get(last["stage"])
 
     @staticmethod
-    def _key(event: dict[str, Any]) -> tuple[str, int, str, str, str | None]:
-        """Receipt identity: stage, evidence digest and the parent it binds.
+    def _key(event: dict[str, Any]) -> tuple[str, int, str, str, str | None, int | None]:
+        """Receipt identity: stage, evidence digest, parent and Spec version.
 
         A receipt only speaks about one parent: a Spec revision answers a
-        rejected check, a spec-check answers a Spec revision. The parent is
-        part of the identity, so a receipt replayed from an earlier round is
-        not mistaken for a duplicate of the current one.
+        rejected check, a spec-check answers a Spec revision. The parent and
+        checked Spec version are part of identity, so a receipt replayed from
+        an earlier round is not mistaken for a duplicate of the current one.
         """
         data = event.get("data") or {}
         return (event["change_id"], event["attempt"], event["stage"], event["input_digest"],
-                data.get("parent_receipt") or data.get("parent_spec_digest"))
+                data.get("parent_receipt") or data.get("parent_spec_digest"),
+                data.get("spec_version") if event["stage"] == "spec-check" else None)
 
     def _reduce(self, event: dict[str, Any]) -> None:
         self._event_keys[self._key(event)] = event
@@ -373,7 +376,9 @@ class RoleController:
             raise Rejected("input_digest_mismatch")
         state = self.state(change_id, attempt)
         binding = self._parent_binding(state, stage)
-        previous = self._event_keys.get((change_id, attempt, stage, event_digest, binding))
+        spec_version = state["spec_version"] if stage == "spec-check" and state else None
+        previous = self._event_keys.get(
+            (change_id, attempt, stage, event_digest, binding, spec_version))
         if previous is None and stage == "spec-check":
             previous = self._legacy_spec_check(change_id, attempt, event_digest, binding, state)
         if previous:
@@ -616,7 +621,8 @@ class RoleController:
     def run_holdout(self, change_id: str, *, attempt: int = 0) -> dict[str, Any]:
         self._refresh()
         state = self.state(change_id, attempt)
-        prior = self._event_keys.get((change_id, attempt, "holdout", digest({"suite": state["intake"]["intake_digest"]}) if state else "", None))
+        prior = self._event_keys.get((change_id, attempt, "holdout",
+            digest({"suite": state["intake"]["intake_digest"]}) if state else "", None, None))
         if prior:
             return self._public(prior["data"], change_id=change_id, attempt=attempt)
         if not state or state["next"] != "holdout":

@@ -586,6 +586,27 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self.assertEqual(state["next"], "spec-check")
         self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
 
+    def test_replayed_check_from_earlier_version_is_rejected_after_digest_repeats(self):
+        first_digest = digest({"spec": "shared"})
+        second_digest = digest({"spec": "revised"})
+        self._spec(version=1, spec_digest=first_digest)
+        first_check = {"verdict": "FAIL", "blockers": ["first rejection"],
+                       "spec_digest": first_digest, "spec_version": 1}
+        self.controller.accept("offline-demo", "spec-check", first_check)
+
+        self._spec(version=2, spec_digest=second_digest)
+        self._check(verdict="FAIL", blockers=["second rejection"])
+        self._spec(version=3, spec_digest=first_digest)
+
+        with self.assertRaises(Rejected):
+            self.controller.accept("offline-demo", "spec-check", first_check)
+
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["spec_version"], 3)
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], first_digest)
+        self.assertEqual(state["next"], "spec-check")
+        self.assertEqual(len(state["rejections"]), 2)
+
     def test_concurrent_stale_versioned_initial_spec_is_rejected(self):
         other = self._controller()
         spec_digest = digest({"spec": "shared"})
