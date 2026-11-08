@@ -654,8 +654,10 @@ Rules of the probe:
   (`"level": "uncollected"`) and never alerts;
 - a failed bulk `/proc` cgroup mapping marks the host and every enumerated service
   **not collected**, without alerts, because descendant cgroup zombies cannot be
-  counted reliably without that mapping. Any failed `/proc/<pid>/cgroup` read aborts
-  the remote command; PID-only or malformed mapping records also fail sampling;
+  counted reliably without that mapping. A failed or empty `/proc/<pid>/cgroup` read
+  is skipped only if `/proc/<pid>` has disappeared (the process exited during the
+  sample); otherwise it aborts the remote command. PID-only or malformed mapping
+  records also fail sampling;
 - when an alert fires, the full `ps -eo pid,ppid,stat,etimes,args` table is written to the
   snapshot directory **before** the alert is appended to `health.alert`; if the snapshot
   cannot be saved, no alert is written (no evidence, no alert);
@@ -766,6 +768,12 @@ Fourth implementation review (baseline `1c890c4e4`), regressions in `ExecutorRev
 | blocker | fix | regression |
 |---|---|---|
 | B1 - `printf` masks failed bulk cgroup reads and parsing ignores incomplete records | exit nonzero immediately on a failed read and reject PID-only or malformed records, using the existing host/service `uncollected` path | `test_bulk_cgroup_command_propagates_a_read_failure` executes the remote command in a real shell with a missing middle file; `test_incomplete_cgroup_map_is_uncollected_instead_of_zero_zombies` verifies 51 zombies with an empty root PID list, persisted failure for every service, and no alerts or snapshots |
+
+Fifth implementation review (baseline `32cf3ae6d`), regression in `ExecutorReviewRegressionTests`:
+
+| blocker | fix | regression |
+|---|---|---|
+| B1 - normal process exits abort the bulk cgroup sample and suppress all host alerts | skip failed or empty reads only after confirming that the process directory disappeared; continue to fail sampling for unreadable surviving processes or malformed records | `test_bulk_cgroup_command_skips_exited_processes_and_keeps_alerts` forces an exit during the actual shell command, covering both failed and empty reads, then verifies 51 descendant zombies, their parent PID, soft and hard service alerts, persisted health payload and the full ps snapshot; existing read-failure and incomplete-record regressions remain in place |
 
 
 ## ctl-loop child reaping and restart (Refs #951)

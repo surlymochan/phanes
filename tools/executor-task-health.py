@@ -95,9 +95,12 @@ PS_COMMAND = "ps -eo pid,ppid,stat,etimes,args"
 CGROUP_PROCS_COMMAND = "cat /sys/fs/cgroup%s/cgroup.procs"
 # One dump of the cgroup of every process: a zombie that is already reaped from
 # cgroup.procs still shows its cgroup here, so it can be attributed to its unit.
+# Processes can exit after glob expansion or during the read. Skip those only when
+# their process directory has disappeared; failures for remaining PIDs still abort.
 CGROUP_MAP_COMMAND = (
     "for p in /proc/[0-9]*; do "
-    "group=$(head -n 1 \"$p/cgroup\") || exit 1; "
+    "group=$(head -n 1 \"$p/cgroup\" 2>/dev/null) && [ -n \"$group\" ] || "
+    "{ [ ! -d \"$p\" ] && continue; exit 1; }; "
     "printf '%s %s\\n' \"${p#/proc/}\" \"$group\"; done"
 )
 

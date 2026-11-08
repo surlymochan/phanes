@@ -842,6 +842,72 @@ class ExecutorReviewRegressionTests(ProbeTestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 MODULE.ssh_runner(HOST)(command)
 
+    def test_bulk_cgroup_command_skips_exited_processes_and_keeps_alerts(self):
+        # Force an enumerated process to exit during its read. Linux may report
+        # either a failed open or a successful empty read for an exiting task.
+        host = self.soft_host()
+        host.services[SERVICE]["pids"] = []
+        host.service(SERVICE2, tasks_current=900, tasks_max=1000, pids=[])
+        real_run = subprocess.run
+        for read_status in (1, 0):
+            with self.subTest(read_status=read_status):
+                sample = self.root / str(read_status)
+                proc = sample / "proc"
+                proc.mkdir(parents=True)
+                exiting = proc / "100"
+                exiting.mkdir()
+                for index in range(51):
+                    entry = proc / str(PARENT_PID + 1 + index)
+                    entry.mkdir()
+                    (entry / "cgroup").write_text(
+                        "0::/system.slice/" + SERVICE + "/sandbox\n")
+                bin_dir = sample / "bin"
+                bin_dir.mkdir()
+                head = bin_dir / "head"
+                head.write_text(
+                    '#!/bin/sh\n'
+                    'if [ "$3" = "$EXECUTOR_TEST_EXITING_CGROUP" ]; then\n'
+                    '  rmdir "${3%/cgroup}" || exit 1\n'
+                    '  exit "$EXECUTOR_TEST_READ_STATUS"\n'
+                    'fi\n'
+                    'exec "$EXECUTOR_TEST_REAL_HEAD" "$@"\n')
+                head.chmod(0o755)
+                environment = dict(os.environ,
+                                   PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                                   EXECUTOR_TEST_EXITING_CGROUP=str(exiting / "cgroup"),
+                                   EXECUTOR_TEST_READ_STATUS=str(read_status),
+                                   EXECUTOR_TEST_REAL_HEAD=shutil.which("head"))
+                command = MODULE.CGROUP_MAP_COMMAND.replace("/proc/", str(proc) + "/")
+
+                def remote_shell(argv, **kwargs):
+                    return real_run(["sh", "-c", ssh_command(argv, HOST)],
+                                    env=environment, **kwargs)
+
+                with mock.patch.object(MODULE.subprocess, "run", side_effect=remote_shell):
+                    mapping_output = MODULE.ssh_runner(HOST)(command)
+                self.assertFalse(exiting.exists())
+                self.assertEqual(len(MODULE.parse_cgroup_map(mapping_output)), 51)
+
+                def runner(command):
+                    if command == MODULE.CGROUP_MAP_COMMAND:
+                        return mapping_output
+                    return host.run(command)
+
+                health = sample / "health.json"
+                alert = sample / "health.alert"
+                snapshots = sample / "snapshots"
+                payload = MODULE.update(HOST, health, alert, snapshots, run=runner)
+                self.assertEqual(payload["status"], "collected")
+                services = {entry["service"]: entry for entry in payload["services"]}
+                self.assertEqual(services[SERVICE]["zombie_count"], 51)
+                self.assertEqual(services[SERVICE]["zombie_parent_pids"], [PARENT_PID])
+                self.assertEqual(services[SERVICE]["level"], "soft")
+                self.assertEqual(services[SERVICE2]["level"], "hard")
+                self.assertEqual(json.loads(health.read_text())["executor_tasks"][HOST], payload)
+                self.assertIn("service=" + SERVICE + " ", alert.read_text())
+                self.assertIn("service=" + SERVICE2 + " ", alert.read_text())
+                self.assertEqual(self.snapshots(snapshots)[0].read_text(), host.ps)
+
     def test_failed_cgroup_map_marks_each_service_uncollected_without_alerting(self):
         host = self.soft_host()
         host.services[SERVICE]["pids"] = []
