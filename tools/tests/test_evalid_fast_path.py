@@ -1,11 +1,12 @@
-"""Reproduction-only contract tests for #1976; no gate implementation is included.
+"""Contract tests for the #1976 deterministic simple-Issue fast-path gate.
 
 The batch baseline has tools/evalid_roles_control.py but no evalid_fast_path
 module. These tests make that missing product capability an explicit assertion,
-not an ImportError or an environmental failure. Once implemented, the same tests
-exercise the deterministic gate against the acceptance matrix below.
+not an ImportError or an environmental failure. The gate now lives in
+tools/evalid_fast_path.py and the same tests exercise it against the
+acceptance matrix below.
 
-Public test seam proposed here (there is no existing fast-path API to preserve):
+Public test seam (there is no pre-existing fast-path API to preserve):
     evaluate(intake: dict, *, enabled: bool = False) -> dict
 The result has eligible: bool and approved_spec: dict | None. An approved receipt
 contains intake_digest, spec (public requirements), and spec_digest = SHA256 of
@@ -25,6 +26,7 @@ Expected on bbcc2778: assertion failures stating the gate is not implemented.
 import copy
 import importlib
 import importlib.util
+import json
 import unittest
 from unittest import mock
 
@@ -158,6 +160,21 @@ class FastPathContractTests(unittest.TestCase):
         intake["public_scope"]["requirements"] = "Fix."
         del intake["public_scope"]["boundaries"]
         self.assert_closed(intake, enabled=True)
+
+    def test_labels_are_not_evidence_and_not_a_veto(self):
+        labelled = copy.deepcopy(self.intake)
+        labelled["labels"] = ["simple", "fast-path"]
+        result = self.evaluate(labelled, enabled=True)
+        self.assertTrue(result["eligible"],
+                        "a human label must neither replace nor block the evidence")
+        self.assertEqual(result["approved_spec"]["intake_digest"], digest(labelled))
+
+    def test_receipt_publishes_only_the_issue_reference_digest(self):
+        receipt = self.evaluate(enabled=True)["approved_spec"]
+        self.assertEqual(receipt["issue_ref_digest"], digest(self.intake["issue_ref"]))
+        published = json.dumps(receipt, sort_keys=True)
+        self.assertNotIn(self.intake["issue_ref"], published,
+                         "the raw issue reference stays out of the receipt")
 
     def test_receipt_is_stable_for_equivalent_key_order(self):
         reordered = dict(reversed(list(self.intake.items())))
