@@ -10,7 +10,8 @@ only live on the box after that sync.
 
 **旧 dispatcher 已退役**：上游已删除 `lib/dispatch/engine.py`；本轮一并移除无生产调用方的
 phanes_only dispatch 扩展及其测试。当前自动派发使用 swrm 原生 batch/fleet。
-本目录仍保留独立的旧控制面镜像和离线测试，不包含旧 engine 的审查派发实现。
+本目录仍保留独立的旧控制面镜像和离线测试；审查车道按积压分配（Refs #1701，见下文）落在
+本镜像里，旧 engine 的其余实现不再保留。
 `tools/check-ad-review-pause-uncounted.py` 的运行副本契约不适用于本镜像。
 
 Base-commit validation: the base commit must exist in the target repo before a lane is assigned
@@ -89,6 +90,34 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 - `queue share: dispatched <class> #<n> on <lane>` —— 本次派发的类别。
 
 离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含工作洪峰 / 验证洪峰 / 工作类上限三个场景）。
+
+## 审查车道按积压分配（Refs #1701）
+
+审查只认 CX2/CX4/CX5 三条 review 车道。以前 AD 按车道顺序派审查卡：一条车道先空出来就
+先拿下一张，快的车道反复连审，另一条车道空着。现在审查卡**按在途积压分配**：
+
+- **积压** = 该车道正在审的审查数 + 排在该车道上等着的审查卡数（review 队列 + 在途）；
+- **选车道**：积压最少的那条车道先拿；积压相同时**轮询**（同积压依次轮给各条 review 车道）；
+- **上限**：单车道在途审查达到 `AD_REVIEW_MAX_IN_FLIGHT`（默认 1）时**跳过**该车道，审查卡
+  留在队列里等空闲车道，不再往一条车道上堆；
+- **留痕**：每次分配写一行审查日志（PR、所选车道、当时各条 review 车道的积压快照）。
+
+分配决策在派发循环之前算好（`plan_reviews()`），派发时审查卡只交给**计划给它的那条车道**：
+计划给别的车道（或因为所有 review 车道都到上限而没有计划）的审查卡本轮不派发，等下一轮。
+
+日志（`~/phanes-ctl/autodispatch/autodispatch.log`）：
+
+- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: CX2=1, CX4=0, CX5=0)` —— 分配决策与积压快照；
+- `review: PR #<n> waits: every review lane is at its cap (1)` —— 所有 review 车道都到上限，审查等空闲车道。
+
+`lanes-status.json` 里多一个 `_review_backlog` 字段（三条 review 车道的当前积压），便于事后复核。
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `AD_REVIEW_MAX_IN_FLIGHT` | `1` | 单条 review 车道可同时承载的在途审查上限；达到上限的车道被跳过 |
+
+离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含积压最少者被选中、同积压轮询、
+上限跳过、日志含积压快照，以及 2026-11-02 晚审查序列回放）。
 
 ## PR 提交前校验（Refs #1704）
 
