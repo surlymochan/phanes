@@ -5932,6 +5932,11 @@ def peer_review_prompt(run_id, base, branch, diff):
             f"Run: {run_id}\nBase: {base}\nBranch: {branch}\n\nDiff:\n```diff\n{diff}\n```")
 
 
+def review_rules_hash(rules):
+    """Return the stable short fingerprint for the peer-review rules text."""
+    return hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+
+
 def review_command(reviewer, prompt, repo, scratch_dir, policy):
     backend, binary, model = reviewer["backend"], reviewer["binary"], reviewer.get("model")
     cfg = policy.get(backend) if isinstance(policy.get(backend), dict) else {}
@@ -6231,13 +6236,15 @@ def perform_peer_review(run_id, by, policy):
     else:
         reviewer = choose_review_backend(result.get("backend"), policy, available)
     prompt = peer_review_prompt(run_id, base, branch, diff)
+    rules = prompt.split("\n\nRun:", 1)[0]
+    rules_hash = review_rules_hash(rules)
     payload = invoke_reviewer(reviewer, prompt, repo, run_dir, policy)
     counts = {severity.lower(): sum(item["severity"] == severity for item in payload["findings"])
               for severity in ("P0", "P1", "P2")}
     reviewer_name = reviewer["backend"] + (f":{reviewer['model']}" if reviewer.get("model") else "")
     record = {"run_id": run_id, "by": reviewer_name, **payload,
               "reviewed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-              "base": base, "branch": branch}
+              "base": base, "branch": branch, "rules_hash": rules_hash}
     jsave(os.path.join(run_dir, "review.json"), record)
     if not update_peer_review_ledger(run_id, {"by": reviewer_name, "verdict": payload["verdict"], **counts}):
         raise ValueError(f"run is missing from the ledger: {run_id}")
