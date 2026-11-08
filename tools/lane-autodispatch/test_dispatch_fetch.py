@@ -299,6 +299,89 @@ class DispatchFetchResilienceTest(unittest.TestCase):
     def test_tls_errors_are_retryable(self):
         self.assertEqual(AUTODISPATCH.classify_harvest_fetch_error("gnutls_handshake failed"), "transient")
 
+    def test_finish_rejects_stale_harvest_mirror(self):
+        self.run_harvest_mirror_scenario(stale=True)
+
+    def test_finish_accepts_matching_harvest_mirror(self):
+        self.run_harvest_mirror_scenario()
+
+    def test_finish_rejects_unreadable_harvest_mirror_commit(self):
+        self.run_harvest_mirror_scenario(unreadable=True)
+
+    def run_harvest_mirror_scenario(self, stale=False, unreadable=False):
+        with tempfile.TemporaryDirectory(dir=self.scratch) as scratch:
+            root = Path(scratch)
+            executor, mirror, controller, published = [root / name for name in
+                                                      ("executor", "mirror", "controller", "published")]
+
+            def git(repo, *args):
+                result = subprocess.run(["git", "-C", str(repo), *args],
+                                        capture_output=True, text=True, check=True)
+                return result.stdout.strip()
+
+            executor.mkdir()
+            git(executor, "init", "-q", "-b", "work")
+            git(executor, "config", "user.name", "Test")
+            git(executor, "config", "user.email", "test@example.com")
+            (executor / "result").write_text("base\n")
+            git(executor, "add", "result")
+            git(executor, "commit", "-qm", "base")
+            base = git(executor, "rev-parse", "HEAD")
+            (executor / "result").write_text("old result\n")
+            git(executor, "commit", "-qam", "old result")
+            old = git(executor, "rev-parse", "HEAD")
+            (executor / "result").write_text("latest result\n")
+            git(executor, "commit", "-qam", "fix #1719 fetch\n\nCloses #1719\n\nVerify: local tests passed")
+            expected = git(executor, "rev-parse", "HEAD")
+            # The controller even has the expected object: checking its existence
+            # instead of comparing the harvested ref would still lose the result.
+            git(root, "clone", "-q", str(executor), str(controller))
+            git(root, "clone", "--bare", "-q", str(executor), str(mirror))
+            if stale:
+                git(mirror, "update-ref", "refs/heads/work", old)
+            git(root, "init", "--bare", "-q", str(published))
+            git(controller, "remote", "set-url", "origin", str(published))
+            st = {"issue": 1719, "run": "run-mirror", "base": base}
+            state = {"CX10": st}
+            info = {"branch": "work", "commit": expected, "repo": str(executor), "status": "done"}
+            real_sh = AUTODISPATCH.sh
+            pushes = []
+
+            def fake_sh(command, timeout=120, inp=None):
+                if "fetch" in command and f"govpn:{executor}" in command:
+                    return 1, "", "gnutls_handshake failed"
+                if unreadable and "rev-parse" in command:
+                    return 1, "", "cannot resolve harvested commit"
+                if "push" in command:
+                    pushes.append(command)
+                return real_sh(command, timeout=timeout, inp=inp)
+
+            with mock.patch.object(AUTODISPATCH, "LOCAL", str(controller)), \
+                 mock.patch.object(AUTODISPATCH, "D", scratch), \
+                 mock.patch.object(AUTODISPATCH, "sh", side_effect=fake_sh), \
+                 mock.patch.object(AUTODISPATCH, "gh", return_value=(0, "", "")) as gh, \
+                 mock.patch.object(AUTODISPATCH, "log") as log, \
+                 mock.patch.object(AUTODISPATCH.time, "sleep"), \
+                 mock.patch.dict("os.environ", {"AD_HARVEST_FETCH_MIRROR": str(mirror)}):
+                result = AUTODISPATCH.finish("CX10", {"host": "govpn"}, st, info, state)
+
+            if stale or unreadable:
+                self.assertFalse(result["done"], "unverified mirror must not complete the lane")
+                self.assertEqual(result["status"], "fetch-commit-mismatch")
+                self.assertIn(expected, result["error"])
+                self.assertTrue(any("commit" in call.args[0] for call in log.call_args_list))
+                self.assertEqual(pushes, [])
+                gh.assert_not_called()
+                self.assertNotIn(1719, state.get("_done", []))
+                self.assertIs(state["CX10"], st)
+                self.assertEqual(git(published, "for-each-ref", "--format=%(objectname)"), "")
+            else:
+                self.assertEqual(result["status"], "pr-created")
+                self.assertTrue(result["done"])
+                self.assertEqual(len(pushes), 1)
+                self.assertEqual(git(published, "rev-parse", "refs/heads/fleet/CX10-issue1719-run-mirror"), expected)
+                self.assertIn(1719, state["_done"])
+
     def test_harvest_timeouts_retry_and_attribute_seed_fallback_failure(self):
         for seed_succeeds in (True, False):
             with self.subTest(seed_succeeds=seed_succeeds):

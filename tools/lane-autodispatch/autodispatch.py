@@ -1318,6 +1318,17 @@ def finish(lane, cfg, st, info, state):
                           if seed else None)
         ok, err, failures = harvest_fetch(lane, n, fetch, st, cfg["host"], fallback_fetch)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
+        if seed:
+            # A mirror may serve an older branch even when the reported commit
+            # already exists locally. Check the fetched tip before filtering can
+            # rewrite it or any push can publish an incomplete result.
+            rc, fetched, err = sh(["git", "-C", LOCAL, "rev-parse", "--verify", f"refs/fleet/{lane}^{{commit}}"])
+            if rc or fetched.strip() != info["commit"]:
+                error = (f"harvest commit mismatch: expected {info['commit']}, "
+                         f"fetched {fetched.strip() if not rc else 'unresolved'}"
+                         + (f": {err.strip()[-200:]}" if rc else ""))
+                log(f"{lane} #{n} run {run} {error}", brain=False)
+                return {"done": False, "status": "fetch-commit-mismatch", "error": error, "missing": []}
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
