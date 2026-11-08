@@ -245,6 +245,21 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
 
+    def test_lane_git_metadata_is_inside_executor_writable_worktree(self):
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        wt.parent.mkdir(parents=True)
+        self.git("worktree", "add", "--detach", "-q", str(wt), "HEAD")
+        git_dir = pathlib.Path(self.git("-C", str(wt), "rev-parse", "--git-dir"))
+        if not git_dir.is_absolute():
+            git_dir = wt / git_dir
+
+        self.assertEqual(
+            git_dir.resolve(),
+            wt.resolve() / ".git",
+            "lane worktree git metadata must be writable from the executor's sandbox; "
+            "a linked worktree points .git outside its writable root",
+        )
+
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
         (self.data / "policy.local.json").write_text(json.dumps({"rate_limit": {
