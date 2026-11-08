@@ -38,7 +38,6 @@ import sys
 import tempfile
 import time as time_module
 import unittest
-import warnings
 from pathlib import Path
 
 
@@ -239,10 +238,7 @@ class IdleRedispatchTest(unittest.TestCase):
                         "ended_at": self.clock.now - 5 if ended_at is None else ended_at}}
 
     def tick(self, state):
-        # the dispatcher writes the snapshot without closing it: the warning is pre-existing
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ResourceWarning)
-            self.module.tick(self.lanes, state, 0)
+        self.module.tick(self.lanes, state, 0)
         return state
 
     def advance(self, seconds, dispatcher_alive=True):
@@ -307,6 +303,47 @@ class IdleRedispatchTest(unittest.TestCase):
         window = state["_idle"][LANE]
         self.assertGreaterEqual(window["paused_s"], TICK_S)
         self.assertEqual(window["no_card_s"], 0.0)
+
+    def test_verify_share_counts_a_just_harvested_lane_as_available(self):
+        self.module.AD_VERIFY_SHARE_ENABLED = True
+        state = self.busy_state()
+        self.sandbox.remote_state[LANE] = self.finished_run(lane_state="busy")
+        self.tick(state)
+        self.assertEqual(self.sandbox.assigned, [(LANE, 43)])
+        self.assertEqual(state[LANE]["class"], "work")
+
+    def test_verify_share_still_reserves_capacity_after_harvest(self):
+        self.module.AD_VERIFY_SHARE_ENABLED = True
+        self.module.VERIFY_MIN = 1
+        self.module.VERIFY_SHARE = 0.25
+        self.lanes["CX2"] = dict(self.lanes[LANE])
+        state = self.busy_state()
+        # Another work run already occupies the only unreserved slot. The freed
+        # lane counts as capacity, but must not let work cross the existing cap.
+        state["CX2"] = dict(state[LANE], issue=41, run="run-41", **{"class": "work"})
+        self.sandbox.remote_state["CX2"] = {"lane": "busy", "run": "running"}
+        self.sandbox.remote_state[LANE] = self.finished_run(lane_state="busy")
+        self.tick(state)
+        self.assertEqual(self.sandbox.assign_attempts, [])
+        self.assertNotIn(LANE, state)
+        self.assertEqual(state["CX2"]["run"], "run-41")
+
+    def test_verify_share_uses_a_free_work_slot_only_once(self):
+        self.module.AD_VERIFY_SHARE_ENABLED = True
+        self.module.VERIFY_MIN = 1
+        self.module.VERIFY_SHARE = 0.25
+        self.lanes["CX2"] = dict(self.lanes[LANE])
+        self.lanes["GH3"] = dict(self.lanes[LANE])
+        state = self.busy_state()
+        state["CX2"] = dict(state[LANE], issue=41, run="run-41", **{"class": "work"})
+        self.sandbox.remote_state["CX2"] = {"lane": "busy", "run": "running"}
+        self.sandbox.remote_state["GH3"] = {"lane": "idle"}
+        self.sandbox.remote_state[LANE] = self.finished_run(lane_state="busy")
+        self.sandbox.add_issue(44)
+        self.tick(state)
+        self.assertEqual(self.sandbox.assigned, [(LANE, 43)])
+        self.assertNotIn("GH3", state)
+        self.assertNotIn("in-progress", self.sandbox.issues[44]["labels"])
 
     def test_a_finished_lane_is_redispatched_before_another_lanes_slow_harvest(self):
         other_lane = "GH3"

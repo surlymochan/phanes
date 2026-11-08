@@ -222,7 +222,7 @@ tick 开始前的其余时间才落到之前的原因桶，所以“无卡 → �
 离线验证：
 
 ```bash
-python3 tools/check-ad-idle-redispatch.py                 # 23 个 tick 级 / 集成用例
+python3 tools/check-ad-idle-redispatch.py                 # 26 个 tick 级 / 集成用例
 python3 tools/lane-autodispatch/test_idle_redispatch.py   # 9 个复现用例（基线全红）
 ```
 
@@ -233,6 +233,7 @@ python3 tools/lane-autodispatch/test_idle_redispatch.py   # 9 个复现用例（
 
 | 轮次 | 意见（BLOCKER） | 对应改动 | 测试 |
 | --- | --- | --- | --- |
+| 批次复审 B1 | 容量预留开启时，刚收割但远端快照仍为 busy 的车道被漏算，工作槽位误为 0 | 本轮已释放车道纳入同一 `queue_class_limits()` 可用容量计算，仍检查暂停、主机与工作类上限 | `test_verify_share_counts_a_just_harvested_lane_as_available`、`test_verify_share_still_reserves_capacity_after_harvest`、`test_verify_share_uses_a_free_work_slot_only_once` |
 | 第 1 轮 B1 | 即时重派发绕过车道暂停：运行中的车道被暂停后，run 一结束仍收到新任务 | 即时重派发与普通派发合并到 `give_card()`：同一套 `lane_paused()` / `host_ok()` 检查，暂停车道不派发 | `test_a_paused_lane_gets_no_card_after_its_run_ended`（两个文件各一份） |
 | 第 1 轮 B2 | 远端结果没有结束时间，空闲时长从收割时刻起算；收割重试、push、建 PR 与停机恢复都会少算 | 远端状态片段采集 run 的结束时间（`ended_at`），空闲窗口从真实结束时间起算 | `test_the_idle_metric_starts_at_the_real_end_of_the_run`、`test_the_remote_status_reports_the_end_time_of_the_run` |
 | 第 1 轮 B3 | `setdefault` 保留上一个窗口的 `down_s`，一次停机之后所有长空闲都被归因为派发器未运行 | 每个空闲窗口的桶从零开始（`idle_open()` 新建窗口），窗口关闭后被丢弃 | `test_the_next_idle_window_does_not_inherit_the_downtime_of_the_previous_one` |

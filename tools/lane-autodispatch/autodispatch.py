@@ -603,7 +603,9 @@ def load(p, d):
     try: return json.load(open(p))
     except Exception: return d
 def save_state(s):
-    tmp = f"{D}/state.json.tmp"; json.dump(s, open(tmp, "w"), indent=1, ensure_ascii=False); os.replace(tmp, f"{D}/state.json")
+    tmp = f"{D}/state.json.tmp"
+    with open(tmp, "w") as stream: json.dump(s, stream, indent=1, ensure_ascii=False)
+    os.replace(tmp, f"{D}/state.json")
 def gh(args, timeout=60):
     return sh(["gh"] + args + ["-R", REPO], timeout=timeout)
 
@@ -1008,7 +1010,8 @@ def dispatch(lane, cfg, item, base):
     if is_impl and IMPL_CARD_TASK_BOOK.rstrip() not in body:
         body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
     task = f"# #{n} {item['title']}\n\n{body}\n\n{RULES.format(n=n)}\n"
-    path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
+    path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True)
+    with open(path, "w") as stream: stream.write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/swrm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
     with open(path) as task_file:
         rc, _, err = sh(ssh_argv(ssh_opts(h), h, f"cat > /tmp/task-{lane}.md"), timeout=60, inp=task_file.read())
@@ -1466,6 +1469,7 @@ def tick(lanes, state, last_warn):
     queue_error = ""
     base = None
     outcomes = {}
+    freed_lanes = set()
 
     def tick_queue():
         """Load the shared queue on the first dispatch attempt, after that lane's harvest.
@@ -1508,8 +1512,11 @@ def tick(lanes, state, last_warn):
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
         if AD_VERIFY_SHARE_ENABLED:
+            # A harvested lane is available in this tick even if the remote
+            # snapshot still calls it busy. Keep the same pause/host/cap checks.
             idle = [name for name, c in lanes.items() if not state.get(name) and "error" not in res[name]
-                    and res[name].get("lane") == "idle" and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
+                    and (name in freed_lanes or res[name].get("lane") == "idle")
+                    and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
             # The work class may hold at most `total - reserve` lanes: with no work slot left it takes
             # no further lane, the work cards in flight keep the lanes they hold (Refs #1864). The cap
@@ -1571,6 +1578,7 @@ def tick(lanes, state, last_warn):
         elif st and reconcile(L, lanes[L], st, r, state):
             state.pop(L); save_state(state); freed = True
         if freed:
+            freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
     update_busy_stale(lanes, state, res)
     if not tick_queue():
@@ -1613,7 +1621,8 @@ def tick(lanes, state, last_warn):
     state["_tick_at"] = now
     save_state(state)
     st = status_snapshot(lanes, state, res, ready, blocked)
-    json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
+    with open(f"{D}/lanes-status.json", "w") as stream:
+        json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
 
 def file_issue(text, extra=()):

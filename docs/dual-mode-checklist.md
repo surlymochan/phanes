@@ -16,6 +16,7 @@
 - [ ] **检查车道空闲间隙（Refs #1688）**：
   - `_idle_s` 给出每条车道最近一次空闲时长（上次 run 结束 → 本次派发，单位秒），`_idle_open_s` 给出仍在等待的车道当前已空闲的秒数，`_idle_worst_s` 是当前最大空窗，`_idle_reason` 给出原因。
   - 每条车道收割成功后立即尝试重派发，再收割下一条车道；其他车道的慢收割不会阻塞已释放车道的派发。空闲窗口在该车道派发成功时立即关闭；同轮其他车道的派发耗时不计入。旧心跳只核算 tick 开始前的停机，tick 内收割与派发延迟归为 `dispatcher not dispatching`。
+  - 开启 `AD_VERIFY_SHARE_ENABLED` 时，刚收割的车道即使远端快照仍为 `busy` 也纳入可用容量；重派发仍受暂停、主机 backoff 与验证类容量预留约束。
   - 空闲超过 5 分钟的派发会在 brain log 留一行 `<lane> idle <n>s before dispatch (reason: <原因>)`，巡检时用 `grep "before dispatch" ~/phanes-ctl/brain/log.md` 核对。
   - 判定：原因 `no card` → 池子空了，补充 backlog；`no capacity` → 查并发/容量上限；`lane paused` → 确认暂停是否有意；`dispatcher not running` → 查派发器停机（对照 `~/phanes-ctl/autodispatch/heartbeat`）；`dispatcher not dispatching` → 查收割/派发延迟。
 
