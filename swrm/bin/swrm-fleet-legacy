@@ -5,7 +5,7 @@ root=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.dirname(os.path
 # This wrapper is itself the candidate-runtime entry point.  Do not inherit a
 # caller's generic OPENSWARM_HOME, or `auto` can silently inspect the old
 # runtime while dispatching through the candidate binary.
-export OPENSWARM_HOME="$HOME/.claude/openswarm-executor-candidate"
+export OPENSWARM_HOME="$HOME/.claude/swrm-executor-candidate"
 export OPENSWARM_FLEET_GUARD_CONFIG="${OPENSWARM_FLEET_GUARD_CONFIG:-$OPENSWARM_HOME/fleet-capacity.json}"
 export OPENSWARM_AUTO_TOPOLOGY_POLICY="$OPENSWARM_FLEET_GUARD_CONFIG"
 export OPENSWARM_FLEET_GUARD_REQUIRED="${OPENSWARM_FLEET_GUARD_REQUIRED:-1}"
@@ -15,17 +15,17 @@ if [ "${1:-}" = push ]; then
 fi
 if [ "${1:-}" = auto ]; then
   shift
-  exec "$root/bin/openswarm-auto" "$@"
+  exec "$root/bin/swrm-auto" "$@"
 fi
 if [ "${1:-}" = harvest ]; then
   # The fleet harvest collects the assigned lane results of every fleet host
   # and reports a failed host instead of dropping its evidence.
   shift
-  exec "$root/bin/openswarm" fleet harvest "$@"
+  exec "$root/bin/swrm" fleet harvest "$@"
 fi
 export PATH="$HOME/.local/node-v24.14.1/bin:$HOME/tools/copilot-executor/node_modules/.bin:$HOME/tools/bun-runtime/node_modules/.bin:$HOME/.local/bin:/opt/homebrew/bin:$PATH"
-if [ -d "$HOME/Library/Application Support/openswarm-copilot-secure" ]; then
-  export COPILOT_HOME="${COPILOT_HOME:-$HOME/Library/Application Support/openswarm-copilot-secure}"
+if [ -d "$HOME/Library/Application Support/swrm-copilot-secure" ]; then
+  export COPILOT_HOME="${COPILOT_HOME:-$HOME/Library/Application Support/swrm-copilot-secure}"
 fi
 if [ -d "$HOME/tools/pi-sandbox/node_modules" ]; then
   export OPENSWARM_PI_RUNTIME="${OPENSWARM_PI_RUNTIME:-$HOME/tools/pi-sandbox}"
@@ -36,7 +36,7 @@ fi
 if [ -x "$HOME/tools/bun-runtime/node_modules/.bin/bun" ]; then
   export OPENSWARM_PI_BUN_RUNTIME="${OPENSWARM_PI_BUN_RUNTIME:-$HOME/tools/bun-runtime}"
 fi
-if [ -S /run/openswarm-pi/broker.sock ]; then
-  export OPENSWARM_PI_BROKER_SOCKET="${OPENSWARM_PI_BROKER_SOCKET:-/run/openswarm-pi/broker.sock}"
+if [ -S /run/swrm-pi/broker.sock ]; then
+  export OPENSWARM_PI_BROKER_SOCKET="${OPENSWARM_PI_BROKER_SOCKET:-/run/swrm-pi/broker.sock}"
 fi
-exec "$root/bin/openswarm" "$@"
+exec "$root/bin/swrm" "$@"

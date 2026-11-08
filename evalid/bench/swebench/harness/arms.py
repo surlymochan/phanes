@@ -315,7 +315,7 @@ def arm_openswarm(inst, repo, venv, events, tid):
         usage["errors"] += u["errors"]
     ex["usage"] = usage
     # merge the openswarm branch back so grading sees the executor's commit
-    branches = E.sh(GIT + ["for-each-ref", "--format=%(refname:short)", "refs/heads/openswarm/"], cwd=repo).stdout.split()
+    branches = E.sh(GIT + ["for-each-ref", "--format=%(refname:short)", "refs/heads/swrm/"], cwd=repo).stdout.split()
     ex["branches"] = branches
     for b in branches:
         m = E.sh(GIT + ["merge", "-q", "--no-edit", b], cwd=repo, check=False)
