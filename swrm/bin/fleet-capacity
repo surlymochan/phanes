@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Atomic fleet admission. Reservations persist until explicitly released, even after a crash."""
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -30,6 +31,12 @@ _spawnable = _load_spawnable()
 import time
 
 ALLOWED = {'codex', 'pi', 'cursor', 'agy', 'copilot'}
+try:
+    LEASE_TTL = float(os.environ.get('OPENSWARM_FLEET_CAPACITY_TTL_SECONDS', '300'))
+except ValueError:
+    sys.exit('invalid fleet capacity lease TTL')
+if not math.isfinite(LEASE_TTL) or LEASE_TTL <= 0:
+    sys.exit('invalid fleet capacity lease TTL')
 LIMITS = {'total': 8, 'host:broker': 2, 'host:worker': 2, 'host:local': 2,
           'codex': 1, 'pi': 1, 'cursor': 1, 'agy': 1, 'copilot': 1, 'minimax-cn': 1}
 if len(sys.argv) != 2 or sys.argv[1] not in ('broker', 'worker', 'local'):
@@ -87,7 +94,7 @@ try:
             result = json.loads(bundle.stdout)
         print(json.dumps({'ok': process.returncode == 0, 'result': result}, separators=(',', ':')))
         sys.exit(0 if process.returncode == 0 else 1)
-    if op not in ('acquire', 'release', 'status', 'recover'):
+    if op not in ('acquire', 'release', 'status', 'recover', 'renew'):
         raise ValueError('invalid operation')
     root = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
                 (Path(_home()) / '.claude/swrm-fleet-capacity'))
@@ -95,20 +102,49 @@ try:
     db = sqlite3.connect(str(root / 'capacity.sqlite'), timeout=10, isolation_level=None)
     os.chmod(root / 'capacity.sqlite', 0o600)
     db.execute('PRAGMA busy_timeout=10000')
-    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
     db.execute('BEGIN IMMEDIATE')
+    db.execute('CREATE TABLE IF NOT EXISTS reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL, lease_expires REAL)')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(reservations)')}
+    if 'lease_expires' not in columns:
+        db.execute('ALTER TABLE reservations ADD COLUMN lease_expires REAL')
+    now = time.time()
+    db.execute('UPDATE reservations SET lease_expires=CASE WHEN created>0 THEN created+? ELSE ? END '
+               'WHERE lease_expires IS NULL', (LEASE_TTL, now + LEASE_TTL))
     if op == 'status':
-        rows = db.execute('SELECT host,run_id,backend,provider,created FROM reservations ORDER BY created').fetchall()
-        out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created'), row)) for row in rows]}
+        rows = db.execute('SELECT host,run_id,backend,provider,created,lease_expires FROM reservations ORDER BY created').fetchall()
+        out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created','lease_expires'), row)) for row in rows]}
+    elif op == 'renew':
+        token, run_id = request.get('token'), request.get('run_id')
+        if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
+            raise ValueError('invalid token')
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
+            raise ValueError('invalid run id')
+        if request.get('host') is not None or request.get('lease_expires') is not None:
+            raise ValueError('owner and lease expiry are coordinator-controlled')
+        expires = now + LEASE_TTL
+        count = db.execute('UPDATE reservations SET lease_expires=? WHERE token=? AND host=? AND run_id=?',
+                           (expires, token, host, run_id)).rowcount
+        if not count:
+            raise ValueError('reservation owner mismatch or reservation missing')
+        out = {'ok': True, 'lease_expires': expires, 'lease_ttl_seconds': LEASE_TTL}
     elif op == 'recover':
-        # Local operator only, after independently confirming the runner and
-        # every executor descendant are stopped. Never automatically expire.
-        if host != 'broker' or request.get('confirm') != 'all-executor-processes-stopped':
-            raise ValueError('local explicit recovery confirmation required')
+        # The authenticated owner can recover itself; the broker operator can
+        # recover any owner only after the coordinator lease has expired.
         owner, run_id = request.get('host'), request.get('run_id')
+        token = request.get('token')
         if owner not in ('broker', 'worker', 'local') or not isinstance(run_id, str) or not run_id:
             raise ValueError('invalid reservation owner or run id')
-        count = db.execute('DELETE FROM reservations WHERE host=? AND run_id=?', (owner,run_id)).rowcount
+        if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
+            raise ValueError('invalid token')
+        if host != owner and host != 'broker':
+            raise ValueError('recovery owner mismatch')
+        count = db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=? AND lease_expires<=?',
+                           (token, owner, run_id, now)).rowcount
+        if not count:
+            row = db.execute('SELECT lease_expires FROM reservations WHERE token=? AND host=? AND run_id=?',
+                             (token, owner, run_id)).fetchone()
+            if row:
+                raise ValueError('reservation lease has not expired')
         out = {'ok': True, 'recovered': count}
     else:
         token, run_id = request.get('token'), request.get('run_id')
@@ -129,7 +165,10 @@ try:
             if old:
                 if old != (host,run_id,backend,provider):
                     raise ValueError('reservation token conflict')
-                out = {'ok': True, 'admitted': True, 'existing': True}
+                out = {'ok': True, 'admitted': True, 'existing': True,
+                       'lease_expires': db.execute('SELECT lease_expires FROM reservations WHERE token=?',
+                                                   (token,)).fetchone()[0],
+                       'lease_ttl_seconds': LEASE_TTL}
             else:
                 rows = db.execute('SELECT host,backend,provider FROM reservations').fetchall()
                 keys = {'total', 'host:' + host, backend} | ({provider} if provider else set())
@@ -141,8 +180,10 @@ try:
                 if blocked:
                     out = {'ok': True, 'admitted': False, 'blocked': blocked}
                 else:
-                    db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)', (token,host,run_id,backend,provider,time.time()))
-                    out = {'ok': True, 'admitted': True}
+                    db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?,?)',
+                               (token,host,run_id,backend,provider,now,now + LEASE_TTL))
+                    out = {'ok': True, 'admitted': True, 'lease_expires': now + LEASE_TTL,
+                           'lease_ttl_seconds': LEASE_TTL}
     db.execute('COMMIT')
     print(json.dumps(out, separators=(',',':')))
 except Exception as error:

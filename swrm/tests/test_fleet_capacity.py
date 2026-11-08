@@ -30,6 +30,13 @@ class FleetCapacityTests(unittest.TestCase):
                            capture_output=True, env=self.env, timeout=15)
         return json.loads(p.stdout)
 
+    def expire(self, token):
+        import sqlite3
+        db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
+        db.execute('UPDATE reservations SET lease_expires=0 WHERE token=?', (token,))
+        db.commit()
+        db.close()
+
     def test_atomic_limit_and_idempotent_recovery(self):
         def attempt(i):
             return self.call('broker' if i % 2 else 'worker', op='acquire',
@@ -90,6 +97,14 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertFalse(xs.release_fleet_slot(rdir))
         self.assertEqual(call.call_count, 3)
         self.assertIn(rdir, xs._FLEET_RESERVATIONS)
+
+    def test_supervisor_renews_owned_fleet_lease(self):
+        stop = mock.Mock()
+        stop.wait.side_effect = [False, True]
+        payload = {'run_id': 'renew-run', 'token': 'f' * 32}
+        with mock.patch.object(xs, 'fleet_guard_call', return_value={'ok': True}) as call:
+            xs.renew_fleet_slot(['guard'], payload, 1, stop)
+        call.assert_called_once_with(['guard'], {'op': 'renew', 'run_id': 'renew-run', 'token': 'f' * 32})
 
     def test_remote_review_assignment_passes_read_only_to_lane(self):
         root = pathlib.Path(self.temp.name)
@@ -231,11 +246,12 @@ class FleetCapacityTests(unittest.TestCase):
         token = 'a' * 32
         self.assertTrue(self.call('worker', op='acquire', token=token, run_id='orphan',
                                   backend='cursor', provider=None)['admitted'])
-        self.assertFalse(self.call('worker', op='recover', host='worker', run_id='orphan',
+        self.assertFalse(self.call('worker', op='recover', host='worker', run_id='orphan', token=token)['ok'])
+        self.assertFalse(self.call('broker', op='recover', host='worker', run_id='orphan', token=token,
                                    confirm='all-executor-processes-stopped')['ok'])
-        self.assertFalse(self.call('broker', op='recover', host='worker', run_id='orphan')['ok'])
-        self.assertEqual(self.call('broker', op='recover', host='worker', run_id='orphan',
-                                   confirm='all-executor-processes-stopped')['recovered'], 1)
+        self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+        self.expire(token)
+        self.assertEqual(self.call('broker', op='recover', host='worker', run_id='orphan', token=token)['recovered'], 1)
 
     def test_remote_recovery_rejects_unverified_local_confirmation(self):
         token = 'b' * 32
@@ -245,10 +261,40 @@ class FleetCapacityTests(unittest.TestCase):
         # A broker-side assertion cannot establish that a worker's process
         # tree is stopped; remote recovery needs verifiable cross-host evidence.
         result = self.call('broker', op='recover', host='worker', run_id='remote-orphan',
-                           confirm='all-executor-processes-stopped')
+                           token=token, confirm='all-executor-processes-stopped')
 
         self.assertFalse(result['ok'], result)
         self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+
+    def test_renew_requires_authenticated_owner_and_exact_reservation(self):
+        token = 'c' * 32
+        acquired = self.call('worker', op='acquire', token=token, run_id='renew-me',
+                             backend='cursor', provider=None)
+        self.assertTrue(acquired['admitted'])
+        before = acquired['lease_expires']
+        self.assertFalse(self.call('broker', op='renew', token=token, run_id='renew-me')['ok'])
+        self.assertFalse(self.call('worker', op='renew', token='d' * 32, run_id='renew-me')['ok'])
+        self.assertFalse(self.call('worker', op='renew', token=token, run_id='wrong')['ok'])
+        renewed = self.call('worker', op='renew', token=token, run_id='renew-me')
+        self.assertTrue(renewed['ok'])
+        self.assertGreaterEqual(renewed['lease_expires'], before)
+        self.assertFalse(self.call('worker', op='renew', token=token, run_id='renew-me',
+                                   lease_expires=before + 1000)['ok'])
+
+    def test_legacy_reservations_migrate_to_conservative_lease(self):
+        import sqlite3
+        created = 1_800_000_000.0
+        db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
+        db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, '
+                   'backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
+        db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)',
+                   ('e' * 32, 'worker', 'legacy', 'cursor', None, created))
+        db.commit()
+        db.close()
+        status = self.call('broker', op='status')
+        row = status['reservations'][0]
+        self.assertEqual(row['lease_expires'], created + 300)
+        self.assertEqual(self.call('broker', op='status')['reservations'][0]['lease_expires'], created + 300)
 
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
@@ -265,9 +311,10 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertTrue(self.call('local', **local)['admitted'])
         self.assertEqual(self.call('broker', **remote)['blocked'], ['codex'])
         self.assertFalse(self.call('local', op='recover', host='local', run_id='local-turn',
-                                   confirm='all-executor-processes-stopped')['ok'])
+                                   token=local['token'])['ok'])
+        self.expire(local['token'])
         self.assertEqual(self.call('broker', op='recover', host='local', run_id='local-turn',
-                                   confirm='all-executor-processes-stopped')['recovered'], 1)
+                                   token=local['token'])['recovered'], 1)
         self.assertTrue(self.call('broker', **remote)['admitted'])
 
     def test_local_host_limit_applies_across_backends(self):

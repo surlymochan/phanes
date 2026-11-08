@@ -3825,9 +3825,10 @@ def provider_concurrency_limits(policy, keys):
     return limits
 
 
-# Tokens stay in this supervisor process. Lost supervisors intentionally leave a
-# persistent reservation for manual, evidence-backed recovery: no unsafe TTL.
+# Tokens stay in this supervisor process. Lost supervisors leave reservations
+# until the coordinator lease expires and an authorized recovery is requested.
 _FLEET_RESERVATIONS = {}
+_FLEET_RENEWALS = {}
 
 
 def fleet_guard_command():
@@ -3860,10 +3861,14 @@ def fleet_guard_call(command, payload):
 
 
 def release_fleet_slot(rdir):
-    item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
+    key = os.path.realpath(rdir)
+    item = _FLEET_RESERVATIONS.get(key)
     if not item:
         return True
     command, payload = item
+    renewal = _FLEET_RENEWALS.pop(key, None)
+    if renewal:
+        renewal[0].set()
     for attempt in range(3):
         try:
             fleet_guard_call(command, {"op": "release", "run_id": payload["run_id"], "token": payload["token"]})
@@ -3875,6 +3880,17 @@ def release_fleet_slot(rdir):
             time.sleep(0.2 * (attempt + 1))
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
     return True
+
+
+def renew_fleet_slot(command, payload, interval, stop):
+    """Keep a coordinator lease alive while this supervisor owns the run."""
+    while not stop.wait(interval):
+        try:
+            fleet_guard_call(command, {"op": "renew", "run_id": payload["run_id"], "token": payload["token"]})
+        except RuntimeError:
+            # Keep retrying. A coordinator outage must never be converted to a
+            # local release; the coordinator remains authoritative on recovery.
+            continue
 
 
 def executor_boundary_empty(rdir, boundary):
@@ -3937,14 +3953,22 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                         counts[key] += 1
             if all(counts[key] < cap for key, cap in limits.items()):
                 admitted = True
+                answer = {}
                 if command:
                     try:
-                        admitted = bool(fleet_guard_call(command, payload).get("admitted"))
+                        answer = fleet_guard_call(command, payload)
+                        admitted = bool(answer.get("admitted"))
                     except RuntimeError as error:
                         admitted = False
                         set_status(rdir, fleet_reservation_error=str(error))
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
+                    interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
+                    stop = threading.Event()
+                    thread = threading.Thread(target=renew_fleet_slot, args=(command, payload, interval, stop),
+                                              daemon=True)
+                    _FLEET_RENEWALS[reservation_key] = (stop, thread)
+                    thread.start()
             else:
                 admitted = False
             if admitted and keep_waiting and not keep_waiting():
