@@ -13,7 +13,7 @@ class UsageCounts(unittest.TestCase):
             "inputTokens": 7,
             "outputTokens": None,
             "cacheReadTokens": True,
-            "cacheWriteTokens": "12",
+            "cacheWriteTokens": False,
         }
         self.assertEqual(xs.cursor_usage(raw), {
             "inputTokens": 7,
@@ -32,7 +32,7 @@ class UsageCounts(unittest.TestCase):
     def test_pi_missing_null_and_boolean_counts_are_zero(self):
         event = {"type": "message_end", "message": {
             "role": "assistant",
-            "usage": {"input": 7, "output": None, "cacheRead": True, "cacheWrite": "12"},
+            "usage": {"input": 7, "output": None, "cacheRead": True, "cacheWrite": False},
             "content": [],
         }}
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as fh:
@@ -69,6 +69,35 @@ class UsageCounts(unittest.TestCase):
             pi, _, _ = xs.pi_usage(fh.name)
         self.assertEqual(pi["input"], 4)
         self.assertEqual(pi["output"], 2)
+
+    def test_numeric_strings_keep_integer_normalization(self):
+        for value in ("12", " 12 ", "+12", "0"):
+            with self.subTest(value=value):
+                self.assertEqual(xs.cursor_usage({"inputTokens": value})["inputTokens"], int(value))
+                event = {"type": "message_end", "message": {
+                    "role": "assistant", "usage": {"input": value}, "content": [],
+                }}
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(event) + "\n")
+                    fh.flush()
+                    usage, _, errors = xs.pi_usage(fh.name)
+                self.assertEqual(usage["input"], int(value))
+                self.assertEqual(errors, [])
+
+    def test_invalid_counts_do_not_pollute_valid_usage(self):
+        for value in (None, True, False, -5, "-5", "invalid", "", [], {},
+                      float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertEqual(xs.cursor_usage({"inputTokens": value})["inputTokens"], 0)
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as fh:
+                    for counts in ({"input": "12", "output": 3}, {"input": value}, {}):
+                        fh.write(json.dumps({"type": "message_end", "message": {
+                            "role": "assistant", "usage": counts, "content": [],
+                        }}) + "\n")
+                    fh.flush()
+                    usage, _, errors = xs.pi_usage(fh.name)
+                self.assertEqual(usage, {"input": 12, "output": 3, "cacheRead": 0, "cacheWrite": 0})
+                self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":
