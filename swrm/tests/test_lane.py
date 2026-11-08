@@ -349,6 +349,43 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["branch"], f"swrm/{run_id}")
         self.assertEqual(self.git("show", f"swrm/{run_id}:lane_result.txt"), "completed")
 
+    def test_codex_two_lanes_allow_writes_to_each_worktree_gitdir(self):
+        """#1832: same-named lane worktrees must grant each actual gitdir to Codex."""
+        worktrees = [self.root / "lanes" / lane / "wt" for lane in ("L1", "L2")]
+        for worktree in worktrees:
+            subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--detach", "-q",
+                            str(worktree), "HEAD"], check=True, capture_output=True, text=True)
+
+        class RecordingChild:
+            def __init__(self):
+                self.requests = []
+
+            def send(self, request):
+                self.requests.append(request)
+
+            def wait_response(self, request_id, timeout, event_file):
+                if request_id.startswith("thread-"):
+                    return {"thread": {"id": "fake-thread"}}
+                return {"turn": {"id": "fake-turn"}}
+
+        from swrm.tests._load import load
+        swrm = load()
+        child = RecordingChild()
+        for worktree in worktrees:
+            swrm.lane_begin_turn({"backend": "codex", "model": "fake-model", "effort": "xhigh"},
+                                 child, "test", str(worktree), None, {})
+        starts = {request["params"]["cwd"]: request["params"] for request in child.requests
+                  if request.get("method") == "thread/start"}
+        gitdirs = {str(wt): subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
+            check=True, capture_output=True, text=True).stdout.strip() for wt in worktrees}
+        self.assertEqual(len(set(gitdirs.values())), 2)
+        for worktree in worktrees:
+            params = starts[str(worktree)]
+            sandbox = params["sandbox"]
+            self.assertIsInstance(sandbox, dict)
+            self.assertIn(gitdirs[str(worktree)], sandbox["writableRoots"])
+
     def test_pi_session_leak_is_excluded_even_when_staged(self):
         self.set_config("pi")
         self.start_lane()
