@@ -194,6 +194,8 @@ class TickHarness:
             dispatched.append((lane, item["n"]))
             return "run-1", None
 
+        self.host_fail_calls = []
+        self.last_status = {}
         patched = ("D", "gh", "sh", "log", "host_ok", "host_fail", "host_good", "remote", "deps_met",
                    "dispatch", "replenish", "save_state", "status_snapshot")
         saved = {name: getattr(AUTODISPATCH, name) for name in patched}
@@ -204,20 +206,22 @@ class TickHarness:
                 AUTODISPATCH.gh = fake_gh
                 def fake_sh(args, *a, **k):
                     command = " ".join(args)
-                    if available_memory_mb is not None and ("free -m" in command or "/proc/meminfo" in command):
-                        return 0, f"MemAvailable: {available_memory_mb * 1024} kB\n", ""
+                    if "/proc/meminfo" in command:
+                        memory = 1024 if available_memory_mb is None else available_memory_mb
+                        return 0, f"{memory * 1024}\n", ""
                     return 0, "0" * 40 + "\n", ""
                 AUTODISPATCH.sh = fake_sh
                 AUTODISPATCH.log = lambda msg, brain=True: logs.append(msg)
                 AUTODISPATCH.host_ok = lambda h: True
-                AUTODISPATCH.host_fail = lambda h, why: None
+                AUTODISPATCH.host_fail = lambda h, why: self.host_fail_calls.append((h, why))
                 AUTODISPATCH.host_good = lambda h: None
                 AUTODISPATCH.remote = lambda lane, cfg, run="": {"lane": "idle"}
                 AUTODISPATCH.deps_met = lambda item: True
                 AUTODISPATCH.dispatch = fake_dispatch
                 AUTODISPATCH.replenish = lambda k, state: []
                 AUTODISPATCH.save_state = lambda state: None
-                AUTODISPATCH.status_snapshot = lambda *a, **k: {}
+                AUTODISPATCH.status_snapshot = lambda lanes, state, res, ready, blocked: self.last_status.update(
+                    {"_ready": ready, "_blocked": blocked}) or self.last_status
                 AUTODISPATCH.VERIFY_REJECT_LOGGED.clear()
                 # tick() writes lanes-status.json without closing it: the warning is pre-existing
                 with warnings.catch_warnings():
@@ -360,6 +364,55 @@ class TickMemoryPreflightTest(TickHarness, unittest.TestCase):
 
         self.assertEqual(dispatched, [], "a 135MB host must not start a codex session")
         self.assertTrue(any("gores2" in line and "135" in line and "400" in line for line in logs), logs)
+
+    def test_sufficient_memory_dispatches_and_does_not_fail_host(self):
+        card = issue(1713, "Codex session work", ("lane-ready",))
+        dispatched, _ = self.run_tick([card], lanes={"CX2": {"host": "gores2", "backend": "codex"}},
+                                      available_memory_mb=400)
+        self.assertEqual(dispatched, [("CX2", 1713)])
+        self.assertEqual(self.host_fail_calls, [])
+
+    def test_configured_threshold_applies_to_host_and_skip_is_not_failure(self):
+        card = issue(1714, "Codex session work", ("lane-ready",))
+        lane = {"CX2": {"host": "gores2", "backend": "codex", "min_available_memory_mb": 200}}
+        dispatched, logs = self.run_tick([card], lanes=lane, available_memory_mb=135)
+        self.assertEqual(dispatched, [])
+        self.assertTrue(any("135" in line and "200" in line for line in logs), logs)
+        self.assertEqual(self.host_fail_calls, [])
+
+    def test_pi_lane_ignores_codex_memory_threshold_at_135mb(self):
+        card = issue(1715, "Pi task", ("lane-ready", "backend:pi"))
+        dispatched, _ = self.run_tick([card], lanes={"PI1": {"host": "gores2", "backend": "pi"}},
+                                      available_memory_mb=135)
+        self.assertEqual(dispatched, [("PI1", 1715)])
+
+    def test_codex_fallback_is_gated_but_pi_lane_can_take_the_card(self):
+        card = issue(1716, "Pi task", ("lane-ready", "backend:pi"))
+        lanes = {"CX2": {"host": "gores2", "backend": "codex"},
+                 "PI1": {"host": "pi-host", "backend": "pi"}}
+        dispatched, logs = self.run_tick([card], lanes=lanes, available_memory_mb=135)
+        self.assertIn(("PI1", 1716), dispatched)
+        self.assertTrue(any("blocked-by-host-memory" in line and "gores2" in line for line in logs), logs)
+
+    def test_memory_only_block_is_counted_once_with_host_diagnostics(self):
+        card = issue(1717, "Codex session work", ("lane-ready",))
+        lanes = {"CX2": {"host": "gores2", "backend": "codex"},
+                 "CX10": {"host": "gores2", "backend": "codex"}}
+        dispatched, _ = self.run_tick([card], lanes=lanes, available_memory_mb=135)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.last_status["_blocked"], 1)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(len(self.last_status["_memory_blocks"][1717]), 2)
+
+    def test_busy_backend_lane_does_not_hide_memory_block(self):
+        card = issue(1718, "Codex session work", ("lane-ready",))
+        lanes = {"CX2": {"host": "gores2", "backend": "codex"},
+                 "CX10": {"host": "h10", "backend": "codex"}}
+        state = {"CX10": {"issue": 9, "run": "active", "host": "h10", "at": "2026-11-08 00:00:00"}}
+        dispatched, _ = self.run_tick([card], lanes=lanes, state=state, available_memory_mb=135)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.last_status["_blocked"], 1)
+        self.assertEqual([row["host"] for row in self.last_status["_memory_blocks"][1718]], ["gores2"])
 
 
 if __name__ == "__main__":
