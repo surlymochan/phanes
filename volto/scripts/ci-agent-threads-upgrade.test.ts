@@ -30,8 +30,18 @@ describe("agent thread upgrade host E2E", () => {
     expect(script).toMatch(/restart/i);
   });
 
+  test("uses the released upstream 47 schema without fork-only tables", () => {
+    expect(script).toContain("const UPSTREAM_VERSION = 47;");
+    expect(script).toContain('sourceTables.includes("projection_agent_threads")');
+    expect(script).toContain('!sourceTables.includes("projection_agent_tasks")');
+    expect(script).toContain('!sourceTables.includes("routine_backoff")');
+    expect(script).toContain("AGENT_THREAD_MIGRATION_SQL");
+  });
+
   test("CI runs the focused upgrade E2E and uploads its report", () => {
-    expect(workflow).toContain("bun test ./scripts/agent-threads-upgrade-e2e.ts ./scripts/ci-agent-threads-upgrade.test.ts");
+    expect(workflow).toContain(
+      "bun test ./scripts/agent-threads-upgrade-e2e.ts ./scripts/ci-agent-threads-upgrade.test.ts",
+    );
     expect(workflow).toContain("xvfb-run -a bun test ./scripts/agent-threads-upgrade-e2e.ts");
     expect(workflow).toContain("agent-threads-upgrade-e2e/report.json");
     expect(workflow).toContain("actions/upload-artifact");
@@ -45,6 +55,8 @@ describe("agent thread upgrade host E2E", () => {
       { cwd: resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 240_000 },
     );
     expect(output).toContain('"passed": true');
+    expect(output).toContain('"sourceVersion": 47');
+    expect(output).toContain('"tasks": 1');
     expect(output).toContain('"hostRestarted": true');
     expect(output).toContain('"retainedSessions": 1');
   }, 240_000);

@@ -1,10 +1,9 @@
-// Upgrades a copy of a real `openbot.db` from upstream migration 47 through the desktop host startup path
-// to migration 48 (tasks become side threads), then restarts the host. The source file is opened read-only
-// (the app must be closed) and copied; only the copy changes. On the copy, a forced failure inside 48 must
-// roll back to the task table before the real host starts. Checks: each task with a conversation is a side
-// thread with the same values, and a task with
-// none is reported; every other table retains its upstream rows; every mailbox message that names
-// a task finds its thread; the integrity and foreign-key checks pass.
+// Opens a copy of a real `openbot.db` from upstream migration 47 through the desktop host startup path,
+// then restarts the host. Upstream 47 already has projection_agent_threads and has dropped
+// projection_agent_tasks. The source file is opened read-only (the app must be closed) and copied; only
+// the copy changes. A forced failure at migration 48 must leave the upstream rows unchanged. Checks:
+// sessions and legacy task ids survive both host starts, every other upstream row is retained, migration
+// markers stay stable on restart, and the integrity and foreign-key checks pass.
 //   bun test ./scripts/agent-threads-upgrade-e2e.ts
 //   bun scripts/agent-threads-upgrade-e2e.ts --run-e2e --source=<openbot.db>
 // Writes .volto-build/agent-threads-upgrade-e2e/report.json with counts only, no message text or titles.
@@ -19,12 +18,18 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { _electron, type ElectronApplication } from "playwright-core";
+import { AGENT_THREAD_MIGRATION_SQL } from "../src/backend/agent-threads/agent-thread-schema";
+import { BROWSER_PROFILE_SCHEMA_SQL } from "../src/backend/browser-profiles/browser-profile-schema";
 import { migrateVoltoDatabase } from "../src/backend/volto-database-schema";
+import { WORKFLOW_SCHEMA_SQL } from "../src/backend/workflows/workflow-schema";
 import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 const OUT = resolve(import.meta.dirname, "../.volto-build/agent-threads-upgrade-e2e");
 const ROOT = resolve(import.meta.dirname, "..");
-const THREAD_VERSION = 48;
+const BASELINE_VERSION = 8;
+const UPSTREAM_VERSION = 47;
+const THREAD_VERSION = UPSTREAM_VERSION + 1;
+const LATEST_VERSION = THREAD_VERSION + 1;
 const E2E_TIMEOUT_MS = 240_000;
 let build: Promise<unknown> | undefined;
 
@@ -67,8 +72,8 @@ async function startHost(profile: string): Promise<ElectronApplication> {
     throw error;
   }
 }
-const TASK_COLUMNS =
-  "task_id, agent_id, thread_id, origin, title, outcome, error, created_at, updated_at, closed_at, last_event_sequence";
+const THREAD_COLUMNS =
+  "thread_id, agent_id, legacy_task_id, origin, title, title_source, outcome, error, created_at, updated_at, archived_at, last_event_sequence";
 
 interface SourceReport {
   source: string;
@@ -150,33 +155,35 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
   let connection: DatabaseSync | undefined;
   try {
     report.sourceVersion = version(db);
-    assert.ok(report.sourceVersion < THREAD_VERSION, `the source is at version ${report.sourceVersion}, not a release`);
-    if (report.sourceVersion < THREAD_VERSION - 1) migrateUpTo(db, THREAD_VERSION - 1);
-    assert.equal(version(db), THREAD_VERSION - 1);
+    assert.equal(report.sourceVersion, UPSTREAM_VERSION, "the source is not released upstream 47");
+    const sourceTables = tableNames(db);
+    assert.ok(sourceTables.includes("projection_agent_threads"), "upstream 47 has agent threads");
+    assert.ok(!sourceTables.includes("projection_agent_tasks"), "upstream 47 dropped the task table");
+    assert.ok(!sourceTables.includes("routine_backoff"), "upstream 47 has no fork backoff table");
 
     const before = tableHashes(db);
-    const retainedRows = new Map(
-      tableNames(db)
-        .filter((name) => name !== "projection_agent_tasks")
-        .map((name) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]),
+    const retainedRows = new Map(tableNames(db).map((name) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]));
+    const sessions = db.prepare(`SELECT ${THREAD_COLUMNS} FROM projection_agent_threads ORDER BY thread_id`).all();
+    assert.ok(sessions.length > 0, "the upstream database has no session data to preserve");
+    assert.ok(
+      sessions.some((session) => session.legacy_task_id !== null),
+      "the upstream database has no legacy task data to preserve",
     );
-    const tasks = db.prepare(`SELECT ${TASK_COLUMNS} FROM projection_agent_tasks ORDER BY task_id`).all();
-    assert.ok(tasks.length > 0, "the upstream database has no task data to preserve");
     const threadIds = new Set(
       db
         .prepare("SELECT thread_id FROM projection_threads")
         .all()
         .map((row) => String(row.thread_id)),
     );
-    const kept = tasks.filter((task) => threadIds.has(String(task.thread_id)));
-    report.tasks = tasks.length;
-    report.orphanTasks = tasks.length - kept.length;
+    const kept = sessions.filter((session) => threadIds.has(String(session.thread_id)));
+    report.tasks = kept.filter((session) => session.legacy_task_id !== null).length;
+    report.orphanTasks = sessions.length - kept.length;
     report.tables = before.size;
     report.rows = [...before.values()].reduce((sum, table) => sum + table.rows, 0);
 
-    // A failure inside 48 leaves the database as it was before 48.
-    migrateUpTo(db, THREAD_VERSION - 1);
-    assert.equal(version(db), THREAD_VERSION - 1);
+    // A failure before recording 48 leaves the upstream database unchanged.
+    migrateUpTo(db, UPSTREAM_VERSION);
+    assert.equal(version(db), UPSTREAM_VERSION);
     assert.deepEqual(tableHashes(db), before, "a failed migration 48 changed a table");
     report.rolledBack = true;
 
@@ -189,11 +196,11 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     report.hostPid = application.process().pid;
     assert.notEqual(report.hostPid, process.pid, "the host must run in its own application process");
     const latestVersion = version(connection);
-    assert.ok(latestVersion >= THREAD_VERSION, `host stopped at migration ${latestVersion}`);
+    assert.equal(latestVersion, LATEST_VERSION, `host stopped at migration ${latestVersion}`);
     assert.equal(
       connection.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count,
       kept.length,
-      "the host did not retain every task as a session",
+      "the host did not retain every upstream session",
     );
     report.retainedSessions = kept.length;
 
@@ -214,15 +221,15 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     const checkHostTasks = async () => {
       assert.ok(application);
       const page = await application.firstWindow();
-      for (const agentId of new Set(kept.map((task) => String(task.agent_id)))) {
+      for (const agentId of new Set(kept.map((session) => String(session.agent_id)))) {
         const snapshot = await page.evaluate((id) => window.volto.agent.listTasks(id), agentId);
         assert.deepEqual(
           snapshot.tasks.map((task) => task.id).sort(),
           kept
-            .filter((task) => task.agent_id === agentId)
-            .map((task) => String(task.task_id))
+            .filter((session) => session.agent_id === agentId)
+            .map((session) => String(session.legacy_task_id ?? session.thread_id))
             .sort(),
-          "the real host API did not retain migrated task sessions",
+          "the real host API did not retain upstream session and task ids",
         );
       }
     };
@@ -230,26 +237,45 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
 
     const threads = new Map(
       connection
-        .prepare(
-          `SELECT thread_id, agent_id, legacy_task_id, origin, title, title_source, outcome, error, created_at,
-             updated_at, archived_at, last_event_sequence FROM projection_agent_threads`,
-        )
+        .prepare(`SELECT ${THREAD_COLUMNS} FROM projection_agent_threads`)
         .all()
-        .map((row) => [String(row.legacy_task_id), row]),
+        .map((row) => [String(row.thread_id), row]),
     );
-    assert.equal(threads.size, kept.length, "a task with a conversation is not a side thread");
-    for (const task of kept) {
-      const thread = threads.get(String(task.task_id));
-      assert.ok(thread, "a task has no side thread");
+    assert.equal(threads.size, kept.length, "the host changed the upstream side-thread count");
+    for (const session of kept) {
+      const thread = threads.get(String(session.thread_id));
+      assert.ok(thread, "the host removed an upstream side thread");
       assert.deepEqual(
-        [thread.thread_id, thread.agent_id, thread.origin, thread.title, thread.outcome, thread.error],
-        [task.thread_id, task.agent_id, task.origin, task.title, task.outcome, task.error],
+        [
+          thread.thread_id,
+          thread.agent_id,
+          thread.legacy_task_id,
+          thread.origin,
+          thread.title,
+          thread.title_source,
+          thread.outcome,
+          thread.error,
+          thread.created_at,
+          thread.updated_at,
+          thread.archived_at,
+          thread.last_event_sequence,
+        ],
+        [
+          session.thread_id,
+          session.agent_id,
+          session.legacy_task_id,
+          session.origin,
+          session.title,
+          session.title_source,
+          session.outcome,
+          session.error,
+          session.created_at,
+          session.updated_at,
+          session.archived_at,
+          session.last_event_sequence,
+        ],
+        "the host changed an upstream side thread",
       );
-      assert.deepEqual(
-        [thread.created_at, thread.updated_at, thread.archived_at, thread.last_event_sequence],
-        [task.created_at, task.updated_at, task.closed_at, task.last_event_sequence],
-      );
-      assert.equal(thread.title_source, task.origin === "agent" ? "agent" : "auto");
     }
     report.archivedThreads = [...threads.values()].filter((thread) => thread.archived_at !== null).length;
 
@@ -260,9 +286,14 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
       .all()
       .map((row) => String(row.task_id));
     report.taskMessages = taskIds.length;
-    // A message can name a task that was not copied: its task had no conversation, or no row at all. The
-    // app's boot step interrupts its queued delivery (`AgentTasks.endWorkOfGoneTasks`); the row stays.
-    report.taskMessagesWithoutThread = taskIds.filter((id) => !threads.has(id)).length;
+    // The app's boot step interrupts queued delivery to a missing task (`AgentTasks.endWorkOfGoneTasks`).
+    const sessionIds = new Set(
+      kept.flatMap((session) => [
+        String(session.thread_id),
+        ...(session.legacy_task_id ? [String(session.legacy_task_id)] : []),
+      ]),
+    );
+    report.taskMessagesWithoutThread = taskIds.filter((id) => !sessionIds.has(id)).length;
 
     const integrity = connection.prepare("PRAGMA integrity_check").all();
     assert.deepEqual(
@@ -272,6 +303,11 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     assert.equal(connection.prepare("PRAGMA foreign_key_check").all().length, 0, "a foreign key has no row");
     const migratedData = tableHashes(connection);
     const migrationMarkers = connection.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+    assert.deepEqual(
+      migrationMarkers.map((marker) => marker.version),
+      Array.from({ length: LATEST_VERSION - BASELINE_VERSION + 1 }, (_value, index) => index + BASELINE_VERSION),
+      "the host did not retain the complete migration history",
+    );
     connection.close();
     connection = undefined;
     await application.close();
@@ -287,7 +323,7 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     assert.equal(
       connection.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count,
       kept.length,
-      "the restarted host did not retain migrated task sessions",
+      "the restarted host did not retain upstream sessions",
     );
     assert.deepEqual(connection.prepare("PRAGMA foreign_key_check").all(), []);
     assert.deepEqual(
@@ -322,10 +358,7 @@ async function createUpstreamFixture(path: string): Promise<void> {
   const db = new DatabaseSync(path);
   try {
     db.exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
-    db.exec(`CREATE TEMP TRIGGER stop_at_version BEFORE INSERT ON schema_migrations WHEN new.version > 47
-      BEGIN SELECT RAISE(ABORT, 'fixture stop'); END;`);
-    assert.throws(() => migrateVoltoDatabase(db), /migration to version 48 failed/);
-    db.exec("DROP TRIGGER stop_at_version");
+    migrateUpTo(db, 44);
     db.prepare(`INSERT INTO projection_threads
       (thread_id, agent_id, title, active_turn_id, created_at, updated_at, last_event_sequence)
       VALUES ('upstream-session-1', 'upstream-agent', 'Retained upstream task', NULL, ?, ?, 12)`).run(
@@ -336,10 +369,34 @@ async function createUpstreamFixture(path: string): Promise<void> {
       (task_id, agent_id, thread_id, origin, title, outcome, error, created_at, updated_at, closed_at, last_event_sequence)
       VALUES ('upstream-task-1', 'upstream-agent', 'upstream-session-1', 'user', 'Retained upstream task',
         'completed', NULL, '2026-10-01T08:00:00.000Z', '2026-10-02T08:00:00.000Z', NULL, 12)`).run();
+    db.exec(BROWSER_PROFILE_SCHEMA_SQL + WORKFLOW_SCHEMA_SQL + AGENT_THREAD_MIGRATION_SQL);
+    db.exec("INSERT INTO schema_migrations VALUES (45, 'upstream'), (46, 'upstream'), (47, 'upstream')");
   } finally {
     db.close();
   }
 }
+
+test("the upstream 47 fixture matches the released schema", async () => {
+  await mkdir(OUT, { recursive: true });
+  const directory = await mkdtemp(join(OUT, "fixture-"));
+  const path = join(directory, "upstream-47.db");
+  try {
+    await createUpstreamFixture(path);
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const tables = tableNames(db);
+      assert.equal(version(db), 47);
+      assert.ok(tables.includes("projection_agent_threads"), "released upstream 47 has agent threads");
+      assert.ok(!tables.includes("projection_agent_tasks"), "released upstream 47 dropped the task table");
+      assert.ok(!tables.includes("routine_backoff"), "released upstream 47 has no fork backoff table");
+      assert.ok(Number(db.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count ?? 0) > 0);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 async function runE2E(): Promise<void> {
   await mkdir(OUT, { recursive: true });
