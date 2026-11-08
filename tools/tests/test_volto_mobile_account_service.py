@@ -148,6 +148,14 @@ def account_service_source() -> str:
 class MobileAccountServiceTest(unittest.TestCase):
     """The account service a mobile build talks to."""
 
+    def test_self_hosted_profile_uses_a_builtin_eas_environment(self) -> None:
+        """A self-hosted build does not need a paid custom EAS environment."""
+        config = json.loads((VOLTO_DIR / "apps/mobile/eas.json").read_text(encoding="utf-8"))
+        profile = config["build"]["self-hosted"]
+        self.assertEqual(profile["environment"], "production")
+        self.assertEqual(profile["channel"], "self-hosted")
+        self.assertEqual(profile["env"]["EXPO_PUBLIC_APP_ENV"], "production")
+
     def test_release_build_uses_the_configured_account_service(self) -> None:
         """A self-compiled or TestFlight build asks the account service it names."""
         requests = account_service_requests(

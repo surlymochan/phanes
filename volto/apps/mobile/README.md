@@ -547,11 +547,14 @@ The value is part of the app bundle. Do not put a secret in it.
 1. Use your own Expo project for the build. Set `owner` and `extra.eas.projectId` in `app.json` to
    your project, and set `updates.url` to your project, so the build does not receive updates from
    the hosted project.
-2. In the Expo dashboard, open your project, then **Environment variables**. Add an environment named
-   `self-hosted`, and add `EXPO_PUBLIC_VOLTO_API_URL` to it. Use `Plain text` or `Sensitive`
-   visibility. A `Secret` variable is not available to a local build.
-3. Build with the `self-hosted` profile. It reads the account service address from the `self-hosted`
-   EAS environment, and it keeps `EXPO_PUBLIC_APP_ENV=production`.
+2. In the Expo dashboard, open your project, then **Environment variables**. Select the built-in
+   `production` environment and add `EXPO_PUBLIC_VOLTO_API_URL` with your account service origin.
+   Use `Plain text` or `Sensitive` visibility. A `Secret` variable is not available to a local build.
+   This configuration needs no custom environment or paid Expo plan. See
+   [Expo environment variables](https://docs.expo.dev/eas/environment-variables/manage/).
+3. Build with the `self-hosted` profile. It reads the account service address from your project's
+   `production` EAS environment, uses the `self-hosted` update channel, and keeps
+   `EXPO_PUBLIC_APP_ENV=production`.
 
    ```bash
    cd apps/mobile
@@ -564,9 +567,12 @@ The value is part of the app bundle. Do not put a secret in it.
    account. The phone then uses your account service for the session, the server directory, and the
    profile.
 
-A build that names no account service keeps the hosted account service. The `production` profile
-keeps the hosted account service, so use the `self-hosted` profile for a self-hosted service. The
-desktop app names its account service with `VOLTO_AUTH_API_URL`. See
+A build that names no account service keeps the hosted account service. Both profiles read your
+project's `production` EAS environment. Use your own project and the `self-hosted` profile for this
+procedure. For a local build, also export `EXPO_PUBLIC_VOLTO_API_URL` in the shell before the build
+command. For OTA updates, use the same project, the `self-hosted` channel, and
+`--environment production` to keep the same account service address. The desktop app names its
+account service with `VOLTO_AUTH_API_URL`. See
 [self-hosting](../../docs/self-hosting.md).
 
 ## OpenPanel product analytics
