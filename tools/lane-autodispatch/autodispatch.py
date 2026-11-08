@@ -1194,6 +1194,15 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def requeue_executor_start_failure(lane, n, run):
+    """Requeue an executor startup failure only once there is no work left to harvest."""
+    rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                     "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+    if rc:
+        return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+    log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
+    return {"done": True, "status": "lane-ready", "error": None, "missing": []}
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -1201,17 +1210,15 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
-    # Finalization can preserve edits made before an early crash as a commit.
-    # Startup failures still require cooldown and requeue, regardless of that commit.
-    if info.get("error_class") == "executor_start_failed":
+    start_failed = info.get("error_class") == "executor_start_failed"
+    has_commit = info.get("branch") and info["branch"] != "None" and info.get("commit")
+    if start_failed:
         pause_executor_start_lane(lane)
-        rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
-                         "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-        if rc:
-            return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
-        log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
-        return {"done": True, "status": "lane-ready", "error": None, "missing": []}
-    if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+        # Finalization may preserve work made before an early crash. Harvest that
+        # commit normally before freeing the lane; only empty runs can be requeued.
+        if not has_commit:
+            return requeue_executor_start_failure(lane, n, run)
+    if has_commit:
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -1225,6 +1232,8 @@ def finish(lane, cfg, st, info, state):
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
         if empty:
+            if start_failed:
+                return requeue_executor_start_failure(lane, n, run)
             label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)

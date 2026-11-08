@@ -1004,6 +1004,67 @@ class AgyStartupRegressionTests(unittest.TestCase):
         result = self.run_turn("second startup crash", early=True)
         self.assertEqual(result[2], "executor_start_failed")
 
+    def test_steered_start_retry_preserves_correction_and_conversation(self):
+        xs, mock = self.xs, self.mock
+        for late_original in (False, True):
+            for eof in (None, False):
+                with self.subTest(late_original=late_original, eof=eof):
+                    clock = [100.0]
+                    child = mock.Mock(pid=123)
+                    child.alive.return_value = False
+                    child.proc.poll.return_value = 2
+                    child.stderr_text.return_value = "startup crash"
+                    turn = {"conversation_id": "conv-1"}
+                    events = iter(([{"type": "init"}] if late_original else []) +
+                                  [None, eof] + ([False] if eof is False else []) +
+                                  [{"type": "result", "status": "SUCCESS",
+                                    "response": '{"status":"done"}'}])
+
+                    def next_event(timeout):
+                        if late_original and child.start.call_count == 1:
+                            clock[0] = 106.0
+                        return next(events)
+
+                    def control(*args):
+                        if child.start.call_count == 1:
+                            turn["steer_queue"] = ["important correction"]
+
+                    child.next_event.side_effect = next_event
+                    with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
+                         mock.patch.object(xs, "set_status"), \
+                         mock.patch.object(xs, "load_policy", return_value={}), \
+                         mock.patch.object(xs, "lane_control_messages", side_effect=control), \
+                         mock.patch.object(xs, "enforced_risk", return_value=None):
+                        result = xs.lane_run_turn(
+                            self.lane, child, {"started": 100, "budget_minutes": 1},
+                            "original task", {"path": self.tmp.name}, self.tmp.name, None, turn, [])
+                    self.assertEqual(child.start.call_count, 3)
+                    steered, retried = child.start.call_args_list[1:]
+                    self.assertIn("important correction", steered.args[0])
+                    self.assertEqual(retried, steered, "retry must resend the exact steered prompt and context")
+                    self.assertEqual(retried.kwargs["conversation"], "conv-1")
+                    self.assertEqual(result[2:4], (None, 0))
+
+    def test_continuation_start_retry_preserves_prompt_and_conversation(self):
+        xs, mock = self.xs, self.mock
+        child = mock.Mock(pid=123)
+        child.proc.poll.return_value = 2
+        child.stderr_text.return_value = "startup crash"
+        child.next_event.side_effect = [None, {"type": "result", "status": "SUCCESS",
+                                              "response": '{"status":"done"}'}]
+        with mock.patch.object(xs, "NOW", return_value=100), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages"), \
+             mock.patch.object(xs, "enforced_risk", return_value=None):
+            result = xs.lane_run_turn(
+                self.lane, child, {"started": 100, "budget_minutes": 1}, xs.RATE_LIMIT_CONTINUE_PROMPT,
+                {"path": self.tmp.name}, self.tmp.name, None,
+                {"prompt": "original task", "conversation_id": "conv-1"}, [], continuation=True)
+        self.assertEqual(child.start.call_args_list, [mock.call(
+            xs.RATE_LIMIT_CONTINUE_PROMPT, model="test", effort=None, conversation="conv-1")] * 2)
+        self.assertEqual(result[2:4], (None, 0))
+
     def assert_interrupted_startup_exit(self, eof, interruption, after_restart=False):
         xs, mock = self.xs, self.mock
         clock = [100.0]

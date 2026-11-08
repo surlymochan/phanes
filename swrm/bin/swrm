@@ -8100,6 +8100,7 @@ def lane_approval_response(child, msg, event_file, host_warning=False):
 
 
 def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, attempt=1, continuation=False):
+    agy_prompt = prompt
     agy_start_grace_s = AGY_START_GRACE_S
     agy_started_at = NOW()
     agy_saw_executor_event = False
@@ -8147,16 +8148,20 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
 
     def agy_resume_steer():
         """Restart the agy turn with the queued steer text; True when a new turn was started."""
+        nonlocal agy_prompt, agy_started_at, agy_saw_executor_event
         if not turn.get("steer_queue") or spec.get("abort_requested") or budget_hit:
             return False
         correction = turn["steer_queue"].pop(0)
         # The follow-up prompt replaces the cancelled one, so it has to restate the report
         # requirement; otherwise the agent finishes the work without printing the JSON report.
         # The task text is kept as well: without a conversation id the new run starts from scratch.
-        child.start(f"{turn.get('prompt') or ''}\n\n"
-                    "Correction to the interrupted task: apply this update while continuing the task.\n\n"
-                    + correction + "\n\n" + REPORT_INSTRUCTION,
-                    model=lane["model"], effort=lane.get("effort"), conversation=turn.get("conversation_id"))
+        agy_prompt = (f"{turn.get('prompt') or ''}\n\n"
+                      "Correction to the interrupted task: apply this update while continuing the task.\n\n"
+                      + correction + "\n\n" + REPORT_INSTRUCTION)
+        child.start(agy_prompt, model=lane["model"], effort=lane.get("effort"),
+                    conversation=turn.get("conversation_id"))
+        agy_started_at = NOW()
+        agy_saw_executor_event = False
         set_status(rdir, executor_pid=child.pid)
         turn["id"] = "agy-" + uuid.uuid4().hex
         return True
@@ -8197,7 +8202,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         agy_start_restarts += 1
         set_status(rdir, executor_restarts=agy_start_restarts, stderr_tail=stderr_tail)
         # Agy has no persistent RPC session; restart the exact turn prompt with its conversation id.
-        child.start(prompt, model=lane["model"], effort=lane.get("effort"),
+        child.start(agy_prompt, model=lane["model"], effort=lane.get("effort"),
                     conversation=turn.get("conversation_id"))
         agy_started_at = NOW()
         agy_saw_executor_event = False
@@ -8583,7 +8588,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
-               scope=spec.get("scope", "repo"))
+               scope=spec.get("scope", "repo"), error_class=error_class)
     if not evidence_error:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
