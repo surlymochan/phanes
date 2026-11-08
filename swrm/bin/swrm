@@ -3826,7 +3826,7 @@ def provider_concurrency_limits(policy, keys):
 
 
 # Tokens stay in this supervisor process. Lost supervisors leave reservations
-# until their owner provides authenticated reboot evidence and the lease expires.
+# until the coordinator independently verifies an owner reboot and the lease expires.
 _FLEET_RESERVATIONS = {}
 _FLEET_RENEWALS = {}
 
@@ -3919,14 +3919,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
     token = uuid.uuid4().hex
-    # A kernel boot ID is public evidence bound to the authenticated host by
-    # the guard transport. Unsupported platforms retain crash reservations.
-    try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
-            boot_id = stream.read().strip()
-    except OSError:
-        boot_id = None
-    payload = {"op": "acquire", "boot_id": boot_id, "token": token, "run_id": os.path.basename(rdir),
+    # The coordinator obtains kernel boot evidence over its own trusted channel.
+    payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
     while True:
         with open(lock_path, "a") as lock:
