@@ -10,8 +10,8 @@ Two rules drive the numbers:
 
 * Queue time is capacity wait, not work. ``queued_seconds`` is reported on its
   own and never enters ``budget_seconds``: a run's budget is derived from its
-  execution attempts only, so queue time is never charged and never deducted
-  twice.
+  queue-adjusted ``started`` timestamp, including rate-limit backoff between
+  execution attempts. Queue time is never charged and never deducted twice.
 * Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
   one run each on red, green, holdout and Review per change; every further run
   -- the Spec and spec-check runs, plus retries -- is extra quota and extra
@@ -208,7 +208,8 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     if status is None:
         errors.append({"run_id": name, "field": "status.json", "error": "invalid"})
         return {"run_id": name, "stage": None, "errors": errors, "queued_seconds": 0.0,
-                "execution_seconds": None, "budget_seconds": 0.0, "usage": {}}
+                "execution_seconds": None, "budget_seconds": 0.0,
+                "budget_elapsed_seconds": 0.0, "usage": {}}
     result = _load_json(run_dir / "result.json") or {}
 
     stage, stage_error = _stage_of(status, result)
@@ -252,8 +253,26 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
         errors.append({"run_id": name, "field": "queued_seconds", "error": "negative"})
         queued = 0.0
 
-    # The budget covers execution only; queue seconds are not
-    # charged to it, and a run killed at its deadline cannot exceed it.
+    # swrm shifts started forward for each capacity wait, but rate-limit
+    # backoff still consumes deadline budget. Do not subtract queued_seconds
+    # again, or use result.seconds (which omits all time between attempts).
+    elapsed = window if window is not None and window >= 0 else execution
+    attempts = result.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts else None
+    attempt_started = _parse_timestamp(status.get("attempt_started"))
+    if isinstance(last, dict) and attempt_started is not None and started is not None:
+        last_seconds = _number(last.get("seconds"))
+        # An expired/stopped run may have spent its remaining time in backoff
+        # after the last executor returned. Its finish window includes that wait.
+        interrupted = (result.get("error_class") in ("budget_exceeded", "stopped")
+                       or last.get("error_class") in ("budget_exceeded", "stopped"))
+        if last_seconds is not None and last_seconds >= 0 and not interrupted:
+            attempt_end = (attempt_started - started).total_seconds() + last_seconds
+            if attempt_end >= 0 and (window is None or attempt_end <= window):
+                elapsed = attempt_end
+    # Without an attempt endpoint, finished is the best available wall window;
+    # without a wall window, retain the recorded execution duration fallback.
+    # A run killed at its deadline cannot consume more than its allowance.
     budget_minutes = _number(status.get("budget_minutes"))
     allowance = None
     if budget_minutes is not None and budget_minutes >= 0:
@@ -261,9 +280,9 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     if execution is None:
         budget = 0.0
     elif allowance is None:
-        budget = execution
+        budget = elapsed
     else:
-        budget = min(execution, allowance)
+        budget = min(elapsed, allowance)
 
     change_id = status.get("change_id") or result.get("change_id")
     if change_id is None:
@@ -271,7 +290,8 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     return {"run_id": name, "stage": stage, "errors": errors,
             "change_id": str(change_id) if change_id is not None else None,
             "queued_seconds": float(queued), "execution_seconds": execution,
-            "budget_seconds": budget, "usage": _usage_of(status, result)}
+            "budget_seconds": budget, "budget_elapsed_seconds": elapsed or 0.0,
+            "usage": _usage_of(status, result)}
 
 
 def _empty_bucket() -> dict:
@@ -286,6 +306,7 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
     root = pathlib.Path(runs_dir)
     buckets = {stage: _empty_bucket() for stage in selected}
     queue_samples: list[float] = []
+    budget_checks: list[bool] = []
     errors: list[dict] = []
     baseline_runs: set[tuple[Optional[str], str]] = set()
 
@@ -299,6 +320,7 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
         stage = record["stage"]
         if stage is None or stage not in buckets:
             continue
+        budget_checks.append(record["budget_seconds"] <= record["budget_elapsed_seconds"] + 1e-9)
         if stage in BASELINE_STAGES:
             baseline_runs.add((record["change_id"], stage))
         bucket = buckets[stage]
@@ -344,9 +366,7 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
         "baseline_run_count": baseline_run_count,
         "extra_run_count": total_run_count - baseline_run_count,
         "queue_percentiles_seconds": {name: _seconds(value) for name, value in percentiles.items()},
-        "budget_excludes_queue_seconds": all(
-            stage["budget_seconds"] <= stage["execution_seconds"] + 1e-9
-            for stage in stages_report.values()),
+        "budget_excludes_queue_seconds": all(budget_checks),
         "data_quality_errors": errors,
     }
 

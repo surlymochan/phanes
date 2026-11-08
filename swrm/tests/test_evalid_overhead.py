@@ -141,7 +141,8 @@ class EvalidOverheadTests(unittest.TestCase):
 
     def test_result_seconds_excludes_verification_and_finalization(self):
         self.write_run("finished", stage="red", queued_at=100, started=110,
-                       finished=210, queued_seconds=10, budget_minutes=1)
+                       attempt_started=120, finished=210, queued_seconds=10,
+                       budget_minutes=1)
         (self.runs / "finished" / "result.json").write_text(json.dumps({
             "seconds": 30, "attempts": [{"seconds": 10}, {"seconds": 20}],
         }), encoding="utf-8")
@@ -150,6 +151,70 @@ class EvalidOverheadTests(unittest.TestCase):
 
         self.assertEqual(report["stages"]["red"]["execution_seconds"], 30)
         self.assertEqual(report["stages"]["red"]["budget_seconds"], 30)
+        self.assertEqual(report["data_quality_errors"], [])
+
+    def test_rate_limit_wait_consumes_budget_without_charging_capacity_queue(self):
+        cases = (("red", None, 90), ("green", 2, 90), ("Review", 1, 60))
+        for index, (stage, allowance, expected) in enumerate(cases):
+            with self.subTest(budget_minutes=allowance):
+                # First admission at 120; after a 30s attempt and 30s backoff,
+                # capacity wait adds 40s to both started and deadline. The last
+                # attempt then runs from 220 to 250: 60s execution, 90s budget.
+                run_id = f"retry-{index}"
+                self.write_run(run_id, stage=stage, queued_at=100,
+                               execution_started=120, started=160, finished=250,
+                               queued_seconds=60, budget_minutes=allowance)
+                (self.runs / run_id / "result.json").write_text(json.dumps({
+                    "seconds": 60,
+                    "attempts": [
+                        {"seconds": 30, "error_class": "rate_limit"},
+                        {"seconds": 30, "error_class": None},
+                    ],
+                }), encoding="utf-8")
+
+                report = overhead.build_report(self.runs)
+
+                self.assertEqual(report["stages"][stage]["execution_seconds"], 60)
+                self.assertEqual(report["stages"][stage]["queued_seconds"], 60)
+                self.assertEqual(report["stages"][stage]["budget_seconds"], expected)
+                self.assertEqual(report["totals"]["budget_seconds"],
+                                 sum((90, 90, 60)[:index + 1]))
+                self.assertTrue(report["budget_excludes_queue_seconds"])
+                self.assertEqual(report["data_quality_errors"], [])
+                self.assertEqual(overhead.render_report(report),
+                                 overhead.render_report(overhead.build_report(self.runs)))
+
+    def test_retry_budget_excludes_finalization_after_the_last_attempt(self):
+        self.write_run("retry", stage="green", queued_at=100, started=120,
+                       attempt_started=180, finished=300, queued_seconds=20,
+                       budget_minutes=2)
+        (self.runs / "retry" / "result.json").write_text(json.dumps({
+            "seconds": 60,
+            "attempts": [{"seconds": 30, "error_class": "rate_limit"},
+                         {"seconds": 30, "error_class": None}],
+        }), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["stages"]["green"]["execution_seconds"], 60)
+        self.assertEqual(report["stages"]["green"]["budget_seconds"], 90)
+        self.assertTrue(report["budget_excludes_queue_seconds"])
+        self.assertEqual(report["data_quality_errors"], [])
+
+    def test_budget_exhausted_during_rate_limit_wait_counts_the_wait(self):
+        self.write_run("expired", stage="Review", queued_at=100, started=120,
+                       attempt_started=120, finished=180, queued_seconds=20,
+                       budget_minutes=1)
+        (self.runs / "expired" / "result.json").write_text(json.dumps({
+            "error_class": "budget_exceeded", "seconds": 30,
+            "attempts": [{"seconds": 30, "error_class": "budget_exceeded"}],
+        }), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["stages"]["Review"]["execution_seconds"], 30)
+        self.assertEqual(report["stages"]["Review"]["budget_seconds"], 60)
+        self.assertTrue(report["budget_excludes_queue_seconds"])
         self.assertEqual(report["data_quality_errors"], [])
 
     def test_result_seconds_does_not_hide_timestamp_or_duration_errors(self):
