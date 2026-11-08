@@ -3654,6 +3654,10 @@ def concurrency(st, policy):
 def route(prof, st, policy, exclude=()):
     r = policy["routing"]
     default_order = list(r["default_order"])
+    # Unknown and omitted task types use the ordinary implementation route.
+    # Keep the caller's profile untouched while giving the planner a stable
+    # type for the special review and low-difficulty routing checks below.
+    route_prof = {**prof, "type": prof.get("type") or "impl"}
 
     def prioritize(preferred):
         return [backend for backend in preferred if backend in default_order] + [
@@ -3699,18 +3703,18 @@ def route(prof, st, policy, exclude=()):
         return None, order, skipped
 
     notes = []
-    plan_prof = prof
+    plan_prof = route_prof
     proxy = None
-    if prof["type"] in r["review_types"] and not prof.get("backend") and not prof.get("model"):
+    if route_prof["type"] in r["review_types"] and not route_prof.get("backend") and not route_prof.get("model"):
         # Resolve who would implement this work, so the review can be checked
         # against the implementer's family instead of a per-tier proxy. The
         # planners see the family/model as private profile keys; the caller's
         # profile is never mutated.
-        proxy_d, _, _ = attempt({**prof, "type": "impl"}, [])
+        proxy_d, _, _ = attempt({**route_prof, "type": "impl"}, [])
         if proxy_d:
             proxy = {"backend": proxy_d["backend"], "model": proxy_d.get("model"),
                      "family": compare_backend_family(proxy_d["backend"], proxy_d.get("model"), policy, st)}
-            plan_prof = {**prof, "_impl_family": proxy["family"], "_impl_model": proxy["model"]}
+            plan_prof = {**route_prof, "_impl_family": proxy["family"], "_impl_model": proxy["model"]}
     d, order, skipped = attempt(plan_prof, notes)
     if d and proxy:
         fam = compare_backend_family(d["backend"], d.get("model"), policy, st)
