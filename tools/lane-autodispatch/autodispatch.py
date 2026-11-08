@@ -868,6 +868,57 @@ def acceptance_evidence(verify_rc, report, summary, tests):
     if reported and reported.lower() not in ("none", "null"): return f"lane reported tests: `{reported[:200]}`"
     return ""
 
+def review_evidence_errors(evidence):
+    """Validate the versioned raw package, never deriving facts from lane opinions."""
+    if not isinstance(evidence, dict): return ["review evidence package missing or not an object"]
+    if type(evidence.get("version")) is not int or evidence["version"] != 1:
+        return ["unsupported review evidence version"]
+    errors = []
+    for section, fields in (("ci", ("conclusion", "workflow", "url")), ("tests", ("summary",))):
+        value = evidence.get(section)
+        if not isinstance(value, dict):
+            errors.append(f"review evidence missing {section}")
+            continue
+        for field in fields:
+            if not isinstance(value.get(field), str) or not value[field].strip():
+                errors.append(f"review evidence missing {section}.{field}")
+    diff = evidence.get("diff")
+    if not isinstance(diff, dict): errors.append("review evidence missing diff")
+    else:
+        for field in ("files", "insertions", "deletions"):
+            if type(diff.get(field)) is not int or diff[field] < 0:
+                errors.append(f"review evidence invalid diff.{field}")
+    acceptance = evidence.get("acceptance")
+    if not isinstance(acceptance, list) or not acceptance:
+        errors.append("review evidence missing acceptance checklist")
+    else:
+        for item in acceptance:
+            if (not isinstance(item, dict) or not isinstance(item.get("text"), str)
+                    or not item["text"].strip() or type(item.get("ok")) is not bool):
+                errors.append("review evidence invalid acceptance item")
+    return errors
+
+
+def review_evidence_body(evidence, summary):
+    """Keep raw fields in fixed sections and the opinion in a separate quoted block.
+
+    JSON escaping preserves multiline raw values without letting them create new
+    Markdown headings. Lane text is never used as acceptance or CI evidence.
+    """
+    def raw(value):
+        return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("`", "\\u0060")
+    parts = ["## CI\n" + raw(evidence["ci"]),
+             "## 测试日志摘要\n" + raw(evidence["tests"]),
+             "## diff 统计\n" + raw(evidence["diff"]),
+             "验收：原始核查清单\n" + "\n".join(
+                 f"- [{'x' if item['ok'] else ' '}] {raw(item['text'])}"
+                 for item in evidence["acceptance"])]
+    if summary:
+        parts.append("## Lane 意见（参考、不算判定）\n" + "\n".join(
+            "> " + line for line in str(summary).splitlines()))
+    return parts
+
+
 def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests, verify_rc):
     """Build the lane PR title and body from the lane's own artifacts.
 
@@ -880,8 +931,13 @@ def lane_pr_content(issue, lane, cfg, st, info, subject, message, summary, tests
     parts = []
     # the closing reference comes from the lane's own text only: the title carries the issue
     # number by rule, and a number in the title is not a closing instruction (Refs #1704)
-    closing = closing_reference(issue, f"{report}\n{summary or ''}")
+    closing = closing_reference(issue, report if st.get("class") == "verify" else f"{report}\n{summary or ''}")
     if closing: parts.append(closing)
+    if st.get("class") == "verify":
+        package = info.get("evidence")
+        if not review_evidence_errors(package):
+            parts.extend(review_evidence_body(package, summary))
+        return title, "\n\n".join(parts)
     evidence = acceptance_evidence(verify_rc, report, summary, tests)
     if evidence: parts.append(f"验收：{evidence}")
     verify_note = f", host verify rc `{verify_rc}`" if verify_rc is not None else ""
@@ -1010,6 +1066,7 @@ if R:
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
       "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None,
+      "evidence":r.get("evidence"),
       "ended_at":ended}
   else:
     out["run"]="running"
@@ -1728,6 +1785,10 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    if st.get("class") == "verify":
+        missing = review_evidence_errors(info.get("evidence"))
+        if missing:
+            return block_pr_validation(lane, cfg, st, info, state, "", "", missing)
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
@@ -1757,6 +1818,11 @@ def finish(lane, cfg, st, info, state):
         _, msg, _ = sh(["git", "-C", LOCAL, "log", "-1", "--format=%B", head])
         title, body = lane_pr_content(n, lane, cfg, st, info, subj, msg, info.get("summary"), info.get("tests"), info.get("verify_rc"))
         missing = validate_lane_pr(n, title, body)
+        # A quoted opinion (or a raw log) may contain closing keywords, but it
+        # cannot supply the commit's missing issue linkage.
+        if st.get("class") == "verify" and not closing_reference(n, msg):
+            problem = f"PR 正文缺少 Closes/Fixes/Resolves #{n}"
+            if problem not in missing: missing.append(problem)
         mode = pr_validation_mode()
         if missing and mode == PR_VALIDATION_STRICT:
             return block_pr_validation(lane, cfg, st, info, state, title, body, missing)
