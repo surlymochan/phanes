@@ -22,6 +22,7 @@ Seam:
 from __future__ import annotations
 
 import copy
+import math
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -142,7 +143,15 @@ def _requirements_reason(value: Any) -> str | None:
     """A vague requirement must go back to Spec instead of being guessed."""
     if not isinstance(value, str) or not value.strip():
         return "unknown_requirements"
-    return _ambiguity_reason(value)
+    reason = _ambiguity_reason(value)
+    if reason:
+        return reason
+    # Conservatively accept behavioral statements, not implementation goals
+    # such as "Fix the bug". Unsupported prose goes through the full Spec run.
+    if not re.match(r"^(?:return|emit|print|write|reject|accept|exit|output)\s+\S",
+                    value.strip(), re.IGNORECASE):
+        return "requirements_behavior_unspecified"
+    return None
 
 
 def _ambiguity_reason(text: str) -> str | None:
@@ -168,6 +177,9 @@ def _commands_reason(value: Any) -> str | None:
     for item in command:
         if not isinstance(item, str) or not item.strip():
             return "acceptance_command_invalid"
+        # '-' and '--' are concrete argv tokens, not unknown-value markers.
+        if item.strip().lower() in UNKNOWN_MARKERS - {"-", "--"}:
+            return "acceptance_command_unknown"
     return None
 
 
@@ -209,12 +221,28 @@ def _boundaries_reason(value: Any) -> str | None:
         if type(boundary["exit_code"]) is not int:
             return "boundary_exit_code_unknown"
         # A boundary may legitimately expect no output at all.
-        if not isinstance(boundary["output"], str):
+        if (not isinstance(boundary["output"], str) or
+                not _concrete_boundary_value(boundary["output"])):
             return "boundary_output_unknown"
-        if (isinstance(boundary["input"], str) and
-                boundary["input"].strip().lower() in UNKNOWN_MARKERS):
+        if not _concrete_boundary_value(boundary["input"]):
             return "boundary_input_unknown"
     return None
+
+
+def _concrete_boundary_value(value: Any) -> bool:
+    """Check JSON boundary data recursively; empty inputs/outputs are concrete."""
+    if isinstance(value, str):
+        return value == "" or value.strip().lower() not in UNKNOWN_MARKERS
+    if type(value) in (bool, int):
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_concrete_boundary_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _concrete_boundary_value(item)
+                   for key, item in value.items())
+    return False
 
 
 def _allowed_files_reason(value: Any) -> str | None:
@@ -224,6 +252,10 @@ def _allowed_files_reason(value: Any) -> str | None:
     for path in value:
         if not isinstance(path, str) or not path.strip():
             return "allowed_files_invalid"
+        if path.strip().lower() in UNKNOWN_MARKERS:
+            return "allowed_files_invalid"
+        if PurePosixPath(path) == PurePosixPath("."):
+            return "allowed_files_not_narrow"
         if path.startswith(("/", "~")):
             return "allowed_files_not_relative"
         if ".." in PurePosixPath(path).parts:

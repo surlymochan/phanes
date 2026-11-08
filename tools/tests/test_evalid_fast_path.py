@@ -120,6 +120,40 @@ class FastPathContractTests(unittest.TestCase):
                 del intake["public_scope"][field]
                 self.assert_closed(intake, enabled=True)
 
+    def test_requirements_must_describe_observable_behavior(self):
+        for text in ("Fix the bug.", "Fix.", "Update the implementation.",
+                     "Improve performance."):
+            with self.subTest(requirements=text):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["requirements"] = text
+                self.assert_closed(intake, enabled=True)
+
+    def test_unknown_command_arguments_fail_closed(self):
+        for command in (["TBD"], ["unknown"], ["python3", "TBD"],
+                        ["python3", None]):
+            with self.subTest(command=command):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["acceptance_commands"] = [command]
+                self.assert_closed(intake, enabled=True)
+
+    def test_unknown_boundary_values_fail_closed(self):
+        for field, value in (("input", None), ("input", "TBD"),
+                             ("input", [0, None]), ("input", {"x": "unknown"}),
+                             ("output", "TBD"), ("output", "unknown")):
+            with self.subTest(field=field, value=value):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["boundaries"][0][field] = value
+                self.assert_closed(intake, enabled=True)
+
+    def test_concrete_empty_boundary_values_and_command_flags_are_valid(self):
+        intake = copy.deepcopy(self.intake)
+        intake["public_scope"]["acceptance_commands"][0].append("--")
+        for value in ("", [], {}, 0, False):
+            with self.subTest(input=value):
+                intake["public_scope"]["boundaries"][0] = {
+                    "input": value, "exit_code": 0, "output": ""}
+                self.assertTrue(self.evaluate(intake, enabled=True)["eligible"])
+
     def test_missing_or_unknown_intake_identity_fails_closed(self):
         for field in ("issue_ref", "base_commit", "policy_digest"):
             for value in (None, "", "unknown", "TBD"):
@@ -148,7 +182,8 @@ class FastPathContractTests(unittest.TestCase):
                 self.assert_closed(intake, enabled=True)
 
     def test_wide_or_unknown_file_scope_fails_closed(self):
-        for paths in ([], ["**"], ["tools/**"], ["../outside.py"], ["/etc/config"], [None]):
+        for paths in ([], ["**"], ["tools/**"], ["../outside.py"], ["/etc/config"],
+                      [None], ["."], ["./"], ["tools/.."], ["unknown"], ["TBD"]):
             with self.subTest(paths=paths):
                 intake = copy.deepcopy(self.intake)
                 intake["public_scope"]["allowed_files"] = paths
