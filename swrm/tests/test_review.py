@@ -265,6 +265,33 @@ class PeerReviewTests(unittest.TestCase):
         self.assertIn("not json", raw)
         self.assertIn("still not json", raw)
 
+    def test_blank_review_response_retries_and_fails_without_approval(self):
+        blank = " \n\t"
+        completed = [subprocess.CompletedProcess([], 0, blank, "") for _ in range(2)]
+        with mock.patch.object(xs, "run_peer_reviewer", side_effect=completed) as run:
+            with self.assertRaisesRegex(RuntimeError, "after repair retry"):
+                xs.invoke_reviewer({"backend": "agy", "binary": "/fake/agy"}, "review",
+                                   str(self.repo), str(self.run_dir), {})
+        self.assertEqual(run.call_count, 2)
+        repair_prompt = run.call_args_list[1].args[0][run.call_args_list[1].args[0].index("-p") + 1]
+        self.assertIn("Return only JSON", repair_prompt)
+        raw = (self.run_dir / "review.raw.txt").read_text(encoding="utf-8")
+        self.assertIn("--- attempt 1 ---\n" + blank, raw)
+        self.assertIn("--- attempt 2 ---\n" + blank, raw)
+
+    def test_review_json_without_required_fields_retries_and_fails(self):
+        invalid = json.dumps({"message": "review complete"})
+        completed = [subprocess.CompletedProcess([], 0, invalid, "") for _ in range(2)]
+        with mock.patch.object(xs, "run_peer_reviewer", side_effect=completed) as run:
+            with self.assertRaisesRegex(RuntimeError, "after repair retry"):
+                xs.invoke_reviewer({"backend": "agy", "binary": "/fake/agy"}, "review",
+                                   str(self.repo), str(self.run_dir), {})
+        self.assertEqual(run.call_count, 2)
+        raw = (self.run_dir / "review.raw.txt").read_text(encoding="utf-8")
+        self.assertIn(invalid, raw)
+        self.assertIn("--- attempt 1 ---", raw)
+        self.assertIn("--- attempt 2 ---", raw)
+
     def test_agy_permission_denial_is_reported_without_a_paid_format_retry(self):
         output = json.dumps({"response": "", "denied_actions": [{"action": "command"}]})
         completed = subprocess.CompletedProcess([], 0, output, "agy: no output produced; command permission denied")
