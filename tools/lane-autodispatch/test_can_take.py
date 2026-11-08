@@ -356,6 +356,16 @@ class ReviewBacklogAssignmentTest(unittest.TestCase):
 
     LANES = ("CX2", "CX4", "CX5")
 
+    def setUp(self):
+        # the rotation cursor is global: reset it so the rotation test does not depend
+        # on the order the test classes run in
+        self.rotation = dict(AUTODISPATCH.REVIEW_ROTATION)
+        AUTODISPATCH.REVIEW_ROTATION.clear()
+
+    def tearDown(self):
+        AUTODISPATCH.REVIEW_ROTATION.clear()
+        AUTODISPATCH.REVIEW_ROTATION.update(self.rotation)
+
     def test_selects_the_lane_with_the_smallest_queue_plus_active_reviews(self):
         lane, loads = AUTODISPATCH.pick_reviewer(
             self.LANES,
@@ -388,15 +398,17 @@ class ReviewBacklogAssignmentTest(unittest.TestCase):
 class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
     """tick() level proof of the review lane balancing (Refs #1701).
 
-    The review cards go to the review lane with the smallest in-flight backlog, a lane
-    that already carries `AD_REVIEW_MAX_IN_FLIGHT` reviews is skipped (the review waits
-    for a free lane), and the decision is logged with the backlog snapshot."""
+    The review cards go to the review lane with the smallest review load (the reviews it
+    runs plus the cards the plan gave it), a lane that already carries
+    `AD_REVIEW_MAX_IN_FLIGHT` reviews is skipped (the review waits for a free lane), and
+    the decision is logged with the backlog snapshot."""
 
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX4": {"host": "h4", "backend": "codex"},
              "CX5": {"host": "h5", "backend": "codex"}}
 
     def setUp(self):
         self.rotation = dict(AUTODISPATCH.REVIEW_ROTATION)
+        AUTODISPATCH.REVIEW_ROTATION.clear()
 
     def tearDown(self):
         AUTODISPATCH.REVIEW_ROTATION.clear()
@@ -407,37 +419,65 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         return {lane: {"issue": 9, "run": "run-9", "host": "h2", "base": "b" * 40,
                        "at": "2026-01-01 00:00:00", "verify": None, "class": cls}}
 
-    def test_the_review_goes_to_the_lane_with_the_smallest_backlog(self):
-        # CX2 runs a review (backlog 1) and CX5 waits for one (backlog 1): only CX4 is
-        # free and under the cap, so the review card goes there
+    def test_the_review_goes_to_the_lane_with_the_smallest_load(self):
+        # CX2 runs a review (load 1) and CX4 runs a work card: only CX5 is free, so the
+        # review card goes there - never to the lane that already reviews
         state = self.busy("CX2", "verify")
-        state["_review_waiting"] = {"CX5": 1}
+        state.update(self.busy("CX4", "work"))
         dispatched, logs = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
                                          self.LANES, state)
-        self.assertEqual(dispatched, [("CX4", 1)])
+        self.assertEqual(dispatched, [("CX5", 1)])
         line = [row for row in logs if "review assignment" in row][0]
         self.assertIn("PR #1", line)
-        self.assertIn("lane CX4", line)
-        self.assertIn("CX2=1", line)   # the backlog of every review lane is in the log
-        self.assertIn("CX5=1", line)
+        self.assertIn("lane CX5", line)
+        self.assertIn("CX2=1", line)   # the load of every review lane is in the log
+        self.assertIn("CX4=0", line)
+        self.assertIn("CX5=0", line)
 
-    def test_the_review_waits_when_every_review_lane_is_at_its_cap(self):
-        # every review lane already carries one review: the review card waits for a free
-        # lane instead of piling up on one of them
-        state = {"_review_waiting": {"CX2": 1, "CX4": 1, "CX5": 1}}
-        dispatched, logs = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+    def test_the_review_waits_when_the_free_review_lanes_are_at_their_cap(self):
+        # CX5 is free and takes the first review card; the second card waits for a free
+        # lane instead of piling up on CX5
+        state = self.busy("CX2", "verify")
+        state.update(self.busy("CX4", "verify"))
+        dispatched, logs = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent")),
+                                          issue(2, VERIFY_BODY, ("lane-ready", "verify-intent"))],
                                          self.LANES, state)
-        self.assertEqual(dispatched, [])
+        self.assertEqual(dispatched, [("CX5", 1)])
         self.assertTrue(any("review" in row and "wait" in row for row in logs))
 
+    def test_a_free_lane_is_not_blocked_by_the_queue_of_the_last_tick(self):
+        # the queue of the last tick named CX4, but CX4 is free now: it takes the review
+        # (a lane is never blocked by its own queue entry)
+        state = self.busy("CX2", "verify")
+        state.update(self.busy("CX5", "verify"))
+        state["_review_waiting"] = {"CX4": 2}
+        dispatched, _ = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+                                      self.LANES, state)
+        self.assertEqual(dispatched, [("CX4", 1)])
+
+    def test_the_review_goes_out_when_the_reserved_verify_lane_is_busy(self):
+        # the verify share reserves a lane for the verify class, it does not limit the
+        # verify class to that lane: a free review lane takes the review even when the
+        # reserved lane already runs a review
+        old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
+        AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
+        try:
+            state = self.busy("CX2", "verify")
+            dispatched, _ = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
+                                          self.LANES, state)
+        finally:
+            AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = old
+        self.assertEqual(dispatched, [("CX4", 1)])
+
     def test_the_waiting_reviews_are_the_review_queue_of_their_lane(self):
-        # the review cards that could not be dispatched are counted as the review queue
-        # of the lane they wait for, so the next tick does not pile them up again
-        state = {"_review_waiting": {"CX2": 1, "CX4": 1, "CX5": 1}}
-        self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent")),
-                       issue(2, VERIFY_BODY, ("lane-ready", "verify-intent"))], self.LANES, state)
+        # the review card that could not be dispatched is counted as the review queue of
+        # the lane it waits for, so the backlog report shows where the queue stands
+        state = self.busy("CX2", "work")
+        state.update(self.busy("CX4", "verify"))
+        state.update(self.busy("CX5", "verify"))
+        self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))], self.LANES, state)
         waiting = {lane: count for lane, count in self.last_state.get("_review_waiting", {}).items() if count}
-        self.assertEqual(sum(waiting.values()), 2)
+        self.assertEqual(sum(waiting.values()), 1)
 
 
 class ReviewSequenceReplayTest(unittest.TestCase):

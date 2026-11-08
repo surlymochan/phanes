@@ -730,34 +730,41 @@ def review_lanes(lanes):
     """The review lanes of a lane set, in the caller's order (CX2/CX4/CX5)."""
     return [lane for lane in lanes if is_review_lane(lane)]
 
-def review_backlog(lanes, state):
-    """The in-flight review load of every review lane (Refs #1701).
+def review_running(lanes, state):
+    """The reviews every review lane runs right now (the in-flight part of its load).
 
-    The load of a lane is the number of reviews it runs plus the number of review cards
-    that wait for it: the review queue and the reviews in flight."""
+    A lane runs one card at a time, so a lane runs at most one review (Refs #1701)."""
     state = state or {}
+    return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
+
+def review_backlog(lanes, state):
+    """The review load of every review lane: the reviews it runs plus the reviews that
+    wait for it (the review queue of the lane and the reviews in flight) (Refs #1701).
+
+    The waiting part is the forecast of the queue spread (`_review_waiting`): it is the
+    report of the last tick, not an input of the assignment - a lane is never blocked by
+    its own queue entry, a free lane always takes a review."""
+    state = state or {}
+    running = review_running(lanes, state)
     waiting = state.get("_review_waiting") or {}
-    loads = {}
-    for lane in lanes:
-        running = 1 if (state.get(lane) or {}).get("class") == "verify" else 0
-        loads[lane] = running + int(waiting.get(lane, 0) or 0)
-    return loads
+    return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
 
 def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None):
-    """Pick the review lane with the smallest in-flight backlog (Refs #1701).
+    """Pick the review lane with the smallest review load (Refs #1701).
 
-    `loads` maps a lane to the number of reviews it carries. The lane with the smallest
-    load wins; equal loads rotate over the review lanes. A lane that already carries
-    `max_in_flight` reviews is skipped: the review waits for a free lane instead of
-    piling up on one lane. The decision is logged with the backlog snapshot (the PR, the
-    chosen lane and the load of every review lane), so it can be reviewed afterwards."""
+    `loads` maps a lane to the reviews it carries: the reviews it runs plus the reviews
+    already queued for it. The lane with the smallest load wins; equal loads rotate over
+    the review lanes. A lane that already carries `max_in_flight` reviews is skipped:
+    the review waits for a free lane instead of piling up on one lane. The decision is
+    logged with the backlog snapshot (the PR, the chosen lane and the load of every
+    review lane), so it can be reviewed afterwards."""
     order = [str(lane) for lane in lanes]
     snapshot = {lane: int((loads or {}).get(lane, 0) or 0) for lane in order}
     backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in order)
     eligible = [lane for lane in order if max_in_flight is None or snapshot[lane] < max_in_flight]
     if not eligible:
         if log:
-            log(f"review assignment: PR #{pr} → lane none (backlog: {backlog}); every review lane is at "
+            log(f"review plan: PR #{pr} → lane none (backlog: {backlog}); every free review lane is at "
                 f"its cap ({max_in_flight}), the review waits for a free lane")
         return None, snapshot
     smallest = min(snapshot[lane] for lane in eligible)
@@ -769,28 +776,30 @@ def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None):
     # smallest backlog is no rotation and must not shift the next decision
     if len(tied) > 1: REVIEW_ROTATION[key] = index + 1
     if log:
-        log(f"review assignment: PR #{pr} → lane {chosen} (backlog: {backlog})")
+        log(f"review plan: PR #{pr} → lane {chosen} (backlog: {backlog})")
     return chosen, snapshot
 
-def plan_reviews(idle_review_ids, pending, loads, max_in_flight=None, lane_cfgs=None, max_lanes=None, log=None):
-    """Plan the review cards over the review lanes by backlog (Refs #1701).
+def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfgs=None, log=None):
+    """Plan the review cards over the review lanes by load (Refs #1701).
+
+    `running` maps a review lane to the reviews it runs right now; the load of a lane is
+    that number plus the cards the plan already gave it (its review queue). The cards
+    are taken by the lane with the smallest load, equal loads rotate.
 
     Returns (plan, snapshots): the plan maps a review lane to the cards it takes (the
-    first card is dispatched first), the snapshots hold the backlog at the moment of the
+    first card is dispatched first), the snapshots hold the load at the moment of the
     decision (for the log). A lane at its cap is skipped: the review waits for a free
-    lane. `max_lanes` limits the number of review lanes the plan may use (the verify
-    share of the queue classes)."""
-    plan, snapshots, counts = {}, {}, dict(loads)
+    lane."""
+    plan, snapshots, counts = {}, {}, dict(running)
     for card in pending:
         eligible = [lane for lane in idle_review_ids
                     if lane_cfgs is None or can_take(lane_cfgs[lane].get("backend"), card, lane)]
         if not eligible: continue
         lane, snapshot = pick_reviewer(eligible, counts, max_in_flight=max_in_flight)
         if lane is None:
-            # every review lane is at its cap: the review waits for a free lane
-            if log: log(f"review: PR #{card['n']} waits: every review lane is at its cap ({max_in_flight})")
+            # every free review lane is at its cap: the review waits for a free lane
+            if log: log(f"review: PR #{card['n']} waits: every free review lane is at its cap ({max_in_flight})")
             continue
-        if max_lanes is not None and lane not in plan and len(plan) >= max_lanes: continue
         plan.setdefault(lane, []).append(card)
         snapshots[card["n"]] = snapshot
         counts[lane] = counts.get(lane, 0) + 1
@@ -799,9 +808,11 @@ def plan_reviews(idle_review_ids, pending, loads, max_in_flight=None, lane_cfgs=
 def review_waiting_counts(review_ids, pending, running, max_in_flight=None):
     """The review cards that wait for a lane, counted per lane (Refs #1701).
 
-    The waiting cards are the review queue of a lane: they are distributed over the
-    review lanes by backlog, so a lane that already carries reviews is not given more
-    of them. The cards that do not fit any lane stay in the queue."""
+    The waiting cards are the review queue of the lanes: they are spread over the review
+    lanes the way the backlog rule would spread them, so the report shows where the queue
+    would go. The cards that do not fit any lane stay in the queue. The count is a report
+    of the last tick, never an input of the assignment: a free lane takes a review even
+    when the queue of the last tick named it."""
     counts, current = {}, dict(running)
     for card in pending:
         lane, _ = pick_reviewer(review_ids, current, max_in_flight=max_in_flight)
@@ -1376,20 +1387,20 @@ def tick(lanes, state, last_warn):
     # The review cards are planned over the review lanes before the dispatch loop: the lane
     # with the smallest in-flight backlog takes them, equal backlogs rotate, and a lane at
     # its cap is skipped - the review waits for a free lane instead of piling up on one.
+    # The load of a lane is the reviews it runs plus the cards the plan gave it: the queue
+    # is re-planned every tick, so a lane is never blocked by its own queue entry.
     review_ids = review_lanes(lanes)
     idle_lanes = idle_lane_names(lanes, state, res, scopes)
     idle_review_ids = [L for L in review_ids if L in idle_lanes]
-    review_loads = review_backlog(review_ids, state)
+    review_loads = review_running(review_ids, state)
     review_plan, review_snapshots = {}, {}
     if review_ids and idle_review_ids:
         pending_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
-        max_review_lanes = len(idle_review_ids)
-        if AD_VERIFY_SHARE_ENABLED:
-            verify_slots, _ = queue_class_limits(lanes, state, idle_lanes)
-            max_review_lanes = min(max_review_lanes, verify_slots)
-        if max_review_lanes > 0 and pending_reviews:
+        if pending_reviews:
+            # every free review lane may take a review: the verify share reserves a lane for
+            # the verify class, it does not limit it to that lane (the reserve is a floor)
             review_plan, review_snapshots = plan_reviews(idle_review_ids, pending_reviews, review_loads,
-                                                         REVIEW_MAX_IN_FLIGHT, lanes, max_review_lanes,
+                                                         REVIEW_MAX_IN_FLIGHT, lanes,
                                                          log=lambda row: log(row, brain=False))
     for L, cfg in lanes.items():
         r = res[L]
@@ -1452,7 +1463,7 @@ def tick(lanes, state, last_warn):
     # tick counts them in the backlog of the lane, so a lane that already carries
     # reviews is not given more of them (Refs #1701)
     if review_ids:
-        running = {L: (1 if (state.get(L) or {}).get("class") == "verify" else 0) for L in review_ids}
+        running = review_running(review_ids, state)
         waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
         state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
         save_state(state)

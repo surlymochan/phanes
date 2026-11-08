@@ -96,21 +96,27 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 审查只认 CX2/CX4/CX5 三条 review 车道。以前 AD 按车道顺序派审查卡：一条车道先空出来就
 先拿下一张，快的车道反复连审，另一条车道空着。现在审查卡**按在途积压分配**：
 
-- **积压** = 该车道正在审的审查数 + 排在该车道上等着的审查卡数（review 队列 + 在途）；
+- **积压** = 该车道正在审的审查数 + 本轮已排在它后面的审查卡数（review 队列 + 在途）；
 - **选车道**：积压最少的那条车道先拿；积压相同时**轮询**（同积压依次轮给各条 review 车道）；
-- **上限**：单车道在途审查达到 `AD_REVIEW_MAX_IN_FLIGHT`（默认 1）时**跳过**该车道，审查卡
-  留在队列里等空闲车道，不再往一条车道上堆；
-- **留痕**：每次分配写一行审查日志（PR、所选车道、当时各条 review 车道的积压快照）。
+- **上限**：单车道在途（正在审 + 本轮已排）达到 `AD_REVIEW_MAX_IN_FLIGHT`（默认 1）时**跳过**
+  该车道，审查卡留在队列里等空闲车道，不再往一条车道上堆；
+- **留痕**：每次分配写一行审查日志（PR、所选车道、当时各车道积压快照），供事后复核。
+
+审查队列**每个 tick 重新分配**：积压里的“队列”部分就是本轮计划已经排给该车道的审查卡，
+上一轮的队列不会把车道挡住——车道空出来就一定拿得到审查（车道一次只跑一张卡，所以默认
+上限 1 就是它的物理容量）。
 
 分配决策在派发循环之前算好（`plan_reviews()`），派发时审查卡只交给**计划给它的那条车道**：
-计划给别的车道（或因为所有 review 车道都到上限而没有计划）的审查卡本轮不派发，等下一轮。
+计划给别的车道（或因为所有空闲 review 车道都到上限而没有计划）的审查卡本轮不派发，等下一轮。
 
 日志（`~/phanes-ctl/autodispatch/autodispatch.log`）：
 
-- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: CX2=1, CX4=0, CX5=0)` —— 分配决策与积压快照；
-- `review: PR #<n> waits: every review lane is at its cap (1)` —— 所有 review 车道都到上限，审查等空闲车道。
+- `review plan: PR #<n> → lane <CX2|CX4|CX5> (backlog: CX2=1, CX4=0, CX5=0)` —— 分配决策与积压快照；
+- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: ...)` —— 该决策真正落到的那条车道；
+- `review: PR #<n> waits: every free review lane is at its cap (1)` —— 空闲的 review 车道都到上限，审查等空闲车道。
 
-`lanes-status.json` 里多一个 `_review_backlog` 字段（三条 review 车道的当前积压），便于事后复核。
+`lanes-status.json` 里多一个 `_review_backlog` 字段（三条 review 车道的当前积压：正在审的数 +
+上一轮排给它的队列数），便于事后复核。
 
 | 环境变量 | 默认 | 含义 |
 | --- | --- | --- |
