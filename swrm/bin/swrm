@@ -3688,7 +3688,7 @@ def planner_decision(prof, policy):
     """
     limit = (policy.get("routing") or {}).get("planner_skip_max_difficulty", 2)
     difficulty = prof.get("difficulty")
-    if difficulty is not None and difficulty <= limit:
+    if isinstance(difficulty, int) and not isinstance(difficulty, bool) and difficulty <= limit:
         return "skipped"
     return "used"
 
