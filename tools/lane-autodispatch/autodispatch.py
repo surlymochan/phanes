@@ -749,7 +749,8 @@ DEFAULT_CODEX_MIN_MEMORY_MB = 400
 def available_memory_mb(host):
     """Read MemAvailable on an executor host through the normal SSH shim."""
     command = "awk '/^MemAvailable:/ {print $2; found=1} END {if (!found) exit 1}' /proc/meminfo"
-    try: rc, out, _ = sh(ssh_argv(ssh_opts(host), host, "sh", "-lc", command), timeout=30)
+    # SSH joins remote arguments with spaces; keep the entire script as one -c argument.
+    try: rc, out, _ = sh(ssh_argv(ssh_opts(host), host, "sh", "-lc", shlex.quote(command)), timeout=30)
     except (OSError, subprocess.TimeoutExpired): return None
     if rc: return None
     try: return int(out.strip().splitlines()[-1]) // 1024
@@ -1644,8 +1645,11 @@ def tick(lanes, state, last_warn):
     blocked = sum(not i["deps_ok"] for i in q)
     memory_blocks = {}
     for item in q:
+        # A lane that took a card (or failed dispatch) no longer offers capacity
+        # to the remaining queue, even though it was eligible earlier this tick.
         candidates = [L for L in dispatch_eligible_lanes
-                      if can_take(lanes[L]["backend"], item, L) and item.get("deps_ok", True)]
+                      if outcomes.get(L) == "no-card" and not state.get(L)
+                      and can_take(lanes[L]["backend"], item, L) and item.get("deps_ok", True)]
         rejections = memory_rejections.get(item["n"], {})
         if candidates and all(L in rejections for L in candidates):
             memory_blocks[item["n"]] = list(rejections.values())

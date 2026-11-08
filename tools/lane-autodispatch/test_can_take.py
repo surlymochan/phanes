@@ -3,11 +3,13 @@
 import json
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 import warnings
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
 AUTODISPATCH = importlib.util.module_from_spec(SPEC)
@@ -356,6 +358,20 @@ class TickWorkClassCapTest(TickHarness, unittest.TestCase):
 class TickMemoryPreflightTest(TickHarness, unittest.TestCase):
     """A low-memory host must not start a codex session during tick dispatch."""
 
+    def test_memory_probe_executes_after_ssh_joins_remote_arguments(self):
+        def local_remote_shell(args, timeout):
+            # OpenSSH joins the remote argv with spaces before the host shell parses it.
+            command = " ".join(args[args.index("probe-host") + 1:])
+            result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=timeout)
+            return result.returncode, result.stdout, result.stderr
+
+        with open("/proc/meminfo") as stream:
+            self.assertIn("MemAvailable:", stream.read())
+        with patch.object(AUTODISPATCH, "sh", side_effect=local_remote_shell):
+            available = AUTODISPATCH.available_memory_mb("probe-host")
+        self.assertIsInstance(available, int)
+        self.assertGreater(available, 0)
+
     def test_codex_lane_skips_a_135mb_host_before_dispatch(self):
         lanes = {"CX2": {"host": "gores2", "backend": "codex", "min_available_memory_mb": 400}}
         card = issue(1712, "Codex session work", ("lane-ready", "backend:codex"))
@@ -393,6 +409,24 @@ class TickMemoryPreflightTest(TickHarness, unittest.TestCase):
         dispatched, logs = self.run_tick([card], lanes=lanes, available_memory_mb=135)
         self.assertIn(("PI1", 1716), dispatched)
         self.assertTrue(any("blocked-by-host-memory" in line and "gores2" in line for line in logs), logs)
+        self.assertEqual(self.last_status["_blocked"], 0)
+        self.assertEqual(self.last_status["_ready"], 0)
+        self.assertEqual(self.last_status["_memory_blocks"], {})
+
+    def test_backend_lane_dispatched_this_tick_does_not_hide_remaining_memory_block(self):
+        cards = [issue(n, "Pi task", ("lane-ready", "backend:pi")) for n in (1719, 1720)]
+        lanes = {"CX2": {"host": "gores2", "backend": "codex"},
+                 "PI1": {"host": "pi-host", "backend": "pi"}}
+        for order in (lanes, dict(reversed(list(lanes.items())))):
+            with self.subTest(order=list(order)):
+                dispatched, _ = self.run_tick(cards, lanes=order, available_memory_mb=135)
+                self.assertEqual(dispatched, [("PI1", 1719)])
+                self.assertEqual(self.last_status["_blocked"], 1)
+                self.assertEqual(self.last_status["_ready"], 0)
+                self.assertEqual(set(self.last_status["_memory_blocks"]), {1720})
+                self.assertEqual(self.last_status["_memory_blocks"][1720], [
+                    {"host": "gores2", "available_mb": 135, "threshold_mb": 400,
+                     "reason": "blocked-by-host-memory"}])
 
     def test_memory_only_block_is_counted_once_with_host_diagnostics(self):
         card = issue(1717, "Codex session work", ("lane-ready",))
