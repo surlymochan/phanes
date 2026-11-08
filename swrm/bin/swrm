@@ -424,6 +424,7 @@ NOW = time.time
 
 # The Antigravity CLI (`agy`) is the executor behind the `gemini` alias.
 AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
+AGY_START_GRACE_S = 5
 BACKEND_ALIASES = {"gemini": "agy"}
 AGY_LOGIN_TIMEOUT = 5
 _AGY_LOGIN_CACHE = {}
@@ -8078,6 +8079,11 @@ def lane_approval_response(child, msg, event_file, host_warning=False):
 
 
 def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, attempt=1, continuation=False):
+    agy_start_grace_s = AGY_START_GRACE_S
+    agy_started_at = NOW()
+    agy_saw_executor_event = False
+    agy_start_restarts = 0
+    agy_start_failures = []
     event_file = (spec.get("_event_file") if attempt == 1 else None) or \
                  os.path.join(rdir, f"events.{attempt}.{lane['backend']}.jsonl")
     spec["_event_file"] = event_file
@@ -8139,11 +8145,40 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         text = detail or ""
         if lane_headless(lane):
             text = child.stderr_text()[-600:] or text
+            if agy_start_failures:
+                failures = "; ".join(agy_start_failures)
+                return "executor_start_failed", f"startup failed after {failures}"
         if AUTH_ERROR_RE.search(text):
             return "auth", text
         if RATE_LIMIT_RE.search(text):
             return "rate_limit", text
         return ("risk_blocked" if spec.get("risk_blocks") else "exec_error"), text
+
+    def retry_agy_start(detail):
+        """Restart a headless agy process once when it exits before a stable turn starts."""
+        nonlocal agy_started_at, agy_saw_executor_event, agy_start_restarts
+        if not lane_headless(lane) or (agy_saw_executor_event and NOW() - agy_started_at >= agy_start_grace_s):
+            return False
+        proc = getattr(child, "proc", None)
+        exit_code = proc.poll() if proc else None
+        stderr_tail = child.stderr_text()[-600:]
+        diagnostic = stderr_tail or detail or ""
+        if AUTH_ERROR_RE.search(diagnostic) or RATE_LIMIT_RE.search(diagnostic) or MODEL_UNAVAILABLE_RE.search(diagnostic):
+            return False
+        agy_start_failures.append(
+            f"exit code {exit_code}; stderr tail: {stderr_tail or detail or '(empty)'}")
+        if agy_start_restarts >= 1:
+            set_status(rdir, executor_restarts=agy_start_restarts, stderr_tail=stderr_tail)
+            return False
+        agy_start_restarts += 1
+        set_status(rdir, executor_restarts=agy_start_restarts, stderr_tail=stderr_tail)
+        # Agy has no persistent RPC session; restart the exact turn prompt with its conversation id.
+        child.start(prompt, model=lane["model"], effort=lane.get("effort"),
+                    conversation=turn.get("conversation_id"))
+        agy_started_at = NOW()
+        agy_saw_executor_event = False
+        set_status(rdir, executor_pid=child.pid)
+        return True
 
     if budget_hit:
         lane_abort_child(lane, child, turn)
@@ -8178,6 +8213,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     if msg is False:
                         if agy_resume_steer():
                             continue
+                        if retry_agy_start("resident executor process exited"):
+                            continue
                         error_class, detail = lane_failure("resident executor process exited")
                         return None, usage, error_class, 1, event_file, detail
                 else:
@@ -8187,9 +8224,13 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             if lane_headless(lane):
                 if agy_resume_steer():
                     continue
+                if retry_agy_start("resident executor stdout closed"):
+                    continue
                 error_class, detail = lane_failure("resident executor stdout closed")
                 return None, usage, error_class, 1, event_file, detail
             return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor stdout closed"
+        if lane_headless(lane):
+            agy_saw_executor_event = True
         block = enforced_risk(msg, risk_policy, ws["path"], scope=spec.get("scope", "repo"))
         if block and block.get("enforced") is False:
             lane_record_event(event_file, {"type": "risk_warning", **block})

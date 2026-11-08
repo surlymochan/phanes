@@ -595,6 +595,67 @@ class LaneTests(unittest.TestCase):
         self.assertIn("startup failed before executor event", result["attempts"][-1]["error_tail"])
         self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
 
+    def test_agy_early_event_crash_restarts_and_preserves_conversation(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "early-event-crash-once"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        calls = [json.loads(line) for line in pathlib.Path(self.env["FAKE_AGY_LOG"]).read_text().splitlines()]
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["executor_restarts"], 1)
+        self.assertIn("--conversation", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--conversation") + 1], "conv-early")
+
+    def test_agy_early_event_repeated_crash_is_executor_start_failed(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "early-event-crash-always"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["error_class"], "executor_start_failed")
+        error_tail = result["attempts"][-1]["error_tail"]
+        self.assertEqual(error_tail.count("exit code 2"), 2)
+        self.assertIn("early event then startup crash", error_tail)
+        self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
+
+    def test_agy_silent_exit_after_start_grace_is_start_failed(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "late-silent-crash"
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id, timeout=20)
+        self.assertEqual(state["error_class"], "executor_start_failed")
+        self.assertEqual(state["executor_restarts"], 1)
+
+    def test_agy_exit_after_event_and_start_grace_is_exec_error(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "late-event-crash"
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id, timeout=20)
+        self.assertEqual(state["error_class"], "exec_error")
+        self.assertNotIn("executor_restarts", state)
+
+    def test_agy_auth_failure_is_not_retried_as_startup_crash(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "auth"
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        calls = [json.loads(line) for line in pathlib.Path(self.env["FAKE_AGY_LOG"]).read_text().splitlines()]
+        self.assertEqual(state["error_class"], "auth")
+        self.assertNotIn("executor_restarts", state)
+        self.assertEqual(sum(call[:1] == ["-p"] for call in calls), 1)
+
     def test_agy_steer_aborts_the_process_and_resumes_the_conversation(self):
         self.set_config("agy")
         self.start_lane()

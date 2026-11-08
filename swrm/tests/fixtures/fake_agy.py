@@ -56,6 +56,28 @@ if mode in ("startup-crash-once", "startup-crash-always"):
     if mode == "startup-crash-always" or count == 0:
         sys.stderr.write("startup failed before executor event\n")
         sys.exit(2)
+if mode in ("early-event-crash-once", "early-event-crash-always"):
+    marker = os.environ["FAKE_AGY_STARTUP_CRASH_MARKER"]
+    try:
+        with open(marker) as stream:
+            count = int(stream.read())
+    except FileNotFoundError:
+        count = 0
+    with open(marker, "w") as stream:
+        stream.write(str(count + 1))
+    if mode == "early-event-crash-always" or count == 0:
+        send({"type": "init", "conversation_id": "conv-early"})
+        sys.stderr.write("early event then startup crash\n")
+        sys.exit(2)
+if mode == "late-silent-crash":
+    time.sleep(5.2)
+    sys.stderr.write("late silent executor crash\n")
+    sys.exit(2)
+if mode == "late-event-crash":
+    send({"type": "init", "conversation_id": "conv-late"})
+    time.sleep(5.2)
+    sys.stderr.write("late executor crash after event\n")
+    sys.exit(2)
 if mode == "sleep":
     time.sleep(30)
     sys.exit(0)
