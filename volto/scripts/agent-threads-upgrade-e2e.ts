@@ -17,8 +17,8 @@ import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { promisify } from "node:util";
-import { type ElectronApplication, _electron } from "playwright-core";
+import { isDeepStrictEqual, promisify } from "node:util";
+import { _electron, type ElectronApplication } from "playwright-core";
 import { migrateVoltoDatabase } from "../src/backend/volto-database-schema";
 import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
@@ -156,10 +156,9 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
 
     const before = tableHashes(db);
     const retainedRows = new Map(
-      tableNames(db).filter((name) => name !== "projection_agent_tasks").map((name) => [
-        name,
-        db.prepare(`SELECT * FROM "${name}"`).all(),
-      ]),
+      tableNames(db)
+        .filter((name) => name !== "projection_agent_tasks")
+        .map((name) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]),
     );
     const tasks = db.prepare(`SELECT ${TASK_COLUMNS} FROM projection_agent_tasks ORDER BY task_id`).all();
     assert.ok(tasks.length > 0, "the upstream database has no task data to preserve");
@@ -200,11 +199,14 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
 
     // Startup can add import receipts and events. Every upstream row must still have the same values.
     for (const [name, rows] of retainedRows) {
-      const columns = connection.prepare(`PRAGMA table_info("${name}")`).all().map((row) => String(row.name));
+      const columns = connection
+        .prepare(`PRAGMA table_info("${name}")`)
+        .all()
+        .map((row) => String(row.name));
       const actual = connection.prepare(`SELECT * FROM "${name}"`).all();
       for (const row of rows) {
         assert.ok(
-          actual.some((candidate) => columns.every((column) => candidate[column] === row[column])),
+          actual.some((candidate) => columns.every((column) => isDeepStrictEqual(candidate[column], row[column]))),
           `host startup changed an upstream row in ${name}`,
         );
       }
@@ -216,7 +218,10 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
         const snapshot = await page.evaluate((id) => window.volto.agent.listTasks(id), agentId);
         assert.deepEqual(
           snapshot.tasks.map((task) => task.id).sort(),
-          kept.filter((task) => task.agent_id === agentId).map((task) => String(task.thread_id)).sort(),
+          kept
+            .filter((task) => task.agent_id === agentId)
+            .map((task) => String(task.task_id))
+            .sort(),
           "the real host API did not retain migrated task sessions",
         );
       }
@@ -286,7 +291,10 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     );
     assert.deepEqual(connection.prepare("PRAGMA foreign_key_check").all(), []);
     assert.deepEqual(
-      connection.prepare("PRAGMA integrity_check").all().map((row) => row.integrity_check),
+      connection
+        .prepare("PRAGMA integrity_check")
+        .all()
+        .map((row) => row.integrity_check),
       ["ok"],
     );
     assert.deepEqual(
@@ -320,13 +328,14 @@ async function createUpstreamFixture(path: string): Promise<void> {
     db.exec("DROP TRIGGER stop_at_version");
     db.prepare(`INSERT INTO projection_threads
       (thread_id, agent_id, title, active_turn_id, created_at, updated_at, last_event_sequence)
-      VALUES ('upstream-session-1', 'upstream-agent', 'Retained upstream task', NULL, ?, ?, 12)`)
-      .run("2026-10-01T08:00:00.000Z", "2026-10-02T08:00:00.000Z");
+      VALUES ('upstream-session-1', 'upstream-agent', 'Retained upstream task', NULL, ?, ?, 12)`).run(
+      "2026-10-01T08:00:00.000Z",
+      "2026-10-02T08:00:00.000Z",
+    );
     db.prepare(`INSERT INTO projection_agent_tasks
       (task_id, agent_id, thread_id, origin, title, outcome, error, created_at, updated_at, closed_at, last_event_sequence)
       VALUES ('upstream-task-1', 'upstream-agent', 'upstream-session-1', 'user', 'Retained upstream task',
-        'completed', NULL, '2026-10-01T08:00:00.000Z', '2026-10-02T08:00:00.000Z', NULL, 12)`)
-      .run();
+        'completed', NULL, '2026-10-01T08:00:00.000Z', '2026-10-02T08:00:00.000Z', NULL, 12)`).run();
   } finally {
     db.close();
   }
@@ -345,7 +354,13 @@ async function runE2E(): Promise<void> {
     const passed = reports.every((report) => report.passed);
     await writeFile(join(OUT, "report.json"), `${JSON.stringify({ passed, reports }, null, 2)}\n`);
     process.stdout.write(`${JSON.stringify({ passed, reports }, null, 2)}\n`);
-    assert.ok(passed, reports.map((report) => report.error).filter(Boolean).join("\n"));
+    assert.ok(
+      passed,
+      reports
+        .map((report) => report.error)
+        .filter(Boolean)
+        .join("\n"),
+    );
   } finally {
     await rm(workDirectory, { recursive: true, force: true });
   }
