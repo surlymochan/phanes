@@ -25,12 +25,16 @@ describe("agent goals view", () => {
   });
 
   it("shows a completion percentage for active goals", () => {
-    assert.match(threadView, /goal[^\n]*completion|completion[^\n]*goal/i);
-    assert.match(threadView, /%|percent/i);
+    assert.match(threadView, /const goals = \(\) => props\.tasks \?\?/);
+    assert.match(threadView, /const activeGoals = \(\) => goals\(\)\.filter\(\(goal\) => goal\.state !== "closed"\)/);
+    assert.match(threadView, /const goalCompletion = \(goal: AgentTask\)/);
+    assert.match(threadView, /Math\.max\(0, Math\.min\(100, Number\(value\)\)\)/);
+    assert.match(threadView, /aria-label=\{`Completion \$\{goal\.state === "closed" \? COMPLETED_GOAL_COMPLETION : `\$\{goalCompletion\(goal\)\}%`\}`\}/);
   });
 
   it("keeps completed goals visible with 100 percent completion", () => {
-    assert.match(threadView, /completedGoals\(\)/);
+    assert.match(threadView, /const completedGoals = \(\) => goals\(\)\.filter\(\(goal\) => goal\.state === "closed"\)/);
+    assert.match(threadView, /goalGroup\(\) === "active" \? activeGoals\(\) : completedGoals\(\)/);
     assert.match(threadView, /goal\.state === "closed" \? COMPLETED_GOAL_COMPLETION/);
     assert.match(threadView, /100\s*%|100%/);
   });
