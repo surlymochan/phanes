@@ -106,10 +106,17 @@ class PiIsolationTests(unittest.TestCase):
                 expected_index = subprocess.check_output(
                     ['git', '-C', str(work), 'rev-parse', '--path-format=absolute', '--git-path', 'index'],
                     text=True).strip()
-                self.assertEqual(json.loads(result.stdout), {
+                payload = json.loads(result.stdout)
+                self.assertEqual({k: payload[k] for k in ('git', 'node', 'node_path', 'parent', 'index')}, {
                     'git': 0, 'node': 0, 'node_path': '/node/bin/node', 'parent': 'ok',
-                    'add': 0, 'index': expected_index, 'add_error': '',
-                    'update_ref': 0, 'ref_error': ''})
+                    'index': expected_index})
+                # Preserve the existing sandbox policy: shared Git metadata is read-only.
+                self.assertEqual(payload['add'], 128, payload)
+                self.assertIn(expected_index + '.lock', payload['add_error'])
+                self.assertIn('Read-only file system', payload['add_error'])
+                self.assertEqual(payload['update_ref'], 128, payload)
+                self.assertIn('refs/swrm-test', payload['ref_error'])
+                self.assertIn('Read-only file system', payload['ref_error'])
             finally:
                 sock.close()
 

@@ -221,12 +221,19 @@ class WorkspaceTest(unittest.TestCase):
         # Exercise the checkout running this test: its .git file may point to metadata
         # outside the sandbox's writable roots.
         root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+        def git_path(path):
+            return subprocess.check_output(
+                ["git", "rev-parse", "--path-format=absolute", "--git-path", path],
+                cwd=root, text=True).strip()
+        index_path = git_path("index")
         probe = tempfile.NamedTemporaryFile(prefix=".l2-1872-", dir=root, delete=False)
         probe_path = probe.name
         probe.close()
         try:
             staged = subprocess.run(["git", "add", "--", probe_path], cwd=root,
                                     capture_output=True, text=True)
+            print(f"git add rc={staged.returncode} worktree={root} index={index_path} "
+                  f"stderr={staged.stderr.strip()}", flush=True)
             with self.subTest(operation="git add"):
                 try:
                     self.assertEqual(staged.returncode, 0,
@@ -239,6 +246,8 @@ class WorkspaceTest(unittest.TestCase):
             ref = f"refs/l2-1872-probe/{os.getpid()}"
             updated = subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=root,
                                      capture_output=True, text=True)
+            print(f"git update-ref rc={updated.returncode} worktree={root} ref={git_path(ref)} "
+                  f"stderr={updated.stderr.strip()}", flush=True)
             with self.subTest(operation="git update-ref"):
                 try:
                     self.assertEqual(updated.returncode, 0,
