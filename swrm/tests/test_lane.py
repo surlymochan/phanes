@@ -10,6 +10,8 @@ import tempfile
 import time
 import unittest
 
+import _load
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "swrm"
@@ -581,6 +583,34 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "gemini-3.8-flash-medium")
         self.assertEqual(calls[0][calls[0].index("--output-format") + 1], "stream-json")
 
+    def test_pi_spawn_failure_keeps_the_executor_stderr_in_the_failed_run(self):
+        """A pi lane that dies before the session exists must keep the agent-side error string."""
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_STDERR inspect the fixture")
+        self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        tail = result["attempts"][-1]["error_tail"]
+        self.assertEqual(result["attempts"][-1]["error_class"], "exec_error")
+        self.assertIn("isolated Pi broker socket unavailable", tail)
+        events = (self.data / "runs" / run_id / "events.1.pi.jsonl").read_text()
+        self.assertIn("isolated Pi broker socket unavailable", events)
+
+    def test_pi_run_records_the_spawn_path_it_was_started_with(self):
+        """The run must say how pi was started, not only that it failed (Refs #1747)."""
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("LANE_TEST_EXIT_WITH_STDERR inspect the fixture")
+        self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        spawn = result["attempts"][-1].get("spawn")
+        self.assertIsNotNone(spawn)
+        self.assertEqual(spawn["wrapper"], str(FIXTURES / "fake_pi_rpc.py"))
+        self.assertEqual(len(spawn["wrapper_sha256"]), 64)
+        self.assertIn("broker", spawn)
+        status = json.loads((self.data / "runs" / run_id / "status.json").read_text())
+        self.assertEqual(status["spawn"]["wrapper"], spawn["wrapper"])
+
     def test_agy_steer_aborts_the_process_and_resumes_the_conversation(self):
         self.set_config("agy")
         self.start_lane()
@@ -842,6 +872,25 @@ class LaneTests(unittest.TestCase):
         self.assertTrue(any(event.get("type") == "codex_app_server_restarted" for event in events))
         pid_after = self.lane_state()["child_pid"]
         self.assertNotEqual(pid_before, pid_after)
+
+
+class PiSpawnEvidenceTests(unittest.TestCase):
+    def test_broker_existence_requires_a_successful_stat(self):
+        xs = _load.load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            regular = root / "regular"
+            regular.write_text("not a socket")
+            dangling = root / "dangling"
+            dangling.symlink_to(root / "missing")
+            for path, exists in ((root / "missing", False), (regular, True), (dangling, False)):
+                with self.subTest(path=path.name):
+                    spawn = xs.lane_pi_spawn_evidence(str(CLI), {
+                        "OPENSWARM_PI_BROKER_SOCKET": str(path),
+                    })
+                    self.assertEqual(spawn["broker"], {
+                        "path": str(path), "exists": exists, "is_socket": False,
+                    })
 
 
 def process_alive(pid):

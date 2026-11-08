@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -18,28 +19,121 @@ parser.add_argument('--session-dir')
 parser.add_argument('--provider', required=True)
 parser.add_argument('--model', required=True)
 parser.add_argument('--tools', default='read,bash,edit,write,grep,find,ls')
+parser.add_argument('--preflight', action='store_true',
+                    help='report the spawn preconditions as JSON and exit without starting pi')
 parser.add_argument('prompt', nargs='?')
 args = parser.parse_args()
 model = os.environ.get('OPENSWARM_PI_ISOLATED_MODEL', 'MiniMax-M3.1-Flash')
 runtime = os.path.realpath(os.environ.get('OPENSWARM_PI_RUNTIME', ''))
-broker = os.path.realpath(os.environ.get('OPENSWARM_PI_BROKER_SOCKET', ''))
+broker_value = os.environ.get('OPENSWARM_PI_BROKER_SOCKET', '').strip()
+broker = os.path.realpath(broker_value) if broker_value else ''
 cwd = os.path.realpath(os.getcwd())
 root_query = subprocess.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'],
                             capture_output=True, text=True, timeout=10)
 worktree = os.path.realpath(root_query.stdout.strip()) if root_query.returncode == 0 else cwd
-if args.provider != 'minimax-cn' or args.model != model or args.tools != 'read,bash,edit,write,grep,find,ls':
-    sys.exit('isolated Pi rejected provider, model or tool configuration')
-if (args.mode == 'json' and (not args.p or args.prompt is None)) or (args.mode == 'rpc' and (args.p or args.prompt is not None)):
-    sys.exit('isolated Pi rejected mode or prompt configuration')
-if not shutil.which('bwrap') or not shutil.which('socat') or not os.path.isfile(os.path.join(runtime, 'node_modules/.bin/pi')):
-    sys.exit('isolated Pi dependencies unavailable')
-try:
-    if not stat.S_ISSOCK(os.stat(broker).st_mode):
-        sys.exit('isolated Pi broker socket unavailable')
-except OSError:
-    sys.exit('isolated Pi broker socket unavailable')
-if worktree == '/' or not os.path.isdir(worktree):
-    sys.exit('isolated Pi requires a dedicated worktree')
+
+ISOLATED_TOOLS = 'read,bash,edit,write,grep,find,ls'
+
+
+def broker_socket_live(path, timeout=1.0):
+    """Whether a unix socket still accepts connections (a stale socket file does not)."""
+    probe = socket.socket(socket.AF_UNIX)
+    try:
+        probe.settimeout(timeout)
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def preflight(provider, model_name, tools, mode, prompt, prompt_flag):
+    """Evaluate the spawn preconditions in the order the wrapper checks them.
+
+    Returns (error, findings).  `error` is the message the wrapper exits with, or None when
+    every precondition holds.  The findings name the resolved paths, so a failed spawn says
+    which part of the environment was wrong instead of only "unavailable".
+    """
+    runtime_value = os.environ.get('OPENSWARM_PI_RUNTIME', '').strip()
+    broker_name = os.environ.get('OPENSWARM_PI_BROKER_SOCKET', '').strip()
+    sandbox_value = os.environ.get('OPENSWARM_PI_SANDBOX_TMP', '').strip()
+    pi_binary = os.path.join(runtime_value, 'node_modules/.bin/pi') if runtime_value else ''
+    bwrap, socat = shutil.which('bwrap'), shutil.which('socat')
+    findings = {
+        'provider': provider, 'model': model_name, 'expected_model': model, 'tools': tools, 'mode': mode,
+        'runtime': {'env': 'OPENSWARM_PI_RUNTIME', 'path': runtime_value or None,
+                    'pi_binary': pi_binary if os.path.isfile(pi_binary) else None,
+                    'ok': bool(runtime_value) and os.path.isfile(pi_binary)},
+        'sandbox': {'bwrap': bwrap, 'socat': socat, 'ok': bool(bwrap and socat)},
+        'broker': {'env': 'OPENSWARM_PI_BROKER_SOCKET', 'path': broker_name or None,
+                   'exists': False, 'is_socket': False, 'live': None},
+        'worktree': {'path': worktree, 'ok': worktree != '/' and os.path.isdir(worktree)},
+        'sandbox_tmp': {'env': 'OPENSWARM_PI_SANDBOX_TMP', 'path': sandbox_value or None, 'ok': True},
+    }
+    if provider != 'minimax-cn' or model_name != model or tools != ISOLATED_TOOLS:
+        findings['guard'] = 'configuration'
+        findings['error'] = ('isolated Pi rejected provider, model or tool configuration: '
+                             f'provider={provider} model={model_name} expected_model={model} '
+                             f'tools={tools} expected_tools={ISOLATED_TOOLS}')
+        return findings['error'], findings
+    if (mode == 'json' and (not prompt_flag or prompt is None)) or (mode == 'rpc' and (prompt_flag or prompt is not None)):
+        findings['guard'] = 'mode'
+        findings['error'] = 'isolated Pi rejected mode or prompt configuration'
+        return findings['error'], findings
+    if not bwrap or not socat or not findings['runtime']['ok']:
+        findings['guard'] = 'dependencies'
+        findings['error'] = ('isolated Pi dependencies unavailable: '
+                             f'bwrap={bwrap or "missing"} socat={socat or "missing"} '
+                             f'pi_runtime={runtime_value or "OPENSWARM_PI_RUNTIME unset"}')
+        return findings['error'], findings
+    if not broker_name:
+        findings['guard'] = 'broker_socket'
+        findings['error'] = ('isolated Pi broker socket unavailable: OPENSWARM_PI_BROKER_SOCKET is not set '
+                             '(the host broker socket must be named explicitly)')
+        return findings['error'], findings
+    try:
+        broker_stat = os.stat(broker_name)
+        findings['broker']['exists'] = True
+        findings['broker']['is_socket'] = stat.S_ISSOCK(broker_stat.st_mode)
+    except OSError:
+        pass
+    if not findings['broker']['is_socket']:
+        findings['guard'] = 'broker_socket'
+        findings['error'] = (f'isolated Pi broker socket unavailable: {broker_name} is not a unix socket '
+                             '(OPENSWARM_PI_BROKER_SOCKET must name the host broker socket)')
+        return findings['error'], findings
+    if not findings['worktree']['ok']:
+        findings['guard'] = 'worktree'
+        findings['error'] = f'isolated Pi requires a dedicated worktree: {worktree}'
+        return findings['error'], findings
+    if sandbox_value and not os.path.isabs(sandbox_value):
+        findings['guard'] = 'sandbox_tmp'
+        findings['error'] = 'OPENSWARM_PI_SANDBOX_TMP must be an absolute path'
+        return findings['error'], findings
+    if sandbox_value and os.path.realpath(sandbox_value) == '/':
+        findings['guard'] = 'sandbox_tmp'
+        findings['error'] = 'OPENSWARM_PI_SANDBOX_TMP must not be /'
+        return findings['error'], findings
+    if args.preflight:
+        # A socket file can outlive its broker; a dead one fails later, inside the sandbox.
+        findings['broker']['live'] = broker_socket_live(broker_name)
+        if not findings['broker']['live']:
+            findings['guard'] = 'broker_socket'
+            findings['error'] = (f'isolated Pi broker socket is not live: {broker_name} '
+                                 '(the socket file exists but nothing is listening on it)')
+            return findings['error'], findings
+    findings['guard'] = None
+    findings['error'] = None
+    return None, findings
+
+
+error, findings = preflight(args.provider, args.model, args.tools, args.mode, args.prompt, args.p)
+if args.preflight:
+    print(json.dumps(findings, indent=2, ensure_ascii=False))
+    sys.exit(1 if error else 0)
+if error:
+    sys.exit(error)
 config = {'providers': {'minimax-sandbox': {'baseUrl': 'http://127.0.0.1:18765',
           'api': 'anthropic-messages', 'apiKey': 'isolated-placeholder', 'models': [{
               'id': model, 'name': model, 'reasoning': True, 'input': ['text'],
