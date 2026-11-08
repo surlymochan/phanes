@@ -1,5 +1,6 @@
 """Peer reviews use stubbed reviewers and local git fixtures only."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -96,10 +97,10 @@ class PeerReviewTests(unittest.TestCase):
         saved = json.loads((self.run_dir / "review.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["by"], "pi:pi-model")
         rules = invoke.call_args.args[1].split("\n\nRun:", 1)[0]
-        rules_hash = xs.review_rules_hash(rules)
-        self.assertEqual(xs.review_rules_hash(rules), rules_hash)
+        rules_hash = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12], rules_hash)
         changed_rules = rules[:-1] + (" " if rules[-1] != " " else "!")
-        self.assertNotEqual(xs.review_rules_hash(changed_rules), rules_hash)
+        self.assertNotEqual(hashlib.sha256(changed_rules.encode("utf-8")).hexdigest()[:12], rules_hash)
         self.assertEqual(saved.get("rules_hash"), rules_hash)
         ledger = json.loads(Path(xs.LEDGER).read_text(encoding="utf-8"))
         self.assertEqual(ledger["peer_review"], {"by": "pi:pi-model", "verdict": "changes",
@@ -110,6 +111,40 @@ class PeerReviewTests(unittest.TestCase):
         rules = "Review only concrete bugs.\nReturn JSON."
         self.assertEqual(xs.review_rules_hash(rules), xs.review_rules_hash(rules))
         self.assertNotEqual(xs.review_rules_hash(rules), xs.review_rules_hash(rules + "!"))
+
+    def test_review_rules_hash_uses_twelve_sha256_hex_digits_of_utf8(self):
+        for rules in ("", "abc", "Review only concrete bugs.\nReturn JSON.", "评审规则\n只报告缺陷。"):
+            with self.subTest(rules=rules):
+                expected = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+                actual = xs.review_rules_hash(rules)
+                self.assertEqual(actual, expected)
+                self.assertRegex(actual, r"^[0-9a-f]{12}$")
+
+    def test_review_event_hash_tracks_rules_but_not_run_context(self):
+        original_prompt = xs.peer_review_prompt
+        rules = original_prompt("run-1", "base", "branch", "diff").split("\n\nRun:", 1)[0]
+        changed_rules = rules[:-1] + "!"
+        payload = {"findings": [], "verdict": "approve"}
+        contexts = ((str(self.repo), "base-a", "branch-a", "first diff"),
+                    (str(self.repo), "base-b", "branch-b", "different diff\n\nRun: untrusted"))
+        hashes = []
+        with mock.patch.object(xs, "review_available", return_value={
+                "pi": {"backend": "pi", "binary": "/fake/pi"}}), \
+                mock.patch.object(xs, "invoke_reviewer", return_value=payload) as invoke:
+            for context, active_rules in ((contexts[0], rules), (contexts[1], rules),
+                                          (contexts[1], changed_rules)):
+                prompt = original_prompt("run-1", *context[1:])
+                prompt = active_rules + prompt[len(rules):]
+                with mock.patch.object(xs, "review_diff", return_value=context), \
+                        mock.patch.object(xs, "peer_review_prompt", return_value=prompt):
+                    xs.perform_peer_review("run-1", "pi", {})
+                self.assertEqual(invoke.call_args.args[1], prompt)
+                saved = json.loads((self.run_dir / "review.json").read_text(encoding="utf-8"))
+                expected = hashlib.sha256(active_rules.encode("utf-8")).hexdigest()[:12]
+                self.assertEqual(saved["rules_hash"], expected)
+                hashes.append(saved["rules_hash"])
+        self.assertEqual(hashes[0], hashes[1])
+        self.assertNotEqual(hashes[1], hashes[2])
 
     def test_family_selection_uses_policy_order_and_opposite_family(self):
         available = {backend: {"backend": backend, "binary": f"/fake/{backend}"}
