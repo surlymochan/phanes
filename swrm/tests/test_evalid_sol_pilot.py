@@ -194,6 +194,28 @@ class EvalidSolPilotTests(unittest.TestCase):
             "samples": [{"execution_seconds": 60.0, "run_id": "spec-1"}],
         })
 
+    def test_spec_artifact_in_subdirectory_enables_pool(self):
+        self.receipt(artifacts=[{"name": "deliverables/spec.json", "sha256": "a" * 64}])
+        rc, report = self.evaluate()
+        self.assertEqual(rc, 0)
+        self.assertEqual(report, {
+            "decision": "enable",
+            "sample_count": 1,
+            "reasons": [],
+            "samples": [{"execution_seconds": 55.0, "run_id": "spec-1"}],
+        })
+
+    def test_nested_spec_artifact_still_requires_valid_digest(self):
+        self.receipt(artifacts=[{"name": "deliverables/spec.json", "sha256": "invalid"}])
+        self.assert_rejected_for("missing_spec_artifact")
+
+    def test_artifact_name_requires_string_and_exact_basename(self):
+        self.receipt(artifacts=[{"name": name, "sha256": "a" * 64} for name in (
+            None, 42, ["spec.json"], {"name": "spec.json"},
+            "deliverables/not-spec.json", "deliverables/spec.json.bak",
+            "deliverables/spec.json/other.json")])
+        self.assert_rejected_for("missing_spec_artifact")
+
     def test_missing_spec_artifact_and_insufficient_samples_are_stable_reasons(self):
         self.receipt(artifacts=[])
         completed = subprocess.run(

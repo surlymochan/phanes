@@ -59,7 +59,8 @@ def validate_receipt(receipt, run_id, max_execution_seconds):
         reasons.append("invalid_usage")
     artifacts = receipt.get("artifacts")
     if not isinstance(artifacts, list) or not any(
-            isinstance(item, dict) and item.get("name") == "spec.json"
+            isinstance(item, dict) and isinstance(item.get("name"), str)
+            and Path(item["name"]).name == "spec.json"
             and isinstance(item.get("sha256"), str)
             and re.fullmatch(r"[0-9a-fA-F]{64}", item["sha256"])
             for item in artifacts):
