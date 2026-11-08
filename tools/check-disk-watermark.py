@@ -22,10 +22,12 @@ Covered contract:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -185,6 +187,15 @@ def check_dispatch_gate(base):
         assert f"host:{HOST}" in dispatcher.paused_scopes(), dispatcher.paused_scopes()
         assert dispatcher.lane_paused("CX2", {"host": HOST}), \
             "the dispatcher must hold a lane of the blocked host"
+        # A stopped guard and a health sweep must not reopen a full host.
+        (pause_dir / MARKER).unlink()
+        state_file = pause_dir / f"disk-watermark-{HOST}.json"
+        record = json.loads(state_file.read_text())
+        record["updated_at"] = time.time() - 7 * 24 * 3600
+        state_file.write_text(json.dumps(record))
+        assert dispatcher.lane_paused("CX2", {"host": HOST}), \
+            "an old blocked state must hold the gate until measured recovery"
+        assert f"host:{HOST}" in dispatcher.paused_scopes()
         env["PATH"] = fake_ssh(base, DF_RECOVERED)
         done = run_guard(base, pause_dir, brain_log, env)
         assert done.returncode == 0, done.stderr

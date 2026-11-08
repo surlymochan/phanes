@@ -24,7 +24,7 @@ pair must always be installed together (`tools/install-disk-watermark-guard.sh`)
 Usage:
 
     python3 tools/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
-        --brain-log ~/phanes-ctl/brain.log --host govpn2
+        --brain-log /workspace/phanes/brain/log.md --host govpn2
     python3 tools/disk-watermark-guard.py --loop --host govpn2
 """
 
@@ -270,7 +270,7 @@ def main(argv=None):
         description="Measure a remote lane host and pause its lanes when the disk is too full.")
     parser.add_argument("--pause-dir", default=os.path.join(home, "phanes-ctl", "autodispatch"),
                         help="the directory with the PAUSE-HOST-* markers")
-    parser.add_argument("--brain-log", default=os.path.join(home, "phanes-ctl", "brain.log"),
+    parser.add_argument("--brain-log", default=os.environ.get("DISK_WATERMARK_BRAIN_LOG", "/workspace/phanes/brain/log.md"),
                         help="the brain log the alert rows are appended to")
     parser.add_argument("--path", default="/",
                         help="the remote filesystem to measure")

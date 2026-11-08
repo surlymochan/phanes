@@ -111,11 +111,11 @@ def marker_scope(name):
 # dispatcher reads the state file of the guard as well: that is an independent gate that keeps the
 # lane closed for the whole hysteresis band, even between two guard ticks.
 DISK_WATERMARK_STATE_PREFIX = "disk-watermark-"
-DISK_WATERMARK_MAX_AGE = 1800     # seconds; the state of a dead guard does not block forever
 
 def disk_watermark_states(now=None):
     """The disk watermark states of the guard: one record per measured lane host."""
-    now = time.time() if now is None else now
+    # A blocked host stays blocked until the guard records a measured recovery.
+    # A stopped guard and a missing marker are not evidence of free disk space.
     states = {}
     try: names = sorted(os.listdir(D))
     except OSError: return states
@@ -129,7 +129,6 @@ def disk_watermark_states(now=None):
         if not isinstance(host, str) or not host.strip(): continue
         updated = record.get("updated_at")
         if isinstance(updated, bool) or not isinstance(updated, (int, float)): continue
-        if now - updated > DISK_WATERMARK_MAX_AGE: continue
         states[host.strip()] = record
     return states
 

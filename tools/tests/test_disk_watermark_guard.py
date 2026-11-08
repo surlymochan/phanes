@@ -21,6 +21,7 @@ worktree. The suite stays red until the #1666 implementation lands.
 
 import contextlib
 import importlib.util
+import json
 import os
 import re
 import signal
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -252,6 +254,20 @@ class DiskUsageProbeTests(unittest.TestCase):
             self.assertGreater(sizes["allocated"], sizes["sparse"],
                                f"the ranking must use the allocated blocks, not the apparent "
                                f"size: {sizes}")
+
+    def test_probe_counts_files_below_the_old_depth_limit(self):
+        with scratch() as tmp:
+            root = Path(tmp)
+            deep = root / "large" / "a" / "b" / "c" / "d"
+            deep.mkdir(parents=True)
+            (deep / "payload").write_bytes(b"x" * (1024 * 1024))
+            (root / "small").mkdir()
+            (root / "small" / "payload").write_bytes(b"x" * 65536)
+            done = run_probe(root)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            sizes = parse_sizes(done.stdout)
+            self.assertGreaterEqual(sizes["large"], (deep / "payload").stat().st_blocks * 512)
+            self.assertGreater(sizes["large"], sizes["small"])
 
     def test_probe_output_is_reproducible(self):
         with scratch() as tmp:
@@ -531,8 +547,15 @@ class DispatchTickTests(unittest.TestCase):
             done = run_guard(pause_dir, brain_log, fake.env)
             self.assertEqual(done.returncode, 0, done.stderr)
             (pause_dir / PAUSE_MARKER).unlink()
+            # A stopped guard must keep the gate closed beyond the old 30-minute TTL.
+            state_file = pause_dir / f"disk-watermark-{HOST}.json"
+            record = json.loads(state_file.read_text())
+            record["updated_at"] = time.time() - 1801
+            state_file.write_text(json.dumps(record))
 
             dispatcher = load_autodispatch()
+            self.assertTrue(dispatcher.lane_paused("CX2", {"host": HOST}))
+            self.assertIn(f"host:{HOST}", dispatcher.paused_scopes())
             dispatcher.BRAIN_LOG = str(brain_log)
             dispatched = []
             card = {"n": 1666, "title": "card", "body": "body", "labels": [], "prio": 3,
@@ -606,6 +629,7 @@ echo "status:"
         require(INSTALLER, "the disk watermark guard installer")
         environment = dict(env)
         environment["HOME"] = str(home)
+        environment["DISK_WATERMARK_BRAIN_LOG"] = str(Path(home) / "workspace" / "brain" / "log.md")
         return subprocess.run(["bash", str(INSTALLER), str(ctl)],
                               capture_output=True, text=True, env=environment, timeout=180)
 
@@ -634,8 +658,11 @@ echo "status:"
                             "the resident guard must measure the remote host")
             self.assertTrue(self.wait_for(lambda: list(ctl.rglob(PAUSE_MARKER))),
                             f"the resident guard must pause {HOST}: {done.stdout}\n{done.stderr}")
-            self.assertTrue(self.wait_for(lambda: self.brain_rows(ctl)),
-                            "the resident guard must write the alert into the brain log")
+            brain_log = home / "workspace" / "brain" / "log.md"
+            self.assertTrue(self.wait_for(lambda: any("state=block" in row
+                                                    for row in log_lines(brain_log))),
+                            "the resident guard must write the alert into the configured brain log")
+            self.assertFalse((ctl / "brain.log").exists())
 
     def test_installer_replaces_the_guard_that_is_still_running(self):
         with scratch() as tmp:
@@ -775,6 +802,21 @@ class ControlPlaneWiringTests(unittest.TestCase):
         text = START_EXAMPLE.read_text()
         self.assertIn("disk-watermark", text,
                       "the control plane start script must start the disk watermark guard")
+
+    def test_default_alerts_use_the_dispatcher_brain_log(self):
+        dispatcher = load_autodispatch()
+        spec = importlib.util.spec_from_file_location("disk_guard_default_log", GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        environment = dict(os.environ)
+        environment.pop("DISK_WATERMARK_BRAIN_LOG", None)
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(guard, "run_once", return_value=0) as run_once:
+            self.assertEqual(guard.main([]), 0)
+        self.assertEqual(run_once.call_args.args[0].brain_log, dispatcher.BRAIN_LOG)
+        for path in (INSTALLER, START_EXAMPLE):
+            self.assertIn("${DISK_WATERMARK_BRAIN_LOG:-" + dispatcher.BRAIN_LOG + "}",
+                          path.read_text(), f"{path} must wire the actual dispatcher brain log")
 
     def test_ctl_boot_documents_the_guard_and_its_probe(self):
         require(CTL_BOOT, "the control plane boot documentation")

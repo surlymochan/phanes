@@ -31,7 +31,7 @@ import sys
 BLOCK_SIZE = 512      # st_blocks is counted in 512 byte units
 DF_BLOCK = 1024       # df -Pk reports 1K blocks
 DEFAULT_TOP = 10
-DEFAULT_MAX_DEPTH = 3
+DEFAULT_MAX_DEPTH = None
 
 
 def parse_df(text, path=None):
@@ -100,7 +100,7 @@ def walk_usage(root, max_depth=DEFAULT_MAX_DEPTH):
     stack = [(root, 1)]
     while stack:
         current, depth = stack.pop()
-        if depth > max_depth:
+        if max_depth is not None and depth > max_depth:
             continue
         try:
             entries = sorted(os.scandir(current), key=lambda entry: entry.name)
@@ -159,7 +159,7 @@ def main(argv=None):
     parser.add_argument("--top", type=int, default=DEFAULT_TOP,
                         help="how many directories to list")
     parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH,
-                        help="how deep the directory walk goes")
+                        help="limit the directory walk depth (default: unlimited)")
     args = parser.parse_args(argv)
     root = args.path_option or args.root or "/"
     try:
