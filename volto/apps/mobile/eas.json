@@ -31,9 +31,19 @@
       "env": {
         "EXPO_PUBLIC_APP_ENV": "production"
       }
+    },
+    "self-hosted": {
+      "bun": "1.4.2",
+      "autoIncrement": true,
+      "channel": "self-hosted",
+      "environment": "self-hosted",
+      "env": {
+        "EXPO_PUBLIC_APP_ENV": "production"
+      }
     }
   },
   "submit": {
-    "production": {}
+    "production": {},
+    "self-hosted": {}
   }
 }

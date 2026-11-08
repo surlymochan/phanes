@@ -346,6 +346,7 @@ EAS CLI prompts for signing credentials when needed.
 The build loads `Plain text` and `Sensitive` variables from the EAS `production` environment.
 Variables with `Secret` visibility must be supplied in the local environment.
 See [OpenPanel configuration](#openpanel-product-analytics) for the required analytics variables.
+To use a self-hosted account service, see [Self-hosted account service](#self-hosted-account-service).
 
 To upload, open Apple's Transporter app, sign in, add the `.ipa`, and select **Deliver**.
 After Apple processes the build, select it in App Store Connect under **TestFlight** and assign
@@ -519,6 +520,54 @@ A failed post does not change the release: re-run the `Post on Discord` job. A r
 successful post posts the message again. To post a version again, or one that a push did not post,
 run `gh workflow run mobile-release-announcement.yml --ref main -f version=x.y.z`. Both stores must
 have the version in `apps/mobile/CHANGELOG.md`, and the file must be for that version.
+
+## Self-hosted account service
+
+The phone signs in to an account service. That service holds the account, sends the one-time code of
+the email sign-in, and hands out the session. The hosted account service is `https://api.openbot.run`.
+A build can name another account service, so a self-compiled build or a TestFlight build can use a
+self-hosted account service.
+
+### Name the account service in the build
+
+| Variable | Value |
+| --- | --- |
+| `EXPO_PUBLIC_VOLTO_API_URL` | The account service address, for example `https://api.example.com` |
+| `EXPO_PUBLIC_OPENBOT_API_URL` | The old name of the same variable. It is used when the new name is not set, or does not hold a valid address |
+
+The address must be an origin: a scheme, a host, and an optional port, with no path. Only `https` is
+allowed. `http` is allowed for `localhost`, `127.0.0.1`, and private network addresses
+(`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). An address that is not allowed is ignored, and
+the build keeps the hosted account service.
+
+The value is part of the app bundle. Do not put a secret in it.
+
+### Build with a self-hosted account service
+
+1. Use your own Expo project for the build. Set `owner` and `extra.eas.projectId` in `app.json` to
+   your project, and set `updates.url` to your project, so the build does not receive updates from
+   the hosted project.
+2. In the Expo dashboard, open your project, then **Environment variables**. Add an environment named
+   `self-hosted`, and add `EXPO_PUBLIC_VOLTO_API_URL` to it. Use `Plain text` or `Sensitive`
+   visibility. A `Secret` variable is not available to a local build.
+3. Build with the `self-hosted` profile. It reads the account service address from the `self-hosted`
+   EAS environment, and it keeps `EXPO_PUBLIC_APP_ENV=production`.
+
+   ```bash
+   cd apps/mobile
+   bunx eas-cli@latest build --profile self-hosted --platform ios
+   ```
+
+   For a build on your own Mac, add `--local`. The command writes the `.ipa` file. See
+   [Local TestFlight build](#local-testflight-build) for the signing and upload steps.
+4. Install the build on the phone, and sign in with an email address. The code comes from your SMTP
+   account. The phone then uses your account service for the session, the server directory, and the
+   profile.
+
+A build that names no account service keeps the hosted account service. The `production` profile
+keeps the hosted account service, so use the `self-hosted` profile for a self-hosted service. The
+desktop app names its account service with `VOLTO_AUTH_API_URL`. See
+[self-hosting](../../docs/self-hosting.md).
 
 ## OpenPanel product analytics
 
