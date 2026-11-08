@@ -58,9 +58,27 @@ def extract_result_object(text: str) -> dict | None:
             obj, _end = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and obj.get("id"):
+        if _is_result_receipt(obj):
             found = obj
     return found
+
+
+def _is_result_receipt(obj: object) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    if not isinstance(obj.get("id"), str) or not obj["id"].strip():
+        return False
+    if "status" in obj and not isinstance(obj["status"], str):
+        return False
+    # Run receipts carry at least one field that does not appear on generic
+    # log/telemetry objects. run_dir and attempts also cover early failures
+    # where workspace preparation did not complete.
+    return (
+        isinstance(obj.get("run_dir"), str)
+        or isinstance(obj.get("workspace"), dict)
+        or isinstance(obj.get("attempts"), list)
+        or "result" in obj
+    )
 
 
 def executor_calls(result: dict) -> list[dict]:
