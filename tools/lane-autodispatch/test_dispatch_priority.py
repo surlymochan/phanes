@@ -172,6 +172,96 @@ class DispatchPriorityTest(unittest.TestCase):
             returned = AUTODISPATCH.queue(state)
         self.assertEqual(returned[0]["pool_entered_at"], self.NOW + 7200)
 
+    def test_full_pool_read_keeps_waiting_cards_beyond_first_page(self):
+        large = {"number": 1705, "title": "waiting large", "body": "预算：90",
+                 "labels": ["lane-ready"]}
+        for count in (100, 101, 200, 251):
+            with self.subTest(count=count):
+                state = {"_pool_entered_at": {"1705": self.NOW - 3600}}
+                # Include excluded rows: completeness depends on raw rows, not on
+                # how many cards remain after eligibility checks.
+                rows = [{"number": n, "title": "other", "body": "预算：30",
+                         "labels": ["lane-ready", "in-progress"]}
+                        for n in range(1, count)] + [large]
+
+                def gh(args, timeout=60):
+                    limit = int(args[args.index("--limit") + 1])
+                    return 0, json.dumps(rows[:limit]), ""
+
+                with patch.object(AUTODISPATCH, "gh", side_effect=gh), \
+                        patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
+                    queued = AUTODISPATCH.queue(state)
+                self.assertEqual([item["n"] for item in queued], [1705])
+                self.assertEqual(queued[0]["pool_entered_at"], self.NOW - 3600)
+                self.assertEqual(state["_pool_entered_at"]["1705"], self.NOW - 3600)
+
+    def test_incomplete_pool_read_does_not_replace_clocks(self):
+        state = {"_pool_entered_at": {"1705": self.NOW - 3600}}
+        rows = [{"number": n, "title": "small", "body": "预算：30",
+                 "labels": ["lane-ready"]} for n in range(1, 101)]
+        responses = [(0, json.dumps(rows), ""), (1, "", "next page unavailable")]
+        with patch.object(AUTODISPATCH, "gh", side_effect=responses):
+            with self.assertRaisesRegex(RuntimeError, "next page unavailable"):
+                AUTODISPATCH.queue(state)
+        self.assertEqual(state, {"_pool_entered_at": {"1705": self.NOW - 3600}})
+
+    def test_large_pool_preserves_wait_across_restarts_and_dispatches_top_score(self):
+        large = {"number": 1705, "title": "waiting large", "body": "预算：90",
+                 "labels": ["lane-ready"]}
+        rows, dispatched, reads = [large], [], []
+
+        def gh(args, timeout=60):
+            if args[:2] == ["issue", "list"]:
+                limit = int(args[args.index("--limit") + 1])
+                return 0, json.dumps(rows[:limit]), ""
+            item = next(i for i in rows if i["number"] == int(args[2]))
+            if args[:2] == ["issue", "view"]:
+                reads.append(item["number"])
+                return 0, json.dumps({**item, "state": "OPEN"}), ""
+            if args[:2] == ["issue", "edit"]:
+                item["labels"].append("in-progress")
+                return 0, "", ""
+            self.fail(f"unexpected GitHub command: {args}")
+
+        def dispatch(lane, cfg, item, base):
+            dispatched.append(item["n"])
+            return f"run-{item['n']}", None
+
+        scratch = Path(__file__).resolve().parents[2] / ".swrm-tmp"
+        scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root = Path(directory)
+            (root / "lanes.json").write_text(json.dumps({"CX10": {"host": "h", "backend": "codex"}}))
+            for index, elapsed in enumerate((0, 3600, 3660)):
+                if index == 1:
+                    rows[:0] = [{"number": n, "title": "new small", "body": "预算：30",
+                                 "labels": ["lane-ready"], "createdAt": "2026-11-01T00:00:00Z"}
+                                for n in range(1, 251)]
+                module = importlib.util.module_from_spec(SPEC)
+                SPEC.loader.exec_module(module)
+                reads.clear()
+                with ExitStack() as stack:
+                    replacements = {
+                        "D": directory, "gh": gh, "dispatch": dispatch,
+                        "sh": lambda *a, **k: (0, "a" * 40, ""),
+                        "remote": lambda *a: {"lane": "idle" if index == 2 else "busy"},
+                        "audit_switches": lambda: None,
+                        "paused_scopes": lambda: {"mint"},
+                        "log": lambda *a, **k: None,
+                    }
+                    for name, value in replacements.items():
+                        stack.enter_context(patch.object(module, name, value))
+                    stack.enter_context(patch.object(module.time, "time", return_value=self.NOW + elapsed))
+                    stack.enter_context(patch.object(module.sys, "argv", ["autodispatch.py", "--once"]))
+                    module.main()
+                state = json.loads((root / "state.json").read_text())
+                self.assertLessEqual(len(reads), module.FRESH_READ_BUDGET)
+                if index < 2:
+                    self.assertEqual(state["_pool_entered_at"].get("1705"), self.NOW)
+                else:
+                    self.assertNotIn("1705", state["_pool_entered_at"])
+            self.assertEqual(dispatched, [1705])
+
 
 if __name__ == "__main__":
     unittest.main()

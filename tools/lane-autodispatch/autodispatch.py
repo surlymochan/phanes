@@ -743,16 +743,23 @@ def remote(lane, cfg, run=""):
 def queue(state=None):
     """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
 
-    Only a successful pool read replaces the clocks. Missing/invalid cards lose their
-    clock so a later admission cannot inherit issue age or an earlier pool visit.
+    Only a successful, complete pool read replaces the clocks. Missing/invalid cards
+    lose their clock so a later admission cannot inherit an earlier pool visit.
     """
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
-    if rc: raise RuntimeError(err)
+    limit = 100
+    while True:
+        rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", str(limit), "--json", "number,title,labels,body,createdAt"])
+        if rc: raise RuntimeError(err)
+        issues = json.loads(out)
+        if len(issues) < limit: break
+        # gh paginates up to --limit. A full result may omit an older waiting
+        # card, so expand until exhaustion before replacing any admission clocks.
+        limit *= 2
     state = {} if state is None else state
     entered_at = state.get("_pool_entered_at", {})
     now = time.time()
     items = []
-    for i in json.loads(out):
+    for i in issues:
         labels = label_names(i)
         if not dispatchable_issue(i): continue
         pr = min([PRIO[l] for l in labels if l in PRIO] or [3])
@@ -1555,8 +1562,8 @@ def tick(lanes, state, last_warn):
             return False
         save_state(state)  # admission clocks survive --once and failures later in the tick
         for i in q: i["deps_ok"] = deps_met(i)
-        # one authoritative read per issue per tick, shared by all dispatches and the count
-        prefetch_labels([i["n"] for i in q])
+        # Dispatch reads labels in score order before freshen_queue uses the remaining
+        # read budget. Prefetching by issue number can starve a high-scoring old card.
         return True
 
     def base_commit():
