@@ -5,9 +5,12 @@ Every TICK seconds: finish runs that ended (push branch + open PR, relabel issue
 lane the next open issue labelled `lane-ready` (not `in-progress`), ordered p0 < p1 < p2 < unlabelled,
 then by issue number. Optional `backend:pi|agy|codex` label pins an issue to that executor family.
 State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/autodispatch.log + brain/log.md
-Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
-legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
-PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
+Pause: the swrm pause store ($OPENSWARM_PAUSE_DIR, else $OPENSWARM_HOME/pauses, written by
+`swrm pause <scope>` and by `swrm fleet health --apply`) and the legacy markers
+~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
+PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). All are read (Refs #1366).
+A hold that a program keeps under a scope of its own (`host:<host>@health`, written by
+`swrm fleet health --apply`) holds the host as well (Refs #1367).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
@@ -104,7 +107,14 @@ def ctl_state_dir():
     return directory
 
 def pause_store_dir():
-    """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
+    """The swrm pause store ($OPENSWARM_PAUSE_DIR, else $OPENSWARM_HOME/pauses), the new home of the pause switches.
+
+    The health check of the fleet (`swrm fleet health --apply`) writes its hold into the
+    same directory, so the dispatcher and the health check always agree on the pause
+    directory (Refs #1367)."""
+    configured = os.environ.get("OPENSWARM_PAUSE_DIR") or os.environ.get("XSWARM_PAUSE_DIR")
+    if configured:
+        return os.path.expanduser(configured)
     home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm"
     return os.path.join(os.path.expanduser(home), "pauses")
 
@@ -147,6 +157,16 @@ def pause_records(now=None):
         if scope is None: continue
         records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
                         "expires_at": None, "source": "marker"})
+    # The pause store carries the PAUSE markers of the health check too (the fleet health
+    # writes `PAUSE-HOST-<host>` there), so the markers of both directories are read.
+    if store != D:
+        try: names = sorted(os.listdir(store))
+        except OSError: names = []
+        for name in names:
+            scope = marker_scope(name)
+            if scope is None: continue
+            records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
+                            "expires_at": None, "source": "marker"})
     return sorted(records, key=lambda row: row["scope"])
 
 def paused_scopes(now=None):
@@ -159,9 +179,20 @@ def lane_paused(lane, cfg=None, scopes=None):
     if "all" in scopes: return True
     if f"lane:{lane}" in scopes: return True
     cfg = cfg or {}
-    if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
-    if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
+    if cfg.get("host") and holds_target(scopes, "host", cfg["host"]): return True
+    if cfg.get("backend") and holds_target(scopes, "backend", cfg["backend"]): return True
     return False
+
+def holds_target(scopes, kind, value):
+    """Whether a scope holds the dispatch target `kind:value`.
+
+    A hold that a program keeps under a scope of its own (`host:<host>@health`) holds the
+    target as well: the fleet health check never overwrites the pause of an operator, and
+    the release of the operator never frees the host (Refs #1367).
+    """
+    base = f"{kind}:{value}"
+    if base in scopes: return True
+    return any(str(scope).startswith(base + "@") for scope in scopes)
 
 def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
