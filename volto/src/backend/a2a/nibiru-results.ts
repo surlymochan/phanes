@@ -4,7 +4,7 @@ export interface NibiruTerminalResult {
   idempotencyKey: string;
   taskId: string;
   terminal: NibiruTerminalStatus;
-  /** Omitted from the payload if it contains the token or supplied provider diagnostics. */
+  /** Local output is untrusted and is never forwarded to Nibiru. */
   output?: string;
   /** Provider diagnostics are deliberately never forwarded to Nibiru. */
   providerError?: string;
@@ -52,14 +52,11 @@ export function createNibiruResultSender(options: NibiruResultSenderOptions): Ni
   const inFlight = new Map<string, Promise<void>>();
 
   async function deliver(result: NibiruTerminalResult): Promise<void> {
-    const output = result.output;
-    const unsafeOutput = [options.token, result.providerError].some(
-      (privateValue) => privateValue && output?.includes(privateValue),
-    );
+    // Allow only terminal metadata: provider diagnostics can appear in output even
+    // when providerError is absent or contains a different part of the error.
     const payload = JSON.stringify({
       taskId: result.taskId,
       terminal: result.terminal,
-      ...(output === undefined || unsafeOutput ? {} : { output }),
     });
     const headers: Record<string, string> = {
       "content-type": "application/json",

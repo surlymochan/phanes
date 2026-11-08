@@ -9,6 +9,39 @@ describe("Nibiru A2A terminal result delivery", () => {
     server = undefined;
   });
 
+  test("omits raw output when provider diagnostics are absent or incomplete", async () => {
+    const bodies: unknown[] = [];
+    const logs: string[] = [];
+    const output = "Upstream request failed: private provider endpoint and request details";
+    const sender = createNibiruResultSender({
+      endpoint: "https://nibiru.example/results",
+      log: (message) => logs.push(message),
+      fetch: (async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    for (const terminal of ["completed", "failed", "interrupted"] as const) {
+      for (const providerError of [undefined, "a different provider error", `${output}: more details`]) {
+        await sender.sendTerminalResult({
+          idempotencyKey: `${terminal}-${bodies.length}`,
+          taskId: `task-${terminal}`,
+          terminal,
+          output,
+          ...(providerError === undefined ? {} : { providerError }),
+        });
+      }
+    }
+
+    expect(bodies).toEqual(
+      ["completed", "failed", "interrupted"].flatMap((terminal) =>
+        Array.from({ length: 3 }, () => ({ taskId: `task-${terminal}`, terminal })),
+      ),
+    );
+    expect(JSON.stringify({ bodies, logs })).not.toContain(output);
+  });
+
   test("omits output containing credentials or provider diagnostics for every terminal status", async () => {
     const bodies: Array<{ output?: string }> = [];
     const logs: string[] = [];
@@ -43,7 +76,7 @@ describe("Nibiru A2A terminal result delivery", () => {
     expect(serialized).not.toContain("raw provider failure");
   });
 
-  test("preserves safe output and permits another callback after retry exhaustion", async () => {
+  test("sends terminal metadata and permits another callback after retry exhaustion", async () => {
     const bodies: unknown[] = [];
     const logs: string[] = [];
     const sender = createNibiruResultSender({
@@ -71,7 +104,7 @@ describe("Nibiru A2A terminal result delivery", () => {
     await sender.sendTerminalResult(result);
 
     expect(bodies).toHaveLength(3);
-    expect(bodies.every((body) => (body as { output: string }).output === result.output)).toBe(true);
+    expect(bodies).toEqual(Array.from({ length: 3 }, () => ({ taskId: result.taskId, terminal: result.terminal })));
     expect(logs.join("\n")).not.toContain("secret-test-token");
     expect(logs.join("\n")).not.toContain("raw provider failure");
   });
