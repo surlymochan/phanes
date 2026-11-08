@@ -292,6 +292,22 @@ class PeerReviewTests(unittest.TestCase):
         self.assertIn("--- attempt 1 ---", raw)
         self.assertIn("--- attempt 2 ---", raw)
 
+    def test_unparsable_review_response_fails_without_recording_a_verdict(self):
+        blank = " \n\t"
+        completed = [subprocess.CompletedProcess([], 0, blank, "") for _ in range(2)]
+        with mock.patch.object(xs, "review_available", return_value={
+                "agy": {"backend": "agy", "binary": "/fake/agy"}}), \
+                mock.patch.object(xs, "run_peer_reviewer", side_effect=completed) as run:
+            with self.assertRaisesRegex(RuntimeError, "after repair retry"):
+                xs.perform_peer_review("run-1", "agy", {})
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse((self.run_dir / "review.json").exists())
+        ledger = json.loads(Path(xs.LEDGER).read_text(encoding="utf-8"))
+        self.assertNotIn("peer_review", ledger)
+        for raw in (blank, json.dumps({"findings": []}), json.dumps({"verdict": "approve"})):
+            with self.subTest(raw=raw):
+                self.assertIsNone(xs.review_payload_from_text(raw))
+
     def test_agy_permission_denial_is_reported_without_a_paid_format_retry(self):
         output = json.dumps({"response": "", "denied_actions": [{"action": "command"}]})
         completed = subprocess.CompletedProcess([], 0, output, "agy: no output produced; command permission denied")
