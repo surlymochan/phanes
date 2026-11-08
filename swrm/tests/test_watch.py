@@ -73,8 +73,12 @@ class WatchTests(unittest.TestCase):
             rdir.mkdir(parents=True)
             events = rdir / "events.jsonl"
             events.write_text("\n".join(json.dumps(e) for e in [
+                update("agent_message_chunk", content={"type": "text", "text": "intermediate"}),
+                update("tool_call", toolCallId="one", title="inspect"),
+                update("agent_message_chunk", content={}),
+                {"type": "message_end", "message": "malformed message"},
                 {"type": "message_end", "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": "last message " + "x" * 250}]}},
+                    {"type": "text", "text": "final message " + "x" * 250}]}},
                 {"type": "tool_execution_start", "args": {"command": "git push"}},
                 {"type": "risk_blocked", "risk": "secret print", "command": "echo [redacted]"},
                 {"type": "error", "error": "expected test error"}]) + "\n")
@@ -92,9 +96,9 @@ class WatchTests(unittest.TestCase):
             self.assertTrue(any("ERROR:" in line for line in lines))
             beat = next(line for line in lines if "HEARTBEAT:" in line)
             self.assertIn("2m/", beat)
-            self.assertIn("cmds=1", beat)
+            self.assertIn("cmds=2", beat)
             self.assertIn("1 file changed", beat)
-            self.assertTrue(beat.endswith(xs.short("last message " + "x" * 250, 200)))
+            self.assertTrue(beat.endswith(xs.short("final message " + "x" * 250, 200)))
             self.assertFalse(any(token in output.getvalue() for token in ("MSG:", "CMD:", "WATCH-EXPIRED:")))
 
     def test_wake_reads_actionable_event_and_persists_byte_cursor(self):
