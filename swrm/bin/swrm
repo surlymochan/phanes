@@ -7091,6 +7091,9 @@ def lane_validate_socket_path(name):
     return path
 
 
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+
+
 def lane_config():
     path = envvar("LANES_FILE", os.path.join(DATA, "lanes.json"))
     try:
@@ -7113,6 +7116,9 @@ def lane_config():
         names.add(name)
         if backend not in ("codex", "cursor", "agy", "pi", "hermes", "copilot"):
             raise ValueError(f"invalid lane config {where}: unsupported backend")
+        thinking = lane.get("thinking")
+        if thinking is not None and (backend != "pi" or thinking not in PI_THINKING_LEVELS):
+            raise ValueError(f"invalid lane config {where}: thinking must be one of {', '.join(PI_THINKING_LEVELS)} for pi lanes")
         if backend == "pi" and (load_policy().get("pi") or {}).get("require_isolation", sys.platform != "darwin"):
             expected = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-isolated")
             if lane.get("binary") and os.path.realpath(lane["binary"]) != os.path.realpath(expected):
@@ -7349,6 +7355,8 @@ class LaneChild:
             if lane.get("provider"):
                 cmd += ["--provider", lane["provider"]]
             cmd += ["--model", lane["model"]]
+            if lane.get("thinking"):
+                cmd += ["--thinking", lane["thinking"]]
         elif backend == "hermes":
             binary = lane.get("binary") or hermes_bin(policy)
             if not binary:
@@ -8888,6 +8896,9 @@ def cmd_lane_status():
 def cmd_lane_assign(args):
     validate_card_type(load_policy(), getattr(args, "card_type", None))
     lane = lanes_by_name([args.name])[0]
+    thinking = getattr(args, "thinking", None)
+    if thinking is not None and (lane["backend"] != "pi" or thinking not in PI_THINKING_LEVELS):
+        raise ValueError(f"thinking must be one of {', '.join(PI_THINKING_LEVELS)} for pi lanes")
     if args.prompt is not None:
         task = args.prompt
     else:
@@ -8914,6 +8925,7 @@ def cmd_lane_assign(args):
                                          "rework_of": getattr(args, "rework_of", None),
                                          "paths": getattr(args, "paths", None) or [],
                                          "read_only": getattr(args, "read_only", False),
+                                         "thinking": thinking,
                                          "evalid_role": role_info["role"] if role_info else None,
                                          "evalid_stage": args.evalid_stage if role_info else None,
                                          "evalid_assignment_index": args.evalid_assignment_index if role_info else None,
@@ -12391,6 +12403,8 @@ def main():
     add_dispatch_arguments(lp, "card-type", "rework-of", "paths", "read-only",
                            card_type_help="optional task card type from knowledge/card-types.yaml",
                            rework_of_help="run id this task is reworking")
+    lp.add_argument("--thinking", choices=PI_THINKING_LEVELS,
+                    help="Pi thinking level for this assignment")
     lp.add_argument("--evalid-stage", choices=("spec", "spec-check", "red", "green", "delivery"),
                     help=argparse.SUPPRESS)
     lp.add_argument("--evalid-assignment-index", type=int,

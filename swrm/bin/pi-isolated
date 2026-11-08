@@ -17,6 +17,7 @@ parser.add_argument('--mode', choices=['json', 'rpc'], required=True)
 parser.add_argument('--session-dir')
 parser.add_argument('--provider', required=True)
 parser.add_argument('--model', required=True)
+parser.add_argument('--thinking', choices=['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
 parser.add_argument('--tools', default='read,bash,edit,write,grep,find,ls')
 parser.add_argument('prompt', nargs='?')
 args = parser.parse_args()
@@ -53,11 +54,15 @@ cp /config/models.json /tmp/agent/models.json
 socat TCP-LISTEN:18765,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/broker.sock >/dev/null 2>&1 &
 if [ "$1" = rpc ]; then
   mkdir -p /tmp/pi-sessions
-  exec /runtime/node_modules/.bin/pi --mode rpc --session-dir /tmp/pi-sessions --provider minimax-sandbox --model "$2" \\
+  thinking=""
+  if [ -n "$4" ]; then thinking="--thinking $4"; fi
+  exec /runtime/node_modules/.bin/pi --mode rpc --session-dir /tmp/pi-sessions --provider minimax-sandbox --model "$2" $thinking \\
     --tools "$3" --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files
 else
-  exec /runtime/node_modules/.bin/pi -p --mode json --provider minimax-sandbox --model "$2" \\
-    --tools "$3" --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-session "$4"
+  thinking=""
+  if [ -n "$4" ]; then thinking="--thinking $4"; fi
+  exec /runtime/node_modules/.bin/pi -p --mode json --provider minimax-sandbox --model "$2" $thinking \\
+    --tools "$3" --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-session "$5"
 fi
 '''
     cmd = ['bwrap', '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
@@ -95,5 +100,6 @@ fi
     cmd += ['--bind', worktree, worktree, '--chdir', cwd,
             '--clearenv', '--setenv', 'HOME', '/home/pi', '--setenv', 'PATH', path,
             '--setenv', 'GIT_OPTIONAL_LOCKS', '0', '--setenv', 'PI_CODING_AGENT_DIR', '/tmp/agent',
-            '/usr/bin/sh', '-c', script, 'pi-isolated', args.mode, model, args.tools, args.prompt or '']
+            '/usr/bin/sh', '-c', script, 'pi-isolated', args.mode, model, args.tools,
+            args.thinking or '', args.prompt or '']
     sys.exit(subprocess.call(cmd))
