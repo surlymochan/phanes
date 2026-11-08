@@ -1030,7 +1030,7 @@ def remote(lane, cfg, run=""):
     except Exception: return {"error": out[-200:]}
 
 def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body"])
+    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
     if rc: raise RuntimeError(err)
     items = []
     for i in json.loads(out):
@@ -1049,7 +1049,7 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
+        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify, "queued": to_epoch(i.get("createdAt"))})
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -1801,7 +1801,6 @@ def finish(lane, cfg, st, info, state):
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
         if empty:
-            record_verify_time(state, n, "evidence_ready")
             label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
@@ -1830,7 +1829,6 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
-        record_verify_time(state, n, "evidence_ready")
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
@@ -2066,7 +2064,9 @@ def tick(lanes, state, last_warn):
         metrics = verify_metrics(state)
         for item in q:
             if item.get("verify"):
-                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now})
+                # Use the order time, including time spent waiting while AD was stopped.
+                queued = item.get("queued")
+                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now if queued is None else queued})
         # one authoritative read per issue per tick, shared by all dispatches and the count
         prefetch_labels([i["n"] for i in q])
         return True

@@ -65,6 +65,7 @@ import sys
 import tempfile
 import time as time_module
 import unittest
+from unittest import mock
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("autodispatch.py")
@@ -271,7 +272,8 @@ class Fleet:
     def gh(self, args, timeout=60):
         if args[:2] == ["issue", "list"]:
             rows = [{"number": number, "title": issue["title"], "body": issue["body"],
-                     "labels": list(issue["labels"]), "state": issue["state"]}
+                     "labels": list(issue["labels"]), "state": issue["state"],
+                     "createdAt": issue.get("createdAt")}
                     for number, issue in sorted(self.issues.items()) if issue["state"] == "OPEN"]
             return 0, json.dumps(rows), ""
         if args[:2] == ["issue", "view"]:
@@ -583,6 +585,45 @@ class VerifyMetricsTest(unittest.TestCase):
         self.step_verdict()
 
     # --- the tests -----------------------------------------------------------------------
+    def test_queue_cycle_includes_time_before_the_dispatcher_discovers_the_card(self):
+        created = self.clock.now
+        self.fleet.issues[VERIFY_ISSUE]["createdAt"] = time_module.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time_module.gmtime(created))
+        self.advance(3600)  # dispatcher was stopped or paused after the order
+        self.scenario()
+        record = verify_records(self.state)[VERIFY_ISSUE]
+        self.assertEqual(to_epoch(point(record, "queued")), created)
+        self.assertEqual(to_epoch(point(record, "dispatched")) - created, 3600 + WAIT_S)
+        self.assertEqual(bucket_count(self.wait_histogram(), 3600 + WAIT_S), 1)
+        self.assertEqual(bucket_count(self.cycle_histogram(),
+                                      3600 + WAIT_S + RUN_S + VERDICT_LAG_S), 1)
+        self.advance(60)
+        self.tick()
+        self.assertEqual(to_epoch(point(verify_records(self.state)[VERIFY_ISSUE], "queued")), created)
+
+    def test_failed_verify_run_without_a_commit_has_no_ready_evidence(self):
+        self.step_queue()
+        self.step_dispatch()
+        self.advance(RUN_S)
+        result = self.module.finish(REVIEW_LANE, self.lanes[REVIEW_LANE],
+                                    self.state[REVIEW_LANE],
+                                    {"status": "failed", "branch": None, "commit": None,
+                                     "error_class": "executor-failed"}, self.state)
+        self.assertEqual(result["status"], "lane-failed")
+        self.assertIsNone(point(verify_records(self.state)[VERIFY_ISSUE], "evidence_ready"))
+
+    def test_verify_run_with_no_effective_change_has_no_ready_evidence(self):
+        self.step_queue()
+        self.step_dispatch()
+        with mock.patch.object(self.module, "harvest_fetch", return_value=(True, "", 0)), \
+             mock.patch.object(self.module, "filter_harvest", return_value=(self.base, [], True)):
+            result = self.module.finish(REVIEW_LANE, self.lanes[REVIEW_LANE],
+                                        self.state[REVIEW_LANE],
+                                        {"branch": "branch", "commit": "commit", "repo": "repo"},
+                                        self.state)
+        self.assertEqual(result["status"], "lane-failed")
+        self.assertIsNone(point(verify_records(self.state)[VERIFY_ISSUE], "evidence_ready"))
+
     def test_the_verify_card_records_the_four_time_points_of_its_life(self):
         self.scenario()
         records = verify_records(self.state)
