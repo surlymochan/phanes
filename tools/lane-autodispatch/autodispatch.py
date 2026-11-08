@@ -953,20 +953,31 @@ def dispatch_fetch_policy(host, cfg=None):
             "fallback_after": max(1, int(policy["fallback_after"]))}
 
 
-def dispatch_git_network(host, command, operation, policy, fallback=None):
-    """Apply one policy to main/PR fetch, controller fetch and seed push.
+def git_network_attempt(command):
+    """Return timeouts as network failures so retry/fallback policy still runs."""
+    try:
+        return sh(command, timeout=180)
+    except subprocess.TimeoutExpired as error:
+        detail = error.stderr or ""
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        return 124, "", f"network command timed out after {error.timeout}s: {detail}"
+
+
+def dispatch_git_network(host, command, operation, policy, fallback=None, fallback_name="controller seed push"):
+    """Apply one policy to base lookup, main/PR fetch, controller fetch and seed push.
 
     Only network commands enter this function, so assign errors never inflate health.
     Successful retries retain the recent failures for diagnosis.
     """
     last_error = ""
     for attempt in range(1, policy["retries"] + 1):
-        rc, out, last_error = sh(command, timeout=180)
+        rc, out, last_error = git_network_attempt(command)
         if not rc:
             return out
         record_dispatch_fetch_failure(host, last_error)
         if fallback and attempt >= policy["fallback_after"]:
-            log(f"{host} {operation} threshold reached; falling back to controller seed push", brain=False)
+            log(f"{host} {operation} threshold reached; falling back to {fallback_name}", brain=False)
             return fallback()
         if attempt < policy["retries"]:
             delay = policy["delay"] * (2 ** (attempt - 1))
@@ -974,9 +985,32 @@ def dispatch_git_network(host, command, operation, policy, fallback=None):
             time.sleep(delay)
     # Exhausting a shorter retry budget also invokes the seed path.
     if fallback:
-        log(f"{host} {operation} retries exhausted; falling back to controller seed push", brain=False)
+        log(f"{host} {operation} retries exhausted; falling back to {fallback_name}", brain=False)
         return fallback()
     raise RuntimeError(f"{operation} failed on {host}: {last_error.strip()[-160:]}")
+
+
+def dispatch_base_revision(host, cfg):
+    """Resolve the base with retries and an optional mirror before assigning a lane.
+
+    No seed push is possible until the base is known. A configured mirror can
+    supply it; dispatch() still validates that exact commit on the target.
+    """
+    policy = dispatch_fetch_policy(host, cfg)
+    mirror = os.environ.get("AD_BASE_FETCH_MIRROR")
+
+    def lookup(source, fallback=None):
+        out = dispatch_git_network(
+            host, ["git", "ls-remote", "--exit-code", source, f"refs/heads/{BASE_BRANCH}"],
+            "base ls-remote", policy, fallback, fallback_name="base mirror")
+        fields = out.split()
+        if not fields or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", fields[0]):
+            error = "base ls-remote returned no valid commit"
+            record_dispatch_fetch_failure(host, error)
+            raise RuntimeError(error)
+        return fields[0]
+
+    return lookup(BASE_REPO_URL, (lambda: lookup(mirror)) if mirror and mirror != BASE_REPO_URL else None)
 
 
 def dispatch_seed_push(host, repo_path, base, branch, policy):
@@ -1108,7 +1142,7 @@ def harvest_fetch(lane, n, fetch, st, host=None, fallback=None):
     """
     err = ""
     for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
-        rc, _, err = sh(fetch, timeout=180)
+        rc, _, err = git_network_attempt(fetch)
         if not rc:
             st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
             return True, "", 0
@@ -1123,7 +1157,7 @@ def harvest_fetch(lane, n, fetch, st, host=None, fallback=None):
     # SSH route is unhealthy. Keep this inside the fetch policy and fail closed if it fails.
     if fallback:
         log(f"{host or lane} harvest fetch retries exhausted; falling back to seed endpoint", brain=False)
-        rc, _, fallback_error = sh(fallback, timeout=180)
+        rc, _, fallback_error = git_network_attempt(fallback)
         if not rc:
             st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
             return True, "", 0
@@ -1388,7 +1422,10 @@ def tick(lanes, state, last_warn):
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: continue
         if base is None:
-            _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
+            try: base = dispatch_base_revision(cfg["host"], cfg)
+            except RuntimeError as error:
+                host_fail(cfg["host"], f"dispatch #{pick['n']}: {error}")
+                continue
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, base)
         except Exception as e:
