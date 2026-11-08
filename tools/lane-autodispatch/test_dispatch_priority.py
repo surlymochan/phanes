@@ -14,6 +14,44 @@ SPEC.loader.exec_module(AUTODISPATCH)
 
 
 class DispatchPriorityTest(unittest.TestCase):
+    NOW = AUTODISPATCH.timestamp("2026-11-08T23:40:00Z")
+
+    def card(self, number, *, backend="codex", budget=30, entered="2026-11-08T23:40:00Z"):
+        return {"n": number, "backend": backend, "prio": 2, "verify": False,
+                "budget_minutes": budget, "pool_entered_at": entered}
+
+    def test_large_budget_adds_size_score(self):
+        small = self.card(1, budget=30)
+        large = self.card(2, budget=90)
+        small_score, _ = AUTODISPATCH.priority_score("codex", small, self.NOW)
+        large_score, basis = AUTODISPATCH.priority_score("codex", large, self.NOW)
+        self.assertGreater(large_score, small_score)
+        self.assertEqual(basis["size"], AUTODISPATCH.PRIORITY_LARGE_BONUS)
+
+    def test_real_pool_wait_increases_score(self):
+        fresh = self.card(1)
+        waiting = self.card(2, entered="2026-11-08T23:10:00Z")
+        fresh_score, _ = AUTODISPATCH.priority_score("codex", fresh, self.NOW)
+        waiting_score, basis = AUTODISPATCH.priority_score("codex", waiting, self.NOW)
+        self.assertGreater(waiting_score, fresh_score)
+        self.assertEqual(basis["wait_s"], 30 * 60)
+
+    def test_backend_match_contributes_to_score_without_changing_eligibility(self):
+        exact = self.card(1, backend="codex")
+        unpinned = self.card(2, backend=None)
+        cross = self.card(3, backend="pi")
+        scores = [AUTODISPATCH.priority_score("codex", item, self.NOW)[0]
+                  for item in (exact, unpinned, cross)]
+        self.assertGreater(scores[0], scores[1])
+        self.assertGreater(scores[1], scores[2])
+        self.assertTrue(AUTODISPATCH.can_take("codex", exact))
+
+    def test_small_card_gets_configured_starvation_lift_at_threshold(self):
+        threshold = self.NOW - AUTODISPATCH.PRIORITY_STARVATION_S
+        starved = self.card(1, entered=threshold)
+        _, basis = AUTODISPATCH.priority_score("codex", starved, self.NOW)
+        self.assertEqual(basis["starvation"], AUTODISPATCH.PRIORITY_STARVATION_BONUS)
+
     def test_newly_admitted_old_small_card_does_not_overtake_waiting_large_card(self):
         """An old creation date must not masquerade as time spent in the ready pool.
 

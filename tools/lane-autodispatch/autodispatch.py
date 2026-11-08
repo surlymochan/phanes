@@ -98,6 +98,60 @@ AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower()
 VERIFY_SHARE = env_number("AD_VERIFY_SHARE", 0.2)
 VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
 
+# --- dispatch priority (Refs #1705) -------------------------------------------------------
+# Scores deliberately use time in the *dispatchable pool*, not issue creation time.
+PRIORITY_WAIT_STEP_S = max(1.0, env_number("AD_PRIORITY_WAIT_STEP_S", 900.0))
+PRIORITY_WAIT_WEIGHT = env_number("AD_PRIORITY_WAIT_WEIGHT", 1.0)
+PRIORITY_LARGE_BUDGET_MINUTES = env_number("AD_PRIORITY_LARGE_BUDGET_MINUTES", 90.0)
+PRIORITY_LARGE_BONUS = env_number("AD_PRIORITY_LARGE_BONUS", 8.0)
+PRIORITY_BACKEND_EXACT = env_number("AD_PRIORITY_BACKEND_EXACT", 4.0)
+PRIORITY_BACKEND_UNPINNED = env_number("AD_PRIORITY_BACKEND_UNPINNED", 2.0)
+PRIORITY_STARVATION_S = max(0.0, env_number("AD_PRIORITY_STARVATION_S", 3600.0))
+PRIORITY_STARVATION_BONUS = env_number("AD_PRIORITY_STARVATION_BONUS", 16.0)
+POOL_ENTERED_AT = {}
+
+def timestamp(value):
+    """Return an epoch timestamp for a numeric or ISO-8601 value, else None."""
+    if isinstance(value, bool) or value is None: return None
+    if isinstance(value, (int, float)): return float(value)
+    text = str(value).strip()
+    if not text: return None
+    for pattern, candidate in (("%Y-%m-%dT%H:%M:%SZ", text), ("%Y-%m-%dT%H:%M:%S", text[:19])):
+        try: return time.mktime(time.strptime(candidate, pattern))
+        except ValueError: pass
+    return None
+
+def budget_minutes(item):
+    """Read the dispatch budget populated by queue(), accepting legacy spellings."""
+    for key in ("budget_minutes", "budgetMinutes", "budget"):
+        try: return float(item.get(key))
+        except (TypeError, ValueError): pass
+    return 0.0
+
+def pool_wait_seconds(item, now=None):
+    """How long the card has actually been dispatchable, never its issue age."""
+    now = time.time() if now is None else now
+    entered = timestamp(item.get("pool_entered_at"))
+    if entered is None: entered = timestamp(item.get("poolEnteredAt"))
+    if entered is None: entered = POOL_ENTERED_AT.get(item.get("n"), now)
+    return max(0.0, now - entered)
+
+def priority_score(backend, item, now=None):
+    """Return the score and auditable components used by dispatch ordering."""
+    waited = pool_wait_seconds(item, now)
+    wait_score = math.floor(waited / PRIORITY_WAIT_STEP_S) * PRIORITY_WAIT_WEIGHT
+    budget = budget_minutes(item)
+    large = budget >= PRIORITY_LARGE_BUDGET_MINUTES
+    size_score = PRIORITY_LARGE_BONUS if large else 0.0
+    if item.get("backend") == backend: backend_score = PRIORITY_BACKEND_EXACT
+    elif item.get("backend") is None: backend_score = PRIORITY_BACKEND_UNPINNED
+    else: backend_score = 0.0
+    starvation_score = PRIORITY_STARVATION_BONUS if not large and waited >= PRIORITY_STARVATION_S else 0.0
+    components = {"wait_s": round(waited, 3), "wait": wait_score, "size": size_score,
+                  "backend": backend_score, "starvation": starvation_score,
+                  "budget_minutes": budget}
+    return sum(components[k] for k in ("wait", "size", "backend", "starvation")), components
+
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -688,7 +742,7 @@ def remote(lane, cfg, run=""):
     except Exception: return {"error": out[-200:]}
 
 def queue():
-    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body"])
+    rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
     if rc: raise RuntimeError(err)
     items = []
     for i in json.loads(out):
@@ -707,7 +761,13 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify})
+        entered = POOL_ENTERED_AT.setdefault(i["number"], time.time())
+        match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
+        budget = float(match.group(1)) if match else float(BUDGET)
+        items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
+                      "created_at": i.get("createdAt"), "pool_entered_at": entered, "budget_minutes": budget})
+    living = {item["n"] for item in items}
+    for number in set(POOL_ENTERED_AT) - living: POOL_ENTERED_AT.pop(number, None)
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -746,8 +806,10 @@ def can_take(backend, item, lane=None, verify_gate=True):
 def is_review_lane(lane):
     """The review lanes a verify card may be dispatched to (CX2/CX4/CX5)."""
     return bool(re.fullmatch(r"CX(?:2|4|5)(?:[-_].*)?", str(lane), re.I))
-def rank(backend, item):  # own pin first, then unpinned, then cross-pinned; within each by priority, work before verify, number
-    return (0 if item["backend"] == backend else 1 if item["backend"] is None else 2, item["prio"], bool(item.get("verify")), item["n"])
+def rank(backend, item):
+    """Highest score first; stable legacy fields break equal-score ties."""
+    score, _ = priority_score(backend, item)
+    return (-score, item["prio"], bool(item.get("verify")), item["n"])
 
 def queue_class_limits(lanes, state, idle):
     """Reserve review-capable capacity using available lanes and active runs only."""
@@ -1558,7 +1620,9 @@ def tick(lanes, state, last_warn):
             if idle_s > IDLE_LOG_MIN_S:
                 log(f"{L} idle {idle_s:.0f}s before dispatch (reason: {reason})", brain=True)
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
-        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]}")
+        score, basis = priority_score(cfg["backend"], pick)
+        save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]} "
+                               f"priority={score:g} basis={json.dumps(basis, sort_keys=True)}")
         return "dispatched"
 
     # 1) Re-dispatch each freed lane before harvesting the next one (Refs #1688).
