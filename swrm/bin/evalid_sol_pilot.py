@@ -4,8 +4,10 @@
 Read RUNS/<run_id>/result.json receipts, never dispatch or enable a pool.
 Exit 0 means the supplied evidence meets the gate; exit 1 rejects it.
 Actual profiles come from attempts, with a successful final attempt required.
-Spec artifact names are relative to the run directory; their local bytes must
-match the declared SHA-256. No live quota query is performed.
+Only evalid-spec/spec receipts qualify. Batched Spec artifacts are read from
+--artifact-sink/<batch>/<name>; legacy unbatched names are relative to the run
+directory. Their local bytes must match the declared SHA-256. No live quota
+query is performed.
 Reasons are ordered by directory then by validation field, with sample-count
 failure first. Native seconds already excludes queue time; legacy total
 duration_seconds includes it and requires subtraction after validation.
@@ -25,7 +27,7 @@ def nonnegative_number(value):
     return (type(value) in (int, float) and math.isfinite(value) and value >= 0)
 
 
-def validate_spec_artifacts(artifacts, run_dir):
+def validate_spec_artifacts(artifacts, run_dir, artifact_sink=None):
     """Verify local Spec evidence without following receipt-controlled links."""
     if not isinstance(artifacts, list):
         return "missing_spec_artifact"
@@ -42,7 +44,18 @@ def validate_spec_artifacts(artifacts, run_dir):
             return "missing_spec_artifact"
         try:
             source = run_dir
-            for part in name.parts:
+            parts = name.parts
+            if "batch" in item:
+                batch = item["batch"]
+                if (artifact_sink is None or not isinstance(batch, str) or not batch
+                        or Path(batch).is_absolute() or ".." in Path(batch).parts
+                        or not Path(batch).parts):
+                    return "missing_spec_artifact"
+                source = Path(artifact_sink)
+                parts = (*Path(batch).parts, *parts)
+            if source.is_symlink():
+                return "missing_spec_artifact"
+            for part in parts:
                 source = source / part
                 if source.is_symlink():
                     return "missing_spec_artifact"
@@ -59,13 +72,17 @@ def validate_spec_artifacts(artifacts, run_dir):
     return None if found else "missing_spec_artifact"
 
 
-def validate_receipt(receipt, run_id, max_execution_seconds, run_dir):
+def validate_receipt(receipt, run_id, max_execution_seconds, run_dir, artifact_sink=None):
     """Return all reasons plus execution time, without executing receipt data."""
     reasons = []
     if not isinstance(receipt, dict):
         return ["invalid_receipt"], None
     if receipt.get("id") != run_id:
         reasons.append("run_id_mismatch")
+    if receipt.get("evalid_role") != "evalid-spec":
+        reasons.append("invalid_evalid_role")
+    if receipt.get("evalid_stage") != "spec":
+        reasons.append("invalid_evalid_stage")
     for field, expected in PROFILE.items():
         if receipt.get(field) != expected:
             reasons.append(f"profile_mismatch:{field}")
@@ -107,13 +124,13 @@ def validate_receipt(receipt, run_id, max_execution_seconds, run_dir):
     elif any(type(usage[key]) is not int or usage[key] < 0
              for key in ("input_tokens", "output_tokens")):
         reasons.append("invalid_usage")
-    artifact_error = validate_spec_artifacts(receipt.get("artifacts"), run_dir)
+    artifact_error = validate_spec_artifacts(receipt.get("artifacts"), run_dir, artifact_sink)
     if artifact_error:
         reasons.append(artifact_error)
     return reasons, execution
 
 
-def evaluate(runs, min_samples=3, max_execution_seconds=60):
+def evaluate(runs, min_samples=3, max_execution_seconds=60, artifact_sink=None):
     """Summarize immediate run directories; unreadable input fails closed."""
     reasons, samples = [], []
     if (type(min_samples) is not int or min_samples < 1
@@ -136,7 +153,8 @@ def evaluate(runs, min_samples=3, max_execution_seconds=60):
             if path.is_symlink() or result.is_symlink() or not result.is_file():
                 raise ValueError("linked receipt")
             receipt = json.loads(result.read_text(encoding="utf-8"))
-            errors, execution = validate_receipt(receipt, path.name, max_execution_seconds, path)
+            errors, execution = validate_receipt(
+                receipt, path.name, max_execution_seconds, path, artifact_sink)
         except (OSError, ValueError, OverflowError, RecursionError):
             errors, execution = ["invalid_receipt"], None
         reasons.extend({"run_id": path.name, "reason": reason} for reason in errors)
@@ -149,10 +167,12 @@ def evaluate(runs, min_samples=3, max_execution_seconds=60):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", required=True, type=Path)
+    parser.add_argument("--artifact-sink", type=Path,
+                        help="local artifact sink required for receipts with batch entries")
     parser.add_argument("--min-samples", type=int, default=3)
     parser.add_argument("--max-execution-seconds", type=float, default=60)
     args = parser.parse_args()
-    report = evaluate(args.runs, args.min_samples, args.max_execution_seconds)
+    report = evaluate(args.runs, args.min_samples, args.max_execution_seconds, args.artifact_sink)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False))
     return 0 if report["decision"] == "enable" else 1
 

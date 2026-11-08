@@ -33,6 +33,8 @@ class EvalidSolPilotTests(unittest.TestCase):
             "model": "gpt-6.1-sol",
             "effort": "high",
             "status": "done",
+            "evalid_role": "evalid-spec",
+            "evalid_stage": "spec",
             "duration_seconds": 75.0,
             "queued_seconds": 20.0,
             "usage": {"input_tokens": 1200, "output_tokens": 300},
@@ -47,10 +49,13 @@ class EvalidSolPilotTests(unittest.TestCase):
         (run / "result.json").write_text(json.dumps(receipt), encoding="utf-8")
         return receipt
 
-    def evaluate(self, *, max_execution_seconds=60):
+    def evaluate(self, *, max_execution_seconds=60, artifact_sink=None):
+        artifact_args = (["--artifact-sink", str(artifact_sink)]
+                         if artifact_sink is not None else [])
         completed = subprocess.run(
             [sys.executable, str(PILOT), "--runs", str(self.runs),
-             "--min-samples", "1", "--max-execution-seconds", str(max_execution_seconds)],
+             "--min-samples", "1", "--max-execution-seconds", str(max_execution_seconds),
+             *artifact_args],
             capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(completed.stderr, "")
@@ -113,6 +118,85 @@ class EvalidSolPilotTests(unittest.TestCase):
     def test_receipt_identity_must_match_its_directory(self):
         self.receipt(id="different")
         self.assert_rejected_for("run_id_mismatch")
+
+    def test_only_spec_role_and_stage_can_certify_pilot(self):
+        for role, stage, reasons in (
+                ("evalid-tdd", "green", ["invalid_evalid_role", "invalid_evalid_stage"]),
+                ("evalid-review", "spec", ["invalid_evalid_role"]),
+                ("evalid-spec", "spec-check", ["invalid_evalid_stage"]),
+                (None, "spec", ["invalid_evalid_role"]),
+                ("evalid-spec", None, ["invalid_evalid_stage"])):
+            with self.subTest(role=role, stage=stage):
+                shutil.rmtree(self.runs / "spec-1", ignore_errors=True)
+                receipt = self.receipt(evalid_role=role, evalid_stage=stage)
+                for field in ("evalid_role", "evalid_stage"):
+                    if receipt[field] is None:
+                        del receipt[field]
+                (self.runs / "spec-1" / "result.json").write_text(json.dumps(receipt))
+                rc, report = self.evaluate()
+                self.assertEqual(rc, 1)
+                self.assertEqual(report["decision"], "reject")
+                self.assertEqual(report["reasons"], [
+                    {"run_id": "spec-1", "reason": reason} for reason in reasons])
+
+    def batch_receipt(self, **overrides):
+        name = "evidence/spec.json"
+        manifest = [{"name": name, "sha256": SPEC_SHA256}]
+        batch = "spec-1/executor/" + hashlib.sha256(
+            json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+        self.receipt(seconds=55, artifacts=[{**manifest[0], "batch": batch}], **overrides)
+        sink = self.runs.parent / "sink"
+        artifact = sink / batch / name
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(SPEC_CONTENT)
+        # Native receipts keep evidence in the sink, never in the run directory.
+        (self.runs / "spec-1" / "spec.json").unlink()
+        return sink, artifact
+
+    def test_collector_batch_layout_enables_spec_pilot(self):
+        sink, _ = self.batch_receipt()
+        before = {path: path.read_bytes() for path in sink.rglob("*") if path.is_file()}
+        rc, report = self.evaluate(artifact_sink=sink)
+        self.assertEqual(rc, 0)
+        self.assertEqual(report, {
+            "decision": "enable", "sample_count": 1, "reasons": [],
+            "samples": [{"execution_seconds": 55.0, "run_id": "spec-1"}],
+        })
+        self.assertEqual(report, self.evaluate(artifact_sink=sink)[1])
+        self.assertEqual(before, {
+            path: path.read_bytes() for path in sink.rglob("*") if path.is_file()})
+
+    def test_batch_artifact_requires_sink_and_matching_bytes(self):
+        sink, artifact = self.batch_receipt()
+        self.assert_rejected_for("missing_spec_artifact")
+        artifact.write_bytes(b'{"tampered": true}')
+        rc, report = self.evaluate(artifact_sink=sink)
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["reasons"], [
+            {"run_id": "spec-1", "reason": "spec_artifact_digest_mismatch"}])
+
+    def test_batch_cannot_escape_sink_or_follow_links(self):
+        sink, artifact = self.batch_receipt()
+        result = self.runs / "spec-1" / "result.json"
+        receipt = json.loads(result.read_text())
+        for batch in (None, "", 42, "../sink", str(artifact.parent),
+                      "nested/../../sink"):
+            with self.subTest(batch=batch):
+                receipt["artifacts"][0]["batch"] = batch
+                result.write_text(json.dumps(receipt))
+                rc, report = self.evaluate(artifact_sink=sink)
+                self.assertEqual(rc, 1)
+                self.assertEqual(report["reasons"], [
+                    {"run_id": "spec-1", "reason": "missing_spec_artifact"}])
+        actual_sink = sink.with_name("actual-sink")
+        sink.rename(actual_sink)
+        sink.symlink_to(actual_sink, target_is_directory=True)
+        receipt["artifacts"][0]["batch"] = str(artifact.relative_to(sink).parent.parent)
+        result.write_text(json.dumps(receipt))
+        rc, report = self.evaluate(artifact_sink=sink)
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["reasons"], [
+            {"run_id": "spec-1", "reason": "missing_spec_artifact"}])
 
     def test_invalid_limits_cannot_enable_pool(self):
         self.receipt()
