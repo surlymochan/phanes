@@ -216,51 +216,39 @@ class LanePrSubmitTests(unittest.TestCase):
         self.assertIn("Closes #1704", fake.prs[0]["--body"])
         self.assertIn("验收：python3 -m unittest tools/tests (passed)", fake.prs[0]["--body"])
 
-    def test_start_failure_with_commit_is_harvested_before_freeing_lane(self):
+    def test_start_failure_with_commit_requeues_without_harvesting_or_counting(self):
         info = FakeLaneHost().info()
         info.update(status="failed", error_class="executor_start_failed")
         with mock.patch.object(MODULE, "pause_store_dir", return_value=self.tmp.name), \
              mock.patch.object(MODULE, "harvest_fetch", wraps=MODULE.harvest_fetch) as fetch:
             fake, result = self.finish(info=info, message=MESSAGE_WITH_ALL)
             records = MODULE.pause_records()
-        fetch.assert_called_once()
-        self.assertEqual(result["status"], "pr-created")
+        fetch.assert_not_called()
+        self.assertEqual(result["status"], "lane-ready")
         self.assertTrue(result["done"])
-        self.assertEqual(len(fake.prs), 1)
-        self.assertEqual(fake.label_edits[-1][-1], "lane-pr")
+        self.assertEqual(fake.prs, [])
+        self.assertEqual(fake.label_edits[-1][-1], "lane-ready")
+        self.assertNotIn(ISSUE, self.state.get("_done", []))
         self.assertEqual(records[0]["scope"], "lane:codex")
         self.assertEqual(records[0]["expires_at"] - records[0]["created_at"], 600)
 
-    def test_start_failure_with_commit_keeps_lane_pending_if_harvest_fails(self):
+    def test_start_failure_with_commit_keeps_lane_pending_if_requeue_fails(self):
         info = FakeLaneHost().info()
         info.update(status="failed", error_class="executor_start_failed")
-        for failure in ("fetch", "filter", "push"):
-            with self.subTest(failure=failure), contextlib.ExitStack() as stack:
-                stack.enter_context(mock.patch.object(MODULE, "pause_store_dir", return_value=self.tmp.name))
-                stack.enter_context(mock.patch.object(MODULE, "save_state"))
-                if failure == "fetch":
-                    stack.enter_context(mock.patch.object(
-                        MODULE, "harvest_fetch", return_value=(False, "Connection timed out", 1)))
-                elif failure == "filter":
-                    stack.enter_context(mock.patch.object(
-                        MODULE, "filter_harvest", side_effect=RuntimeError("filter failed")))
-                else:
-                    stack.enter_context(mock.patch.object(MODULE, "harvest_fetch", return_value=(True, "", 0)))
-                    stack.enter_context(mock.patch.object(
-                        MODULE, "filter_harvest", return_value=("c0ffee", [], False)))
-                    fake = FakeLaneHost(message=MESSAGE_WITH_ALL)
-                    stack.enter_context(mock.patch.object(MODULE, "sh", return_value=(1, "", "push failed")))
-                    stack.enter_context(mock.patch.object(MODULE, "gh", side_effect=fake.gh))
-                    stack.enter_context(mock.patch.object(MODULE, "log"))
-                    result = MODULE.finish("codex", CFG, {"issue": ISSUE, "run": RUN}, info, self.state)
-                if failure != "push":
-                    fake, result = self.finish(info=info, message=MESSAGE_WITH_ALL)
-                self.assertFalse(result["done"])
-                self.assertEqual(result["status"], {
-                    "fetch": "fetch-backoff", "filter": "filter-failed", "push": "push-failed"}[failure])
-                self.assertEqual(fake.prs, [])
-                self.assertEqual(fake.label_edits, [])
-                self.assertNotIn(ISSUE, self.state.get("_done", []))
+        with mock.patch.object(MODULE, "pause_store_dir", return_value=self.tmp.name), \
+             mock.patch.object(MODULE, "gh", return_value=(1, "", "labels unavailable")) as gh, \
+             mock.patch.object(MODULE, "sh") as sh, \
+             mock.patch.object(MODULE, "harvest_fetch") as fetch, \
+             mock.patch.object(MODULE, "log"):
+            result = MODULE.finish("codex", CFG, {"issue": ISSUE, "run": RUN}, info, self.state)
+        self.assertFalse(result["done"])
+        self.assertEqual(result["status"], "requeue-failed")
+        self.assertEqual(result["error"], "labels unavailable")
+        self.assertNotIn(ISSUE, self.state.get("_done", []))
+        gh.assert_called_once_with(["issue", "edit", str(ISSUE), "--remove-label", "in-progress",
+                                    "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+        fetch.assert_not_called()
+        sh.assert_not_called()
 
     def test_host_verify_rc_is_the_acceptance_evidence(self):
         fake, _ = self.finish(subject="fix #1704 parser", message="Rewrote the parser.\n\nCloses #1704",
@@ -380,7 +368,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_start_failure_with_empty_commit_requeues_after_harvest(self):
+    def test_start_failure_with_empty_commit_requeues_without_harvest(self):
         for rc in (0, 1):
             with self.subTest(relabel_rc=rc), tempfile.TemporaryDirectory() as directory, \
                  mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
@@ -403,7 +391,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
                 self.assertEqual(len(records), 1)
                 self.assertEqual(records[0]["scope"], "lane:A1")
                 self.assertEqual(records[0]["expires_at"] - records[0]["created_at"], 600)
-                fetch.assert_called_once()
+                fetch.assert_not_called()
                 failed.assert_not_called()
 
     def test_start_failure_requeues_without_count_and_pauses_lane(self):
@@ -439,7 +427,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
 
 
     def test_tick_harvest_requeues_and_honors_new_pause_immediately(self):
-        for outcome in ("no-commit", "harvested", "filter-failed"):
+        for outcome in ("no-commit", "with-commit", "requeue-failed"):
             with self.subTest(outcome=outcome):
                 self.assert_tick_start_failure(outcome)
 
@@ -452,7 +440,11 @@ class ExecutorStartHarvestTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(MODULE, "pause_store_dir", return_value=directory))
             stack.enter_context(mock.patch.object(MODULE, "host_ok", return_value=True))
             fake = FakeLaneHost(subject="fix #1595 startup crash", message="Closes #1595\n\nVerify: passed")
-            stack.enter_context(mock.patch.object(MODULE, "gh", side_effect=fake.gh))
+            def gh(args, timeout=60):
+                if outcome == "requeue-failed" and args[:2] == ["issue", "edit"]:
+                    return 1, "", "labels unavailable"
+                return fake.gh(args, timeout=timeout)
+            stack.enter_context(mock.patch.object(MODULE, "gh", side_effect=gh))
             info = {"error_class": "executor_start_failed"}
             if outcome != "no-commit":
                 info.update(branch="work", commit="c0ffee", repo=CFG["repo"])
@@ -461,8 +453,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
             fetch = stack.enter_context(mock.patch.object(
                 MODULE, "harvest_fetch", return_value=(True, "", 0)))
             stack.enter_context(mock.patch.object(
-                MODULE, "filter_harvest", return_value=("c0ffee", [], False),
-                side_effect=RuntimeError("filter failed") if outcome == "filter-failed" else None))
+                MODULE, "filter_harvest", return_value=("c0ffee", [], False)))
             stack.enter_context(mock.patch.object(MODULE, "queue", return_value=[{"n": 1595}]))
             stack.enter_context(mock.patch.object(MODULE, "deps_met", return_value=True))
             stack.enter_context(mock.patch.object(MODULE, "freshen_queue", side_effect=lambda q, s: q))
@@ -473,19 +464,17 @@ class ExecutorStartHarvestTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(MODULE, "status_snapshot", return_value={}))
             state = {"A1": {"issue": 1595, "run": RUN}}
             MODULE.tick({"A1": CFG}, state, 0)
-            if outcome == "filter-failed":
+            if outcome == "requeue-failed":
                 self.assertEqual(state["A1"]["run"], RUN)
                 self.assertEqual(fake.label_edits, [])
             else:
                 self.assertNotIn("A1", state)
-            self.assertEqual(state["_done"], [1595] if outcome == "harvested" else [])
-            self.assertEqual(len(fake.prs), 1 if outcome == "harvested" else 0)
+                self.assertEqual(fake.label_edits[-1][-1], "lane-ready")
+            self.assertEqual(state["_done"], [])
+            self.assertEqual(fake.prs, [])
             self.assertTrue(MODULE.lane_paused("A1"))
             dispatch.assert_not_called()
-            if outcome == "no-commit":
-                fetch.assert_not_called()
-            else:
-                fetch.assert_called_once()
+            fetch.assert_not_called()
 
 
 if __name__ == "__main__":

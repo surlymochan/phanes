@@ -1195,7 +1195,7 @@ def filter_harvest(ref, base):
     return parent, removed, tree_of(parent) == tree_of(base)
 
 def requeue_executor_start_failure(lane, n, run):
-    """Requeue an executor startup failure only once there is no work left to harvest."""
+    """Requeue an executor startup failure without counting a task attempt."""
     rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
                      "--remove-label", "lane-failed", "--add-label", "lane-ready"])
     if rc:
@@ -1210,15 +1210,12 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
-    start_failed = info.get("error_class") == "executor_start_failed"
-    has_commit = info.get("branch") and info["branch"] != "None" and info.get("commit")
-    if start_failed:
+    if info.get("error_class") == "executor_start_failed":
         pause_executor_start_lane(lane)
-        # Finalization may preserve work made before an early crash. Harvest that
-        # commit normally before freeing the lane; only empty runs can be requeued.
-        if not has_commit:
-            return requeue_executor_start_failure(lane, n, run)
-    if has_commit:
+        # Even a commit made during the startup grace period is not a completed
+        # task. Leave the run's work intact and return the card for another attempt.
+        return requeue_executor_start_failure(lane, n, run)
+    if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -1232,8 +1229,6 @@ def finish(lane, cfg, st, info, state):
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
         if empty:
-            if start_failed:
-                return requeue_executor_start_failure(lane, n, run)
             label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
