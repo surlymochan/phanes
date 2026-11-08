@@ -5384,7 +5384,8 @@ def adjust_status_for_change_evidence(status, verify_note, *, commit, workspace_
 
 
 JUNK = ["__pycache__/**", "*.pyc", ".DS_Store", "node_modules/**", ".pytest_cache/**", ".venv/**", "*.egg-info/**"]
-NEVER_COMMIT = ["*_????????-????-????-????-????????????.jsonl", ".pi/", ".codex/", ".cursor/", ".agy/",
+NEVER_COMMIT = ["*_????????-????-????-????-????????????.jsonl", "openswarm-card-*.md",
+                ".pi/", ".codex/", ".cursor/", ".agy/",
                 "pi-session*.jsonl", "codex-session*.jsonl", "cursor-session*.jsonl",
                 "pi*.log", "codex*.log", "cursor*.log", "agy*.log"]
 
@@ -8745,7 +8746,13 @@ def lane_do_run(lane, spec, child, server, current):
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
             return status
-        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp)
+        return lane_finalize_run(
+            lane, spec, ws, None, {}, error_class, 1, evp,
+            attempts=[{"backend": lane["backend"], "model": lane["model"],
+                       "effort": lane.get("effort"), "rc": 1,
+                       "seconds": round(NOW() - spec.get("started", NOW()), 3),
+                       "error_class": error_class, "meta": {"usage": {}},
+                       "events": evp, "error_tail": short(e, 500)}])
 
 
 def agy_quota_available(lane, child):
