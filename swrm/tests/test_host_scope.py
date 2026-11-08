@@ -28,6 +28,38 @@ class HostScopeTests(unittest.TestCase):
             self.addCleanup(patch.stop)
         self.policy = xs.load_policy()
 
+    def test_host_research_commits_new_file_but_explicit_read_only_does_not(self):
+        repo = self.root / "repo-commit"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "init"], check=True)
+        run_dir = self.root / "run"
+        run_dir.mkdir()
+
+        self.assertFalse(xs.run_is_read_only("host", False, "research"))
+        ws = xs.prepare_workspace(str(repo), "host-research", True)
+        (Path(ws["path"]) / "q6" / "review-quality.md").parent.mkdir()
+        (Path(ws["path"]) / "q6" / "review-quality.md").write_text("review\n")
+        result = xs.finalize_workspace(ws, "research", "codex", str(run_dir), keep=True)
+        self.assertTrue(result["commit"])
+        self.assertEqual(result["branch"], "swrm/host-research")
+        self.assertIn("q6/review-quality.md", subprocess.run(
+            ["git", "-C", str(repo), "show", "--format=", "--name-only", result["commit"]],
+            check=True, capture_output=True, text=True).stdout)
+        xs.cleanup_worktree(ws, result["commit"])
+
+        self.assertTrue(xs.run_is_read_only("host", True, "research"))
+        ws = xs.prepare_workspace(str(repo), "host-read-only", True)
+        (Path(ws["path"]) / "ignored.txt").write_text("discard\n")
+        fin = {"branch": None, "commit": None}
+        if not xs.run_is_read_only("host", True, "research"):
+            fin = xs.finalize_workspace(ws, "research", "codex", str(run_dir), keep=True)
+        self.assertIsNone(fin["commit"])
+        self.assertIsNone(fin["branch"])
+        xs.cleanup_worktree(ws, None)
+
     def test_wrapped_commands_keep_all_inner_enforcement(self):
         prefixes = ("sudo", "sudo -u operator", "sudo -n -uoperator --",
                     "/usr/bin/sudo --user=operator", "sudo --user operator --",

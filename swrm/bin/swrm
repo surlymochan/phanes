@@ -2993,6 +2993,12 @@ def changed_paths(repo, base, commit, fallback=None):
 READ_ONLY_CARD_TYPES = {"review", "research"}
 
 
+def run_is_read_only(scope, explicit_read_only, task_type=None, card_type=None):
+    # Host-scoped work may make repository changes unless the caller explicitly opts out.
+    return bool(explicit_read_only or (scope != "host" and
+                (task_type in READ_ONLY_CARD_TYPES or card_type in READ_ONLY_CARD_TYPES)))
+
+
 def read_only_output_exists(root, files):
     root = os.path.realpath(root)
     for path in files if isinstance(files, list) else []:
@@ -5448,8 +5454,8 @@ def cmd_run(args, policy):
     title = args.title or task.strip().splitlines()[0][:72]
     set_status(rdir, scope=scope)
     prof = profile_from_args(args)
-    prof["read_only"] = (getattr(args, "read_only", False) or
-                         prof.get("type") in READ_ONLY_CARD_TYPES or card_type in READ_ONLY_CARD_TYPES)
+    prof["read_only"] = run_is_read_only(scope, getattr(args, "read_only", False),
+                                          prof.get("type"), card_type)
     budget_min = args.budget_minutes if args.budget_minutes is not None else policy["run"]["timeout_seconds"] / 60
     if args.backend == "github-issue":
         try:
