@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import sys
@@ -107,6 +109,71 @@ class EvalidOverheadTests(unittest.TestCase):
         ])
         self.assertEqual(report["stages"]["holdout"]["run_count"], 1)
         self.assertEqual(report["stages"]["spec-check"]["run_count"], 1)
+
+    def test_swrm_run_shape_reports_execution_without_queue(self):
+        run = self.runs / "swrm-run"
+        run.mkdir()
+        (run / "status.json").write_text(json.dumps({
+            "stage": "red",
+            "queued_at": 1000.0,
+            "started": 1010.0,
+            "queued_seconds": 12.5,
+            "budget_minutes": 1,
+        }), encoding="utf-8")
+        (run / "result.json").write_text(json.dumps({
+            "seconds": 45.0,
+            "usage": {"input_tokens": 5},
+        }), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["data_quality_errors"], [])
+        self.assertEqual(report["stages"]["red"], {
+            "run_count": 1,
+            "queued_seconds": 12.5,
+            "execution_seconds": 45.0,
+            "budget_seconds": 45.0,
+            "usage": {"input_tokens": 5},
+        })
+        self.assertTrue(report["budget_excludes_queue_seconds"])
+
+    def test_budget_is_capped_at_the_allowance_and_never_charges_queue(self):
+        self.write_run(
+            "over-budget",
+            stage="green",
+            queued_at="2026-11-09T04:00:00Z",
+            started="2026-11-09T04:00:10Z",
+            finished="2026-11-09T04:03:30Z",
+            queued_seconds=90,
+            budget_minutes=1,
+        )
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["stages"]["green"]["execution_seconds"], 200.0)
+        self.assertEqual(report["stages"]["green"]["budget_seconds"], 60.0)
+        self.assertEqual(report["stages"]["green"]["queued_seconds"], 90.0)
+        self.assertTrue(report["budget_excludes_queue_seconds"])
+
+    def test_cli_prints_the_same_report_as_the_library(self):
+        self.write_run(
+            "spec-cli",
+            stage="Spec",
+            queued_at="2026-11-09T05:00:00Z",
+            started="2026-11-09T05:00:10Z",
+            finished="2026-11-09T05:00:40Z",
+            queued_seconds=10,
+            budget_minutes=1,
+            usage={"input_tokens": 3},
+        )
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = overhead._main([str(self.runs)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue(),
+                         overhead.render_report(overhead.build_report(self.runs)))
 
 
 if __name__ == "__main__":

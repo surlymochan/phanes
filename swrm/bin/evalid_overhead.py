@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""Report evalid stage overhead; queue time never consumes the run budget.
+
+Read-only reporter over a swrm runs directory. Every run directory holds a
+``status.json`` (and usually a ``result.json``); the reporter aggregates the
+L2 role pipeline stages -- Spec, spec-check, red, green, holdout and Review --
+into run counts, queue seconds, execution seconds, budget seconds and usage.
+
+Two rules drive the numbers:
+
+* Queue time is capacity wait, not work. ``queued_seconds`` is reported on its
+  own and never enters ``budget_seconds``: a run's budget is derived from its
+  execution window only, so queue time is never charged and never deducted
+  twice.
+* Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
+  one run each on red, green, holdout and Review; every further run -- the Spec
+  and spec-check runs, plus retries -- is extra quota and extra concurrency.
+
+Missing timestamps and negative durations are reported as deterministic data
+quality errors instead of silently skewing the totals. The same input always
+renders the same JSON bytes.
+
+Usage:
+    python3 swrm/bin/evalid_overhead.py [RUNS_DIR] [--stage STAGE]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import pathlib
+import sys
+from datetime import datetime, timezone
+from typing import Any, Optional, Sequence
+
+SCHEMA = "evalid-overhead/1"
+
+#: Pipeline stages in execution order; always reported, even when empty.
+STAGES = ("Spec", "spec-check", "red", "green", "holdout", "Review")
+
+#: Stages the pre-Spec flow already ran once; their first run is the baseline.
+BASELINE_STAGES = ("red", "green", "holdout", "Review")
+
+#: Accepted stage spellings, normalized to the canonical stage names.
+STAGE_ALIASES = {
+    "spec": "Spec",
+    "spec-check": "spec-check",
+    "red": "red",
+    "green": "green",
+    "holdout": "holdout",
+    "review": "Review",
+    "delivery": "Review",
+}
+
+#: Queue percentiles reported for the experiment conclusion.
+PERCENTILES = (("p50", 50.0), ("p90", 90.0), ("p95", 95.0), ("p99", 99.0))
+
+SECONDS_PER_MINUTE = 60.0
+
+
+def default_runs_dir() -> str:
+    """Return the swrm runs directory of the current host."""
+    home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME")
+    if not home:
+        home = os.path.join(os.path.expanduser("~"), ".claude", "swrm")
+    return os.path.join(home, "runs")
+
+
+def _load_json(path: pathlib.Path) -> Optional[dict]:
+    """Read a JSON object, or None when the file is absent or unusable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _number(value: Any) -> Optional[Any]:
+    """Return a finite number, or None when the value is not numeric."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _seconds(value: Any) -> float:
+    """Round a duration to milliseconds so the JSON stays comparable."""
+    return round(float(value), 3)
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Accept ISO-8601 text or epoch seconds; None when unusable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _timestamp_error(raw: Any) -> str:
+    """Classify an unusable timestamp as missing or invalid."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return "missing"
+    return "invalid"
+
+
+def _stage_of(status: dict, result: dict) -> tuple[Optional[str], Optional[str]]:
+    """Normalize the recorded stage; None stage comes with its error kind."""
+    raw = status.get("stage")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = status.get("evalid_stage")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = result.get("evalid_stage")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, "missing"
+    stage = STAGE_ALIASES.get(str(raw).strip().lower())
+    return (stage, None) if stage else (None, "unknown")
+
+
+def _percentile(samples: Sequence[float], percent: float) -> float:
+    """Nearest-rank percentile of an already sorted sample list."""
+    if not samples:
+        return 0.0
+    rank = math.ceil(percent / 100.0 * len(samples))
+    index = min(max(rank - 1, 0), len(samples) - 1)
+    return float(samples[index])
+
+
+def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
+    """Read one run directory into stage, durations, queue time and usage."""
+    status_path = run_dir / "status.json"
+    if not status_path.exists():
+        return None
+    status = _load_json(status_path)
+    name = run_dir.name
+    errors: list[dict] = []
+    if status is None:
+        errors.append({"run_id": name, "field": "status.json", "error": "invalid"})
+        return {"run_id": name, "stage": None, "errors": errors, "queued_seconds": 0.0,
+                "execution_seconds": None, "budget_seconds": 0.0, "usage": {}}
+    result = _load_json(run_dir / "result.json") or {}
+
+    stage, stage_error = _stage_of(status, result)
+    if stage_error:
+        errors.append({"run_id": name, "field": "stage", "error": stage_error})
+
+    queued_raw = status.get("queued_at")
+    started_raw = status.get("started")
+    finished_raw = status.get("finished")
+    queued_at = _parse_timestamp(queued_raw)
+    started = _parse_timestamp(started_raw)
+    finished = _parse_timestamp(finished_raw)
+    if queued_at is None:
+        errors.append({"run_id": name, "field": "queued_at", "error": _timestamp_error(queued_raw)})
+    if started is None:
+        errors.append({"run_id": name, "field": "started", "error": _timestamp_error(started_raw)})
+
+    # Execution time is the work window; queue time never enters it.
+    execution = None
+    if started is not None and finished is not None:
+        execution = (finished - started).total_seconds()
+        if execution < 0:
+            errors.append({"run_id": name, "field": "execution_seconds", "error": "negative"})
+            execution = None
+    else:
+        fallback = _number(result.get("seconds"))
+        if fallback is not None and fallback >= 0:
+            execution = float(fallback)
+        elif finished is None and started is not None:
+            errors.append({"run_id": name, "field": "finished", "error": _timestamp_error(finished_raw)})
+
+    queued = _number(status.get("queued_seconds"))
+    if queued is None:
+        queued = _number(result.get("queued_seconds"))
+    if queued is None:
+        queued = 0.0
+    elif queued < 0:
+        errors.append({"run_id": name, "field": "queued_seconds", "error": "negative"})
+        queued = 0.0
+
+    # The budget covers the execution window only; queue seconds are not
+    # charged to it, and a run killed at its deadline cannot exceed it.
+    budget_minutes = _number(status.get("budget_minutes"))
+    allowance = None
+    if budget_minutes is not None and budget_minutes >= 0:
+        allowance = float(budget_minutes) * SECONDS_PER_MINUTE
+    if execution is None:
+        budget = 0.0
+    elif allowance is None:
+        budget = execution
+    else:
+        budget = min(execution, allowance)
+
+    usage_raw = status.get("usage")
+    if not isinstance(usage_raw, dict) or not usage_raw:
+        usage_raw = result.get("usage")
+    usage: dict[str, Any] = {}
+    if isinstance(usage_raw, dict):
+        for key, value in usage_raw.items():
+            number = _number(value)
+            if number is not None:
+                usage[str(key)] = number
+
+    return {"run_id": name, "stage": stage, "errors": errors,
+            "queued_seconds": float(queued), "execution_seconds": execution,
+            "budget_seconds": budget, "usage": usage}
+
+
+def _empty_bucket() -> dict:
+    """Return a fresh per-stage accumulator."""
+    return {"run_count": 0, "queued_seconds": 0.0, "execution_seconds": 0.0,
+            "budget_seconds": 0.0, "usage": {}}
+
+
+def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
+    """Aggregate a runs directory into the stage overhead report."""
+    selected = tuple(stages) if stages else STAGES
+    root = pathlib.Path(runs_dir)
+    buckets = {stage: _empty_bucket() for stage in selected}
+    queue_samples: list[float] = []
+    errors: list[dict] = []
+
+    for entry in sorted(root.iterdir(), key=lambda path: path.name):
+        if not entry.is_dir():
+            continue
+        record = _run_record(entry)
+        if record is None:
+            continue
+        errors.extend(record["errors"])
+        stage = record["stage"]
+        if stage is None or stage not in buckets:
+            continue
+        bucket = buckets[stage]
+        bucket["run_count"] += 1
+        bucket["queued_seconds"] += record["queued_seconds"]
+        if record["execution_seconds"] is not None:
+            bucket["execution_seconds"] += record["execution_seconds"]
+        bucket["budget_seconds"] += record["budget_seconds"]
+        for key, value in record["usage"].items():
+            bucket["usage"][key] = bucket["usage"].get(key, 0) + value
+        queue_samples.append(record["queued_seconds"])
+
+    stages_report: dict[str, dict] = {}
+    for stage, bucket in buckets.items():
+        stages_report[stage] = {
+            "run_count": bucket["run_count"],
+            "queued_seconds": _seconds(bucket["queued_seconds"]),
+            "execution_seconds": _seconds(bucket["execution_seconds"]),
+            "budget_seconds": _seconds(bucket["budget_seconds"]),
+            "usage": {key: bucket["usage"][key] for key in sorted(bucket["usage"])},
+        }
+
+    totals_usage: dict[str, Any] = {}
+    for bucket in buckets.values():
+        for key, value in bucket["usage"].items():
+            totals_usage[key] = totals_usage.get(key, 0) + value
+
+    total_run_count = sum(bucket["run_count"] for bucket in buckets.values())
+    baseline_run_count = sum(1 for stage in BASELINE_STAGES
+                             if stage in buckets and buckets[stage]["run_count"] > 0)
+    queue_samples.sort()
+    percentiles = {name: _percentile(queue_samples, percent) for name, percent in PERCENTILES}
+
+    return {
+        "schema": SCHEMA,
+        "stages": stages_report,
+        "totals": {
+            "run_count": total_run_count,
+            "queued_seconds": _seconds(sum(bucket["queued_seconds"] for bucket in buckets.values())),
+            "execution_seconds": _seconds(sum(bucket["execution_seconds"] for bucket in buckets.values())),
+            "budget_seconds": _seconds(sum(bucket["budget_seconds"] for bucket in buckets.values())),
+            "usage": {key: totals_usage[key] for key in sorted(totals_usage)},
+        },
+        "baseline_run_count": baseline_run_count,
+        "extra_run_count": total_run_count - baseline_run_count,
+        "queue_percentiles_seconds": {name: _seconds(value) for name, value in percentiles.items()},
+        "budget_excludes_queue_seconds": all(
+            stage["budget_seconds"] <= stage["execution_seconds"] + 1e-9
+            for stage in stages_report.values()),
+        "data_quality_errors": errors,
+    }
+
+
+def render_report(report: dict) -> str:
+    """Render the report as stable JSON: the same input gives the same bytes."""
+    return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Report evalid stage overhead from a swrm runs directory.")
+    parser.add_argument("runs_dir", nargs="?", default=default_runs_dir(),
+                        help="runs directory (default: $OPENSWARM_HOME/runs)")
+    parser.add_argument("--stage", action="append", choices=STAGES,
+                        help="only report these stages (repeatable)")
+    args = parser.parse_args(argv)
+    try:
+        report = build_report(args.runs_dir, stages=args.stage)
+    except OSError as error:
+        print(json.dumps({"error": str(error)[:200]}), file=sys.stderr)
+        return 2
+    sys.stdout.write(render_report(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
