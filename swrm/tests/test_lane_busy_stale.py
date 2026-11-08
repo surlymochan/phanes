@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import importlib.util
 import os
@@ -5,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -19,6 +21,75 @@ spec.loader.exec_module(ad)
 
 
 class LaneBusyStaleTests(unittest.TestCase):
+    def test_status_and_supervisor_updates_are_serialized(self):
+        # Pause the first transaction after reading state.json, then force the
+        # other caller to attempt its lock. Exercise both orders, including the
+        # status writes that initialize or normalize the activity clock.
+        for activity in (100, 12_000, None):
+            for changes in ({"state": "idle", "current_run": None},
+                            {"state": "busy", "current_run": "run-2", "last_activity": 10_000},
+                            {"last_activity": 10_000}):
+                for status_first in (True, False):
+                    with self.subTest(activity=activity, changes=changes, status_first=status_first):
+                        self.check_concurrent_update(activity, changes, status_first)
+
+    def check_concurrent_update(self, activity, changes, status_first):
+        with tempfile.TemporaryDirectory(prefix="lane-busy-stale-") as root:
+            lane = {"name": "L1", "backend": "codex", "model": "test-model"}
+            state_path = os.path.join(root, "lanes", "L1", "state.json")
+            xs.jsave(state_path, {"state": "busy", "current_run": "run-1",
+                                 "supervisor_pid": 123, "last_activity": activity})
+            read = threading.Event()
+            release = threading.Event()
+            contending = threading.Event()
+            first_thread = []
+            jload, flock = xs.jload, xs._flock
+
+            def paused_read(path, default=None):
+                value = jload(path, default)
+                if path == state_path and not read.is_set():
+                    first_thread.append(threading.get_ident())
+                    read.set()
+                    if not release.wait(5):
+                        raise AssertionError("state transaction was not released")
+                return value
+
+            def observed_lock(target, op):
+                if first_thread and threading.get_ident() != first_thread[0]:
+                    contending.set()
+                return flock(target, op)
+
+            with mock.patch.object(xs, "DATA", root), \
+                    mock.patch.object(xs, "lane_config", return_value=[lane]), \
+                    mock.patch.object(xs, "pid_alive", return_value=True), \
+                    mock.patch.object(xs, "NOW", return_value=10_000), \
+                    mock.patch.object(xs, "jload", side_effect=paused_read), \
+                    mock.patch.object(xs, "_flock", side_effect=observed_lock):
+                status = lambda: xs.lane_status_rows()[0]
+                update = lambda: xs.lane_write_state("L1", **changes)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(status if status_first else update)
+                    try:
+                        self.assertTrue(read.wait(5), "first transaction never read state")
+                        second = pool.submit(update if status_first else status)
+                        self.assertTrue(contending.wait(5), "second transaction did not attempt the lock")
+                        self.assertFalse(second.done(), "second transaction bypassed the state lock")
+                    finally:
+                        release.set()
+                    first.result(timeout=5)
+                    second.result(timeout=5)
+                persisted = jload(state_path, {})
+                for key, value in changes.items():
+                    self.assertEqual(persisted[key], value)
+                if "current_run" in changes:
+                    self.assertNotIn("stale_run", persisted)
+                    self.assertNotIn("stale_since", persisted)
+                elif not status_first:
+                    self.assertNotIn("stale_run", persisted)
+                else:
+                    # Activity after marking does not implicitly acknowledge it.
+                    self.assertEqual(persisted.get("stale_run"), "run-1" if activity == 100 else None)
+
     def test_legacy_busy_without_activity_eventually_expires(self):
         with tempfile.TemporaryDirectory(prefix="lane-busy-stale-") as root:
             os.makedirs(os.path.join(root, "lanes", "L1"))
@@ -270,16 +341,19 @@ class AutodispatchBusyStaleTests(unittest.TestCase):
 # #1786 review closure (migration: openswarm/bin/openswarm -> swrm/bin/swrm;
 # openswarm/tests/test_dispatch_busy_stale.py -> this file; the dispatch status
 # writer lives in tools/lane-autodispatch/autodispatch.py).
-# B1 -> swrm/tests/test_lane_busy_stale.py:263 ->
+# B1 -> swrm/tests/test_lane_busy_stale.py:334 ->
 # test_reviewed_binary_artifacts_are_absent -> PASS; the reviewed .so files are
 # absent, and `git diff a4a49b831 --numstat` contains only three text files.
 # Status writer blocker -> tools/lane-autodispatch/autodispatch.py:878,1245 ->
 # test_host_backoff_persists_stale_until_recovery_harvest,
 # test_ssh_failure_uses_cached_activity_before_backoff,
 # test_queue_failure_still_updates_stale_status_and_state -> PASS.
-# Legacy clock blocker -> swrm/bin/swrm:8894 ->
+# Legacy clock blocker -> swrm/bin/swrm:8912 ->
 # test_legacy_busy_without_activity_eventually_expires,
 # test_legacy_run_gets_one_observation_window_even_offline -> PASS.
+# Concurrent state writer blocker -> swrm/bin/swrm:7172,8904 ->
+# test_status_and_supervisor_updates_are_serialized -> PASS (both transaction
+# orders; completion, new run and fresh activity; stale, legacy and skewed clocks).
 # Coverage blocker -> tools/lane-autodispatch/autodispatch.py:626,907 ->
 # test_real_executor_activity_keeps_long_run_busy_then_expires_without_events,
 # test_repeated_future_host_reading_does_not_refresh_activity -> PASS.

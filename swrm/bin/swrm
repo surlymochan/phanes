@@ -7168,7 +7168,23 @@ def lanes_by_name(names=None):
     return [by_name[n] for n in names]
 
 
+@contextlib.contextmanager
+def lane_state_lock(lane_name):
+    # Lock a stable sidecar: jsave replaces state.json, so locking that inode
+    # would leave readers and writers holding locks on different files.
+    os.makedirs(lane_root(lane_name), exist_ok=True)
+    with open(lane_state_path(lane_name) + ".lock", "a") as lock:
+        _flock(lock, LOCK_EX)
+        yield
+
+
 def lane_write_state(lane_name, **changes):
+    with lane_state_lock(lane_name):
+        return lane_write_state_locked(lane_name, **changes)
+
+
+def lane_write_state_locked(lane_name, **changes):
+    """Read/modify/write with lane_state_lock already held by the caller."""
     state = jload(lane_state_path(lane_name), {}) or {}
     old_run = state.get("current_run")
     state.update(changes)
@@ -7665,10 +7681,11 @@ def lane_record_event(path, event):
         except (OSError, ValueError):
             return
         for lane in lanes:
-            state = jload(lane_state_path(lane["name"]), {}) or {}
-            if state.get("current_run") == run_id and state.get("state") == "busy":
-                lane_write_state(lane["name"], last_activity=NOW())
-                break
+            with lane_state_lock(lane["name"]):
+                state = jload(lane_state_path(lane["name"]), {}) or {}
+                if state.get("current_run") == run_id and state.get("state") == "busy":
+                    lane_write_state_locked(lane["name"], last_activity=NOW())
+                    break
 
 
 def lane_control_messages(server, lane, current, child, turn, pending):
@@ -8883,35 +8900,36 @@ def lane_status_rows():
     except (TypeError, ValueError):
         stale_after = 30 * 60
     for lane in lane_config():
-        state = jload(lane_state_path(lane["name"]), {}) or {}
-        pid = state.get("supervisor_pid")
-        lane_state = state.get("state", "down")
-        if not pid:
-            lane_state = "down"
-        elif not pid_alive(pid):
-            lane_state = "crashed"
-        if state.get("state") == "busy" and state.get("current_run"):
-            activity = state.get("last_activity")
-            if not (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
-                    math.isfinite(activity) and activity > 0):
-                # Pre-upgrade runs have no activity clock. Start one persisted
-                # grace window, without treating periodic `updated` as progress.
-                if "activity_observed_since" not in state:
-                    state = lane_write_state(lane["name"], activity_observed_since=now)
-                activity = state["activity_observed_since"]
-            if state.get("stale_run") == state.get("current_run"):
-                lane_state = "stale"
-            elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
-                  math.isfinite(activity) and activity > now):
-                # Normalize a skewed future timestamp once. Persisting the
-                # observation prevents every status tick from making it fresh.
-                activity = now
-                state = lane_write_state(lane["name"], last_activity=activity)
-            elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
-                  math.isfinite(activity) and now - activity > stale_after):
-                state = lane_write_state(lane["name"], stale_since=now,
-                                         stale_run=state["current_run"])
-                lane_state = "stale"
+        with lane_state_lock(lane["name"]):
+            state = jload(lane_state_path(lane["name"]), {}) or {}
+            pid = state.get("supervisor_pid")
+            lane_state = state.get("state", "down")
+            if not pid:
+                lane_state = "down"
+            elif not pid_alive(pid):
+                lane_state = "crashed"
+            if state.get("state") == "busy" and state.get("current_run"):
+                activity = state.get("last_activity")
+                if not (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                        math.isfinite(activity) and activity > 0):
+                    # Pre-upgrade runs have no activity clock. Start one persisted
+                    # grace window, without treating periodic `updated` as progress.
+                    if "activity_observed_since" not in state:
+                        state = lane_write_state_locked(lane["name"], activity_observed_since=now)
+                    activity = state["activity_observed_since"]
+                if state.get("stale_run") == state.get("current_run"):
+                    lane_state = "stale"
+                elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                      math.isfinite(activity) and activity > now):
+                    # Normalize a skewed future timestamp once. Persisting the
+                    # observation prevents every status tick from making it fresh.
+                    activity = now
+                    state = lane_write_state_locked(lane["name"], last_activity=activity)
+                elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                      math.isfinite(activity) and now - activity > stale_after):
+                    state = lane_write_state_locked(lane["name"], stale_since=now,
+                                                    stale_run=state["current_run"])
+                    lane_state = "stale"
         model = state.get("resolved_model") or lane["model"]
         quota_until = state.get("quota_until")
         if (lane_state == "idle" and lane["backend"] == "agy" and state.get("quota_model") == model
