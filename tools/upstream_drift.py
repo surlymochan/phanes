@@ -169,7 +169,8 @@ def pr_changed_paths() -> set[str]:
     if not base_ref:
         return set()
     run(["git", "fetch", "--no-tags", "origin", base_ref], cwd=ROOT)
-    return set(run(["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"], cwd=ROOT).splitlines())
+    output = run(["git", "diff", "--name-only", "-z", f"origin/{base_ref}...HEAD"], cwd=ROOT)
+    return {path for path in output.split("\0") if path}
 
 
 def marks_upstream(title: str) -> bool:
