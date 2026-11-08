@@ -7170,7 +7170,14 @@ def lanes_by_name(names=None):
 
 def lane_write_state(lane_name, **changes):
     state = jload(lane_state_path(lane_name), {}) or {}
+    old_run = state.get("current_run")
     state.update(changes)
+    # Keep stale visible through later activity and status writes. Clear it
+    # only when its run is resolved or a different run is assigned.
+    if ((changes.get("state") == "idle" and changes.get("current_run") is None) or
+            (changes.get("current_run") and changes.get("current_run") != old_run)):
+        state.pop("stale_since", None)
+        state.pop("stale_run", None)
     state["updated"] = NOW()
     jsave(lane_state_path(lane_name), state)
     return state
@@ -7649,6 +7656,18 @@ def lane_refresh_codex_child_if_stale(lane, child, policy, event_file):
 def lane_record_event(path, event):
     with open(path, "a") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    # Executor events are progress; supervisor polling and status writes are not.
+    if event.get("type") not in {"lane_start", "risk_warning", "risk_blocked", "error", "RATELIMIT"}:
+        run_id = os.path.basename(os.path.dirname(path))
+        try:
+            lanes = lane_config()
+        except (OSError, ValueError):
+            return
+        for lane in lanes:
+            state = jload(lane_state_path(lane["name"]), {}) or {}
+            if state.get("current_run") == run_id and state.get("state") == "busy":
+                lane_write_state(lane["name"], last_activity=NOW())
+                break
 
 
 def lane_control_messages(server, lane, current, child, turn, pending):
@@ -7704,7 +7723,7 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                         open(spec["_event_file"], "w").close()
                         current.update(spec)
                         lane_write_state(lane["name"], state="busy", current_run=rid, turn_state="queued",
-                                         concurrency_keys=[], last_error=None)
+                                         concurrency_keys=[], last_error=None, last_activity=NOW())
                         set_status(rdir, id=rid, state="queued", title=spec.get("title") or task.strip().splitlines()[0][:72],
                                    backend=lane["backend"], model=lane["model"], effort=lane.get("effort"), lane=lane["name"],
                                    provider=provider, concurrency_keys=concurrency_keys(lane["backend"], provider),
@@ -8857,6 +8876,11 @@ def cmd_lane_down(args):
 
 def lane_status_rows():
     rows = []
+    now = NOW()
+    try:
+        stale_after = float((load_policy().get("thresholds") or {}).get("busy_stale_minutes", 30)) * 60
+    except (TypeError, ValueError):
+        stale_after = 30 * 60
     for lane in lane_config():
         state = jload(lane_state_path(lane["name"]), {}) or {}
         pid = state.get("supervisor_pid")
@@ -8865,6 +8889,21 @@ def lane_status_rows():
             lane_state = "down"
         elif not pid_alive(pid):
             lane_state = "crashed"
+        if state.get("state") == "busy" and state.get("current_run"):
+            activity = state.get("last_activity")
+            if state.get("stale_run") == state.get("current_run"):
+                lane_state = "stale"
+            elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                  math.isfinite(activity) and activity > now):
+                # Normalize a skewed future timestamp once. Persisting the
+                # observation prevents every status tick from making it fresh.
+                activity = now
+                state = lane_write_state(lane["name"], last_activity=activity)
+            elif (isinstance(activity, (int, float)) and not isinstance(activity, bool) and
+                  math.isfinite(activity) and now - activity > stale_after):
+                state = lane_write_state(lane["name"], stale_since=now,
+                                         stale_run=state["current_run"])
+                lane_state = "stale"
         model = state.get("resolved_model") or lane["model"]
         quota_until = state.get("quota_until")
         if (lane_state == "idle" and lane["backend"] == "agy" and state.get("quota_model") == model
@@ -8874,6 +8913,8 @@ def lane_status_rows():
                      "model": model, "pid": state.get("child_pid"), "supervisor_pid": pid,
                      "quota_reset_at": quota_until if lane_state == "quota_exhausted" else None,
                      "current_run": state.get("current_run"),
+                     "last_activity": state.get("last_activity"),
+                     "stale_since": state.get("stale_since"),
                      "run_state": state.get("turn_state"),
                      "provider": execution_provider(lane["backend"], policy=load_policy(), lane=lane),
                      "uptime_seconds": round(NOW() - state["started"], 1) if state.get("started") else None,
