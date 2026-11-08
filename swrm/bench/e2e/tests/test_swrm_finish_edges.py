@@ -27,6 +27,30 @@ def test_receipt_ignores_unrelated_trailing_json_object():
     assert extract_result_object(stdout) == receipt
 
 
+def test_receipt_ignores_trailing_telemetry_with_attempt_metadata():
+    receipt = {
+        "id": "run-123",
+        "status": "done",
+        "workspace": {"mode": "worktree", "path": "/tmp/run-123"},
+        "run_dir": "/tmp/swrm/runs/run-123",
+    }
+    telemetry = {
+        "id": "metrics-456",
+        "event": "usage",
+        "attempts": [
+            {
+                "backend": "cursor",
+                "model": "grok",
+                "meta": {"usage": {"inputTokens": 8}},
+            }
+        ],
+    }
+    stdout = json.dumps(receipt) + "\n" + json.dumps(telemetry)
+
+    assert extract_result_object(stdout) == receipt
+    assert extract_result_object(json.dumps(telemetry)) is None
+
+
 def test_receipt_keeps_support_for_multiple_stdout_objects():
     receipt = {
         "id": "run-789",

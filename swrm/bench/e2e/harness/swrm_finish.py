@@ -73,15 +73,19 @@ def _is_result_receipt(obj: object) -> bool:
         return False
     run_dir = obj.get("run_dir")
     workspace = obj.get("workspace")
-    if obj.get("status") in terminal_statuses and (
+    has_run_context = (
         (isinstance(run_dir, str) and bool(run_dir.strip()))
         or (isinstance(workspace, dict) and workspace.get("mode") in ("worktree", "in-place", "github-issue"))
-    ):
+    )
+    if obj.get("status") in terminal_statuses and has_run_context:
         return True
-    # Also support attempt-based receipts without a status. An empty
-    # attempts list alone is common in telemetry, so require executor metadata.
+    # A statusless result can still be recognized by its run context. Without
+    # that context, require the top-level usage summary as well as attempts;
+    # telemetry events may carry attempt metadata but are not run receipts.
+    if "status" not in obj and has_run_context:
+        return True
     attempts = obj.get("attempts")
-    return isinstance(attempts, list) and bool(attempts) and all(
+    has_executor_attempts = isinstance(attempts, list) and bool(attempts) and all(
         isinstance(attempt, dict)
         and isinstance(attempt.get("backend"), str)
         and bool(attempt["backend"].strip())
@@ -89,6 +93,9 @@ def _is_result_receipt(obj: object) -> bool:
         and isinstance(attempt.get("meta"), dict)
         for attempt in attempts
     )
+    if not has_executor_attempts:
+        return False
+    return obj.get("status") in terminal_statuses or looks_like_usage(obj.get("usage"))
 
 
 def executor_calls(result: dict) -> list[dict]:
