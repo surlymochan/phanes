@@ -92,8 +92,19 @@ class CgroupBoundary:
 
     def members(self):
         try:
-            raw = (self.path / "cgroup.procs").read_text(encoding="ascii")
-            return [int(value) for value in raw.split()]
+            members = set()
+
+            def unreadable(error):
+                raise error
+
+            # cgroup.procs contains only direct members. Descendants may create
+            # nested cgroups, so every directory must be readable before release.
+            for root, _, _ in os.walk(self.path, onerror=unreadable):
+                raw = (Path(root) / "cgroup.procs").read_text(encoding="ascii")
+                members.update(int(value) for value in raw.split())
+            if not self.path.is_dir():
+                return None
+            return sorted(members)
         except (OSError, ValueError):
             return None
 
@@ -108,6 +119,15 @@ class CgroupBoundary:
         if not self.proven:
             self._remove_empty()
             return False, []
+        # The kernel's recursive populated flag also catches a process moving
+        # into a cgroup we already sampled during the recursive enumeration.
+        try:
+            events = dict(line.split() for line in
+                          (self.path / "cgroup.events").read_text(encoding="ascii").splitlines())
+            if events.get("populated") != "0":
+                return False, None
+        except (OSError, ValueError):
+            return False, None
         self._remove_empty()
         return True, []
 
@@ -142,4 +162,3 @@ def observe_spawn():
         members = boundary.members()
         if members:
             boundary.proven = True
-

@@ -138,18 +138,21 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(xs.executor_error_class(1, None, error, 'agy'), 'upstream_forbidden')
         self.assertEqual(xs.executor_error_class(1, None, error, 'codex'), 'exec_error')
 
-    def test_reaped_stopped_runner_releases_slot(self):
+    def test_reaped_stopped_runner_retains_slot_without_boundary(self):
         guard = pathlib.Path(self.temp.name, 'guard.json')
         guard.write_text(json.dumps({'command': [str(BIN), 'broker']}))
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard), 'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}
-        with mock.patch.dict(os.environ, env), mock.patch.dict(xs.EXECUTORS, {'pi': lambda *args: (133, None, {}, 'stopped')}):
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs.procboundary.CgroupBoundary, 'create', return_value=None), \
+             mock.patch.dict(xs.EXECUTORS, {'pi': lambda *args: (133, None, {}, 'stopped')}):
             rdir = pathlib.Path(self.temp.name, 'runs', 'reaped')
             rdir.mkdir(parents=True)
             _, _, error = xs.run_executor_with_rate_limit('pi', {'backend': 'pi', 'model': 'fake'}, {}, 'review',
                                                           self.temp.name, str(rdir), xs.NOW() + 15,
                                                           {'concurrency': {'total': 8}})
             self.assertEqual(error, 'risk_blocked')
-            self.assertEqual(self.call('broker', op='status')['reservations'], [])
+            self.assertTrue(self.call('broker', op='status')['reservations'])
+            xs.release_fleet_slot(str(rdir))
 
     @unittest.skipIf(os.name == 'nt', 'fixture relies on POSIX detached sessions')
     def test_successful_executor_retains_slot_for_unobserved_detached_descendant(self):
@@ -203,7 +206,7 @@ class FleetCapacityTests(unittest.TestCase):
                                                    'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
                     xs.release_fleet_slot(str(rdir))
 
-    def test_one_shot_agy_403_releases_slot_for_next_run(self):
+    def test_one_shot_agy_403_retains_slot_without_boundary(self):
         guard = pathlib.Path(self.temp.name, 'guard.json')
         guard.write_text(json.dumps({'command': [str(BIN), 'broker']}))
         fake = HERE / 'fixtures/fake_agy.py'
@@ -211,7 +214,8 @@ class FleetCapacityTests(unittest.TestCase):
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard),
                'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name,
                'OPENSWARM_AGY_BIN': str(fake), 'FAKE_AGY_MODE': 'forbidden-exit'}
-        with mock.patch.dict(os.environ, env):
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs.procboundary.CgroupBoundary, 'create', return_value=None):
             for number in range(2):
                 rdir = pathlib.Path(self.temp.name, 'runs', f'run-{number}')
                 rdir.mkdir(parents=True)
@@ -220,7 +224,8 @@ class FleetCapacityTests(unittest.TestCase):
                     str(rdir), xs.NOW() + 15, {'concurrency': {'total': 8}})
                 self.assertEqual(error, 'upstream_forbidden')
                 self.assertEqual(attempts[0]['rc'], 1)
-                self.assertEqual(self.call('broker', op='status')['reservations'], [])
+                self.assertTrue(self.call('broker', op='status')['reservations'])
+                xs.release_fleet_slot(str(rdir))
 
     def test_recovery_requires_local_explicit_confirmation(self):
         token = 'a' * 32
@@ -279,20 +284,23 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertEqual([c.args[1]['op'] for c in call.call_args_list], ['acquire', 'release'])
             self.assertNotIn(os.path.realpath(rdir), xs._FLEET_RESERVATIONS)
 
-    def test_early_agy_result_releases_one_shot_reservation(self):
+    def test_early_agy_result_retains_reservation_without_boundary(self):
         rdir = os.path.join(self.temp.name, 'runs', 'early-agy')
         os.makedirs(rdir)
         fake = mock.Mock(return_value=(1, None, {'usage':{}, 'finished_reason':'print_timeout'},
                                       'agy turn ended early: print_timeout'))
         with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}), \
              mock.patch.object(xs, 'fleet_guard_command', return_value=[str(BIN), 'broker']), \
+             mock.patch.object(xs.procboundary.CgroupBoundary, 'create', return_value=None), \
              mock.patch.dict(xs.EXECUTORS, {'agy':fake}):
             attempts, final, error = xs.run_executor_with_rate_limit(
                 'agy', {'backend':'agy', 'model':'gemini-3.8-flash-medium', 'effort':None}, {}, 'task', self.temp.name, rdir,
                 xs.NOW() + 30, xs.load_policy())
         self.assertEqual(error, 'exec_error')
         self.assertIsNone(final)
-        self.assertEqual(self.call('broker', op='status')['reservations'], [])
+        self.assertTrue(self.call('broker', op='status')['reservations'])
+        with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_CAPACITY_DIR': self.temp.name}):
+            xs.release_fleet_slot(rdir)
 
 if __name__ == '__main__':
     unittest.main()

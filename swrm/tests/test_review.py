@@ -67,21 +67,25 @@ class PeerReviewTests(unittest.TestCase):
         self.assertEqual((self.repo / "module.py").read_text(), "value = 2\n")
         self.assertEqual(len(self.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 1)
 
-    def test_timed_out_review_releases_the_fleet_reservation(self):
+    def test_timed_out_review_retains_the_fleet_reservation_without_boundary(self):
         guard = self.root / 'guard.json'
         coordinator = Path(_load.ROOT) / 'bin/fleet-capacity'
         guard.write_text(json.dumps({'command': [str(coordinator), 'broker']}))
         script = self.root / 'slow-review.py'
         script.write_text('import time\ntime.sleep(30)\n')
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard), 'OPENSWARM_FLEET_CAPACITY_DIR': str(self.root / 'capacity')}
-        with mock.patch.dict(os.environ, env), mock.patch.object(xs, 'review_command', return_value=[sys.executable, str(script)]):
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs.procboundary.CgroupBoundary, 'create', return_value=None), \
+             mock.patch.object(xs, 'review_command', return_value=[sys.executable, str(script)]):
             with self.assertRaisesRegex(RuntimeError, 'reviewer timed out'):
                 xs.invoke_reviewer({'backend': 'agy'}, 'review', str(self.repo), str(self.run_dir),
                                    {'review': {'timeout_seconds': 2}})
             coordinator_cmd = [sys.executable, str(coordinator)] if os.name == 'nt' else [str(coordinator)]
             status = subprocess.run([*coordinator_cmd, 'broker'], input=json.dumps({'op': 'status'}),
                                     text=True, capture_output=True, check=True)
-        self.assertEqual(json.loads(status.stdout)['reservations'], [])
+            self.assertTrue(json.loads(status.stdout)['reservations'])
+            for slot in self.runs.glob('review-slot-*'):
+                xs.release_fleet_slot(str(slot))
 
     def test_perform_review_stores_findings_and_peer_ledger_fields(self):
         findings = [{"severity": "P1", "path": "module.py", "line": 1,
