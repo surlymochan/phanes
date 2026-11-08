@@ -104,6 +104,32 @@ class PairedReportTests(unittest.TestCase):
         self.assertEqual([row['change_id'] for row in first['pairs']],
                          ['card-1', 'card-2', 'card-3'])
 
+    def test_all_infra_has_no_defined_difference(self):
+        manifest, receipts = fixture()
+        for receipt in receipts:
+            receipt['status'] = 'INFRA'
+        report = self.report(manifest, receipts)
+        self.assertIsNone(report['first_round_pass_difference'])
+        self.assertEqual(len(report['infra_missing']), 10)
+        self.assertEqual(report['sign_test'], {'control_wins': 0, 'treatment_wins': 0})
+
+    def test_rejects_invalid_or_ambiguous_inputs(self):
+        manifest, receipts = fixture()
+        cases = []
+        duplicate_card = copy.deepcopy(manifest)
+        duplicate_card['cards'].append(copy.deepcopy(duplicate_card['cards'][0]))
+        cases.append((duplicate_card, receipts))
+        cases.append((manifest, receipts + [dict(receipts[0], attempt=1),
+                                            dict(receipts[0], attempt=1)]))
+        cases.append((manifest, receipts + [dict(receipts[0], change_id='unknown')]))
+        cases.append((manifest, [dict(receipts[0], status='UNKNOWN')] + receipts[1:]))
+        cases.append((manifest, [dict(receipts[0], attempt=True)] + receipts[1:]))
+        for invalid_manifest, invalid_receipts in cases:
+            with self.subTest(manifest=invalid_manifest, receipts=invalid_receipts):
+                result = self.invoke(invalid_manifest, invalid_receipts)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(result.stderr.strip())
+
 
 if __name__ == '__main__':
     unittest.main()
