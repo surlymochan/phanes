@@ -821,7 +821,7 @@ def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfg
 def review_waiting_counts(review_ids, pending, running, max_in_flight=None, head_eligible=None):
     """Spread the entire waiting queue for backlog accounting, without admitting it.
 
-    The backlog cap limits admission, not visibility: even when every lane is at
+    The in-flight cap limits admission, not visibility: even when every lane is at
     capacity, every waiting card must appear in the backlog. This forecast uses a
     private copy of the current cursor so counting cannot consume an actual
     assignment's turn. During admission, reserve the queue head's prospective turn
@@ -1457,13 +1457,14 @@ def tick(lanes, state, last_warn):
             waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
             eligible = [lane for lane in [L, *remaining] if lane in review_ids
                         and lane in idle_lane_names(lanes, state, res, scopes)
+                        and running[lane] < REVIEW_MAX_IN_FLIGHT
                         and can_take(lanes[lane]["backend"], pick, lane)]
             queued = review_waiting_counts(review_ids, waiting, running, head_eligible=eligible)
-            # Admission and the decision log use the same backlog: running reviews
-            # plus the other cards waiting in this decision, excluding the queue head.
+            # Rank and log the full backlog, but enforce capacity on admitted reviews
+            # above. These waiting cards have no assigned lane yet: their forecast
+            # must not fill every idle lane's cap and prevent the queue from draining.
             loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
             chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
-                                             max_in_flight=REVIEW_MAX_IN_FLIGHT,
                                              pr=review_target_pr(pick),
                                              log=lambda row: log(row, brain=False))
             if chosen is None: continue

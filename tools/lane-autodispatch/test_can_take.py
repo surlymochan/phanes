@@ -244,9 +244,7 @@ class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
             verify = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 6)]
             work = [issue(n, "普通工作卡", ("lane-ready",)) for n in range(10, 15)]
             for rows in (work + verify[:1], verify + work[:1]):
-                # Exercise class sharing with enough review backlog capacity.
-                with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 5):
-                    dispatched, logs = self.run_tick(rows)
+                dispatched, logs = self.run_tick(rows)
                 self.assertEqual(dispatched, [("CX2", 1), ("CX10", 10)])
                 self.assertTrue(any("other class yields" in line for line in logs))
         finally:
@@ -263,8 +261,7 @@ class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
         old = AUTODISPATCH.AD_VERIFY_SHARE_ENABLED
         AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = True
         try:
-            with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 3):
-                dispatched, _ = self.run_tick(verify + work, lanes)
+            dispatched, _ = self.run_tick(verify + work, lanes)
         finally:
             AUTODISPATCH.AD_VERIFY_SHARE_ENABLED = old
         self.assertEqual([lane for lane, _ in dispatched], ["CX2", "CX4", "CX10"])
@@ -552,32 +549,44 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertIn("CX2=2, CX4=3, CX5=2", assignment)
         self.assertIn("lane CX2", assignment)
 
-    def test_waiting_queue_counts_toward_the_admission_cap(self):
-        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 9)]
+    def test_waiting_queue_larger_than_capacity_drains_at_the_default_cap(self):
+        pending = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 9)]
+        state, assignments = {}, []
         with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
-            dispatched, logs = self.run_tick(rows, self.LANES)
-        self.assertEqual(dispatched, [])
-        self.assertEqual(sum(self.last_state["_review_waiting"].values()), 8)
-        plans = [row for row in logs if "review plan" in row]
-        self.assertTrue(plans)
-        self.assertTrue(all("lane none" in row and "cap (1)" in row for row in plans))
-        self.assertIn("CX2=2, CX4=3, CX5=2", plans[0])
-        for row in plans:
-            self.assertTrue(all(int(count) >= 1 for count in re.findall(r"CX[245]=(\d+)", row)))
-        self.assertFalse(any("review assignment" in row for row in logs))
+            for expected in (3, 3, 2):
+                dispatched, _ = self.run_tick(pending, self.LANES, state)
+                self.assertEqual(len(dispatched), expected)
+                self.assertEqual(len({lane for lane, _ in dispatched}), expected)
+                assignments.extend(lane for lane, _ in dispatched)
+                completed = {n for _, n in dispatched}
+                pending = [row for row in pending if row["number"] not in completed]
+                self.assertEqual(sum(self.last_state["_review_waiting"].values()), len(pending))
+                # Finish this round, retaining the previous tick's queue forecast.
+                state = {key: value for key, value in self.last_state.items() if key not in self.LANES}
+        self.assertEqual(pending, [])
+        self.assertEqual(assignments, ["CX2", "CX4", "CX5", "CX2", "CX4", "CX5", "CX2", "CX4"])
 
-    def test_waiting_backlog_at_the_cap_skips_idle_review_lanes(self):
+    def test_four_waiting_reviews_fill_idle_lanes_at_the_default_cap(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
         with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
             dispatched, logs = self.run_tick(rows, self.LANES)
-        self.assertEqual(dispatched, [])
-        plan = next(row for row in logs if "review plan" in row)
-        self.assertIn("lane none (backlog: CX2=1, CX4=1, CX5=1)", plan)
-        self.assertIn("cap (1)", plan)
+            self.assertEqual(dispatched, [("CX2", 1), ("CX4", 2), ("CX5", 3)])
+            self.assertEqual(sum(self.last_state["_review_waiting"].values()), 1)
+            plan = next(row for row in logs if "review plan" in row)
+            self.assertIn("lane CX2 (backlog: CX2=1, CX4=1, CX5=1)", plan)
+            assignment = next(row for row in logs if "review assignment" in row)
+            self.assertIn("PR #1785 → lane CX2 (backlog: CX2=1, CX4=1, CX5=1)", assignment)
+            # No lane can take another review while its admitted review is running.
+            blocked, _ = self.run_tick(rows[3:], self.LANES, self.last_state)
+            self.assertEqual(blocked, [])
+            self.last_state.pop("CX2")
+            resumed, _ = self.run_tick(rows[3:], self.LANES, self.last_state)
+            self.assertEqual(resumed, [("CX2", 4)])
+            self.assertEqual(sum(self.last_state["_review_waiting"].values()), 0)
 
     def test_tick_rotation_records_the_unique_minimum_before_the_next_round(self):
         rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 5)]
-        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 2):
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
             first, _ = self.run_tick(rows, self.LANES, {})
             second, _ = self.run_tick(rows, self.LANES, {})
         self.assertEqual([lane for lane, _ in first], list(self.LANES))
@@ -701,8 +710,8 @@ class ReviewSequenceReplayTest(TickHarness, unittest.TestCase):
         free = dict.fromkeys(self.LANES, 0)
         pending, assignments, state = [], [], {}
         index, minute, spread = 0, 0, 0
-        # The cap includes waiting reviews; allow room for the recorded bursts.
-        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 4):
+        # Replay bursts at the default cap; unassigned demand must never stop admission.
+        with patch.object(AUTODISPATCH, "REVIEW_MAX_IN_FLIGHT", 1):
             while (index < len(self.SEQUENCE) or pending) and minute < 4000:
                 while index < len(self.SEQUENCE) and int(self.SEQUENCE[index].split(":")[0]) <= minute:
                     pr = self.SEQUENCE[index].split(":")[1]
