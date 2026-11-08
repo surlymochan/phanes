@@ -48,6 +48,32 @@ class DispatchFetchResilienceTest(unittest.TestCase):
             self.assertEqual(base_checks, 2, "base must be checked again after the successful fetch")
             self.assertIn("lane assign", " ".join(calls[-1]))
 
+    def test_fetch_failure_health_is_recent_and_classified(self):
+        AUTODISPATCH.DISPATCH_FETCH_FAILURES.clear()
+        AUTODISPATCH.record_dispatch_fetch_failure("govpn", "gnutls_handshake failed")
+        health = AUTODISPATCH.dispatch_fetch_health()
+        self.assertEqual(health["govpn"]["recent_failures"], 1)
+        self.assertEqual(health["govpn"]["primary_error"], "tls")
+
+    def test_failed_fetch_uses_configured_mirror_after_retry_threshold(self):
+        commands = []
+
+        def fake_sh(command, timeout=None, inp=None):
+            text = " ".join(command) if isinstance(command, (list, tuple)) else command
+            commands.append(text)
+            return (1, "", "gnutls_handshake failed") if "github.com" in text else (0, "", "")
+
+        with mock.patch.object(AUTODISPATCH, "sh", side_effect=fake_sh), \
+             mock.patch.object(AUTODISPATCH, "log"), \
+             mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_RETRIES", 2), \
+             mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_FALLBACK_AFTER", 2), \
+             mock.patch.dict("os.environ", {"AD_BASE_FETCH_MIRROR": "ssh://seed/phanes.git"}), \
+             mock.patch.object(AUTODISPATCH.time, "sleep"):
+            AUTODISPATCH.dispatch_base_fetch("govpn", "~/repo", "abc123")
+
+        self.assertEqual(sum("github.com" in command for command in commands), 2)
+        self.assertTrue(any("ssh://seed/phanes.git" in command for command in commands))
+
 
 if __name__ == "__main__":
     unittest.main()

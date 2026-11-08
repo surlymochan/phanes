@@ -54,7 +54,12 @@ BASE_BRANCH = "main"
 BASE_REPO_URL = f"https://github.com/{REPO}.git"  # the upstream the base commit is read from
 DISPATCH_BASE_FETCH_ATTEMPTS = 3  # bounded attempts (check -> fetch -> check) when the base is missing
 DISPATCH_BASE_FETCH_DELAY = 5     # seconds between two attempts
+DISPATCH_FETCH_RETRIES = int(os.environ.get("AD_DISPATCH_FETCH_RETRIES", "3"))
+DISPATCH_FETCH_RETRY_DELAY = float(os.environ.get("AD_DISPATCH_FETCH_RETRY_DELAY", "5"))
+DISPATCH_FETCH_FALLBACK_AFTER = int(os.environ.get("AD_DISPATCH_FETCH_FALLBACK_AFTER", "3"))
 BASE_MISSING_RE = re.compile(r"Not a valid object name", re.I)
+FETCH_ERROR_KIND_RE = re.compile(r"gnutls|tls|ssl|handshake|timed? out|connection reset|could not resolve|failed to connect|network is unreachable", re.I)
+DISPATCH_FETCH_FAILURES = {}  # host -> recent fetch failures; included in lanes-status.json
 STALE_STRIPPED_N = 0  # stale search-index entries removed by this process
 STALE_LANE_FAILED_N = 0  # stale hits whose issue still carries both lane-failed and lane-ready (Refs #985)
 LABEL_CACHE = {}  # issue number -> (status, payload): authoritative label reads of the current tick
@@ -883,6 +888,7 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
+    status["_dispatch_fetch_failures"] = dispatch_fetch_health()
     status["_at"] = time.strftime("%F %T")
     return status
 
@@ -905,6 +911,56 @@ def base_check_command(repo_path, base):
 def base_fetch_command(repo_path, url, branch):
     """Remote snippet: fetch the base branch into the target repo."""
     return f"git -C {repo_path} fetch -q {url} {branch}"
+
+def record_dispatch_fetch_failure(host, error):
+    """Keep a bounded, recent per-host summary for health and blocking diagnosis."""
+    now = time.time()
+    rows = DISPATCH_FETCH_FAILURES.setdefault(host, [])
+    rows[:] = [row for row in rows if now - row["at"] <= 3600]
+    kind = "tls" if re.search(r"gnutls|tls|ssl|handshake", error or "", re.I) else \
+           "network" if FETCH_ERROR_KIND_RE.search(error or "") else "other"
+    rows.append({"at": now, "kind": kind, "error": (error or "").strip()[-200:]})
+
+def dispatch_fetch_health(now=None):
+    """Per-host fetch failures in the last hour and their most common error type."""
+    now = time.time() if now is None else now
+    result = {}
+    for host, entries in DISPATCH_FETCH_FAILURES.items():
+        recent = [entry for entry in entries if now - entry["at"] <= 3600]
+        if recent:
+            counts = {kind: sum(entry["kind"] == kind for entry in recent)
+                      for kind in {entry["kind"] for entry in recent}}
+            result[host] = {"recent_failures": len(recent),
+                            "primary_error": max(counts, key=counts.get),
+                            "last_error": recent[-1]["error"]}
+    return result
+
+def dispatch_base_fetch(host, repo_path, base, fetch_command=None):
+    """Fetch a missing base with bounded retries and a configured mirror fallback."""
+    command = fetch_command or base_fetch_command(repo_path, BASE_REPO_URL, BASE_BRANCH)
+    attempts = max(1, DISPATCH_FETCH_RETRIES)
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        rc, _, last_error = sh(ssh_argv(ssh_opts(host), host, command), timeout=180)
+        if not rc:
+            return
+        record_dispatch_fetch_failure(host, last_error)
+        if attempt < attempts:
+            delay = DISPATCH_FETCH_RETRY_DELAY * (2 ** (attempt - 1))
+            log(f"{host} base fetch failed ({attempt}/{attempts}); retrying in {delay:g}s: {last_error.strip()[-100:]}", brain=False)
+            time.sleep(delay)
+    # Operators can configure a reachable mirror/seed endpoint per host. The object is
+    # still validated by cat-file in dispatch() before lane assignment.
+    mirror = os.environ.get("AD_BASE_FETCH_MIRROR")
+    if mirror and attempts >= DISPATCH_FETCH_FALLBACK_AFTER:
+        log(f"{host} base fetch threshold reached; falling back to configured seed mirror {mirror}", brain=False)
+        rc, _, fallback_error = sh(ssh_argv(ssh_opts(host), host,
+            base_fetch_command(repo_path, mirror, BASE_BRANCH)), timeout=180)
+        if not rc:
+            return
+        record_dispatch_fetch_failure(host, fallback_error)
+        last_error = f"{last_error}; mirror fetch: {fallback_error}"
+    raise RuntimeError(f"base fetch failed on {host} after {attempts} attempts: {last_error.strip()[-160:]}")
 
 def dispatch_failed(lane, cfg, item, error):
     """A failed dispatch drops the in-progress label and backs the host off (transient, unchanged)."""
@@ -933,14 +989,15 @@ def dispatch(lane, cfg, item, base):
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
         # own short-lived ref locks).
-        frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
-        if frc:
+        try:
+            dispatch_base_fetch(h, R, base)
+        except RuntimeError as fetch_error:
             # A failing fetch aborts the dispatch right away: the base could not be validated, and
             # a later successful check (e.g. a concurrent tick that fetched the object in the
             # meantime) must never mask the fetch failure. The caller backs the host off as usual.
             # The fetch failure ends the message: the host backoff log keeps the last 80 chars.
             raise RuntimeError(f"base check: {(err or out).strip()[-120:]} | "
-                               f"base fetch failed rc={frc}: {ferr.strip()[-40:]}")
+                               f"{fetch_error}")
         time.sleep(DISPATCH_BASE_FETCH_DELAY)
     raise RuntimeError(f"assign rc={rc}: {(err or out).strip()[-300:]}")
 
