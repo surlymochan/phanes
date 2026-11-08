@@ -143,6 +143,17 @@ def pause_records(now=None):
     try: names = sorted(os.listdir(D))
     except OSError: names = []
     for name in names:
+        # A recovery claim remains a gate until it is inspected and removed. If
+        # restoring an independent pause collides with a new marker, keep both.
+        if name.startswith(".pause-recovery-"):
+            try: claimed = os.listdir(os.path.join(D, name))
+            except OSError: claimed = []
+            for marker in claimed:
+                scope = marker_scope(marker)
+                if scope is not None:
+                    records.append({"scope": scope, "reason": f"recovery hold: {name}/{marker}",
+                                    "created_at": 0.0, "expires_at": None, "source": "marker"})
+            continue
         scope = marker_scope(name)
         if scope is None: continue
         records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
@@ -547,10 +558,10 @@ def write_unreachable_pause(host, since):
     An existing pause is never overwritten: it carries another cause (the disk
     limit, a manual hold) that this dispatcher does not own."""
     path = host_pause_path(host)
-    if os.path.exists(path): return False
     try:
-        with open(path, "w", encoding="utf-8") as stream:
+        with open(path, "x", encoding="utf-8") as stream:
             stream.write(f"{HOST_UNREACHABLE_MARKER} host={host} since={int(since)}\n")
+    except FileExistsError: return False
     except OSError as e:
         log(f"{host}: the automatic pause of the outage was not written ({e!r})", brain=False)
         return False
@@ -559,10 +570,10 @@ def write_unreachable_pause(host, since):
 def release_unreachable_pauses(host, paths, explain=True):
     """Release the automatic pauses of a host whose cause is its unreachability.
 
-    The body of every pause is read again right before the removal, so a pause that
-    another writer replaced in the meantime is kept.  A pause of another cause is
-    kept as well: a reachable host does not prove that the disk, the memory or the
-    cooldown of the host is gone (Refs #1673)."""
+    Atomically move the candidate to a private claim before checking its cause.
+    Only the claimed path is ever deleted; a health writer can create a new pause
+    at the original path without recovery unlinking it. Claims remain pause gates
+    until removed, including after an error or a dispatcher restart (Refs #1673)."""
     released = []
     for path in paths:
         body = read_pause(path)
@@ -573,11 +584,33 @@ def release_unreachable_pauses(host, paths, explain=True):
                 log(f"{name}: kept after the recovery of {host} (the cause is not the unreachability: "
                     f"{normalized_pause_reason(body) or 'manual hold'})", brain=False)
             continue
-        try: os.unlink(path)
+        claim_dir = None
+        claimed = None
+        try:
+            claim_dir = tempfile.mkdtemp(prefix=".pause-recovery-", dir=os.path.dirname(path))
+            claimed = os.path.join(claim_dir, name)
+            os.rename(path, claimed)
+            # The original path may have changed after the first read. Check the
+            # file we actually claimed, never unlink the shared pathname.
+            if not pause_cause_is_unreachable(read_pause(claimed)):
+                try: os.link(claimed, path)
+                except FileExistsError:
+                    # Preserve the independent cause as an additional pause gate;
+                    # replacing the new marker would lose that writer's cause.
+                    log(f"{name}: independent recovery hold retained at {claimed}", brain=False)
+                    continue
+                os.unlink(claimed)
+                continue
+            os.unlink(claimed)
         except FileNotFoundError: continue
         except OSError as e:
             log(f"{name}: the automatic pause of the outage was not released ({e!r})", brain=False)
             continue
+        finally:
+            if claim_dir:
+                try: os.rmdir(claim_dir)
+                except OSError: pass  # A retained claim must stay visible to pause_records().
+        if os.path.lexists(path): continue
         released.append(name)
         log(f"{name}: released after the recovery of {host} (the pause was caused by its unreachability)")
     return released

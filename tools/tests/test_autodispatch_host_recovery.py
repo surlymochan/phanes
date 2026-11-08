@@ -53,6 +53,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 AUTODISPATCH_PATH = ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
@@ -422,6 +423,80 @@ class HostRecoveryPauseTests(unittest.TestCase):
         self.assertIn("disk_hard", pause.read_text(),
                       "the pause of the disk limit must not be overwritten by the marker")
 
+    def test_a_disk_pause_written_during_marker_creation_is_kept(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        real_open = open
+
+        def competing_open(path, mode="r", *args, **kwargs):
+            if str(path) == str(pause) and mode in ("w", "x"):
+                pause.write_text("auto: disk_hard\n")
+            return real_open(path, mode, *args, **kwargs)
+
+        with patch.object(self.module, "open", competing_open, create=True):
+            self.assertFalse(self.module.write_unreachable_pause(HOST, 1700000000))
+        self.assertEqual(pause.read_text(), "auto: disk_hard\n")
+
+    def test_a_disk_pause_written_after_the_read_is_restored(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("auto: ssh unreachable\n")
+        read_pause = self.module.read_pause
+
+        def competing_read(path):
+            body = read_pause(path)
+            if str(path) == str(pause):
+                pause.write_text("auto: disk_hard\n")
+            return body
+
+        with patch.object(self.module, "read_pause", competing_read):
+            self.assertEqual(self.module.release_unreachable_pauses(HOST, [str(pause)]), [])
+        self.assertEqual(pause.read_text(), "auto: disk_hard\n")
+        self.assertEqual(list(self.root.glob(".pause-recovery-*")), [])
+
+    def test_a_new_pause_after_the_claim_is_never_unlinked(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("auto: ssh unreachable\n")
+        read_pause = self.module.read_pause
+
+        def competing_read(path):
+            body = read_pause(path)
+            if str(path) != str(pause):
+                pause.write_text("auto: disk_hard\n")
+            return body
+
+        with patch.object(self.module, "read_pause", competing_read):
+            self.assertEqual(self.module.release_unreachable_pauses(HOST, [str(pause)]), [])
+        self.assertEqual(pause.read_text(), "auto: disk_hard\n")
+        self.assertEqual(list(self.root.glob(".pause-recovery-*")), [])
+
+    def test_a_restore_collision_preserves_both_pause_causes(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("auto: ssh unreachable\n")
+        read_pause = self.module.read_pause
+
+        def competing_read(path):
+            body = read_pause(path)
+            if str(path) == str(pause):
+                pause.write_text("auto: disk_hard\n")
+            else:
+                pause.write_text("operator hold\n")
+            return body
+
+        with patch.object(self.module, "read_pause", competing_read):
+            self.assertEqual(self.module.release_unreachable_pauses(HOST, [str(pause)]), [])
+        self.assertEqual(pause.read_text(), "operator hold\n")
+        claims = list(self.root.glob(".pause-recovery-*/PAUSE-HOST-*"))
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0].read_text(), "auto: disk_hard\n")
+        pause.unlink()  # Even if the newer hold clears, disk protection remains.
+        self.assertTrue(self.module.lane_paused(LANE, LANE_CFG))
+
+    def test_a_failed_claim_cleanup_keeps_the_pause_gate(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("auto: ssh unreachable\n")
+        with patch.object(self.module.os, "unlink", side_effect=PermissionError("held")):
+            self.assertEqual(self.module.release_unreachable_pauses(HOST, [str(pause)]), [])
+        self.assertTrue(self.module.lane_paused(LANE, LANE_CFG))
+
 
 class HostRecoveryTickTests(RecoveryTickTests):
     """The recovery of a host inside the tick of the dispatcher.
@@ -436,6 +511,27 @@ class HostRecoveryTickTests(RecoveryTickTests):
         self.assertTrue(self.host_pause().exists(),
                         "the outage must hold the host with the marker of its unreachability")
         self.assertIn(self.module.HOST_UNREACHABLE_MARKER, self.host_pause().read_text())
+
+    def test_the_recovery_keeps_a_disk_pause_written_during_release(self):
+        self.outage()
+        state = self.tick({LANE: lane_state()})
+        self.host_back()
+        self.status = remote_status(runner_alive=True)
+        pause = self.host_pause()
+        read_pause = self.module.read_pause
+
+        def competing_read(path):
+            body = read_pause(path)
+            if str(path) == str(pause):
+                pause.write_text("auto: disk_hard\n")
+            return body
+
+        with patch.object(self.module, "read_pause", competing_read):
+            state = self.tick(state)
+        self.assertEqual(pause.read_text(), "auto: disk_hard\n")
+        self.assertIn(LANE, state)
+        self.assertTrue(self.module.lane_paused(LANE, LANE_CFG))
+        self.assertEqual(self.fleet.edits, [])
 
     def test_the_recovery_releases_the_pause_and_requeues_the_lost_run(self):
         self.outage()

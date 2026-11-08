@@ -28,6 +28,7 @@ import json
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -132,6 +133,21 @@ def main() -> None:
         assert "disk_hard" in host_pause.read_text()
         host_pause.unlink()
 
+        # A health write between the cause check and removal must survive too.
+        host_pause.write_text("auto: ssh unreachable\n")
+        read_pause = runtime.read_pause
+
+        def health_write_during_read(path):
+            body = read_pause(path)
+            if str(path) == str(host_pause):
+                host_pause.write_text("auto: disk_hard\n")
+            return body
+
+        with patch.object(runtime, "read_pause", health_write_during_read):
+            assert runtime.release_unreachable_pauses(HOST, [str(host_pause)]) == []
+        assert host_pause.read_text() == "auto: disk_hard\n"
+        host_pause.unlink()
+
         # 5) the lane pause of the outage is released, an independent one is kept
         lane_pause.write_text("auto: ssh streak 3\n")
         released = runtime.release_unreachable_pauses(HOST, runtime.host_pause_paths(HOST, [LANE]))
@@ -181,6 +197,7 @@ def main() -> None:
     print("OK: the outage holds the host and the recovery releases that pause")
     print("OK: a pause of another cause (disk, memory, cooldown, quota, unknown) survives")
     print("OK: the marker of the dispatcher never overwrites the pause of another cause")
+    print("OK: a concurrent disk pause survives the recovery cause check")
     print("OK: the lane pause of the outage is released, an independent one is kept")
     print("OK: only a positively dead runner re-queues a card, an unknown liveness keeps it")
     print("OK: a failed label update keeps the lane state, so the next tick retries")
