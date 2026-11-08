@@ -507,6 +507,26 @@ class LanesReportTests(unittest.TestCase):
             payload = json.loads(output.getvalue().strip().splitlines()[-1])
             self.assertEqual(reasons(payload)["P1"], "no_card")
 
+    def test_marker_deadlines_match_dispatcher(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+            state_dir = Path(root) / "state"
+            state_dir.mkdir()
+            marker = state_dir / "PAUSE-P1"
+            lanes = {"P1": {"backend": "pi"}}
+            queue = [{"backend": "pi"}]
+            cases = (("auto:cooldown:until=1", "ready"),
+                     ("until=2000-01-01T00:00:00Z", "ready"),
+                     ("until=2999-01-01T00:00:00", "paused:PAUSE-P1"),
+                     ("until=invalid", "paused:PAUSE-P1"),
+                     ("manual hold", "paused:PAUSE-P1"))
+            with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(Path(root) / "home")}):
+                for body, expected in cases:
+                    with self.subTest(body=body):
+                        marker.write_text(body, encoding="utf-8")
+                        got = report.summarize(lanes, {"P1": "idle"}, {},
+                                               report._pauses(str(state_dir)), queue)
+                        self.assertEqual(reasons(got)["P1"], expected)
+
     def test_home_pause_store_and_marker_survive_expired_records(self):
         # B1/B2: current home store is independent of the legacy state directory.
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:

@@ -547,6 +547,30 @@ def _queue(config=None):
     return cards
 
 
+def _marker_expired(path):
+    """Match the dispatcher's optional epoch or ISO deadline in a marker body."""
+    try:
+        with open(path, encoding="utf-8") as marker:
+            body = marker.read()
+    except (OSError, UnicodeError):
+        return False
+    match = re.search(r"(?:^|[\s:])until=(\S+)", body, re.MULTILINE)
+    if not match:
+        return False
+    value = match.group(1)
+    try:
+        deadline = float(value)
+    except ValueError:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            deadline = parsed.timestamp()
+        except (ValueError, OverflowError, OSError):
+            return False
+    return deadline <= datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+
 def _pauses(state_dir):
     """The pauses of the fleet: the ``PAUSE*`` markers of the state directory and the
     records of the current home and legacy state-directory pause stores.
@@ -557,6 +581,9 @@ def _pauses(state_dir):
     except OSError:
         names = []
     for name in names:
+        if (name == "PAUSE" or name.startswith("PAUSE-")) and _marker_expired(
+                os.path.join(state_dir, name)):
+            continue
         if name == "PAUSE":
             pauses["all"] = name
         elif name.startswith("PAUSE-"):
