@@ -8,7 +8,7 @@ distribution state.
 
 ## Phanes 中的 CI 与发布边界
 
-Phanes 根目录的 `.github/workflows/evalid.yml` 负责测试、drift scan、打包检查和外部采用 smoke test，工作目录为 `phanes/evalid`。组件内的 `.github/` 已移除；本次未迁入上游自动 npm 发布流程，发布前需由维护者另行配置并核实可信发布环境。下文手动发布命令应在 `phanes/evalid` 内执行。
+Phanes 根目录的 `.github/workflows/evalid.yml` 负责测试、drift scan、打包检查和外部采用 smoke test，工作目录为 `evalid`。组件内的 `.github/` 已移除；本次未迁入上游自动 npm 发布流程，发布前需由维护者另行配置并核实可信发布环境。下文手动发布命令应在 `evalid` 内执行。
 
 ## Current Verified State
 

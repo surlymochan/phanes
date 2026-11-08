@@ -697,7 +697,7 @@ describe('competitive readiness benchmark', () => {
 
   test('minimal external adoption remains documented and exercised in CI', () => {
     const demoProof = readFileSync(resolve(REPO_ROOT, 'docs', 'demo-proof.md'), 'utf8');
-    const ciWorkflow = readFileSync(resolve(REPO_ROOT, '..', '..', '.github', 'workflows', 'evalid.yml'), 'utf8');
+    const ciWorkflow = readFileSync(resolve(REPO_ROOT, '..', '.github', 'workflows', 'evalid.yml'), 'utf8');
     const adoptionRecord = readFileSync(resolve(REPO_ROOT, 'docs', 'adoption', 'openflow-release-hardening.md'), 'utf8');
 
     for (const phrase of [
