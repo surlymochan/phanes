@@ -23,6 +23,7 @@ RULES = ("Rules: work only inside this repository worktree (the current director
 IMPL_CARD_TASK_BOOK = ("## Impl card delivery requirements\n"
                        "1. 交付说明必须对每个新增函数列出入口→调用链→数据结构来源：由谁调用、输入来自哪个真实数据结构、每个字段由谁填写。\n"
                        "2. 至少补一个 tick/集成级测试：从真实入口（tick 或等价入口）驱动到可观测结果；只测函数加 mock 不算。\n")
+NON_IMPL_CARD_TYPES = {"upstream", "ops", "follow-up", "planner", "verify-intent"}
 PRIO = {"p0": 0, "p1": 1, "p2": 2}
 DISPATCH_EXCLUDING_LABELS = {"in-progress", "lane-pr", "lane-failed"}
 # One multiplexed connection per host (cuts handshakes ~10x; banner-exchange timeouts came from bursts of parallel ssh).
@@ -918,8 +919,12 @@ def dispatch(lane, cfg, item, base):
     n = item["n"]
     body = item["body"]
     labels = set(item.get("labels", ()))
-    is_impl = ("impl" in labels or "card:impl" in labels or "type:impl" in labels
-               or re.match(r"(?i)^impl(?:\s*[:：]|\s+)", item["title"]))
+    # PLANNER's ordinary work cards have Chinese titles and only priority/backend
+    # labels, so impl is the default. Explicit non-impl markers take precedence,
+    # including when an old impl label or title prefix remains on the card.
+    excluded_labels = {prefix + kind for kind in NON_IMPL_CARD_TYPES for prefix in ("", "card:", "type:")}
+    excluded_title = re.match(r"(?i)^(?:upstream|ops|follow-up|planner|verify-intent)(?:\s*[:：]|\s+|$)", item["title"])
+    is_impl = not (labels & excluded_labels or excluded_title)
     if is_impl and "## Impl card delivery requirements" not in body:
         body = f"{body.rstrip()}\n\n{IMPL_CARD_TASK_BOOK}"
     task = f"# #{n} {item['title']}\n\n{body}\n\n{RULES.format(n=n)}\n"

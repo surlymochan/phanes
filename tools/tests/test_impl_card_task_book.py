@@ -27,9 +27,8 @@ inspected.
 They turn green once the dispatcher injects the two requirements into the task
 book of an impl card (and only there).
 
-The card class is expressed in every convention the repository uses (the title
-prefix, the bare label and the ``card:`` / ``type:`` labels), so the tests do not
-depend on the convention the implementation picks.
+Coverage includes the ordinary PLANNER format (no impl marker), individual class
+markers and conflicting markers where an excluded class must take precedence.
 
 The requirements are a precondition for the author, not a change of the review
 standard: the tests say nothing about the strictness of a review.
@@ -192,12 +191,13 @@ class ImplCardTaskBookTests(unittest.TestCase):
         MODULE.log = lambda message, brain=True: None
 
     # -- the path the AD really walks ---------------------------------------------
-    def backlog_card(self, kind, title, body):
+    def backlog_card(self, kind, title, body, labels=None):
         """The backlog file of a card: the title, the labels (the class) and the body."""
-        labels = f"p1,backend:codex,{kind},card:{kind},type:{kind}"
+        if labels is None:
+            labels = f"p1,backend:codex,{kind},card:{kind},type:{kind}"
         return f"# {title}\nlabels: {labels}\n{body}\n"
 
-    def task_book(self, kind, title=None, body=None):
+    def task_book(self, kind, title=None, body=None, labels=None):
         """The task file a lane receives for a card of the given class.
 
         The card is filed by the AD (replenish -> file_issue), the AD queues it
@@ -212,7 +212,7 @@ class ImplCardTaskBookTests(unittest.TestCase):
         backlog.mkdir(parents=True, exist_ok=True)
         self.cards += 1
         (backlog / f"{self.cards:02d}-{kind}.md").write_text(
-            self.backlog_card(kind, title, body), encoding="utf-8")
+            self.backlog_card(kind, title, body, labels), encoding="utf-8")
 
         filed = MODULE.replenish(1, {})
         self.assertEqual(len(filed), 1, "the AD did not file the backlog card")
@@ -254,6 +254,35 @@ class ImplCardTaskBookTests(unittest.TestCase):
                                  f"a {kind} card must not get the impl delivery requirements")
 
     # -- the injection happens once ------------------------------------------------
+    def test_planner_format_impl_card_gets_requirements_once(self):
+        first = self.task_book(IMPL, title="解析器补充空值保护", labels="p1,backend:codex")
+        self.assertEqual(self.github.created[-1]["labels"], ["lane-ready", "p1", "backend:codex"])
+        self.assertIn(MODULE.IMPL_CARD_TASK_BOOK, first)
+        second = self.task_book(IMPL, title="解析器补充空值保护", body=first,
+                                labels="p1,backend:codex")
+        self.assertEqual(second.count(MODULE.IMPL_CARD_TASK_BOOK), 1)
+
+    def test_excluded_class_markers_override_impl_markers(self):
+        for kind in (*OTHER_CLASSES, "planner", "verify-intent"):
+            for prefix in ("", "card:", "type:"):
+                with self.subTest(card_class=kind, label_prefix=prefix):
+                    body = ("## Verify Intent\n目标 PR：#42\n证据要求：\n- [ ] 检查结果\n"
+                            if kind == "verify-intent" else None)
+                    task = self.task_book(IMPL, title="impl: 同步或跟进一项工作",
+                                          labels=f"p1,backend:codex,impl,card:impl,type:impl,{prefix}{kind}",
+                                          body=body)
+                    self.assertNotIn(MODULE.IMPL_CARD_TASK_BOOK, task)
+                    self.assertFalse(has_requirement_one(task))
+                    self.assertFalse(has_requirement_two(task))
+
+    def test_excluded_title_prefix_overrides_impl_label(self):
+        for kind in OTHER_CLASSES:
+            for separator in (":", "：", " "):
+                with self.subTest(card_class=kind, separator=separator):
+                    task = self.task_book(IMPL, title=f"{kind}{separator} 同步或跟进一项工作",
+                                          labels="p1,backend:codex,impl")
+                    self.assertNotIn(MODULE.IMPL_CARD_TASK_BOOK, task)
+
     def test_the_requirements_are_not_injected_twice(self):
         first = self.task_book(IMPL)
         self.assertTrue(has_requirement_one(first),
