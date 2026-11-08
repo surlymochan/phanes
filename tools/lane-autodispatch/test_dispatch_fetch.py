@@ -142,6 +142,65 @@ class DispatchFetchResilienceTest(unittest.TestCase):
         self.assertEqual(sum("github.com" in command for command in commands), 2)
         self.assertTrue(any("ssh://seed/phanes.git" in command for command in commands))
 
+    def test_dispatch_fetch_uses_exponential_backoff(self):
+        delays = []
+
+        def fake_sh(command, timeout=None, inp=None):
+            return 1, "", "gnutls_handshake failed"
+
+        with mock.patch.object(AUTODISPATCH, "sh", side_effect=fake_sh), \
+             mock.patch.object(AUTODISPATCH, "log"), \
+             mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_RETRIES", 3), \
+             mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_FALLBACK_AFTER", 4), \
+             mock.patch.dict("os.environ", {"AD_BASE_FETCH_MIRROR": ""}), \
+             mock.patch.object(AUTODISPATCH.time, "sleep", side_effect=delays.append), \
+             self.assertRaises(RuntimeError):
+            AUTODISPATCH.dispatch_base_fetch("govpn", "~/repo", "abc123")
+
+        self.assertEqual(delays, [5, 10])
+
+    def test_failed_seed_fallback_never_assigns_and_health_is_exported(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / ".swrm-tmp") as scratch:
+            commands = []
+            base_checks = 0
+
+            def fake_sh(command, timeout=None, inp=None):
+                nonlocal base_checks
+                text = " ".join(command) if isinstance(command, (list, tuple)) else command
+                commands.append(text)
+                if "cat > /tmp/task-CX10.md" in text:
+                    return 0, "", ""
+                if "cat-file -e" in text:
+                    base_checks += 1
+                    return (1, "", "fatal: Not a valid object name abc123^{commit}")
+                if " fetch -q https://github.com/" in text:
+                    return 1, "", "gnutls_handshake failed"
+                if " fetch -q ssh://seed/phanes.git " in text:
+                    return 1, "", "connection reset"
+                raise AssertionError(f"unexpected dispatch command: {text}")
+
+            AUTODISPATCH.DISPATCH_FETCH_FAILURES.clear()
+            with mock.patch.object(AUTODISPATCH, "D", scratch), \
+                 mock.patch.object(AUTODISPATCH, "sh", side_effect=fake_sh), \
+                 mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_RETRIES", 2), \
+                 mock.patch.object(AUTODISPATCH, "DISPATCH_FETCH_FALLBACK_AFTER", 2), \
+                 mock.patch.dict("os.environ", {"AD_BASE_FETCH_MIRROR": "ssh://seed/phanes.git"}), \
+                 mock.patch.object(AUTODISPATCH.time, "sleep"), \
+                 mock.patch.object(AUTODISPATCH, "log"):
+                with self.assertRaisesRegex(RuntimeError, "mirror fetch"):
+                    AUTODISPATCH.dispatch("CX10", {"host": "govpn"},
+                                          {"n": 1719, "title": "fetch resilience", "body": ""}, "abc123")
+
+            self.assertEqual(base_checks, 1)
+            # The assign is chained after cat-file -e; because the check failed and
+            # dispatch raised, no successful assign response was returned.
+            self.assertEqual(sum("lane assign" in command for command in commands), 1)
+            health = AUTODISPATCH.dispatch_fetch_health()
+            self.assertEqual(health["govpn"]["recent_failures"], 3)
+            status = AUTODISPATCH.status_snapshot({"CX10": {"host": "govpn"}}, {},
+                                                  {"CX10": {}}, 0, 0)
+            self.assertEqual(status["_dispatch_fetch_failures"]["govpn"]["primary_error"], "tls")
+
 
 if __name__ == "__main__":
     unittest.main()

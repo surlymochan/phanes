@@ -930,9 +930,10 @@ def dispatch_fetch_health(now=None):
         recent = [entry for entry in entries if now - entry["at"] <= 3600]
         if recent:
             counts = {kind: sum(entry["kind"] == kind for entry in recent)
-                      for kind in {entry["kind"] for entry in recent}}
+                      for kind in sorted({entry["kind"] for entry in recent})}
             result[host] = {"recent_failures": len(recent),
-                            "primary_error": max(counts, key=counts.get),
+                            # Stable tie breaking keeps health output useful in diffs.
+                            "primary_error": max(counts, key=lambda kind: (counts[kind], kind)),
                             "last_error": recent[-1]["error"]}
     return result
 
