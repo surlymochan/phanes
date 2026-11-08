@@ -7,8 +7,8 @@ the reviews stall.  The guard is the resident loop of the box control plane:
 * it measures the **remote** filesystem of the lane host over ssh (the box and
   govpn2 have very different disks, so the local disk says nothing about the
   lane host);
-* above the block threshold it pauses the host (a `PAUSE-HOST-<host>` marker
-  that the dispatcher reads) and writes an alert row into the brain log;
+* above the block threshold it pauses the host through its independent state
+  gate and writes an alert row into the brain log;
 * between the block and the recovery threshold it **keeps** an existing pause
   (the hysteresis band) and restores the marker when another sweep removed it;
   a host that was not blocked only gets a warning;
@@ -42,13 +42,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-GUARD_VERSION = 1
+GUARD_VERSION = 2
 DEFAULT_HOST = "govpn2"
 BLOCK_PCT = 95          # at or above this usage the lane host is paused
 RECOVER_PCT = 87        # at or below this usage the guard releases its own pause
 INTERVAL = 300          # seconds between two measurements of the resident loop
 SSH_TIMEOUT = 60        # seconds the remote probe may take
 MARKER_PREFIX = "auto:disk-watermark"   # the body prefix of the marker of this guard
+MARKER_DIR = ".disk-watermark"         # only this guard writes here
 STATE_PREFIX = "disk-watermark-"        # the state file prefix of this guard
 
 
@@ -75,18 +76,13 @@ PROBE = load_probe()
 
 
 def marker_path(pause_dir, host):
-    """The pause marker of a host (the dispatcher reads `PAUSE-HOST-<host>`)."""
-    return Path(pause_dir) / f"PAUSE-HOST-{host}"
+    """Our private marker; shared host markers belong to health/operators."""
+    return Path(pause_dir) / MARKER_DIR / f"PAUSE-HOST-{host}"
 
 
 def state_path(pause_dir, host):
     """The state file of a host (the independent gate of the dispatcher)."""
     return Path(pause_dir) / f"{STATE_PREFIX}{host}.json"
-
-
-def owns_marker(body):
-    """Whether a pause marker body belongs to this guard."""
-    return bool(body) and body.startswith(MARKER_PREFIX)
 
 
 def decide(used_pct, block_pct=BLOCK_PCT, recover_pct=RECOVER_PCT, was_blocked=False):
@@ -106,41 +102,29 @@ def decide(used_pct, block_pct=BLOCK_PCT, recover_pct=RECOVER_PCT, was_blocked=F
 
 
 def ensure_marker(path, host, used_pct, state):
-    """Create or refresh our own pause marker.
+    """Create or refresh a marker in the guard's exclusive namespace.
 
-    The marker is restored when another sweep removed it (the health sweep
-    clears stale `auto:` host pauses): the gate has to stay closed for the
-    whole hysteresis band.  A marker of another owner is never overwritten.
-
-    Returns `created` (the marker was missing and is back), `refreshed` (our
-    marker was updated) or `foreign` (the pause belongs to somebody else).
+    A content check followed by replace/unlink cannot protect a shared file
+    against independent writers. Never mutate the shared
+    PAUSE-HOST path, even when its body came from an older guard version.
+    The dispatcher uses our state file as the independent disk gate.
     """
+    if path.parent.name != MARKER_DIR:
+        return "foreign"
     body = f"{MARKER_PREFIX} host={host} state={state} used_pct={used_pct}\n"
-    if path.exists():
-        try:
-            current = path.read_text(errors="replace")
-        except OSError:
-            current = ""
-        if not owns_marker(current):
-            return "foreign"        # somebody else owns the pause: never take it over
-        write_atomic(path, body)
-        return "refreshed"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
     write_atomic(path, body)
-    return "created"
+    return "refreshed" if existed else "created"
 
 
 def release_marker(path):
-    """Release our own pause marker; a marker of another owner stays."""
-    if not path.exists():
+    """Release only a private marker, without touching any shared host pause."""
+    if path.parent.name != MARKER_DIR:
         return False
     try:
-        current = path.read_text(errors="replace")
-    except OSError:
+        path.unlink()
+    except FileNotFoundError:
         return False
-    if not owns_marker(current):
-        return False
-    path.unlink()
     return True
 
 

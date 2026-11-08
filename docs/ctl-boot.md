@@ -629,24 +629,30 @@ Watermark policy (the thresholds are the ones of the lane host):
 
 | Measured usage | State | Effect |
 | --- | --- | --- |
-| `>= 95%` | `block` | the host is paused (`PAUSE-HOST-<host>`) and the brain log gets an alert row |
+| `>= 95%` | `block` | the independent disk gate pauses the host and the brain log gets an alert row |
 | `> 87%` and `< 95%`, previously blocked | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
 | `> 87%` and `< 95%`, previously unblocked | `warn` | the brain log gets a warning; dispatch stays open and no pause is created |
 | `<= 87%` | `recovered` | the guard releases **its own** marker only |
 
-Ownership rules: the marker body starts with `auto:disk-watermark`, so the health
-sweep (`tools/check-health-pause.py`) may clear it — the guard restores its own
-marker on the next tick and the dispatcher keeps the gate closed through the
-independent state file below.  A marker that belongs to another guard or to an
-operator is never taken over and never released.  A **failed** probe is never a
-healthy host: the guard fails closed (the host stays paused) and says so in the
-brain log.
+Ownership rules: the guard writes its diagnostic marker only in
+`~/phanes-ctl/autodispatch/.disk-watermark/PAUSE-HOST-<host>`. The shared
+`~/phanes-ctl/autodispatch/PAUSE-HOST-<host>` belongs to health checks and
+operators; the guard never writes or deletes it. Checking its body before a
+replace/unlink cannot protect a concurrent independent writer. A removed
+private marker is restored on the next tick; the independent state file below
+holds the gate throughout that interval. A **failed** probe is never a healthy
+host: the guard fails closed (the host stays paused) and says so in the brain log.
 
 The dispatch gate is independent of the pause marker: the dispatcher reads
 `~/phanes-ctl/autodispatch/disk-watermark-<host>.json` (written by the guard) and
 holds every lane of that host (`host:<host>` scope) even in the window where the
 health sweep has just cleared the marker. Blocked records never expire: if the
 guard stops, the host remains blocked until a successful probe records recovery.
+When upgrading from guard version 1, the shared `auto:disk-watermark host=...`
+marker is left untouched. Once a version 2 state exists, the updated dispatcher
+uses that state in place of the legacy disk marker, so recovery can open the
+gate without an unsafe deletion. Manual and other guards' shared markers still
+hold the host, including when they replace the legacy marker during recovery.
 
 Deploy (on the box, from the repository mirror):
 
@@ -671,6 +677,13 @@ requests a partial scan.
 
 Review fixes and evidence:
 
+- Marker ownership race: private markers separate disk writes/releases from
+  shared host pauses. `check-disk-watermark.py` injects manual and other-guard
+  writes (in-place and atomic replacement) at creation, refresh and unlink,
+  verifies the shared bytes survive, and checks v1 upgrade and manual pauses
+  in the actual dispatcher gate. The regression suite keeps its block/hold/
+  recovery, marker removal and deployment checks against the private marker;
+  foreign ownership checks still exercise the shared host marker.
 - Recovery boundary: the guard and offline check exercise 95% → 91% → 87%;
   at 87% the own marker is removed, the independent gate opens and recovery is logged.
 - Dispatcher restart: installer tests cover the updated resident dispatcher's

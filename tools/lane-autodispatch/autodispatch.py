@@ -147,6 +147,7 @@ def pause_records(now=None):
     carries no clock, so it never expires. The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
+    disk_states = disk_watermark_states(now)
     store = pause_store_dir()
     try: names = sorted(os.listdir(store))
     except OSError: names = []
@@ -168,11 +169,23 @@ def pause_records(now=None):
     for name in names:
         scope = marker_scope(name)
         if scope is None: continue
+        # Version 2 stopped writing shared host markers. Retain old files
+        # untouched, but use its independent state instead of its legacy marker.
+        # Other writers do not share a lock with the guard; deleting the legacy
+        # file after reading its body could delete a concurrent manual pause.
+        if name.startswith("PAUSE-HOST-"):
+            host = name[len("PAUSE-HOST-"):]
+            version = disk_states.get(host, {}).get("guard", 0)
+            if isinstance(version, int) and version >= 2:
+                try:
+                    with open(os.path.join(D, name)) as stream: body = stream.read()
+                except OSError: body = ""
+                if body.startswith(f"auto:disk-watermark host={host} "): continue
         records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
                         "expires_at": None, "source": "marker"})
     # The disk watermark gate (Refs #1666): a blocked lane host stays blocked even when the
     # health sweep removed its pause marker, as long as the guard reports the block.
-    for host, record in disk_watermark_states(now).items():
+    for host, record in disk_states.items():
         if not record.get("blocked"): continue
         records.append({"scope": f"host:{host}", "reason": f"disk watermark guard: {record.get('state')}",
                         "created_at": record.get("updated_at"), "expires_at": None,

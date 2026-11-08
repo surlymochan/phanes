@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 
 TOOLS = Path(__file__).resolve().parent
@@ -38,7 +39,7 @@ GUARD = TOOLS / "disk-watermark-guard.py"
 PROBE = TOOLS / "disk-usage-probe.py"
 AUTODISPATCH = TOOLS / "lane-autodispatch" / "autodispatch.py"
 HOST = "govpn2"
-MARKER = f"PAUSE-HOST-{HOST}"
+MARKER = f".disk-watermark/PAUSE-HOST-{HOST}"
 
 DF_HEADER = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
 DF_BLOCKED = DF_HEADER + "/dev/sda1 1000000 950000 50000 95% /\n"
@@ -141,20 +142,22 @@ def check_hysteresis(base):
     assert marker.exists(), "the guard must restore its own marker while the disk is too full"
 
     # a marker of another owner is neither taken over nor released.
-    marker.write_text("auto:other-guard\n")
+    foreign = pause_dir / f"PAUSE-HOST-{HOST}"
+    foreign.write_text("auto:other-guard\n")
     env["PATH"] = fake_ssh(base, DF_BLOCKED)
     run_guard(base, pause_dir, brain_log, env)
-    assert marker.read_text() == "auto:other-guard\n", marker.read_text()
+    assert foreign.read_text() == "auto:other-guard\n", foreign.read_text()
 
     # At the recovery threshold a foreign marker still belongs to its owner.
     env["PATH"] = fake_ssh(base, DF_RECOVERED)
     done = run_guard(base, pause_dir, brain_log, env)
     assert done.returncode == 0, done.stderr
-    assert marker.read_text() == "auto:other-guard\n", marker.read_text()
+    assert foreign.read_text() == "auto:other-guard\n", foreign.read_text()
+    assert not marker.exists(), "recovery must release our independent marker"
 
     # Reach the block threshold again after recovery, then check marker repair
     # in the hold band and release exactly at 87%.
-    marker.unlink()
+    foreign.unlink()
     env["PATH"] = fake_ssh(base, DF_BLOCKED)
     done = run_guard(base, pause_dir, brain_log, env)
     assert done.returncode == 0, done.stderr
@@ -169,6 +172,60 @@ def check_hysteresis(base):
     assert done.returncode == 0, done.stderr
     assert not marker.exists(), f"the recovery must release the pause of {HOST}: {done.stdout}"
     print("OK: block/hold/recovered holds the gate and releases only the own marker")
+
+
+def check_marker_races(base):
+    """Foreign writes at the guard's replace/unlink boundary must survive.
+
+    Inject both in-place writes (health-loop/operator) and atomic replacements
+    immediately before each destructive operation. A shared lock would not
+    protect against these writers, which do not participate in that lock.
+    """
+    guard = load("disk_watermark_marker_races", GUARD)
+    pause_dir = Path(base) / "marker-races"
+    pause_dir.mkdir()
+    marker = guard.marker_path(pause_dir, HOST)
+    shared = pause_dir / f"PAUSE-HOST-{HOST}"
+    original_write = guard.write_atomic
+    original_unlink = Path.unlink
+    for replace in (False, True):
+        for foreign_body in ("manual: operator pause\n", "auto:other-guard\n"):
+            def foreign_write():
+                if replace:
+                    other = shared.with_suffix(".other")
+                    other.write_text(foreign_body)
+                    os.replace(other, shared)
+                else:
+                    shared.write_text(foreign_body)
+
+            def racing_write(path, text):
+                assert path == marker, path
+                foreign_write()
+                original_write(path, text)
+
+            def racing_unlink(path, *args, **kwargs):
+                assert path == marker, path
+                foreign_write()
+                return original_unlink(path, *args, **kwargs)
+
+            # Test both creation and refresh, including a missing-path race.
+            for state in ("block", "hold"):
+                with mock.patch.object(guard, "write_atomic", side_effect=racing_write):
+                    guard.ensure_marker(marker, HOST, 95, state)
+                assert shared.read_text() == foreign_body, (replace, state, foreign_body)
+            with mock.patch.object(Path, "unlink", racing_unlink):
+                assert guard.release_marker(marker), "our private marker must be released"
+            assert not marker.exists(), marker
+            assert shared.read_text() == foreign_body, (replace, "release", foreign_body)
+
+    # Calling the helpers with a legacy shared marker is also safe, even if
+    # its body still claims ownership by the old version of this guard.
+    shared.write_text(f"auto:disk-watermark host={HOST} state=block used_pct=95\n")
+    before = shared.read_bytes()
+    assert guard.ensure_marker(shared, HOST, 95, "block") == "foreign"
+    assert not guard.release_marker(shared)
+    assert shared.read_bytes() == before
+    print("OK: concurrent manual/foreign writes survive marker creation, refresh and release")
 
 
 def check_failed_probe(base):
@@ -240,6 +297,37 @@ def check_dispatch_gate(base):
         assert not (pause_dir / MARKER).exists(), done.stdout
         assert not dispatcher.lane_paused("CX2", {"host": HOST}), \
             "returning to the warning band after recovery must not reblock the host"
+
+        # Upgrade from v1 without ever deleting its shared marker. Until a v2
+        # measurement exists it still blocks; afterward the independent gate
+        # replaces only this legacy guard marker, never foreign/manual pauses.
+        shared = pause_dir / f"PAUSE-HOST-{HOST}"
+        legacy_body = f"auto:disk-watermark host={HOST} state=block used_pct=95\n"
+        shared.write_text(legacy_body)
+        record = json.loads(state_file.read_text())
+        state_file.unlink()
+        assert dispatcher.lane_paused("CX2", {"host": HOST}), \
+            "a shared disk marker must still block without replacement state"
+        record["guard"] = 1
+        state_file.write_text(json.dumps(record))
+        assert dispatcher.lane_paused("CX2", {"host": HOST})
+        env["PATH"] = fake_ssh(base, DF_RECOVERED)
+        done = run_guard(base, pause_dir, brain_log, env)
+        assert done.returncode == 0, done.stderr
+        assert shared.read_text() == legacy_body, "upgrade must not delete shared markers"
+        assert not dispatcher.lane_paused("CX2", {"host": HOST}), \
+            "the old guard marker must not strand a recovered host after upgrade"
+        for body in ("manual: operator pause\n", "auto:other-guard\n",
+                     "auto:disk-watermark-other host=govpn2\n",
+                     "auto:disk-watermark host=other-host state=block\n"):
+            shared.write_text(body)
+            done = run_guard(base, pause_dir, brain_log, env)
+            assert done.returncode == 0, done.stderr
+            assert shared.read_text() == body, body
+            assert dispatcher.lane_paused("CX2", {"host": HOST}), \
+                "measured disk recovery must never release a manual/foreign host pause"
+        shared.unlink()
+        assert not dispatcher.lane_paused("CX2", {"host": HOST})
     finally:
         for name, value in previous.items():
             if value is None:
@@ -264,6 +352,7 @@ def main():
         base = Path(fixture)
         check_probe(base)
         check_hysteresis(base)
+        check_marker_races(base)
         check_failed_probe(base)
         check_dispatch_gate(base)
         check_deployment()

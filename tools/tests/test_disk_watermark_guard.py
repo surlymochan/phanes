@@ -44,7 +44,8 @@ CTL_BOOT = ROOT / "docs" / "ctl-boot.md"
 AUTODISPATCH = TOOLS / "lane-autodispatch" / "autodispatch.py"
 
 HOST = "govpn2"
-PAUSE_MARKER = f"PAUSE-HOST-{HOST}"
+# The guard owns a separate namespace; health/operator markers remain shared.
+PAUSE_MARKER = f".disk-watermark/PAUSE-HOST-{HOST}"
 
 # df -Pk output of the fake remote host: blocked (95%), inside the
 # block -> warn band (91%), recovery boundary (87%) and healthy (50%).
@@ -412,7 +413,7 @@ class GuardHysteresisTests(unittest.TestCase):
             fake = FakeSsh(base)
             pause_dir = base / "pause"
             brain_log = base / "brain.log"
-            marker = pause_dir / PAUSE_MARKER
+            marker = pause_dir / f"PAUSE-HOST-{HOST}"
             pause_dir.mkdir(parents=True, exist_ok=True)
             marker.write_text("auto:other-guard\n")
 
