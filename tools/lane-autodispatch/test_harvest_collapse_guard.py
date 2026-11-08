@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""The collapse guard of the fix/rebase harvest (Refs #1833).
+
+A fix/rebase round that does not continue on the head the PR had, but only produces an
+incremental patch, replaces the whole PR when the AD pushes the harvest back to the PR
+branch (2026-11-03: #1807 8 files/1780 lines -> 1/11, #1804 6/1401 -> 3/39, #1715
+8/868 -> 2/23, #1755 8/746 -> 1/19, #1653 6/200 -> 2/19, #1824 9/835 -> 1/17).  Before such
+a push the AD therefore checks:
+
+  1. the new head must contain the head the PR had before the round
+     (`git merge-base --is-ancestor`), otherwise the harvest replaced the PR;
+  2. the number of changed files and the number of changed lines relative to the base must
+     not collapse: either one of them dropping by more than the threshold (50% by default)
+     refuses the push (the two dimensions are independent: "or", not "and");
+  3. a git command that fails refuses the push as well (fail closed);
+  4. a card whose body cannot be read or parsed is not an empty card: the harvest is
+     refused as well (the target PR of a fix/rebase card is unknown then).
+
+A refused harvest pushes nothing, leaves the PR branch alone, does not consume a review
+round, labels the issue lane-failed and writes the verdict (PR number, both heads, both
+sizes, the reason) to the brain log.  A card that declares a full rewrite is exempt.
+
+The tests drive the public harvest entry point (`ad.finish`) with a real git repository and
+a fake `gh`, so they pin the behaviour and not the shape of the implementation.
+
+Migration: the issue named `openswarm/tests/test_harvest_collapse_guard.py`; the vendored
+openswarm tree moved to swrm/ (#1894) and the AD itself lives in `tools/lane-autodispatch/`,
+so the suite sits next to the other AD suites (`test_harvest_filter.py`).
+"""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
+ad = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ad)
+
+ISSUE = 1833
+PR = 1845
+BRANCH = "fleet/M8-issue1833-20261103-192907-5e4c2d"
+# The card of a fix/rebase round names the PR it works on: that is how the AD finds the head
+# the PR had before the round.
+CARD = f"# AD fix 收割护栏\n\n重基PR：#{PR} {BRANCH}\n"
+# A card that declares a full rewrite may replace the history: the guard is waived.
+REWRITE_CARD = CARD + "\n整体重写：是\n"
+# An ordinary implementation card: no target PR, nothing to compare against.
+PLAIN_CARD = "# 实现一个新功能\n\n按卡面实现并写测试。\n"
+# The six collapsed PRs of 2026-11-03 as recorded in issue #1833 ("files/lines" relative to
+# the base, before and after the harvest).
+RECORDED_INCIDENTS = (
+    {"pr": 1807, "files_before": 8, "lines_before": 1780, "files_after": 1, "lines_after": 11},
+    {"pr": 1804, "files_before": 6, "lines_before": 1401, "files_after": 3, "lines_after": 39},
+    {"pr": 1715, "files_before": 8, "lines_before": 868, "files_after": 2, "lines_after": 23},
+    {"pr": 1755, "files_before": 8, "lines_before": 746, "files_after": 1, "lines_after": 19},
+    {"pr": 1653, "files_before": 6, "lines_before": 200, "files_after": 2, "lines_after": 19},
+    {"pr": 1824, "files_before": 9, "lines_before": 835, "files_after": 1, "lines_after": 17},
+)
+MANIFEST_NAME = "restore-collapsed-heads-20261103.json"
+
+
+def manifest_paths():
+    """Every place the restore manifest may live (the dispatch box keeps it out of the repo)."""
+    candidates = [os.environ.get("AD_HARVEST_COLLAPSE_MANIFEST", ""),
+                  str(Path.home() / "gocc" / "autodispatch" / "bak" / MANIFEST_NAME),
+                  str(Path.home() / "phanes-ctl" / "autodispatch" / "bak" / MANIFEST_NAME)]
+    return [path for path in candidates if path and os.path.isfile(path)]
+
+
+def manifest_entries(path):
+    """Read the restore manifest: the real before/after heads of the collapsed PRs."""
+    with open(path, encoding="utf-8") as stream:
+        payload = json.load(stream)
+    items = payload
+    if isinstance(payload, dict):
+        for key in ("entries", "items", "incidents", "restores", "prs", "collapsed"):
+            if isinstance(payload.get(key), list):
+                items = payload[key]
+                break
+        else:
+            items = [dict(value, pr=key) for key, value in payload.items() if isinstance(value, dict)]
+    entries = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        pr = item.get("pr") or item.get("pr_number") or item.get("number") or item.get("issue")
+        before = item.get("before") or item.get("old_head") or item.get("before_sha")
+        after = item.get("after") or item.get("new_head") or item.get("after_sha")
+        base = item.get("base") or item.get("base_sha") or item.get("base_commit")
+        if isinstance(before, dict):
+            before = before.get("sha") or before.get("head")
+        if isinstance(after, dict):
+            after = after.get("sha") or after.get("head")
+        if isinstance(base, dict):
+            base = base.get("sha")
+        if before and after:
+            entries.append({"pr": str(pr), "base": base, "before": before, "after": after})
+    return entries
+
+
+class HarvestFixture:
+    """A git repository with a PR branch and the harvest of a lane result on top of it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.cwd())
+        self.root = Path(self.tmp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.brain_log = self.root / "brain-log.md"
+        self.repo_index = 0
+        for patch in (mock.patch.object(ad, "D", str(self.state)),
+                      mock.patch.object(ad, "BRAIN_LOG", str(self.brain_log))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # --- the git fixture -----------------------------------------------------------
+
+    def git(self, *args, cwd=None):
+        return subprocess.check_output(["git", "-C", str(cwd or self.repo), *args], text=True).strip()
+
+    def build_repo(self):
+        """A work repository with a bare origin; returns the base commit."""
+        self.repo_index += 1
+        self.remote = self.root / f"remote{self.repo_index}.git"
+        self.repo = self.root / f"work{self.repo_index}"
+        self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.root)
+        self.git("init", "-q", "-b", "main", str(self.repo), cwd=self.root)
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.com")
+        self.git("remote", "add", "origin", str(self.remote))
+        self.write("base", "base\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", f"{self.base}:refs/heads/main")
+        self.git("fetch", "-q", "origin")
+        return self.base
+
+    def write(self, name, text):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def lines(self, count, prefix="line"):
+        return "".join(f"{prefix} {index}\n" for index in range(count))
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def scenario_files_collapse(self):
+        """The head before the round changed 4 files/40 lines, the harvest only 1 file/40 lines."""
+        for name in "abcd":
+            self.write(name, self.lines(10, name))
+        old = self.commit("old")
+        for name in "bcd":
+            (self.repo / name).unlink()
+        self.write("a", self.lines(40, "a"))
+        new = self.commit("new")
+        return old, new
+
+    def scenario_lines_collapse(self):
+        """The head before the round changed 1 file/100 lines, the harvest only 1 file/4 lines."""
+        self.write("big", self.lines(100, "big"))
+        old = self.commit("old")
+        (self.repo / "big").unlink()
+        self.write("small", self.lines(4, "small"))
+        new = self.commit("new")
+        return old, new
+
+    def scenario_replaced(self):
+        """The harvest head does not contain the head the PR had: the PR was replaced."""
+        self.write("old", self.lines(10, "old"))
+        old = self.commit("old")
+        self.git("checkout", "-q", "-B", "harvest", self.base)
+        self.write("other", self.lines(10, "other"))
+        new = self.commit("new")
+        return old, new
+
+    def scenario_grown(self):
+        """The harvest continues on the head of the PR and keeps the change size."""
+        self.write("old", self.lines(10, "old"))
+        old = self.commit("old")
+        self.write("new", self.lines(10, "new"))
+        new = self.commit("new")
+        return old, new
+
+    # --- the harvest ----------------------------------------------------------------
+
+    def harvest(self, old, new, *, card=CARD, body_error=None, pr_payload=None,
+                harvest_ref=None, lane_ref=True):
+        """Run the harvest of a lane result and return (result, gh calls, sh calls)."""
+        self.old_head = old
+        self.new_head = new
+        # the PR branch still points at the head the PR had before the round
+        self.git("push", "-q", "origin", f"{old}:refs/heads/{BRANCH}")
+        self.git("fetch", "-q", "origin")
+        self.git("update-ref", f"refs/heads/{BRANCH}", old)
+        if lane_ref:
+            self.git("update-ref", "refs/fleet/lane", new)
+        gh_calls, sh_calls = [], []
+
+        def fake_gh(args, timeout=60):
+            gh_calls.append(list(args))
+            if args[:2] == ["issue", "view"]:
+                if body_error is not None:
+                    return body_error
+                return (0, json.dumps({"body": card, "labels": []}), "")
+            if args[:2] == ["pr", "view"]:
+                payload = {"number": PR, "headRefName": BRANCH, "headRefOid": old,
+                           "baseRefOid": self.base}
+                payload.update(pr_payload or {})
+                return (0, json.dumps(payload), "")
+            if args[:2] == ["pr", "list"]:
+                return (0, json.dumps([{"number": PR, "headRefName": BRANCH}]), "")
+            return (0, "", "")
+
+        real_sh = ad.sh
+
+        def spy_sh(cmd, timeout=120, inp=None):
+            """Run the command for real (the git reads of the guard need it) and record it."""
+            sh_calls.append(cmd)
+            return real_sh(cmd, timeout=timeout, inp=inp)
+
+        state = {}
+        st = {"issue": ISSUE, "run": "run", "base": self.base}
+        info = {"branch": "branch", "commit": "commit", "repo": "repo"}
+        with mock.patch.object(ad, "LOCAL", str(self.repo)), \
+             mock.patch.object(ad, "harvest_fetch", return_value=(True, "", 0)), \
+             mock.patch.object(ad, "filter_harvest", return_value=(harvest_ref or new, [], False)), \
+             mock.patch.object(ad, "pr_validation_mode", return_value="warn"), \
+             mock.patch.object(ad, "gh", side_effect=fake_gh), \
+             mock.patch.object(ad, "sh", side_effect=spy_sh):
+            result = ad.finish("lane", {"host": "host"}, st, info, state)
+        return result, gh_calls, sh_calls
+
+    # --- the assertions ------------------------------------------------------------
+
+    @staticmethod
+    def pushes(sh_calls):
+        pushed = []
+        for cmd in sh_calls:
+            text = cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)
+            if "push" in text:
+                pushed.append(text)
+        return pushed
+
+    @staticmethod
+    def pr_writes(gh_calls):
+        return [args for args in gh_calls
+                if args[:2] in (["pr", "create"], ["pr", "edit"], ["pr", "ready"], ["pr", "close"])]
+
+    @staticmethod
+    def lane_failed(gh_calls):
+        return [args for args in gh_calls
+                if args[:2] == ["issue", "edit"] and "lane-failed" in args]
+
+    def brain(self):
+        return self.brain_log.read_text(encoding="utf-8") if self.brain_log.exists() else ""
+
+    def remote_head(self, branch=BRANCH):
+        """The head the branch has on the remote (the PR branch the harvest pushes back to)."""
+        line = self.git("ls-remote", "origin", f"refs/heads/{branch}")
+        return line.split()[0] if line else ""
+
+    def assert_refused(self, result, gh_calls, sh_calls, *, heads=True, sizes=()):
+        """The harvest was refused: nothing was pushed, the PR is untouched, the issue is back."""
+        self.assertEqual(self.pushes(sh_calls), [], "the refused harvest pushed something")
+        self.assertEqual(self.pr_writes(gh_calls), [], "the refused harvest touched the PR")
+        self.assertEqual(self.remote_head(), self.old_head, "the refused harvest moved the PR branch")
+        self.assertTrue(self.lane_failed(gh_calls), "the refused harvest did not label lane-failed")
+        self.assertNotEqual(result.get("status"), "pr-created")
+        self.assertNotEqual(result.get("status"), "pr-updated")
+        brain = self.brain()
+        self.assertTrue(brain.strip(), "the refused harvest wrote no brain log")
+        if heads:
+            self.assertIn(str(PR), brain)
+            self.assertIn(self.old_head[:8], brain)
+            self.assertIn(self.new_head[:8], brain)
+        for size in sizes:
+            self.assertIn(str(size), brain)
+
+    def assert_allowed(self, result, gh_calls, sh_calls):
+        """The harvest passed the guard: it was pushed and the issue stays untouched."""
+        self.assertTrue(self.pushes(sh_calls), "the accepted harvest pushed nothing")
+        self.assertEqual(self.lane_failed(gh_calls), [], "the accepted harvest labelled lane-failed")
+
+
+class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
+    """The guard refuses a harvest that would collapse the PR it pushes back to."""
+
+    def test_file_count_collapse_is_refused(self):
+        # only the file count collapses (4 -> 1 files, the lines stay at 40): the two
+        # dimensions are independent, the file count alone refuses the push
+        self.build_repo()
+        old, new = self.scenario_files_collapse()
+        result, gh_calls, sh_calls = self.harvest(old, new)
+        self.assert_refused(result, gh_calls, sh_calls, sizes=(4, 40, 1))
+
+    def test_line_count_collapse_is_refused(self):
+        # only the line count collapses (1 -> 1 file, 100 -> 4 lines)
+        self.build_repo()
+        old, new = self.scenario_lines_collapse()
+        result, gh_calls, sh_calls = self.harvest(old, new)
+        self.assert_refused(result, gh_calls, sh_calls, sizes=(100, 4))
+
+    def test_head_that_does_not_contain_the_old_head_is_refused(self):
+        self.build_repo()
+        old, new = self.scenario_replaced()
+        result, gh_calls, sh_calls = self.harvest(old, new)
+        self.assert_refused(result, gh_calls, sh_calls)
+
+    def test_ancestor_with_a_normal_size_is_allowed(self):
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new)
+        self.assert_allowed(result, gh_calls, sh_calls)
+
+    def test_rewrite_marker_waives_the_guard(self):
+        # a card that declares a full rewrite may replace the history and shrink the diff
+        self.build_repo()
+        old, new = self.scenario_files_collapse()
+        result, gh_calls, sh_calls = self.harvest(old, new, card=REWRITE_CARD)
+        self.assert_allowed(result, gh_calls, sh_calls)
+
+    def test_failing_git_check_fails_closed(self):
+        # the head of the PR cannot be resolved locally: the guard may not let the push pass
+        self.build_repo()
+        old, new = self.scenario_grown()
+        missing = "0" * 40
+        result, gh_calls, sh_calls = self.harvest(old, new, pr_payload={"headRefOid": missing})
+        self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_unreadable_card_body_is_refused(self):
+        # a card whose body cannot be read is not an empty card: without the target PR the
+        # AD cannot tell which head the PR had, so the harvest is refused
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new, body_error=(1, "", "body unavailable"))
+        self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_unparsable_card_body_is_refused(self):
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new, body_error=(0, "not json", ""))
+        self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_missing_harvest_ref_is_refused(self):
+        # the harvest branch does not exist: the guard may not read that as "nothing to check"
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new, harvest_ref="refs/heads/missing-harvest",
+                                                 lane_ref=False)
+        self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_card_without_a_target_pr_is_allowed(self):
+        # an ordinary implementation card names no PR: there is no head to compare with
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new, card=PLAIN_CARD)
+        self.assert_allowed(result, gh_calls, sh_calls)
+
+
+class HarvestCollapseReplayTest(HarvestFixture, unittest.TestCase):
+    """Replay of the six collapsed PRs of 2026-11-03 (Refs #1833)."""
+
+    def build_sizes(self, files_before, lines_before, files_after, lines_after):
+        """A history whose head before the round and harvest head have the recorded sizes."""
+        self.build_repo()
+        for index in range(files_before):
+            self.write(f"f{index}", self.lines(self.share(lines_before, files_before, index), "old"))
+        old = self.commit("old")
+        for index in range(files_before):
+            (self.repo / f"f{index}").unlink()
+        for index in range(files_after):
+            self.write(f"g{index}", self.lines(self.share(lines_after, files_after, index), "new"))
+        new = self.commit("new")
+        return old, new
+
+    @staticmethod
+    def share(lines, files, index):
+        """The lines of file `index` when `lines` lines are spread over `files` files."""
+        base = lines // files
+        return base + (1 if index < lines % files else 0)
+
+    def test_every_recorded_incident_is_refused(self):
+        """Every one of the six recorded collapses is refused by the guard."""
+        for incident in RECORDED_INCIDENTS:
+            with self.subTest(pr=incident["pr"]):
+                old, new = self.build_sizes(incident["files_before"], incident["lines_before"],
+                                            incident["files_after"], incident["lines_after"])
+                result, gh_calls, sh_calls = self.harvest(old, new)
+                self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_replay_of_the_restore_manifest_refuses_every_incident(self):
+        """The real before/after heads of the six collapsed PRs (the box keeps the manifest)."""
+        paths = manifest_paths()
+        if not paths:
+            self.skipTest(f"the restore manifest with the real before/after heads is not reachable "
+                          f"from this workspace (looked for {MANIFEST_NAME}); run it on the box with "
+                          "AD_HARVEST_COLLAPSE_MANIFEST=<path> to replay the six real SHA pairs")
+        entries = manifest_entries(paths[0])
+        self.assertTrue(entries, f"the manifest {paths[0]} carries no before/after heads")
+        for entry in entries:
+            with self.subTest(pr=entry["pr"]):
+                self.build_repo()
+                result, gh_calls, sh_calls = self.harvest(entry["before"], entry["after"])
+                self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+
+if __name__ == "__main__":
+    unittest.main()
