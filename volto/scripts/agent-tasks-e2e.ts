@@ -4,10 +4,11 @@
 // turns at the same time (not a custom ACP agent):
 // `bun scripts/agent-tasks-e2e.ts --allow-mutations --agent=<agent id>`.
 //
-// It checks the task limit and its hold, a raised limit that starts the waiting task, Stop, a
-// provider switch queued while a task runs, and that the task list reports the `error` field. Each
-// task turn is a real provider turn, so keep the prompts short. At the end it stops and closes the
-// tasks it started and gives the agent its task limit back.
+// It checks the task limit and its hold, the completion of a task that runs, of a task that finished
+// and of a task that was stopped, a raised limit that starts the waiting task, Stop, a provider
+// switch queued while a task runs, and that the task list reports the `error` field. Each task turn
+// is a real provider turn, so keep the prompts short. At the end it stops and closes the tasks it
+// started and gives the agent its task limit back.
 // Writes .volto-build/agent-tasks-e2e/report.json.
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -40,8 +41,9 @@ const agentArgument = argument("agent");
 assert.ok(agentArgument, "Pass --agent=<agent id> of an agent whose provider is signed in.");
 const agentId: string = agentArgument;
 
-// Long enough that the first task still runs while the script reads the second one.
-const LONG_PROMPT = "Write a numbered list of 40 short facts about rivers. Do not use tools.";
+// Long enough that the first task still runs while the script reads the second one. It calls a tool,
+// so the task reports the progress that the completion of its goal follows.
+const LONG_PROMPT = "Call openbot.list_agents, then write a numbered list of 40 short facts about rivers.";
 const SHORT_PROMPT = "Reply with the single word ready. Do not use tools.";
 const WAIT_MS = 120_000;
 
@@ -59,7 +61,7 @@ interface Report {
     pendingModel?: string | null;
   };
   errorField?: { present: boolean };
-  completion?: { running: number; completed: number; invalidRejected: boolean };
+  completion?: { running: number; completed: number; stopped: number | null; invalidRejected: boolean };
   restored?: { taskLimit: number | null };
   passed: boolean;
 }
@@ -136,7 +138,7 @@ const taskIn = (snapshot: AgentTasksSnapshot, taskId: string): AgentTask => {
   return task;
 };
 
-const taskCompletion = (task: AgentTask): unknown => Reflect.get(task, "completion");
+const taskCompletion = (task: AgentTask): number | null | undefined => task.completion;
 
 const before = await readAgent();
 report.provider = before.provider;
@@ -204,6 +206,7 @@ try {
   report.completion = {
     running: runningCompletion as number,
     completed: completedCompletion as number,
+    stopped: null,
     invalidRejected: true,
   };
 
@@ -253,6 +256,11 @@ try {
   };
   // The second task can finish its short turn before Stop reaches it.
   assert.equal(taskIn(stopped, first.id).outcome, "interrupted");
+
+  // A task that was stopped keeps the percent its goal reached: the goal did not finish.
+  const stoppedCompletion = taskCompletion(taskIn(stopped, first.id));
+  assert.notEqual(stoppedCompletion, 100, "A stopped task must not report 100 percent completion.");
+  if (report.completion) report.completion.stopped = stoppedCompletion ?? null;
 
   // 5. The list reports the stored error of each task: null after a turn that did not fail.
   report.errorField = { present: stopped.tasks.every((task) => "error" in task) };
