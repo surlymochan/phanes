@@ -19,7 +19,7 @@ SPEC.loader.exec_module(overhead)
 
 class EvalidOverheadTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(dir=ROOT.parent)
         self.runs = pathlib.Path(self.temporary.name)
 
     def tearDown(self):
@@ -127,7 +127,9 @@ class EvalidOverheadTests(unittest.TestCase):
 
         report = overhead.build_report(self.runs)
 
-        self.assertEqual(report["data_quality_errors"], [])
+        self.assertEqual(report["data_quality_errors"], [
+            {"run_id": "swrm-run", "field": "finished", "error": "missing"},
+        ])
         self.assertEqual(report["stages"]["red"], {
             "run_count": 1,
             "queued_seconds": 12.5,
@@ -136,6 +138,69 @@ class EvalidOverheadTests(unittest.TestCase):
             "usage": {"input_tokens": 5},
         })
         self.assertTrue(report["budget_excludes_queue_seconds"])
+
+    def test_result_seconds_excludes_verification_and_finalization(self):
+        self.write_run("finished", stage="red", queued_at=100, started=110,
+                       finished=210, queued_seconds=10, budget_minutes=1)
+        (self.runs / "finished" / "result.json").write_text(json.dumps({
+            "seconds": 30, "attempts": [{"seconds": 10}, {"seconds": 20}],
+        }), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["stages"]["red"]["execution_seconds"], 30)
+        self.assertEqual(report["stages"]["red"]["budget_seconds"], 30)
+        self.assertEqual(report["data_quality_errors"], [])
+
+    def test_result_seconds_does_not_hide_timestamp_or_duration_errors(self):
+        self.write_run("missing-times", stage="Spec")
+        self.write_run("reversed", stage="red", queued_at=100, started=110,
+                       finished=109)
+        self.write_run("negative-result", stage="green", queued_at=100,
+                       started=110, finished=210)
+        for run_id, seconds in (("missing-times", 30), ("reversed", 30),
+                                ("negative-result", -1)):
+            (self.runs / run_id / "result.json").write_text(
+                json.dumps({"seconds": seconds}), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        self.assertEqual(report["data_quality_errors"], [
+            {"run_id": "missing-times", "field": "queued_at", "error": "missing"},
+            {"run_id": "missing-times", "field": "started", "error": "missing"},
+            {"run_id": "missing-times", "field": "finished", "error": "missing"},
+            {"run_id": "negative-result", "field": "execution_seconds", "error": "negative"},
+            {"run_id": "reversed", "field": "execution_seconds", "error": "negative"},
+        ])
+        self.assertEqual(report["stages"]["green"]["execution_seconds"], 0)
+
+    def test_baselines_are_counted_per_change_and_retries_remain_extra(self):
+        common = {"queued_at": 100, "started": 110, "finished": 140,
+                  "queued_seconds": 10, "usage": {"input_tokens": 5}}
+        for change in ("issue-a", "issue-b"):
+            for stage in ("red", "green", "holdout", "Review"):
+                self.write_run(f"{change}-{stage}", stage=stage,
+                               change_id=change, **common)
+        self.write_run("spec", stage="Spec", change_id="issue-a", **common)
+
+        report = overhead.build_report(self.runs)
+        self.assertEqual(report["baseline_run_count"], 8)
+        self.assertEqual(report["extra_run_count"], 1)
+
+        # A retry belongs to the same change even if metadata is in result.json.
+        self.write_run("retry", stage="red", **common)
+        (self.runs / "retry" / "result.json").write_text(
+            json.dumps({"change_id": "issue-b", "seconds": 30}), encoding="utf-8")
+        report = overhead.build_report(self.runs)
+        self.assertEqual(report["baseline_run_count"], 8)
+        self.assertEqual(report["extra_run_count"], 2)
+        self.assertEqual(report["totals"]["usage"], {"input_tokens": 50})
+        self.assertEqual(report["stages"]["red"]["run_count"], 3)
+        self.assertEqual(report["stages"]["red"]["execution_seconds"], 90)
+        self.assertEqual(overhead.build_report(self.runs, stages=["red"])
+                         ["baseline_run_count"], 2)
+        self.assertEqual(overhead.render_report(report),
+                         overhead.render_report(overhead.build_report(self.runs)))
 
     def test_budget_is_capped_at_the_allowance_and_never_charges_queue(self):
         self.write_run(

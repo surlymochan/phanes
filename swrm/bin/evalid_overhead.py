@@ -10,11 +10,14 @@ Two rules drive the numbers:
 
 * Queue time is capacity wait, not work. ``queued_seconds`` is reported on its
   own and never enters ``budget_seconds``: a run's budget is derived from its
-  execution window only, so queue time is never charged and never deducted
+  execution attempts only, so queue time is never charged and never deducted
   twice.
 * Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
-  one run each on red, green, holdout and Review; every further run -- the Spec
-  and spec-check runs, plus retries -- is extra quota and extra concurrency.
+  one run each on red, green, holdout and Review per change; every further run
+  -- the Spec and spec-check runs, plus retries -- is extra quota and extra
+  concurrency. ``change_id`` in status or result identifies a change. Legacy
+  runs without it share a single baseline group; separate experiments must
+  supply distinct change IDs (or be reported from separate runs directories).
 
 Missing timestamps and negative durations are reported as deterministic data
 quality errors instead of silently skewing the totals. The same input always
@@ -40,7 +43,7 @@ SCHEMA = "evalid-overhead/1"
 #: Pipeline stages in execution order; always reported, even when empty.
 STAGES = ("Spec", "spec-check", "red", "green", "holdout", "Review")
 
-#: Stages the pre-Spec flow already ran once; their first run is the baseline.
+#: Stages the pre-Spec flow already ran once per change.
 BASELINE_STAGES = ("red", "green", "holdout", "Review")
 
 #: Accepted stage spellings, normalized to the canonical stage names.
@@ -175,20 +178,23 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
         errors.append({"run_id": name, "field": "queued_at", "error": _timestamp_error(queued_raw)})
     if started is None:
         errors.append({"run_id": name, "field": "started", "error": _timestamp_error(started_raw)})
+    if finished is None:
+        errors.append({"run_id": name, "field": "finished", "error": _timestamp_error(finished_raw)})
 
-    # Execution time is the work window; queue time never enters it.
-    execution = None
+    # Validate timestamps independently of the attempt duration in result.json.
+    # finished is written after verification/cleanup, so the wall window is only
+    # a fallback for older runs without a recorded execution duration.
+    window = None
     if started is not None and finished is not None:
-        execution = (finished - started).total_seconds()
-        if execution < 0:
-            errors.append({"run_id": name, "field": "execution_seconds", "error": "negative"})
-            execution = None
-    else:
-        fallback = _number(result.get("seconds"))
-        if fallback is not None and fallback >= 0:
-            execution = float(fallback)
-        elif finished is None and started is not None:
-            errors.append({"run_id": name, "field": "finished", "error": _timestamp_error(finished_raw)})
+        window = (finished - started).total_seconds()
+    execution = _number(result.get("seconds"))
+    negative = (window is not None and window < 0) or (execution is not None and execution < 0)
+    if negative:
+        errors.append({"run_id": name, "field": "execution_seconds", "error": "negative"})
+    if execution is None:
+        execution = window if window is not None and window >= 0 else None
+    elif execution < 0:
+        execution = None
 
     queued = _number(status.get("queued_seconds"))
     if queued is None:
@@ -199,7 +205,7 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
         errors.append({"run_id": name, "field": "queued_seconds", "error": "negative"})
         queued = 0.0
 
-    # The budget covers the execution window only; queue seconds are not
+    # The budget covers execution only; queue seconds are not
     # charged to it, and a run killed at its deadline cannot exceed it.
     budget_minutes = _number(status.get("budget_minutes"))
     allowance = None
@@ -222,7 +228,9 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
             if number is not None:
                 usage[str(key)] = number
 
+    change_id = status.get("change_id") or result.get("change_id")
     return {"run_id": name, "stage": stage, "errors": errors,
+            "change_id": str(change_id) if change_id is not None else None,
             "queued_seconds": float(queued), "execution_seconds": execution,
             "budget_seconds": budget, "usage": usage}
 
@@ -240,6 +248,7 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
     buckets = {stage: _empty_bucket() for stage in selected}
     queue_samples: list[float] = []
     errors: list[dict] = []
+    baseline_runs: set[tuple[Optional[str], str]] = set()
 
     for entry in sorted(root.iterdir(), key=lambda path: path.name):
         if not entry.is_dir():
@@ -251,6 +260,8 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
         stage = record["stage"]
         if stage is None or stage not in buckets:
             continue
+        if stage in BASELINE_STAGES:
+            baseline_runs.add((record["change_id"], stage))
         bucket = buckets[stage]
         bucket["run_count"] += 1
         bucket["queued_seconds"] += record["queued_seconds"]
@@ -277,8 +288,7 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
             totals_usage[key] = totals_usage.get(key, 0) + value
 
     total_run_count = sum(bucket["run_count"] for bucket in buckets.values())
-    baseline_run_count = sum(1 for stage in BASELINE_STAGES
-                             if stage in buckets and buckets[stage]["run_count"] > 0)
+    baseline_run_count = len(baseline_runs)
     queue_samples.sort()
     percentiles = {name: _percentile(queue_samples, percent) for name, percent in PERCENTILES}
 
