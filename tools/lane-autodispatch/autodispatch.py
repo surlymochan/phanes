@@ -9,7 +9,7 @@ Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <sco
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
 """
-import base64, hashlib, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import base64, hashlib, importlib.util, json, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -642,6 +642,26 @@ if R:
         except ProcessLookupError: out["runner_alive"]=False
         except PermissionError: out["runner_alive"]=True
     except Exception: out["run_state"]="missing"
+# The token usage samples of the lane (Refs #1690): the finished runs of the lane's
+# usage log and the staged sample of the run that is still going.  The samples are
+# read on the host that owns the runs, so the control plane never guesses the burn.
+samples=[]
+try:
+  with open(f"{O}/lanes/{L}/usage.jsonl",encoding="utf-8") as stream:
+    for line in stream.readlines()[-200:]:
+      line=line.strip()
+      if not line: continue
+      try: row=json.loads(line)
+      except Exception: continue
+      if isinstance(row,dict): samples.append({"run":row.get("run"),"lane":L,"at":row.get("at"),"usage":row.get("usage")})
+except Exception: pass
+try:
+  running=R or out.get("current_run")
+  if running:
+    with open(f"{O}/runs/{running}/status.json") as stream: s=json.load(stream)
+    if s.get("usage"): samples.append({"run":running,"lane":L,"at":s.get("updated") or s.get("started"),"usage":s.get("usage"),"staged":True})
+except Exception: pass
+out["usage_samples"]=samples
 print(json.dumps(out))
 '''
 def remote(lane, cfg, run=""):
@@ -874,6 +894,64 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
+def usage_module():
+    """The token usage helper (swrm/bin/dispatch_usage.py), loaded by path.
+
+    The dispatcher aggregates the burn of the lanes with the same helper the
+    executor records it with, so both sides read a usage sample the same way
+    (Refs #1690).  A helper that is not there leaves the burn uncollected
+    instead of breaking the tick.
+    """
+    name = "swrm_dispatch_usage"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "swrm", "bin", "dispatch_usage.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+def usage_samples(row):
+    """The usage samples of one lane, without the duplicate of a finished run.
+
+    The lane's usage log holds the final counts of every finished run; the
+    status of the running run holds the staged counts of the same run while it
+    goes on.  The final record wins, so a run is never counted twice
+    (Refs #1690).
+    """
+    samples = [entry for entry in ((row or {}).get("usage_samples") or []) if isinstance(entry, dict)]
+    final = {entry.get("run") for entry in samples if not entry.get("staged")}
+    return [entry for entry in samples if not (entry.get("staged") and entry.get("run") in final)]
+
+def lane_burn(lanes, res, now=None):
+    """The burn of every lane: its last run and the two windows (Refs #1690).
+
+    The windows are recomputed here, against the clock of this tick, so a lane
+    that stopped running ages out of the 15 minute window instead of keeping
+    the numbers of its last run.  A lane the tick could not read is reported
+    as not collected, never as a zero burn.
+    """
+    module = usage_module()
+    moment = time.time() if now is None else now
+    samples = {name: usage_samples((res or {}).get(name)) for name in (lanes or {})}
+    if module is None:
+        return {"lanes": {}, "window_15m": None, "window_1h": None}
+    views = {}
+    for name in lanes:
+        view = module.lane_view(samples.get(name) or [], moment)
+        view["host"] = (lanes.get(name) or {}).get("host")
+        views[name] = view
+    fleet = module.fleet_view({name: {"host": views[name]["host"], "samples": samples.get(name) or []}
+                               for name in views}, moment)
+    return {"lanes": views, "window_15m": fleet["window_15m"], "window_1h": fleet["window_1h"]}
+
 def status_snapshot(lanes, state, res, ready, blocked):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
@@ -884,6 +962,11 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
     status["_at"] = time.strftime("%F %T")
+    # The burn of the lanes: the last run of every lane and the windows around it.
+    # The health check turns this snapshot into the fleet wide burn table (Refs #1690).
+    burn = lane_burn(lanes, res)
+    status["_burn"] = burn["lanes"]
+    status["_summary"] = {"burn_15m": burn["window_15m"], "burn_1h": burn["window_1h"]}
     return status
 
 def deps_met(item):

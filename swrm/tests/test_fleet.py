@@ -61,9 +61,16 @@ class FleetTests(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(xs, "sh", return_value=(0, "task-box  Running\n", "")), \
                 mock.patch.object(xs, "host_run", return_value=(0, b'{"lanes": [], "active_runs": []}', b"")), \
+                mock.patch.object(xs, "HOME", str(self.root)), \
                 contextlib.redirect_stdout(output):
             xs.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=False))
-        self.assertEqual(output.getvalue(), "box  no lanes  lanes=0 active=0\n")
+            snapshot_path = xs.dispatch_lanes_status_path()
+        # the fleet status ends with the burn table of the dispatcher's snapshot (Refs #1690)
+        self.assertEqual(output.getvalue(),
+                         "box  no lanes  lanes=0 active=0\n"
+                         "\n"
+                         "fleet burn: 未采集\n"
+                         f"  (no lane status snapshot: {snapshot_path})\n")
 
     def test_empty_lane_config_is_valid(self):
         config = self.root / "lanes.json"

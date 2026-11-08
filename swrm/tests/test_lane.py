@@ -168,6 +168,37 @@ class LaneTests(unittest.TestCase):
         self.assertIn("lane supervisor is already listening", second.stderr)
         self.assertTrue(json.loads(self.cli("lane", "status").stdout))
 
+    def test_pi_run_records_the_token_usage_of_the_session(self):
+        # The run end publishes the canonical counts of the session and the lane's
+        # usage log holds the sample the control plane attributes the burn with
+        # (Refs #1690).
+        self.short_data_root()
+        self.set_config("pi")
+        self.start_lane()
+        run_id = self.assign("record the token usage")
+        state = self.wait_run(run_id)
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["usage"], {"input": 3, "output": 2, "cache_read": 0, "cache_write": 0})
+        self.assertFalse(state["usage_staged"])
+        log = (self.data / "lanes" / self.lane_name / "usage.jsonl").read_text().splitlines()
+        record = json.loads(log[-1])
+        self.assertEqual(record["run"], run_id)
+        self.assertEqual(record["usage"], {"input": 3, "output": 2, "cache_read": 0, "cache_write": 0})
+
+    def short_data_root(self):
+        """Move the lane's data root into a short scratch dir.
+
+        AF_UNIX limits the lane control socket path to 108 bytes and the CI gate
+        puts TMPDIR inside the checkout: a long path there pushes the lane over
+        the limit, so the test runs from a short scratch root instead.
+        """
+        scratch = pathlib.Path(__file__).resolve().parents[2] / ".tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.short = tempfile.TemporaryDirectory(prefix="lane-", dir=str(scratch))
+        self.addCleanup(self.short.cleanup)
+        self.data = pathlib.Path(self.short.name) / "data"
+        self.env["OPENSWARM_HOME"] = str(self.data)
+
     def test_assign_commits_and_writes_normal_result(self):
         self.set_config("pi")
         knowledge = self.root / "knowledge"

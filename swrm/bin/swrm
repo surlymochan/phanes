@@ -7061,6 +7061,61 @@ def lane_state_path(name):
     return os.path.join(lane_root(name), "state.json")
 
 
+def lane_usage_log_path(name):
+    """The token usage log of a lane: one line per finished run (Refs #1690).
+
+    The dispatcher reads this file to attribute the burn of the lane; the run
+    end is the only place that knows the counts of the session.
+    """
+    return os.path.join(lane_root(name), "usage.jsonl")
+
+
+def lane_append_usage(name, run_id, usage, at=None):
+    """Append the token usage of a finished run to the lane's usage log.
+
+    A run without a reading is appended as well (with ``usage: null``): the
+    newest run of a lane must show "not collected" instead of falling back to
+    the numbers of an older run (Refs #1690).
+    """
+    counts = dispatch_usage_module().normalize(usage)
+    record = {"run": run_id, "at": at if at is not None else NOW(), "usage": counts}
+    path = lane_usage_log_path(name)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return None
+    lane_trim_usage_log(path)
+    return record
+
+
+def lane_trim_usage_log(path, keep=200, limit=256 * 1024):
+    """Keep the usage log bounded: only the recent runs matter for the windows."""
+    try:
+        if os.path.getsize(path) <= limit:
+            return
+        with open(path, encoding="utf-8") as stream:
+            lines = stream.readlines()
+    except OSError:
+        return
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.writelines(lines[-keep:])
+
+
+def lane_record_staged_usage(rdir, usage):
+    """Publish the usage sampled so far into the run status (Refs #1690).
+
+    A run that is still going publishes the counts of its last sample, so the
+    control plane can attribute a partial burn instead of showing nothing.
+    """
+    counts = dispatch_usage_module().normalize(usage)
+    if counts is None:
+        return None
+    set_status(rdir, usage=counts, usage_staged=True)
+    return counts
+
+
 def lane_socket_path(name):
     path = os.path.join(lane_root(name), "ctl.sock")
     if sys.platform == "darwin" and len(os.fsencode(path)) > 103:
@@ -8150,6 +8205,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     for k, v in (message.get("usage") or {}).items():
                         if isinstance(v, (int, float)):
                             usage[k] = usage.get(k, 0) + v
+                    # The run is still going: publish the counts of this sample so the
+                    # control plane can attribute the partial burn of the lane (Refs #1690).
+                    lane_record_staged_usage(rdir, usage)
                     text = "".join(b.get("text", "") for b in message.get("content") or []
                                    if isinstance(b, dict) and b.get("type") == "text")
                     final = extract_json(text) or final
@@ -8415,8 +8473,13 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
+    # The run end publishes the canonical token counts of the session: the control
+    # plane reads them to attribute the burn of the lane (Refs #1690).  A run
+    # without a reading keeps ``usage`` empty and is logged as missing.
+    counts = dispatch_usage_module().normalize(usage)
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
-               scope=spec.get("scope", "repo"))
+               scope=spec.get("scope", "repo"), usage=counts, usage_staged=False)
+    lane_append_usage(lane["name"], rid, usage, NOW())
     if not evidence_error:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
@@ -9743,6 +9806,42 @@ def fleet_snapshot():
             "lane_config_error": config_error}
 
 
+def dispatch_lanes_status_path(state_dir=None):
+    """The dispatcher's lane status snapshot: ``<state_dir>/lanes-status.json``.
+
+    The state directory is the one the dispatcher really uses (the configured
+    one, else the default ``~/phanes-ctl/autodispatch``), so the health check
+    reads the snapshot the dispatcher wrote (Refs #1690).
+    """
+    explicit = os.environ.get("OPENSWARM_LANES_STATUS")
+    if explicit:
+        return os.path.expanduser(explicit)
+    directory = state_dir or os.environ.get("OPENSWARM_AD_STATE_DIR") or os.path.join(HOME, "phanes-ctl", "autodispatch")
+    return os.path.join(os.path.expanduser(directory), "lanes-status.json")
+
+
+def fleet_burn_report(state_dir=None, now=None):
+    """The fleet burn table of the dispatcher's lane status snapshot.
+
+    The snapshot holds the per lane burn the dispatcher collected (the last
+    run and the 15 minute and one hour windows).  The table adds the per host
+    subtotals and the fleet total, with the input and the cache share of the
+    hour, so the reading lines up with the MiniMax console (Refs #1690).
+    """
+    module = dispatch_usage_module()
+    source = dispatch_lanes_status_path(state_dir)
+    snapshot = jload(source, None)
+    table = module.fleet_table(snapshot) if isinstance(snapshot, dict) else None
+    report = {"source": source, "at": (snapshot or {}).get("_at") if isinstance(snapshot, dict) else None,
+              "table": table, "lanes": (table or {}).get("lanes") or [],
+              "hosts": (table or {}).get("hosts") or [],
+              "window_15m": (table or {}).get("window_15m"), "window_1h": (table or {}).get("window_1h"),
+              "collected": table is not None}
+    if now is not None:
+        report["now"] = now
+    return report
+
+
 def cmd_fleet(args):
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
@@ -9794,8 +9893,11 @@ def cmd_fleet(args):
         else:
             row["status"] = "reachable"
         rows.append(row)
+    # The burn of the lanes: the table the dispatcher wrote, with the per host
+    # subtotals and the hour total (Refs #1690).
+    burn = fleet_burn_report()
     if args.json:
-        print(json.dumps({"hosts": rows}, indent=2, ensure_ascii=False))
+        print(json.dumps({"hosts": rows, "burn": burn}, indent=2, ensure_ascii=False))
     else:
         for row in rows:
             state = row["status"]
@@ -9810,6 +9912,11 @@ def cmd_fleet(args):
                 print(f"  {lane['name']} {lane['state']} {lane.get('model') or '-'} run={lane.get('current_run') or '-'}")
             for run in row["active_runs"]:
                 print(f"  run {run['id']} {run['state']}")
+        print("")
+        for line in dispatch_usage_module().render_table(burn.get("table"), "fleet burn"):
+            print(line)
+        if not burn.get("collected"):
+            print(f"  (no lane status snapshot: {burn.get('source')})")
 
 
 def safe_id(value):
@@ -11291,6 +11398,27 @@ def consult_module():
         raise ImportError(f"cannot load consult helper from {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def dispatch_usage_module():
+    """The token usage helper (bin/dispatch_usage.py), loaded by path.
+
+    The helper is the one place that knows what a usage reading means: the
+    executor records the breakdown with it and the control plane aggregates it
+    with it (Refs #1690).
+    """
+    name = "swrm_dispatch_usage"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dispatch_usage.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load the usage helper from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
