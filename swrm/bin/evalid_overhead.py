@@ -11,7 +11,9 @@ Two rules drive the numbers:
 * Queue time is capacity wait, not work. ``queued_seconds`` is reported on its
   own and never enters ``budget_seconds``: a run's budget is derived from its
   queue-adjusted ``started`` timestamp, including rate-limit backoff between
-  execution attempts. Queue time is never charged and never deducted twice.
+  execution attempts. An interrupted capacity wait is excluded separately
+  because swrm shifts ``started`` only after admission. Queue time is never
+  charged and never deducted twice.
 * Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
   one run each on red, green, holdout and Review per change; every further run
   -- the Spec and spec-check runs, plus retries -- is extra quota and extra
@@ -253,10 +255,17 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
         errors.append({"run_id": name, "field": "queued_seconds", "error": "negative"})
         queued = 0.0
 
-    # swrm shifts started forward for each capacity wait, but rate-limit
-    # backoff still consumes deadline budget. Do not subtract queued_seconds
-    # again, or use result.seconds (which omits all time between attempts).
+    # swrm shifts started only after admission. If a capacity wait is aborted,
+    # queued_seconds includes that wait but started does not. Subtract only the
+    # queue not already represented by started - queued_at; rate-limit backoff
+    # still consumes budget, and admitted waits must not be deducted twice.
+    unshifted_queue = 0.0
+    if queued_at is not None and started is not None:
+        shifted_queue = max(0.0, (started - queued_at).total_seconds())
+        unshifted_queue = max(0.0, _seconds(queued - shifted_queue))
     elapsed = window if window is not None and window >= 0 else execution
+    if window is not None and window >= 0:
+        elapsed = max(0.0, window - unshifted_queue)
     attempts = result.get("attempts")
     last = attempts[-1] if isinstance(attempts, list) and attempts else None
     attempt_started = _parse_timestamp(status.get("attempt_started"))
@@ -266,7 +275,8 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
         # after the last executor returned. Its finish window includes that wait.
         interrupted = (result.get("error_class") in ("budget_exceeded", "stopped")
                        or last.get("error_class") in ("budget_exceeded", "stopped"))
-        if last_seconds is not None and last_seconds >= 0 and not interrupted:
+        if (last_seconds is not None and last_seconds >= 0
+                and not interrupted and not unshifted_queue):
             attempt_end = (attempt_started - started).total_seconds() + last_seconds
             if attempt_end >= 0 and (window is None or attempt_end <= window):
                 elapsed = attempt_end

@@ -217,6 +217,46 @@ class EvalidOverheadTests(unittest.TestCase):
         self.assertTrue(report["budget_excludes_queue_seconds"])
         self.assertEqual(report["data_quality_errors"], [])
 
+    def test_interrupted_retry_queue_excludes_only_unshifted_capacity_wait(self):
+        cases = (
+            # First attempt: 30s execution, 10s backoff, 60s cancelled queue.
+            ("stopped", 120, 120, 220, 80, 30, 40),
+            ("budget_exceeded", 120, 120, 220, 80, 30, 40),
+            ("exec_error", 120, 120, 220, 80, 30, 40),
+            # One admitted retry already shifted started by 40s. A further
+            # cancelled queue adds 60s; both 10s backoffs still consume budget.
+            ("stopped", 160, 200, 300, 120, 60, 80),
+            # Cancellation before the first admission consumes no budget.
+            ("stopped", 100, None, 160, 60, 0, 0),
+        )
+        for index, (error, started, attempt_started, finished, queued,
+                    execution, expected) in enumerate(cases):
+            with self.subTest(error=error, started=started):
+                run_id = f"interrupted-{index}"
+                stage = ("Spec", "spec-check", "red", "green", "holdout")[index]
+                self.write_run(run_id, stage=stage, queued_at=100,
+                               started=started, attempt_started=attempt_started,
+                               finished=finished, queued_seconds=queued,
+                               budget_minutes=2)
+                attempts = [{"seconds": 30, "error_class": "rate_limit"}
+                            for _ in range(execution // 30)]
+                # swrm records an unadmitted retry as a zero-second attempt.
+                attempts.append({"seconds": 0, "error_class": error})
+                (self.runs / run_id / "result.json").write_text(json.dumps({
+                    "seconds": execution, "error_class": error,
+                    "attempts": attempts,
+                }), encoding="utf-8")
+
+                report = overhead.build_report(self.runs)
+
+                self.assertEqual(report["stages"][stage]["budget_seconds"], expected)
+                self.assertEqual(report["stages"][stage]["execution_seconds"], execution)
+                self.assertEqual(report["stages"][stage]["queued_seconds"], queued)
+                self.assertTrue(report["budget_excludes_queue_seconds"])
+                self.assertEqual(report["data_quality_errors"], [])
+                self.assertEqual(overhead.render_report(report),
+                                 overhead.render_report(overhead.build_report(self.runs)))
+
     def test_result_seconds_does_not_hide_timestamp_or_duration_errors(self):
         self.write_run("missing-times", stage="Spec")
         self.write_run("reversed", stage="red", queued_at=100, started=110,
