@@ -215,6 +215,41 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(current_head(), head)
         xs.cleanup_worktree(ws, None)
 
+    @unittest.skipIf(os.name == "nt", "Git metadata write permissions are platform-specific")
+    def test_current_worktree_git_metadata_is_writable(self):
+        # Lane executors need to update the worktree index and refs to produce a commit.
+        # Exercise the checkout running this test: its .git file may point to metadata
+        # outside the sandbox's writable roots.
+        root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+        probe = tempfile.NamedTemporaryFile(prefix=".l2-1872-", dir=root, delete=False)
+        probe_path = probe.name
+        probe.close()
+        try:
+            staged = subprocess.run(["git", "add", "--", probe_path], cwd=root,
+                                    capture_output=True, text=True)
+            with self.subTest(operation="git add"):
+                try:
+                    self.assertEqual(staged.returncode, 0,
+                                     f"git add failed for the current worktree metadata: {staged.stderr.strip()}")
+                finally:
+                    if staged.returncode == 0:
+                        subprocess.run(["git", "reset", "--quiet", "--", probe_path], cwd=root,
+                                       capture_output=True, text=True)
+
+            ref = f"refs/l2-1872-probe/{os.getpid()}"
+            updated = subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=root,
+                                     capture_output=True, text=True)
+            with self.subTest(operation="git update-ref"):
+                try:
+                    self.assertEqual(updated.returncode, 0,
+                                     f"git update-ref failed for the current worktree metadata: {updated.stderr.strip()}")
+                finally:
+                    if updated.returncode == 0:
+                        subprocess.run(["git", "update-ref", "-d", ref], cwd=root,
+                                       capture_output=True, text=True)
+        finally:
+            os.unlink(probe_path)
+
     def test_watch_accepts_several_runs(self):
         home = os.path.join(self.tmp, "home")
         runs = os.path.join(home, "runs")
