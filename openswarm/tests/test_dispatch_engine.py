@@ -606,28 +606,6 @@ class ReviewGate(Base):
                 d.review_candidates({}, {}, [])
                 self.assertEqual(len(self.runner.called(f"issue edit {number + 1}")), 1)
 
-    def test_the_rebase_cap_parks_the_pr_after_n_main_advances(self):
-        # Refs #1870: a PR that stays CONFLICTING is rebased again on every advance of main.
-        # After N rebase attempts the dispatcher queues none and parks the PR as `needs-human`.
-        p = pr(40, 400, mergeable="CONFLICTING")
-        d = self.make(self.rules([p]))
-        cap = d.rebase_cap()
-        for i in range(cap + 1):
-            d.main_sha = lambda i=i: "%040x" % (i + 1)       # main advances on every tick
-            d.review_candidates({}, {}, [])
-        # N rebase tasks were queued, the N+1'st main advance queues none
-        self.assertEqual(len(self.runner.called("issue edit 400")), cap)
-        self.assertEqual(d.load_reviews()["40"]["rebase_rounds"], cap)
-        # the PR is parked for a human and the reason is written
-        self.assertTrue(self.runner.called("pr edit 40 --add-label needs-human"))
-        self.assertTrue(self.runner.called("pr comment 40"))
-        self.assertEqual(d.load_reviews()["40"]["needs_human_reason"], "rebase_rounds")
-        # a parked PR is not rebased again
-        self.runner.calls.clear()
-        d.main_sha = lambda: "%040x" % (cap + 2)
-        d.review_candidates({}, {}, [])
-        self.assertEqual(self.runner.called("issue edit 400"), [])
-
     def test_the_rebase_cap_is_lifted_when_the_head_moves(self):
         # Refs #1870: the label is ours to lift - a human that pushed a new head starts the
         # count of this PR over.
@@ -1090,17 +1068,18 @@ class RebaseTickIntegration(Base):
         """A dispatcher whose GitHub answers with one conflicting PR and its lane-ready card."""
         branch = f"fleet/M5-issue{card}-r1"
         current = pr(number, card, mergeable="CONFLICTING", head=head, branch=branch)
+        self.current_pr = current
         ready = []
         self.main_box = {"sha": main}
 
         def ls_remote(text):
             if "refs/heads/main" in text:
                 return 0, f"{self.main_box['sha']}\trefs/heads/main\n", ""
-            return 0, f"{head}\trefs/heads/{branch}\n", ""
+            return 0, f"{current['headRefOid']}\trefs/heads/{branch}\n", ""
 
         rules = [("merge-base", (0, "", "")), ("diff --stat", (0, " a | 1\n", "")),
                  (" push -q", push), ("rev-parse", rev_parse),
-                 ("pr list", (0, json.dumps([current]), "")),
+                 ("pr list", lambda _: (0, json.dumps([current]), "")),
                  ("issue list --state open --label lane-ready", lambda _: (0, json.dumps(ready), "")),
                  ("issue list", (0, "[]", "")),
                  ("issue view", lambda _: (0, json.dumps({"state": "OPEN", "body": "orig",
@@ -1108,18 +1087,73 @@ class RebaseTickIntegration(Base):
                  ("ls-remote", ls_remote),
                  ("lane assign", (0, '{"id":"retry"}', ""))]
         d = self.make(rules)
-        original_write = d.gh_write
+        original_write = d.write
 
-        def write(args, **kwargs):
+        def write(cmd, **kwargs):
             # the card is in the lane-ready queue as soon as the AD labels it
+            args = cmd[1:] if isinstance(cmd, list) and cmd[0] == "gh" else []
             added = args[args.index("--add-label") + 1] if "--add-label" in args else ""
             if args[:3] == ["issue", "edit", str(card)] and added == "lane-ready":
                 ready[:] = [issue(card, ["lane-ready"], args[args.index("--body") + 1])]
-            return original_write(args, **kwargs)
+            elif args[:3] == ["issue", "edit", str(card)] and added == "in-progress":
+                ready.clear()
+            if args[:3] == ["pr", "edit", str(number)] and added:
+                current["labels"].append({"name": added})
+            return original_write(cmd, **kwargs)
 
-        d.gh_write = write
+        d.write = write
         d.replenish = lambda *args: None
         return d, ready, branch
+
+    def test_rebase_cap_stops_dispatch_after_n_main_advances(self):
+        d, ready, _ = self.dispatcher(40, 400, SHA, SHA2, (0, "", ""))
+        self.runner.rules.insert(0, ("merge-base", (1, "", "")))  # rebase cannot resolve the conflict
+        lanes, state = {"M5": self.LANES["M5"]}, {}
+        cap = d.rebase_cap()
+        for i in range(cap):
+            self.main_box["sha"] = "%040x" % (i + 1)
+            d.probe = lambda *_: {"M5": {"lane": "idle"}}
+            d.tick(lanes, state)          # enqueue through the review gate
+            self.assertTrue(ready)
+            d.tick(lanes, state)          # dispatch the ready card
+            self.assertEqual(state["M5"]["rebase_pr"], 40)
+            self.assertEqual(len(self.runner.called("lane assign")), i + 1)
+            d.probe = lambda *_: {"M5": {"lane": "idle", "run": dict(self.INFO)}}
+            d.tick(lanes, state)          # harvest the unsuccessful rebase
+            self.assertNotIn("M5", state)
+            self.assertEqual(d.load_reviews()["40"]["rebase_rounds"], i + 1)
+        for i in (cap + 1, cap + 2):
+            self.main_box["sha"] = "%040x" % i
+            d.tick(lanes, state)
+            self.assertFalse(ready)
+            self.assertEqual(len(self.runner.called("lane assign")), cap)
+        self.assertEqual(len([c for c in self.runner.called("issue edit 400")
+                              if "--add-label lane-ready" in c]), cap)
+        self.assertIn({"name": "needs-human"}, self.current_pr["labels"])
+        self.assertEqual(d.load_reviews()["40"]["needs_human_reason"], "rebase_rounds")
+        self.assertIn(f"the cap is {cap}", self.runner.called("pr comment 40")[0])
+
+    def test_manual_rebase_clears_count_before_a_later_conflict(self):
+        d, ready, _ = self.dispatcher(41, 401, SHA2, SHA, (0, "", ""))
+        # The cap was reached but no needs-human label was applied before the human's push.
+        d.put_review(41, {"sha": SHA2, "verdict": "APPROVE", "rebase_sha": SHA,
+                          "rebase_base_sha": SHA, "rebase_rounds": d.rebase_cap()})
+        self.current_pr["mergeable"] = "MERGEABLE"
+        d.probe = lambda *_: {"M5": {"lane": "idle"}}
+        lanes, state = {"M5": self.LANES["M5"]}, {}
+        d.tick(lanes, state)
+        self.assertEqual(d.load_reviews()["41"]["rebase_rounds"], 0)
+        self.assertEqual(d.load_reviews()["41"]["verdict"], "APPROVE")
+        self.assertFalse(ready)
+        self.current_pr["mergeable"] = "CONFLICTING"
+        self.main_box["sha"] = "c" * 40
+        d.tick(lanes, state)
+        self.assertTrue(ready)
+        self.assertEqual(d.load_reviews()["41"]["rebase_rounds"], 1)
+        d.tick(lanes, state)
+        self.assertEqual(state["M5"]["rebase_pr"], 41)
+        self.assertEqual(len(self.runner.called("lane assign")), 1)
+        self.assertFalse(self.runner.called("pr edit 41 --add-label needs-human"))
 
     def test_moved_head_requeues_and_dispatches_with_lane_limit_and_budget(self):
         # the AD logs of #1655/#1367 and #1749/#1719: the rebase run is discarded because
@@ -1166,12 +1200,14 @@ class RebaseTickIntegration(Base):
                                             rev_parse=(0, lane + "\n", ""))
         state = {"M5": {"issue": card, "run": "r1", "base": base, "at": "2026-11-03 18:00:00",
                          "rebase_pr": number, "rebase_branch": branch, "rebase_head": SHA}}
+        d.put_review(number, {"rebase_rounds": d.rebase_cap()})
         d.probe = lambda *_: {"M5": {"lane": "busy", "run": dict(self.INFO)}, "M6": {"lane": "idle"}}
         d.tick(self.LANES, state)
         # the pushed head is recorded: the rebase of that head is done
         reviews = d.load_reviews()[str(number)]
         self.assertEqual(reviews["rebase_sha"], lane)
         self.assertEqual(reviews["rebase_base_sha"], base)
+        self.assertEqual(reviews["rebase_rounds"], 0)
         self.assertFalse(ready)
         # the next tick does not rebase the same head again, not even while the PR is CONFLICTING
         d.probe = lambda *_: {"M5": {"lane": "idle"}, "M6": {"lane": "idle"}}

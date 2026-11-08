@@ -211,7 +211,7 @@ DEFAULTS = {
         # N = this value (3: the same order as the CHANGES-round limit `rounds`).  The count is
         # `rebase_rounds` in the review record of that PR (reviews.json): one per rebase task the
         # dispatcher queued for it.  A successful rebase (the lane pushed the rebased head) clears
-        # the count, and so does a head that moved (a human fixed the PR by hand).
+        # the count, as does observing MERGEABLE (including a human's successful rebase).
         "rebase_max_rounds": 3,
     },
     # Timed mode: backend, window.resets_at (epoch), burn_before_reset_h and factor.
@@ -2176,6 +2176,12 @@ class Dispatcher:
                 continue
             labs = {l["name"] for l in p["labels"]}
             r = revs.get(str(p["number"])) or {}
+            if p["mergeable"] == "MERGEABLE" and r.get("rebase_rounds"):
+                # A resolved conflict ends the consecutive attempts, even before the cap
+                # label was applied. Persist this before the busy/pending/review skips so a
+                # later advance of main cannot revive failures from before a human's rebase.
+                r["rebase_rounds"] = 0
+                self.merge_review(p["number"], {"rebase_rounds": 0})
             stale = sorted(labs & {L["reviewed"], L["needs_changes"]})
             if stale and r.get("sha") != p["headRefOid"]:
                 args = ["pr", "edit", str(p["number"])]
