@@ -14,7 +14,7 @@ WRAPPER = pathlib.Path(__file__).resolve().parents[1] / 'bin' / 'pi-isolated'
 # A stand-in for bubblewrap: it runs the wrapped command as it is, with the pi binary replaced by
 # a fake one, so the wrapper can be checked without user namespaces (Refs #1847).
 FAKE_BWRAP = '''#!/usr/bin/env python3
-import os, subprocess, sys
+import os, shutil, subprocess, sys
 args = sys.argv[1:]
 index = args.index("-c")
 script = args[index + 1]
@@ -23,10 +23,11 @@ script = (script.replace("/runtime/node_modules/.bin/pi", os.environ["FAKE_PI_BI
                 .replace("/config/models.json", os.path.join(root, "models.json"))
                 .replace("/run/broker.sock", os.environ["FAKE_BROKER_SOCKET"])
                 .replace("/tmp/agent", os.path.join(root, "agent"))
+                .replace("/tmp/pi-sessions", os.path.join(root, "pi-sessions"))
                 .replace("/home/pi", os.path.join(root, "home")))
 # The broker relay is not part of this check: the fake sandbox shares the host network.
 script = "\\n".join(line for line in script.splitlines() if not line.strip().startswith("socat "))
-sys.exit(subprocess.call(["/usr/bin/sh", "-c", script, *args[index + 2:]]))
+sys.exit(subprocess.call([shutil.which("sh") or "/bin/sh", "-c", script, *args[index + 2:]]))
 '''
 
 # The fake pi reports the command line it was started with.

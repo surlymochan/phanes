@@ -136,5 +136,57 @@ class AssignThinkingTest(unittest.TestCase):
         self.assertIsNone(self.assign(None).get("thinking"))
 
 
+class ThinkingChildTest(unittest.TestCase):
+    """pi only reads its thinking level at start-up, so a new level needs a new process."""
+
+    class Child:
+        def __init__(self, thinking=None):
+            self.thinking = thinking
+            self.closed = False
+            self.pid = 4242
+
+        def close(self):
+            self.closed = True
+
+    def relaunch(self, spec, child):
+        policy = {"pi": {"require_isolation": False}}
+        with mock.patch.object(xs, "lane_child", return_value=self.Child("high")) as launcher, \
+                mock.patch.object(xs, "lanes_by_name",
+                                  return_value=[{"name": "L1", "backend": "pi", "model": "fake-model"}]), \
+                mock.patch.object(xs, "lane_record_event"), \
+                mock.patch.object(xs, "lane_write_state"), \
+                mock.patch.object(xs, "lane_root", return_value="/tmp/lane-root"):
+            return xs.lane_pi_thinking_child({"name": "L1", "backend": "pi"}, child, spec, policy), launcher
+
+    def test_another_level_relaunches_pi_with_it(self):
+        child = self.Child("low")
+        new_child, launcher = self.relaunch({"thinking": "high"}, child)
+        self.assertEqual(launcher.call_args[0][0]["thinking"], "high")
+        self.assertEqual(new_child.thinking, "high")
+        # The resident child stays: the lane keeps it for the tasks that follow this run, so a
+        # fix round never changes the level of the review tasks of the same lane (Refs #1847).
+        self.assertFalse(child.closed)
+        self.assertIsNot(new_child, child)
+
+    def test_the_same_level_keeps_the_child(self):
+        child = self.Child("high")
+        new_child, launcher = self.relaunch({"thinking": "high"}, child)
+        self.assertIs(new_child, child)
+        self.assertFalse(launcher.called)
+
+    def test_a_run_without_a_level_keeps_the_child(self):
+        child = self.Child("low")
+        new_child, launcher = self.relaunch({}, child)
+        self.assertIs(new_child, child)
+        self.assertFalse(launcher.called)
+
+    def test_an_unknown_level_keeps_the_child(self):
+        # An unknown level never reaches pi: the run keeps the level of the lane.
+        child = self.Child("low")
+        new_child, launcher = self.relaunch({"thinking": "deeper"}, child)
+        self.assertIs(new_child, child)
+        self.assertFalse(launcher.called)
+
+
 if __name__ == "__main__":
     unittest.main()

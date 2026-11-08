@@ -246,14 +246,32 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(result["workspace"]["base"], expected_head)
         self.assertTrue(wt.is_dir())
 
-    def child_command(self):
-        """The command line of the lane's resident executor process (what `ps` shows)."""
-        pid = self.lane_state().get("child_pid")
+    def child_command(self, pid=None):
+        """The command line of a lane process (what `ps` shows)."""
+        pid = pid or self.lane_state().get("child_pid")
         self.assertTrue(pid, "the lane has no resident executor process")
-        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True,
+        # `ps` cuts the command line at 80 columns when its output is not a terminal, so the wide
+        # form is the one that shows the whole command line of a lane process.
+        command = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], text=True,
                                  capture_output=True, check=False).stdout
         self.assertTrue(command.strip(), f"no process command line for pid {pid}")
         return command
+
+    def pi_commands(self, level=None):
+        """The command lines of the pi processes of this lane - what `ps` shows on the host."""
+        listing = subprocess.run(["ps", "-ww", "-eo", "pid=,command="], text=True, capture_output=True,
+                                 check=False).stdout
+        binary = str(FIXTURES / "fake_pi_rpc.py")
+        found = []
+        for line in listing.splitlines():
+            # The pi process is the one whose second argument is the fixture itself: the pid, the
+            # interpreter and the binary are the first three fields of the line.
+            fields = line.split()
+            if len(fields) < 3 or fields[2] != binary:
+                continue
+            if level is None or f"--thinking {level}" in line:
+                found.append(line.strip())
+        return found
 
     def test_pi_lane_starts_pi_at_the_thinking_level_of_its_lane(self):
         """A lane with a thinking level starts pi with it (Refs #1847)."""
@@ -266,9 +284,15 @@ class LaneTests(unittest.TestCase):
         """A run that asks for a thinking level starts pi with it (Refs #1847)."""
         self.set_config("pi")
         self.start_lane()
-        run_id = self.assign("LANE_TEST_WAIT_SHORT pi thinking level", "--thinking", "high")
-        self.assertEqual(self.wait_run(run_id)["status"], "done")
-        self.assertIn("--thinking high", self.child_command())
+        # The prompt keeps the turn open, so the process of the run stays visible.
+        self.assign("LANE_TEST_WAIT pi thinking level", "--thinking", "high")
+        # pi reads its thinking level once, at start-up: the level of the run is in the command
+        # line of the process the run uses.
+        self.wait_for(lambda: self.pi_commands("high") or None, timeout=15,
+                      description="a pi process started with --thinking high")
+        # The lane keeps its own level: the resident child of the lane runs without one, so the
+        # review tasks of the same lane are not touched by the fix round.
+        self.assertNotIn("--thinking", self.child_command())
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")

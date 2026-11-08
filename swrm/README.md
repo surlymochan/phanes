@@ -461,9 +461,14 @@ steered or aborted while working. Cursor lanes run the local `cursor-agent acp` 
 {"lanes":[
   {"name":"C1","backend":"codex","model":"gpt-6-luna","effort":"xhigh","repo":"/abs/repo"},
   {"name":"K1","backend":"cursor","model":"composer-2.5","repo":"/abs/repo"},
-  {"name":"M1","backend":"pi","provider":"minimax-cn","model":"MiniMax-M3.1-Flash","repo":"/abs/repo"}
+  {"name":"M1","backend":"pi","provider":"minimax-cn","model":"MiniMax-M3.1-Flash","thinking":"high","repo":"/abs/repo"}
 ]}
 ```
+
+A pi lane may carry an optional `thinking` level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`); an unknown level is
+refused. pi reads the level once, at start-up, so it shows up in the command line of the pi process (`ps -ww -o command= -p <pid>`).
+`swrm lane assign <lane> --thinking <level>` runs one task at another level: that task gets its own pi process, and the lane keeps
+its own level for the tasks that follow.
 
 Each lane keeps a fixed worktree under `$OPENSWARM_HOME/lanes/<name>/wt`. Start lanes and dispatch tasks with:
 
