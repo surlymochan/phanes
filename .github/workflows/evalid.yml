@@ -4,11 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - 'phanes/evalid/**'
+      - 'evalid/**'
       - '.github/workflows/evalid.yml'
   pull_request:
     paths:
-      - 'phanes/evalid/**'
+      - 'evalid/**'
       - '.github/workflows/evalid.yml'
 
 permissions:
@@ -19,14 +19,14 @@ jobs:
     runs-on: ubuntu-24.04
     defaults:
       run:
-        working-directory: phanes/evalid
+        working-directory: evalid
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: phanes/evalid/package-lock.json
+          cache-dependency-path: evalid/package-lock.json
       - run: npm ci
       - name: Check home path redactions
         run: python3 scripts/redact-home-paths.py --check

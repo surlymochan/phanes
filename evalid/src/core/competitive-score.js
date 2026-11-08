@@ -214,7 +214,7 @@ const DIMENSIONS = [
       ['text', 'docs/install-upgrade.md', /xflow package preflight --check-registry --check-auth --json/],
       ['file', 'docs/demo-proof.md'],
       ['file', 'docs/fixtures/tracker-item.json'],
-      ['text', '../../.github/workflows/evalid.yml', /Minimal External Adoption Example/],
+      ['text', '../.github/workflows/evalid.yml', /Minimal External Adoption Example/],
     ],
   },
 ];

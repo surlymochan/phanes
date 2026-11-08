@@ -8,7 +8,7 @@
   "kind": "example",
   "summary": "用 OpenSwarm 编排 Boss→DA→Builder 三阶段流水线：每阶段有任务提示、产物路径和 --verify 门禁；下一阶段的 --base 取上一阶段的提交；每阶段后做一次跨执行器交叉审查；真实组织数据只经仓库外的数据参数绝对路径进入。",
   "prerequisites": {
-    "openswarm_cli": "openswarm（或 openswarm/bin/openswarm）",
+    "swrm_cli": "swrm（或 swrm/bin/swrm）",
     "python": ">=3.9",
     "executors": [
       "codex"
@@ -19,9 +19,9 @@
       "cursor"
     ],
     "notes": [
-      "codex 运行的交叉审查执行器只能是 agy/pi/cursor 之一（openswarm/bin/openswarm:5487-5494）。",
-      "交叉审查要求该阶段有 openswarm/<run-id> 分支且 diff 非空（openswarm/bin/openswarm:5532-5543），所以每个阶段都必须在仓库内留下不含真实数据的提交。",
-      "openswarm 只建分支和提交，不合并也不推送；合入由人工评审后执行。"
+      "codex 运行的交叉审查执行器只能是 agy/pi/cursor 之一（swrm/bin/swrm:5487-5494）。",
+      "交叉审查要求该阶段有 swrm/<run-id> 分支且 diff 非空（swrm/bin/swrm:5532-5543），所以每个阶段都必须在仓库内留下不含真实数据的提交。",
+      "swrm 只建分支和提交，不合并也不推送；合入由人工评审后执行。"
     ]
   },
   "variables": {
@@ -46,8 +46,8 @@
       "description": "DA 阶段产出的诊断 JSON（仓库外绝对路径，schema v4 结构）。"
     },
     "OPENSWARM": {
-      "default": "openswarm",
-      "description": "openswarm CLI；未安装时可用仓库内的 openswarm/bin/openswarm。"
+      "default": "swrm",
+      "description": "swrm CLI；未安装时可用仓库内的 swrm/bin/swrm。"
     },
     "REVIEWER": {
       "default": "pi",
@@ -61,9 +61,9 @@
     "rules": [
       "真实组织数据只经仓库外的绝对路径读入；站点入口固定使用 examples/org-health-local/serve.py 的 --data 参数。",
       "仓库内只保留合成示例 examples/org-health-local/data/diagnosis.json。",
-      "DA 阶段的诊断 JSON 写在仓库外，不随 openswarm 分支提交。",
+      "DA 阶段的诊断 JSON 写在仓库外，不随 swrm 分支提交。",
       "每个阶段只把不含真实数据的说明文件提交进仓库，保证交叉审查有 diff 可看。",
-      "verify 命令里指向仓库内的路径用相对路径（相对 worktree 根），指向仓库外的路径用绝对路径：openswarm 只会把 base 仓库的绝对路径前缀改写成 worktree 路径（openswarm/bin/openswarm:4923-4926）。"
+      "verify 命令里指向仓库内的路径用相对路径（相对 worktree 根），指向仓库外的路径用绝对路径：swrm 只会把 base 仓库的绝对路径前缀改写成 worktree 路径（swrm/bin/swrm:4923-4926）。"
     ],
     "forbidden_paths": [
       "(^|/)diagnosis[^/]*\\.json$"
@@ -239,11 +239,11 @@
     "record": "${OPENSWARM_HOME}/runs/<run-id>/result.json",
     "fields": {
       "commit": "阶段提交的 SHA；为空表示该阶段没有仓库内改动。",
-      "branch": "openswarm/<run-id>；评审与合并都用它。",
+      "branch": "swrm/<run-id>；评审与合并都用它。",
       "workspace.base": "该阶段实际使用的 base 提交，用于回退。"
     },
-    "merge_hint": "人工评审通过后执行 git -C \"${REPO}\" merge --no-ff openswarm/<run-id>。",
-    "rework": "审查不通过时用 openswarm run --rework-of <run-id> 续做同一张卡。",
+    "merge_hint": "人工评审通过后执行 git -C \"${REPO}\" merge --no-ff swrm/<run-id>。",
+    "rework": "审查不通过时用 swrm run --rework-of <run-id> 续做同一张卡。",
     "note": "真实数据不参与交接：它始终留在仓库外的 ${DIAGNOSIS}，靠路径传递而不是靠 git。"
   },
   "review": {
@@ -257,13 +257,13 @@
       "--json"
     ],
     "record": "${OPENSWARM_HOME}/runs/<run-id>/review.json",
-    "gate": "verdict=changes，或 findings 里出现 P0/P1 时不进入下一阶段；改用 openswarm run --rework-of <run-id> 返工。",
+    "gate": "verdict=changes，或 findings 里出现 P0/P1 时不进入下一阶段；改用 swrm run --rework-of <run-id> 返工。",
     "constraints": [
-      "审查执行器必须与阶段执行器不同族：codex 只能由 agy/pi/cursor 审查（openswarm/bin/openswarm:5487-5494）。",
-      "审查要求分支 openswarm/<run-id> 存在且 diff 非空（openswarm/bin/openswarm:5532-5543）。",
-      "自动审查只在 --card-type 属于 feature/fix/review-fix/migration 时触发（openswarm/bin/openswarm:5905-5910），本示例不带 --card-type，所以交叉审查是显式的一步。"
+      "审查执行器必须与阶段执行器不同族：codex 只能由 agy/pi/cursor 审查（swrm/bin/swrm:5487-5494）。",
+      "审查要求分支 swrm/<run-id> 存在且 diff 非空（swrm/bin/swrm:5532-5543）。",
+      "自动审查只在 --card-type 属于 feature/fix/review-fix/migration 时触发（swrm/bin/swrm:5905-5910），本示例不带 --card-type，所以交叉审查是显式的一步。"
     ],
-    "optional": "openswarm compare --task-file <card> --title <t> --a codex --b pi 可以让两个执行器并行产出 DA 结论再对比。"
+    "optional": "swrm compare --task-file <card> --title <t> --a codex --b pi 可以让两个执行器并行产出 DA 结论再对比。"
   },
   "pending": [
     {

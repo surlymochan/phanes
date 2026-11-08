@@ -1,8 +1,8 @@
 """Machine-checkable tests for the fusion agreement v0.2 doc (phanes #1481).
 
 The document lives at the phanes repository root, two levels above
-this file (openswarm/tests -> openswarm -> repo root). In a standalone
-openswarm checkout it does not exist and every test skips; in the
+this file (swrm/tests -> swrm -> repo root). In a standalone
+swrm checkout it does not exist and every test skips; in the
 phanes tree the tests run for real.
 
 These tests pin only what issue #1481 requires, so a later edit

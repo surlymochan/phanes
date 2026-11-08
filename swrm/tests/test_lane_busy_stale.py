@@ -333,13 +333,13 @@ class AutodispatchBusyStaleTests(unittest.TestCase):
 
     def test_reviewed_binary_artifacts_are_absent(self):
         root = Path(__file__).resolve().parents[2]
-        for directory in ("openswarm/tests", "swrm/tests"):
+        for directory in ("swrm/tests",):
             for name in (".dde4fd5ffeb7d431-00000000.so", ".dde4fd5ffebede34-00000000.so"):
                 self.assertFalse((root / directory / name).exists())
 
 
-# #1786 review closure (migration: openswarm/bin/openswarm -> swrm/bin/swrm;
-# openswarm/tests/test_dispatch_busy_stale.py -> this file; the dispatch status
+# #1786 review closure (migration: swrm/bin/swrm;
+# swrm/tests/test_dispatch_busy_stale.py -> this file; the dispatch status
 # writer lives in tools/lane-autodispatch/autodispatch.py).
 # B1 -> swrm/tests/test_lane_busy_stale.py:334 ->
 # test_reviewed_binary_artifacts_are_absent -> PASS; the reviewed .so files are

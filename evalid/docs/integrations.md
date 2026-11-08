@@ -8,7 +8,7 @@ evalid keeps integrations thin: external systems may supply issues, docs, CI, or
 | --- | --- | --- | --- |
 | GitHub Issues | `xflow adapter github-issue --repo owner/name --issue <number>` plus `openissue` atoms | Import issue context and create/patch issue state without coupling workflow truth to GitHub. | Implemented |
 | GitHub PR | `A6.pr.create` after `A5.archive.commit_push_close` | Open review after archive commit and push. | Implemented |
-| GitHub Actions | `../../.github/workflows/evalid.yml` | Test, drift scan, package readiness, and minimal external adoption proof. | Implemented |
+| GitHub Actions | `../.github/workflows/evalid.yml` | Test, drift scan, package readiness, and minimal external adoption proof. | Implemented |
 | Jira | `xflow adapter import-file --input jira-item.json` | Keep Jira as an issue source, not workflow source of truth. | Adapter seam implemented |
 | Linear | `xflow adapter import-file --input linear-item.json` | Same as Jira: issue metadata can map into proposal/status artifacts. | Adapter seam implemented |
 | Confluence | `docs/integrations.md` contract | Durable docs can link to Confluence, but root specs stay in repo. | Documented |
