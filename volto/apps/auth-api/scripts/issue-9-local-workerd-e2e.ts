@@ -146,7 +146,9 @@ function startWorker(port: number, environment: NodeJS.ProcessEnv): void {
   starts.push(Date.now());
   child = spawn(
     "bun",
-    ["run", "--bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+    // Bun loads the TypeScript config and its extensionless imports directly. Vite's bundled
+    // config loader relies on Node's module hooks for import.meta.resolve, which Bun does not use.
+    ["run", "--bun", "vite", "dev", "--configLoader", "native", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
     { cwd: APP, env: environment, stdio: ["ignore", "pipe", "pipe"] },
   );
   child.stdout?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
