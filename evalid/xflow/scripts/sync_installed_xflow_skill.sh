@@ -79,6 +79,15 @@ rm -f "$extra_source_found"
 TAB=$(printf '\t')
 EXTRA_MANAGED_SKILLS=$(mktemp)
 
+# The standalone xmem family installer rewrites the xmem install and drops its
+# skillhub marker, so xmem is only managed here when that installer is off.
+standalone_xmem_install_enabled() {
+  [ -n "$XMEM_SOURCE_DIR" ] || return 1
+  [ -d "$XMEM_SOURCE_DIR" ] || return 1
+  [ -f "$XMEM_SOURCE_DIR/skill.md" ] || return 1
+  return 0
+}
+
 # The shared skillhub sync resolves managed skills from a single extra source
 # dir, so the aggregated list of extra source dirs makes it prune the managed
 # skills owned by the other sources. Snapshot those managed skills before the
@@ -92,9 +101,9 @@ snapshot_extra_managed_skills() {
       for source_path in "$source_dir"/*; do
         [ -d "$source_path" ] || continue
         skill_name=$(basename "$source_path")
-        case "$skill_name" in
-          xmem) continue ;;
-        esac
+        if [ "$skill_name" = "xmem" ] && standalone_xmem_install_enabled; then
+          continue
+        fi
         target_path=$target_dir/$skill_name
         [ -d "$target_path" ] || continue
         marker_path=$target_path/.skillhub-source
@@ -149,6 +158,8 @@ verify_extra_managed_skills() {
   done <"$EXTRA_MANAGED_SKILLS"
 }
 
+# Restore the extra-source managed skills even when the sync fails, so a
+# failed sync never leaves the installed skills without their managed ones.
 trap 'restore_extra_managed_skills || true; rm -f "$EXTRA_MANAGED_SKILLS"' 0
 
 snapshot_extra_managed_skills
