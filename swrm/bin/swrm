@@ -427,6 +427,11 @@ AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
 BACKEND_ALIASES = {"gemini": "agy"}
 AGY_LOGIN_TIMEOUT = 5
 _AGY_LOGIN_CACHE = {}
+# Providers that publish an account balance endpoint for the Pi backend, and the environment
+# variable that holds their key. Providers without an entry keep an unknown quota.
+PI_BALANCE_ENDPOINTS = {
+    "deepseek": ("https://api.deepseek.com/user/balance", "DEEPSEEK_API_KEY"),
+}
 
 
 # ---------------------------------------------------------------- utils
@@ -3551,9 +3556,28 @@ def pi_bin():
 
 
 def probe_pi(policy):
+    """Pi is an opt-in executor. Its quota is unknown unless the provider publishes a balance
+    endpoint (DeepSeek does), so routing can tell an exhausted Pi provider from a healthy one."""
     cfg = policy.get("pi") or {}
-    return {"binary": pi_bin(), "provider": cfg.get("provider"), "default_model": cfg.get("default_model"),
-            "quota": None}
+    res = {"binary": pi_bin(), "provider": cfg.get("provider"), "default_model": cfg.get("default_model"),
+           "quota": None}
+    endpoint = PI_BALANCE_ENDPOINTS.get(str(cfg.get("provider") or ""))
+    if not endpoint:
+        return res
+    url, env_name = endpoint
+    key = os.environ.get(env_name)
+    if not key:
+        res["quota_error"] = f"no {env_name} in the environment"
+        return res
+    try:
+        hdr = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+        d = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=15))
+        bi = (d.get("balance_infos") or [{}])[0]
+        res["quota"] = {"balance": float(bi.get("total_balance", 0)), "currency": bi.get("currency"),
+                        "available": d.get("is_available")}
+    except Exception as e:  # noqa: BLE001
+        res["quota_error"] = str(e)[:200]
+    return res
 
 
 def plan_pi(prof, st, policy, forced, notes):
@@ -3563,6 +3587,9 @@ def plan_pi(prof, st, policy, forced, notes):
         known.get("binary") if known is not None and "binary" in known else pi_bin())
     if not binary:
         return None, "no working pi binary"
+    quota = (known or {}).get("quota") or {}
+    if quota and (quota.get("available") is False or quota.get("balance") is not None and quota.get("balance") <= 0):
+        return None, "pi provider balance exhausted"
     if cfg.get("require_isolation", sys.platform != "darwin"):
         expected = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pi-isolated")
         if os.path.realpath(binary) != os.path.realpath(expected):
@@ -3574,7 +3601,8 @@ def plan_pi(prof, st, policy, forced, notes):
             return None, "isolated Pi provider or model does not match the broker"
     if f"pi/{model or 'default'}" in breakers() or "pi/all" in breakers():
         return None, "pi breaker open"
-    notes.append("pi quota unknown (opt-in backend; not metered by swrm)")
+    notes.append(f"pi provider balance {quota.get('balance')} {quota.get('currency') or ''}".strip()
+                 if quota else "pi quota unknown (opt-in backend; not metered by swrm)")
     tier = policy["difficulty_map"][str(prof["difficulty"])]["tier"]
     return {"backend": "pi", "model": model, "effort": None, "tier": tier}, None
 
@@ -3649,6 +3677,20 @@ def concurrency(st, policy):
         if u < row["codex_used_below"]:
             return {"codex": row["codex"], "ocgo": row["ocgo"]}
     return {"codex": 1, "ocgo": 1}
+
+
+def planner_decision(prof, policy):
+    """Whether the task still needs a planner turn before the executor runs.
+
+    The route resolves one task to one executor (the fallbacks are only spill options for a
+    failed attempt), so a small task goes straight to the executor instead of paying for a
+    separate planner turn first (optimization backlog #4, P1-3).
+    """
+    limit = (policy.get("routing") or {}).get("planner_skip_max_difficulty", 2)
+    difficulty = prof.get("difficulty")
+    if difficulty is not None and difficulty <= limit:
+        return "skipped"
+    return "used"
 
 
 def route(prof, st, policy, exclude=()):
@@ -3743,8 +3785,9 @@ def route(prof, st, policy, exclude=()):
         mode, why_c = claude_mode(st, policy)
         return {"ok": True, **d, "fallbacks": [x for x in order if x != d["backend"]],
                 "claude_review": mode, "reasons": list(dict.fromkeys(notes + [why_c])), "skipped": skipped,
-                "concurrency": concurrency(st, policy), "profile": prof}
-    return {"ok": False, "reasons": list(dict.fromkeys(notes)), "skipped": skipped, "profile": prof}
+                "concurrency": concurrency(st, policy), "planner": planner_decision(prof, policy), "profile": prof}
+    return {"ok": False, "reasons": list(dict.fromkeys(notes)), "skipped": skipped,
+            "planner": planner_decision(prof, policy), "profile": prof}
 
 
 # ---------------------------------------------------------------- execution
@@ -11451,9 +11494,14 @@ def cmd_status(policy, refresh):
           f"model={cu.get('default_model') or (policy.get('cursor') or {}).get('default_model') or 'composer-2.5[fast=false]'} "
           f"quota=unknown")
     pi = st.get("pi") or {}
+    pi_quota = pi.get("quota") or {}
+    pi_quota_text = "unknown"
+    if pi_quota:
+        pi_quota_text = f"balance={pi_quota.get('balance')} {pi_quota.get('currency') or ''}".strip()
     print(f"Pi       opt-in (--backend pi) bin={pi.get('binary') or '-'} "
           f"model={pi.get('default_model') or (policy.get('pi') or {}).get('default_model') or 'pi default'} "
-          f"quota=unknown")
+          f"quota={pi_quota_text}"
+          f"{' ERROR ' + str(pi['quota_error']) if pi.get('quota_error') else ''}")
     ag = st.get("agy") or {}
     print(f"Antigravity opt-in (--backend agy, alias gemini) bin={ag.get('binary') or '-'} "
           f"model={ag.get('default_model') or (policy.get('agy') or {}).get('default_model') or AGY_DEFAULT_MODEL} "
