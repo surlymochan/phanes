@@ -11,6 +11,43 @@ spec.loader.exec_module(module)
 
 
 class TesterRiskTests(unittest.TestCase):
+    def test_omitted_history_requires_full_read(self):
+        result = module.classify(
+            {"files_changed": 1, "additions": 2, "deletions": 1},
+            pr_number=1988,
+            sample_rate=0,
+        )
+
+        self.assertEqual(result["decision"], "full_read")
+        self.assertIn("history", result["reason"])
+
+    def test_explicit_empty_history_allows_routine_sampling(self):
+        diff = {"files_changed": 1, "additions": 2, "deletions": 1}
+        for rate, decision in ((0, "sampled"), (1, "full_read")):
+            with self.subTest(rate=rate):
+                result = module.classify(diff, [], pr_number=1988, sample_rate=rate)
+                self.assertEqual(result["decision"], decision)
+
+    def test_large_diff_thresholds_require_full_read_with_sampling_disabled(self):
+        for diff in (
+            {"files_changed": 20, "additions": 0, "deletions": 0},
+            {"files_changed": 1, "additions": 500, "deletions": 500},
+        ):
+            with self.subTest(diff=diff):
+                result = module.classify(diff, [], pr_number=1988, sample_rate=0)
+                self.assertEqual(result["decision"], "full_read")
+
+    def test_sampling_uses_pr_and_seed_without_diff_order_dependence(self):
+        diff = {"files_changed": 1, "additions": 2, "deletions": 1}
+        decisions = []
+        for pr in range(1, 31):
+            first = module.classify(diff, [], pr_number=pr, seed="fixed")
+            repeated = module.classify(dict(reversed(list(diff.items()))), [],
+                                       pr_number=pr, seed="fixed")
+            self.assertEqual(first, repeated)
+            decisions.append(first["decision"])
+        self.assertEqual(set(decisions), {"full_read", "sampled"})
+
     def classify(self, diff_stats, needs_human_history=(), **config):
         return module.classify(
             diff_stats=diff_stats,

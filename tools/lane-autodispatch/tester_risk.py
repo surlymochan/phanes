@@ -14,7 +14,7 @@ def _non_negative_int(value):
 
 def classify(
     diff_stats,
-    needs_human_history=(),
+    needs_human_history=None,
     *,
     pr_number,
     sample_rate=0.2,
