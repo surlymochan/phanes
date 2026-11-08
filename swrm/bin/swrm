@@ -7150,6 +7150,7 @@ def lane_recovery_event(lane, spec, event_file, reason=None):
              "level": spec.get("_recovery_level"), "point": spec.get("_recovery_point")}
     if reason:
         event["reason"] = reason
+        jsave(os.path.join(lane_root(lane["name"]), "preserve-workspace.json"), {"run_id": spec["run_id"]})
     elif spec.get("_recovery_level") == "workspace":
         event["note"] = "恢复自未提交状态"
     lane_record_event(event_file, event)
@@ -7189,8 +7190,10 @@ def lane_recover_assignment(lane, previous_state):
         return None, "saved Codex thread is missing; refusing a new session"
     if lane["backend"] == "pi" and not spec.get("session_file"):
         return None, "saved Pi session file is missing; refusing a new session"
-    if lane["backend"] not in ("codex", "pi"):
-        return None, "backend does not support persistent session recovery"
+    if lane_headless(lane) and not spec.get("conversation_id"):
+        return None, "saved headless conversation is missing; refusing a new session"
+    if lane["backend"] in ("cursor", "hermes", "copilot") and not lane_headless(lane) and not spec.get("session_id"):
+        return None, "saved ACP session is missing; refusing a new session"
     wt = os.path.join(lane_root(lane["name"]), "wt")
     if spec.get("workspace_path") != wt:
         return None, "saved workspace path does not match this lane"
@@ -7333,6 +7336,33 @@ def lane_state_lock(lane_name):
         yield
 
 
+def lane_process_identity(pid):
+    """A PID alone is not an identity across supervisor or host restarts."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return None
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/sys/kernel/random/boot_id") as stream:
+                boot = stream.read().strip()
+            with open(f"/proc/{pid}/stat") as stream:
+                fields = stream.read().rsplit(")", 1)[1].split()
+            return {"boot": boot, "start": fields[19]}
+        if sys.platform == "darwin":
+            rc, boot, _ = sh(["sysctl", "-n", "kern.boottime"], timeout=5)
+            rc2, process, _ = sh(["ps", "-p", str(pid), "-o", "lstart="], timeout=5)
+            if not rc and not rc2 and boot.strip() and process.strip():
+                return {"boot": boot.strip(), "process": process.strip()}
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def lane_stop_previous_child(previous_state):
+    pid, expected = previous_state.get("child_pid"), previous_state.get("child_identity")
+    if expected and expected == lane_process_identity(pid):
+        kill_tree(pid, grace=1)
+
+
 def lane_write_state(lane_name, **changes):
     with lane_state_lock(lane_name):
         return lane_write_state_locked(lane_name, **changes)
@@ -7342,6 +7372,8 @@ def lane_write_state_locked(lane_name, **changes):
     """Read/modify/write with lane_state_lock already held by the caller."""
     state = jload(lane_state_path(lane_name), {}) or {}
     old_run = state.get("current_run")
+    if "child_pid" in changes:
+        changes["child_identity"] = lane_process_identity(changes["child_pid"])
     state.update(changes)
     # Keep stale visible through later activity and status writes. Clear it
     # only when its run is resolved or a different run is assigned.
@@ -7441,6 +7473,45 @@ def lane_rebuild_worktree(repo, wt, base):
         raise RuntimeError(f"lane worktree rebuild failed: {err[:250]}")
 
 
+def lane_snapshot_workspace(lane, rid, wt):
+    """Keep an independent worktree, including its index and ignored/untracked files."""
+    rdir = os.path.join(RUNS, rid)
+    saved = jload(os.path.join(rdir, "status.json"), {}) or {}
+    if saved.get("preserved_workspace") and lane_worktree_matches(lane["repo"], saved["preserved_workspace"]):
+        return saved["preserved_workspace"]
+    archive = os.path.join(lane_root(lane["name"]), "preserved", rid + "-" + uuid.uuid4().hex[:8])
+    os.makedirs(os.path.dirname(archive), exist_ok=True)
+    rc, head, err = lane_git(["rev-parse", "HEAD"], wt)
+    if rc:
+        raise RuntimeError(f"cannot preserve interrupted workspace: {err}")
+    rc, _, err = lane_git(["worktree", "add", "--detach", "--no-checkout", archive, head], lane["repo"])
+    if rc:
+        raise RuntimeError(f"cannot preserve interrupted workspace: {err}")
+    # Only the root .git belongs to the source worktree. Keep nested repos and
+    # dependency symlinks as-is, and never traverse their targets.
+    shutil.copytree(wt, archive, symlinks=True, dirs_exist_ok=True,
+                    ignore=lambda directory, names: [".git"] if directory == wt else [])
+    rc, source, err = lane_git(["rev-parse", "--git-path", "index"], wt)
+    rc2, target, err2 = lane_git(["rev-parse", "--git-path", "index"], archive)
+    if rc or rc2:
+        raise RuntimeError(f"cannot preserve interrupted index: {err or err2}")
+    source = source if os.path.isabs(source) else os.path.join(wt, source)
+    target = target if os.path.isabs(target) else os.path.join(archive, target)
+    if os.path.isfile(source):
+        shutil.copy2(source, target)
+        # Split indexes refer to sharedindex files beside the original index.
+        for name in os.listdir(os.path.dirname(source)):
+            if name.startswith("sharedindex."):
+                shutil.copy2(os.path.join(os.path.dirname(source), name), os.path.join(os.path.dirname(target), name))
+    set_status(rdir, preserved_workspace=archive, preserved_head=head)
+    result_path = os.path.join(rdir, "result.json")
+    result = jload(result_path, None)
+    if isinstance(result, dict):
+        result["preserved_workspace"] = archive
+        jsave(result_path, result)
+    return archive
+
+
 def lane_prepare_workspace(lane, rid, base_rev=None, preserve=False, recovery_point=None):
     repo = os.path.realpath(lane["repo"])
     rc, top, err = lane_git(["rev-parse", "--show-toplevel"], repo)
@@ -7477,6 +7548,21 @@ def lane_prepare_workspace(lane, rid, base_rev=None, preserve=False, recovery_po
         return {"mode": "worktree", "path": wt, "root": wt, "repo": repo, "branch": branch,
                 "base": base, "head": head, "base_dirty": False, "linked": linked, "lane": lane["name"],
                 "workspace_note": workspace_note(repo)}
+    protection_path = os.path.join(lane_root(lane["name"]), "preserve-workspace.json")
+    protected = jload(protection_path, {}) or {}
+    if protected.get("run_id") and os.path.exists(wt):
+        lane_snapshot_workspace(lane, protected["run_id"], wt)
+        os.unlink(protection_path)
+    if lane_worktree_matches(repo, wt):
+        rc, branch, err = lane_git(["branch", "--show-current"], wt)
+        if rc:
+            raise RuntimeError(f"cannot inspect prior lane workspace: {err}")
+        old_rid = branch.removeprefix("swrm/") if branch.startswith("swrm/") else None
+        if old_rid and old_rid != rid:
+            prior = jload(os.path.join(RUNS, old_rid, "status.json"), {}) or {}
+            if prior.get("recovery_abandoned") or prior.get("workspace_preserved") or prior.get("state") in ("queued", "running"):
+                # Refuse destructive preparation unless the backup is complete.
+                lane_snapshot_workspace(lane, old_rid, wt)
     if not lane_worktree_matches(repo, wt):
         lane_rebuild_worktree(repo, wt, base)
     # Temporarily remove only dependency symlinks created for this worktree. This lets `git clean
@@ -7799,7 +7885,7 @@ class CursorHeadlessChild(AgyChild):
         cmd = [binary, "-p", "--trust", "--force", "--sandbox", "enabled", "--model", "composer-2.5",
                "--output-format", "stream-json"]
         if conversation:
-            cmd.append("--continue")
+            cmd += ["--resume", conversation] if isinstance(conversation, str) else ["--continue"]
         cmd += ["--", prompt]
         # A steer/restart may leave detached descendants in the previous scope.
         # Reuse it until finish() has proved it empty and removed the directory.
@@ -7824,6 +7910,8 @@ class CursorHeadlessChild(AgyChild):
                     event = json.loads(line)
                 except ValueError:
                     continue
+                if event.get("session_id"):
+                    event["conversation_id"] = event["session_id"]
                 if event.get("type") == "result":
                     event["response"] = event.get("result") or ""
                     event["status"] = "ERROR" if event.get("is_error") else "SUCCESS"
@@ -8122,19 +8210,46 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn, spec=None):
     elif lane_headless(lane):
         turn["id"] = "agy-" + uuid.uuid4().hex
         turn["prompt"] = prompt
-        child.start(prompt, model=lane["model"], effort=lane.get("effort"))
+        conversation = spec.get("conversation_id") if spec and spec.get("_recovered") else None
+        if spec and spec.get("_recovered") and not conversation:
+            raise RuntimeError("saved headless conversation is missing")
+        turn["conversation_id"] = conversation
+        child.start(prompt, model=lane["model"], effort=lane.get("effort"), conversation=conversation)
     else:
+        recovering = bool(spec and spec.get("_recovered"))
+        if recovering and not spec.get("session_id"):
+            raise RuntimeError("saved ACP session is missing")
         sid = "session-" + uuid.uuid4().hex
-        child.send({"jsonrpc": "2.0", "id": sid, "method": "session/new",
-                    "params": {"cwd": worktree, "mcpServers": []}})
+        method = "session/load" if recovering else "session/new"
+        params = {"cwd": worktree, "mcpServers": []}
+        if recovering:
+            params["sessionId"] = spec["session_id"]
+        child.send({"jsonrpc": "2.0", "id": sid, "method": method, "params": params})
         reply = child.wait_response(sid, 60, event_file)
         if reply.get("error"):
-            raise RuntimeError(f"cursor-agent ACP session/new failed: {short(reply['error'], 300)}")
+            raise RuntimeError(f"ACP {method} failed: {short(reply['error'], 300)}")
         result = reply.get("result") or {}
-        turn["session_id"] = result.get("sessionId")
+        turn["session_id"] = result.get("sessionId") or (spec["session_id"] if recovering else None)
         if not turn["session_id"]:
             raise RuntimeError("cursor-agent ACP session/new response did not contain sessionId")
-        if lane["backend"] == "hermes" and not lane.get("model"):
+        if spec is not None:
+            if recovering and turn["session_id"] != spec["session_id"]:
+                raise RuntimeError("ACP restored a different session")
+            spec["session_id"] = turn["session_id"]
+            if spec.get("run_id"):
+                lane_save_assignment(spec)
+        if recovering and isinstance(getattr(child, "backlog", None), list):
+            # session/load replays history before its response. Keep that history
+            # in the log without treating old answers as output of the new turn.
+            pending = []
+            for event in child.backlog:
+                if (isinstance(event, dict) and event.get("method") == "session/update"
+                        and (event.get("params") or {}).get("sessionId") == turn["session_id"]):
+                    lane_record_event(event_file, {"type": "session_replay", "event": event})
+                else:
+                    pending.append(event)
+            child.backlog = pending
+        if (lane["backend"] == "hermes" and not lane.get("model")) or (recovering and not result.get("configOptions")):
             lane_cursor_start_prompt(child, turn, prompt)
             if turn.get("abort_pending"):
                 lane_abort_child(lane, child, turn)
@@ -8297,6 +8412,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             lane_recovery_event(lane, spec, event_file)
     if lane_headless(lane):
         set_status(rdir, executor_pid=child.pid)
+        lane_write_state(lane["name"], child_pid=child.pid)
     while pending:
         kind, value = pending.pop(0)
         if kind == "steer":
@@ -8332,6 +8448,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     + correction + "\n\n" + REPORT_INSTRUCTION,
                     model=lane["model"], effort=lane.get("effort"), conversation=turn.get("conversation_id"))
         set_status(rdir, executor_pid=child.pid)
+        lane_write_state(lane["name"], child_pid=child.pid)
         turn["id"] = "agy-" + uuid.uuid4().hex
         return True
 
@@ -8460,6 +8577,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             kind, payload = agy_event(msg)
             if payload.get("conversation_id"):
                 turn["conversation_id"] = payload.get("conversation_id")
+                spec["conversation_id"] = turn["conversation_id"]
+                if spec.get("run_id"):
+                    lane_save_assignment(spec)
             if kind != "result":
                 continue
             result = agy_result(msg)
@@ -8467,6 +8587,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                 spec["_agy_finished_early"] = result["finished_reason"]
             if result["conversation_id"]:
                 turn["conversation_id"] = result["conversation_id"]
+                spec["conversation_id"] = turn["conversation_id"]
+                if spec.get("run_id"):
+                    lane_save_assignment(spec)
             if any(result["usage"].values()):
                 usage = result["usage"]
             if spec.get("abort_requested") or budget_hit:
@@ -8574,6 +8697,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
     # Prepare/session failures must leave interrupted progress (including the index) intact.
     preserve_workspace = preserve_workspace or (spec.get("_recovered") and error_class in ("prepare_failed", "exec_error"))
+    if preserve_workspace:
+        jsave(os.path.join(lane_root(lane["name"]), "preserve-workspace.json"), {"run_id": rid})
     evidence_error = None
     collected_artifacts = []
     if spec.get("evalid_role"):
@@ -8713,7 +8838,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "lessons_injected": spec.get("lessons_injected", []),
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
-               scope=spec.get("scope", "repo"))
+               scope=spec.get("scope", "repo"), workspace_preserved=bool(preserve_workspace))
     if not evidence_error and not preserve_workspace:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
@@ -8956,9 +9081,7 @@ def cmd_lane_serve(lane, policy):
     previous_state = jload(lane_state_path(name), {}) or {}
     recovered, recovery_error = lane_recover_assignment(lane, previous_state)
     if previous_state.get("current_run"):
-        old_child = previous_state.get("child_pid")
-        if isinstance(old_child, int) and old_child > 1:
-            kill_tree(old_child, grace=1)
+        lane_stop_previous_child(previous_state)
     started, backoff, next_start = NOW(), 1, 0
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None,

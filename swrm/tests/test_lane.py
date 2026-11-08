@@ -54,10 +54,11 @@ class LaneTests(unittest.TestCase):
         if backend:
             self.backend = backend
         fixture = {"codex": "fake_app_server.py", "cursor": "fake_cursor_acp.py",
-                   "agy": "fake_agy.py", "pi": "fake_pi_rpc.py"}[self.backend]
+                   "agy": "fake_agy.py", "pi": "fake_pi_rpc.py",
+                   "hermes": "fake_cursor_acp.py", "copilot": "fake_cursor_acp.py"}[self.backend]
         binary = FIXTURES / fixture
         if model is None:
-            model = "composer-2.5" if self.backend == "cursor" else (
+            model = "composer-2.5" if self.backend in ("cursor", "hermes", "copilot") else (
                 "gemini-3.8-flash-medium" if self.backend == "agy" else "fake-model")
         (self.data / "lanes").mkdir(parents=True, exist_ok=True)
         (self.data / "lanes.json").write_text(json.dumps({"lanes": [{
@@ -67,8 +68,11 @@ class LaneTests(unittest.TestCase):
                ({"provider": "fake-provider"} if self.backend == "pi" else {})),
             "repo": str(self.repo), "binary": str(binary),
         }]}))
-        if self.backend == "cursor":
+        if self.backend in ("cursor", "hermes", "copilot"):
             self.env["FAKE_CURSOR_ACP_LOG"] = str(self.root / "fake-cursor-acp.jsonl")
+            self.env["FAKE_CURSOR_SESSION_DIR"] = str(self.root / "sessions")
+        if self.backend == "hermes":
+            self.env["HERMES_HOME"] = str(self.root / "hermes")
         if self.backend == "agy":
             self.env["FAKE_AGY_LOG"] = str(self.root / "fake-agy.jsonl")
 
@@ -305,7 +309,7 @@ class LaneTests(unittest.TestCase):
         rid = self.assign("LANE_TEST_WAIT broker interrupted task", "--title", "#1720 recovery")
         self.wait_running(rid)
         assignment = self.data / "runs" / rid / "assignment.json"
-        key = "session_file" if backend == "pi" else "thread_id"
+        key = {"pi": "session_file", "codex": "thread_id", "agy": "conversation_id"}.get(backend, "session_id")
         self.wait_for(lambda: json.loads(assignment.read_text()).get(key), description="persisted session")
         (self.root / "ad.json").write_text(json.dumps({self.lane_name: {"issue": 1720, "run": rid}}))
         return rid
@@ -390,6 +394,8 @@ class LaneTests(unittest.TestCase):
 
     def check_abandoned_restart(self, condition, reason):
         rid = self.prepare_interrupted_issue()
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        (wt / "partial.txt").write_text("unfinished work")
         if condition == "unavailable":
             (self.root / "ad.json").unlink()
         elif condition == "not-progress":
@@ -405,6 +411,8 @@ class LaneTests(unittest.TestCase):
         self.assertNotIn('"switch_session"', pathlib.Path(self.env["FAKE_PI_RPC_LOG"]).read_text())
         self.assertIn("recovery_abandoned", (self.root / "brain.log").read_text())
         self.assertEqual(self.wait_run(self.assign("new task after abandonment"))["status"], "done")
+        archive = pathlib.Path(self.run_state(rid)["preserved_workspace"])
+        self.assertEqual((archive / "partial.txt").read_text(), "unfinished work")
 
     def test_restart_abandons_unavailable_ad_authority(self):
         self.check_abandoned_restart("unavailable", "unavailable")
@@ -425,6 +433,46 @@ class LaneTests(unittest.TestCase):
         resumed = next(m for m in messages if m.get("method") == "thread/resume")
         self.assertEqual(resumed["params"]["threadId"], "fake-thread")
         self.assertEqual(self.lane_state()["current_run"], rid)
+
+    def check_acp_restart_uses_saved_session(self, backend):
+        rid = self.prepare_interrupted_issue(backend)
+        wt = self.data / "lanes" / self.lane_name / "wt"
+        (wt / "partial.txt").write_text("unfinished work")
+        self.restart_supervisor()
+        log = pathlib.Path(self.env["FAKE_CURSOR_ACP_LOG"])
+        self.wait_for(lambda: '"session/load"' in log.read_text(), description=f"{backend} restores saved session")
+        event_file = self.data / "runs" / rid / f"events.1.{backend}.jsonl"
+        self.wait_for(lambda: '"type": "recovery"' in event_file.read_text(), description="successful session recovery")
+        messages = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(sum(m.get("method") == "session/new" for m in messages), 1)
+        loaded = next(m for m in messages if m.get("method") == "session/load")
+        self.assertEqual(loaded["params"]["sessionId"], "fake-cursor-session")
+        self.assertEqual(self.lane_state()["current_run"], rid)
+        self.assertEqual((wt / "partial.txt").read_text(), "unfinished work")
+        duplicate = self.cli("lane", "assign", self.lane_name, "--prompt", "duplicate", check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual(len(list((self.data / "runs").iterdir())), 1)
+
+    def test_restart_cursor_uses_saved_session(self):
+        self.check_acp_restart_uses_saved_session("cursor")
+
+    def test_restart_hermes_uses_saved_session(self):
+        self.check_acp_restart_uses_saved_session("hermes")
+
+    def test_restart_copilot_uses_saved_session(self):
+        self.check_acp_restart_uses_saved_session("copilot")
+
+    def test_restart_agy_uses_saved_conversation(self):
+        rid = self.prepare_interrupted_issue("agy")
+        self.restart_supervisor()
+        log = pathlib.Path(self.env["FAKE_AGY_LOG"])
+        self.wait_for(lambda: '"--conversation", "conv-1"' in log.read_text(), description="agy resumes saved conversation")
+        event_file = self.data / "runs" / rid / "events.1.agy.jsonl"
+        self.wait_for(lambda: '"type": "recovery"' in event_file.read_text(), description="successful agy recovery")
+        self.assertEqual(self.lane_state()["current_run"], rid)
+        duplicate = self.cli("lane", "assign", self.lane_name, "--prompt", "duplicate", check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual(len(list((self.data / "runs").iterdir())), 1)
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")
