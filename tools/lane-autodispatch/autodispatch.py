@@ -1649,12 +1649,12 @@ def tick(lanes, state, last_warn):
 def refill_need(ready, low=None, target=None, starved=0):
     """How many cards the pool needs (Refs #1662).
 
-    Below LOW the pool is topped up to TARGET, not to LOW: a pool that only reaches LOW
-    is refilled again on the next tick and the lanes starve in between.  A backend that
-    cannot be fed needs its own number of cards on top of that."""
+    Below LOW the pool is topped up to at least LOW or TARGET, whichever is higher.
+    This preserves the low-water trigger when AD_LOW exceeds AD_TARGET.  A backend
+    that cannot be fed can request more cards than the pool deficit."""
     low = LOW if low is None else low
     target = TARGET if target is None else target
-    if ready < low: return max(target - ready, starved, 0)
+    if ready < low: return max(target - ready, low - ready, starved, 0)
     return max(starved, 0)
 
 def card_defect(text, strict=False):

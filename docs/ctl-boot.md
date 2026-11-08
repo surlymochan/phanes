@@ -464,7 +464,8 @@ python3 tools/lane-autodispatch/test_can_take.py
 When `lane-autodispatch` ready queue drops below `LOW` (`AD_LOW`, default 10), the refill
 loop must request enough candidate cards to refill up to `TARGET` (`TARGET = 20`) rather than
 topping up one card at a time. For fake `ready`, `LOW`, and `TARGET` values, the refill count
-calculates `need = max(TARGET - ready, starved, 0)` whenever `ready < LOW`.
+calculates `need = max(TARGET - ready, LOW - ready, starved, 0)` whenever `ready < LOW`.
+The `LOW` floor preserves refill when `AD_LOW` exceeds `AD_TARGET`.
 
 Candidate issue cards are rejected if they are thin:
 - `is_thin_card` discards any card lacking a `# ` title, a `labels:` declaration, a substantive body (at least two lines), or an `验收：` acceptance line.
@@ -480,8 +481,9 @@ The pool ran dry on 2026-11-02 (14 → 5 dispatchable issues) without a single m
 `autodispatch.log`, and the 19:45 watchdog round found no usable card among the 21 cards of the
 local backlog. The refill triggers are therefore:
 
-- Below `LOW` the pool is topped up to `TARGET` (`need = max(TARGET - ready, starved, 0)`), not to
-  `LOW`: a pool that only reaches the threshold starves again before the next tick.
+- Below `LOW` the pool is topped up to the higher of `TARGET` and `LOW`
+  (`need = max(TARGET - ready, LOW - ready, starved, 0)`). With the defaults it reaches
+  `TARGET`; with `AD_LOW=30`, `AD_TARGET=20`, and `ready=25`, it still requests 5 cards.
 - While the queue read fails the pool level is unknown. The refill works on the last known level
   plus the cards minted since, and the consecutive failures are bounded
   (`AD_QUEUE_FAIL_REFILL_MAX`, default 3): past the bound the AD mints nothing and waits for an

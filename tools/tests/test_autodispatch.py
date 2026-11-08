@@ -101,6 +101,30 @@ class ReplenishTriggerTests(unittest.TestCase):
         self.assertEqual(autodispatch.refill_need(5, starved=25), 25)
         self.assertEqual(autodispatch.refill_need(autodispatch.TARGET + 5), 0)
 
+    def test_a_target_below_low_does_not_disable_the_low_water_trigger(self):
+        for ready, starved, expected in ((0, 0, 30), (19, 0, 11), (20, 0, 10),
+                                         (25, 0, 5), (25, 8, 8), (30, 0, 0),
+                                         (30, 3, 3), (31, 0, 0)):
+            with self.subTest(ready=ready, starved=starved):
+                self.assertEqual(autodispatch.refill_need(ready, low=30, target=20,
+                                                        starved=starved), expected)
+
+    def test_the_tick_refills_when_low_exceeds_target(self):
+        needs = []
+        self.patch("LOW", 30)
+        self.patch("TARGET", 20)
+        self.patch("queue", lambda: [{"n": n, "body": ""} for n in range(25)])
+        self.patch("prefetch_labels", lambda numbers: None)
+        self.patch("freshen_queue", lambda q, state: q)
+        self.patch("replenish", lambda k, state: needs.append(k) or [])
+        state = {}
+
+        autodispatch.tick({}, state, 0)
+
+        self.assertEqual(needs, [5])
+        self.assertEqual(state["_ready"], 25)
+        self.assertIn("need 5 card(s) (threshold 30, target 20)", self.log_text())
+
     def test_an_unusable_card_does_not_block_the_rest_of_the_batch(self):
         backlog = self.backlog(a_thin=self.THIN, b_good=self.THICK)
 
@@ -225,6 +249,19 @@ class ReplenishUnreadableQueueTests(unittest.TestCase):
 
         self.assertEqual(state["_minted"], 1)
         self.assertEqual(autodispatch.pool_level(state), 6)
+
+    def test_an_unreadable_queue_refills_to_low_when_target_is_lower(self):
+        self.patch("LOW", 30)
+        self.patch("TARGET", 20)
+        self.patch("replenish", lambda k, state: self.needs.append(k) or ["#501"] * k)
+        state = {"_ready": 25}
+
+        for _ in range(autodispatch.QUEUE_UNREADABLE_REFILL_MAX + 2):
+            autodispatch.tick({}, state, 0)
+
+        self.assertEqual(self.needs, [5])
+        self.assertEqual(state["_minted"], 5)
+        self.assertEqual(autodispatch.pool_level(state), 30)
 
     def test_an_unknown_pool_level_mints_nothing(self):
         state = {}

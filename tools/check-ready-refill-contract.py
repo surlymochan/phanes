@@ -108,6 +108,11 @@ def check_quarantine_keeps_both_cards(module, temp_dir, replenish):
 
 def check_refill_target(module, temp_dir):
     """池见底时补到 target 而不是只补到 low：否则池子一直贴着阈值 (Refs #1662)。"""
+    # AD_LOW can exceed the default AD_TARGET without disabling low-water refill.
+    assert module.refill_need(25, low=30, target=20) == 5
+    assert module.refill_need(0, low=30, target=20) == 30
+    assert module.refill_need(25, low=30, target=20, starved=8) == 8
+    assert module.refill_need(30, low=30, target=20) == 0
     temp_dir.mkdir(parents=True, exist_ok=True)
     needs = []
     module.D = str(temp_dir)

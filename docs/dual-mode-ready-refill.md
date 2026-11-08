@@ -11,9 +11,10 @@
 2026-11-02 19:00 之后 `autodispatch.log` 再没有新的 mint 记录：池水位从 14 掉到 5，看门狗
 19:45 那一轮在 backlog 的 21 张卡里找不到一张合规卡。补卡的触发条件因此固定为：
 
-- **池见底补到 target，而不是只补到 low**：`ready < LOW` 时补卡数是
-  `need = max(TARGET - ready, starved, 0)`（`TARGET = 20`，`AD_TARGET` 可调）。只补到 low
-  会让池子一直贴着阈值，下一轮 tick 之前车道又是空的。
+- **池见底补到 target，且至少达到 low**：`ready < LOW` 时补卡数是
+  `need = max(TARGET - ready, LOW - ready, starved, 0)`（`TARGET = 20`，`AD_TARGET` 可调）。
+  默认配置补到 target，避免池子一直贴着阈值；若 `AD_LOW=30` 而 `AD_TARGET` 仍为默认 20，
+  则 `ready=25` 时请求 5 张，保留低水位触发行为。`ready >= LOW` 时仅按 backend 饥饿数补卡。
 - **队列读不出来时补卡有界**：队列查询失败时水位未知，补卡按「上次已知水位 + 之后铸出的
   张数」计算，连续失败次数记在 `state["_queue_failures"]`，超过
   `AD_QUEUE_FAIL_REFILL_MAX`（默认 3）就不再铸卡，转而等待一次权威读；水位完全未知
