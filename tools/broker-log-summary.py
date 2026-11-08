@@ -20,6 +20,9 @@ error and the duration.  --pauses box-pauses.jsonl marks every listed request
 with the pause window it falls into ("during_pause=<from→to>") and counts the
 failed requests that happened during a pause.  Broker "ts" is UTC; the pause
 stamps are local time of the "tz" field of the pause record (default UTC+8).
+A pause stamp that no platform can represent (a non-finite number or an epoch
+outside the datetime range) makes its record unusable: it is skipped, and the
+other windows of the log are kept.
 
 The JSON report keeps the old fields and adds "slow_ms", "slow" (the listed
 slow requests) and "pause_overlaps" ({"pauses", "requests", "failed",
@@ -28,6 +31,7 @@ are used.
 """
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -136,26 +140,48 @@ def parse_pause_tz(text):
         raise ValueError(f"unknown pause timezone {text!r}") from exc
 
 
-def parse_pause_dt(value, tz):
-    """Return the instant of a pause stamp; a naive stamp is local to ``tz``."""
+def parse_pause_stamp(value, tz):
+    """Return ``(instant, unusable)`` for one pause stamp value.
+
+    ``instant`` is None when the value holds no stamp at all.  ``unusable`` is
+    True when the value is a number no platform can turn into a datetime: a
+    non-finite float or an epoch outside the datetime range.  Such a stamp is
+    a bad record, not a crash.
+    """
     if value is None or isinstance(value, bool):
-        return None
+        return None, False
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz)
+        if isinstance(value, float) and not math.isfinite(value):
+            return None, True
+        try:
+            return datetime.fromtimestamp(value, tz), False
+        except (OverflowError, OSError, ValueError):
+            return None, True
     if not isinstance(value, str) or not value.strip():
-        return None
+        return None, False
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)
+        return None, False
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)), False
+
+
+def parse_pause_dt(value, tz):
+    """Return the instant of a pause stamp; a naive stamp is local to ``tz``.
+
+    A stamp that no platform can represent is skipped: it is a bad record,
+    not a crash.
+    """
+    return parse_pause_stamp(value, tz)[0]
 
 
 def parse_pause_record(obj):
     """Return one pause window, or None when the record is unusable.
 
     A window is ``{"start": datetime, "end": datetime|None, "tz": timezone}``;
-    ``end`` is None for a pause that is still open.
+    ``end`` is None for a pause that is still open.  A record that holds a
+    stamp no platform can represent is unusable: skipping the stamp would
+    turn a bounded window into an open one.
     """
     if not isinstance(obj, dict):
         return None
@@ -165,15 +191,21 @@ def parse_pause_record(obj):
         return None
     start = None
     for key in PAUSE_FROM_KEYS:
-        start = parse_pause_dt(obj.get(key), tz)
-        if start is not None:
+        stamp, unusable = parse_pause_stamp(obj.get(key), tz)
+        if unusable:
+            return None
+        if stamp is not None:
+            start = stamp
             break
     if start is None:
         return None
     end = None
     for key in PAUSE_TO_KEYS:
-        end = parse_pause_dt(obj.get(key), tz)
-        if end is not None:
+        stamp, unusable = parse_pause_stamp(obj.get(key), tz)
+        if unusable:
+            return None
+        if stamp is not None:
+            end = stamp
             break
     if end is not None and end < start:
         return None
