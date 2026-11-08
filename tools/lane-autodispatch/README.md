@@ -23,6 +23,7 @@ tick that fetched the object in the meantime) must never mask it.
 python3 tools/lane-autodispatch/test_can_take.py
 python3 tools/lane-autodispatch/test_harvest_filter.py
 python3 tools/check-ad-base-fetch-on-miss.py
+python3 tools/check-ad-idle-redispatch.py
 python3 -m unittest tools.tests.test_lane_pr_validation
 ```
 
@@ -174,3 +175,75 @@ cd swrm && python3 -m unittest tests.test_autodispatch.SwitchAuditTests -v
 | 第 1 轮 B1 | 目录枚举失败被当成空开关集（`switch_stats()` 返回空集合） | `switch_stats()` 目录列不出来时返回 `complete=False`，同样跳过比较与基线更新 | `test_an_unreadable_directory_does_not_fake_a_deletion`、`test_an_unreadable_switch_directory_is_survivable` |
 | 第 2 轮 B1 | `os.path.isfile()` 的第二次 stat 吞掉 OSError：仍存活的开关被漏掉、快照被标成完整 → 假 `deleted` + 基线被改写，恢复后假 `created` | `switch_stats()` 复用第一次 `os.stat()` 的 `st_mode`（`stat.S_ISREG`）判断文件类型，不再第二次 stat；`switch_entry()` 复用同一个 stat 结果（每轮每开关只 stat 一次） | `test_a_stat_failure_does_not_fake_a_deletion`、`test_the_recovery_after_a_stat_failure_does_not_fake_a_creation`、`test_a_switch_is_stat_ed_only_once_per_tick`、`test_a_living_switch_is_audited_when_a_second_stat_would_fail` |
 | 第 2 轮 B2 | 交付说明没有逐条列出上轮 B1、对应改动和具体测试 | 本表（README）与提交信息里的同一张对照表 | — |
+
+## 车道空闲间隙（Refs #1688）
+
+run 结束到下一张卡之间天然存在空窗：池子不空、容量不卡时，这段空窗纯属调度延迟，直接拉低
+车道的并行利用率。本轮把空窗收窄，并把它变成可观测、可归因的指标。
+
+**即时重派发**：收割/结束一条 run 后，`tick()` 立即对同一车道再尝试一次派发，再收割下一条
+车道；不等其他车道的慢收割或下一个 tick。队列与 label 权威读在首次派发时加载，同轮共享；
+队列读取失败时继续收割其余车道，同轮不重复读取。即时重派发与普通派发走同一条 acquire
+路径（`give_card()`）：同一套车道暂停检查（`PAUSE-<lane>`）、同一套主机可用性检查、同一次
+`dispatch()`、同一张卡的选择与 label 权威读。拿不到卡或拿不到槽位时静默失败：移除 in-progress
+标签、不重试、不占位，也不给整台主机退避（容量耗尽和宿主仍报 busy 都不计为宿主故障），留给
+下一 tick；真实 SSH 或 base fetch 故障仍按原有逻辑退避。被暂停的车道不派发。
+
+**空闲时长指标**：每条车道的空闲窗口记在 state 的 `_idle`（`since`/`last_seen` 与各原因的秒数），
+关闭后写入 `_idle_last`。`lanes-status.json` 新增：
+
+| 字段 | 含义 |
+| --- | --- |
+| `_idle_s` | 每条车道**最近一次**空闲时长（上次 run 结束 → 本次派发，秒） |
+| `_idle_reason` | 该间隙的原因 |
+| `_idle_open_s` | 仍在等待的车道当前已经空闲的秒数 |
+| `_idle_worst_s` | 当前最大的空窗 |
+
+**原因归因**：空闲超过 5 分钟（`AD_IDLE_LOG_S`，默认 300s）的派发在 brain log 写一行
+`<lane> idle <n>s before dispatch (reason: <reason>)`。原因是各时间桶里最长的一桶：
+`dispatcher not running`（派发器停机）、`no card`（无卡）、`no capacity`（无容量）、
+`lane paused`（车道暂停）、`dispatcher not dispatching`（收割/派发延迟）。每个空闲窗口的桶
+从零开始：上一个窗口的停机时长不会解释下一个窗口的间隙。
+两次观察之间的在线等待按上次观察结果累计；本轮结果只用于之后的等待，避免把此前的
+“无卡”时长记给本轮刚出现的“无容量”（反向切换同理）。
+
+**结束时间的采集**：空闲窗口从 run 的**真实结束时间**起算，不是从收割时刻。远端状态片段
+（`REMOTE_STATUS`）读取 `runs/<run>/result.json` 与 `runs/<run>/status.json` 的结束时间戳
+（`finished_at`/`ended_at`/`finished`/`updated_at`；布尔标志不是时间，不参与选取），没有时退回
+result.json 的 mtime。收割延迟、或派发器停机期间结束的 run 因此不会被算成“刚刚空闲”。
+
+**停机时长**：派发器的心跳（`$D/heartbeat`，tick 之间每 5s 刷新一次）是它活着的证据；心跳与
+当前 tick 的间隔就是派发器自己的停机时长（`HEARTBEAT_GRACE_S` 吸收心跳抖动）。关闭窗口前按
+**旧心跳**累计截至 tick 开始时的停机时长；tick 内收割与派发耗时计入 `lag_s`，不会被算成停机。
+每条车道成功派发时立即关闭自己的窗口，后续车道派发耗时不延长它的指标，也不会产生虚假的长空闲日志。
+tick 开始前的其余时间才落到之前的原因桶，所以“无卡 → 派发器停机 15 分钟
+→ 恢复当轮就派发成功”的间隙归因是“派发器未运行”，不是“无卡”。
+
+离线验证：
+
+```bash
+python3 tools/check-ad-idle-redispatch.py                 # 26 个 tick 级 / 集成用例
+python3 tools/lane-autodispatch/test_idle_redispatch.py   # 9 个复现用例（基线全红）
+```
+
+### 修复交付对照（review 意见 → 改动 → 测试）
+
+测试在 `tools/check-ad-idle-redispatch.py`（tick 级 / 集成）与
+`tools/lane-autodispatch/test_idle_redispatch.py`（复现用例）。
+
+| 轮次 | 意见（BLOCKER） | 对应改动 | 测试 |
+| --- | --- | --- | --- |
+| 批次复审 B1 | 容量预留开启时，刚收割但远端快照仍为 busy 的车道被漏算，工作槽位误为 0 | 本轮已释放车道纳入同一 `queue_class_limits()` 可用容量计算，仍检查暂停、主机与工作类上限 | `test_verify_share_counts_a_just_harvested_lane_as_available`、`test_verify_share_still_reserves_capacity_after_harvest`、`test_verify_share_uses_a_free_work_slot_only_once` |
+| 第 1 轮 B1 | 即时重派发绕过车道暂停：运行中的车道被暂停后，run 一结束仍收到新任务 | 即时重派发与普通派发合并到 `give_card()`：同一套 `lane_paused()` / `host_ok()` 检查，暂停车道不派发 | `test_a_paused_lane_gets_no_card_after_its_run_ended`（两个文件各一份） |
+| 第 1 轮 B2 | 远端结果没有结束时间，空闲时长从收割时刻起算；收割重试、push、建 PR 与停机恢复都会少算 | 远端状态片段采集 run 的结束时间（`ended_at`），空闲窗口从真实结束时间起算 | `test_the_idle_metric_starts_at_the_real_end_of_the_run`、`test_the_remote_status_reports_the_end_time_of_the_run` |
+| 第 1 轮 B3 | `setdefault` 保留上一个窗口的 `down_s`，一次停机之后所有长空闲都被归因为派发器未运行 | 每个空闲窗口的桶从零开始（`idle_open()` 新建窗口），窗口关闭后被丢弃 | `test_the_next_idle_window_does_not_inherit_the_downtime_of_the_previous_one` |
+| 第 2 轮 B1 | 缺 run 结束后暂停车道不派发的 tick 级测试 | 补 tick 级用例（暂停车道 + 收割同一轮） | `test_a_paused_lane_gets_no_card_after_its_run_ended` |
+| 第 2 轮 B2 | 缺延迟收割与派发器停机恢复的 tick / 集成测试 | 补两个用例：停机 900s 后恢复当轮派发、窗口跨停机后从零开始 | `test_the_downtime_of_the_dispatcher_is_the_reason_of_a_long_gap`、`test_the_next_idle_window_does_not_inherit_the_downtime_of_the_previous_one` |
+| 第 2 轮 B3 | `_idle_down_s` 归零但没有停机时长累计，非零长间隙无法归因为派发器未运行 | 按心跳与上次观察的间隔累计停机时长（`dispatcher_downtime()`） | 同上 |
+| 第 3 轮 B1 | 已开启的空闲窗口在恢复后当轮派发时直接 `idle_close`，跳过停机累计：上次观察以来的全部时长都记给了上次结果，没有用旧心跳算停机（无卡后停机 15 分钟、恢复有卡，日志仍归因为无卡） | `idle_close()` 关闭窗口前用**旧心跳**（`dispatcher_last_alive()`）累计该窗口的停机时长，其余时间才落到上次观察的原因桶；窗口随关闭被丢弃，下一个窗口从零开始 | `test_the_downtime_of_an_open_window_is_accounted_when_the_dispatcher_returns`、`test_the_window_after_a_dispatcher_outage_starts_empty` |
+| 第 3 轮 B2 | `tools/check-ad-idle-redispatch.py` 把 `remote` 整体替换为假实现并直接注入 `ended_at`，延迟收割与停机恢复没有执行真实的结果采集 | 远端状态片段用 `stamp()` 只挑真正的时间戳（布尔 `finished` 不算时间）；新增集成用例：真实片段读假执行器 home → tick → 指标 → brain log | `test_the_real_remote_status_drives_the_idle_metric`（另见 `test_the_remote_status_reports_the_end_time_of_the_run`） |
+| 第 3 轮 B3 | 交付说明只概述实现与测试，没有按 B1/B2/B3 逐条映射 | 本表（README）与提交信息里的同一张对照表 | — |
+| 第 4 轮 B1 | 先串行收割所有车道、再统一重派发，一条车道被另一条车道的慢收割阻塞 | 每条车道释放后立即调用现有 `give_card()`，再处理下一条车道；队列首次派发时加载、同轮共享，读取失败也继续收割且不重试 | `test_a_finished_lane_is_redispatched_before_another_lanes_slow_harvest`、`test_a_queue_outage_does_not_stop_harvesting_or_retry_in_the_same_tick` |
+| 第 4 轮 B2 | 容量不足仍调用 `host_fail()`：记成主机故障并退避，挡住同主机的其他车道 | `dispatch_failed()` 识别容量耗尽，移除 claim 后静默返回；真实主机故障仍退避 | `test_a_capacity_failure_is_the_reason_of_the_gap`、`test_a_capacity_failure_does_not_block_another_lane_on_the_same_host`、`test_a_transport_failure_still_backs_the_host_off` |
+| 第 4 轮 B3 | 所有车道派发结束后统一关闭窗口，后续车道的耗时虚增前一车道的指标与长空闲日志 | `give_card()` 在本车道派发成功后立即关闭窗口并记录日志 | `test_each_lane_gap_ends_at_its_own_dispatch` |
+| 第 4 轮 B4 | 本轮失败原因被用于上一观察区间（600 秒无卡后才出现的无容量覆盖了已知原因） | `idle_account()` 与 `idle_close()` 一致：按窗口保存的上次结果累计已过时间，再保存本轮结果供下一区间使用 | `test_a_new_capacity_failure_does_not_replace_the_previous_no_card_wait`、`test_an_empty_pool_does_not_replace_the_previous_capacity_wait` |
