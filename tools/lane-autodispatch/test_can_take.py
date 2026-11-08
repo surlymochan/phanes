@@ -344,5 +344,24 @@ class TickWorkClassCapTest(TickHarness, unittest.TestCase):
         self.assertEqual(dispatched, [("CX2", 1)])  # the cap limits the work class only
 
 
+class ConsecutiveLaneFailureBrakeTest(unittest.TestCase):
+    """Refs #1711: repeated quick no-commit failures must pause a lane automatically."""
+
+    def test_third_quick_failure_writes_lane_pause_switch(self):
+        # The CX9 incident had four short failed runs while dispatch kept accepting cards.
+        # A third failure within the configured window must persist PAUSE-CX9, so subsequent
+        # dispatch ticks observe the brake through the existing pause-switch mechanism.
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as scratch:
+            old = AUTODISPATCH.D
+            AUTODISPATCH.D = scratch
+            try:
+                for issue_number in (1711, 1712, 1713):
+                    AUTODISPATCH.note_lane_failure(
+                        "CX9", issue_number, "exec_error", seconds=45, committed=False)
+                self.assertTrue((Path(scratch) / "PAUSE-CX9").exists())
+            finally:
+                AUTODISPATCH.D = old
+
+
 if __name__ == "__main__":
     unittest.main()
