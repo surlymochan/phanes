@@ -286,12 +286,20 @@ def scan_evidence(run_dir, record):
         try:
             size = path.stat().st_size
             with path.open("rb") as stream:
-                if size > MAX_SCAN_BYTES:
-                    stream.seek(size - MAX_SCAN_BYTES)
-                raw = stream.read().decode("utf-8", errors="replace")
+                # Count skipped newlines without loading the whole log. Keep
+                # the partial first line too: its number is still absolute.
+                remaining = max(0, size - MAX_SCAN_BYTES)
+                skipped_lines = 0
+                while remaining:
+                    chunk = stream.read(min(remaining, 64 * 1024))
+                    if not chunk:
+                        break
+                    skipped_lines += chunk.count(b"\n")
+                    remaining -= len(chunk)
+                raw = stream.read(MAX_SCAN_BYTES).decode("utf-8", errors="replace")
         except OSError:
             continue
-        for number, line in enumerate(raw.splitlines(), 1):
+        for number, line in enumerate(raw.split("\n"), skipped_lines + 1):
             line = line.strip()
             if not line:
                 continue

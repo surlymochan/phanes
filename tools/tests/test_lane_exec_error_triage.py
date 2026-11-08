@@ -59,6 +59,18 @@ class LaneExecErrorTriageTests(unittest.TestCase):
         self.assertEqual(evidence["line"], 2)
         self.assertIn("broker.sock", evidence["text"])
 
+    def test_large_log_evidence_uses_absolute_line_numbers(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1]) as tmp:
+            run_dir = write_run(tmp, "20261103-001700-aaaa", "GH2", "exec_error", 1, 118)
+            path = run_dir / "events.1.pi.jsonl.err"
+            for prefix in ("x" * 99 + "\n", "x" * 100 + "\n"):
+                with self.subTest(line_bytes=len(prefix)):
+                    path.write_text(prefix * 6000 + "socat: connection refused\n", encoding="utf-8")
+                    evidence = triage.scan_evidence(run_dir, {})
+                    self.assertEqual(len(evidence), 1)
+                    self.assertEqual(evidence[0]["line"], 6001)
+                    self.assertEqual(path.read_text().splitlines()[6000], evidence[0]["text"])
+
     def test_a_run_without_an_error_class_has_unknown_cause(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_run(tmp, "20261102-231000-1111", "CX9", None, None, 95, backend="codex")
