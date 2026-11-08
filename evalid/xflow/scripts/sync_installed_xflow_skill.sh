@@ -93,7 +93,7 @@ normalize_skill_source_path() {
   normalize_candidate_dir=${normalize_candidate%/*}
   normalize_candidate_name=${normalize_candidate##*/}
   [ "$normalize_candidate_dir" != "$normalize_candidate" ] || normalize_candidate_dir=.
-  normalize_candidate_dir=$(CDPATH= cd -L "$normalize_candidate_dir" 2>/dev/null && pwd -L) || return 1
+  normalize_candidate_dir=$(CDPATH= cd -P "$normalize_candidate_dir" 2>/dev/null && pwd -P) || return 1
   if [ "$normalize_candidate_dir" = / ]; then
     printf '/%s\n' "$normalize_candidate_name"
   else
@@ -111,7 +111,9 @@ snapshot_extra_managed_skills() {
     printf '%s\n' "$EXTRA_SOURCE_DIRS" | while IFS= read -r source_dir; do
       [ -n "$source_dir" ] || continue
       [ -d "$source_dir" ] || continue
-      source_dir=$(CDPATH= cd -L "$source_dir" 2>/dev/null && pwd -L) || continue
+      # Resolve source identity physically for comparison, while retaining the
+      # original .skillhub-source value below for restoration.
+      source_dir=$(CDPATH= cd -P "$source_dir" 2>/dev/null && pwd -P) || continue
       for source_path in "${source_dir%/}"/*; do
         [ -d "$source_path" ] || continue
         skill_name=$(basename "$source_path")
