@@ -327,10 +327,10 @@ another repository never releases a PR, a list record without a repository never
 number is shared by every repository), and a bare number key only counts when the record names the repository
 itself.
 
-The `rules_hash` is the version of the rules the review worked by: the first 12 hex digits of the sha256 of the
-review prompt (the prompt text alone, so that anyone can recompute it). It only names the rules, it never changes
-them, so a changed hash marks the point where the review metrics before and after the change are not comparable
-any more.
+The `rules_hash` records the first 12 hex digits of sha256 of the unformatted `templates.review_task` and
+`templates.rules`, joined with two newlines. Both templates reach the reviewer; PR-specific substitutions
+are excluded. This records rule changes without changing the prompt or standard. The dispatch saves the hash;
+legacy in-flight reviews without one record `unknown` rather than attributing them to today's rules.
 
 ### Rerun a failed run once, and the post-merge hook
 

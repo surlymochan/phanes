@@ -390,21 +390,12 @@ def quota_module():
     return _QUOTA_MOD
 
 
-# --- Refs #1852: the version hash of the review rules -------------------------------------
-# The review rules are the prompt the reviewer works by.  Every review event carries the
-# hash of that text, so that a change of the rules is visible as a break in the metrics.
-# The hash only *names* the rules: neither the prompt nor the review standard is changed
-# by it (anti-gaming, not anti-tuning).
+# Refs #1852: record the rules version without changing the review prompt or standard.
 RULES_HASH_LEN = 12
 
 
 def rules_hash(text):
-    """The version hash of a rules text: the first 12 hex digits of its sha256.
-
-    The same text always hashes to the same value and a changed text (one character is
-    enough) hashes to another one: the hash is the marker of the rules a review worked by.
-    It is the hash of the rules text and of nothing else, so anyone can recompute it.
-    """
+    """The version hash of a rules text: the first 12 hex digits of its sha256."""
     return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:RULES_HASH_LEN]
 
 
@@ -2302,20 +2293,16 @@ class Dispatcher:
         return "%s/PR-%s%s.md" % (self.R["verdict_dir"], pr, self.R.get("evidence_suffix") or "-evidence")
 
     def review_prompt_text(self):
-        """The rules a lane review works by: the text of the review prompt.
+        """Unformatted review_task and rules templates, joined as in task_text().
 
-        The prompt is read, never written (Refs #1852): only its hash goes into the review
-        event, so that a change of the rules shows up as a break in the metrics.
+        Include the rules appended to every task, without PR-specific substitutions.
+        Reading the templates for the hash never modifies the dispatched prompt.
         """
-        return str((self.cfg.get("templates") or {}).get("review_task") or "")
+        templates = self.cfg.get("templates") or {}
+        return "\n\n".join(str(templates.get(key) or "") for key in ("review_task", "rules"))
 
     def review_rules_hash(self):
-        """The version hash of the review rules of this dispatcher (Refs #1852).
-
-        It is the first 12 hex digits of the sha256 of the review prompt - the hash of the
-        rules text itself, and of nothing else, so that it can be recomputed from the
-        prompt by anyone who reads the event.
-        """
+        """The sha256 prefix of both review rule templates (Refs #1852)."""
         return rules_hash(self.review_prompt_text())
 
     def diffstat_of(self, diff):
@@ -2506,10 +2493,9 @@ class Dispatcher:
             self.quota_lane_guard(lane, lc, info)
         pr, sha = st["review_pr"], st["review_sha"]
         r = self.load_reviews().get(str(pr)) or {}
-        # The rules version of this review event (Refs #1852): the hash of the rules the
-        # reviewer worked by.  The dispatch writes it into the lane state, so a review that
-        # ran under other rules keeps the hash of those rules and not the ones of today.
-        rules = st.get("rules_hash") or self.review_rules_hash()
+        # Legacy in-flight reviews have no recorded version: today's rules cannot
+        # identify what they ran with, nor can the previous review record's hash.
+        rules = st.get("rules_hash") or "unknown"
         r["rules_hash"] = rules
         txt = ""
         ev_txt = ""
