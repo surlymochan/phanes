@@ -767,12 +767,17 @@ def reconcile(L, cfg, st, r, state):
     """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
     the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
     if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
-    if r.get("runner_alive") or (r.get("runner_alive") is None and age_s(st) < 600) or age_s(st) < 180: return False
-    n = st["issue"]; _, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
+    # Missing status is not evidence that the runner exited. Keep the lane claimed
+    # until the remote probe positively reports a dead runner (Refs #1673).
+    if r.get("runner_alive") is not False or age_s(st) < 180: return False
+    n = st["issue"]
+    rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
+    if rc: return False
     try: j = json.loads(out); labels = {l["name"] for l in j["labels"]}
     except Exception: return False
     if j["state"] == "OPEN" and "lane-pr" not in labels:
-        gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+        rc, _, _ = gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--add-label", "lane-ready"])
+        if rc: return False
         what = "requeued (lane-ready)"
     else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
     log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")

@@ -91,6 +91,7 @@ class FakeGitHub:
         self.issues = issues          # issue number -> {"state": ..., "labels": [...]}
         self.calls = []               # every call, in order
         self.edits = []               # the `gh issue edit` calls only
+        self.fail_edits = False
 
     def __call__(self, args, timeout=60):
         args = list(args)
@@ -110,6 +111,8 @@ class FakeGitHub:
         if args[:2] == ["issue", "edit"]:
             number = int(args[2])
             self.edits.append(args)
+            if self.fail_edits:
+                return 1, "", "synthetic label update failure"
             issue = self.issues.get(number)
             if issue is not None:
                 for flag, add in (("--add-label", True), ("--remove-label", False)):
@@ -173,6 +176,14 @@ class OrphanRunTests(unittest.TestCase):
         self.assertFalse(self.module.reconcile(LANE, LANE_CFG, state, status, {}),
                          "a young run must not be re-queued")
         self.assertEqual(self.fleet.edits, [], "no label may be changed for a young run")
+
+    def test_failed_label_update_does_not_release_the_run(self):
+        """Failed relabeling leaves state in place so the next tick can retry."""
+        self.fleet.fail_edits = True
+        state = lane_state()
+        self.assertFalse(self.module.reconcile(LANE, LANE_CFG, state,
+                                               remote_status(runner_alive=False), {}))
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"])
 
 
 class RecoveryTickTests(unittest.TestCase):
@@ -239,6 +250,14 @@ class RecoveryTickTests(unittest.TestCase):
                          "the re-queued card loses its in-progress label")
         self.assertIn("lane-ready", self.fleet.issues[ISSUE]["labels"],
                       "the re-queued card carries the lane-ready label again")
+
+    def test_the_tick_keeps_the_lane_when_requeue_label_update_fails(self):
+        self.status = remote_status(runner_alive=False)
+        self.fleet.fail_edits = True
+        state = self.tick({LANE: lane_state()})
+        self.assertIn(LANE, state,
+                      "the lane must remain recorded until issue relabeling succeeds")
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"])
 
 
 class HealthPauseContractTests(unittest.TestCase):
