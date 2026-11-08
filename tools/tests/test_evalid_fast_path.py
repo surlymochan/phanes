@@ -124,7 +124,9 @@ class FastPathContractTests(unittest.TestCase):
         for text in ("Fix the bug.", "Fix.", "Update the implementation.",
                      "Improve performance.", "Return a result.",
                      "Return the expected value.", "Print the output.",
-                     "Accept any input."):
+                     "Accept any input.", "Return a result depending on input.",
+                     "Return a result based on input.",
+                     "Return the expected value for the input."):
             with self.subTest(requirements=text):
                 intake = copy.deepcopy(self.intake)
                 intake["public_scope"]["requirements"] = text
@@ -133,15 +135,33 @@ class FastPathContractTests(unittest.TestCase):
     def test_unrecognized_public_contract_fields_fail_closed(self):
         # Unsupported requirements must go to Spec even when their values look
         # concrete; otherwise the receipt silently drops part of the contract.
-        for location in ("scope", "output", "boundary"):
+        for location in ("intake", "scope", "output", "boundary"):
             for value in ("unknown", None, "TBD", 30):
                 with self.subTest(location=location, value=value):
                     intake = copy.deepcopy(self.intake)
                     scope = intake["public_scope"]
-                    target = {"scope": scope, "output": scope["expected_output"],
+                    target = {"intake": intake, "scope": scope,
+                              "output": scope["expected_output"],
                               "boundary": scope["boundaries"][0]}[location]
                     target["timeout"] = value
                     self.assert_closed(intake, enabled=True)
+
+    def test_invalid_output_regex_fails_closed(self):
+        for pattern in ("[", "(", "(?P<name>a)(?P<name>b)", "a{99999999999999999999}"):
+            with self.subTest(pattern=pattern):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["expected_output"] = {
+                    "stream": "stdout", "match": "regex", "value": pattern}
+                self.assert_closed(intake, enabled=True)
+
+    def test_valid_output_regex_is_explicit_evidence(self):
+        intake = copy.deepcopy(self.intake)
+        intake["public_scope"]["expected_output"] = {
+            "stream": "stdout", "match": "regex", "value": r"^-?\d+\n$"}
+        result = self.evaluate(intake, enabled=True)
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["approved_spec"]["spec"]["expected_output"],
+                         intake["public_scope"]["expected_output"])
 
     def test_unknown_command_arguments_fail_closed(self):
         for command in (["TBD"], ["unknown"], ["python3", "TBD"],

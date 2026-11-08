@@ -35,6 +35,7 @@ from tools.evalid_roles_control import DIGEST, OID, digest
 
 
 IDENTITY_FIELDS = ("issue_ref", "base_commit", "policy_digest")
+INTAKE_FIELDS = IDENTITY_FIELDS + ("public_scope", "labels")
 SCOPE_FIELDS = ("allowed_files", "requirements", "acceptance_commands",
                 "expected_exit_code", "expected_output", "boundaries")
 BOUNDARY_FIELDS = ("input", "exit_code", "output")
@@ -110,6 +111,10 @@ def _closed(reason: str) -> dict[str, Any]:
 
 def _blocking_reason(intake: dict[str, Any]) -> str | None:
     """Return the first reason the intake cannot take the fast path."""
+    # Labels are non-authoritative metadata. Every other extension may add a
+    # contract this gate does not understand and therefore needs a Spec run.
+    if intake.keys() - INTAKE_FIELDS:
+        return "unsupported_intake_field"
     for field in IDENTITY_FIELDS:
         value = intake.get(field)
         if not isinstance(value, str) or not value.strip():
@@ -156,11 +161,12 @@ def _requirements_reason(value: Any) -> str | None:
                         value.strip(), re.IGNORECASE | re.DOTALL)
     if behavior is None:
         return "requirements_behavior_unspecified"
-    # Naming an action with a generic object adds no observable behavior, even
-    # when the other fields contain concrete examples ("Return a result.").
-    if re.fullmatch(r"(?:(?:a|an|the|some|any|correct|expected|valid|exact)\s+)*"
-                    r"(?:result|value|output|response|error|input|data|message|status|code)"
-                    r"[.!]?", behavior[1], re.IGNORECASE):
+    # A generic object stays underspecified with qualifiers such as "depending
+    # on input". Conservatively send such prose to Spec instead of inferring a
+    # relationship from the other fields' concrete examples.
+    if re.match(r"(?:(?:a|an|the|some|any|correct|expected|valid|exact)\s+)*"
+                r"(?:result|value|output|response|error|input|data|message|status|code)\b",
+                behavior[1], re.IGNORECASE):
         return "requirements_behavior_unspecified"
     return None
 
@@ -218,6 +224,11 @@ def _output_reason(value: Any) -> str | None:
     # An empty or placeholder acceptance output is not an explicit expectation.
     if value["value"].strip().lower() in UNKNOWN_MARKERS:
         return "unknown_expected_output_value"
+    if value["match"] == "regex":
+        try:
+            re.compile(value["value"])
+        except (re.error, OverflowError):
+            return "invalid_expected_output_regex"
     return None
 
 
