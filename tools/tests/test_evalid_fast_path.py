@@ -158,6 +158,79 @@ class FastPathContractTests(unittest.TestCase):
                     for value in ([], [0, 0], ["x", 1])]
                 self.assertTrue(self.evaluate(intake, enabled=True)["eligible"])
 
+    def test_contradictory_unconditional_behaviors_fail_closed(self):
+        for requirement, expected, boundary in (
+                ("Return 3.", "4\n", "5\n"),
+                ("Return 3.", "4\n", "3\n"),
+                ("Return 3.", "3\n", "5\n"),
+                ('Print "success".', "success\n", "failure\n")):
+            with self.subTest(requirement=requirement, expected=expected, boundary=boundary):
+                intake = copy.deepcopy(self.intake)
+                scope = intake["public_scope"]
+                scope["requirements"] = requirement
+                scope["expected_output"]["value"] = expected
+                scope["boundaries"] = [
+                    {"input": [], "exit_code": 0, "output": boundary}]
+                self.assert_closed(intake, enabled=True)
+
+    def test_unconditional_output_matchers_are_checked_against_behavior(self):
+        for match, matching, conflicting in (
+                ("exact", "success\n", "failure\n"),
+                ("contains", "success", "failure"),
+                ("prefix", "suc", "fail"),
+                ("suffix", "cess\n", "ure\n"),
+                ("regex", r"^success\n$", r"^failure\n$")):
+            for value, eligible in ((matching, True), (conflicting, False)):
+                with self.subTest(match=match, value=value):
+                    intake = copy.deepcopy(self.intake)
+                    scope = intake["public_scope"]
+                    scope["requirements"] = 'Print "success".'
+                    scope["expected_output"].update(match=match, value=value)
+                    scope["boundaries"] = [
+                        {"input": [], "exit_code": 0, "output": "success\n"}]
+                    result = self.evaluate(intake, enabled=True)
+                    self.assertEqual(result["eligible"], eligible)
+                    if not eligible:
+                        self.assertIsNone(result["approved_spec"])
+
+    def test_unconditional_boundaries_must_have_a_single_outcome(self):
+        for field, conflicting in (("output", "3"), ("exit_code", 2)):
+            with self.subTest(field=field):
+                intake = copy.deepcopy(self.intake)
+                scope = intake["public_scope"]
+                scope["requirements"] = "Return 3."
+                scope["boundaries"] = [
+                    {"input": [], "exit_code": 0, "output": "3\n"},
+                    {"input": [1], "exit_code": 0, "output": "3\n"}]
+                scope["boundaries"][1][field] = conflicting
+                self.assert_closed(intake, enabled=True)
+
+    def test_arithmetic_boundaries_agree_with_the_requirement(self):
+        for operation, output in (("sum", "5\n"), ("difference", "1\n"),
+                                  ("product", "6\n")):
+            for boundary_output, eligible in ((output, True), ("99\n", False)):
+                with self.subTest(operation=operation, output=boundary_output):
+                    intake = copy.deepcopy(self.intake)
+                    scope = intake["public_scope"]
+                    scope["requirements"] = (
+                        "Return the exact decimal " + operation + " of two integers.")
+                    scope["boundaries"] = [
+                        {"input": [3, 2], "exit_code": 0, "output": boundary_output}]
+                    result = self.evaluate(intake, enabled=True)
+                    self.assertEqual(result["eligible"], eligible)
+                    if not eligible:
+                        self.assertIsNone(result["approved_spec"])
+
+    def test_identical_boundary_inputs_cannot_have_conflicting_outcomes(self):
+        for field, conflicting in (("output", "another error\n"), ("exit_code", 3)):
+            with self.subTest(field=field):
+                intake = copy.deepcopy(self.intake)
+                boundaries = intake["public_scope"]["boundaries"]
+                duplicate = copy.deepcopy(boundaries[-1])
+                duplicate[field] = conflicting
+                boundaries.append(duplicate)
+                self.assert_closed(intake, enabled=True)
+
     def test_unrecognized_public_contract_fields_fail_closed(self):
         # Unsupported requirements must go to Spec even when their values look
         # concrete; otherwise the receipt silently drops part of the contract.
@@ -262,6 +335,19 @@ class FastPathContractTests(unittest.TestCase):
         intake["public_scope"]["allowed_files"] = [
             "tools/evalid_fast_path.py", "tools/new_fast_path_module.py"]
         self.assertTrue(self.evaluate(intake, enabled=True)["eligible"])
+
+    def test_literal_file_scope_has_a_small_fixed_limit(self):
+        # The conservative fast-path policy permits at most four exact files.
+        # This limit depends only on frozen intake, not the checkout's size.
+        for count, eligible in ((1, True), (4, True), (5, False), (1000, False)):
+            with self.subTest(count=count):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["allowed_files"] = [
+                    f"src/file{i}.py" for i in range(count)]
+                result = self.evaluate(intake, enabled=True)
+                self.assertEqual(result["eligible"], eligible)
+                if not eligible:
+                    self.assertIsNone(result["approved_spec"])
 
     def test_scope_verdict_and_receipt_ignore_workspace_path_types(self):
         # allowed_files is a set of exact file names, not directory prefixes.

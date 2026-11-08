@@ -44,6 +44,11 @@ OUTPUT_FIELDS = ("stream", "match", "value")
 OUTPUT_STREAMS = ("stdout", "stderr", "both")
 OUTPUT_MATCHES = ("exact", "contains", "prefix", "suffix", "regex")
 GLOB_CHARACTERS = "*?[]{}"
+# Conservative policy: a simple change may name up to four exact files.
+MAX_ALLOWED_FILES = 4
+BEHAVIOR_PATTERN = re.compile(r"(?:return|emit|print|output)\s+(.+?)\.?", re.IGNORECASE)
+ARITHMETIC_PATTERN = re.compile(
+    r"the exact decimal (sum|difference|product) of two integers", re.IGNORECASE)
 
 # Values that mean "not decided yet". A field holding one of them is unknown,
 # so the gate fails closed instead of guessing what the Spec run would say.
@@ -146,7 +151,7 @@ def _blocking_reason(intake: dict[str, Any]) -> str | None:
         reason = check(scope[field])
         if reason:
             return reason
-    return None
+    return _behavior_consistency_reason(scope)
 
 
 def _requirements_reason(value: Any) -> str | None:
@@ -160,12 +165,10 @@ def _requirements_reason(value: Any) -> str | None:
     # prose defines a function (e.g. "Return 3 or 4 depending on input"). Only
     # recognize this small grammar of complete behaviors. All other prose,
     # including conditional or compound statements, needs independent Spec.
-    behavior = re.fullmatch(r"(?:return|emit|print|output)\s+(.+?)\.?",
-                            value.strip(), re.IGNORECASE)
+    behavior = BEHAVIOR_PATTERN.fullmatch(value.strip())
     if behavior is None:
         return "requirements_behavior_unspecified"
-    if re.fullmatch(r"the exact decimal (?:sum|difference|product) of two integers",
-                    behavior[1], re.IGNORECASE):
+    if ARITHMETIC_PATTERN.fullmatch(behavior[1]):
         return None
     # An unconditional JSON string or integer literal is also explicit. Parsing
     # the entire object rejects trailing alternatives, qualifiers and sentences.
@@ -179,6 +182,67 @@ def _requirements_reason(value: Any) -> str | None:
     if type(literal) in (str, int):
         return None
     return "requirements_behavior_unspecified"
+
+
+def _behavior_consistency_reason(scope: dict[str, Any]) -> str | None:
+    """Cross-check the small behavior grammar after validating each field.
+
+    Literal requirements are unconditional: all boundaries must describe the
+    same output/exit, and the acceptance matcher must agree with that output.
+    For arithmetic, check every two-integer boundary against the operation.
+    Other inputs have explicitly declared boundary outcomes; no input for the
+    acceptance command is supplied, so its arithmetic result cannot be inferred.
+    """
+    behavior = BEHAVIOR_PATTERN.fullmatch(scope["requirements"].strip())[1]
+    arithmetic = ARITHMETIC_PATTERN.fullmatch(behavior)
+    literal = str(json.loads(behavior)) if arithmetic is None else None
+    first = scope["boundaries"][0]
+    outcomes = {}
+    for boundary in scope["boundaries"]:
+        input_digest = digest(boundary["input"])
+        outcome = (boundary["exit_code"], boundary["output"])
+        if input_digest in outcomes and outcomes[input_digest] != outcome:
+            return "contradictory_boundary_outcomes"
+        outcomes[input_digest] = outcome
+        expected = literal
+        if arithmetic:
+            values = boundary["input"]
+            if (isinstance(values, list) and len(values) == 2 and
+                    all(type(value) is int for value in values)):
+                left, right = values
+                operation = arithmetic[1].lower()
+                if operation == "sum":
+                    expected = str(left + right)
+                elif operation == "difference":
+                    expected = str(left - right)
+                else:
+                    expected = str(left * right)
+        else:
+            if (boundary["exit_code"] != scope["expected_exit_code"] or
+                    boundary["output"] != first["output"]):
+                return "contradictory_unconditional_outcomes"
+        # The literal/decimal grammar leaves a final line terminator optional;
+        # concrete boundary output and the acceptance matcher still must agree.
+        if expected is not None and boundary["output"] not in (expected, expected + "\n"):
+            return "output_contradicts_requirements"
+    if arithmetic is None and not _output_matches(scope["expected_output"], first["output"]):
+        return "acceptance_output_contradicts_requirements"
+    return None
+
+
+def _output_matches(expectation: dict[str, str], output: str) -> bool:
+    """Compare known literal output without running the acceptance command."""
+    value = expectation["value"]
+    match = expectation["match"]
+    if match == "exact":
+        return output == value
+    if match == "contains":
+        return value in output
+    if match == "prefix":
+        return output.startswith(value)
+    if match == "suffix":
+        return output.endswith(value)
+    return re.search(value, output) is not None
 
 
 def _ambiguity_reason(text: str) -> str | None:
@@ -284,6 +348,7 @@ def _concrete_boundary_value(value: Any) -> bool:
 def _allowed_files_reason(value: Any) -> str | None:
     """Require literal, canonical repository paths, never directory prefixes.
 
+    At most four files can take the fast path; larger changes need Spec.
     Scope is syntactic, just like the controller's exact (non-glob) matching;
     it does not infer file types from a checkout. Require a filename suffix as
     conservative evidence of file intent. Extensionless or unconventional names
@@ -291,6 +356,8 @@ def _allowed_files_reason(value: Any) -> str | None:
     """
     if not isinstance(value, list) or not value:
         return "allowed_files_missing"
+    if len(value) > MAX_ALLOWED_FILES:
+        return "allowed_files_not_narrow"
     for path in value:
         if not isinstance(path, str) or not path.strip():
             return "allowed_files_invalid"
