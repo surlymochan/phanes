@@ -246,12 +246,29 @@ class FastPathContractTests(unittest.TestCase):
                     self.assert_closed(intake, enabled=True)
 
     def test_invalid_output_regex_fails_closed(self):
-        for pattern in ("[", "(", "(?P<name>a)(?P<name>b)", "a{99999999999999999999}"):
+        for pattern in ("[", "(", "(?P<name>a)(?P<name>b)",
+                        "a{99999999999999999999}", "^(a+)+$", "^(a|aa)+$"):
             with self.subTest(pattern=pattern):
                 intake = copy.deepcopy(self.intake)
                 intake["public_scope"]["expected_output"] = {
                     "stream": "stdout", "match": "regex", "value": pattern}
                 self.assert_closed(intake, enabled=True)
+                module = importlib.import_module("tools.evalid_fast_path")
+                self.assertEqual(module._output_reason(intake["public_scope"]["expected_output"]),
+                                 "invalid_expected_output_regex")
+
+    def test_pathological_output_regex_is_rejected_for_reported_reproducer(self):
+        intake = copy.deepcopy(self.intake)
+        scope = intake["public_scope"]
+        scope["requirements"] = 'Print "' + "a" * 30 + '!".'
+        scope["expected_output"] = {
+            "stream": "stdout", "match": "regex", "value": "^(a+)+$"}
+        scope["boundaries"] = [
+            {"input": [], "exit_code": 0, "output": "a" * 30 + "!"}]
+        result = self.evaluate(intake, enabled=True)
+        self.assertFalse(result["eligible"])
+        self.assertIsNone(result["approved_spec"])
+        self.assertEqual(result["reason"], "invalid_expected_output_regex")
 
     def test_valid_output_regex_is_explicit_evidence(self):
         intake = copy.deepcopy(self.intake)

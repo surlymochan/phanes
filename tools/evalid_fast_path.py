@@ -46,6 +46,7 @@ OUTPUT_MATCHES = ("exact", "contains", "prefix", "suffix", "regex")
 GLOB_CHARACTERS = "*?[]{}"
 # Conservative policy: a simple change may name up to four exact files.
 MAX_ALLOWED_FILES = 4
+MAX_REGEX_PATTERN_LENGTH = 256
 BEHAVIOR_PATTERN = re.compile(r"(?:return|emit|print|output)\s+(.+?)\.?", re.IGNORECASE)
 ARITHMETIC_PATTERN = re.compile(
     r"the exact decimal (sum|difference|product) of two integers", re.IGNORECASE)
@@ -242,7 +243,127 @@ def _output_matches(expectation: dict[str, str], output: str) -> bool:
         return output.startswith(value)
     if match == "suffix":
         return output.endswith(value)
-    return re.search(value, output) is not None
+    return _safe_regex_search(value, output)
+
+
+def _safe_regex_parts(
+        pattern: str) -> tuple[bool, bool, list[tuple[re.Pattern[str], str]]] | None:
+    """Parse the small regex subset matched by a bounded NFA below.
+
+    Groups, alternation, backreferences and counted repeats are deliberately
+    unsupported. Matching this flat sequence of single-character atoms takes
+    O(pattern length * output length), so intake cannot trigger backtracking.
+    """
+    if len(pattern) > MAX_REGEX_PATTERN_LENGTH:
+        return None
+    anchored_start = pattern.startswith("^")
+    start = 1 if anchored_start else 0
+    anchored_end = False
+    end = len(pattern)
+    if end > start and pattern.endswith("$"):
+        slashes = 0
+        cursor = end - 2
+        while cursor >= start and pattern[cursor] == "\\":
+            slashes += 1
+            cursor -= 1
+        if slashes % 2 == 0:
+            anchored_end = True
+            end -= 1
+
+    tokens: list[tuple[re.Pattern[str], str]] = []
+    index = start
+    while index < end:
+        character = pattern[index]
+        if character == "[":
+            class_end = index + 1
+            if class_end < end and pattern[class_end] == "^":
+                class_end += 1
+            if class_end < end and pattern[class_end] == "]":
+                class_end += 1
+            while class_end < end:
+                if pattern[class_end] == "\\":
+                    class_end += 2
+                elif pattern[class_end] == "]":
+                    break
+                else:
+                    class_end += 1
+            if class_end >= end or pattern[class_end] != "]":
+                return None
+            source = pattern[index:class_end + 1]
+            index = class_end + 1
+        elif character == "\\":
+            if index + 1 >= end:
+                return None
+            escaped = pattern[index + 1]
+            if escaped in "dDsSwW":
+                source = pattern[index:index + 2]
+            elif escaped in r"nrtfv\\.^$[]{}()*+?| -":
+                source = pattern[index:index + 2]
+            else:
+                return None
+            index += 2
+        elif character == ".":
+            source = "."
+            index += 1
+        elif character in "()*+?|{}^$]":
+            return None
+        else:
+            source = re.escape(character)
+            index += 1
+
+        try:
+            atom = re.compile(source)
+        except (re.error, OverflowError):
+            return None
+        quantifier = ""
+        if index < end and pattern[index] in "*+?":
+            quantifier = pattern[index]
+            index += 1
+        tokens.append((atom, quantifier))
+    return anchored_start, anchored_end, tokens
+
+
+def _safe_regex_search(pattern: str, text: str) -> bool:
+    """Match supported regexes with a Thompson-style NFA, never re.search."""
+    parts = _safe_regex_parts(pattern)
+    if parts is None:
+        return False
+    anchored_start, anchored_end, tokens = parts
+
+    def closure(states: set[int]) -> set[int]:
+        result = set(states)
+        pending = list(states)
+        while pending:
+            state = pending.pop()
+            if state < len(tokens) and tokens[state][1] in ("*", "?"):
+                following = state + 1
+                if following not in result:
+                    result.add(following)
+                    pending.append(following)
+        return result
+
+    active: set[int] = set()
+    for position in range(len(text) + 1):
+        if position == 0 or not anchored_start:
+            active.add(0)
+        active = closure(active)
+        end_match = (position == len(text) or
+                     (text.endswith("\n") and position == len(text) - 1))
+        if len(tokens) in active and (not anchored_end or end_match):
+            return True
+        if position == len(text):
+            break
+        following: set[int] = set()
+        for state in active:
+            if state == len(tokens):
+                continue
+            atom, quantifier = tokens[state]
+            if atom.fullmatch(text[position]):
+                if quantifier in ("*", "+"):
+                    following.add(state)
+                following.add(state + 1)
+        active = following
+    return False
 
 
 def _ambiguity_reason(text: str) -> str | None:
@@ -299,9 +420,7 @@ def _output_reason(value: Any) -> str | None:
     if value["value"].strip().lower() in UNKNOWN_MARKERS:
         return "unknown_expected_output_value"
     if value["match"] == "regex":
-        try:
-            re.compile(value["value"])
-        except (re.error, OverflowError):
+        if _safe_regex_parts(value["value"]) is None:
             return "invalid_expected_output_regex"
     return None
 
