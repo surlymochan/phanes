@@ -7,11 +7,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 BIN = HERE.parent / 'bin' / 'fleet-capacity'
+BOOT = '11111111-1111-1111-1111-111111111111'
+NEXT_BOOT = '22222222-2222-2222-2222-222222222222'
 sys.path.insert(0, str(HERE))
 import _load
 xs = _load.load()
@@ -21,14 +24,35 @@ class FleetCapacityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.env = dict(os.environ, OPENSWARM_FLEET_CAPACITY_DIR=self.temp.name)
+        # Model coordinator-owned, authenticated kernel reads separately from
+        # the untrusted JSON submitted by a reservation owner.
+        self.boot_files = {}
+        probes = {}
+        for host in ('broker', 'worker', 'local'):
+            path = pathlib.Path(self.temp.name, host + '.boot')
+            path.write_text(BOOT)
+            self.boot_files[host] = path
+            probes[host] = [sys.executable, '-c',
+                            'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())', str(path)]
+        self.probe_config = pathlib.Path(self.temp.name, 'boot-probes.json')
+        self.probe_config.write_text(json.dumps(probes))
 
     def call(self, authenticated_host, **payload):
+        if payload.get('op') == 'acquire':
+            payload.setdefault('boot_id', BOOT)
         argv = [str(BIN), authenticated_host]
         if os.name == "nt":  # Windows cannot CreateProcess a shebang script (WinError 193)
             argv = [sys.executable, *argv]
         p = subprocess.run(argv, input=json.dumps(payload), text=True,
                            capture_output=True, env=self.env, timeout=15)
         return json.loads(p.stdout)
+
+    def expire(self, token):
+        import sqlite3
+        db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
+        db.execute('UPDATE reservations SET lease_expires=0 WHERE token=?', (token,))
+        db.commit()
+        db.close()
 
     def test_atomic_limit_and_idempotent_recovery(self):
         def attempt(i):
@@ -90,6 +114,14 @@ class FleetCapacityTests(unittest.TestCase):
             self.assertFalse(xs.release_fleet_slot(rdir))
         self.assertEqual(call.call_count, 3)
         self.assertIn(rdir, xs._FLEET_RESERVATIONS)
+
+    def test_supervisor_renews_owned_fleet_lease(self):
+        stop = mock.Mock()
+        stop.wait.side_effect = [False, True]
+        payload = {'run_id': 'renew-run', 'token': 'f' * 32}
+        with mock.patch.object(xs, 'fleet_guard_call', return_value={'ok': True}) as call:
+            xs.renew_fleet_slot(['guard'], payload, 1, stop)
+        call.assert_called_once_with(['guard'], {'op': 'renew', 'run_id': 'renew-run', 'token': 'f' * 32})
 
     def test_remote_review_assignment_passes_read_only_to_lane(self):
         root = pathlib.Path(self.temp.name)
@@ -227,15 +259,226 @@ class FleetCapacityTests(unittest.TestCase):
                 self.assertTrue(self.call('broker', op='status')['reservations'])
                 xs.release_fleet_slot(str(rdir))
 
-    def test_recovery_requires_local_explicit_confirmation(self):
+    def test_recovery_requires_expiry_and_authenticated_owner_reboot(self):
         token = 'a' * 32
         self.assertTrue(self.call('worker', op='acquire', token=token, run_id='orphan',
                                   backend='cursor', provider=None)['admitted'])
-        self.assertFalse(self.call('worker', op='recover', host='worker', run_id='orphan',
+        self.assertFalse(self.call('worker', op='recover', host='worker', run_id='orphan', token=token)['ok'])
+        self.assertFalse(self.call('broker', op='recover', host='worker', run_id='orphan', token=token,
                                    confirm='all-executor-processes-stopped')['ok'])
-        self.assertFalse(self.call('broker', op='recover', host='worker', run_id='orphan')['ok'])
+        self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+        self.expire(token)
+        self.assertFalse(self.call('broker', op='recover', host='worker', run_id='orphan', token=token)['ok'])
+        self.boot_files['worker'].write_text(NEXT_BOOT)
+        self.assertTrue(self.call('worker', op='attest_boot', boot_id=NEXT_BOOT)['ok'])
+        row = self.call('broker', op='status')['reservations'][0]
+        self.assertNotIn('token', row)
+        recovery_id = row['recovery_id']
         self.assertEqual(self.call('broker', op='recover', host='worker', run_id='orphan',
-                                   confirm='all-executor-processes-stopped')['recovered'], 1)
+                                   recovery_id=recovery_id)['recovered'], 1)
+        self.assertEqual(self.call('broker', op='recover', host='worker', run_id='orphan',
+                                   recovery_id=recovery_id)['recovered'], 0)
+
+    def test_remote_recovery_rejects_unverified_local_confirmation(self):
+        token = 'b' * 32
+        self.assertTrue(self.call('worker', op='acquire', token=token, run_id='remote-orphan',
+                                  backend='cursor', provider=None)['admitted'])
+
+        # A broker-side assertion cannot establish that a worker's process
+        # tree is stopped; remote recovery needs verifiable cross-host evidence.
+        result = self.call('broker', op='recover', host='worker', run_id='remote-orphan',
+                           token=token, confirm='all-executor-processes-stopped')
+
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+
+    def test_expired_lease_with_live_executor_and_failed_renewal_is_not_recoverable(self):
+        self.env['OPENSWARM_FLEET_CAPACITY_TTL_SECONDS'] = '0.05'
+        token = '7' * 32
+        payload = {'token': token, 'run_id': 'partitioned'}
+        self.assertTrue(self.call('worker', op='acquire', backend='cursor', **payload)['admitted'])
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            # Simulate the supervisor losing its coordinator connection while
+            # the remote executor continues running; expiry is real, not a DB edit.
+            stop = mock.Mock()
+            stop.wait.side_effect = [False, True]
+            with mock.patch.object(xs, 'fleet_guard_call', side_effect=RuntimeError('partition')):
+                xs.renew_fleet_slot(['guard'], payload, 0.01, stop)
+            time.sleep(0.1)
+            self.assertIsNone(process.poll())
+            for authenticated_host in ('broker', 'worker'):
+                result = self.call(authenticated_host, op='recover', host='worker',
+                                   confirm='all-executor-processes-stopped', **payload)
+                self.assertFalse(result['ok'], result)
+                self.assertIn('reboot evidence required', result['error'])
+            # Neither broker-side claims nor its own reboot prove worker death.
+            self.assertFalse(self.call('broker', op='attest_boot', host='worker', boot_id=NEXT_BOOT)['ok'])
+            self.boot_files['broker'].write_text(NEXT_BOOT)
+            self.assertTrue(self.call('broker', op='attest_boot', boot_id=NEXT_BOOT)['ok'])
+            self.assertFalse(self.call('broker', op='recover', host='worker', boot_id=NEXT_BOOT, **payload)['ok'])
+            self.assertEqual(self.call('broker', op='acquire', token='8' * 32, run_id='overlap',
+                                       boot_id=NEXT_BOOT, backend='cursor')['blocked'], ['cursor'])
+            self.assertIsNone(process.poll())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_worker_cannot_forge_reboot_while_executor_is_alive(self):
+        self.env['OPENSWARM_FLEET_CAPACITY_TTL_SECONDS'] = '0.05'
+        payload = {'token': '5' * 32, 'run_id': 'forged-reboot'}
+        self.assertTrue(self.call('worker', op='acquire', backend='cursor', **payload)['admitted'])
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            time.sleep(0.1)
+            for op in ('attest_boot', 'acquire'):
+                forged = {'op': op, 'boot_id': NEXT_BOOT}
+                if op == 'acquire':
+                    forged.update(token='4' * 32, run_id='forged-acquire', backend='pi')
+                self.assertFalse(self.call('worker', **forged)['ok'])
+                result = self.call('broker', op='recover', host='worker', **payload)
+                self.assertFalse(result['ok'], result)
+                self.assertEqual(self.call('broker', op='acquire', token='3' * 32,
+                                           run_id='overlap', backend='cursor')['blocked'], ['cursor'])
+                self.assertIsNone(process.poll())
+                self.assertEqual(self.boot_files['worker'].read_text(), BOOT)
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    @unittest.skipUnless(pathlib.Path('/proc/sys/kernel/random/boot_id').is_file(),
+                         'requires a Linux kernel boot id')
+    def test_probe_reads_real_kernel_and_rejects_forged_initial_and_next_boot(self):
+        kernel = pathlib.Path('/proc/sys/kernel/random/boot_id')
+        actual_boot = kernel.read_text().strip()
+        probes = json.loads(self.probe_config.read_text())
+        probes['worker'][-1] = str(kernel)
+        self.probe_config.write_text(json.dumps(probes))
+        payload = {'token': '4' * 32, 'run_id': 'real-kernel'}
+        fake_boot = NEXT_BOOT if actual_boot != NEXT_BOOT else BOOT
+        self.assertFalse(self.call('worker', op='acquire', boot_id=fake_boot,
+                                   backend='cursor', **payload)['ok'])
+        self.assertEqual(self.call('broker', op='status')['reservations'], [])
+        self.assertTrue(self.call('worker', op='acquire', boot_id=actual_boot,
+                                  backend='cursor', **payload)['admitted'])
+        self.expire(payload['token'])
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            self.assertFalse(self.call('worker', op='attest_boot', boot_id=fake_boot)['ok'])
+            self.assertFalse(self.call('broker', op='recover', host='worker',
+                                       boot_id=fake_boot, **payload)['ok'])
+            self.assertEqual(self.call('broker', op='acquire', token='3' * 32,
+                                       run_id='overlap', backend='cursor')['blocked'], ['cursor'])
+            self.assertIsNone(process.poll())
+            self.assertEqual(kernel.read_text().strip(), actual_boot)
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_recover_observes_remote_reboot_without_owner_attestation(self):
+        payload = {'token': '4' * 32, 'run_id': 'probe-reboot'}
+        self.assertTrue(self.call('worker', op='acquire', backend='cursor', **payload)['admitted'])
+        self.expire(payload['token'])
+        self.assertFalse(self.call('broker', op='recover', host='worker',
+                                   boot_id=NEXT_BOOT, **payload)['ok'])
+        self.boot_files['worker'].write_text(NEXT_BOOT)
+        self.assertEqual(self.call('broker', op='recover', host='worker', **payload)['recovered'], 1)
+        self.assertTrue(self.call('broker', op='acquire', token='3' * 32,
+                                  run_id='replacement', backend='cursor')['admitted'])
+
+    def test_missing_or_failed_probe_never_reclaims_verified_reservation(self):
+        payload = {'token': '4' * 32, 'run_id': 'probe-failure'}
+        self.assertTrue(self.call('worker', op='acquire', backend='cursor', **payload)['admitted'])
+        self.expire(payload['token'])
+        for config in (None, {}, {'worker': 'invalid command'},
+                       {'worker': [sys.executable, '-c', 'print("invalid boot id")']},
+                       {'worker': [sys.executable, '-c', f'print("{NEXT_BOOT}"); exit(1)']},
+                       {'worker': [sys.executable, '-c', 'import time; time.sleep(10)']}):
+            with self.subTest(config=config):
+                if config is None:
+                    self.probe_config.unlink()
+                else:
+                    self.probe_config.write_text(json.dumps(config))
+                self.assertFalse(self.call('broker', op='recover', host='worker', **payload)['ok'])
+                self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+
+    def test_prior_self_reported_boot_records_are_not_migrated_as_proof(self):
+        import sqlite3
+        payload = {'token': '4' * 32, 'run_id': 'untrusted-legacy'}
+        with sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite')) as db:
+            db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, '
+                       'run_id TEXT NOT NULL, backend TEXT NOT NULL, provider TEXT, '
+                       'created REAL NOT NULL, lease_expires REAL, boot_id TEXT)')
+            db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?,?,?)',
+                       (payload['token'], 'worker', payload['run_id'], 'cursor', None, 1, 0, BOOT))
+            db.execute('CREATE TABLE host_boots (host TEXT, boot_id TEXT, retired INTEGER)')
+            db.execute('INSERT INTO host_boots VALUES (?,?,?)', ('worker', BOOT, 1))
+            db.execute('INSERT INTO host_boots VALUES (?,?,?)', ('worker', NEXT_BOOT, 0))
+        self.boot_files['worker'].write_text(NEXT_BOOT)
+        self.assertTrue(self.call('worker', op='attest_boot', boot_id=NEXT_BOOT)['ok'])
+        self.assertFalse(self.call('broker', op='recover', host='worker', **payload)['ok'])
+        row = self.call('broker', op='status')['reservations'][0]
+        self.assertIsNone(row['boot_id'])
+        self.assertTrue(self.call('worker', op='release', **payload)['released'])
+
+    def test_reboot_evidence_fences_old_supervisor_and_requires_expiry(self):
+        payload = {'token': '9' * 32, 'run_id': 'old-boot'}
+        self.assertTrue(self.call('worker', op='acquire', backend='cursor', **payload)['admitted'])
+        self.boot_files['worker'].write_text(NEXT_BOOT)
+        self.assertTrue(self.call('worker', op='attest_boot', boot_id=NEXT_BOOT)['ok'])
+        self.assertFalse(self.call('broker', op='recover', host='worker', **payload)['ok'])
+        self.assertFalse(self.call('worker', op='renew', **payload)['ok'])
+        self.assertFalse(self.call('worker', op='attest_boot', boot_id=BOOT)['ok'])
+        self.assertFalse(self.call('worker', op='acquire', backend='cursor', **payload)['ok'])
+        self.assertFalse(self.call('worker', op='acquire', boot_id=NEXT_BOOT, backend='cursor', **payload)['ok'])
+        self.expire(payload['token'])
+        self.assertEqual(self.call('broker', op='recover', host='worker', **payload)['recovered'], 1)
+        self.assertFalse(self.call('worker', op='acquire', backend='cursor', **payload)['ok'])
+        self.assertTrue(self.call('worker', op='acquire', boot_id=NEXT_BOOT, backend='cursor', **payload)['admitted'])
+
+    def test_legacy_reservation_without_boot_evidence_cannot_be_recovered(self):
+        payload = {'token': '6' * 32, 'run_id': 'unproven'}
+        probes = self.probe_config.read_text()
+        self.probe_config.unlink()
+        self.assertTrue(self.call('worker', op='acquire', boot_id=BOOT, backend='cursor', **payload)['admitted'])
+        self.assertIsNone(self.call('broker', op='status')['reservations'][0]['boot_id'])
+        self.expire(payload['token'])
+        self.probe_config.write_text(probes)
+        for boot in (BOOT, NEXT_BOOT):
+            self.boot_files['worker'].write_text(boot)
+            self.assertTrue(self.call('worker', op='attest_boot', boot_id=boot)['ok'])
+        self.assertFalse(self.call('broker', op='recover', host='worker', **payload)['ok'])
+        self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+
+    def test_renew_requires_authenticated_owner_and_exact_reservation(self):
+        token = 'c' * 32
+        acquired = self.call('worker', op='acquire', token=token, run_id='renew-me',
+                             backend='cursor', provider=None)
+        self.assertTrue(acquired['admitted'])
+        before = acquired['lease_expires']
+        self.assertFalse(self.call('broker', op='renew', token=token, run_id='renew-me')['ok'])
+        self.assertFalse(self.call('worker', op='renew', token='d' * 32, run_id='renew-me')['ok'])
+        self.assertFalse(self.call('worker', op='renew', token=token, run_id='wrong')['ok'])
+        renewed = self.call('worker', op='renew', token=token, run_id='renew-me')
+        self.assertTrue(renewed['ok'])
+        self.assertGreaterEqual(renewed['lease_expires'], before)
+        self.assertFalse(self.call('worker', op='renew', token=token, run_id='renew-me',
+                                   lease_expires=before + 1000)['ok'])
+
+    def test_legacy_reservations_migrate_to_conservative_lease(self):
+        import sqlite3
+        created = 1_800_000_000.0
+        db = sqlite3.connect(pathlib.Path(self.temp.name, 'capacity.sqlite'))
+        db.execute('CREATE TABLE reservations (token TEXT PRIMARY KEY, host TEXT NOT NULL, run_id TEXT NOT NULL, '
+                   'backend TEXT NOT NULL, provider TEXT, created REAL NOT NULL)')
+        db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?)',
+                   ('e' * 32, 'worker', 'legacy', 'cursor', None, created))
+        db.commit()
+        db.close()
+        status = self.call('broker', op='status')
+        row = status['reservations'][0]
+        self.assertEqual(row['lease_expires'], created + 300)
+        self.assertEqual(self.call('broker', op='status')['reservations'][0]['lease_expires'], created + 300)
 
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
@@ -252,9 +495,12 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertTrue(self.call('local', **local)['admitted'])
         self.assertEqual(self.call('broker', **remote)['blocked'], ['codex'])
         self.assertFalse(self.call('local', op='recover', host='local', run_id='local-turn',
-                                   confirm='all-executor-processes-stopped')['ok'])
+                                   token=local['token'])['ok'])
+        self.expire(local['token'])
+        self.boot_files['local'].write_text(NEXT_BOOT)
+        self.assertTrue(self.call('local', op='attest_boot', boot_id=NEXT_BOOT)['ok'])
         self.assertEqual(self.call('broker', op='recover', host='local', run_id='local-turn',
-                                   confirm='all-executor-processes-stopped')['recovered'], 1)
+                                   token=local['token'])['recovered'], 1)
         self.assertTrue(self.call('broker', **remote)['admitted'])
 
     def test_local_host_limit_applies_across_backends(self):
