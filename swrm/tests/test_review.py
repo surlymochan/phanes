@@ -1,5 +1,6 @@
 """Peer reviews use stubbed reviewers and local git fixtures only."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -95,6 +96,12 @@ class PeerReviewTests(unittest.TestCase):
         self.assertIn("Diff:", invoke.call_args.args[1])
         saved = json.loads((self.run_dir / "review.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["by"], "pi:pi-model")
+        rules = invoke.call_args.args[1].split("\n\nRun:", 1)[0]
+        rules_hash = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12], rules_hash)
+        changed_rules = rules[:-1] + (" " if rules[-1] != " " else "!")
+        self.assertNotEqual(hashlib.sha256(changed_rules.encode("utf-8")).hexdigest()[:12], rules_hash)
+        self.assertEqual(saved.get("rules_hash"), rules_hash)
         ledger = json.loads(Path(xs.LEDGER).read_text(encoding="utf-8"))
         self.assertEqual(ledger["peer_review"], {"by": "pi:pi-model", "verdict": "changes",
                                                   "p0": 0, "p1": 1, "p2": 0})
