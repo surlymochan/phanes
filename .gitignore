@@ -29,3 +29,7 @@ __pycache__/
 
 # Private deployment settings stay on the operator machine.
 .deployment.env
+
+# Local review records and backup files.
+.lane-review/
+*.bak*
