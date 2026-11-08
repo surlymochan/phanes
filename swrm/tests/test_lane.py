@@ -273,6 +273,13 @@ class LaneTests(unittest.TestCase):
             description=f"restarted lane to resume run {run_id}",
         )
         self.assertEqual(state["state"], "busy")
+        self.wait_for(
+            lambda: log.exists() and any(row.get("type") == "switch_session"
+                                         for row in (json.loads(line) for line in log.read_text().splitlines())),
+            description="the restarted executor to restore the saved Pi session",
+        )
+        events = [json.loads(line) for line in (self.data / "runs" / run_id / "events.1.pi.jsonl").read_text().splitlines()]
+        self.assertTrue(any(event.get("type") == "recovery" and event.get("run_id") == run_id for event in events))
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")

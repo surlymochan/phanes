@@ -7096,6 +7096,47 @@ def lane_state_path(name):
     return os.path.join(lane_root(name), "state.json")
 
 
+def lane_assignment_path(rid):
+    return os.path.join(RUNS, rid, "assignment.json")
+
+
+def lane_save_assignment(spec):
+    """Persist enough of an assignment to validate and restore it after supervisor restart."""
+    jsave(lane_assignment_path(spec["run_id"]), spec)
+
+
+def lane_recover_assignment(lane, previous_state):
+    rid = previous_state.get("current_run")
+    if not rid or previous_state.get("state") != "busy":
+        return None, "no busy run was recorded"
+    status = jload(os.path.join(RUNS, rid, "status.json"), {}) or {}
+    if status.get("state") not in ("queued", "running") or status.get("lane") != lane["name"]:
+        return None, "run status is not queued/running on this lane"
+    for other in lane_config():
+        if other["name"] == lane["name"]:
+            continue
+        other_state = jload(lane_state_path(other["name"]), {}) or {}
+        if other_state.get("current_run") == rid:
+            return None, f"run is already assigned to lane {other['name']}"
+    spec = jload(lane_assignment_path(rid), None)
+    if not isinstance(spec, dict) or spec.get("run_id") != rid or not isinstance(spec.get("task"), str):
+        return None, "saved assignment is missing or invalid"
+    wt = os.path.join(lane_root(lane["name"]), "wt")
+    if spec.get("workspace_path") != wt:
+        return None, "saved workspace path does not match this lane"
+    spec["_recovered"] = True
+    branch = f"swrm/{rid}"
+    rc, head, _ = lane_git(["rev-parse", "--verify", "HEAD^{commit}"], wt)
+    rc_remote, remote, _ = lane_git(["rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"], wt)
+    pushed = False
+    if not rc and not rc_remote and head != spec.get("base"):
+        rc, _, _ = lane_git(["merge-base", "--is-ancestor", head, remote], wt)
+        pushed = rc == 0
+    spec["_recovery_level"] = "commit" if pushed else "workspace"
+    spec["_recovery_point"] = head if pushed else wt
+    return spec, None
+
+
 def lane_socket_path(name):
     path = os.path.join(lane_root(name), "ctl.sock")
     if sys.platform == "darwin" and len(os.fsencode(path)) > 103:
@@ -7321,7 +7362,7 @@ def lane_rebuild_worktree(repo, wt, base):
         raise RuntimeError(f"lane worktree rebuild failed: {err[:250]}")
 
 
-def lane_prepare_workspace(lane, rid, base_rev=None):
+def lane_prepare_workspace(lane, rid, base_rev=None, preserve=False):
     repo = os.path.realpath(lane["repo"])
     rc, top, err = lane_git(["rev-parse", "--show-toplevel"], repo)
     if rc:
@@ -7332,6 +7373,20 @@ def lane_prepare_workspace(lane, rid, base_rev=None):
         raise RuntimeError(f"invalid base revision {base_rev!r}: {err}")
     wt = os.path.join(lane_root(lane["name"]), "wt")
     os.makedirs(os.path.dirname(wt), exist_ok=True)
+    if preserve:
+        if not lane_worktree_matches(repo, wt):
+            raise RuntimeError("cannot resume run: saved lane worktree is missing or belongs to another repository")
+        rc, branch, err = lane_git(["branch", "--show-current"], wt)
+        if rc or branch != f"swrm/{rid}":
+            raise RuntimeError("cannot resume run: lane worktree branch does not match saved run")
+        rc, head, err = lane_git(["rev-parse", "HEAD"], wt)
+        if rc:
+            raise RuntimeError(f"cannot resume run: cannot read worktree tip: {err}")
+        linked = link_dependency_dirs(repo, wt)
+        configure_executor_environment(wt)
+        return {"mode": "worktree", "path": wt, "root": wt, "repo": repo, "branch": branch,
+                "base": base, "head": head, "base_dirty": False, "linked": linked, "lane": lane["name"],
+                "workspace_note": workspace_note(repo)}
     if not lane_worktree_matches(repo, wt):
         lane_rebuild_worktree(repo, wt, base)
     # Temporarily remove only dependency symlinks created for this worktree. This lets `git clean
@@ -7788,11 +7843,18 @@ def lane_control_messages(server, lane, current, child, turn, pending):
                                                         "card_type", "rework_of", "paths", "regress_label", "read_only", "scope")}
                         spec["scope"] = spec.get("scope") or "repo"
                         spec["budget_minutes"] = budget
+                        if not spec.get("base"):
+                            rc, base, err = lane_git(["rev-parse", "--verify", "HEAD^{commit}"], lane["repo"])
+                            if rc:
+                                raise RuntimeError(f"lane repository has no valid base: {err[:250]}")
+                            spec["base"] = base
                         provider = execution_provider(lane["backend"], policy=load_policy(), lane=lane)
                         spec.update({"run_id": rid, "task": task, "started": NOW(), "provider": provider})
                         spec["queued_at"] = spec["started"]
+                        spec["workspace_path"] = os.path.join(lane_root(lane["name"]), "wt")
                         spec["_event_file"] = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
                         open(spec["_event_file"], "w").close()
+                        lane_save_assignment(spec)
                         current.update(spec)
                         lane_write_state(lane["name"], state="busy", current_run=rid, turn_state="queued",
                                          concurrency_keys=[], last_error=None, last_activity=NOW())
@@ -7897,7 +7959,7 @@ def lane_agy_stop(child):
         kill_tree(child.proc.pid, grace=1)
 
 
-def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
+def lane_begin_turn(lane, child, prompt, worktree, event_file, turn, spec=None):
     if lane["backend"] == "codex":
         req_id = "thread-" + uuid.uuid4().hex
         child.send({"jsonrpc": "2.0", "id": req_id, "method": "thread/start",
@@ -7920,9 +7982,30 @@ def lane_begin_turn(lane, child, prompt, worktree, event_file, turn):
             raise RuntimeError(f"codex turn/start failed: {short(reply['error'], 300)}")
         turn["id"] = (reply.get("turn") or {}).get("id")
     elif lane["backend"] == "pi":
+        if spec and spec.get("_recovered") and spec.get("session_file"):
+            sid = "switch-" + uuid.uuid4().hex
+            child.send({"id": sid, "type": "switch_session", "sessionFile": spec["session_file"]})
+            switched = child.wait_response(sid, 30, event_file)
+            if switched.get("success") is False:
+                raise RuntimeError("Pi could not restore the saved session")
+            turn["session_id"] = spec.get("session_id")
+            lane_record_event(event_file, {"type": "recovery", "run_id": spec["run_id"],
+                                           "level": spec.get("_recovery_level", "workspace"),
+                                           "point": spec.get("session_file"), "session_restored": True})
+            pid = "prompt-" + uuid.uuid4().hex
+            child.send({"id": pid, "type": "prompt", "message":
+                        "Resume the interrupted run from the existing session and continue its task.\n\n" + prompt})
+            turn["id"] = pid
+            return
         sid = "new-" + uuid.uuid4().hex
         child.send({"id": sid, "type": "new_session"})
-        child.wait_response(sid, 30, event_file)
+        response = child.wait_response(sid, 30, event_file)
+        data = response.get("data") or response.get("result") or {}
+        session_id = response.get("sessionId") or response.get("session_id") or data.get("sessionId") or data.get("session_id")
+        session_file = response.get("sessionFile") or response.get("session_file") or data.get("sessionFile") or data.get("session_file")
+        if spec and (session_id or session_file):
+            spec["session_id"], spec["session_file"] = session_id, session_file
+            lane_save_assignment(spec)
         pid = "prompt-" + uuid.uuid4().hex
         child.send({"id": pid, "type": "prompt", "message": prompt})
         turn["id"] = pid
@@ -8092,7 +8175,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     if continuation:
         lane_continue_turn(lane, child, prompt, event_file, turn)
     else:
-        lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn)
+        lane_begin_turn(lane, child, prompt, ws["path"], event_file, turn, spec)
     if lane_headless(lane):
         set_status(rdir, executor_pid=child.pid)
     while pending:
@@ -8521,7 +8604,7 @@ def lane_do_run(lane, spec, child, server, current):
     ws = None
     turn, pending = {}, []
     try:
-        ws = lane_prepare_workspace(lane, rid, spec.get("base"))
+        ws = lane_prepare_workspace(lane, rid, spec.get("base"), preserve=bool(spec.get("_recovered")))
         if ws.get("workspace_note"):
             set_status(rdir, workspace_note=ws["workspace_note"])
         ws["prepare"] = []
@@ -8737,6 +8820,12 @@ def cmd_lane_serve(lane, policy):
     name = lane["name"]
     server = lane_ctl_listener(name)
     current, child = {}, None
+    previous_state = jload(lane_state_path(name), {}) or {}
+    recovered, recovery_error = lane_recover_assignment(lane, previous_state)
+    if recovered:
+        old_child = previous_state.get("child_pid")
+        if isinstance(old_child, int) and old_child > 1:
+            kill_tree(old_child, grace=1)
     started, backoff, next_start = NOW(), 1, 0
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
                      state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
@@ -8762,8 +8851,25 @@ def cmd_lane_serve(lane, policy):
             if rc:
                 raise RuntimeError(f"lane worktree creation failed: {err[:250]}")
         child = lane_child(lane, wt, policy)
-        lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
-                         turn_state=None, concurrency_keys=[])
+        if recovered:
+            current.update(recovered)
+            lane_write_state(name, state="busy", child_pid=child.pid, current_run=recovered["run_id"],
+                             turn_state="running", last_error=None, last_activity=NOW())
+            recovery_file = recovered.get("_event_file") or os.path.join(
+                RUNS, recovered["run_id"], f"events.1.{lane['backend']}.jsonl")
+            lane_record_event(recovery_file, {"type": "recovery", "run_id": recovered["run_id"],
+                                              "level": recovered["_recovery_level"],
+                                              "point": os.path.join(lane_root(name), "wt")})
+        else:
+            lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
+                             turn_state=None, concurrency_keys=[])
+            if recovery_error and previous_state.get("current_run"):
+                rid = previous_state["current_run"]
+                event_file = os.path.join(RUNS, rid, f"events.1.{lane['backend']}.jsonl")
+                if os.path.isdir(os.path.dirname(event_file)):
+                    lane_record_event(event_file, {"type": "recovery_abandoned", "run_id": rid,
+                                                    "reason": recovery_error})
+                    set_status(os.path.dirname(event_file), recovery_abandoned=recovery_error)
     except Exception as e:
         traceback.print_exc()
         lane_write_state(name, state="crashed", last_error=short(e, 500), child_pid=None)

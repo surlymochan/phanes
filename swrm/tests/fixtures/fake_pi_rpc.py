@@ -38,7 +38,16 @@ for line in sys.stdin:
         sessions = sys.argv[sys.argv.index("--session-dir") + 1]
         if os.path.commonpath([os.path.realpath(sessions), os.getcwd()]) == os.getcwd():
             raise RuntimeError("session directory inside worktree")
-        response(req, kind)
+        session_file = os.path.join(sessions, "lane-test-session.jsonl")
+        with open(session_file, "a") as stream:
+            stream.write(json.dumps({"type": "session", "id": "lane-test-session"}) + "\n")
+        send({"id": req.get("id"), "type": "response", "command": kind, "success": True,
+              "data": {"sessionId": "lane-test-session", "sessionFile": session_file}})
+    elif kind == "switch_session":
+        if not os.path.isfile(req.get("sessionFile", "")):
+            response(req, kind, success=False)
+        else:
+            response(req, kind)
     elif kind == "prompt":
         prompt = req.get("message", "")
         prompt_count += 1
