@@ -237,6 +237,19 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(self.call('broker', op='recover', host='worker', run_id='orphan',
                                    confirm='all-executor-processes-stopped')['recovered'], 1)
 
+    def test_remote_recovery_rejects_unverified_local_confirmation(self):
+        token = 'b' * 32
+        self.assertTrue(self.call('worker', op='acquire', token=token, run_id='remote-orphan',
+                                  backend='cursor', provider=None)['admitted'])
+
+        # A broker-side assertion cannot establish that a worker's process
+        # tree is stopped; remote recovery needs verifiable cross-host evidence.
+        result = self.call('broker', op='recover', host='worker', run_id='remote-orphan',
+                           confirm='all-executor-processes-stopped')
+
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(len(self.call('broker', op='status')['reservations']), 1)
+
     def test_host_limit_is_shared_across_backend_types(self):
         first = dict(op='acquire', token='1' * 32, run_id='one', backend='codex', provider=None)
         second = dict(op='acquire', token='2' * 32, run_id='two', backend='agy', provider=None)
