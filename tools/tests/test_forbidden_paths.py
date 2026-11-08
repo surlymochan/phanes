@@ -21,9 +21,7 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Test")
         self.write("openswarm/x.py", "old")
-        self.write("tools/ci/forbidden_paths.legacy", "openswarm/x.py\n")
-        self.script.with_name("forbidden_paths.legacy").write_text("openswarm/x.py\n")
-        self.git("add", "openswarm/x.py", "tools/ci/forbidden_paths.legacy")
+        self.git("add", "openswarm/x.py")
         self.git("commit", "-qm", "base")
         self.base = self.git("rev-parse", "HEAD").strip()
 
@@ -102,52 +100,35 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("FORBIDDEN A swrm/tests/.foo.so", result.stdout)
 
-    def test_tree(self):
-        result = self.check("--tree")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("forbidden-paths: OK", result.stdout)
-
-    def test_tree_rejects_unlisted_openswarm(self):
-        self.write("openswarm/y.py")
-        self.commit()
+    def test_tree_rejects_openswarm(self):
         result = self.check("--tree")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("FORBIDDEN A openswarm/y.py", result.stdout)
+        self.assertIn("FORBIDDEN A openswarm/x.py", result.stdout)
 
-    def test_tree_stale_legacy(self):
-        self.script.with_name("forbidden_paths.legacy").write_text(
-            "openswarm/x.py\nopenswarm/deleted.py\n")
-        result = self.check("--tree")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("STALE-LEGACY openswarm/deleted.py", result.stdout)
-
-    def test_tree_empty_directory_with_legacy(self):
+    def test_tree_reads_head_not_worktree(self):
         (self.root / "openswarm/x.py").unlink()
         self.commit()
+        clean_head = self.git("rev-parse", "HEAD").strip()
+        self.write("openswarm/uncommitted.py")
+        self.assertEqual(self.check("--tree", "--head", clean_head).returncode, 0)
+        result = self.check("--tree", "--head", self.base)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FORBIDDEN A openswarm/x.py", result.stdout)
+        self.assertNotIn("uncommitted.py", result.stdout)
+
+    def test_path_with_trailing_space(self):
+        self.write("openswarm/trailing ")
+        result = self.diff()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FORBIDDEN A openswarm/trailing  (openswarm/)", result.stdout)
         result = self.check("--tree")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("LEGACY-NOT-EMPTY", result.stdout)
+        self.assertIn("FORBIDDEN A openswarm/trailing  (openswarm/)", result.stdout)
 
-    def test_legacy_added_line_rejected(self):
-        self.write("tools/ci/forbidden_paths.legacy", "openswarm/x.py\nopenswarm/y.py\n")
+    def test_nul_delimited_path_with_newline(self):
+        self.write("openswarm/中文\nname.py")
         result = self.diff()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("LEGACY-GROWN openswarm/y.py", result.stdout)
-
-    def test_bootstrap_legacy_with_unicode_path(self):
-        self.git("rm", "tools/ci/forbidden_paths.legacy")
-        self.write("openswarm/中文 名.py")
-        self.git("add", "openswarm/中文 名.py")
-        self.git("commit", "-qm", "base without legacy")
-        self.base = self.git("rev-parse", "HEAD").strip()
-        self.write("tools/ci/forbidden_paths.legacy", "openswarm/x.py\nopenswarm/中文 名.py\n")
-        result = self.diff()
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_legacy_deleted_line_allowed(self):
-        self.write("tools/ci/forbidden_paths.legacy", "")
-        result = self.diff()
-        self.assertEqual(result.returncode, 0)
+        self.assertIn("FORBIDDEN A openswarm/中文\nname.py", result.stdout)
 
     def test_tree_other_rules(self):
         for path in ("nested/.tmp/a", "a/.lane-review/history.md", "openswarm/x.so", "swrm/x.bak-1"):

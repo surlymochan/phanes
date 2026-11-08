@@ -2,15 +2,9 @@
 """Reject forbidden paths in a change or in a committed tree."""
 
 import argparse
-from collections import Counter
 import re
 import subprocess
 import sys
-from pathlib import Path
-
-
-LEGACY_FILE = Path(__file__).with_name("forbidden_paths.legacy")
-LEGACY_PATH = "tools/ci/forbidden_paths.legacy"
 
 
 def rule_for(path):
@@ -30,12 +24,6 @@ def rule_for(path):
 
 def git(*args):
     return subprocess.check_output(["git", *args])
-
-
-def legacy_lines(revision):
-    if not git("ls-tree", "--name-only", "-z", revision, "--", LEGACY_PATH):
-        return []
-    return git("show", f"{revision}:{LEGACY_PATH}").decode("utf-8", errors="surrogateescape").splitlines()
 
 
 def main():
@@ -63,43 +51,9 @@ def main():
                 entries.append((status.decode(), path))
 
     forbidden = False
-    legacy = set()
-    if args.tree:
-        if LEGACY_FILE.exists():
-            legacy = {line.strip() for line in LEGACY_FILE.read_text(errors="surrogateescape").splitlines()
-                      if line.strip() and not line.strip().startswith("#")}
-        tree_paths = {path.decode("utf-8", errors="surrogateescape") for _, path in entries}
-        openswarm_paths = {path for path in tree_paths if path.startswith("openswarm/")}
-        for path in sorted(legacy - tree_paths):
-            print(f"STALE-LEGACY {path}（已删除，请从 forbidden_paths.legacy 移除该行）")
-            forbidden = True
-        if legacy and not openswarm_paths:
-            print("LEGACY-NOT-EMPTY")
-            forbidden = True
-    elif any(path.decode("utf-8", errors="surrogateescape") == LEGACY_PATH
-             for _, path in entries):
-        def entries_of(lines):
-            return Counter(l.strip() for l in lines if l.strip() and not l.strip().startswith("#"))
-        base_lines = legacy_lines(args.base)
-        added = entries_of(legacy_lines(args.head)) - entries_of(base_lines)
-        if not git("ls-tree", "--name-only", "-z", args.base, "--", LEGACY_PATH):
-            # Bootstrap: the list may only name files that already exist on the base.
-            base_tree = {path.decode("utf-8", errors="surrogateescape") for path in
-                         git("ls-tree", "-r", "--name-only", "-z", args.base, "--", "openswarm").split(b"\0") if path}
-            added = Counter({l: n for l, n in added.items() if l not in base_tree})
-        for line in sorted(added.elements()):
-            print(f"LEGACY-GROWN {line}")
-            forbidden = True
-
     for status, raw_path in entries:
         path = raw_path.decode("utf-8", errors="surrogateescape")
-        if not args.tree and path.startswith("openswarm/"):
-            print(f"FORBIDDEN {status} {path} (openswarm/)")
-            forbidden = True
-            continue
         rule = rule_for(path)
-        if rule == "openswarm/" and args.tree and path in legacy:
-            continue
         if rule:
             print(f"FORBIDDEN {status} {path} ({rule})")
             forbidden = True
