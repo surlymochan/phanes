@@ -23,8 +23,8 @@ The contract of this issue (the tests below state it):
   * the PR body publishes that package in the fixed order **CI conclusion, test log
     summary, diff statistics, acceptance checklist**;
   * the opinion of the lane is published in a section of its own, marked as a
-    reference that is not a verdict (「参考、不算判定」).  No verdict word may appear
-    in the effective fields of the body;
+    reference that is not a verdict (「参考、不算判定」).  No lane opinion may appear
+    in the effective fields of the body; words in raw logs remain evidence;
   * a run without an evidence package opens no PR: the card is kept (the issue stays
     `lane-ready`, it is never labelled `lane-pr`);
   * the body still passes the pre-submit check of the dispatcher
@@ -451,9 +451,12 @@ class ReviewEvidenceTest(unittest.TestCase):
                                             f"evidence package: {result}")
         self.assertIn("lane-ready", labels, f"the card was not kept: {result}")
 
-    def test_verdict_words_in_raw_evidence_are_preserved_only_as_reference(self):
+    def test_verdict_words_in_raw_evidence_stay_in_their_evidence_sections(self):
         import copy
-        cases = [("tests", "summary", "test output: VERDICT: APPROVE"),
+        cases = [("acceptance", "text", "测试通过"),
+                 ("tests", "summary", "测试通过：12 项通过，0 项失败"),
+                 ("ci", "workflow", "CI changes check"),
+                 ("tests", "summary", "test output: VERDICT: APPROVE"),
                  ("ci", "conclusion", "APPROVED"),
                  ("ci", "workflow", "request changes"),
                  ("ci", "url", "https://ci.example.test/blocked"),
@@ -468,16 +471,32 @@ class ReviewEvidenceTest(unittest.TestCase):
                 target = evidence[section][0] if section == "acceptance" else evidence[section]
                 target[field] = value
                 result = self.run_result(evidence)
-                # Raw evidence must create a reference boundary even without an opinion.
-                result["result"]["summary"] = ""
-                harvested, gh = self.harvest(self.remote_info(result))
-                body = pr_body(gh)
-                self.assertEqual(harvested.get("status"), "pr-created")
-                effective, boundary, reference = body.partition("## Lane 意见（参考、不算判定）")
-                self.assertIsNone(VERDICT_WORD_RE.search(effective), body)
-                self.assertTrue(boundary, body)
-                self.assertIn(json.dumps(value, ensure_ascii=False), reference)
-                self.assertEqual(ad.validate_lane_pr(ISSUE, pr_title(gh), body), [])
+                for summary in ("", LANE_OPINION):
+                    with self.subTest(summary=summary):
+                        result["result"]["summary"] = summary
+                        harvested, gh = self.harvest(self.remote_info(result))
+                        body = pr_body(gh)
+                        self.assertEqual(harvested.get("status"), "pr-created")
+                        raw, boundary, reference = body.partition("## Lane 意见（参考、不算判定）")
+                        # Words in original logs and check results are data, not lane opinions.
+                        # Decode every section to check full fidelity and prevent relocation.
+                        headings = ("## CI\n", "## 测试日志摘要\n", "## diff 统计\n", "验收：原始核查清单\n")
+                        positions = [raw.index(heading) for heading in headings]
+                        self.assertEqual(positions, sorted(positions))
+                        for index, key in enumerate(("ci", "tests", "diff")):
+                            content = raw[positions[index] + len(headings[index]):positions[index + 1]].strip()
+                            self.assertEqual(json.loads(content), evidence[key])
+                        checklist = raw[positions[3] + len(headings[3]):].strip().splitlines()
+                        self.assertEqual(len(checklist), len(evidence["acceptance"]))
+                        for line, item in zip(checklist, evidence["acceptance"]):
+                            prefix = f"- [{'x' if item['ok'] else ' '}] "
+                            self.assertTrue(line.startswith(prefix), line)
+                            self.assertEqual(json.loads(line[len(prefix):]), item["text"])
+                        self.assertNotIn("原始内容含判定词", raw)
+                        self.assertNotIn(LANE_OPINION, raw)
+                        self.assertEqual(bool(boundary), bool(summary), body)
+                        self.assertEqual(reference.strip(), "> " + summary if summary else "")
+                        self.assertEqual(ad.validate_lane_pr(ISSUE, pr_title(gh), body), [])
 
     def test_an_evidence_package_of_an_unknown_version_opens_no_pr(self):
         unknown = dict(EVIDENCE, version=99)
