@@ -98,7 +98,12 @@ snapshot_extra_managed_skills() {
     printf '%s\n' "$EXTRA_SOURCE_DIRS" | while IFS= read -r source_dir; do
       [ -n "$source_dir" ] || continue
       [ -d "$source_dir" ] || continue
-      for source_path in "$source_dir"/*; do
+      # Avoid inserting an extra slash before the skill name, which would
+      # prevent matching the source path stored in existing markers.
+      while [ "$source_dir" != / ] && [ "${source_dir%/}" != "$source_dir" ]; do
+        source_dir=${source_dir%/}
+      done
+      for source_path in "${source_dir%/}"/*; do
         [ -d "$source_path" ] || continue
         skill_name=$(basename "$source_path")
         if [ "$skill_name" = "xmem" ] && standalone_xmem_install_enabled; then
