@@ -80,10 +80,18 @@ class PiIsolationTests(unittest.TestCase):
             runtime = root / 'runtime'
             binary = runtime / 'node_modules' / '.bin' / 'pi'
             binary.parent.mkdir(parents=True)
-            binary.write_text('#!/usr/bin/python3\nimport json,subprocess,shutil\n'
+            binary.write_text('#!/usr/bin/python3\nimport json,os,pathlib,subprocess,shutil\n'
                               'g=subprocess.run(["git","status","--porcelain"],capture_output=True,text=True)\n'
                               'n=subprocess.run(["node","--version"],capture_output=True,text=True)\n'
-                              'print(json.dumps({"git":g.returncode,"node":n.returncode,"node_path":shutil.which("node"),"parent":open("../tracked").read()}))\n')
+                              'probe=pathlib.Path(".git-write-probe");probe.write_text("probe")\n'
+                              'a=subprocess.run(["git","add","--",str(probe)],capture_output=True,text=True)\n'
+                              'idx=subprocess.run(["git","rev-parse","--git-path","index"],capture_output=True,text=True)\n'
+                              'subprocess.run(["git","reset","--quiet","--",str(probe)],capture_output=True)\n'
+                              'ref="refs/swrm-test/pi-isolated-probe"\n'
+                              'u=subprocess.run(["git","update-ref",ref,"HEAD"],capture_output=True,text=True)\n'
+                              'if u.returncode == 0: subprocess.run(["git","update-ref","-d",ref],capture_output=True)\n'
+                              'probe.unlink()\n'
+                              'print(json.dumps({"git":g.returncode,"node":n.returncode,"node_path":shutil.which("node"),"parent":open("../tracked").read(),"add":a.returncode,"index":idx.stdout.strip(),"add_error":a.stderr.strip(),"update_ref":u.returncode,"ref_error":u.stderr.strip()}))\n')
             binary.chmod(0o755)
             sock = socket.socket(socket.AF_UNIX)
             try:
@@ -95,7 +103,13 @@ class PiIsolationTests(unittest.TestCase):
                            'MiniMax-M3.1-Flash', '--tools', 'read,bash,edit,write,grep,find,ls', 'synthetic']
                 result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout), {'git': 0, 'node': 0, 'node_path': '/node/bin/node', 'parent': 'ok'})
+                expected_index = subprocess.check_output(
+                    ['git', '-C', str(work), 'rev-parse', '--path-format=absolute', '--git-path', 'index'],
+                    text=True).strip()
+                self.assertEqual(json.loads(result.stdout), {
+                    'git': 0, 'node': 0, 'node_path': '/node/bin/node', 'parent': 'ok',
+                    'add': 0, 'index': expected_index, 'add_error': '',
+                    'update_ref': 0, 'ref_error': ''})
             finally:
                 sock.close()
 

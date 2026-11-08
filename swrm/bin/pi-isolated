@@ -71,7 +71,11 @@ fi
     if git.returncode == 0:
         common_dir = os.path.realpath(git.stdout.strip())
         if os.path.isdir(common_dir):
-            cmd += ['--ro-bind', common_dir, common_dir]
+            # A linked worktree's .git file points into common_dir/worktrees/<id>.
+            # Git writes its index there and refs/objects in common_dir itself.
+            # Keep those writes inside the isolated view while allowing Git to
+            # stage and commit changes from the writable worktree.
+            cmd += ['--bind', common_dir, common_dir]
             if not deps_root and os.path.basename(common_dir) == '.git':
                 deps_root = os.path.dirname(common_dir)
     if deps_root:
