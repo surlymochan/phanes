@@ -45,6 +45,19 @@ class WatchTests(unittest.TestCase):
                          [("msg", "finished")])
         self.assertEqual(messages.flush(), [])
 
+    def test_mixed_events_ignore_empty_and_malformed_messages(self):
+        messages = xs.WatchMessages()
+        self.assertEqual(messages.feed(update("agent_message_chunk", content={
+            "type": "text", "text": "intermediate"})), [])
+        self.assertEqual(messages.feed(update("tool_call", toolCallId="one", title="inspect")),
+                         [("msg", "intermediate"), ("cmd", "inspect")])
+        self.assertEqual(messages.feed(update("agent_message_chunk", content={})), [])
+        self.assertEqual(messages.feed({"type": "message_end", "message": "malformed message"}), [])
+        self.assertEqual(messages.feed({"type": "message_end", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "final message"}]}}),
+            [("msg", "final message")])
+        self.assertEqual(messages.flush(), [])
+
     def test_cursor_one_shot_and_codex_messages(self):
         messages = xs.WatchMessages()
         for text in ("first", " second"):
