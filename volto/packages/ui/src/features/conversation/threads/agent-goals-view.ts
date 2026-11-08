@@ -46,20 +46,37 @@ export function agentGoalGroups(goals: readonly AgentTask[]): {
 }
 
 /**
+ * The percent of a progress text, with the fraction of a percent it may name. The whole number
+ * alone would read the tail of a decimal as the percent, so the fraction belongs to the number.
+ */
+const PROGRESS_PERCENT = /(\d{1,3}(?:\.\d+)?)\s*%/;
+
+/**
  * How far a goal is, in percent. A goal that is done is at 100. The snapshot has no completion of
- * its own yet, so the percent of the progress text is what the goal reached.
+ * its own yet, so the percent of the progress text is what the goal reached. A progress that names
+ * a fraction of a percent keeps it, so the view shows the percent the agent reported.
  */
 export function agentGoalCompletion(goal: AgentTask): number {
   if (goal.state === "closed") return 100;
-  const percent = goal.progress?.match(/(\d{1,3})\s*%/)?.[1];
+  const percent = goal.progress?.match(PROGRESS_PERCENT)?.[1];
   if (percent === undefined) return 0;
   return Math.max(0, Math.min(100, Number(percent)));
+}
+
+/**
+ * The percent of a completion, as the user reads it. A fraction of a percent stays a fraction, and
+ * a number too small for a plain text would read as an exponent, so it keeps its decimals.
+ */
+function completionNumber(value: number): string {
+  const text = String(value);
+  if (!text.includes("e")) return text;
+  return value.toFixed(10).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 /** The completion of a goal, as the user reads it. */
 export function agentGoalCompletionText(goal: AgentTask): string {
   if (goal.state === "closed") return COMPLETED_GOAL_COMPLETION;
-  return `${agentGoalCompletion(goal)}%`;
+  return `${completionNumber(agentGoalCompletion(goal))}%`;
 }
 
 /** The group a key moves to. The arrow keys move between the groups, Home and End pick one. */

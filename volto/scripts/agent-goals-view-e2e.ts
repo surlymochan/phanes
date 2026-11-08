@@ -225,6 +225,33 @@ const checks: { name: string; run: () => void }[] = [
     },
   },
   {
+    name: "keeps the value of a progress that is not a whole percent",
+    run: () => {
+      const decimal = goal({
+        id: "goal-decimal",
+        title: "A goal",
+        state: "running",
+        progress: "42.5% done",
+      });
+      assert.equal(agentGoalCompletion(decimal), 42.5);
+      assert.equal(agentGoalCompletionText(decimal), "42.5%");
+      const goals = mountGoals([decimal]);
+      const row = goals.rows()[0];
+      assert.ok(row, "The goal that runs now is missing.");
+      assert.equal(completionOf(row), "42.5%");
+      assert.equal(row.querySelector(".agent-goal-completion")?.getAttribute("aria-label"), "Completion 42.5%");
+      // A percent outside the bounds is not shown, and a decimal that is not a percent is no percent.
+      assert.equal(
+        agentGoalCompletion(goal({ id: "goal-wide-decimal", title: "A goal", state: "running", progress: "420.5%" })),
+        100,
+      );
+      assert.equal(
+        agentGoalCompletion(goal({ id: "goal-step", title: "A goal", state: "running", progress: "step 1.5 of 3" })),
+        0,
+      );
+    },
+  },
+  {
     name: "shows the open task alone when the host has no snapshot",
     run: () => {
       assert.deepEqual(agentGoalsForView(undefined, runningGoal), [runningGoal]);

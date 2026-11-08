@@ -83,6 +83,20 @@ describe("the goals of an agent in a side thread", () => {
     expect(panel?.textContent).not.toContain(closedGoal.title);
   });
 
+  it("shows a progress that is not a whole percent with the percent it names", () => {
+    const decimalGoal = goal({
+      id: "goal-decimal",
+      title: "Refine the notes",
+      state: "running",
+      progress: "42.5% done",
+    });
+    renderThread([decimalGoal]);
+    const panel = document.getElementById("agent-goals-panel");
+    expect(panel?.textContent).toContain("42.5%");
+    const completion = panel?.querySelector(".agent-goal-completion");
+    expect(completion?.getAttribute("aria-label")).toBe("Completion 42.5%");
+  });
+
   it("moves between the groups with the keyboard, and keeps the goals that are done", async () => {
     renderThread([runningGoal, closedGoal]);
     const active = document.getElementById("agent-goals-active");
