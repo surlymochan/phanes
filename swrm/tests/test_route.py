@@ -122,6 +122,12 @@ class RoutingScenarios(unittest.TestCase):
         policy["routing"]["default_order"] = ["ocgo", "codex"]
         self.check(prof("mechanical", 1), scenario(), {"backend": "ocgo"}, policy)
 
+    def test_26_disabled_backend_is_skipped_during_automatic_routing(self):
+        st = scenario()
+        st["codex"]["disabled"] = True
+        self.check(prof(d=3), st, {"backend": "ocgo",
+                                    "skipped": lambda s: "codex" in s}, OPT_IN_POLICY)
+
     def test_20_review_spreads_off_the_workhorse_family(self):
         # Two balanced ocgo families: the newer one is the router's workhorse
         # pick for implementation. A review must not land on that same family
@@ -192,6 +198,22 @@ class RoutingScenarios(unittest.TestCase):
         review = xs.route(prof("review", 3), st, OPT_IN_POLICY)
         self.assertEqual(review["backend"], "ocgo")
         self.assertNotIn("degraded", review)
+
+    def test_26_unknown_or_empty_type_uses_default_route(self):
+        for task_type in ("custom-task", ""):
+            with self.subTest(task_type=task_type):
+                self.check(prof(task_type, 3), scenario(),
+                           {"ok": True, "backend": "codex", "tier": "balanced"})
+
+        # A profile with no type is the empty-type form used by callers that
+        # omit the optional field. It should take the same stable default.
+        profile = {"difficulty": 3}
+        self.check(profile, scenario(), {"ok": True, "backend": "codex", "tier": "balanced"})
+
+    def test_27_explicit_backend_and_model_win_for_unknown_type(self):
+        self.check({"type": "custom-task", "difficulty": 3, "backend": "deepseek",
+                    "model": "deepseek-flash"}, scenario(),
+                   {"ok": True, "backend": "deepseek", "model": "deepseek-flash"})
 
     def test_21_impl_does_not_spread(self):
         st = scenario(codex_week=0.90)
