@@ -190,8 +190,9 @@ def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=No
     """Track measured quick no-commit runs and brake a lane after N consecutive failures (Refs #1711)."""
     failures = load_lane_failures()
     if committed:
-        failures.pop(lane, None)
-        save_lane_failures(failures)
+        if lane in failures:
+            failures.pop(lane)
+            save_lane_failures(failures)
         return 0
     # Missing runtime data is not evidence of a quick failure; never guess from an unknown duration.
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0 or seconds > LANE_FAILURE_WINDOW:
@@ -211,6 +212,10 @@ def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=No
         if not os.path.exists(marker):
             with open(marker, "w", encoding="utf-8") as stream:
                 stream.write(f"auto: #1711 {len(runs)} consecutive quick no-commit failures; latest #{issue}: {reason}\n")
+            event = {"at": now, "source": "lane-brake", "lane": lane, "count": len(runs),
+                     "latest": runs[-1], "switch": f"PAUSE-{lane}"}
+            with open(os.path.join(D, SWITCH_ALERT_FILE), "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, ensure_ascii=False) + "\n")
             try: log(f"lane brake {lane}: {len(runs)} consecutive quick failures; latest #{issue}: {reason}")
             except OSError: pass  # the pause switch remains authoritative if the brain log is unavailable
     return len(runs)
@@ -938,7 +943,7 @@ def freshen_queue(q, state, cache=None):
     return fresh
 
 def status_snapshot(lanes, state, res, ready, blocked):
-    """Build observable status, including lane brakes. B1→runtime projection/test_remote_seconds_projection; B2→health status/test_brake_status_is_supervisor_readable; B3→no binary artifacts/git status verification."""
+    """Build observable status, including lane brakes (Refs #1711)."""
     status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L))
     status["_ready"] = ready
@@ -1279,6 +1284,8 @@ def tick(lanes, state, last_warn):
             if result.get("done"): state.pop(L); save_state(state)
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
+    # finish() may have created a lane brake during this tick; dispatch must see it now.
+    scopes = paused_scopes()
     try: q = queue()
     except Exception as e: log(f"queue error: {e}", brain=False); return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
