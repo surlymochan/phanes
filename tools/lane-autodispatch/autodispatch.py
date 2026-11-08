@@ -12,7 +12,12 @@ A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holdin
 deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+import importlib.util
 from datetime import datetime, timezone
+# Resolve the sibling even when the dispatcher is loaded by path from another directory.
+_risk_spec = importlib.util.spec_from_file_location("tester_risk", os.path.join(os.path.dirname(__file__), "tester_risk.py"))
+tester_risk = importlib.util.module_from_spec(_risk_spec)
+_risk_spec.loader.exec_module(tester_risk)
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -1470,6 +1475,9 @@ CAPACITY_EXHAUSTED_RE = re.compile(r"\b(?:capacity exhausted|no (?:available )?c
 def dispatch(lane, cfg, item, base):
     n = item["n"]
     body = item["body"]
+    if item.get("verify") and item.get("tester_risk"):
+        risk = item["tester_risk"]
+        body = f"{body.rstrip()}\n\nTester evidence review: {risk['decision']}\nReason: {risk['reason']}\n"
     labels = set(item.get("labels", ()))
     # PLANNER's ordinary work cards have Chinese titles and only priority/backend
     # labels, so impl is the default. Explicit non-impl markers take precedence,
@@ -2058,6 +2066,11 @@ def tick(lanes, state, last_warn):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: return "no-card"
+        if pick.get("verify"):
+            pick["tester_risk"] = tester_risk.classify_card(
+                pick["body"], repo=REPO, read=sh,
+                sample_rate=os.environ.get("AD_TESTER_RISK_SAMPLE_RATE", "0.2"),
+                seed=os.environ.get("AD_TESTER_RISK_SEED", "risk-v1"))
         commit = base_commit()
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, commit)
@@ -2065,6 +2078,7 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        if pick.get("verify"): state[L]["tester_risk"] = pick["tester_risk"]
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)

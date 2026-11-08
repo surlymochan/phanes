@@ -1,13 +1,19 @@
 """Acceptance tests for the tester evidence review risk classifier (#1988)."""
 import importlib.util
+import json
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("tester_risk.py")
 spec = importlib.util.spec_from_file_location("tester_risk", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+SCRATCH = SCRIPT.resolve().parents[2] / ".swrm-tmp"
 
 
 class TesterRiskTests(unittest.TestCase):
@@ -96,6 +102,132 @@ class TesterRiskTests(unittest.TestCase):
                 result = self.classify(diff_stats, needs_human_history=history)
                 self.assertEqual(result["decision"], "full_read")
                 self.assertTrue(result["reason"])
+
+
+class TesterRiskDispatchTests(unittest.TestCase):
+    """Drive the real queue, dispatch task, and state writer with offline I/O."""
+
+    def run_card(self, pr=None, events=None, *, target="#1988", rate="0", seed="fixed",
+                 issue_number=2000, verify=True):
+        spec = importlib.util.spec_from_file_location(
+            "risk_dispatch", SCRIPT.with_name("autodispatch.py"))
+        ad = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ad)
+        pr = {"changed_files": 1, "additions": 2, "deletions": 1, "labels": []} if pr is None else pr
+        events = [[]] if events is None else events
+        body = f"## Verify Intent\n目标 PR: {target}\n证据要求:\n- [ ] 测试日志"
+        row = {"number": issue_number, "title": "verify evidence", "body": body,
+               "labels": ["lane-ready", "verify-intent"] if verify else ["lane-ready"]}
+        reads = []
+
+        def fake_sh(cmd, **kwargs):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return 0, json.dumps([row]), ""
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return 0, json.dumps(row), ""
+            if cmd[:3] == ["gh", "issue", "edit"]:
+                return 0, "", ""
+            if cmd[:2] == ["gh", "api"]:
+                reads.append(cmd)
+                data = events if "/events" in cmd[2] else pr
+                if isinstance(data, Exception):
+                    raise data
+                if isinstance(data, tuple):
+                    return data
+                if "/events" in cmd[2] and isinstance(data, list):
+                    return 0, "\n".join(json.dumps(page) for page in data), ""
+                return 0, json.dumps(data), ""
+            if cmd[:2] == ["git", "ls-remote"]:
+                return 0, "a" * 40 + "\n", ""
+            if cmd[0] == "ssh":
+                return 0, '{"id": "risk-run"}', ""
+            self.fail(f"unexpected command: {cmd}")
+
+        SCRATCH.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as tmp:
+            root = Path(tmp)
+            (root / "PAUSE-MINT").write_text("test: no replenishment")
+            env = {"OPENSWARM_HOME": str(root / "swrm"),
+                   "OPENSWARM_CTL_STATE_DIR": str(root / "ctl"),
+                   "AD_TESTER_RISK_SAMPLE_RATE": rate, "AD_TESTER_RISK_SEED": seed}
+            with patch.dict(os.environ, env), patch.multiple(
+                ad, D=tmp, BRAIN_LOG=str(root / "brain.log"), AD_VERIFY_SHARE_ENABLED=False,
+                sh=fake_sh, remote=lambda *args: {"lane": "idle"},
+                # Isolate the pre-existing pause_reason signature failure in status output.
+                status_snapshot=lambda *args: {},
+            ):
+                ad.tick({"CX2": {"host": "test-host", "backend": "codex"}}, {}, 0)
+            state = json.loads((root / "state.json").read_text())
+            task = (root / "tasks" / f"CX2-{issue_number}.md").read_text()
+        self.assertEqual(state["CX2"]["issue"], issue_number)
+        return state["CX2"], task, reads
+
+    def test_tick_persists_large_diff_decision_and_passes_it_to_review_lane(self):
+        state, task, reads = self.run_card(
+            {"changed_files": 20, "additions": 2, "deletions": 1, "labels": []})
+        risk = state["tester_risk"]
+        self.assertEqual(risk["decision"], "full_read")
+        self.assertIn("large diff", risk["reason"])
+        self.assertIn(risk["decision"], task)
+        self.assertIn(risk["reason"], task)
+        self.assertTrue(reads)
+
+    def test_tick_reads_removed_needs_human_labels_across_history_pages(self):
+        state, _, reads = self.run_card(events=[[], [
+            {"event": "labeled", "label": {"name": "needs-human"}},
+            {"event": "unlabeled", "label": {"name": "needs-human"}},
+        ]])
+        self.assertEqual(state["tester_risk"]["decision"], "full_read")
+        self.assertIn("history present", state["tester_risk"]["reason"])
+        history_read = next(cmd for cmd in reads if "/events" in cmd[2])
+        self.assertIn("--paginate", history_read)
+        self.assertNotIn("--slurp", history_read)  # supported by older deployed gh versions
+
+    def test_tick_current_needs_human_label_requires_full_read(self):
+        state, _, _ = self.run_card(
+            {"changed_files": 1, "additions": 2, "deletions": 1,
+             "labels": [{"name": "needs-human"}]})
+        self.assertEqual(state["tester_risk"]["decision"], "full_read")
+
+    def test_tick_sampling_uses_target_pr_instead_of_card_number(self):
+        for rate, expected in (("0", "sampled"), ("1", "full_read"), ("0.2", None)):
+            with self.subTest(rate=rate):
+                first, _, _ = self.run_card(rate=rate)
+                repeated, _, _ = self.run_card(
+                    target="https://github.com/surlymochan/phanes/pull/1988",
+                    rate=rate, issue_number=2001)
+                self.assertEqual(first["tester_risk"], repeated["tester_risk"])
+                expected_risk = module.classify(
+                    {"files_changed": 1, "additions": 2, "deletions": 1}, [],
+                    pr_number=1988, sample_rate=float(rate), seed="fixed")
+                self.assertEqual(first["tester_risk"], expected_risk)
+                if expected:
+                    self.assertEqual(first["tester_risk"]["decision"], expected)
+
+    def test_tick_missing_or_malformed_remote_data_and_config_fail_closed(self):
+        for kwargs in (
+            {"pr": {}}, {"pr": {"changed_files": True}},
+            {"pr": (1, "", "unavailable")}, {"pr": (0, "null", "")},
+            {"pr": subprocess.TimeoutExpired("gh", 60)},
+            {"events": {}}, {"events": []}, {"events": [[None]]},
+            {"events": (0, "not JSON", "")},
+            {"events": [[{"event": "labeled"}]]},
+            {"events": [[{"event": "labeled", "label": {"name": ""}}]]},
+            {"events": [[{"event": ""}]]},
+            {"events": subprocess.TimeoutExpired("gh", 60)},
+            {"rate": "invalid"}, {"rate": "nan"}, {"seed": ""},
+            {"target": "unknown"},
+            {"target": "https://github.com/other/repo/pull/1988"},
+        ):
+            with self.subTest(kwargs=kwargs):
+                state, _, _ = self.run_card(**kwargs)
+                self.assertEqual(state["tester_risk"]["decision"], "full_read")
+                self.assertTrue(state["tester_risk"]["reason"])
+
+    def test_tick_ordinary_work_does_not_fetch_pr_or_record_tester_risk(self):
+        state, _, reads = self.run_card(verify=False)
+        self.assertNotIn("tester_risk", state)
+        self.assertEqual(reads, [])
 
 
 if __name__ == "__main__":
