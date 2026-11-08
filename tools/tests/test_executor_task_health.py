@@ -786,6 +786,62 @@ class ExecutorProbeCommandLineTests(ProbeTestCase):
 class ExecutorReviewRegressionTests(ProbeTestCase):
     """Regressions for the blockers of the implementation reviews."""
 
+    def test_incomplete_cgroup_map_is_uncollected_instead_of_zero_zombies(self):
+        host = self.soft_host()
+        host.services[SERVICE]["pids"] = []
+        host.service(SERVICE2, tasks_current=900, tasks_max=1000, pids=[])
+        host.ps += sweep_ps(count=3)
+        group = "/system.slice/" + SERVICE + "/sandbox"
+        valid = "%d 0::%s\n" % (PARENT_PID, group)
+        samples = {
+            "pid_only": "\n".join(str(PARENT_PID + 1 + index) for index in range(51)),
+            "partial": valid + "%d 0:" % (PARENT_PID + 1),
+            "empty_path": valid + "%d 0::" % (PARENT_PID + 1),
+        }
+        for name, output in samples.items():
+            with self.subTest(sample=name):
+                def runner(command):
+                    if command == MODULE.CGROUP_MAP_COMMAND:
+                        return output + "\n"
+                    return host.run(command)
+
+                health = self.root / "health.json"
+                alert = self.root / "health.alert"
+                payload = MODULE.update(HOST, health, alert,
+                                        self.root / "snapshots", run=runner)
+                self.assertEqual(payload["status"], "uncollected")
+                self.assertIn("error", payload)
+                self.assertEqual(len(payload["services"]), 2)
+                for service in payload["services"]:
+                    self.assertFalse(service["collected"])
+                    self.assertEqual(service["level"], "uncollected")
+                    self.assertIsNone(service["zombie_count"])
+                    self.assertIn("error", service)
+                self.assertEqual(json.loads(health.read_text())["executor_tasks"][HOST], payload)
+                self.assertEqual(MODULE.build_alerts(payload), [])
+                self.assertFalse(alert.exists())
+                self.assertFalse(self.snapshots())
+
+    def test_bulk_cgroup_command_propagates_a_read_failure(self):
+        # A missing middle cgroup file must fail even though subsequent reads and
+        # printf would succeed. Execute the actual remote command through a shell.
+        proc = self.root / "proc"
+        proc.mkdir()
+        for pid in (100, 101, 102):
+            entry = proc / str(pid)
+            entry.mkdir()
+            if pid != 101:
+                (entry / "cgroup").write_text("0::/system.slice/" + SERVICE + "\n")
+        command = MODULE.CGROUP_MAP_COMMAND.replace("/proc/", str(proc) + "/")
+        real_run = subprocess.run
+
+        def remote_shell(argv, **kwargs):
+            return real_run(["sh", "-c", ssh_command(argv, HOST)], **kwargs)
+
+        with mock.patch.object(MODULE.subprocess, "run", side_effect=remote_shell):
+            with self.assertRaises(subprocess.CalledProcessError):
+                MODULE.ssh_runner(HOST)(command)
+
     def test_failed_cgroup_map_marks_each_service_uncollected_without_alerting(self):
         host = self.soft_host()
         host.services[SERVICE]["pids"] = []

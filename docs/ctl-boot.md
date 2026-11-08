@@ -654,7 +654,8 @@ Rules of the probe:
   (`"level": "uncollected"`) and never alerts;
 - a failed bulk `/proc` cgroup mapping marks the host and every enumerated service
   **not collected**, without alerts, because descendant cgroup zombies cannot be
-  counted reliably without that mapping;
+  counted reliably without that mapping. Any failed `/proc/<pid>/cgroup` read aborts
+  the remote command; PID-only or malformed mapping records also fail sampling;
 - when an alert fires, the full `ps -eo pid,ppid,stat,etimes,args` table is written to the
   snapshot directory **before** the alert is appended to `health.alert`; if the snapshot
   cannot be saved, no alert is written (no evidence, no alert);
@@ -759,6 +760,12 @@ Third implementation review (baseline `a22027eaa`), regressions in `ExecutorRevi
 | B1 - failed bulk cgroup mapping silently becomes an empty mapping | record the host and every enumerated service as `uncollected`, persist the error in `health.json`, and suppress alerts for the failed sample | `test_failed_cgroup_map_marks_each_service_uncollected_without_alerting` covers an empty root cgroup, 51 zombies, a second service above the hard task threshold, and duplicate sweep loops |
 | B2 - systemd's failed-unit marker hides executor services | accept the optional leading `●` in `list-units` output and sample the unit normally | `test_failed_unit_marker_is_parsed_and_the_service_is_sampled` covers marked and unmarked executor services and verifies the marked service's zombie alert |
 | follow-up - atomic replacement changes existing summary permissions to `0600` | copy the existing permission bits to the temporary file before replacement | `test_health_atomic_replace_preserves_existing_permissions` covers `0644`, `0640`, and `0600` |
+
+Fourth implementation review (baseline `1c890c4e4`), regressions in `ExecutorReviewRegressionTests`:
+
+| blocker | fix | regression |
+|---|---|---|
+| B1 - `printf` masks failed bulk cgroup reads and parsing ignores incomplete records | exit nonzero immediately on a failed read and reject PID-only or malformed records, using the existing host/service `uncollected` path | `test_bulk_cgroup_command_propagates_a_read_failure` executes the remote command in a real shell with a missing middle file; `test_incomplete_cgroup_map_is_uncollected_instead_of_zero_zombies` verifies 51 zombies with an empty root PID list, persisted failure for every service, and no alerts or snapshots |
 
 
 ## ctl-loop child reaping and restart (Refs #951)

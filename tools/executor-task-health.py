@@ -96,8 +96,9 @@ CGROUP_PROCS_COMMAND = "cat /sys/fs/cgroup%s/cgroup.procs"
 # One dump of the cgroup of every process: a zombie that is already reaped from
 # cgroup.procs still shows its cgroup here, so it can be attributed to its unit.
 CGROUP_MAP_COMMAND = (
-    "for p in /proc/[0-9]*; do printf '%s ' \"${p#/proc/}\"; "
-    "head -n 1 \"$p/cgroup\" 2>/dev/null; printf '\\n'; done"
+    "for p in /proc/[0-9]*; do "
+    "group=$(head -n 1 \"$p/cgroup\") || exit 1; "
+    "printf '%s %s\\n' \"${p#/proc/}\" \"$group\"; done"
 )
 
 DEFAULT_TIMEOUT = 60.0
@@ -165,16 +166,19 @@ def parse_pid_list(output: str) -> Set[int]:
 
 
 def parse_cgroup_map(output: str) -> Dict[int, str]:
-    """The ``pid -> cgroup`` pairs of the bulk dump; malformed lines are ignored."""
+    """The ``pid -> cgroup`` pairs of the bulk dump; incomplete records fail sampling."""
     mapping: Dict[int, str] = {}
     for line in (output or "").splitlines():
+        if not line.strip():
+            continue
         fields = line.split()
         if len(fields) != 2 or not fields[0].isdigit():
-            continue
-        path = fields[1]
-        if ":" not in path:
-            continue  # not a cgroup line (0::/system.slice/... or 1:name=systemd:/...)
-        mapping[int(fields[0])] = path.split(":", 2)[-1]
+            raise ValueError("incomplete /proc cgroup record: %r" % line)
+        # Both 0::/path (v2) and 1:name=systemd:/path (v1) need an absolute path.
+        cgroup = fields[1].split(":", 2)
+        if len(cgroup) != 3 or not cgroup[0].isdigit() or not cgroup[2].startswith("/"):
+            raise ValueError("invalid /proc cgroup record: %r" % line)
+        mapping[int(fields[0])] = cgroup[2]
     return mapping
 
 
