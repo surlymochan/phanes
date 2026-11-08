@@ -107,6 +107,19 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 校验结果写入 run 记录（lane 主机 `runs/<run>/pr-validation.json` 与 `pr-validation.log`）
 和 AD 侧 `~/phanes-ctl/autodispatch/runs/<run>.log`，供阻塞诊断引用。
 
+## 推送前 verify 门禁（Refs #1865）
+
+收割 lane run 时、**推送之前**读 `verify_rc`：`0` 正常推送；`null` 不拦推送（没有证据 ≠
+失败，记日志 `no acceptance evidence`）；非 0 则**不推送**，失败输出写进卡面，卡重排回
+`lane-ready`（同一 fix 重试，不打 `lane-failed`）。本地重试上限 **2 次**
+（`AD_VERIFY_GATE_RETRIES`）：重试用完仍然失败就推送，并在 PR 评论标红 🔴 写明 verify 失败。
+
+卡面必须有一行 `验收:`（反引号命令）；缺时 AD 用被改文件的既有测试命令兜底（改的测试文件
+自身 / 组件自己的 typecheck / 同名或同目录的测试文件），并把这一行写回卡面。失败输出带
+`<!-- lane-verify-fail run=<run> -->` 标记：同一个 run 再次收割时不追加、不计次；卡面读不出来
+或写不进去时保留收割状态，下个 tick 重试，不消耗重试预算。设计页与裁定映射：
+[`../../docs/issue-1865-verify-gate.md`](../../docs/issue-1865-verify-gate.md)。
+
 ## 收割前的越界产物过滤（Refs #1835）
 
 收割 fix/rebase/impl 的结果、推送回 PR 分支之前，AD 对待推送分支的变更文件做机械过滤：

@@ -84,27 +84,36 @@ def make_lane_repo(root):
 class FakeLaneHost:
     """Records every gh/git call the submit path makes."""
 
-    def __init__(self, subject="fix #1704 parser", message="", summary="", tests="", verify_rc=None):
+    def __init__(self, subject="fix #1704 parser", message="", summary="", tests="", verify_rc=None,
+                 card_body="", verify=None, base="a" * 40):
         self.subject = subject
         self.message = message
         self.summary = summary
         self.tests = tests
         self.verify_rc = verify_rc
+        self.verify = verify
+        self.base = base           # the base commit the fake `git ls-remote` answers with
+        self.card_body = card_body   # the body of the card (gh issue view --json body)
         self.prs = []          # gh pr create payloads
         self.label_edits = []  # gh issue edit payloads
         self.comments = []     # gh issue comment payloads
+        self.pr_comments = []; self.pushes = []  # gh pr comment payloads, git push commands
         self.run_records = []  # run records written next to the run on the lane host
         self.logs = []
 
     def info(self):
         return {"status": "done", "branch": "work", "commit": "c0ffee", "repo": CFG["repo"],
                 "backend": CFG["backend"], "model": CFG["model"], "summary": self.summary,
-                "tests": self.tests, "verify_rc": self.verify_rc}
+                "tests": self.tests, "verify_rc": self.verify_rc, "verify": self.verify}
 
     def sh(self, cmd, timeout=120, inp=None):
         argv = cmd if isinstance(cmd, list) else [cmd]
         if isinstance(cmd, list) and "--format=%s" in cmd: return 0, self.subject, ""
         if isinstance(cmd, list) and "--format=%B" in cmd: return 0, self.message, ""
+        if isinstance(cmd, list) and "push" in cmd: self.pushes.append(argv); return 0, "", ""
+        if isinstance(cmd, list) and "ls-remote" in cmd: return 0, self.base + "\trefs/heads/main", ""
+        if isinstance(cmd, list) and "lane assign" in " ".join(argv):
+            self.assigns = getattr(self, "assigns", 0) + 1; return 0, '{"id": "r%d"}' % self.assigns, ""
         if inp and "pr-validation.json" in inp:  # the run record write on the lane host
             self.run_records.append(json.loads(base64.b64decode(argv[-1]).decode("utf-8")))
             return 0, "ok", ""
@@ -114,9 +123,18 @@ class FakeLaneHost:
         if args[:2] == ["pr", "create"]:
             self.prs.append(dict(zip(args[2::2], args[3::2])))
             return 0, "https://github.com/surlymochan/phanes/pull/1", ""
-        if args[:2] == ["issue", "view"]: return 0, json.dumps({"labels": []}), ""
+        if args[:2] == ["pr", "comment"]:
+            self.pr_comments.append(list(args)); return 0, "", ""
+        if args[:2] == ["issue", "view"]:
+            if getattr(self, "view_rc", 0): return self.view_rc, "", "gh failed"
+            return 0, json.dumps({"body": self.card_body} if "body" in args else {"labels": []}), ""
         if args[:2] == ["issue", "edit"]:
-            self.label_edits.append(list(args)); return 0, "", ""
+            self.label_edits.append(list(args))
+            if getattr(self, "edit_rc", 0): return self.edit_rc, "", "gh failed"
+            if "--body" in args:
+                body = args[args.index("--body") + 1]
+                self.card_body = body
+            return 0, "", ""
         if args[:2] == ["issue", "comment"]:
             self.comments.append(list(args)); return 0, "", ""
         return 0, "", ""
@@ -275,6 +293,119 @@ class LanePrSubmitTests(unittest.TestCase):
         logged = run_log.read_text(encoding="utf-8")
         self.assertIn("pr_validation", logged)
         self.assertIn("PR 正文缺少 Closes/Fixes/Resolves #1704", logged)
+
+
+class VerifyGateTests(unittest.TestCase):
+    """The push of a lane run is gated on its acceptance (Refs #1865, B1-B5: `docs/issue-1865-verify-gate.md` §8)."""
+
+    FAIL = {"cmd": "python -m unittest tools.tests.test_lane_pr_validation", "rc": 1,
+            "tail": "FAILED tests/test_x.py", "failing": ["tests/test_x.py"]}
+    LANES = {"codex": {"host": "host1", "backend": "codex", "model": "gpt"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo, self.base = make_lane_repo(self.tmp.name)
+        self.state = {"codex": {"issue": ISSUE, "run": RUN, "base": self.base, "host": CFG["host"], "at": "2026-11-04 10:00:00"}}
+        self.patch(D=self.tmp.name, LOCAL=str(self.repo))
+
+    def patch(self, **values):
+        """Patch the module attributes for the duration of the test."""
+        for name, value in values.items():
+            patcher = mock.patch.object(MODULE, name, value); patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def fake(self, **kwargs):
+        """A fake GitHub and lane host."""
+        fake = FakeLaneHost(**kwargs)
+        self.patch(sh=fake.sh, gh=fake.gh, log=fake.log)
+        return fake
+
+    def finish(self, fake):
+        """Harvest a finished lane run (the submit path)."""
+        return MODULE.finish("codex", CFG, {"issue": ISSUE, "run": RUN, "base": self.base, "host": CFG["host"]}, fake.info(), self.state)
+
+    def tick(self, fake):
+        """One AD tick with a fake lane host, a fake queue and a fake GitHub."""
+        card = {"n": ISSUE, "title": "t", "body": "fix it\n", "prio": 0, "backend": None, "strict": False}
+        self.patch(remote=lambda lane, cfg, run="": {"lane": "idle", "run": fake.info()}, queue=lambda: [card],
+                   label_state=lambda n, cache=None: ("fresh", {}), prefetch_labels=lambda *a, **k: None,
+                   deps_met=lambda item: True, audit_switches=lambda *a, **k: None,
+                   paused_scopes=lambda *a, **k: set(), replenish=lambda k, state: [])
+        MODULE.tick(self.LANES, self.state, 0)
+
+    def test_only_a_passing_acceptance_is_pushed(self):
+        fake = self.fake(message=MESSAGE_WITH_ALL, verify_rc=0)
+        self.assertEqual((self.finish(fake)["status"], len(fake.pushes), len(fake.prs)), ("pr-created", 1, 1))
+        # a failed acceptance is not pushed: the card goes back to `lane-ready`
+        fake = self.fake(message=MESSAGE_WITH_ALL, verify_rc=1, verify=self.FAIL, card_body="fix it\n")
+        self.assertEqual((self.finish(fake)["status"], fake.pushes, fake.prs), ("verify-failed", [], []))
+        self.assertIn("验收失败", fake.card_body)
+        self.assertIn("FAILED tests/test_x.py", fake.card_body)
+        edits = " ".join(" ".join(args) for args in fake.label_edits)
+        self.assertIn("--add-label lane-ready", edits)
+        self.assertNotIn("--add-label lane-failed", edits)  # the failure statistics stay clean
+
+    def test_after_two_retries_the_change_is_pushed_with_a_red_comment(self):
+        body = "fix it\n<!-- lane-verify-fail run=r0 --><!-- lane-verify-fail run=r1 -->"
+        fake = self.fake(message=MESSAGE_WITH_ALL, verify_rc=1, verify=self.FAIL, card_body=body)
+        self.assertEqual((self.finish(fake)["status"], len(fake.pushes)), ("pr-created", 1))
+        comment = " ".join(" ".join(args) for args in fake.pr_comments)
+        self.assertIn("🔴", comment)
+        self.assertIn("验收失败", comment)
+
+    def test_an_unreadable_or_unwritable_card_keeps_the_harvest_state(self):
+        # the card cannot be read: nothing is pushed, the card is not overwritten
+        fake = self.fake(message=MESSAGE_WITH_ALL, verify_rc=1, verify=self.FAIL, card_body="fix it\n")
+        fake.view_rc = 1
+        result = self.finish(fake)
+        self.assertFalse(result["done"], "the harvest state is kept, the next tick tries again")
+        self.assertEqual((fake.pushes, fake.card_body), ([], "fix it\n"), "the card is not overwritten")
+        # the card cannot be written: the retry budget is not consumed either
+        fake = self.fake(message=MESSAGE_WITH_ALL, verify_rc=1, verify=self.FAIL, card_body="fix it\n")
+        fake.edit_rc = 1
+        self.assertFalse(self.finish(fake)["done"])
+        self.assertEqual((fake.pushes, "lane-verify-fail" in fake.card_body), ([], False))
+        fake.edit_rc = 0   # the next harvest of the same run is still the first retry
+        self.assertEqual(self.finish(fake)["status"], "verify-failed")
+        self.assertEqual(fake.card_body.count("lane-verify-fail"), 1)
+
+    def test_a_card_without_the_acceptance_line_falls_back_to_the_tests(self):
+        root = Path(self.tmp.name) / "fallback"
+        for rel, text in (("tests/test_engine.py", ""), ("src/engine.py", ""),
+                          ("apps/auth-api/package.json", '{"scripts": {"typecheck": "tsc"}}')):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True); (root / rel).write_text(text)
+        # the existing test of the changed module, the changed test file itself, the component
+        for path, expected in (("src/engine.py", "python -m unittest tests.test_engine"),
+                               ("tests/test_engine.py", "python -m unittest tests.test_engine"),
+                               ("apps/auth-api/src/x.ts", "cd apps/auth-api && bun run typecheck")):
+            with self.subTest(path=path):
+                self.assertEqual(MODULE.verify_fallback([path], root=str(root)), expected)
+        # the dispatch writes the fallback into the card and runs it
+        self.patch(LOCAL=str(root))
+        fake = self.fake(card_body="fix src/engine.py\n")
+        run, ver = MODULE.dispatch("codex", CFG, {"n": ISSUE, "title": "t", "body": "fix src/engine.py\n"}, "a" * 40)
+        self.assertEqual((ver, "验收: `python -m unittest tests.test_engine`" in fake.card_body),
+                         ("python -m unittest tests.test_engine", True))
+
+    def test_the_tick_requeues_the_failed_run_and_pushes_it_after_the_budget(self):
+        fake = self.fake(message=MESSAGE_WITH_ALL, verify_rc=1, verify=self.FAIL, card_body="fix it\n")
+        fake.base, fake.edit_rc = self.base, 1
+        self.tick(fake)
+        # the card write failed: nothing is pushed, the lane slot stays busy
+        self.assertEqual((fake.pushes, "lane-verify-fail" in fake.card_body, self.state["codex"]["run"]), ([], False, RUN))
+        fake.edit_rc = 0
+        # the acceptance failed: the card is requeued and dispatched again
+        self.tick(fake)
+        self.assertEqual((fake.pushes, fake.prs), ([], []))
+        self.assertIn("验收失败", fake.card_body)
+        self.assertIn("--add-label lane-ready", " ".join(" ".join(args) for args in fake.label_edits))
+        self.assertEqual(self.state["codex"]["run"], "r1", "the card is dispatched again")
+        self.tick(fake)      # the second failure is requeued as well
+        self.assertEqual(fake.card_body.count("lane-verify-fail"), 2)
+        self.tick(fake)      # the budget is used up: the change is pushed and the PR says so
+        self.assertEqual(len(fake.pushes), 1)
+        self.assertIn("🔴", " ".join(" ".join(args) for args in fake.pr_comments))
 
 
 class LaneRunInfoReadPathTests(unittest.TestCase):

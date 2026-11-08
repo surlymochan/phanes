@@ -632,7 +632,8 @@ if R:
     out["run"]={"status":r.get("status"),"branch":r.get("branch"),"commit":r.get("commit"),"repo":(r.get("workspace") or {}).get("repo"),
       "backend":r.get("backend"),"model":r.get("model"),"error_class":r.get("error_class"),"summary":(str(res.get("summary") or "") if isinstance(res,dict) else str(res or ""))[:1200],
       "tests":(str(res.get("tests") or "") if isinstance(res,dict) else "")[:400],
-      "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None}
+      "verify_rc":(r.get("verify") or {}).get("rc") if isinstance(r.get("verify"),dict) else None,
+      "verify":r.get("verify") if isinstance(r.get("verify"),dict) else None}
   else:
     out["run"]="running"
     try:
@@ -748,6 +749,61 @@ def verify_of(body):
             cmds = re.findall(r"`([^`]+)`", line)
             if cmds: return " && ".join(cmds) if len(cmds) > 1 and all(not c.startswith("cd ") for c in cmds[1:]) else cmds[0]
     return None
+
+# --- verify gate (Refs #1865) ------------------------------------------------------------
+# A lane run is pushed only when its acceptance passed. A run whose verify rc is not 0 is not
+# pushed: the failure output goes into the card, the card is requeued and the fix runs again.
+VERIFY_GATE_RETRIES = int(os.environ.get("AD_VERIFY_GATE_RETRIES", "2"))
+VERIFY_FAIL_MARKER = "<!-- lane-verify-fail run=%s -->"
+CARD_PATH_RE = re.compile(r"[A-Za-z0-9_][\w./-]*\.(?:py|ts|tsx|js|mjs|cjs|go|rs|sh)")
+
+def verify_fallback(paths, root=None):
+    """The acceptance of the changed files: the existing test of every changed module.
+
+    A changed test file is its own acceptance, a component by the command of that component."""
+    root = os.path.abspath(os.path.expanduser(root or LOCAL))
+    test_cmd = lambda rel: "python3 %s" % rel if "-" in rel else "python -m unittest %s" % rel[:-3].replace(os.sep, ".")
+    tests = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "node_modules"]
+        tests += [os.path.relpath(os.path.join(dirpath, n), root) for n in filenames if n.startswith("test_") and n.endswith(".py")]
+    cmds = []
+    for path in paths or []:
+        rel = os.path.relpath(os.path.abspath(os.path.join(root, path)), root)
+        if rel.startswith(".."): continue
+        name = os.path.basename(rel)
+        if name.startswith("test_") and name.endswith(".py"):
+            cmds.append(test_cmd(rel)); continue
+        component = os.path.join(root, os.path.dirname(rel))
+        while component.startswith(root + os.sep) and not os.path.exists(os.path.join(component, "package.json")):
+            component = os.path.dirname(component)
+        manifest = os.path.join(component, "package.json")
+        if os.path.exists(manifest):
+            try: scripts = (json.load(open(manifest)) or {}).get("scripts") or {}
+            except Exception: scripts = {}
+            if "typecheck" in scripts:
+                cmds.append("cd %s && bun run typecheck" % shlex.quote(os.path.relpath(component, root)))
+                continue
+        stem = os.path.splitext(name)[0]
+        cmds += [test_cmd(t) for t in tests if os.path.dirname(t) == os.path.dirname(rel) or (stem and stem in os.path.basename(t))]
+    cmds = list(dict.fromkeys(cmds))
+    return " && ".join(cmds[:4]) if cmds else None
+
+def read_card(n):
+    """The body of a card; (False, "") when the card cannot be read (an empty card is not a failed read)."""
+    try: rc, out, _ = gh(["issue", "view", str(n), "--json", "body"])
+    except Exception: return False, ""
+    if rc: return False, ""
+    try: return True, (json.loads(out) or {}).get("body") or ""
+    except Exception: return False, ""
+
+def write_acceptance(n, cmd):
+    """Write the acceptance command into the card: the card is the only source of truth."""
+    ok, body = read_card(n)
+    if not ok or verify_of(body): return ok
+    rc, _, err = gh(["issue", "edit", str(n), "--body", body.rstrip() + "\n\n验收: `%s`\n" % cmd])
+    if rc: log(f"#{n}: the acceptance command was not written to the card ({err.strip()[-120:]})", brain=False)
+    return rc == 0
 
 def read_issue(n):
     """One authoritative read of an issue; returns (status, payload).
@@ -918,7 +974,13 @@ def dispatch(lane, cfg, item, base):
     with open(path) as task_file:
         rc, _, err = sh(ssh_argv(ssh_opts(h), h, f"cat > /tmp/task-{lane}.md"), timeout=60, inp=task_file.read())
     if rc: raise RuntimeError(f"task upload: {err.strip()[-200:]}")
-    ver = verify_of(item["body"]); title = f"#{n} {item['title']}"[:120]
+    ver = verify_of(item["body"])
+    if not ver:
+        # a card without an acceptance line: the existing tests of the files it names are the
+        # fallback, and the command is written back into the card (Refs #1865)
+        ver = verify_fallback(CARD_PATH_RE.findall(item["body"]))
+        if ver: write_acceptance(n, ver)
+    title = f"#{n} {item['title']}"[:120]
     assign = (f"{F} lane assign {lane} --task-file /tmp/task-{lane}.md --base {base} --budget-minutes {BUDGET} --title {shlex.quote(title)}"
               + (f" --verify {shlex.quote(ver)}" if ver else ""))
     # Refs #1810: the base commit must exist in the target repo before the lane is assigned. The
@@ -1132,6 +1194,44 @@ def filter_harvest(ref, base):
             parent = git("commit-tree", tree, "-p", parent, env=commit_env, inp=message).strip().decode()
     return parent, removed, tree_of(parent) == tree_of(base)
 
+def verify_gate(lane, st, info):
+    """The push of a lane run is gated on its acceptance (Refs #1865).
+
+    Returns (decision, note): "push" (the harvest goes on; `note` is the red note for the PR
+    when the local retries are used up), "requeue" (the acceptance failed: the card goes back
+    to `lane-ready` with the failure output) or "retry" (the card could not be read or written:
+    the harvest state is kept and the retry budget is not consumed)."""
+    n, run = st["issue"], st["run"]
+    rc_value = info.get("verify_rc")
+    if rc_value is None:
+        log(f"{lane} #{n} run {run}: no acceptance evidence (verify rc is null); the push is not gated", brain=False)
+        return "push", ""
+    if rc_value == 0: return "push", ""
+    ok, body = read_card(n)
+    if not ok:
+        log(f"{lane} #{n} run {run}: the card cannot be read; the push waits for the next tick", brain=False)
+        return "retry", ""
+    marker = VERIFY_FAIL_MARKER % run
+    if marker in body:
+        # the card is already requeued for this run (an interrupted harvest): no second try is counted
+        log(f"{lane} #{n} run {run}: the card is already requeued for this acceptance failure", brain=False)
+        return "requeue", ""
+    tries = body.count("<!-- lane-verify-fail run=")
+    if tries >= VERIFY_GATE_RETRIES:
+        # the local retries are used up: the change is pushed, the PR comment says that the acceptance failed
+        return "push", ("🔴 **验收失败**：verify rc `%s`，本地重排 %s 次后仍失败；这次推送的改动没有通过验收。" % (rc_value, tries))
+    verify = info.get("verify") or {}
+    section = ("\n\n## 验收失败（verify rc %s）\n\n第 %s 次验收失败，未推送；重排本卡重试。\n\n命令：`%s`\n失败用例：%s\n\n```\n%s\n```\n\n%s\n"
+               % (rc_value, tries + 1, verify.get("cmd") or "?", ", ".join(verify.get("failing") or []) or "-",
+                  (verify.get("tail") or "").strip()[-800:] or "-", marker))
+    rc, _, _ = gh(["issue", "edit", str(n), "--body", body.rstrip() + section,
+                   "--add-label", "lane-ready", "--remove-label", "in-progress"])
+    if rc:
+        log(f"{lane} #{n} run {run}: the acceptance failure was not written to the card; retry next tick", brain=False)
+        return "retry", ""
+    log(f"{lane} #{n} run {run}: verify rc {rc_value} → not pushed, the card is requeued ({tries + 1}/{VERIFY_GATE_RETRIES})")
+    return "requeue", ""
+
 def finish(lane, cfg, st, info, state):
     """Harvest a finished lane run: push the branch, open the PR, relabel the issue.
 
@@ -1157,6 +1257,13 @@ def finish(lane, cfg, st, info, state):
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
+        gate, note = verify_gate(lane, st, info)
+        if gate != "push":
+            # the acceptance failed (requeue) or the card could not be read or written (retry):
+            # nothing is pushed, a retry keeps the harvest state and the next tick tries again
+            done = gate == "requeue"
+            if done: mark_done(state, n)
+            return {"done": done, "status": "verify-failed" if done else "verify-gate-retry", "error": None, "missing": []}
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
@@ -1175,6 +1282,9 @@ def finish(lane, cfg, st, info, state):
             log(f"{lane} #{n} run {run} PR validation ({mode}): 缺 {'；'.join(missing)}", brain=False)
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
+        if note:
+            number = re.search(r"/pull/(\d+)", url)
+            if number: gh(["pr", "comment", number.group(1), "--body", note])
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
