@@ -9,6 +9,20 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  forbidden-paths:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check pull request paths
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 tools/ci/forbidden_paths.py --base "$BASE_SHA" --head HEAD
+      - name: Check tree (stale legacy entries, residue)
+        run: python3 tools/ci/forbidden_paths.py --tree --head HEAD
   changes:
     name: Detect changed components
     runs-on: ubuntu-24.04
