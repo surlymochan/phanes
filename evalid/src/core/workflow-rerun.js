@@ -58,7 +58,7 @@ export function prepareWorkflowRerun({
       throw new Error(`Invalid workflow phases: duplicate phase id "${phase.id}"`);
     }
     phaseIds.add(phase.id);
-    if (!Array.isArray(phase.atoms)) {
+    if (phase.atoms !== undefined && !Array.isArray(phase.atoms)) {
       throw new Error(`Invalid workflow phase "${phase.id}": atoms must be an array`);
     }
   }

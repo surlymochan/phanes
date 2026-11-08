@@ -55,6 +55,30 @@ test('rerun preparation rejects non-array phase atoms before writing state', () 
   assertMalformedInputFailsBeforeWriting({
     phases: [{ id: 'target', atoms: {} }],
   }, /atoms/i);
+  assertMalformedInputFailsBeforeWriting({
+    phases: [{ id: 'target', atoms: null }],
+  }, /atoms/i);
+});
+
+test('valid rerun permits omitted atoms in target and other phases', () => {
+  const { projectRoot, pendingGate } = makeProject();
+  try {
+    const result = prepareWorkflowRerun({
+      workflow: { name: 'example' },
+      phases: [
+        { id: 'previous', label: 'Previous', required: true },
+        { id: 'target', label: 'Target', required: true },
+      ],
+      phaseId: 'target',
+      projectRoot,
+    });
+
+    assert.equal(result.state.last_completed_phase, 'previous');
+    assert.equal(existsSync(resolve(projectRoot, '.as-xflow', 'workflow-state.json')), true);
+    assert.equal(existsSync(pendingGate), false);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
 });
 
 test('valid rerun preparation removes the pending gate for its phase', () => {
