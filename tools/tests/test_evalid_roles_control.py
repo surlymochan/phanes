@@ -796,6 +796,13 @@ class SpecRevisionTests(TestEvalidRolesControl):
     def test_replayed_rejection_from_an_earlier_round_is_rejected(self):
         self._spec(version=1, declare=False)
         self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
+        events = [json.loads(line) for line in self.controller._log.read_text().splitlines()]
+        check_event = next(event for event in events if event["stage"] == "spec-check")
+        check_event["data"].pop("parent_spec_digest", None)
+        check_event["data"].pop("spec_version", None)
+        self.controller._log.write_text("".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in events))
         self._spec(version=2)
         with self.assertRaisesRegex(Rejected, "stale_spec_check_receipt"):
             self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
@@ -813,6 +820,31 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self.assertEqual(len([event for event in self.controller._events
                               if event["stage"] == "spec-check"]), 1)
         self.assertEqual(state["next"], "spec")
+
+    def test_legacy_spec_check_receipt_remains_idempotent_after_upgrade(self):
+        self._spec(version=1, declare=False)
+        evidence = {"verdict": "PASS", "blockers": []}
+        self._check(verdict="PASS", bind=False)
+
+        # Baseline receipts did not store revision metadata on Spec checks.
+        events = [json.loads(line) for line in self.controller._log.read_text().splitlines()]
+        spec_event = next(event for event in events if event["stage"] == "spec")
+        check_event = next(event for event in events if event["stage"] == "spec-check")
+        spec_event["data"].pop("spec_version", None)
+        spec_event["data"].pop("versioned", None)
+        check_event["data"].pop("parent_spec_digest", None)
+        check_event["data"].pop("spec_version", None)
+        self.controller._log.write_text("".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in events))
+
+        recovered = self._controller()
+        event_count = len(recovered._events)
+        retried = recovered.accept("offline-demo", "spec-check", evidence)
+        self.assertEqual(retried["verdict"], "PASS")
+        self.assertEqual(retried["evidence_digest"], check_event["data"]["evidence_digest"])
+        self.assertEqual(recovered.state("offline-demo")["next"], "red")
+        self.assertEqual(len(recovered._events), event_count)
 
     def test_rejected_evidence_survives_recovery(self):
         self._spec(version=1)

@@ -374,6 +374,8 @@ class RoleController:
         state = self.state(change_id, attempt)
         binding = self._parent_binding(state, stage)
         previous = self._event_keys.get((change_id, attempt, stage, event_digest, binding))
+        if previous is None and stage == "spec-check":
+            previous = self._legacy_spec_check(change_id, attempt, event_digest, binding, state)
         if previous:
             return self._public(previous["data"], change_id=change_id, attempt=attempt)
         if state and state["next"] == "needs-boss" and stage in ("spec", "spec-check"):
@@ -579,6 +581,37 @@ class RoleController:
                    event["stage"] == "spec-check" and event["input_digest"] == event_digest and
                    event["data"].get("parent_spec_digest") != binding
                    for event in self._events)
+
+    def _legacy_spec_check(self, change_id: str, attempt: int, event_digest: str,
+                           binding: str | None, state: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Find an unbound pre-revision receipt only while its Spec is current.
+
+        Older logs identify retries by stage and input digest alone. Infer the
+        old receipt's parent from the immediately preceding Spec, and accept it
+        only if no later Spec revision has superseded that parent.
+        """
+        current_spec = (state or {}).get("receipts", {}).get("spec", {})
+        if not binding or current_spec.get("spec_digest") != binding:
+            return None
+
+        latest_spec = next(((index, event) for index, event in reversed(list(enumerate(self._events)))
+                            if (event["change_id"], event["attempt"], event["stage"]) ==
+                            (change_id, attempt, "spec")), None)
+        if latest_spec is None or latest_spec[1]["data"].get("spec_digest") != binding:
+            return None
+
+        for index, event in reversed(list(enumerate(self._events))):
+            if ((event["change_id"], event["attempt"], event["stage"], event["input_digest"]) !=
+                    (change_id, attempt, "spec-check", event_digest) or
+                    event["data"].get("parent_spec_digest") is not None):
+                continue
+            preceding_spec = next(((spec_index, spec_event) for spec_index, spec_event in
+                                   reversed(list(enumerate(self._events[:index])))
+                                   if (spec_event["change_id"], spec_event["attempt"],
+                                       spec_event["stage"]) == (change_id, attempt, "spec")), None)
+            if preceding_spec and preceding_spec[0] == latest_spec[0]:
+                return event
+        return None
 
     def run_holdout(self, change_id: str, *, attempt: int = 0) -> dict[str, Any]:
         self._refresh()
