@@ -105,15 +105,15 @@ class DispatchFetchTests(unittest.TestCase):
                 mock.patch.object(module, "ssh_opts", return_value=[]), \
                 mock.patch.object(module, "ssh_argv", side_effect=lambda opts, host, cmd: cmd), \
                 mock.patch.object(module.time, "sleep", side_effect=sleeps.append):
-            with self.assertRaisesRegex(RuntimeError, "recent fetch failures=6"):
+            with self.assertRaisesRegex(RuntimeError, "recent fetch failures=3"):
                 module.dispatch("GH2", cfg, item, "abc")
 
         self.assertEqual(sleeps[:2], [2, 4])
         health = module.dispatch_fetch_health({"GH2": cfg})
-        self.assertEqual(health["govpn"]["recent_failures"], 6)
+        self.assertEqual(health["govpn"]["recent_failures"], 3)
 
     def run_fallback(self, *, missing_after=False, source_fails=False, push_fails=False,
-                     mirror=False, timeouts=False):
+                     mirror=False, timeouts=False, push_error="Connection reset by peer"):
         module = load_module()
         cfg = {"host": "govpn", "repo": "/repo", "controller_repo": "/controller",
                "fetch_policy": {"attempts": 3, "delay": 2, "fallback_after": 2}}
@@ -139,7 +139,7 @@ class DispatchFetchTests(unittest.TestCase):
             if " push -q " in rendered:
                 counts["push"] += 1
                 if push_fails or counts["push"] == 1:
-                    return transfer_failure(command, timeout, "Connection reset by peer")
+                    return transfer_failure(command, timeout, push_error)
                 seeded = True
             elif "fetch" in rendered:
                 kind = "source" if isinstance(command, list) else "mirror" if "mirror.invalid" in rendered else "direct"
@@ -177,7 +177,7 @@ class DispatchFetchTests(unittest.TestCase):
         self.assertGreaterEqual(sum("cat-file -e" in c for c in calls if isinstance(c, str)), 2)
         self.assertTrue(any("threshold reached" in line for line in logs))
         self.assertTrue(any("verifying base" in line for line in logs))
-        self.assertEqual(module.dispatch_fetch_health({"CX1": cfg})["govpn"]["recent_failures"], 3)
+        self.assertEqual(module.dispatch_fetch_health({"CX1": cfg})["govpn"]["recent_failures"], 2)
         self.assertEqual(module.DISPATCH_FETCH_FAILURES["controller"][0]["type"], "network_transient")
         self.assertFalse(module.BACKOFF)
 
@@ -200,18 +200,34 @@ class DispatchFetchTests(unittest.TestCase):
         self.assertFalse(any("ssh transient error" in line for line in logs))
 
     def test_seed_push_exhaustion_retries_mirror_and_starts(self):
-        _, _, result, counts, _, _, _ = self.run_fallback(push_fails=True, mirror=True)
+        module, cfg, result, counts, _, _, _ = self.run_fallback(push_fails=True, mirror=True)
         self.assertEqual(result, ("seeded-run", None))
         self.assertEqual(counts["push"], 3)
         self.assertEqual(counts["mirror"], 2)
+        self.assertEqual(module.dispatch_fetch_health({"CX1": cfg})["govpn"]["recent_failures"], 3)
 
     def test_fetch_blocking_diagnostic_includes_recent_cause(self):
         module, _, result, counts, _, _, logs = self.run_fallback(push_fails=True)
         self.assertIsInstance(result, RuntimeError)
         self.assertEqual(counts["assign"], 0)
         self.assertIn("govpn", module.BACKOFF)
-        self.assertTrue(any("recent=5" in line and "network_transient" in line for line in logs))
+        self.assertTrue(any("recent=2" in line and "network_transient" in line for line in logs))
         self.assertFalse(any("ssh transient error" in line for line in logs))
+
+    def test_seed_push_errors_do_not_change_fetch_health_or_blocking_cause(self):
+        module, cfg, result, counts, _, _, logs = self.run_fallback(
+            push_fails=True, push_error="Permission denied (publickey)")
+        self.assertEqual(counts["push"], 3, "seed push must retain its retry budget")
+        self.assertIsInstance(result, RuntimeError)
+        self.assertIn("Permission denied (publickey)", str(result))
+        self.assertIn("recent fetch failures=2", str(result))
+        self.assertIn("primary error=network_transient", str(result))
+        health = module.dispatch_fetch_health({"CX1": cfg})
+        self.assertEqual(health["govpn"], {"recent_failures": 2,
+                                          "primary_error": "network_transient",
+                                          "window_seconds": 3600})
+        self.assertEqual(health["controller"]["recent_failures"], 1)
+        self.assertTrue(any("recent=2" in line and "network_transient" in line for line in logs))
 
     def test_network_timeout_obeys_direct_threshold_backoff_and_health(self):
         module = load_module()
@@ -265,7 +281,7 @@ class DispatchFetchTests(unittest.TestCase):
                         self.assertFalse(module.BACKOFF)
                     elif options.get("push_fails"):
                         self.assertIn("dispatch fetch failed", str(result))
-                        self.assertEqual(health["govpn"]["recent_failures"], 5)
+                        self.assertEqual(health["govpn"]["recent_failures"], 2)
                         self.assertIn("govpn", module.BACKOFF)
                     else:
                         self.assertIn("Not a valid object name", str(result))

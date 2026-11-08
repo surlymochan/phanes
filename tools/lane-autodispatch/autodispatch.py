@@ -1009,8 +1009,9 @@ def git_network_policy(cfg, harvest=False):
                                                   else DISPATCH_BASE_FETCH_DELAY))),
             "fallback_after": max(1, min(attempts, int(configured.get("fallback_after", attempts))))}
 
-def git_network_operation(command, host, operation, policy, direct=False, transient_only=False):
-    """Run one Git transfer with bounded retries and attributed health diagnostics."""
+def git_network_operation(command, host, operation, policy, direct=False, transient_only=False,
+                          track_fetch=True):
+    """Retry a Git transfer; seed pushes opt out of fetch failure health counts."""
     attempts = policy["fallback_after"] if direct else policy["attempts"]
     for attempt in range(1, attempts + 1):
         try:
@@ -1023,7 +1024,7 @@ def git_network_operation(command, host, operation, policy, direct=False, transi
             if isinstance(err, bytes): err = err.decode(errors="replace")
             rc, err = 124, f"git transfer timed out after {error.timeout}s: {err}"
         if not rc: return rc, out, err
-        record_dispatch_fetch_failure(host, err)
+        if track_fetch: record_dispatch_fetch_failure(host, err)
         retry = attempt < attempts and (not transient_only or classify_harvest_fetch_error(err) == "transient")
         log(f"{host} {operation} failed {attempt}/{attempts} "
             f"({classify_dispatch_fetch_error(err)}); " + ("retrying" if retry else "exhausted"), brain=False)
@@ -1142,7 +1143,8 @@ def dispatch(lane, cfg, item, base):
                 frc, ferr = src_rc, f"controller source fetch failed: {src_err.strip()[-120:]}"
             else:
                 frc, _, ferr = git_network_operation(
-                    base_seed_push_command(controller_repo, h, R, base), h, f"seed push #{n}", policy)
+                    base_seed_push_command(controller_repo, h, R, base), h, f"seed push #{n}", policy,
+                    track_fetch=False)
             if frc and cfg.get("seed_url"):
                 frc, _, ferr = git_network_operation(
                     ssh_argv(ssh_opts(h), h, base_fetch_command(R, cfg["seed_url"], BASE_BRANCH)),
