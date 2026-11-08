@@ -97,7 +97,8 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 先拿下一张，快的车道反复连审，另一条车道空着。现在审查卡**按在途积压分配**：
 
 - **积压** = 该车道正在审的审查数 + 本轮已排在它后面的审查卡数（review 队列 + 在途）；
-- **选车道**：积压最少的那条车道先拿；积压相同时**轮询**（同积压依次轮给各条 review 车道）；
+- **选车道**：积压最少的那条车道先拿；积压相同时**轮询**（轮到最久的那条车道先拿，轮转记在三条
+  review 车道上，某条车道临时忙一下不会打断轮转）；
 - **上限**：单车道在途（正在审 + 本轮已排）达到 `AD_REVIEW_MAX_IN_FLIGHT`（默认 1）时**跳过**
   该车道，审查卡留在队列里等空闲车道，不再往一条车道上堆；
 - **留痕**：每次分配写一行审查日志（PR、所选车道、当时各车道积压快照），供事后复核。
@@ -112,8 +113,9 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 日志（`~/phanes-ctl/autodispatch/autodispatch.log`）：
 
 - `review plan: PR #<n> → lane <CX2|CX4|CX5> (backlog: CX2=1, CX4=0, CX5=0)` —— 分配决策与积压快照；
-- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: ...)` —— 该决策真正落到的那条车道；
-- `review: PR #<n> waits: every free review lane is at its cap (1)` —— 空闲的 review 车道都到上限，审查等空闲车道。
+- `review plan: PR #<n> → lane none (backlog: ...); every free review lane is at its cap (1), the review
+  waits for a free lane` —— 空闲的 review 车道都到上限，审查等空闲车道；
+- `review assignment: PR #<n> → lane <CX2|CX4|CX5> (backlog: ...)` —— 该决策真正落到的那条车道。
 
 `lanes-status.json` 里多一个 `_review_backlog` 字段（三条 review 车道的当前积压：正在审的数 +
 上一轮排给它的队列数），便于事后复核。
@@ -123,7 +125,8 @@ export AD_VERIFY_SHARE_ENABLED=1        # 可选：export AD_VERIFY_SHARE=0.2 AD
 | `AD_REVIEW_MAX_IN_FLIGHT` | `1` | 单条 review 车道可同时承载的在途审查上限；达到上限的车道被跳过 |
 
 离线验证：`python3 tools/lane-autodispatch/test_can_take.py`（含积压最少者被选中、同积压轮询、
-上限跳过、日志含积压快照，以及 2026-11-02 晚审查序列回放）。
+上限跳过、日志含积压快照，以及 2026-11-02 晚审查序列回放：回放里三条车道的审查数之差 ≤1、
+最忙的车道不超过应得份额、且没有一条车道连审两轮）。
 
 ## PR 提交前校验（Refs #1704）
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fake-queue proof for backend starvation fallback (Refs #232), for the verify-card contract
 (Refs #1811) and for the review lane load balancing (Refs #1701)."""
+import copy
 import json
 import math
 import os
@@ -359,7 +360,7 @@ class ReviewBacklogAssignmentTest(unittest.TestCase):
     def setUp(self):
         # the rotation cursor is global: reset it so the rotation test does not depend
         # on the order the test classes run in
-        self.rotation = dict(AUTODISPATCH.REVIEW_ROTATION)
+        self.rotation = copy.deepcopy(AUTODISPATCH.REVIEW_ROTATION)
         AUTODISPATCH.REVIEW_ROTATION.clear()
 
     def tearDown(self):
@@ -394,6 +395,32 @@ class ReviewBacklogAssignmentTest(unittest.TestCase):
         for lane_name, count in loads.items():
             self.assertIn(f"{lane_name}={count}", lines[0])
 
+    def test_the_rotation_goes_on_with_the_next_lane_when_one_is_busy(self):
+        # CX2 has its turn, then it is busy for a moment: the rotation goes on with the
+        # next review lane, the turn of CX2 is not given to it a second time
+        first, _ = AUTODISPATCH.pick_reviewer(self.LANES, {lane: 0 for lane in self.LANES})
+        second, _ = AUTODISPATCH.pick_reviewer(self.LANES, {lane: 0 for lane in self.LANES},
+                                               eligible=("CX4", "CX5"))
+        third, _ = AUTODISPATCH.pick_reviewer(self.LANES, {lane: 0 for lane in self.LANES})
+        self.assertEqual((first, second, third), ("CX2", "CX4", "CX5"))
+
+    def test_the_plan_spreads_the_review_cards_over_the_review_lanes(self):
+        # three review cards, three free review lanes: every lane takes one card, the
+        # load of a lane is the load it already carries plus the cards the plan gave it
+        plan, snapshots = AUTODISPATCH.plan_reviews(
+            self.LANES, [{"n": 1}, {"n": 2}, {"n": 3}],
+            {lane: 0 for lane in self.LANES}, max_in_flight=1,
+        )
+        self.assertEqual([plan[lane][0]["n"] for lane in self.LANES], [1, 2, 3])
+        self.assertEqual(sorted(snapshots), [1, 2, 3])
+
+    def test_the_plan_skips_the_lane_that_is_at_its_cap(self):
+        # CX2 already runs a review (its load is the cap): the card goes to another lane
+        plan, _ = AUTODISPATCH.plan_reviews(
+            self.LANES, [{"n": 1}], {"CX2": 1, "CX4": 0, "CX5": 0}, max_in_flight=1,
+        )
+        self.assertEqual(list(plan), ["CX4"])
+
 
 class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
     """tick() level proof of the review lane balancing (Refs #1701).
@@ -407,7 +434,7 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
              "CX5": {"host": "h5", "backend": "codex"}}
 
     def setUp(self):
-        self.rotation = dict(AUTODISPATCH.REVIEW_ROTATION)
+        self.rotation = copy.deepcopy(AUTODISPATCH.REVIEW_ROTATION)
         AUTODISPATCH.REVIEW_ROTATION.clear()
 
     def tearDown(self):
@@ -433,6 +460,11 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         self.assertIn("CX2=1", line)   # the load of every review lane is in the log
         self.assertIn("CX4=0", line)
         self.assertIn("CX5=0", line)
+        # the decision itself is logged with the same backlog snapshot
+        plan = [row for row in logs if "review plan" in row][0]
+        self.assertIn("PR #1", plan)
+        self.assertIn("lane CX5", plan)
+        self.assertIn("CX2=1", plan)
 
     def test_the_review_waits_when_the_free_review_lanes_are_at_their_cap(self):
         # CX5 is free and takes the first review card; the second card waits for a free
@@ -454,6 +486,19 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         dispatched, _ = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
                                       self.LANES, state)
         self.assertEqual(dispatched, [("CX4", 1)])
+
+    def test_the_reviews_rotate_over_the_review_lanes(self):
+        # the reviews rotate over the review lanes: no lane reviews a second round while
+        # another review lane is free
+        card = [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))]
+        first, _ = self.run_tick(card, self.LANES, {})
+        self.assertEqual(first, [("CX2", 1)])
+        # CX2 reviews now: the next review goes to the lane that waits for its turn
+        second, _ = self.run_tick(card, self.LANES, self.busy("CX2", "verify"))
+        self.assertEqual(second, [("CX4", 1)])
+        # every lane is free again: the lane that had its turn the longest ago takes it
+        third, _ = self.run_tick(card, self.LANES, {})
+        self.assertEqual(third, [("CX5", 1)])
 
     def test_the_review_goes_out_when_the_reserved_verify_lane_is_busy(self):
         # the verify share reserves a lane for the verify class, it does not limit the
@@ -508,7 +553,10 @@ class ReviewSequenceReplayTest(unittest.TestCase):
                 "442:1768 448:1770 452:1755 455:1774 457:1758 461:1755 468:1723 468:1743 469:1751 473:1778").split()
 
     def setUp(self):
-        self.rotation = dict(AUTODISPATCH.REVIEW_ROTATION)
+        self.rotation = copy.deepcopy(AUTODISPATCH.REVIEW_ROTATION)
+        # the replay starts with a fresh rotation: the result does not depend on the
+        # state the other tests left behind
+        AUTODISPATCH.REVIEW_ROTATION.clear()
 
     def tearDown(self):
         AUTODISPATCH.REVIEW_ROTATION.clear()
@@ -542,6 +590,16 @@ class ReviewSequenceReplayTest(unittest.TestCase):
         """The rule before #1701: the lane order decides, the first free lane takes it."""
         return next((lane for lane in self.LANES if not loads[lane]), None)
 
+    def longest_run(self, assignments):
+        """The longest run of the same lane in the assignment sequence."""
+        run = best = 0
+        previous = None
+        for lane in assignments:
+            run = run + 1 if lane == previous else 1
+            previous = lane
+            best = max(best, run)
+        return best
+
     def new_policy(self, loads):
         """The rule of #1701: the lane with the smallest backlog, the ties rotate."""
         lane, _ = AUTODISPATCH.pick_reviewer(self.LANES, loads, max_in_flight=1)
@@ -568,6 +626,10 @@ class ReviewSequenceReplayTest(unittest.TestCase):
         # the old rule gives the first lane of the order clearly more rounds
         self.assertGreater(old["CX2"], new["CX2"])
         self.assertEqual(len(old_sequence), len(new_sequence))
+        # the new rule does not stack the rounds on one lane: no lane reviews two rounds
+        # in a row while another review lane is free
+        self.assertGreaterEqual(self.longest_run(old_sequence), 2)
+        self.assertEqual(self.longest_run(new_sequence), 1)
 
 
 if __name__ == "__main__":

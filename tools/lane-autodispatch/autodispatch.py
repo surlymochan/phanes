@@ -95,7 +95,7 @@ VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
 # chosen lane and the backlog of every review lane) goes to the AD log, so the assignment
 # can be reviewed afterwards.
 REVIEW_MAX_IN_FLIGHT = max(1, env_number("AD_REVIEW_MAX_IN_FLIGHT", 1, int))
-REVIEW_ROTATION = {}  # review lane set -> the round-robin cursor of the equal backlogs
+REVIEW_ROTATION = {}  # review lane set -> {"count": n, "last": {lane: n}}: the turns of the rotation
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -749,56 +749,75 @@ def review_backlog(lanes, state):
     waiting = state.get("_review_waiting") or {}
     return {lane: running[lane] + int(waiting.get(lane, 0) or 0) for lane in lanes}
 
-def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None):
+def pick_reviewer(lanes, loads, max_in_flight=None, log=None, pr=None, eligible=None, rotation=None):
     """Pick the review lane with the smallest review load (Refs #1701).
 
-    `loads` maps a lane to the reviews it carries: the reviews it runs plus the reviews
-    already queued for it. The lane with the smallest load wins; equal loads rotate over
-    the review lanes. A lane that already carries `max_in_flight` reviews is skipped:
-    the review waits for a free lane instead of piling up on one lane. The decision is
-    logged with the backlog snapshot (the PR, the chosen lane and the load of every
-    review lane), so it can be reviewed afterwards."""
+    `lanes` is the ordered list of the review lanes (CX2/CX4/CX5); the order is also the
+    rotation order of the equal backlogs. `loads` maps a lane to the reviews it carries:
+    the reviews it runs plus the reviews already queued for it. The lane with the smallest
+    load wins; equal loads rotate over the review lanes. A lane that already carries
+    `max_in_flight` reviews is skipped: the review waits for a free lane instead of
+    piling up on one lane. `eligible` restricts the lanes that may take the card (a lane
+    that is busy or whose backend cannot take it).
+
+    The rotation remembers the turn of every review lane (the turn is taken by the lane
+    that had it the longest ago), so a lane that is busy for a moment does not break the
+    rotation: the reviews keep rotating over the review lanes instead of stacking on one
+    lane. The decision is logged with the backlog snapshot (the PR, the chosen lane and
+    the load of every review lane), so it can be reviewed afterwards."""
     order = [str(lane) for lane in lanes]
     snapshot = {lane: int((loads or {}).get(lane, 0) or 0) for lane in order}
     backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in order)
-    eligible = [lane for lane in order if max_in_flight is None or snapshot[lane] < max_in_flight]
-    if not eligible:
+    allowed = set(order) if eligible is None else {str(lane) for lane in eligible}
+    free = [lane for lane in order if lane in allowed
+            and (max_in_flight is None or snapshot[lane] < max_in_flight)]
+    if not free:
         if log:
             log(f"review plan: PR #{pr} → lane none (backlog: {backlog}); every free review lane is at "
                 f"its cap ({max_in_flight}), the review waits for a free lane")
         return None, snapshot
-    smallest = min(snapshot[lane] for lane in eligible)
-    tied = [lane for lane in eligible if snapshot[lane] == smallest]
+    smallest = min(snapshot[lane] for lane in free)
+    tied = [lane for lane in free if snapshot[lane] == smallest]
     key = tuple(order)
-    index = REVIEW_ROTATION.get(key, 0)
-    chosen = tied[index % len(tied)]
-    # the cursor only moves when there is a tie to rotate: a single lane with the
-    # smallest backlog is no rotation and must not shift the next decision
-    if len(tied) > 1: REVIEW_ROTATION[key] = index + 1
+    cursor = REVIEW_ROTATION if rotation is None else rotation
+    turns = cursor.setdefault(key, {"count": 0, "last": {}})
+    # the tied lane that had its turn the longest ago (a lane that never had one comes
+    # first): that is the rotation over the review lanes
+    chosen = min(tied, key=lambda lane: (turns["last"].get(lane, -1), order.index(lane)))
+    # the turn only moves when there is a tie to rotate: a single lane with the smallest
+    # backlog is no rotation and must not shift the next decision
+    if len(tied) > 1:
+        turns["count"] += 1
+        turns["last"][chosen] = turns["count"]
     if log:
         log(f"review plan: PR #{pr} → lane {chosen} (backlog: {backlog})")
     return chosen, snapshot
 
-def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfgs=None, log=None):
+def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfgs=None, log=None,
+                 review_ids=None):
     """Plan the review cards over the review lanes by load (Refs #1701).
 
     `running` maps a review lane to the reviews it runs right now; the load of a lane is
     that number plus the cards the plan already gave it (its review queue). The cards
-    are taken by the lane with the smallest load, equal loads rotate.
+    are taken by the lane with the smallest load, equal loads rotate. The rotation walks
+    `review_ids` (all the review lanes, the ones that are busy included), so the reviews
+    keep rotating over the review lanes.
 
     Returns (plan, snapshots): the plan maps a review lane to the cards it takes (the
     first card is dispatched first), the snapshots hold the load at the moment of the
     decision (for the log). A lane at its cap is skipped: the review waits for a free
     lane."""
+    order = [str(lane) for lane in (review_ids or idle_review_ids)]
     plan, snapshots, counts = {}, {}, dict(running)
     for card in pending:
         eligible = [lane for lane in idle_review_ids
                     if lane_cfgs is None or can_take(lane_cfgs[lane].get("backend"), card, lane)]
         if not eligible: continue
-        lane, snapshot = pick_reviewer(eligible, counts, max_in_flight=max_in_flight)
+        lane, snapshot = pick_reviewer(order, counts, max_in_flight=max_in_flight,
+                                      eligible=eligible, log=log, pr=card["n"])
         if lane is None:
             # every free review lane is at its cap: the review waits for a free lane
-            if log: log(f"review: PR #{card['n']} waits: every free review lane is at its cap ({max_in_flight})")
+            # (pick_reviewer logged the decision with the backlog snapshot)
             continue
         plan.setdefault(lane, []).append(card)
         snapshots[card["n"]] = snapshot
@@ -814,8 +833,11 @@ def review_waiting_counts(review_ids, pending, running, max_in_flight=None):
     of the last tick, never an input of the assignment: a free lane takes a review even
     when the queue of the last tick named it."""
     counts, current = {}, dict(running)
+    # the forecast has its own rotation cursor: the report of the queue must not shift
+    # the rotation of the assignment
+    rotation = {}
     for card in pending:
-        lane, _ = pick_reviewer(review_ids, current, max_in_flight=max_in_flight)
+        lane, _ = pick_reviewer(review_ids, current, max_in_flight=max_in_flight, rotation=rotation)
         if lane is None: break  # every review lane is at its cap: the cards wait in the queue
         counts[lane] = counts.get(lane, 0) + 1
         current[lane] = current.get(lane, 0) + 1
@@ -1401,7 +1423,8 @@ def tick(lanes, state, last_warn):
             # the verify class, it does not limit it to that lane (the reserve is a floor)
             review_plan, review_snapshots = plan_reviews(idle_review_ids, pending_reviews, review_loads,
                                                          REVIEW_MAX_IN_FLIGHT, lanes,
-                                                         log=lambda row: log(row, brain=False))
+                                                         log=lambda row: log(row, brain=False),
+                                                         review_ids=review_ids)
     for L, cfg in lanes.items():
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
