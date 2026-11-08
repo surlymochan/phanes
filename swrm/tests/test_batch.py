@@ -357,6 +357,34 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         self.assertEqual(exited.exception.code, 0)
         self.assertEqual(json.loads((self.data / "batches" / bid / "summary.json").read_text())["state"], "finished")
 
+    def test_detached_batch_treats_cards_directory_glob_characters_literally(self):
+        policy = xs.load_policy()
+        real_popen = subprocess.Popen
+
+        def spawn_batch(argv, **kwargs):
+            if "--batch-id" in argv:
+                return mock.Mock(pid=os.getpid())
+            return real_popen(argv, **kwargs)
+
+        for name in ("[cards]", "cards?", "cards*"):
+            with self.subTest(directory=name):
+                cards = self.root / name
+                cards.mkdir()
+                for filename in ("two.md", "one.md", ".hidden.md"):
+                    (cards / filename).write_text("card")
+                (cards / "nested").mkdir()
+                output = io.StringIO()
+                with mock.patch.object(xs.subprocess, "Popen", side_effect=spawn_batch) as popen, \
+                        contextlib.redirect_stdout(output):
+                    xs.cmd_batch(self.args(cards=str(cards), detach=True), policy)
+                reply = json.loads(output.getvalue())
+                summary = json.loads((self.data / "batches" / reply["id"] / "summary.json").read_text())
+                self.assertEqual(summary["state"], "queued")
+                self.assertEqual([row["path"] for row in summary["cards"]],
+                                 [str(cards / "one.md"), str(cards / "two.md")])
+                self.assertEqual(reply["runner_pid"], os.getpid())
+                self.assertEqual(sum("--batch-id" in call.args[0] for call in popen.call_args_list), 1)
+
     def test_detached_cli_runs_entire_batch_in_background(self):
         (self.cards / "card.md").write_text("background card")
         for name in ("b1", "b2"):

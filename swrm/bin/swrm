@@ -10164,7 +10164,8 @@ def cmd_batch(args, policy):
     cards_directory = os.path.abspath(args.cards)
     if not os.path.isdir(cards_directory):
         raise ValueError("cards path must be a directory")
-    paths = sorted(path for path in glob.glob(os.path.join(cards_directory, "*")) if os.path.isfile(path))
+    paths = sorted(path for path in glob.glob(os.path.join(glob.escape(cards_directory), "*"))
+                   if os.path.isfile(path))
     if not paths:
         bid = new_run_id()
         summary = {"id": bid, "repo": args.repo, "base": args.base,
