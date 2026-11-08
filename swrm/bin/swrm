@@ -3847,10 +3847,11 @@ def pi_stream_retry_decision(backend, error_class, error_tail, retries, max_retr
     """
     text = str(error_tail or "")
     cap = pi_stream_retry_max() if max_retries is None else max(0, int(max_retries))
-    if backend != "pi" or error_class != "exec_error" or pi_retry_kind(text) != "stream":
+    if (backend != "pi" or error_class not in ("exec_error", "rate_limit")
+            or pi_retry_kind(text) != "stream"):
         return "stop", error_class, error_tail
     if can_retry and retries < cap:
-        return "retry", error_class, error_tail
+        return "retry", "exec_error", error_tail
     return "stop", "exec_error", f"{text} (stream_retries={retries})"
 
 
@@ -8302,6 +8303,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             error_class = "upstream_forbidden"
         elif AUTH_ERROR_RE.search(text):
             error_class = "auth"
+        elif lane["backend"] == "pi" and pi_retry_kind(text) == "stream":
+            # Stream failures use their own retry budget even when the provider also reports 429.
+            error_class = "exec_error"
         elif RATE_LIMIT_RE.search(text):
             error_class = "rate_limit"
         else:

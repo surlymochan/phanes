@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _load  # noqa: E402
@@ -36,6 +37,7 @@ CLI = pathlib.Path(_load.ROOT) / "bin" / "swrm"
 
 # The two raw samples of the 07:31 / 07:55 incidents (#1594).
 STREAM_SAMPLES = ("Anthropic stream ended before message_stop", "502 provider unavailable")
+RATE_STREAM_SAMPLE = "429 rate limit: Anthropic stream ended before message_stop"
 # The Token Plan is exhausted: not transient, so it must not be retried (#1535).
 QUOTA_SAMPLE = "已达到 Token Plan 用量上限 (2056)"
 # The default cap of the stream retries (#1594).
@@ -102,6 +104,8 @@ for line in sys.stdin:
             fail_turn("HTTP 429 insufficient-quota: message_stop")
         elif mode == "stream_always":
             fail_turn(STREAM_ERROR)
+        elif mode == "rate_stream_always" or (mode == "rate_stream" and prompts == 1):
+            fail_turn("429 rate limit: " + STREAM_ERROR)
         elif mode == "stream" and prompts == 1:
             fail_turn(STREAM_ERROR)
         else:
@@ -174,6 +178,48 @@ class PiStreamRetryContractTests(unittest.TestCase):
     def test_quota_error_is_never_retried(self):
         action, _, _ = self.decide("exec_error", QUOTA_SAMPLE, 0)
         self.assertEqual(action, "stop")
+
+    def test_rate_limit_stream_uses_the_stream_retry_budget(self):
+        self.assertEqual(self.retry_kind(RATE_STREAM_SAMPLE), "stream")
+        with mock.patch.object(xs, "pi_stream_retry_max", return_value=STREAM_RETRY_CAP):
+            for retries in range(STREAM_RETRY_CAP):
+                action, error_class, _ = self.decide("rate_limit", RATE_STREAM_SAMPLE, retries)
+                self.assertEqual((action, error_class), ("retry", "exec_error"))
+            action, error_class, detail = self.decide("rate_limit", RATE_STREAM_SAMPLE, STREAM_RETRY_CAP)
+        self.assertEqual((action, error_class), ("stop", "exec_error"))
+        self.assertIn(f"stream_retries={STREAM_RETRY_CAP}", detail)
+
+    def test_stream_decision_preserves_other_errors(self):
+        for backend, error_class, sample in (
+                ("pi", "rate_limit", "429 too many requests"),
+                ("pi", "rate_limit", f"429 {QUOTA_SAMPLE}: message_stop"),
+                ("pi", "auth", RATE_STREAM_SAMPLE),
+                ("pi", "stopped", RATE_STREAM_SAMPLE),
+                ("codex", "rate_limit", RATE_STREAM_SAMPLE)):
+            with self.subTest(backend=backend, error_class=error_class, sample=sample):
+                self.assertEqual(xs.pi_stream_retry_decision(backend, error_class, sample, 0),
+                                 ("stop", error_class, sample))
+
+    def test_pi_turn_classifies_stream_before_ordinary_rate_limit(self):
+        lane = {"name": "L1", "backend": "pi", "model": "fake-model"}
+        for sample, expected in (
+                (RATE_STREAM_SAMPLE, "exec_error"),
+                (f"429 {STREAM_SAMPLES[1]}", "exec_error"),
+                (f"429 {QUOTA_SAMPLE}: message_stop", "rate_limit"),
+                ("429 too many requests", "rate_limit"),
+                (f"authentication required: {RATE_STREAM_SAMPLE}", "auth")):
+            with self.subTest(sample=sample), tempfile.TemporaryDirectory(prefix="swrm-pi-turn-") as root:
+                message = {"role": "assistant", "stopReason": "error", "errorMessage": sample}
+                child = mock.Mock(pid=123)
+                child.next_event.side_effect = [{"type": "message_end", "message": message},
+                                                {"type": "agent_end", "messages": [message]}]
+                spec = {"started": time.time(), "budget_minutes": 1}
+                with mock.patch.object(xs, "lane_control_messages"):
+                    _, _, error_class, rc, _, detail = xs.lane_run_turn(
+                        lane, child, spec, "test", {"path": root}, root, None, {}, [])
+                self.assertEqual(error_class, expected)
+                self.assertEqual(rc, 75 if expected == "rate_limit" else 1)
+                self.assertEqual(detail, sample)
 
     def test_quota_separators_take_precedence_over_stream_errors(self):
         for separator in ("", " ", "_", "-"):
@@ -277,12 +323,21 @@ class PiStreamRetryLaneTests(unittest.TestCase):
 
     def test_broken_stream_is_retried_and_the_run_finishes(self):
         self.set_config("stream")
+        self.check_stream_recovery()
+
+    def test_rate_limit_stream_is_retried_and_the_run_finishes(self):
+        self.set_config("rate_stream")
+        self.check_stream_recovery()
+
+    def check_stream_recovery(self):
         self.start_lane()
         run_id = self.assign("the upstream stream breaks once")
         self.wait_run(run_id)
         result = self.result(run_id)
         self.assertEqual(result["status"], "done", self.error_classes(result))
-        self.assertGreaterEqual(len(self.prompts()), 2, "the broken stream was not retried")
+        self.assertEqual(len(self.prompts()), 2, "the broken stream must be retried once")
+        self.assertEqual(self.run_state(run_id).get("stream_retries"), 1)
+        self.assertEqual(result["attempts"][0]["error_class"], "exec_error")
 
     def test_token_plan_exhaustion_is_not_retried(self):
         self.set_config("quota")
@@ -307,6 +362,13 @@ class PiStreamRetryLaneTests(unittest.TestCase):
 
     def test_stream_retry_budget_stops_the_run_with_the_counter(self):
         self.set_config("stream_always")
+        self.check_stream_retry_budget()
+
+    def test_rate_limit_stream_retry_budget_stops_the_run_with_the_counter(self):
+        self.set_config("rate_stream_always")
+        self.check_stream_retry_budget()
+
+    def check_stream_retry_budget(self):
         # The cap is configurable; a small one keeps the test short.
         self.env["PI_STREAM_RETRY_MAX"] = "1"
         self.env["OPENSWARM_PI_STREAM_RETRY_MAX"] = "1"
@@ -317,7 +379,7 @@ class PiStreamRetryLaneTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed", self.error_classes(result))
         self.assertEqual(result["error_class"], "exec_error")
         prompts = self.prompts()
-        self.assertGreaterEqual(len(prompts), 2, "the broken stream was not retried at all")
+        self.assertEqual(len(prompts), 2, "the stream must use its own retry cap of one")
         counter = re.search(r"stream_retries=(\d+)", json.dumps(result, ensure_ascii=False))
         self.assertIsNotNone(counter, "the run does not report the stream retries")
         self.assertEqual(int(counter.group(1)), len(prompts) - 1)
