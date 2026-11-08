@@ -982,6 +982,7 @@ def dispatch_fetch_health(lanes, now=None):
     """Health view of recent target-host fetch failures (one-hour rolling window)."""
     now = time.time() if now is None else now
     hosts = {cfg.get("host") for cfg in lanes.values() if cfg.get("host")}
+    hosts.update(cfg.get("controller_host", "controller") for cfg in lanes.values())
     result = {}
     for host in sorted(hosts):
         records = [r for r in DISPATCH_FETCH_FAILURES.get(host, [])
@@ -993,6 +994,34 @@ def dispatch_fetch_health(lanes, now=None):
                             "primary_error": max(counts, key=counts.get),
                             "window_seconds": DISPATCH_FETCH_FAILURE_WINDOW}
     return result
+
+def git_network_policy(cfg, harvest=False):
+    """Per-host lane config: fetch_policy={attempts, delay, fallback_after}.
+
+    Main fetch, controller fetch, mirror fetch and seed push use the same bounds.
+    fallback_after caps direct HTTPS attempts independently of the retry budget.
+    """
+    configured = cfg.get("fetch_policy", {})
+    attempts = max(1, int(configured.get("attempts", HARVEST_FETCH_MAX_ATTEMPTS if harvest
+                                         else DISPATCH_BASE_FETCH_ATTEMPTS)))
+    return {"attempts": attempts,
+            "delay": max(0, float(configured.get("delay", HARVEST_FETCH_RETRY_DELAY if harvest
+                                                  else DISPATCH_BASE_FETCH_DELAY))),
+            "fallback_after": max(1, min(attempts, int(configured.get("fallback_after", attempts))))}
+
+def git_network_operation(command, host, operation, policy, direct=False, transient_only=False):
+    """Run one Git transfer with bounded retries and attributed health diagnostics."""
+    attempts = policy["fallback_after"] if direct else policy["attempts"]
+    for attempt in range(1, attempts + 1):
+        rc, out, err = sh(command, timeout=180)
+        if not rc: return rc, out, err
+        record_dispatch_fetch_failure(host, err)
+        retry = attempt < attempts and (not transient_only or classify_harvest_fetch_error(err) == "transient")
+        log(f"{host} {operation} failed {attempt}/{attempts} "
+            f"({classify_dispatch_fetch_error(err)}); " + ("retrying" if retry else "exhausted"), brain=False)
+        if not retry: break
+        time.sleep(policy["delay"] * attempt)
+    return rc, out, err
 
 def deps_met(item):
     """Body line `依赖：#12 #34` (or `Depends on: #12`) gates dispatch until those issues are CLOSED."""
@@ -1016,7 +1045,8 @@ def base_fetch_command(repo_path, url, branch):
 
 def base_seed_push_command(local_repo, host, repo_path, base):
     """Push the already-fetched base object from the controller into a lane repo over SSH."""
-    return ["git", "-C", local_repo, "push", "-q", f"{host}:{repo_path}",
+    return ["git", "-c", f"core.sshCommand={git_ssh_command(ssh_opts(host))}",
+            "-C", local_repo, "push", "-q", f"{host}:{repo_path}",
             f"{base}:refs/fleet/seed/{base}"]
 
 def dispatch_failed(lane, cfg, item, error, busy=False):
@@ -1041,7 +1071,11 @@ def dispatch_failed(lane, cfg, item, error, busy=False):
             f"#{item['n']}: {str(error)[-100:]}); backing off {wait}s", brain=False)
         return
     if str(error).startswith("controller source fetch failed:"):
-        log(f"dispatch #{item['n']} controller source fetch failed; {cfg['host']} remains healthy ({str(error)[-120:]})", brain=False)
+        source = cfg.get("controller_host", "controller")
+        health = dispatch_fetch_health({"source": {"host": source}}).get(source, {})
+        log(f"dispatch #{item['n']} controller source fetch failed; {cfg['host']} remains healthy "
+            f"(source={source}; recent={health.get('recent_failures', 0)}; "
+            f"primary_error={health.get('primary_error', 'git_fetch_error')}; {str(error)[-120:]})", brain=False)
         return
     host_fail(cfg["host"], f"dispatch #{item['n']}: {error}")
 
@@ -1084,43 +1118,29 @@ def dispatch(lane, cfg, item, base):
         # fetch-on-miss: pull the base branch into the target repo, then check again. No AD-side
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
         # own short-lived ref locks).
-        fetch_errors = []
-        frc = 1
-        for fetch_attempt in range(1, DISPATCH_BASE_FETCH_ATTEMPTS + 1):
-            frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)), timeout=180)
-            if not frc: break
-            fetch_errors.append(ferr.strip()[-160:])
-            record_dispatch_fetch_failure(h, ferr)
-            category = classify_dispatch_fetch_error(ferr)
-            log(f"{h} dispatch fetch #{n} failed {fetch_attempt}/{DISPATCH_BASE_FETCH_ATTEMPTS} "
-                f"({category}); retrying" if fetch_attempt < DISPATCH_BASE_FETCH_ATTEMPTS else
-                f"{h} dispatch fetch #{n} failed {fetch_attempt}/{DISPATCH_BASE_FETCH_ATTEMPTS} ({category})",
-                brain=False)
-            if fetch_attempt < DISPATCH_BASE_FETCH_ATTEMPTS:
-                time.sleep(DISPATCH_BASE_FETCH_DELAY * fetch_attempt)
+        policy = git_network_policy(cfg)
+        frc, _, ferr = git_network_operation(
+            ssh_argv(ssh_opts(h), h, base_fetch_command(R, BASE_REPO_URL, BASE_BRANCH)),
+            h, f"dispatch fetch #{n}", policy, direct=True)
         if frc:
-            # The controller already fetched `base` from the canonical remote. After direct
-            # HTTPS retries are exhausted, seed the target repo over its working SSH route.
-            # The target-side cat-file check above remains the assignment gate.
             log(f"{h} dispatch fetch #{n}: direct fetch threshold reached; falling back to controller seed push", brain=False)
             controller_repo = cfg.get("controller_repo", LOCAL)
-            src_rc, _, src_err = sh(["git", "-C", controller_repo, "fetch", "-q", BASE_REPO_URL, base], timeout=180)
+            controller_host = cfg.get("controller_host", "controller")
+            src_rc, _, src_err = git_network_operation(
+                ["git", "-C", controller_repo, "fetch", "-q", BASE_REPO_URL, base],
+                controller_host, f"controller source fetch #{n}", policy)
             if src_rc:
-                # This failure belongs to the controller's GitHub route, not the target host.
+                # The controller's GitHub route must never back off the target host.
                 frc, ferr = src_rc, f"controller source fetch failed: {src_err.strip()[-120:]}"
-                log(f"controller source fetch for dispatch #{n} failed; target host {h} is not backed off", brain=False)
             else:
-                frc, _, ferr = sh(base_seed_push_command(controller_repo, h, R, base), timeout=180)
+                frc, _, ferr = git_network_operation(
+                    base_seed_push_command(controller_repo, h, R, base), h, f"seed push #{n}", policy)
+            if frc and cfg.get("seed_url"):
+                frc, _, ferr = git_network_operation(
+                    ssh_argv(ssh_opts(h), h, base_fetch_command(R, cfg["seed_url"], BASE_BRANCH)),
+                    h, f"seed mirror fetch #{n}", policy)
             if frc:
-                # Some fleets publish a dedicated seed remote instead of permitting controller push.
-                seed_url = cfg.get("seed_url")
-                if seed_url:
-                    frc, _, ferr = sh(ssh_argv(ssh_opts(h), h, base_fetch_command(R, seed_url, BASE_BRANCH)), timeout=180)
-                if frc:
-                    fetch_errors.append(ferr.strip()[-160:])
-                    record_dispatch_fetch_failure(h, ferr)
-            if frc:
-                if str(ferr).startswith("controller source fetch failed:"):
+                if src_rc and not cfg.get("seed_url"):
                     raise RuntimeError(ferr)
                 health = dispatch_fetch_health({lane: cfg}).get(h, {})
                 raise RuntimeError(f"dispatch fetch failed: base check: {(err or out).strip()[-100:]} | "
@@ -1139,7 +1159,8 @@ def git_fetch_command(ssh_options, local_repo, remote, branch, lane):
 
 def classify_harvest_fetch_error(error):
     """Classify a harvest fetch failure: `transient` (retry after a backoff) or `fatal` (a retry cannot help)."""
-    return "transient" if HARVEST_FETCH_TRANSIENT_RE.search(error or "") else "fatal"
+    return "transient" if (HARVEST_FETCH_TRANSIENT_RE.search(error or "") or
+                           DISPATCH_FETCH_TRANSIENT_RE.search(error or "")) else "fatal"
 
 def should_retry_harvest_fetch(error, attempt, max_attempts=HARVEST_FETCH_MAX_ATTEMPTS):
     """Return whether a failed harvest fetch is transient and still within its retry bound."""
@@ -1168,23 +1189,18 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
-def harvest_fetch(lane, n, fetch, st):
+def harvest_fetch(lane, n, fetch, st, cfg=None):
     """Fetch a finished lane branch with bounded attempts.
 
     Returns (ok, error, failures); `failures` counts the consecutive failed harvest
     cycles of this lane and is reset by the first successful fetch.
     """
-    err = ""
-    for attempt in range(1, HARVEST_FETCH_MAX_ATTEMPTS + 1):
-        rc, _, err = sh(fetch, timeout=180)
-        if not rc:
-            st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
-            return True, "", 0
-        if not should_retry_harvest_fetch(err, attempt):
-            log(f"{lane} #{n} fetch failed after {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} attempts ({classify_harvest_fetch_error(err)}: {err.strip()[-120:]})", brain=False)
-            break
-        log(f"{lane} #{n} fetch failed attempt {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} (transient: {err.strip()[-90:]}); retrying in {HARVEST_FETCH_RETRY_DELAY}s", brain=False)
-        time.sleep(HARVEST_FETCH_RETRY_DELAY)
+    cfg = cfg or {}
+    rc, _, err = git_network_operation(fetch, cfg.get("host", lane), f"PR head fetch {lane} #{n}",
+                                        git_network_policy(cfg, harvest=True), transient_only=True)
+    if not rc:
+        st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
+        return True, "", 0
     failures = int(st.get("fetch_failures", 0) or 0) + 1
     st["fetch_failures"] = failures
     return False, err, failures
@@ -1329,7 +1345,7 @@ def finish(lane, cfg, st, info, state):
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
-        ok, err, failures = harvest_fetch(lane, n, fetch, st)
+        ok, err, failures = harvest_fetch(lane, n, fetch, st, cfg)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))

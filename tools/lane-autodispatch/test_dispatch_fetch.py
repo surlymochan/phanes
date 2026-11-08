@@ -104,12 +104,121 @@ class DispatchFetchTests(unittest.TestCase):
                 mock.patch.object(module, "ssh_opts", return_value=[]), \
                 mock.patch.object(module, "ssh_argv", side_effect=lambda opts, host, cmd: cmd), \
                 mock.patch.object(module.time, "sleep", side_effect=sleeps.append):
-            with self.assertRaisesRegex(RuntimeError, "recent fetch failures=4"):
+            with self.assertRaisesRegex(RuntimeError, "recent fetch failures=6"):
                 module.dispatch("GH2", cfg, item, "abc")
 
         self.assertEqual(sleeps[:2], [2, 4])
         health = module.dispatch_fetch_health({"GH2": cfg})
-        self.assertEqual(health["govpn"]["recent_failures"], 4)
+        self.assertEqual(health["govpn"]["recent_failures"], 6)
+
+    def run_fallback(self, *, missing_after=False, source_fails=False, push_fails=False,
+                     mirror=False):
+        module = load_module()
+        cfg = {"host": "govpn", "repo": "/repo", "controller_repo": "/controller",
+               "fetch_policy": {"attempts": 3, "delay": 2, "fallback_after": 2}}
+        if mirror: cfg["seed_url"] = "https://mirror.invalid/repo"
+        calls, sleeps, logs = [], [], []
+        counts = {"direct": 0, "source": 0, "push": 0, "mirror": 0, "assign": 0}
+        seeded = False
+
+        def fake_sh(command, timeout=120, inp=None):
+            nonlocal seeded
+            rendered = " ".join(command) if isinstance(command, list) else command
+            calls.append(command)
+            if "cat-file -e" in rendered:
+                if seeded and not missing_after:
+                    counts["assign"] += 1
+                    return 0, '{"id":"seeded-run"}', ""
+                return 1, "", "fatal: Not a valid object name abc^{commit}"
+            if " push -q " in rendered:
+                counts["push"] += 1
+                if push_fails or counts["push"] == 1:
+                    return 128, "", "Connection reset by peer"
+                seeded = True
+            elif "fetch" in rendered:
+                kind = "source" if isinstance(command, list) else "mirror" if "mirror.invalid" in rendered else "direct"
+                counts[kind] += 1
+                if kind == "direct" or (kind == "source" and source_fails) or counts[kind] == 1:
+                    return 128, "", "gnutls_handshake() failed"
+                if kind == "mirror": seeded = True
+            return 0, "", ""
+
+        item = {"n": 1719, "title": "resilient fetch", "body": "", "labels": ["ops"]}
+        (MODULE_PATH.parents[2] / ".swrm-tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=MODULE_PATH.parents[2] / ".swrm-tmp") as tmp, \
+                mock.patch.object(module, "D", tmp), \
+                mock.patch.object(module, "sh", side_effect=fake_sh), \
+                mock.patch.object(module, "JUMP_HOSTS", {"govpn": "jump-box"}), \
+                mock.patch.object(module, "ssh_argv", side_effect=lambda opts, host, cmd: cmd), \
+                mock.patch.object(module, "log", side_effect=lambda message, **kw: logs.append(message)), \
+                mock.patch.object(module, "gh", return_value=(0, "", "")), \
+                mock.patch.object(module.time, "sleep", side_effect=sleeps.append):
+            try:
+                result = module.dispatch("CX1", cfg, item, "abc")
+            except RuntimeError as error:
+                result = error
+                module.dispatch_failed("CX1", cfg, item, error)
+        return module, cfg, result, counts, calls, sleeps, logs
+
+    def test_tls_threshold_falls_back_retries_source_and_push_then_checks_base(self):
+        module, cfg, result, counts, calls, sleeps, logs = self.run_fallback()
+        self.assertEqual(result, ("seeded-run", None))
+        self.assertEqual(counts, {"direct": 2, "source": 2, "push": 2, "mirror": 0, "assign": 1})
+        self.assertEqual(sleeps[:3], [2, 2, 2])
+        pushes = [c for c in calls if isinstance(c, list) and "push" in c]
+        self.assertIn("ProxyCommand=", pushes[0][2])
+        self.assertIn("jump-box", pushes[0][2])
+        self.assertGreaterEqual(sum("cat-file -e" in c for c in calls if isinstance(c, str)), 2)
+        self.assertTrue(any("threshold reached" in line for line in logs))
+        self.assertTrue(any("verifying base" in line for line in logs))
+        self.assertEqual(module.dispatch_fetch_health({"CX1": cfg})["govpn"]["recent_failures"], 3)
+        self.assertEqual(module.DISPATCH_FETCH_FAILURES["controller"][0]["type"], "network_transient")
+        self.assertFalse(module.BACKOFF)
+
+    def test_fallback_cannot_assign_when_base_stays_missing(self):
+        _, _, result, counts, _, _, _ = self.run_fallback(missing_after=True)
+        self.assertIsInstance(result, RuntimeError)
+        self.assertIn("Not a valid object name", str(result))
+        self.assertEqual(counts["assign"], 0)
+        self.assertGreater(counts["push"], 0)
+
+    def test_controller_failure_is_attributed_without_target_backoff(self):
+        module, cfg, result, counts, _, _, logs = self.run_fallback(source_fails=True)
+        self.assertRegex(str(result), "controller source fetch failed")
+        self.assertEqual(counts["source"], 3)
+        self.assertEqual(counts["push"], 0)
+        self.assertEqual(len(module.DISPATCH_FETCH_FAILURES["govpn"]), 2)
+        self.assertEqual(len(module.DISPATCH_FETCH_FAILURES["controller"]), 3)
+        self.assertFalse(module.BACKOFF)
+        self.assertTrue(any("recent=3" in line and "primary_error=network_transient" in line for line in logs))
+        self.assertFalse(any("ssh transient error" in line for line in logs))
+
+    def test_seed_push_exhaustion_retries_mirror_and_starts(self):
+        _, _, result, counts, _, _, _ = self.run_fallback(push_fails=True, mirror=True)
+        self.assertEqual(result, ("seeded-run", None))
+        self.assertEqual(counts["push"], 3)
+        self.assertEqual(counts["mirror"], 2)
+
+    def test_fetch_blocking_diagnostic_includes_recent_cause(self):
+        module, _, result, counts, _, _, logs = self.run_fallback(push_fails=True)
+        self.assertIsInstance(result, RuntimeError)
+        self.assertEqual(counts["assign"], 0)
+        self.assertIn("govpn", module.BACKOFF)
+        self.assertTrue(any("recent=5" in line and "network_transient" in line for line in logs))
+        self.assertFalse(any("ssh transient error" in line for line in logs))
+
+    def test_pr_head_fetch_uses_host_policy_and_health(self):
+        module = load_module()
+        cfg = {"host": "govpn", "fetch_policy": {"attempts": 2, "delay": 7}}
+        state = {}
+        with mock.patch.object(module, "sh", side_effect=[(128, "", "gnutls_handshake failed"),
+                                                         (0, "", "")]) as shell, \
+                mock.patch.object(module, "log"), \
+                mock.patch.object(module.time, "sleep") as sleep:
+            self.assertEqual(module.harvest_fetch("CX1", 1719, ["git", "fetch"], state, cfg), (True, "", 0))
+        self.assertEqual(shell.call_count, 2)
+        sleep.assert_called_once_with(7)
+        self.assertEqual(module.dispatch_fetch_health({"CX1": cfg})["govpn"]["recent_failures"], 1)
 
 
 if __name__ == "__main__":

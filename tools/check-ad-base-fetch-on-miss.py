@@ -95,6 +95,7 @@ class Sandbox:
         self.commands = []  # every remote command the AD ran (the fetch-on-miss contract)
         self.gh_calls = []
         self.fetch_mode = "ok"  # "ok" | "fail" | "fail_but_object_arrives"
+        self.seed_push_reachable = False
         self.ls_remote_base = None  # pin the advertised base (a base the fetch cannot deliver)
         self.fetch_lock = threading.Lock()  # models git's own short-lived ref locks
         root.mkdir(parents=True, exist_ok=True)
@@ -168,6 +169,9 @@ class Sandbox:
         if argv[:2] == ["git", "ls-remote"]:
             if self.ls_remote_base:
                 return 0, f"{self.ls_remote_base}\trefs/heads/main\n", ""
+        if self.seed_push_reachable and "push" in argv and f"{HOST}:{self.fleet}" in argv:
+            # Simulate the reachable SSH route with a real local Git object transfer.
+            argv[argv.index(f"{HOST}:{self.fleet}")] = str(self.fleet)
         if argv[:1] == ["ssh"]:
             remote = argv[-1].replace("/tmp/", f"{self.root}/")  # keep every scratch file in the sandbox
             self.commands.append(remote)
@@ -290,7 +294,27 @@ def check_tick_fetch_failure(module, sandbox: Sandbox):
     assert not module.host_ok(HOST), "a failing fetch must back the host off"
     assert "in-progress" not in sandbox.labels(), sandbox.labels()
     assert "dispatch fetch failed" in log, log
+    health = saved_status(module)["_fetch_failures"][HOST]
+    assert health["recent_failures"] >= 3, health
+    assert health["primary_error"] == "network_transient", health
+    assert "recent=" in log and "network_transient" in log, log
+    assert "ssh transient error" not in log, log
     print("  tick: fetch failed (network): reported, no assign, host backed off: OK")
+
+
+def check_tick_tls_seed_fallback(module, sandbox: Sandbox):
+    """Repeated TLS failure -> real seed push -> base check -> actual lane assign."""
+    prepare(module, sandbox)
+    sandbox.seed_push_reachable = True
+    sandbox.fetch = lambda command, timeout: (128, "", "gnutls_handshake() failed")
+    state, log = tick(module, sandbox)
+    assert sandbox.assigned(), log
+    assert not module.BACKOFF, module.BACKOFF
+    assert saved_state(module)[LANE]["base"] == sandbox.base
+    assert git(sandbox.fleet, "cat-file", "-e", f"{sandbox.base}^{{commit}}").returncode == 0
+    assert "seed fallback succeeded; verifying base commit" in log, log
+    assert "in-progress" in sandbox.labels(), sandbox.labels()
+    print("  tick: persistent TLS failure -> seed push -> verified base -> lane started: OK")
 
 
 def check_tick_fetch_failure_not_masked(module, sandbox: Sandbox):
@@ -396,6 +420,7 @@ def main():
         for name, case in (("miss-then-fetch tick", check_tick_miss_then_fetch),
                            ("miss-after-fetch tick", check_tick_miss_after_fetch),
                            ("fetch-failure tick", check_tick_fetch_failure),
+                           ("tls-seed-fallback tick", check_tick_tls_seed_fallback),
                            ("fetch-failure-not-masked tick", check_tick_fetch_failure_not_masked),
                            ("base-present tick", check_tick_base_present),
                            ("configured-repo tick", check_tick_configured_repo),
