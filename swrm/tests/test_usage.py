@@ -13,6 +13,7 @@ class UsageCounts(unittest.TestCase):
             "inputTokens": 7,
             "outputTokens": None,
             "cacheReadTokens": True,
+            "cacheWriteTokens": "12",
         }
         self.assertEqual(xs.cursor_usage(raw), {
             "inputTokens": 7,
@@ -31,7 +32,7 @@ class UsageCounts(unittest.TestCase):
     def test_pi_missing_null_and_boolean_counts_are_zero(self):
         event = {"type": "message_end", "message": {
             "role": "assistant",
-            "usage": {"input": 7, "output": None, "cacheRead": True},
+            "usage": {"input": 7, "output": None, "cacheRead": True, "cacheWrite": "12"},
             "content": [],
         }}
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as fh:
