@@ -1,6 +1,5 @@
 """Peer reviews use stubbed reviewers and local git fixtures only."""
 import contextlib
-import hashlib
 import io
 import json
 import os
@@ -97,15 +96,20 @@ class PeerReviewTests(unittest.TestCase):
         saved = json.loads((self.run_dir / "review.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["by"], "pi:pi-model")
         rules = invoke.call_args.args[1].split("\n\nRun:", 1)[0]
-        rules_hash = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
-        self.assertEqual(hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12], rules_hash)
+        rules_hash = xs.review_rules_hash(rules)
+        self.assertEqual(xs.review_rules_hash(rules), rules_hash)
         changed_rules = rules[:-1] + (" " if rules[-1] != " " else "!")
-        self.assertNotEqual(hashlib.sha256(changed_rules.encode("utf-8")).hexdigest()[:12], rules_hash)
+        self.assertNotEqual(xs.review_rules_hash(changed_rules), rules_hash)
         self.assertEqual(saved.get("rules_hash"), rules_hash)
         ledger = json.loads(Path(xs.LEDGER).read_text(encoding="utf-8"))
         self.assertEqual(ledger["peer_review"], {"by": "pi:pi-model", "verdict": "changes",
                                                   "p0": 0, "p1": 1, "p2": 0})
         self.assertEqual(ledger["review_findings"], {"p0": 0, "p1": 1, "p2": 0})
+
+    def test_review_rules_hash_is_stable_and_tracks_rule_changes(self):
+        rules = "Review only concrete bugs.\nReturn JSON."
+        self.assertEqual(xs.review_rules_hash(rules), xs.review_rules_hash(rules))
+        self.assertNotEqual(xs.review_rules_hash(rules), xs.review_rules_hash(rules + "!"))
 
     def test_family_selection_uses_policy_order_and_opposite_family(self):
         available = {backend: {"backend": backend, "binary": f"/fake/{backend}"}
