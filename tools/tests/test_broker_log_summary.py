@@ -58,20 +58,24 @@ TODAY_FRAGMENT = (
 
 class BrokerLogSummaryTests(unittest.TestCase):
     def test_timezone_offsets_reject_out_of_range_components(self):
-        for value in ("+00:99", "-00:99", "+24:00", "-24:00"):
+        for value in ("+00:60", "-00:60", "+00:99", "-00:99",
+                      "+24:00", "-24:00", "+99:00", "-99:00"):
             with self.subTest(value=value):
                 with self.assertRaises(bls.argparse.ArgumentTypeError):
                     bls.parse_tz(value)
 
     def test_timezone_offsets_accept_valid_boundaries(self):
         for value, expected in (("+00:00", timedelta(0)),
+                                ("-00:00", timedelta(0)),
+                                ("Z", timedelta(0)),
                                 ("+23:59", timedelta(hours=23, minutes=59)),
                                 ("-23:59", timedelta(hours=-23, minutes=-59))):
             with self.subTest(value=value):
                 self.assertEqual(bls.parse_tz(value).utcoffset(None), expected)
 
     def test_cli_rejects_invalid_timezone_without_traceback(self):
-        for value in ("+00:99", "+24:00"):
+        for value in ("+00:60", "-00:60", "+00:99", "-00:99",
+                      "+24:00", "-24:00", "+99:00", "-99:00"):
             with self.subTest(value=value):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
