@@ -7,7 +7,7 @@ const packageJson = JSON.parse(readFileSync(resolve(repositoryRoot, "package.jso
   scripts?: Record<string, string>;
 };
 const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
-const apiJob = workflow.match(/^  api:\n([\s\S]*?)(?=^  [a-zA-Z0-9_-]+:|\s*$)/m)?.[1] ?? "";
+const apiJob = workflow.match(/^  api:\n([\s\S]*?)(?=^  [a-zA-Z0-9_-]+:)/m)?.[1] ?? "";
 const workerdScript = "apps/auth-api/scripts/issue-9-local-workerd-e2e.ts";
 const reportPath = ".volto-build/issue-9-local-workerd-e2e/report.json";
 
