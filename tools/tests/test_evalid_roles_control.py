@@ -556,5 +556,27 @@ class TestEvalidRolesControl(unittest.TestCase):
         self.assertNotIn(leak, json.dumps(recovered.accept("offline-demo", "review", review)))
 
 
+class SpecRevisionTests(TestEvalidRolesControl):
+    def test_failed_spec_check_is_preserved_and_allows_revision(self):
+        first_spec = {"status": "PASS", "spec_digest": digest({"spec": 1})}
+        self.controller.accept("offline-demo", "spec", first_spec)
+
+        rejected_spec = {"verdict": "FAIL", "blockers": []}
+        failed_receipt = self.controller.accept("offline-demo", "spec-check", rejected_spec)
+        state = self.controller.state("offline-demo")
+        self.assertEqual(failed_receipt["verdict"], "FAIL")
+        self.assertEqual(state["next"], "spec")
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+
+        revised_spec = {"status": "PASS", "spec_digest": digest({"spec": 2})}
+        self.controller.accept("offline-demo", "spec", revised_spec)
+        self.controller.accept("offline-demo", "spec-check", {"verdict": "PASS", "blockers": []})
+        state = self.controller.state("offline-demo")
+        self.assertEqual(state["receipts"]["spec"]["spec_digest"], revised_spec["spec_digest"])
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "PASS")
+        self.assertEqual([event["data"]["verdict"] for event in self.controller._events
+                          if event["stage"] == "spec-check"], ["FAIL", "PASS"])
+
+
 if __name__ == "__main__":
     unittest.main()
