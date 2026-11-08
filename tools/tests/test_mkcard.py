@@ -62,6 +62,13 @@ class MkCardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("finding one", out.read_text(encoding="utf-8") if out.exists() else "")
 
+    def test_error_message_names_the_missing_marker(self):
+        audit = self.write_audit("intro\n\n" + START + "\nfinding one\n")
+        result, out = self.build(audit)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("end", result.stderr)
+        self.assertFalse(out.exists())
+
     def test_complete_range_writes_the_card(self):
         audit = self.write_audit(
             "intro\n\n" + START + "\nfinding one\n\n" + END + "\ntrailer\n")
