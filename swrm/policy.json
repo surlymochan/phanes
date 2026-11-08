@@ -268,6 +268,29 @@
     "backoff_seconds": [30, 60, 120, 240],
     "max_retries": 4
   },
+  "backends": {
+    "_doc": "Quota policy of one backend: quota_error_re marks a quota error of the backend, quota_cooldown_s is how long the scope stays paused, scope says what is paused (lane pauses the lane, backend pauses the backend). The pattern is matched against the error text of the run that ended with the error. policy.local.json overrides the fields of one backend without touching the other backends.",
+    "copilot": {
+      "quota_error_re": "402|429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\\s+(exceeded|reached|exhausted)",
+      "quota_cooldown_s": 3600,
+      "scope": "lane"
+    },
+    "codex": {
+      "quota_error_re": "429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\\s+(exceeded|reached|exhausted)",
+      "quota_cooldown_s": 3600,
+      "scope": "backend"
+    },
+    "agy": {
+      "quota_error_re": "429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\\s+(exceeded|reached|exhausted)",
+      "quota_cooldown_s": 1800,
+      "scope": "backend"
+    },
+    "pi": {
+      "quota_error_re": "429|RESOURCE_EXHAUSTED|quotaReached|Individual quota|usage.?limit|weekly.?limit|rate.?limit|quota\\s+(exceeded|reached|exhausted)",
+      "quota_cooldown_s": 1800,
+      "scope": "backend"
+    }
+  },
   "run": {
     "timeout_seconds": 2400,
     "fallback": true

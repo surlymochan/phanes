@@ -3999,6 +3999,243 @@ def executor_error_class(rc, final, err_text, backend=None):
     return None
 
 
+# --- per-backend quota policy (Refs #1368) ---------------------------------
+#
+# ``policy["backends"][<backend>]`` is the quota policy of one backend:
+# ``quota_error_re`` marks a quota error of that backend, ``quota_cooldown_s``
+# is how long the scope stays paused, ``scope`` says what is paused ("lane"
+# pauses the lane, "backend" pauses the backend).  The policy is read from
+# policy.json and policy.local.json (merged by :func:`load_policy`), so a local
+# policy changes the pattern, the cooldown or the scope of one backend without
+# touching the other backends.
+#
+# A quota error pauses its scope through the scoped pause store
+# ($OPENSWARM_HOME/pauses): the same records the autodispatch reads, so a
+# paused lane or a paused backend is not dispatched any more.  The record
+# carries the expiry, so the pause ends by itself when the cooldown is over.
+# A manual pause of the same scope is never replaced, and the quota path never
+# removes one.
+#
+# BLOCKER mapping of PR #1654 (Refs #1368):
+#   B1  the scoped quota pause (apply_backend_quota_policy), the expiry clean
+#       up (reap_quota_pauses) and the probe recovery (resume_quota_scope)
+#       -> swrm/tests/test_quota_policy.py
+#   B2  resume_quota_scope removes automatic pauses only, a manual pause of the
+#       same scope stays -> swrm/tests/test_quota_policy.py
+
+QUOTA_DEFAULT_COOLDOWN_S = 3600
+QUOTA_SCOPES = ("lane", "backend")
+QUOTA_AUTO_REASON = "auto:quota"
+
+
+def quota_policy_table(policy):
+    """The per-backend quota policy: {backend: {quota_error_re, cooldown_s, scope}}."""
+    table = {}
+    for backend, spec in ((policy or {}).get("backends") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        pattern = spec.get("quota_error_re")
+        if not isinstance(pattern, str) or not pattern.strip():
+            continue
+        cooldown = spec.get("quota_cooldown_s", spec.get("cooldown_s"))
+        try:
+            cooldown = int(cooldown)
+        except (TypeError, ValueError):
+            cooldown = QUOTA_DEFAULT_COOLDOWN_S
+        scope = spec.get("scope")
+        table[str(backend)] = {"quota_error_re": pattern, "cooldown_s": max(0, cooldown),
+                               "scope": scope if scope in QUOTA_SCOPES else "backend"}
+    return table
+
+
+def quota_reset_seconds(backend, text):
+    """The reset time a quota error announces ("resets in 1h20m"), in seconds.
+
+    The agy backend keeps its native parser; the other backends read the same
+    "resets in" phrasing.
+    """
+    if backend == "agy":
+        return agy_quota_reset_seconds(backend, text)
+    match = re.search(r"\bresets in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\b", text or "", re.I)
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds = (int(x or 0) for x in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def quota_policy_hit(backend, text, policy):
+    """The quota hit of one backend error text: {scope, cooldown_s, kind} or None.
+
+    A reset time in the text wins over the configured cooldown; an error
+    without a reset time uses the configured cooldown.
+    """
+    return quota_hit_from_table(quota_policy_table(policy), backend, text)
+
+
+def quota_hit_from_table(table, backend, text):
+    """The quota hit of one backend error text, from an already built table."""
+    spec = (table or {}).get(backend)
+    if not spec or not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        match = re.search(spec["quota_error_re"], text, re.I)
+    except re.error:
+        return None
+    if not match:
+        return None
+    cooldown = spec["cooldown_s"]
+    reset = quota_reset_seconds(backend, text)
+    if reset:
+        cooldown = reset
+    return {"scope": spec["scope"], "cooldown_s": cooldown,
+            "kind": re.sub(r"\s+", "_", match.group(0).strip())[:40] or "quota"}
+
+
+def pause_store_dir():
+    """The scoped pause store ($OPENSWARM_HOME/pauses); the autodispatch reads it."""
+    return os.path.join(DATA, "pauses")
+
+
+def pause_scope_file(scope):
+    """The file that holds the record of one pause scope."""
+    return os.path.join(pause_store_dir(), re.sub(r"[^A-Za-z0-9_.-]", "_", scope) + ".json")
+
+
+def pause_record(scope):
+    """The record of one pause scope, or None."""
+    record = jload(pause_scope_file(scope))
+    return record if isinstance(record, dict) else None
+
+
+def pause_records(now=None):
+    """The active pause records of the store, sorted by scope.
+
+    A record without an expiry is a manual pause and never expires; an expired
+    record is no pause at all.
+    """
+    moment = NOW() if now is None else float(now)
+    records = []
+    try:
+        names = sorted(os.listdir(pause_store_dir()))
+    except OSError:
+        return records
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        record = jload(os.path.join(pause_store_dir(), name))
+        if not isinstance(record, dict):
+            continue
+        scope = record.get("scope")
+        if not isinstance(scope, str) or not scope.strip():
+            continue
+        expires = record.get("expires_at")
+        if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+            expires = None
+        elif expires <= moment:
+            continue
+        records.append({"scope": scope.strip(), "reason": str(record.get("reason") or ""),
+                        "created_at": record.get("created_at"), "expires_at": expires})
+    return sorted(records, key=lambda row: row["scope"])
+
+
+def write_scope_pause(scope, ttl_s, reason, now=None):
+    """Create or replace the record of one pause scope; returns the record.
+
+    ``ttl_s`` of None is a pause without an expiry (a manual hold).
+    """
+    moment = NOW() if now is None else float(now)
+    ttl = None if ttl_s is None else max(0.0, float(ttl_s))
+    record = {"scope": scope, "created_at": moment,
+              "expires_at": None if ttl is None else moment + ttl, "reason": str(reason)}
+    os.makedirs(pause_store_dir(), exist_ok=True)
+    path = pause_scope_file(scope)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(record, stream, sort_keys=True)
+        stream.write("\n")
+    os.replace(tmp, path)
+    return record
+
+
+def resume_quota_scope(scope):
+    """Remove the automatic quota pause of one scope; a manual pause is kept.
+
+    Returns whether a record was removed.
+    """
+    record = pause_record(scope)
+    if not record:
+        return False
+    if not str(record.get("reason") or "").startswith(QUOTA_AUTO_REASON):
+        return False
+    try:
+        os.unlink(pause_scope_file(scope))
+    except OSError:
+        return False
+    return True
+
+
+def reap_quota_pauses(now=None):
+    """Remove the expired automatic quota pauses; returns the removed scopes.
+
+    A manual pause has no expiry and is never removed here.
+    """
+    moment = NOW() if now is None else float(now)
+    removed = []
+    try:
+        names = sorted(os.listdir(pause_store_dir()))
+    except OSError:
+        return removed
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(pause_store_dir(), name)
+        record = jload(path)
+        if not isinstance(record, dict):
+            continue
+        if not str(record.get("reason") or "").startswith(QUOTA_AUTO_REASON):
+            continue
+        expires = record.get("expires_at")
+        if isinstance(expires, bool) or not isinstance(expires, (int, float)) or expires > moment:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            continue
+        removed.append(record.get("scope"))
+    return removed
+
+
+def apply_backend_quota_policy(lane, attempts, policy=None, now=None, dry_run=False):
+    """Pause the scope of a backend whose quota pattern matched the run error.
+
+    The pause is a scoped record of the pause store, so the autodispatch skips
+    the paused lane (or the paused backend) until the record expires.  A manual
+    pause of the same scope is never replaced.  In dry-run mode nothing is
+    written: the planned pauses are only returned.
+    """
+    policy = load_policy() if policy is None else policy
+    moment = NOW() if now is None else float(now)
+    lane_name = (lane or {}).get("name")
+    table = quota_policy_table(policy)
+    paused = []
+    for attempt in attempts or []:
+        backend = attempt.get("backend") or (lane or {}).get("backend")
+        hit = quota_hit_from_table(table, backend, attempt.get("error_tail") or "")
+        if not hit or hit["cooldown_s"] <= 0:
+            continue
+        scope = f"lane:{lane_name}" if hit["scope"] == "lane" else f"backend:{backend}"
+        record = pause_record(scope)
+        if record and not str(record.get("reason") or "").startswith(QUOTA_AUTO_REASON):
+            continue
+        reason = f"{QUOTA_AUTO_REASON}:{lane_name}:{hit['kind']}"
+        if dry_run:
+            paused.append({"scope": scope, "ttl_s": hit["cooldown_s"], "reason": reason,
+                           "expires_at": moment + hit["cooldown_s"], "planned": True})
+            continue
+        paused.append(write_scope_pause(scope, hit["cooldown_s"], reason, now=moment))
+    return paused
+
+
 def wait_run_rate_limit(seconds, rdir, deadline):
     end = min(NOW() + seconds, deadline)
     while NOW() < end:
@@ -8386,6 +8623,13 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         if evidence_error:
             role_pass.update(exec_pass=False, exec_pass_reason="role_evidence_infra")
         out.update(role_pass)
+    # A run that ended with a quota error pauses its scope (Refs #1368): the
+    # scoped pause record of the pause store keeps the autodispatch away from
+    # the paused lane or the paused backend until the cooldown is over.
+    if error_class:
+        quota_pauses = apply_backend_quota_policy(lane, attempts[-1:])
+        if quota_pauses:
+            out["quota_pause"] = quota_pauses
     jsave(os.path.join(rdir, "result.json"), out)
     changed = changed_paths(ws.get("repo") or ws.get("root"), ws.get("base"), fin.get("commit"),
                             (final or {}).get("files_changed"))
@@ -8669,7 +8913,13 @@ def cmd_lane_serve(lane, policy):
         lane_write_state(name, state="crashed", last_error=short(e, 500), child_pid=None)
         next_start = NOW() + backoff
     shutdown = False
+    last_reap = 0
     while not shutdown:
+        if NOW() - last_reap >= 60:
+            # The quota pauses of the store expire on their own; the expired
+            # records are removed from disk once a minute (Refs #1368).
+            reap_quota_pauses()
+            last_reap = NOW()
         if child and not child.alive():
             if current.get("run_id"):
                 spec = current
@@ -8739,6 +8989,11 @@ def cmd_lane_serve(lane, policy):
                 lane_write_state(name, quota_until=NOW() + 3600)
                 if agy_quota_available(lane, child):
                     lane_write_state(name, quota_model=None, quota_until=None)
+                    # The probe says the backend is available again: the
+                    # automatic quota pause of the backend (and of the lane) is
+                    # over.  A manual pause of the same scope stays (Refs #1368).
+                    resume_quota_scope(f"backend:{lane['backend']}")
+                    resume_quota_scope(f"lane:{name}")
         timeout = max(0, min(0.5, next_start - NOW())) if child is None else 0.5
         try:
             ready, _, _ = select.select([server], [], [], timeout)

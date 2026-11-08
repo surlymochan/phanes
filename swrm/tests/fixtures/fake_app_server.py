@@ -54,6 +54,13 @@ for line in sys.stdin:
                              "exitCode": 0, "aggregatedOutput": None, "durationMs": 0}}})
             time.sleep(1.0)
             continue
+        if "LANE_TEST_QUOTA" in prompt:
+            # A quota error of the backend: the turn fails with the message the
+            # quota policy of the backend matches (Refs #1368).
+            send({"jsonrpc": "2.0", "method": "turn/failed", "params": {
+                "threadId": thread_id, "turn": {"id": turn_id},
+                "error": {"message": "HTTP 402 Payment Required"}}})
+            continue
         if overload_model == model and not overload_used:
             overload_used = True
             with open(os.path.join(cwd, "lane_partial.txt"), "w") as f:
