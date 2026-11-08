@@ -536,6 +536,106 @@ class BudgetRequeueTest(unittest.TestCase):
         self.assertEqual(self.holds(state), [],
                          "the bookkeeping of a card that failed for good must be cleaned up")
 
+    def write_health(self, minimax, age=0):
+        path = self.state_dir / "health.json"
+        path.write_text(json.dumps({"minimax": minimax}))
+        stamp = self.clock.time() - age
+        os.utime(path, (stamp, stamp))
+
+    def test_default_health_source_releases_only_after_both_windows_recover(self):
+        """No operator probe is needed for the deployed MiniMax remains snapshot."""
+        os.environ.pop("AD_BUDGET_PROBE_CMD", None)
+        state = self.running()
+        self.fleet.end_run("run-1")
+        self.tick(state)
+        for short, weekly in ((0, 80), (80, 0)):
+            self.advance(2 * 3600)
+            self.write_health({"interval_pct": short, "weekly_pct": weekly})
+            self.tick(state)
+            self.assertEqual(self.fleet.dispatches, [])
+            self.assertIn("in-progress", self.labels())
+        self.write_health({"interval_pct": 80, "weekly_pct": 80})
+        self.tick(state)
+        self.assertEqual(self.fleet.dispatches, [ISSUE])
+        self.assertNotIn("lane-failed", self.labels())
+
+    def test_default_health_source_rejects_stale_or_unknown_windows(self):
+        os.environ.pop("AD_BUDGET_PROBE_CMD", None)
+        state = self.running()
+        self.fleet.end_run("run-1")
+        self.tick(state)
+        for row, age in (({"interval_pct": 80, "weekly_pct": 80}, 901),
+                         ({"weekly_pct": 80}, 0), ({"interval_pct": None, "weekly_pct": 80}, 0)):
+            self.write_health(row, age)
+            self.tick(state)
+            self.assertEqual(self.fleet.dispatches, [])
+            self.assertIn("in-progress", self.labels())
+
+    def test_probe_selects_the_target_lane_and_backend(self):
+        state = self.running()
+        self.fleet.end_run("run-1")
+        self.tick(state)
+        window_file = self.root / "window.json"
+        unknown = {"five_hour": None}
+        opened = {"five_hour": {"used_percentage": 0}}
+        for payload in (
+            {"pi": unknown, "codex": opened},
+            {"backends": {"pi": unknown, "codex": opened}},
+            {"lanes": {LANE: unknown, "CX1": opened}},
+            {"backend": "codex", **opened},
+            {"lane": "M18", **opened},
+            {"pi": {"five_hour": {"used_percentage": 0}, "seven_day": None}},
+        ):
+            with self.subTest(payload=payload):
+                window_file.write_text(json.dumps(payload))
+                self.tick(state)
+                self.assertEqual(self.fleet.dispatches, [])
+                self.assertIn("in-progress", self.labels())
+        window_file.write_text(json.dumps({"pi": opened, "codex": unknown}))
+        self.tick(state)
+        self.assertEqual(self.fleet.dispatches, [ISSUE])
+
+    def test_terminal_label_failure_is_retried_after_state_reload(self):
+        """Harvest, requeue, redispatch, hit the cap, then recover a failed label write."""
+        state = self.running()
+        self.fleet.end_run("run-1")
+        self.tick(state)
+        self.fleet.window_open()
+        self.tick(state)
+        self.assertEqual(self.fleet.dispatches, [ISSUE])
+        state = json.loads((self.state_dir / "state.json").read_text())
+        self.fleet.end_run(self.current_run(state))
+        self.tick(state)
+        self.assertNotIn(LANE, state)
+        self.assertGreaterEqual(self.counter(state), 2)
+        gh = self.fleet.gh
+        failed_writes = []
+
+        def fail_terminal_label(args, timeout=60):
+            if args[:2] == ["issue", "edit"] and "lane-failed" in args:
+                failed_writes.append(list(args))
+                return 1, "", "temporary GitHub failure"
+            return gh(args, timeout)
+
+        self.module.gh = fail_terminal_label
+        for _ in range(2):
+            state = json.loads((self.state_dir / "state.json").read_text())
+            self.tick(state)
+            self.assertIn("in-progress", self.labels())
+            self.assertNotIn("lane-failed", self.labels())
+            self.assertGreaterEqual(self.counter(state), 2)
+            self.assertTrue(state["_budget_requeue"][str(ISSUE)]["terminal_pending"])
+            self.assertNotIn(ISSUE, state["_done"])
+            self.assertEqual(self.fleet.dispatches, [ISSUE])
+        self.assertEqual(len(failed_writes), 2)
+        self.module.gh = gh
+        state = json.loads((self.state_dir / "state.json").read_text())
+        self.tick(state)
+        self.assertIn("lane-failed", self.labels())
+        self.assertNotIn("in-progress", self.labels())
+        self.assertEqual(self.holds(state), [])
+        self.assertIn(ISSUE, state["_done"])
+
 
 if __name__ == "__main__":
     unittest.main()

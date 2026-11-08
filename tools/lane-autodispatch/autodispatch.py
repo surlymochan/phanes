@@ -1080,41 +1080,73 @@ def label_lane_failed(n, body):
     gh(["issue", "comment", str(n), "--body", body])
 
 def budget_window_open(lane, cfg, info):
-    """Return True only when the backend window is positively known to be open.
+    """Confirm recovery from a scoped probe, or the health-loop quota snapshot.
 
-    AD_BUDGET_PROBE_CMD is an operator supplied command that prints JSON quota state.
-    Unknown or malformed output fails closed: a held card stays held until a later tick
-    can confirm recovery.
+    The default source is health.json in the AD state directory. Its MiniMax
+    remains observation applies to pi (the provider's consumer in swrm/policy.json).
+    Old snapshots and unknown windows keep the hold; elapsed time alone never
+    establishes recovery. An operator probe overrides the snapshot.
     """
     command = os.environ.get("AD_BUDGET_PROBE_CMD", "").strip()
-    if not command: return False
     try:
-        proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=20)
-        if proc.returncode: return False
-        payload = json.loads(proc.stdout)
+        if command:
+            proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=20)
+            if proc.returncode: return False
+            payload = json.loads(proc.stdout)
+        else:
+            path = os.path.join(D, "health.json")
+            if not 0 <= time.time() - os.path.getmtime(path) <= 900: return False
+            with open(path) as stream: payload = json.load(stream)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
-    if not isinstance(payload, dict): return False
-    def exhausted(value):
-        if isinstance(value, dict):
-            if value.get("exhausted") is True: return True
-            if value.get("exhausted") is False: return False
-            used = value.get("used_percentage", value.get("used_percent"))
-            if isinstance(used, (int, float)) and not isinstance(used, bool): return used >= 100
-        return None
-    # A payload may expose one window or nested backend windows. Any explicitly
-    # exhausted window keeps the hold; unrelated metadata is ignored.
-    rows = []
-    def visit(value):
-        if isinstance(value, dict):
-            status = exhausted(value)
-            if status is not None: rows.append(status)
-            for child in value.values(): visit(child)
-        elif isinstance(value, list):
-            for child in value: visit(child)
-    visit(payload)
-    states = rows
-    return bool(states) and not any(states)
+    backend = cfg.get("backend")
+    if not backend or not isinstance(payload, dict): return False
+    # Select the target before inspecting any windows. Never search other lanes
+    # or backends for an available window when the target has unknown quota.
+    if "lanes" in payload:
+        rows = payload["lanes"]
+        payload = rows.get(lane) if isinstance(rows, dict) else None
+    elif "backends" in payload:
+        rows = payload["backends"]
+        payload = rows.get(backend) if isinstance(rows, dict) else None
+    elif backend in payload:
+        payload = payload[backend]
+    elif not command:
+        provider = cfg.get("provider")
+        if backend != "pi" or provider not in (None, "minimax", "minimax-cn"): return False
+        payload = payload.get("minimax")
+        if isinstance(payload, dict) and any(key in payload for key in ("interval_pct", "weekly_pct")):
+            # health-loop's coding_plan/remains percentages are quota remaining,
+            # not usage. Both the short and weekly window must have headroom.
+            payload = dict(payload, five_hour={"remaining_pct": payload.get("interval_pct")},
+                           seven_day={"remaining_pct": payload.get("weekly_pct")})
+    elif any(key in payload for key in ("pi", "codex", "claude", "agy", "ocgo", "deepseek")):
+        return False
+
+    def available(row):
+        if not isinstance(row, dict): return False
+        if row.get("lane", lane) != lane or row.get("backend", backend) != backend: return False
+        if row.get("stale") is True: return False
+        states = []
+        exhausted = row.get("exhausted")
+        if isinstance(exhausted, bool): states.append(not exhausted)
+        for key, limit, remaining in (("used_percentage", 100, False), ("used_percent", 100, False),
+                                      ("remaining_pct", 100, True), ("used", 1, False)):
+            value = row.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                states.append(0 < value <= limit if remaining else 0 <= value < limit)
+        # Only defined quota containers are inspected; metadata and sibling
+        # backends cannot establish availability. A null advertised window is unknown.
+        for key in ("five_hour", "seven_day", "window", "windows", "quota", "quotas", "rate_limits"):
+            if key in row:
+                child = row[key]
+                if key == "windows" and isinstance(child, dict):
+                    states.append(bool(child) and all(available(value) for value in child.values()))
+                else:
+                    states.append(available(child))
+        return bool(states) and all(states)
+
+    return available(payload)
 
 def budget_holds(state):
     holds = state.get("_budget_requeue")
