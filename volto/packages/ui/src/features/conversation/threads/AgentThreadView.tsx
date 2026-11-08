@@ -10,7 +10,13 @@ import { ComposerEditor } from "@volto/ui/features/conversation/ComposerEditor";
 import { ComposerNotice } from "@volto/ui/features/conversation/ComposerNotice";
 import { ApprovalCard } from "@volto/ui/features/conversation/ConversationPrompts";
 import { type TextValue, useText } from "@volto/ui/text";
-import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
+import {
+  type AgentGoalsView,
+  type AgentGoalsViewLabels,
+  agentGoalsForView,
+  mountAgentGoalsView,
+} from "./agent-goals-view";
 
 const HOLD_TEXT = {
   "agent-restarting": "conversation.threads.hold.agentRestarting",
@@ -22,7 +28,6 @@ const HOLD_TEXT = {
 
 /** The list stays at its end while new text comes in, when the user has not scrolled up. */
 const STICK_DISTANCE = 48;
-const COMPLETED_GOAL_COMPLETION = "100%";
 
 /**
  * Whether the thread shows this message. A stopped turn can leave an agent message with no text and
@@ -78,7 +83,6 @@ export interface AgentThreadViewProps {
  */
 export function AgentThreadView(props: AgentThreadViewProps) {
   const { t } = useText();
-  const [goalGroup, setGoalGroup] = createSignal<"active" | "completed">("active");
   const [draft, setDraft] = createSignal("");
   const [sending, setSending] = createSignal(false);
   let scroller: HTMLElement | undefined;
@@ -145,62 +149,35 @@ export function AgentThreadView(props: AgentThreadViewProps) {
   const running = () => (props.task?.state === "running" && !props.approval ? props.task : undefined);
   const queued = () => (props.task && props.task.queuedMessages.length > 0 ? props.task : undefined);
   const hold = () => (props.task ? agentThreadHoldText(props.task, props.limit, t) : null);
-  const goals = () => props.tasks ?? (props.task ? [props.task] : []);
-  const activeGoals = () => goals().filter((goal) => goal.state !== "closed");
-  const completedGoals = () => goals().filter((goal) => goal.state === "closed");
-  const goalCompletion = (goal: AgentTask) => {
-    if (goal.state === "closed") return 100;
-    const value = goal.progress?.match(/(?:^|\D)(\d{1,3})\s*%/)?.[1];
-    return value === undefined ? 0 : Math.max(0, Math.min(100, Number(value)));
-  };
-  const switchGoalGroup = (event: KeyboardEvent) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const next = goalGroup() === "active" ? "completed" : "active";
-    setGoalGroup(next);
-    requestAnimationFrame(() => document.getElementById(`agent-goals-${next}`)?.focus());
-  };
+  // The goals of the agent: the whole snapshot when the host has one, so the goals that are done
+  // stay in the list, and the open task alone when it does not.
+  const goals = () => agentGoalsForView(props.tasks, props.task);
+  const goalsLabels = (): AgentGoalsViewLabels => ({
+    active: t("conversation.threads.goals.active"),
+    completed: t("conversation.threads.goals.completed"),
+    list: t("conversation.threads.goals.groups"),
+    completion: (value) => t("conversation.threads.goals.completion", { value }),
+  });
+  let goalsView: AgentGoalsView | undefined;
+  createEffect(
+    () => ({ goals: goals(), labels: goalsLabels() }),
+    (view) => {
+      goalsView?.update(view);
+    },
+  );
+  onCleanup(() => {
+    goalsView?.destroy();
+    goalsView = undefined;
+  });
   return (
     <>
-      <section class="agent-goals-view" aria-label="Goals">
-        <div role="tablist" aria-label="Goal groups">
-          <button
-            id="agent-goals-active"
-            type="button"
-            role="tab"
-            aria-controls="agent-goals-panel"
-            tabIndex={goalGroup() === "active" ? 0 : -1}
-            aria-selected={goalGroup() === "active"}
-            onKeyDown={switchGoalGroup}
-            onClick={() => setGoalGroup("active")}
-          >
-            进行中 / Active goals ({activeGoals().length})
-          </button>
-          <button
-            id="agent-goals-completed"
-            type="button"
-            role="tab"
-            aria-controls="agent-goals-panel"
-            tabIndex={goalGroup() === "completed" ? 0 : -1}
-            aria-selected={goalGroup() === "completed"}
-            onKeyDown={switchGoalGroup}
-            onClick={() => setGoalGroup("completed")}
-          >
-            已完成 / Completed goals ({completedGoals().length})
-          </button>
-        </div>
-        <div id="agent-goals-panel" role="tabpanel" aria-labelledby={`agent-goals-${goalGroup()}`}>
-          <For each={goalGroup() === "active" ? activeGoals() : completedGoals()} keyed={(goal) => goal.id}>
-            {(goal) => (
-              <article class="agent-goal">
-                <span>{goal.title}</span>
-                <span aria-label={`Completion ${goal.state === "closed" ? COMPLETED_GOAL_COMPLETION : `${goalCompletion(goal)}%`}`}>
-                  {goal.state === "closed" ? COMPLETED_GOAL_COMPLETION : `${goalCompletion(goal)}%`}
-                </span>
-              </article>
-            )}
-          </For>
-        </div>
+      <section class="agent-goals-view" aria-label={t("conversation.threads.goals.list")}>
+        <div
+          class="agent-goals-host"
+          ref={(element: HTMLElement) => {
+            goalsView = mountAgentGoalsView(element, { goals: goals(), labels: goalsLabels() });
+          }}
+        />
       </section>
       <section
         ref={(element: HTMLElement) => {
