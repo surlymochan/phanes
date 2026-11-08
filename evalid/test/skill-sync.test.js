@@ -135,6 +135,87 @@ describe('xflow skill sync wrapper', () => {
     }
   });
 
+  test('sync preserves managed skills from every extra source dir listed in the project config', () => {
+    // The wrapper aggregates `skills.extra_source_dirs` into one newline separated
+    // string and hands that string to the shared skillhub sync, which resolves
+    // extra sources from a single source dir. Managed skills owned by the other
+    // extra source dirs are pruned by the shared sync, and the post-sync
+    // verification only inspects xflow, so the loss stays invisible.
+    const tempRoot = mkdtempSync(join(tmpdir(), 'openflow-skill-sync-multi-source-'));
+    const configDir = resolve(REPO_ROOT, '.as-xflow');
+    const configPath = resolve(configDir, 'config.json');
+    const originalConfig = existsSync(configPath) ? readFileSync(configPath, 'utf8') : null;
+    try {
+      const targetRoot = resolve(tempRoot, 'installed-skills');
+      const extraRootA = resolve(tempRoot, 'extra-skills-a');
+      const extraRootB = resolve(tempRoot, 'extra-skills-b');
+      const fakeSyncScript = resolve(tempRoot, 'skills_sync.sh');
+      const xmemSource = writeStandaloneXmem(tempRoot);
+
+      const otherSkillSourceA = writeSkill(extraRootA, 'other-skill-a', 'Managed skill from extra source A');
+      const otherSkillSourceB = writeSkill(extraRootB, 'other-skill-b', 'Managed skill from extra source B');
+      const otherSkillTargetA = writeSkill(targetRoot, 'other-skill-a', 'Installed skill from extra source A');
+      const otherSkillTargetB = writeSkill(targetRoot, 'other-skill-b', 'Installed skill from extra source B');
+      writeFileSync(resolve(otherSkillTargetA, '.skillhub-source'), `${otherSkillSourceA}\n`, 'utf8');
+      writeFileSync(resolve(otherSkillTargetB, '.skillhub-source'), `${otherSkillSourceB}\n`, 'utf8');
+      const xmemTarget = writeSkill(targetRoot, 'xmem', 'Stale xmem install');
+      writeFileSync(resolve(xmemTarget, '.skillhub-source'), `${xmemSource}\n`, 'utf8');
+      writeFakeSkillhubSync(fakeSyncScript);
+
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({
+        version: 1,
+        skills: {
+          sync_script: fakeSyncScript,
+          extra_source_dirs: [extraRootA, extraRootB],
+          installed_dir: targetRoot,
+        },
+      }, null, 2));
+
+      const result = spawnSync('sh', ['xflow/scripts/sync_installed_xflow_skill.sh'], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          XFLOW_SKILL_SYNC_SCRIPT: '',
+          XFLOW_SKILL_SYNC_EXTRA_SOURCE_DIRS: '',
+          XFLOW_XMEM_SOURCE_DIR: xmemSource,
+          SKILL_SYNC_TARGET_DIRS: '',
+          SKILLHUB_SYNC_SCRIPT: '',
+          SKILL_SYNC_EXTRA_SOURCE_DIRS: '',
+        },
+        encoding: 'utf8',
+      });
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.ok(
+        existsSync(resolve(targetRoot, 'other-skill-a', 'SKILL.md')),
+        'managed skill from the first extra source dir should not be pruned',
+      );
+      assert.equal(
+        readFileSync(resolve(targetRoot, 'other-skill-a', '.skillhub-source'), 'utf8').trim(),
+        otherSkillSourceA,
+      );
+      assert.ok(
+        existsSync(resolve(targetRoot, 'other-skill-b', 'SKILL.md')),
+        'managed skill from the second extra source dir should not be pruned',
+      );
+      assert.equal(
+        readFileSync(resolve(targetRoot, 'other-skill-b', '.skillhub-source'), 'utf8').trim(),
+        otherSkillSourceB,
+      );
+      assert.ok(existsSync(resolve(targetRoot, 'xmem', 'SKILL.md')), 'standalone xmem root skill should be restored');
+      assert.equal(readFileSync(resolve(targetRoot, 'xmem', '.xflow-source'), 'utf8').trim(), xmemSource);
+      assert.ok(existsSync(resolve(targetRoot, 'xflow', 'README.md')), 'xflow root README should be synced');
+    } finally {
+      if (originalConfig === null) {
+        rmSync(configPath, { force: true });
+      } else {
+        writeFileSync(configPath, originalConfig, 'utf8');
+      }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test('sync reads skill defaults from project-local xflow config', () => {
     const tempRoot = mkdtempSync(join(tmpdir(), 'openflow-skill-sync-config-'));
     const configDir = resolve(REPO_ROOT, '.as-xflow');
