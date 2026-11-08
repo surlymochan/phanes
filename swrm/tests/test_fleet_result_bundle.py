@@ -29,7 +29,7 @@ def completed_run(tmp_path):
     subprocess.run(["git", "-C", str(repo), "commit", "-qam", "result"], check=True)
     commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
 
-    def invoke(raw_result=None):
+    def invoke(raw_result=None, **receipt_fields):
         payload = {
             "id": "run-1984",
             "result": {
@@ -37,6 +37,7 @@ def completed_run(tmp_path):
                 "commit": commit,
                 "workspace": {"repo": str(repo), "base": base},
                 "result": {} if raw_result is None else raw_result,
+                **receipt_fields,
             },
         }
         process = subprocess.run(
@@ -46,6 +47,56 @@ def completed_run(tmp_path):
         return json.loads(process.stdout)
 
     return invoke
+
+
+def test_production_receipt_delivers_verify_and_diffstat(completed_run):
+    diffstat = " result.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"
+    report = completed_run(
+        {"summary": "verification failed", "opinion": "CHANGES: reference only"},
+        verify={"cmd": "python3 -m pytest -q", "rc": 1,
+                "tail": "FAILED test_example\n", "failing": ["test_example"]},
+        diffstat=diffstat,
+    )
+    assert report["evidence"]["tests"] == {
+        "status": "available", "command": "python3 -m pytest -q", "rc": 1,
+        "log": "FAILED test_example\n", "truncated": False,
+    }
+    assert report["evidence"]["diff"] == {"status": "available", "stat": diffstat}
+    assert report["reference_opinion"] == "CHANGES: reference only"
+    assert report["evidence"]["ci"] == {"status": "unavailable"}
+
+
+def test_runner_evidence_takes_precedence_over_nested_result(completed_run):
+    report = completed_run(
+        {"tests": {"command": "true", "rc": 0, "log": "claimed success"},
+         "diff": {"files_changed": 99, "insertions": 99, "deletions": 99}},
+        verify={"cmd": "false", "rc": 1, "tail": "failed"},
+        diffstat=" 1 file changed, 1 insertion(+)"
+    )
+    assert report["evidence"]["tests"]["rc"] == 1
+    assert report["evidence"]["tests"]["log"] == "failed"
+    assert report["evidence"]["diff"] == {
+        "status": "available", "stat": " 1 file changed, 1 insertion(+)"}
+
+
+def test_production_verify_log_is_size_limited(completed_run):
+    log = "中" * 30000
+    tests = completed_run(verify={"cmd": "test", "rc": 0, "tail": log})["evidence"]["tests"]
+    assert tests["status"] == "available"
+    assert tests["truncated"] is True
+    assert len(tests["log"].encode("utf-8")) <= MAX_LOG_BYTES
+    assert log.startswith(tests["log"])
+
+
+@pytest.mark.parametrize("verify, diffstat", [
+    (None, ""),
+    ({"cmd": "test", "rc": True, "tail": "ok"}, None),
+    ({"cmd": "test", "rc": 0}, {}),
+])
+def test_missing_or_malformed_runner_evidence_is_unavailable(completed_run, verify, diffstat):
+    evidence = completed_run(verify=verify, diffstat=diffstat)["evidence"]
+    assert evidence["tests"] == {"status": "unavailable"}
+    assert evidence["diff"] == {"status": "unavailable"}
 
 
 def test_complete_result_carries_all_four_raw_evidence_classes(completed_run):
