@@ -185,6 +185,57 @@ class LaneRecoveryTests(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual(len(list(self.runs.iterdir())), 1)
 
+    def check_recovered_child_exits_before_turn(self, read_only=False):
+        self.setup_run()
+        assignment = self.runs / self.run_id / "assignment.json"
+        spec = json.loads(assignment.read_text())
+        spec.update(read_only=read_only, verify="must not run", started=100)
+        assignment.write_text(json.dumps(spec))
+        (self.wt / "local.txt").write_text("local commit\n")
+        self.git("add", "local.txt", cwd=self.wt)
+        self.git("commit", "-qm", "local progress", cwd=self.wt)
+        head = self.git("rev-parse", "HEAD", cwd=self.wt)
+        (self.wt / "base.txt").write_text("staged progress\n")
+        self.git("add", "base.txt", cwd=self.wt)
+        (self.wt / "base.txt").write_text("unstaged progress\n")
+        (self.wt / "partial.txt").write_text("unfinished work\n")
+        (self.wt / ".gitignore").write_text("ignored.txt\n")
+        (self.wt / "ignored.txt").write_text("ignored progress\n")
+        before = self.git("status", "--porcelain", "--ignored", cwd=self.wt)
+        staged = self.git("diff", "--cached", cwd=self.wt)
+        dead_child = mock.Mock(pid=12345)
+        dead_child.alive.return_value = False
+        replacement = mock.Mock(pid=12346)
+        with self.serve_context(), \
+                mock.patch.object(xs, "NOW", side_effect=itertools.count(100, 10)), \
+                mock.patch.object(xs, "lane_child", side_effect=[dead_child, replacement]), \
+                mock.patch.object(xs, "lane_control_messages", return_value=True), \
+                mock.patch.object(xs, "append_ledger"), \
+                mock.patch.object(xs, "run_verify") as verify, \
+                mock.patch.object(xs, "lane_do_run") as run:
+            xs.cmd_lane_serve(self.lane, {})
+        run.assert_not_called()
+        verify.assert_not_called()
+        result = json.loads((self.runs / self.run_id / "result.json").read_text())
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_class"], "exec_error")
+        self.assertEqual(result["worktree"], str(self.wt))
+        self.assertIsNone(result["commit"])
+        self.assertEqual(len(list(self.runs.iterdir())), 1)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt), head)
+        self.assertEqual(self.git("branch", "--show-current", cwd=self.wt), f"swrm/{self.run_id}")
+        self.assertEqual(self.git("status", "--porcelain", "--ignored", cwd=self.wt), before)
+        self.assertEqual(self.git("diff", "--cached", cwd=self.wt), staged)
+        self.assertEqual((self.wt / "base.txt").read_text(), "unstaged progress\n")
+        self.assertEqual((self.wt / "partial.txt").read_text(), "unfinished work\n")
+        self.assertEqual((self.wt / "ignored.txt").read_text(), "ignored progress\n")
+
+    def test_child_exit_before_recovered_turn_preserves_workspace(self):
+        self.check_recovered_child_exits_before_turn()
+
+    def test_child_exit_before_recovered_read_only_turn_preserves_workspace(self):
+        self.check_recovered_child_exits_before_turn(read_only=True)
+
     def test_pushed_commit_recovers_at_remote_tip(self):
         self.setup_run()
         (self.wt / "saved.txt").write_text("saved\n")

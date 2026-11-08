@@ -8553,7 +8553,8 @@ def lane_wait_rate_limit(seconds, lane, spec, child, server, turn, pending):
     return NOW() < budget_deadline
 
 
-def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None):
+def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file, attempts=None,
+                      preserve_workspace=False):
     rid, rdir = spec["run_id"], os.path.join(RUNS, spec["run_id"])
     title = spec.get("title") or spec["task"].strip().splitlines()[0][:72]
     stopped = bool(spec.get("stop_requested"))
@@ -8571,8 +8572,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ancestor_rc, _, _ = git(["merge-base", "--is-ancestor", ws["base"], head.strip()], ws["root"])
             changed = changed or ancestor_rc == 0
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
-    # A failed prepare must leave interrupted progress (including the index) intact.
-    preserve_failed_recovery = spec.get("_recovered") and error_class == "prepare_failed"
+    # Failures before resuming execution must leave interrupted progress (including the index) intact.
+    preserve_workspace = preserve_workspace or (spec.get("_recovered") and error_class == "prepare_failed")
     evidence_error = None
     collected_artifacts = []
     if spec.get("evalid_role"):
@@ -8581,10 +8582,10 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ws, spec["artifact_sink"], spec["evalid_output"], rid, "executor")
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
-           if read_only or evidence_error or preserve_failed_recovery
+           if read_only or evidence_error or preserve_workspace
            else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (final or {}).get("files_changed"))
-    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role") and not preserve_failed_recovery:
+    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role") and not preserve_workspace:
         for command in (["checkout", "--detach", "-f", ws["base"]],
                         ["clean", "-ffdx", "-e", "/.swrm-tmp/"],
                         ["branch", "-D", ws["branch"]]):
@@ -8598,7 +8599,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                                                collected_artifacts, lane_git)
     verify = None
     prepare_error = None
-    if spec.get("verify") and not evidence_error and not preserve_failed_recovery and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
+    if spec.get("verify") and not evidence_error and not preserve_workspace and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
         if read_only or lockfiles_changed(ws):
             prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_verify")
             if prepared:
@@ -8658,12 +8659,12 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         read_only=read_only, verify=verify)
     if evidence_error:
         status, verify_note, error_class = "failed", evidence_error, "evalid_evidence_infra"
-    if read_only and verify and not evidence_error and not preserve_failed_recovery:
+    if read_only and verify and not evidence_error and not preserve_workspace:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx", "-e", "/.swrm-tmp/"]):
             cleanup_rc, _, cleanup_err = lane_git(command, ws["root"])
             if cleanup_rc:
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
-    if ws.get("mode") == "worktree" and not read_only and not evidence_error and not preserve_failed_recovery:
+    if ws.get("mode") == "worktree" and not read_only and not evidence_error and not preserve_workspace:
         detach_at = fin.get("commit") or ws["base"]
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
@@ -8713,7 +8714,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
                scope=spec.get("scope", "repo"))
-    if not evidence_error and not preserve_failed_recovery:
+    if not evidence_error and not preserve_workspace:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -8951,6 +8952,7 @@ def cmd_lane_serve(lane, policy):
     name = lane["name"]
     server = lane_ctl_listener(name)
     current, child = {}, None
+    recovered_ws = None
     previous_state = jload(lane_state_path(name), {}) or {}
     recovered, recovery_error = lane_recover_assignment(lane, previous_state)
     if previous_state.get("current_run"):
@@ -8971,8 +8973,9 @@ def cmd_lane_serve(lane, policy):
         wt = os.path.join(lane_root(name), "wt")
         if recovered:
             try:
-                lane_prepare_workspace(lane, recovered["run_id"], recovered.get("base"), preserve=True,
-                                       recovery_point=recovered["_recovery_point"] if recovered["_recovery_level"] == "commit" else None)
+                recovered_ws = lane_prepare_workspace(
+                    lane, recovered["run_id"], recovered.get("base"), preserve=True,
+                    recovery_point=recovered["_recovery_point"] if recovered["_recovery_level"] == "commit" else None)
             except Exception as error:
                 recovery_error = f"workspace recovery failed: {short(error, 300)}"
                 recovered = None
@@ -9022,9 +9025,14 @@ def cmd_lane_serve(lane, policy):
                                   {"type": "error", "error": "resident executor process exited"})
                 spec.pop("stop_requested", None)
                 lane_write_state(name, state="crashed", last_error="resident executor process exited", child_pid=None)
-                lane_finalize_run(lane, spec, lane_prepare_workspace(lane, spec["run_id"], spec.get("base")),
+                # A child can die before its first recovered turn. Reuse the validated
+                # workspace instead of preparing it as a fresh run and erasing progress.
+                ws = recovered_ws if spec.get("_recovered") else lane_prepare_workspace(
+                    lane, spec["run_id"], spec.get("base"))
+                lane_finalize_run(lane, spec, ws,
                                   None, {}, "exec_error", 1,
-                                  os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"))
+                                  os.path.join(RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl"),
+                                  preserve_workspace=bool(spec.get("_recovered")))
                 current.clear()
             try:
                 child.close()
