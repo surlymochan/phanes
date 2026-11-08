@@ -108,7 +108,6 @@ PRIORITY_BACKEND_EXACT = env_number("AD_PRIORITY_BACKEND_EXACT", 4.0)
 PRIORITY_BACKEND_UNPINNED = env_number("AD_PRIORITY_BACKEND_UNPINNED", 2.0)
 PRIORITY_STARVATION_S = max(0.0, env_number("AD_PRIORITY_STARVATION_S", 3600.0))
 PRIORITY_STARVATION_BONUS = env_number("AD_PRIORITY_STARVATION_BONUS", 16.0)
-POOL_ENTERED_AT = {}
 
 def timestamp(value):
     """Return an epoch timestamp for a numeric or ISO-8601 value, else None."""
@@ -133,7 +132,7 @@ def pool_wait_seconds(item, now=None):
     now = time.time() if now is None else now
     entered = timestamp(item.get("pool_entered_at"))
     if entered is None: entered = timestamp(item.get("poolEnteredAt"))
-    if entered is None: entered = POOL_ENTERED_AT.get(item.get("n"), now)
+    if entered is None: entered = now
     return max(0.0, now - entered)
 
 def priority_score(backend, item, now=None):
@@ -741,9 +740,17 @@ def remote(lane, cfg, run=""):
     try: return json.loads(out.strip().splitlines()[-1])
     except Exception: return {"error": out[-200:]}
 
-def queue():
+def queue(state=None):
+    """Track admission clocks in tick's persisted state, keyed by JSON issue numbers.
+
+    Only a successful pool read replaces the clocks. Missing/invalid cards lose their
+    clock so a later admission cannot inherit issue age or an earlier pool visit.
+    """
     rc, out, err = gh(["issue", "list", "--state", "open", "--label", "lane-ready", "--limit", "100", "--json", "number,title,labels,body,createdAt"])
     if rc: raise RuntimeError(err)
+    state = {} if state is None else state
+    entered_at = state.get("_pool_entered_at", {})
+    now = time.time()
     items = []
     for i in json.loads(out):
         labels = label_names(i)
@@ -761,13 +768,13 @@ def queue():
             valid, missing = verify_requirements(body)
             if not valid:
                 log_verify_rejected(i["number"], missing); continue
-        entered = POOL_ENTERED_AT.setdefault(i["number"], time.time())
+        entered = timestamp(entered_at.get(str(i["number"])))
+        if entered is None: entered = now
         match = re.search(r"(?im)(?:budget(?:[_ -]minutes)?|预算)\s*[:：]\s*(\d+(?:\.\d+)?)", body)
         budget = float(match.group(1)) if match else float(BUDGET)
         items.append({"n": i["number"], "title": i["title"], "body": body, "labels": sorted(labels), "prio": pr, "backend": be, "strict": "strict-backend" in labels, "verify": verify,
                       "created_at": i.get("createdAt"), "pool_entered_at": entered, "budget_minutes": budget})
-    living = {item["n"] for item in items}
-    for number in set(POOL_ENTERED_AT) - living: POOL_ENTERED_AT.pop(number, None)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in items}
     return sorted(items, key=lambda x: (x["prio"], x["n"]))
 
 VERIFY_HEADING_RE = re.compile(r"(?mi)^##[^\S\r\n]*Verify[^\S\r\n]*Intent[^\S\r\n]*$")
@@ -1541,11 +1548,12 @@ def tick(lanes, state, last_warn):
         nonlocal q, queue_failed, queue_error
         if q is not None: return True
         if queue_failed: return False
-        try: q = queue()
+        try: q = queue(state)
         except Exception as e:
             queue_failed = True; queue_error = str(e)
             log(f"queue error: {e}", brain=False)
             return False
+        save_state(state)  # admission clocks survive --once and failures later in the tick
         for i in q: i["deps_ok"] = deps_met(i)
         # one authoritative read per issue per tick, shared by all dispatches and the count
         prefetch_labels([i["n"] for i in q])
@@ -1612,6 +1620,7 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        state["_pool_entered_at"].pop(str(pick["n"]), None)
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -1666,6 +1675,7 @@ def tick(lanes, state, last_warn):
         idle_account(state, L, window, now, outcomes.get(L, "no-capacity"), last_alive)
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
+    state["_pool_entered_at"] = {str(item["n"]): item["pool_entered_at"] for item in q}
     blocked = sum(not i["deps_ok"] for i in q)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)

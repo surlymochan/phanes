@@ -2,7 +2,10 @@
 """Regression coverage for dispatch-priority starvation (Refs #1705)."""
 
 import importlib.util
+import json
+import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -94,6 +97,80 @@ class DispatchPriorityTest(unittest.TestCase):
             "a just-admitted small card must not use its creation age to jump a "
             "large card that has actually waited in the pool",
         )
+
+    def test_small_card_survives_once_restarts_and_overtakes_new_large_cards(self):
+        """Reload the dispatcher and its real state file for each --once run."""
+        small = {"number": 1, "title": "waiting small", "body": "预算：30",
+                 "labels": ["lane-ready"], "createdAt": "2026-11-01T00:00:00Z"}
+        issues = [small]
+        dispatched, logs, states = [], [], []
+
+        def gh(args, timeout=60):
+            if args[:2] == ["issue", "list"]:
+                return 0, json.dumps(issues), ""
+            item = next(i for i in issues if i["number"] == int(args[2]))
+            if args[:2] == ["issue", "view"]:
+                return 0, json.dumps({**item, "state": "OPEN"}), ""
+            if args[:2] == ["issue", "edit"]:
+                item["labels"].append("in-progress")
+                return 0, "", ""
+            self.fail(f"unexpected GitHub command: {args}")
+
+        def dispatch(lane, cfg, item, base):
+            dispatched.append(item["n"])
+            return f"run-{item['n']}", None
+
+        scratch = Path(__file__).resolve().parents[2] / ".swrm-tmp"
+        scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root = Path(directory)
+            (root / "lanes.json").write_text(json.dumps({"CX10": {"host": "h", "backend": "codex"}}))
+            threshold = AUTODISPATCH.PRIORITY_STARVATION_S
+            for index, elapsed in enumerate((0, threshold / 2, threshold)):
+                issues.append({"number": 100 + index, "title": "new large", "body": "预算：90",
+                               "labels": ["lane-ready"], "createdAt": "2026-11-01T00:00:00Z"})
+                module = importlib.util.module_from_spec(SPEC)
+                SPEC.loader.exec_module(module)
+                with ExitStack() as stack:
+                    replacements = {
+                        "D": directory, "gh": gh, "dispatch": dispatch,
+                        "sh": lambda *a, **k: (0, "a" * 40, ""),
+                        "remote": lambda *a: {"lane": "idle", "run": {"ended_at": self.NOW}},
+                        "finish": lambda *a: {"done": True},
+                        "audit_switches": lambda: None,
+                        "paused_scopes": lambda: {"mint"},
+                        "log": lambda message, brain=True: logs.append(message),
+                    }
+                    for name, value in replacements.items():
+                        stack.enter_context(patch.object(module, name, value))
+                    stack.enter_context(patch.object(module.time, "time", return_value=self.NOW + elapsed))
+                    stack.enter_context(patch.object(module.sys, "argv", ["autodispatch.py", "--once"]))
+                    module.main()
+                states.append(json.loads((root / "state.json").read_text()))
+            self.assertEqual(dispatched, [100, 101, 1])
+            for state in states[:-1]:
+                self.assertEqual(state["_pool_entered_at"]["1"], self.NOW)
+            self.assertNotIn("1", states[-1]["_pool_entered_at"])
+            self.assertTrue(any("dispatched #1 →" in line and '"starvation": 16' in line for line in logs))
+
+    def test_pool_clock_resets_after_leaving_and_survives_queue_read_failure(self):
+        issue = {"number": 1, "title": "small", "body": "预算：30", "labels": ["lane-ready"]}
+        state = {}
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+                patch.object(AUTODISPATCH.time, "time", return_value=self.NOW):
+            AUTODISPATCH.queue(state)
+        original = dict(state["_pool_entered_at"])
+        with patch.object(AUTODISPATCH, "gh", return_value=(1, "", "unavailable")):
+            with self.assertRaises(RuntimeError):
+                AUTODISPATCH.queue(state)
+        self.assertEqual(state["_pool_entered_at"], original)
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, "[]", "")):
+            AUTODISPATCH.queue(state)
+        self.assertEqual(state["_pool_entered_at"], {})
+        with patch.object(AUTODISPATCH, "gh", return_value=(0, json.dumps([issue]), "")), \
+                patch.object(AUTODISPATCH.time, "time", return_value=self.NOW + 7200):
+            returned = AUTODISPATCH.queue(state)
+        self.assertEqual(returned[0]["pool_entered_at"], self.NOW + 7200)
 
 
 if __name__ == "__main__":
