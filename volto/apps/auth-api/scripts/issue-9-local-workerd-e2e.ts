@@ -146,7 +146,7 @@ function startWorker(port: number, environment: NodeJS.ProcessEnv): void {
   starts.push(Date.now());
   child = spawn(
     "bun",
-    ["run", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+    ["run", "--bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
     { cwd: APP, env: environment, stdio: ["ignore", "pipe", "pipe"] },
   );
   child.stdout?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
