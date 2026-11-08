@@ -586,6 +586,46 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self.assertEqual(state["next"], "spec-check")
         self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
 
+    def test_concurrent_stale_versioned_initial_spec_is_rejected(self):
+        other = self._controller()
+        spec_digest = digest({"spec": "shared"})
+        append = self.controller._append
+
+        def race(event):
+            self._spec(other, spec_digest=spec_digest, declare=False)
+            self._check(other, verdict="FAIL", bind=False)
+            return append(event)
+
+        with patch.object(self.controller, "_append", side_effect=race):
+            with self.assertRaises(Rejected):
+                self._spec(version=1, spec_digest=spec_digest)
+
+        state = self._controller().state("offline-demo")
+        self.assertEqual(state["spec_version"], 1)
+        self.assertEqual(state["receipts"]["spec"]["versioned"], False)
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+        self.assertEqual(state["next"], "spec")
+
+    def test_concurrent_stale_unversioned_initial_spec_is_rejected(self):
+        other = self._controller()
+        spec_digest = digest({"spec": "shared"})
+        append = self.controller._append
+
+        def race(event):
+            self._spec(other, version=1, spec_digest=spec_digest)
+            self._check(other, verdict="FAIL")
+            return append(event)
+
+        with patch.object(self.controller, "_append", side_effect=race):
+            with self.assertRaises(Rejected):
+                self._spec(declare=False, spec_digest=spec_digest)
+
+        state = self._controller().state("offline-demo")
+        self.assertEqual(state["spec_version"], 1)
+        self.assertEqual(state["receipts"]["spec"]["versioned"], True)
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+        self.assertEqual(state["next"], "spec")
+
     def _spec(self, controller=None, version=1, spec_digest=None, parent="auto", declare=True):
         """Submit a Spec receipt, binding the rejection it answers by default."""
         controller = controller or self.controller

@@ -175,16 +175,12 @@ class RoleController:
                         specs[-1]["data"].get("spec_digest") or
                         event["data"].get("spec_version") != len(specs)):
                     raise Rejected("spec_check_parent_mismatch")
-            elif event["stage"] == "spec" and event["data"].get("parent_receipt"):
-                checks = [item for item in attempts if item["stage"] == "spec-check" and
-                          item["data"].get("verdict") == "FAIL"]
-                if not checks or event["data"]["parent_receipt"] != self._rejection(
-                        checks[-1]["data"], 0)["receipt_digest"]:
-                    raise Rejected("parent_receipt_mismatch")
             duplicate = next((item for item in existing if self._key(item) == key), None)
             if duplicate:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                 return duplicate["data"]
+            if event["stage"] == "spec":
+                self._validate_spec_append(event, attempts)
             if event["stage"] == "intake":
                 if attempts:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
@@ -205,6 +201,36 @@ class RoleController:
         self._events.append(event)
         self._reduce(event)
         return event["data"]
+
+    def _validate_spec_append(self, event: dict[str, Any],
+                              attempts: list[dict[str, Any]]) -> None:
+        """Recheck Spec revision bindings against the log while holding its lock."""
+        data = event["data"]
+        specs = [item for item in attempts if item["stage"] == "spec"]
+        if not specs:
+            if data.get("spec_version") != 1:
+                raise Rejected("spec_version_mismatch")
+            if data.get("parent_receipt") is not None:
+                raise Rejected("parent_receipt_mismatch")
+            return
+
+        expected_version = len(specs) + 1
+        if data.get("spec_version") != expected_version:
+            raise Rejected("spec_version_mismatch")
+        if not data.get("versioned"):
+            raise Rejected("spec_version_missing")
+        if data.get("spec_digest") == specs[-1]["data"].get("spec_digest"):
+            raise Rejected("spec_not_revised")
+
+        checks = [item for item in attempts if item["stage"] == "spec-check" and
+                  item["data"].get("verdict") == "FAIL"]
+        if not checks:
+            raise Rejected("missing_parent_receipt")
+        parent = self._rejection(checks[-1]["data"], len(specs))["receipt_digest"]
+        if data.get("parent_receipt") is None:
+            raise Rejected("missing_parent_receipt")
+        if data["parent_receipt"] != parent:
+            raise Rejected("parent_receipt_mismatch")
 
     def _refresh(self) -> None:
         """Reload committed events before decisions made by a long-lived worker."""
