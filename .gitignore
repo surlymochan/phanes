@@ -1,11 +1,11 @@
 # Reproducible benchmark summaries are tracked; per-run transcripts, prompts,
 # patches, and grader output are local artifacts.
 swrm/bench/**/results/raw*/
-openswarm/bench/**/results/raw*/
-phanes/evalid/bench/**/results/raw*/
-phanes/evalid/bench/e2e/results/e2e-2026-10-17*.jsonl
-phanes/evalid/bench/e2e/results/usage/
-phanes/evalid/bench/results/llm-*.jsonl
+swrm/bench/**/results/raw*/
+evalid/bench/**/results/raw*/
+evalid/bench/e2e/results/e2e-2026-10-17*.jsonl
+evalid/bench/e2e/results/usage/
+evalid/bench/results/llm-*.jsonl
 
 # The quota-reclaim drill sandbox is a local artifact: it holds throwaway lane
 # homes, repos and evidence, and must never dirty the working tree.
@@ -29,3 +29,8 @@ __pycache__/
 
 # Private deployment settings stay on the operator machine.
 .deployment.env
+
+# Local review records and backup files.
+.lane-review/
+*.bak
+*.bak[-._0-9]*
