@@ -421,7 +421,10 @@ An executor run that ends without a commit with `status` or `error_class` set to
 `budget_exceeded` is held with `in-progress`, which frees its lane without treating
 the card as failed. The AD only removes that hold after it positively confirms that
 the backend window is open. By default AD reads the health-loop's `health.json`
-in its state directory (at most 900 seconds old). For the MiniMax-consuming `pi`
+in its state directory (at most 900 seconds old and strictly newer than the held
+card's `at` timestamp). A snapshot taken before or at the budget failure cannot
+prove recovery; a missing or invalid hold timestamp also keeps the card held.
+For the MiniMax-consuming `pi`
 backend, `minimax.interval_pct` and `minimax.weekly_pct` are percentages remaining;
 both must be positive. An explicit `minimax.exhausted`/`remaining_pct` observation
 is also supported. Missing or unknown short-window data cannot be inferred from
@@ -445,6 +448,9 @@ health snapshot or configured window probe before releasing a hold and keeps it 
 on unknown state. `test_default_health_source_releases_only_after_both_windows_recover`,
 `test_default_health_source_rejects_stale_or_unknown_windows`, and
 `test_probe_selects_the_target_lane_and_backend` cover default recovery and isolation.
+`test_default_health_source_requires_a_snapshot_after_the_hold` covers persisted
+holds across ticks: snapshots from 300 seconds before or at the hold retain the
+card, and a newer recovered snapshot permits re-dispatch.
 `test_the_card_stays_held_while_the_window_is_exhausted` and
 `test_the_card_returns_to_the_queue_when_the_window_recovered` exercise the real
 harvest-to-requeue ticks. **B2:** `_budget_failures` persists by issue across requeue;

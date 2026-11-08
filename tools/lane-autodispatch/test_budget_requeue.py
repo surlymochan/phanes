@@ -571,6 +571,30 @@ class BudgetRequeueTest(unittest.TestCase):
             self.assertEqual(self.fleet.dispatches, [])
             self.assertIn("in-progress", self.labels())
 
+    def test_default_health_source_requires_a_snapshot_after_the_hold(self):
+        """A recent snapshot from before the budget failure cannot prove recovery."""
+        os.environ.pop("AD_BUDGET_PROBE_CMD", None)
+        opened = {"interval_pct": 80, "weekly_pct": 80}
+        self.write_health(opened, age=300)
+        state = self.running()
+        self.fleet.end_run("run-1")
+        self.tick(state)
+        hold = dict(state["_budget_requeue"][str(ISSUE)])
+        for age in (300, 0):
+            with self.subTest(snapshot_age=age):
+                self.write_health(opened, age=age)
+                state = json.loads((self.state_dir / "state.json").read_text())
+                self.tick(state)
+                self.assertEqual(state["_budget_requeue"].get(str(ISSUE)), hold)
+                self.assertIn("in-progress", self.labels())
+                self.assertEqual(self.fleet.dispatches, [])
+        self.advance(1)
+        self.write_health(opened)
+        self.tick(state)
+        self.assertNotIn(str(ISSUE), state["_budget_requeue"])
+        self.assertEqual(self.fleet.dispatches, [ISSUE])
+        self.assertNotIn("lane-failed", self.labels())
+
     def test_probe_selects_the_target_lane_and_backend(self):
         state = self.running()
         self.fleet.end_run("run-1")

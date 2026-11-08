@@ -1084,8 +1084,9 @@ def budget_window_open(lane, cfg, info):
 
     The default source is health.json in the AD state directory. Its MiniMax
     remains observation applies to pi (the provider's consumer in swrm/policy.json).
-    Old snapshots and unknown windows keep the hold; elapsed time alone never
-    establishes recovery. An operator probe overrides the snapshot.
+    Snapshots must be newer than the hold; old snapshots and unknown windows keep
+    the hold. Elapsed time alone never establishes recovery. An operator probe
+    overrides the snapshot.
     """
     command = os.environ.get("AD_BUDGET_PROBE_CMD", "").strip()
     try:
@@ -1095,8 +1096,13 @@ def budget_window_open(lane, cfg, info):
             payload = json.loads(proc.stdout)
         else:
             path = os.path.join(D, "health.json")
-            if not 0 <= time.time() - os.path.getmtime(path) <= 900: return False
-            with open(path) as stream: payload = json.load(stream)
+            held_at = info.get("at")
+            if (not isinstance(held_at, (int, float)) or isinstance(held_at, bool)
+                    or not math.isfinite(held_at)): return False
+            with open(path) as stream:
+                observed_at = os.fstat(stream.fileno()).st_mtime
+                if not 0 <= time.time() - observed_at <= 900 or observed_at <= held_at: return False
+                payload = json.load(stream)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     backend = cfg.get("backend")
