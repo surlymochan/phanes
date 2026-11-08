@@ -71,6 +71,16 @@ mkdir -p "$HOME" "$OPENSWARM_HOME" "$OPENSWARM_FLEET_CAPACITY_DIR" "$XDG_CONFIG_
 
 echo "Swrm gate: only the current Python version is covered ($(python --version))."
 
+# The phanes-side component tests guard the live fleet topology documents
+# (docs/fleet-topology-expected.md, docs/dual-mode-ssh.md), so they run even
+# when only a document changed.
+if [[ -d "$root/openswarm/tests" ]]; then
+  (
+    cd "$root/openswarm"
+    python -m unittest discover -s tests -v
+  )
+fi
+
 # Step A: unit tests (phanes.yml "Unit tests", working directory swrm).
 (
   cd swrm

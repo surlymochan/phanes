@@ -30,7 +30,7 @@
 重复握手：
 
 ```sshconfig
-Host node-1.example.invalid node-2.example.invalid node-3.example.invalid node-4.example.invalid node-5.example.invalid broker relay.example.invalid worker-a.example.invalid worker-b.example.invalid
+Host gores1 gores2 gocc gorelay govpn govpn2
     IdentityFile ~/.ssh/id_ed25519_fleet_operator
     IdentitiesOnly yes
     ControlMaster auto
@@ -43,13 +43,13 @@ Host node-1.example.invalid node-2.example.invalid node-3.example.invalid node-4
 首次部署后只在 box 上验证连通性和远端命令，例如：
 
 ```bash
-ssh -F ~/.ssh/swrm-hub/config node-1.example.invalid -- true
-ssh -F ~/.ssh/swrm-hub/config broker -- true
+ssh -F ~/.ssh/swrm-hub/config gores1 -- true
+ssh -F ~/.ssh/swrm-hub/config gocc -- true
 ```
 
 不要把私钥、密码、known-hosts 内容或 agent socket 放进仓库或 bridge 配置。
 
-box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持该循环。
+box 上 `ib-refresh` 约每 15 分钟续签受控 fleet 主机的证书，派发机需保持该循环。
 
 ## 跳板 / ProxyCommand 拓扑
 
@@ -58,11 +58,11 @@ box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持
 `swrm-fleet` 用上面那段 `~/.ssh/swrm-hub/config`。仓库里能核对到的
 只有这几点：
 
-- 受控 fleet 主机集合固定为 `node-1.example.invalid`–`node-5.example.invalid`、`broker`、`relay.example.invalid`、`worker-a.example.invalid`、`worker-b.example.invalid`
-  （`docs/fleet-topology-expected.md:12-14`）。`bastion` **不是** fleet 主机，
+- 受控 fleet 主机集合固定为 `gores1`、`gores2`、`gocc`、`gorelay`、`govpn`、`govpn2`
+  （`docs/fleet-topology-expected.md:14-22`）。`bastion` **不是** fleet 主机，
   在本仓库里只作为引用回归样例出现（`tools/check-ssh-opts-quote.py:18`、
   `swrm/tests/test_autodispatch.py:17`），不是可核对的跳板拓扑。
-- 上面那段示例 ssh config 对这 9 台主机只配了 `IdentityFile` 与 ControlMaster，
+- 上面那段示例 ssh config 对这 6 台主机只配了 `IdentityFile` 与 ControlMaster，
   没有 `ProxyJump` / `ProxyCommand`；真实跳板链以 box 上实际生效的 ssh config 为准。
 - 方向：coordinator 部署在 `broker`，是 `relay.example.invalid` 通过反向隧道连 `broker`
   （relay.example.invalid→broker，见 `docs/fleet-coordinator-ssh-backoff.md:21-22`）；
@@ -82,7 +82,7 @@ box 上 `ib-refresh` 约每 15 分钟续签 instabox 证书，派发机需保持
 
 ```json
 {
-  "node-1.example.invalid": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
+  "gores1": "ssh -o BatchMode=yes -o ConnectTimeout=20 -W %h:%p <跳板别名>"
 }
 ```
 
@@ -96,28 +96,30 @@ ssh config 的 `IdentityFile` 负责）。
 
 ## Fleet 主机和十 lane 拓扑
 
-自动路由的主机集合固定为 `node-1.example.invalid`–`node-5.example.invalid`、`broker`、`relay.example.invalid`、`worker-a.example.invalid`、
-`worker-b.example.invalid`；不加入 `local`、`worker` 或 copilot。当前十 lane 的容量分配为：
+自动路由的远程主机集合固定为 `gores1`、`gores2`、`gocc`、`gorelay`、`govpn`、
+`govpn2`；`box` 是控制面本机，不加入受控 fleet host。当前十 lane 的容量分配为：
 
 | 主机 | lane 容量 | 允许的 backend |
 |---|---:|---|
-| node-1.example.invalid | 2 | pi |
-| node-2.example.invalid | 1 | pi |
-| node-3.example.invalid | 1 | pi |
-| node-4.example.invalid | 1 | pi |
-| node-5.example.invalid | 1 | pi |
-| broker | 1 | agy |
-| relay.example.invalid | 1 | codex |
-| worker-a.example.invalid | 1 | codex |
-| worker-b.example.invalid | 1 | codex |
+| gores1 | 2 | pi |
+| gores2 | 2 | pi |
+| gocc | 2 | agy |
+| gorelay | 1 | codex |
+| govpn | 1 | codex |
+| govpn2 | 2 | codex |
 
-因此总容量是 10，`broker` 最多 1 个 lane；配置中不得出现 `copilot` 或
-`worker`。在 box 的 bridge/service 环境中设置（JSON 的引号要保留）：
+因此总容量是 10，`gocc` 最多 2 个 lane；配置中不得出现 `copilot`。在 box 的
+bridge/service 环境中设置（JSON 的引号要保留）：
 
 ```bash
-export OPENSWARM_AUTO_FLEET_HOSTS='["node-1.example.invalid","node-2.example.invalid","node-3.example.invalid","node-4.example.invalid","node-5.example.invalid","broker","relay.example.invalid","worker-a.example.invalid","worker-b.example.invalid"]'
-export OPENSWARM_AUTO_HOST_BACKENDS='{"local":[],"node-1.example.invalid":["pi"],"node-2.example.invalid":["pi"],"node-3.example.invalid":["pi"],"node-4.example.invalid":["pi"],"node-5.example.invalid":["pi"],"broker":["agy"],"relay.example.invalid":["codex"],"worker-a.example.invalid":["codex"],"worker-b.example.invalid":["codex"]}'
+export OPENSWARM_AUTO_LOCAL_HOST=box
+export OPENSWARM_AUTO_FLEET_HOSTS='["gores1","gores2","gocc","gorelay","govpn","govpn2"]'
+export OPENSWARM_AUTO_HOST_BACKENDS='{"box":[],"gores1":["pi"],"gores2":["pi"],"gocc":["agy"],"gorelay":["codex"],"govpn":["codex"],"govpn2":["codex"]}'
 ```
+
+`OPENSWARM_AUTO_LOCAL_HOST=box` 与白名单里的 `"box":[]` 一起表示“本机不探测、
+不派发”：自动发现跳过 box 的本地 lane runtime，box 也不会出现在受控 fleet
+host 集合里。
 
 `OPENSWARM_AUTO_HOST_BACKENDS` 是主机 backend 白名单，不是凭据配置。部署后
 以 `swrm-fleet fleet status --json` 观察实际 lane 名称和状态；若实际
@@ -139,8 +141,8 @@ Task type: docs
 EOF
 
 swrm-fleet fleet status --json
-swrm-fleet fleet exec node-1.example.invalid -- lane status
-swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$task" \
+swrm-fleet fleet exec gores1 -- lane status
+swrm-fleet fleet exec gores1 -- lane assign M1 --task-file "$task" \
   --title "SSH fleet smoke" --budget-minutes 5
 ```
 
@@ -149,8 +151,8 @@ swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$tas
 示例）：
 
 ```bash
-scp -q -F ~/.ssh/swrm-hub/config "$task" node-1.example.invalid:/tmp/swrm-ssh-smoke.md
-ssh -F ~/.ssh/swrm-hub/config node-1.example.invalid -- \
+scp -q -F ~/.ssh/swrm-hub/config "$task" gores1:/tmp/swrm-ssh-smoke.md
+ssh -F ~/.ssh/swrm-hub/config gores1 -- \
   swrm-fleet lane assign M1 --task-file /tmp/swrm-ssh-smoke.md \
   --title "SSH fleet smoke" --budget-minutes 5
 ```
@@ -158,8 +160,8 @@ ssh -F ~/.ssh/swrm-hub/config node-1.example.invalid -- \
 `lane assign` 返回 run id 后，用同一 host 查询并等待结果：
 
 ```bash
-swrm-fleet fleet exec node-1.example.invalid -- runs --active --json
-swrm-fleet fleet exec node-1.example.invalid -- lane status
+swrm-fleet fleet exec gores1 -- runs --active --json
+swrm-fleet fleet exec gores1 -- lane status
 ```
 
 也可针对当前空闲 lane，把上例中的 `M1` 替换为 `fleet status` 显示的 lane

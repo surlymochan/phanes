@@ -226,7 +226,8 @@ def fleet_assign(host, lane, prompt, base, title, verify, budget, read_only):
     return response
 
 def local_host():
-    host = os.environ.get('OPENSWARM_AUTO_LOCAL_HOST', 'gores1')
+    # The 2026-11-02 control plane runs on box; the fleet hosts are remote.
+    host = os.environ.get('OPENSWARM_AUTO_LOCAL_HOST', 'box')
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', host):
         raise RuntimeError('invalid automatic routing local host configuration')
     return host

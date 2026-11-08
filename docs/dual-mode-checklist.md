@@ -20,7 +20,7 @@
 
 | 检查项 | 巡检目标 | 一行命令 |
 |---|---|---|
-| **ssh BatchMode** | 验证 box 至受控节点非交互连通性与 ControlMaster 复用 | `ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config node-1.example.invalid true` |
+| **ssh BatchMode** | 验证 box 至受控节点非交互连通性与 ControlMaster 复用 | `ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config gores1 true` |
 | **lane idle** | 检查 10+ 路真实 lane 运行水位与空闲（idle）分配状态 | `~/phanes-ctl/bin/lane-autodispatch-status` |
 | **coordinator** | 向 broker 协调器查询当前全局并发预约快照 | `ssh -F ~/.ssh/swrm-hub/config broker -- python3 ~/.claude/swrm-fleet-capacity/fleet-capacity broker <<< '{"op":"status"}'` |
 | **autodispatch heartbeat** | 检查 autodispatch 派发守护循环最后心跳（>3 分钟异常） | `cat ~/phanes-ctl/autodispatch/heartbeat` |
@@ -29,7 +29,7 @@
 ### 详细步骤与判定说明
 
 - [ ] **1. ssh BatchMode**：
-  - 命令：`ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config node-1.example.invalid true`
+  - 命令：`ssh -o BatchMode=yes -F ~/.ssh/swrm-hub/config gores1 true`
   - 判定：退出码为 0 说明非交互认证与长连接复用正常；若非零退出（含 Permission denied、Connection closed 或超时）则判定 probe 探测失败，容量/健康汇总不得 +1 hosts_ok，需排查 instabox 证书或 key 状态（`ib-refresh` 开启 `ssh_probe` 后该 host 记为 `probe_status: failed` 且不计入 hosts_ok；离线断言见 tools/check-fleet-batchmode-probe.py）。
 - [ ] **2. lane idle**：
   - 命令：`~/phanes-ctl/bin/lane-autodispatch-status`

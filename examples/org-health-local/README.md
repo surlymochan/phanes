@@ -129,7 +129,7 @@ python3 -m unittest discover -s demo -p 'test_*.py'
 | 入口 | 执行位置 | 任务载体 | 结果回来方式 | 适用场景 |
 | --- | --- | --- | --- | --- |
 | 本地 `run_e2e.py` | 自己的机器 | 命令行参数 | 产物落在 `--workdir` | 调试、评审、改代码 |
-| SSH lane | box → 受控主机（node-1.example.invalid–node-5.example.invalid、broker、relay.example.invalid、worker-a.example.invalid、worker-b.example.invalid） | 任务卡文件 | lane 分支 `swrm/<run-id>` | 自己控制的主机与账号 |
+| SSH lane | box → 受控主机（gores1、gores2、gocc、gorelay、govpn、govpn2） | 任务卡文件 | lane 分支 `swrm/<run-id>` | 自己控制的主机与账号 |
 | GitHub issue bus | 不受控执行器（他人 agent、云 agent） | bus issue | issue 里的 `swrm-result` 评论 | 外部或不受管的执行器 |
 
 网络入口的部署约定见 `docs/dual-mode-*.md`（当前仓库只有 SSH 一篇：`docs/dual-mode-ssh.md`；
@@ -164,8 +164,8 @@ Task type: docs
 EOF
 
 swrm-fleet fleet status --json
-swrm-fleet fleet exec node-1.example.invalid -- lane status
-swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$task" \
+swrm-fleet fleet exec gores1 -- lane status
+swrm-fleet fleet exec gores1 -- lane assign M1 --task-file "$task" \
   --title "org-health demo" --budget-minutes 15
 ```
 
@@ -173,8 +173,8 @@ swrm-fleet fleet exec node-1.example.invalid -- lane assign M1 --task-file "$tas
 派发后查状态、取回结果：
 
 ```bash
-swrm-fleet fleet exec node-1.example.invalid -- runs --active --json
-swrm-fleet fleet exec node-1.example.invalid -- lane status
+swrm-fleet fleet exec gores1 -- runs --active --json
+swrm-fleet fleet exec gores1 -- lane status
 ```
 
 跑完确认 lane 回到 `idle`，再删临时任务卡：

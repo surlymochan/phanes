@@ -10,7 +10,9 @@ if [[ ! -f "$doc" ]]; then
   exit 1
 fi
 
-for required in fleet_operator node-1.example.invalid worker-b.example.invalid broker; do
+# The SSH example must cover every controlled host of the current topology
+# (docs/fleet-topology-expected.md); a retired host must not come back.
+for required in fleet_operator gores1 gores2 gocc gorelay govpn govpn2; do
   if grep -Fq -- "$required" "$doc"; then
     echo "OK $required"
   else
@@ -18,6 +20,12 @@ for required in fleet_operator node-1.example.invalid worker-b.example.invalid b
     exit 1
   fi
 done
+
+# A retired Instabox host must not be part of the deployment instructions.
+if grep -Eq '\bib[1-5]\b' "$doc"; then
+  echo "UNEXPECTED retired host in the dual-mode SSH runbook" >&2
+  exit 1
+fi
 
 # Copilot may be mentioned as explicitly disabled, but it must not be part of
 # the default automatic fleet host/backend configuration.
