@@ -135,12 +135,12 @@ def memory_precheck(cfg, available_mb):
 
     `reason` is None when the lane may run. Otherwise it carries the diagnostics of the
     skip: the reason code, the host, the available memory and the threshold. An unreadable
-    memory (the probe failed) never blocks a lane: the dispatch stays as it was."""
+    probe cannot establish the budget, so a gated lane waits until the next round."""
     threshold = memory_threshold_mb(cfg)
     if threshold <= 0: return True, None
     try: available = int(available_mb)
-    except (TypeError, ValueError): return True, None
-    if available >= threshold: return True, None
+    except (TypeError, ValueError): available = None
+    if available is not None and available >= threshold: return True, None
     return False, {"reason": MEMORY_REASON, "host": (cfg or {}).get("host"),
                    "available_mb": available, "threshold_mb": threshold,
                    "backend": (cfg or {}).get("backend")}
@@ -163,6 +163,13 @@ def memory_blocked_tasks(queue, lanes, usable, memory_blocked):
             host = hosts.setdefault(str(reason.get("host")),
                                     {"available_mb": reason.get("available_mb"),
                                      "threshold_mb": reason.get("threshold_mb"), "lanes": []})
+            # A host may carry several lane budgets. Do not describe every rejection
+            # using the first lane's threshold; retain the individual budgets instead.
+            if host["threshold_mb"] != reason.get("threshold_mb"):
+                thresholds = host.setdefault("lane_thresholds_mb",
+                                             {lane: host["threshold_mb"] for lane in host["lanes"]})
+                thresholds[L] = reason.get("threshold_mb")
+                host["threshold_mb"] = None
             host["lanes"].append(L)
         blocked[item["n"]] = {"reason": MEMORY_REASON, "hosts": hosts}
     return blocked
@@ -170,15 +177,26 @@ def memory_blocked_tasks(queue, lanes, usable, memory_blocked):
 def blocked_memory_reasons(blocked_memory):
     """The blocked-diagnostics rows of the host-memory blocks (Refs #1712; input of #1687).
 
-    One row per blocked task and host: the reason code, the host, the available memory and
-    the threshold that rejected the lane."""
+    One row per blocked task, host and threshold: lanes with different budgets on the same
+    host must keep the threshold that actually rejected them."""
     rows = []
     for number, row in sorted((blocked_memory or {}).items()):
         for host, info in sorted(row.get("hosts", {}).items()):
-            rows.append({"issue": number, "reason": row.get("reason", MEMORY_REASON), "host": host,
-                         "available_mb": info.get("available_mb"), "threshold_mb": info.get("threshold_mb"),
-                         "lanes": info.get("lanes", [])})
+            budgets = {}
+            for lane in info.get("lanes", []):
+                threshold = info.get("lane_thresholds_mb", {}).get(lane, info.get("threshold_mb"))
+                budgets.setdefault(threshold, []).append(lane)
+            for threshold, lane_names in sorted(budgets.items()):
+                rows.append({"issue": number, "reason": row.get("reason", MEMORY_REASON), "host": host,
+                             "available_mb": info.get("available_mb"), "threshold_mb": threshold,
+                             "lanes": lane_names})
     return rows
+
+def memory_skip_detail(reason):
+    """The memory reading and the budget in dispatch logs, including probe failures."""
+    available = reason.get("available_mb")
+    reading = "memory probe unavailable;" if available is None else f"available {available}MB <"
+    return f"{reading} threshold {reason['threshold_mb']}MB"
 
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
@@ -735,6 +753,16 @@ def mem_available_mb():
         parts=line.split()
         if len(parts)>=7: return int(parts[6])   # `free` >= 3.3: the available column
         if len(parts)>=4: return int(parts[3])   # old `free`: the free column
+  except Exception: pass
+  try:
+    import re,subprocess
+    vm=subprocess.run(["/usr/bin/vm_stat"],capture_output=True,text=True,timeout=10,check=True).stdout
+    page_size=int(re.search(r"page size of (\d+) bytes",vm).group(1))
+    pages={name:int(value) for name,value in re.findall(r"^Pages (free|inactive|speculative):\s+(\d+)\.",vm,re.M)}
+    # Reclaimable inactive and speculative pages join free pages. Purgeable pages
+    # overlap these categories and must not be counted twice; page sizes vary by Mac.
+    if page_size>0 and all(name in pages for name in ("free","inactive","speculative")):
+      return sum(pages.values())*page_size//(1024*1024)
   except Exception: pass
   return None
 out["memory_available_mb"]=mem_available_mb()
@@ -1350,7 +1378,7 @@ def tick(lanes, state, last_warn):
             # round only. The issue is NOT labelled lane-failed, no host backoff is written and
             # no PAUSE is written (the host may recover within minutes).
             log(f"skip lane {L}: {mem_reason['reason']} host {mem_reason['host']} "
-                f"available {mem_reason['available_mb']}MB < threshold {mem_reason['threshold_mb']}MB "
+                f"{memory_skip_detail(mem_reason)} "
                 f"(backend {mem_reason['backend']})", brain=False)
             continue
         pick = None
@@ -1404,10 +1432,9 @@ def tick(lanes, state, last_warn):
     # a task is blocked by the host memory only when EVERY lane that could take it was skipped:
     # a task another backend can still run stays ready, and a task counts once (Refs #1712)
     blocked_memory = memory_blocked_tasks(q, lanes, usable_lanes, memory_blocked)
-    for number, row in sorted(blocked_memory.items()):
-        for host, info in sorted(row["hosts"].items()):
-            log(f"blocked #{number}: {row['reason']} host {host} available {info['available_mb']}MB "
-                f"< threshold {info['threshold_mb']}MB", brain=False)
+    for reason in blocked_memory_reasons(blocked_memory):
+        log(f"blocked #{reason['issue']}: {reason['reason']} host {reason['host']} "
+            f"{memory_skip_detail(reason)} lanes {','.join(reason['lanes'])}", brain=False)
     blocked_deps = sum(not i["deps_ok"] for i in q)
     blocked = blocked_deps + len(blocked_memory)
     ready = len(q) - blocked

@@ -7,6 +7,10 @@ import tempfile
 import unittest
 import warnings
 import importlib.util
+import contextlib
+import io
+import subprocess
+from unittest import mock
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
@@ -14,6 +18,45 @@ AUTODISPATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTODISPATCH)
 
 SCRATCH = Path(__file__).resolve().parents[2] / ".swrm-tmp"  # gitignored scratch root
+
+def probe_memory(proc=None, free=None, vm_stat=None):
+    """Execute the actual status shim with simulated host memory sources."""
+    def read(path, *args, **kwargs):
+        if path == "/proc/meminfo" and proc is not None: return io.StringIO(proc)
+        raise FileNotFoundError(path)
+
+    def run(args, **kwargs):
+        output = {"free": free, "/usr/bin/vm_stat": vm_stat}.get(args[0])
+        if output is None: raise FileNotFoundError(args[0])
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+    output = io.StringIO()
+    with mock.patch("builtins.open", side_effect=read), mock.patch("subprocess.run", side_effect=run), \
+         mock.patch("sys.argv", ["probe", "CX10"]), contextlib.redirect_stdout(output):
+        exec(AUTODISPATCH.REMOTE_STATUS, {})
+    return json.loads(output.getvalue())["memory_available_mb"]
+
+
+def mac_memory_sample(page_size, free_pages):
+    return (f"Mach Virtual Memory Statistics: (page size of {page_size} bytes)\n"
+            f"Pages free: {free_pages}.\nPages inactive: 2048.\nPages speculative: 1024.\n"
+            "Pages active: 999999.\nPages purgeable: 999999.\n")
+
+
+class RemoteMemoryProbeTest(unittest.TestCase):
+    def test_linux_memavailable_and_free_fallback(self):
+        self.assertEqual(probe_memory(proc="MemAvailable: 138240 kB\n"), 135)
+        self.assertEqual(probe_memory(free="Mem: 1600 1400 100 0 100 135\n"), 135)
+
+    def test_macos_vm_stat_uses_the_reported_page_size(self):
+        # Free + inactive + speculative; purgeable overlaps other page categories.
+        for page_size, free_pages in ((4096, 31488), (16384, 5568)):
+            with self.subTest(page_size=page_size):
+                self.assertEqual(probe_memory(vm_stat=mac_memory_sample(page_size, free_pages)), 135)
+
+    def test_failed_or_incomplete_probes_are_unknown(self):
+        self.assertIsNone(probe_memory())
+        self.assertIsNone(probe_memory(vm_stat="Mach Virtual Memory Statistics:\nPages free: 999999.\n"))
 
 SOCKET_RE = re.compile(r"unix\s*socket|AF_UNIX|socketpair|needs-socket|Unix 套接字|套接字", re.I)
 
@@ -215,7 +258,8 @@ class TickHarness:
                 AUTODISPATCH.host_ok = lambda h: True
                 AUTODISPATCH.host_fail = lambda h, why: None
                 AUTODISPATCH.host_good = lambda h: None
-                AUTODISPATCH.remote = lambda lane, cfg, run="": {"lane": "idle", **(remote_info or {})}
+                AUTODISPATCH.remote = lambda lane, cfg, run="": {
+                    "lane": "idle", **({"memory_available_mb": 900} if remote_info is None else remote_info)}
                 AUTODISPATCH.deps_met = lambda item: True
                 AUTODISPATCH.dispatch = fake_dispatch
                 AUTODISPATCH.replenish = lambda k, state: replenish_calls.append(k) or []
@@ -460,13 +504,49 @@ class TickMemoryPrecheckTest(TickHarness, unittest.TestCase):
         self.assertEqual(dispatched, [])
         self.assertEqual(self.replenish_calls, [])
 
-    def test_an_unreadable_memory_never_blocks_a_lane(self):
-        # The probe failed (no memory in the status): the dispatch stays as it was.
-        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+    def test_an_unreadable_memory_blocks_codex_but_not_pi(self):
+        lanes = {"CX10": {"host": "mac", "backend": "codex"}, "PI1": {"host": "mac", "backend": "pi"}}
         dispatched, logs = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
-                                         lanes=lanes)
-        self.assertEqual(dispatched, [("CX10", 1712)])
-        self.assertFalse(any("blocked-by-host-memory" in line for line in logs))
+                                         lanes=lanes, remote_info={})
+        self.assertEqual(dispatched, [("PI1", 1712)])
+        self.assertTrue(any("memory probe unavailable" in line for line in logs))
+        self.assertFalse([edit for edit in self.edits if "lane-failed" in edit])
+
+    def test_macos_probe_controls_actual_dispatch(self):
+        lanes = {"CX10": {"host": "mac", "backend": "codex"}}
+        for pages, expected in ((5568, []), (62464, [("CX10", 1712)])):
+            with self.subTest(pages=pages):
+                available = probe_memory(vm_stat=mac_memory_sample(16384, pages))
+                dispatched, _ = self.run_tick([issue(1712, "plain card")], lanes=lanes,
+                                              remote_info={"memory_available_mb": available})
+                self.assertEqual(dispatched, expected)
+
+    def test_failed_probe_blocks_a_gated_task_without_counting_failure(self):
+        lanes = {"CX10": {"host": "mac", "backend": "codex"}}
+        dispatched, logs = self.run_tick([issue(1712, "plain card")], lanes=lanes,
+                                         remote_info={"memory_available_mb": probe_memory()})
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.edits, [])
+        snapshot = self.snapshots[-1]
+        self.assertEqual((snapshot["ready"], snapshot["blocked"]), (0, 1))
+        reasons = AUTODISPATCH.blocked_memory_reasons(snapshot["blocked_memory"])
+        self.assertEqual(reasons, [{"issue": 1712, "reason": "blocked-by-host-memory", "host": "mac",
+                                    "available_mb": None, "threshold_mb": 400, "lanes": ["CX10"]}])
+        self.assertTrue(any("blocked #1712:" in line and "memory probe unavailable" in line for line in logs))
+
+    def test_same_host_diagnostics_preserve_each_lane_threshold(self):
+        lanes = {"CX10": {"host": "mac", "backend": "codex", "memory_min_mb": 400},
+                 "CX11": {"host": "mac", "backend": "codex", "memory_min_mb": 512},
+                 "CX12": {"host": "mac", "backend": "codex", "memory_min_mb": 400}}
+        dispatched, logs = self.run_tick([issue(1712, "plain card")], lanes=lanes,
+                                         remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.snapshots[-1]["blocked"], 1)
+        rows = AUTODISPATCH.blocked_memory_reasons(self.snapshots[-1]["blocked_memory"])
+        self.assertEqual([(r["host"], r["threshold_mb"], r["lanes"]) for r in rows],
+                         [("mac", 400, ["CX10", "CX12"]), ("mac", 512, ["CX11"])])
+        for threshold in (400, 512):
+            self.assertTrue(any("blocked #1712:" in line and f"threshold {threshold}MB" in line for line in logs))
 
 
 class TickWorkClassCapTest(TickHarness, unittest.TestCase):
