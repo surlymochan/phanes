@@ -44,7 +44,8 @@ HARVEST_FETCH_BACKOFF_CAP = 600
 # Transfer/ssh hiccups seen in the field (M4#904): `fetch-pack: unexpected disconnect`, `bad pack header`.
 HARVEST_FETCH_TRANSIENT_RE = re.compile(r"Permission denied|Connection closed|broken pipe|timed out|banner|"
                                         r"unexpected disconnect|bad pack header|early eof|index-pack failed|"
-                                        r"RPC failed|Connection reset|hung up unexpectedly", re.I)
+                                        r"RPC failed|Connection reset|hung up unexpectedly|gnutls|tls|ssl|handshake|"
+                                        r"could not resolve|failed to connect|network is unreachable", re.I)
 # Refs #1810: the base commit is read from upstream (ls-remote) and must exist in the target repo
 # before the lane is assigned. The target repo can lag behind upstream (its object store misses the
 # new base), which surfaced as `fatal: Not a valid object name <base>^{commit}` plus a 30s host
@@ -1038,7 +1039,7 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
-def harvest_fetch(lane, n, fetch, st):
+def harvest_fetch(lane, n, fetch, st, host=None, fallback=None):
     """Fetch a finished lane branch with bounded attempts.
 
     Returns (ok, error, failures); `failures` counts the consecutive failed harvest
@@ -1050,11 +1051,24 @@ def harvest_fetch(lane, n, fetch, st):
         if not rc:
             st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
             return True, "", 0
+        if host:
+            record_dispatch_fetch_failure(host, err)
         if not should_retry_harvest_fetch(err, attempt):
             log(f"{lane} #{n} fetch failed after {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} attempts ({classify_harvest_fetch_error(err)}: {err.strip()[-120:]})", brain=False)
             break
         log(f"{lane} #{n} fetch failed attempt {attempt}/{HARVEST_FETCH_MAX_ATTEMPTS} (transient: {err.strip()[-90:]}); retrying in {HARVEST_FETCH_RETRY_DELAY}s", brain=False)
         time.sleep(HARVEST_FETCH_RETRY_DELAY)
+    # A configured seed endpoint can serve the same branch when the executor host's
+    # SSH route is unhealthy. Keep this inside the fetch policy and fail closed if it fails.
+    if fallback:
+        log(f"{host or lane} harvest fetch retries exhausted; falling back to seed endpoint", brain=False)
+        rc, _, fallback_error = sh(fallback, timeout=180)
+        if not rc:
+            st.pop("fetch_failures", None); st.pop("fetch_backoff_until", None)
+            return True, "", 0
+        if host:
+            record_dispatch_fetch_failure(host, fallback_error)
+        err = f"{err}; seed fallback: {fallback_error}"
     failures = int(st.get("fetch_failures", 0) or 0) + 1
     st["fetch_failures"] = failures
     return False, err, failures
@@ -1199,7 +1213,10 @@ def finish(lane, cfg, st, info, state):
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
-        ok, err, failures = harvest_fetch(lane, n, fetch, st)
+        seed = os.environ.get("AD_HARVEST_FETCH_MIRROR")
+        fallback_fetch = (git_fetch_command([], LOCAL, seed, info["branch"], lane)
+                          if seed else None)
+        ok, err, failures = harvest_fetch(lane, n, fetch, st, cfg["host"], fallback_fetch)
         if not ok: return handle_harvest_fetch_failure(lane, cfg, st, info, state, err, failures)
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))

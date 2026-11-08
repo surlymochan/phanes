@@ -50,10 +50,38 @@ class DispatchFetchResilienceTest(unittest.TestCase):
 
     def test_fetch_failure_health_is_recent_and_classified(self):
         AUTODISPATCH.DISPATCH_FETCH_FAILURES.clear()
-        AUTODISPATCH.record_dispatch_fetch_failure("govpn", "gnutls_handshake failed")
-        health = AUTODISPATCH.dispatch_fetch_health()
+        with mock.patch.object(AUTODISPATCH.time, "time", return_value=1000):
+            AUTODISPATCH.record_dispatch_fetch_failure("govpn", "gnutls_handshake failed")
+            health = AUTODISPATCH.dispatch_fetch_health(now=1000)
         self.assertEqual(health["govpn"]["recent_failures"], 1)
         self.assertEqual(health["govpn"]["primary_error"], "tls")
+        self.assertEqual(AUTODISPATCH.dispatch_fetch_health(now=4601), {})
+
+    def test_tls_harvest_failure_retries_and_uses_seed_fallback(self):
+        state = {}
+        attempts = []
+
+        def fake_sh(command, timeout=None, inp=None):
+            attempts.append(command)
+            return (0, "", "") if command[-1] == "seed" else (1, "", "gnutls_handshake failed")
+
+        AUTODISPATCH.DISPATCH_FETCH_FAILURES.clear()
+        with mock.patch.object(AUTODISPATCH, "sh", side_effect=fake_sh), \
+             mock.patch.object(AUTODISPATCH, "HARVEST_FETCH_MAX_ATTEMPTS", 3), \
+             mock.patch.object(AUTODISPATCH, "HARVEST_FETCH_RETRY_DELAY", 0), \
+             mock.patch.object(AUTODISPATCH.time, "sleep"), \
+             mock.patch.object(AUTODISPATCH, "log"):
+            ok, err, failures = AUTODISPATCH.harvest_fetch(
+                "CX10", 1719, ["git", "fetch", "executor"], state, "govpn", ["git", "fetch", "seed"])
+
+        self.assertTrue(ok)
+        self.assertEqual((err, failures), ("", 0))
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(attempts[-1][-1], "seed")
+        self.assertEqual(AUTODISPATCH.dispatch_fetch_health()["govpn"]["recent_failures"], 3)
+
+    def test_tls_errors_are_retryable(self):
+        self.assertEqual(AUTODISPATCH.classify_harvest_fetch_error("gnutls_handshake failed"), "transient")
 
     def test_failed_fetch_uses_configured_mirror_after_retry_threshold(self):
         commands = []
