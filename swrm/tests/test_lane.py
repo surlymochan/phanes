@@ -224,7 +224,7 @@ class LaneTests(unittest.TestCase):
     def test_assignment_rebuilds_a_broken_lane_worktree(self):
         self.start_lane()
         wt = self.data / "lanes" / self.lane_name / "wt"
-        (wt / ".git").unlink()
+        shutil.rmtree(wt / ".git")
         (wt / "stale-worktree-file").write_text("discarded\n")
         expected_head = self.git("rev-parse", "HEAD")
 
@@ -261,6 +261,60 @@ class LaneTests(unittest.TestCase):
             "lane worktree git metadata must be writable from the executor's sandbox; "
             "a linked worktree points .git outside its writable root",
         )
+
+    def test_rebuild_preserves_legacy_linked_worktree_changes(self):
+        wt = self.root / "wt"
+        self.git("worktree", "add", "-q", "-b", "legacy-lane", str(wt))
+        (wt / "committed.txt").write_text("in-flight commit\n")
+        self.git("-C", str(wt), "add", "committed.txt")
+        self.git("-C", str(wt), "commit", "-q", "-m", "in-flight")
+        head = self.git("-C", str(wt), "rev-parse", "HEAD")
+        (wt / "README.md").write_text("staged\n")
+        self.git("-C", str(wt), "add", "README.md")
+        (wt / "README.md").write_text("unstaged\n")
+        (wt / "untracked.txt").write_text("unfinished\n")
+        (wt / ".gitignore").write_text("ignored.txt\n")
+        (wt / "ignored.txt").write_text("ignored result\n")
+        status = self.git("-C", str(wt), "status", "--porcelain")
+
+        functions = runpy.run_path(str(CLI))
+        self.assertFalse(functions["lane_worktree_matches"](str(self.repo), str(wt)))
+        functions["lane_rebuild_worktree"](str(self.repo), str(wt), self.git("rev-parse", "HEAD"))
+
+        backup, = self.root.glob("wt.backup-*/wt")
+        self.assertEqual(self.git("-C", str(backup), "status", "--porcelain"), status)
+        self.assertEqual(self.git("-C", str(backup), "rev-parse", "HEAD"), head)
+        self.assertEqual(self.git("-C", str(backup), "show", ":README.md"), "staged")
+        self.assertEqual((backup / "README.md").read_text(), "unstaged\n")
+        self.assertEqual((backup / "untracked.txt").read_text(), "unfinished\n")
+        self.assertEqual((backup / "ignored.txt").read_text(), "ignored result\n")
+        self.assertIn(str(backup), self.git("worktree", "list", "--porcelain"))
+        self.assertTrue(functions["lane_worktree_matches"](str(self.repo), str(wt)))
+
+    def test_rebuild_refuses_to_discard_locked_legacy_worktree(self):
+        wt = self.root / "wt"
+        self.git("worktree", "add", "-q", "--detach", str(wt))
+        self.git("worktree", "lock", str(wt))
+        (wt / "untracked.txt").write_text("unfinished\n")
+        rebuild = runpy.run_path(str(CLI))["lane_rebuild_worktree"]
+        with self.assertRaisesRegex(RuntimeError, "cannot preserve lane worktree"):
+            rebuild(str(self.repo), str(wt), self.git("rev-parse", "HEAD"))
+        self.assertEqual((wt / "untracked.txt").read_text(), "unfinished\n")
+
+    def test_failed_rebuild_preserves_existing_local_workspace(self):
+        wt = self.root / "wt"
+        rebuild = runpy.run_path(str(CLI))["lane_rebuild_worktree"]
+        rebuild(str(self.repo), str(wt), self.git("rev-parse", "HEAD"))
+        (wt / "untracked.txt").write_text("unfinished\n")
+        (wt / "README.md").write_text("staged\n")
+        self.git("-C", str(wt), "add", "README.md")
+
+        with self.assertRaisesRegex(RuntimeError, "lane worktree checkout failed"):
+            rebuild(str(self.repo), str(wt), "nonexistent-base")
+
+        backup, = self.root.glob("wt.backup-*/wt")
+        self.assertEqual((backup / "untracked.txt").read_text(), "unfinished\n")
+        self.assertEqual(self.git("-C", str(backup), "show", ":README.md"), "staged")
 
     def test_pi_rate_limit_retries_in_session_and_watch_shows_alert(self):
         self.set_config("pi")

@@ -7257,13 +7257,24 @@ def lane_worktree_matches(repo, wt):
 
 
 def lane_rebuild_worktree(repo, wt, base):
-    if os.path.islink(wt) or (os.path.lexists(wt) and not os.path.isdir(wt)):
-        os.unlink(wt)
-    elif os.path.isdir(wt):
-        lane_git(["worktree", "remove", "--force", wt], repo, timeout=300)
-        if os.path.lexists(wt):
-            shutil.rmtree(wt, ignore_errors=True)
-    lane_git(["worktree", "prune"], repo, timeout=300)
+    if os.path.lexists(wt):
+        # Upgrades reject legacy linked worktrees because their Git metadata is
+        # outside the sandbox. Keep all prior work, including dirty files and
+        # the index, rather than treating a layout change as permission to erase it.
+        backup_dir = tempfile.mkdtemp(prefix=os.path.basename(wt) + ".backup-",
+                                      dir=os.path.dirname(wt))
+        backup = os.path.join(backup_dir, os.path.basename(wt))
+        rc, _, _ = lane_git(["rev-parse", "--show-toplevel"], wt) if (
+            os.path.isdir(wt) and not os.path.islink(wt)) else (1, "", "")
+        if not rc and os.path.isfile(os.path.join(wt, ".git")):
+            # Git updates the linked worktree's administrative paths as well.
+            # If it cannot move the worktree (e.g. it is locked), fail closed.
+            rc, _, err = lane_git(["worktree", "move", wt, backup], wt, timeout=300)
+            if rc:
+                raise RuntimeError(f"cannot preserve lane worktree at {backup}: {err[:250]}")
+        else:
+            os.rename(wt, backup)
+        print(f"lane: preserved previous workspace at {backup}", file=sys.stderr)
     rc, _, err = lane_git(["clone", "--shared", "--no-checkout", "-q", repo, wt], repo, timeout=300)
     if rc:
         raise RuntimeError(f"lane worktree clone failed: {err[:250]}")
