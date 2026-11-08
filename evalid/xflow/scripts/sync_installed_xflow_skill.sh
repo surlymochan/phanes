@@ -88,6 +88,19 @@ standalone_xmem_install_enabled() {
   return 0
 }
 
+normalize_skill_source_path() {
+  normalize_candidate=$1
+  normalize_candidate_dir=${normalize_candidate%/*}
+  normalize_candidate_name=${normalize_candidate##*/}
+  [ "$normalize_candidate_dir" != "$normalize_candidate" ] || normalize_candidate_dir=.
+  normalize_candidate_dir=$(CDPATH= cd -L "$normalize_candidate_dir" 2>/dev/null && pwd -L) || return 1
+  if [ "$normalize_candidate_dir" = / ]; then
+    printf '/%s\n' "$normalize_candidate_name"
+  else
+    printf '%s/%s\n' "$normalize_candidate_dir" "$normalize_candidate_name"
+  fi
+}
+
 # The shared skillhub sync resolves managed skills from a single extra source
 # dir, so the aggregated list of extra source dirs makes it prune the managed
 # skills owned by the other sources. Snapshot those managed skills before the
@@ -98,11 +111,7 @@ snapshot_extra_managed_skills() {
     printf '%s\n' "$EXTRA_SOURCE_DIRS" | while IFS= read -r source_dir; do
       [ -n "$source_dir" ] || continue
       [ -d "$source_dir" ] || continue
-      # Avoid inserting an extra slash before the skill name, which would
-      # prevent matching the source path stored in existing markers.
-      while [ "$source_dir" != / ] && [ "${source_dir%/}" != "$source_dir" ]; do
-        source_dir=${source_dir%/}
-      done
+      source_dir=$(CDPATH= cd -L "$source_dir" 2>/dev/null && pwd -L) || continue
       for source_path in "${source_dir%/}"/*; do
         [ -d "$source_path" ] || continue
         skill_name=$(basename "$source_path")
@@ -114,8 +123,9 @@ snapshot_extra_managed_skills() {
         marker_path=$target_path/.skillhub-source
         [ -f "$marker_path" ] || continue
         recorded_source=$(cat "$marker_path" 2>/dev/null || true)
-        [ "$recorded_source" = "$source_path" ] || continue
-        printf '%s%s%s%s%s\n' "$target_dir" "$TAB" "$skill_name" "$TAB" "$source_path" >>"$EXTRA_MANAGED_SKILLS"
+        normalized_recorded_source=$(normalize_skill_source_path "$recorded_source") || continue
+        [ "$normalized_recorded_source" = "$source_path" ] || continue
+        printf '%s%s%s%s%s\n' "$target_dir" "$TAB" "$skill_name" "$TAB" "$recorded_source" >>"$EXTRA_MANAGED_SKILLS"
       done
     done
   done

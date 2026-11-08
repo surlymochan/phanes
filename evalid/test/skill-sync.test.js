@@ -135,7 +135,7 @@ describe('xflow skill sync wrapper', () => {
     }
   });
 
-  function assertMultiSourceSync(trailingSlash = false) {
+  function assertMultiSourceSync(sourceDirSuffix = '') {
     // The wrapper aggregates `skills.extra_source_dirs` into one newline separated
     // string and hands that string to the shared skillhub sync, which resolves
     // extra sources from a single source dir. Managed skills owned by the other
@@ -167,7 +167,7 @@ describe('xflow skill sync wrapper', () => {
         version: 1,
         skills: {
           sync_script: fakeSyncScript,
-          extra_source_dirs: [extraRootA, extraRootB].map((dir) => trailingSlash ? `${dir}/` : dir),
+          extra_source_dirs: [extraRootA, extraRootB].map((dir) => `${dir}${sourceDirSuffix}`),
           installed_dir: targetRoot,
         },
       }, null, 2));
@@ -221,7 +221,11 @@ describe('xflow skill sync wrapper', () => {
   });
 
   test('sync preserves managed skills when extra source dirs have trailing slashes', () => {
-    assertMultiSourceSync(true);
+    assertMultiSourceSync('/');
+  });
+
+  test('sync preserves managed skills when extra source dirs contain dot segments', () => {
+    assertMultiSourceSync('/.');
   });
 
   test('sync reads skill defaults from project-local xflow config', () => {
