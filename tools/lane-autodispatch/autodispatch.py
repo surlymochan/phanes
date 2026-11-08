@@ -1013,7 +1013,15 @@ def git_network_operation(command, host, operation, policy, direct=False, transi
     """Run one Git transfer with bounded retries and attributed health diagnostics."""
     attempts = policy["fallback_after"] if direct else policy["attempts"]
     for attempt in range(1, attempts + 1):
-        rc, out, err = sh(command, timeout=180)
+        try:
+            rc, out, err = sh(command, timeout=180)
+        except subprocess.TimeoutExpired as error:
+            # subprocess can return partial bytes even with text=True. Keep the
+            # timeout in the normal failure path for retries, fallback and health.
+            out, err = error.stdout or "", error.stderr or ""
+            if isinstance(out, bytes): out = out.decode(errors="replace")
+            if isinstance(err, bytes): err = err.decode(errors="replace")
+            rc, err = 124, f"git transfer timed out after {error.timeout}s: {err}"
         if not rc: return rc, out, err
         record_dispatch_fetch_failure(host, err)
         retry = attempt < attempts and (not transient_only or classify_harvest_fetch_error(err) == "transient")

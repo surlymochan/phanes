@@ -7,6 +7,7 @@ Run offline with:
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,7 +113,7 @@ class DispatchFetchTests(unittest.TestCase):
         self.assertEqual(health["govpn"]["recent_failures"], 6)
 
     def run_fallback(self, *, missing_after=False, source_fails=False, push_fails=False,
-                     mirror=False):
+                     mirror=False, timeouts=False):
         module = load_module()
         cfg = {"host": "govpn", "repo": "/repo", "controller_repo": "/controller",
                "fetch_policy": {"attempts": 3, "delay": 2, "fallback_after": 2}}
@@ -120,6 +121,11 @@ class DispatchFetchTests(unittest.TestCase):
         calls, sleeps, logs = [], [], []
         counts = {"direct": 0, "source": 0, "push": 0, "mirror": 0, "assign": 0}
         seeded = False
+
+        def transfer_failure(command, timeout, error):
+            if timeouts:
+                raise subprocess.TimeoutExpired(command, timeout, stderr=error.encode())
+            return 128, "", error
 
         def fake_sh(command, timeout=120, inp=None):
             nonlocal seeded
@@ -133,13 +139,13 @@ class DispatchFetchTests(unittest.TestCase):
             if " push -q " in rendered:
                 counts["push"] += 1
                 if push_fails or counts["push"] == 1:
-                    return 128, "", "Connection reset by peer"
+                    return transfer_failure(command, timeout, "Connection reset by peer")
                 seeded = True
             elif "fetch" in rendered:
                 kind = "source" if isinstance(command, list) else "mirror" if "mirror.invalid" in rendered else "direct"
                 counts[kind] += 1
                 if kind == "direct" or (kind == "source" and source_fails) or counts[kind] == 1:
-                    return 128, "", "gnutls_handshake() failed"
+                    return transfer_failure(command, timeout, "gnutls_handshake() failed")
                 if kind == "mirror": seeded = True
             return 0, "", ""
 
@@ -206,6 +212,83 @@ class DispatchFetchTests(unittest.TestCase):
         self.assertIn("govpn", module.BACKOFF)
         self.assertTrue(any("recent=5" in line and "network_transient" in line for line in logs))
         self.assertFalse(any("ssh transient error" in line for line in logs))
+
+    def test_network_timeout_obeys_direct_threshold_backoff_and_health(self):
+        module = load_module()
+        policy = {"attempts": 4, "delay": 2, "fallback_after": 2}
+        timeout = subprocess.TimeoutExpired(["git", "fetch"], 180,
+                                            output=b"partial output", stderr=b"partial error\xff")
+        with mock.patch.object(module, "sh", side_effect=timeout) as shell, \
+                mock.patch.object(module, "log") as log, \
+                mock.patch.object(module.time, "sleep") as sleep:
+            rc, out, err = module.git_network_operation(
+                ["git", "fetch"], "govpn", "dispatch fetch #1719", policy, direct=True)
+        self.assertEqual(shell.call_count, 2)
+        sleep.assert_called_once_with(2)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out, "partial output")
+        self.assertIn("timed out", err)
+        self.assertIn("180", err)
+        self.assertIn("partial error", err)
+        self.assertEqual(module.dispatch_fetch_health({"CX1": {"host": "govpn"}})["govpn"],
+                         {"recent_failures": 2, "primary_error": "network_transient",
+                          "window_seconds": 3600})
+        self.assertIn("exhausted", log.call_args.args[0])
+
+    def test_network_timeouts_use_seed_fallback_and_preserve_failure_attribution(self):
+        scenarios = [({}, True), ({"source_fails": True}, False),
+                     ({"push_fails": True}, False),
+                     ({"push_fails": True, "mirror": True}, True),
+                     ({"missing_after": True}, False)]
+        for options, succeeds in scenarios:
+            with self.subTest(**options):
+                module, cfg, result, counts, calls, sleeps, logs = self.run_fallback(
+                    timeouts=True, **options)
+                self.assertEqual(counts["direct"], 4 if options.get("missing_after") else 2)
+                self.assertEqual(sleeps[0], 2)
+                self.assertEqual(counts["assign"], int(succeeds))
+                self.assertTrue(any("threshold reached" in line for line in logs))
+                health = module.dispatch_fetch_health({"CX1": cfg})
+                self.assertEqual(health["govpn"]["primary_error"], "network_transient")
+                if succeeds:
+                    self.assertEqual(result, ("seeded-run", None))
+                    self.assertEqual(counts["push"], 3 if options.get("mirror") else 2)
+                    self.assertEqual(counts["source"], 2)
+                    self.assertGreaterEqual(sum("cat-file -e" in c for c in calls if isinstance(c, str)), 2)
+                    self.assertFalse(module.BACKOFF)
+                else:
+                    self.assertIsInstance(result, RuntimeError)
+                    if options.get("source_fails"):
+                        self.assertIn("controller source fetch failed", str(result))
+                        self.assertEqual(health["controller"]["recent_failures"], 3)
+                        self.assertEqual(health["govpn"]["recent_failures"], 2)
+                        self.assertFalse(module.BACKOFF)
+                    elif options.get("push_fails"):
+                        self.assertIn("dispatch fetch failed", str(result))
+                        self.assertEqual(health["govpn"]["recent_failures"], 5)
+                        self.assertIn("govpn", module.BACKOFF)
+                    else:
+                        self.assertIn("Not a valid object name", str(result))
+
+    def test_pr_head_timeout_retries_as_transient_and_retains_health(self):
+        for exhausted in (False, True):
+            with self.subTest(exhausted=exhausted):
+                module = load_module()
+                cfg = {"host": "govpn", "fetch_policy": {"attempts": 2, "delay": 7}}
+                timeout = subprocess.TimeoutExpired(["git", "fetch"], 180)
+                state = {}
+                with mock.patch.object(module, "sh", side_effect=[timeout, timeout if exhausted else (0, "", "")]) as shell, \
+                        mock.patch.object(module, "log"), \
+                        mock.patch.object(module.time, "sleep") as sleep:
+                    ok, error, failures = module.harvest_fetch("CX1", 1719, ["git", "fetch"], state, cfg)
+                self.assertEqual(shell.call_count, 2)
+                sleep.assert_called_once_with(7)
+                self.assertEqual(ok, not exhausted)
+                self.assertEqual(failures, int(exhausted))
+                if exhausted:
+                    self.assertEqual(module.classify_harvest_fetch_error(error), "transient")
+                self.assertEqual(module.dispatch_fetch_health({"CX1": cfg})["govpn"]["recent_failures"],
+                                 2 if exhausted else 1)
 
     def test_pr_head_fetch_uses_host_policy_and_health(self):
         module = load_module()
