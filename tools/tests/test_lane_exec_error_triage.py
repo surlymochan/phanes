@@ -41,6 +41,57 @@ def write_run(root, run_id, lane, error_class, rc, seconds, backend="pi", with_r
 
 
 class LaneExecErrorTriageTests(unittest.TestCase):
+    def test_status_only_in_flight_runs_are_not_failures(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1]) as tmp:
+            run_dir = Path(tmp) / "20261103-002555-active"
+            run_dir.mkdir()
+            for state in ("queued", "routing", "running", "finalizing", "verifying"):
+                with self.subTest(state=state):
+                    (run_dir / "status.json").write_text(json.dumps(
+                        {"lane": "GH2", "backend": "pi", "state": state,
+                         "started": 1793665555.0}), encoding="utf-8")
+                    record = triage.read_run(run_dir)
+                    report = triage.build_report([tmp])
+                    lane = report["lanes"][0]
+                    self.assertEqual(lane["runs"], 1)
+                    self.assertEqual(lane["failures"], 0)
+                    self.assertIsNone(lane["dominant_signature"])
+                    self.assertEqual(lane["causes"], {})
+                    self.assertEqual(lane["runs_detail"], [])
+                    self.assertEqual(lane["evidence"], [])
+                    self.assertIsNone(lane["first_failure"])
+                    self.assertIsNone(lane["last_failure"])
+                    self.assertIsNone(record["finished"])
+                    self.assertEqual(record["status"], state)
+                    self.assertEqual(triage.classify(record, [])[0], "in_progress")
+                    self.assertNotIn("no_result", triage.render_text(report))
+
+    def test_in_flight_run_does_not_pollute_a_failure_burst(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1]) as tmp:
+            for run_id, seconds in GH2_RUNS:
+                write_run(tmp, run_id, "GH2", "exec_error", 1, seconds,
+                          tail=BROKER_TAIL)
+            before = triage.build_report([tmp])["lanes"][0]
+            run_dir = Path(tmp) / "20261103-002555-active"
+            run_dir.mkdir()
+            (run_dir / "status.json").write_text(json.dumps(
+                {"lane": "GH2", "backend": "pi", "state": "running",
+                 "started": 1793665555.0}), encoding="utf-8")
+            (run_dir / "events.1.pi.jsonl.err").write_text(
+                "timeout during an ongoing attempt\n", encoding="utf-8")
+            after = triage.build_report([tmp])["lanes"][0]
+        self.assertEqual(after.pop("runs"), before.pop("runs") + 1)
+        self.assertEqual(after, before)
+
+    def test_final_result_wins_over_stale_running_state(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1]) as tmp:
+            run_dir = write_run(tmp, "20261103-001700-aaaa", "GH2", "exec_error", 1, 118)
+            (run_dir / "status.json").write_text(json.dumps(
+                {"lane": "GH2", "state": "running"}), encoding="utf-8")
+            lane = triage.build_report([tmp])["lanes"][0]
+        self.assertEqual(lane["failures"], 1)
+        self.assertEqual(lane["dominant_signature"], "exec_error:executor_hard_failure")
+
     def test_exec_error_burst_is_classified_from_the_evidence_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             for run_id, seconds in GH2_RUNS:

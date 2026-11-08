@@ -89,8 +89,8 @@ CAUSE_PATTERNS = (
 )
 
 # The recorded error class wins over the text heuristics, except for
-# exec_error: that class only says "the executor died", so the evidence picks
-# the cause.
+# exec_error: that class says "non-zero exit or no final report", so the
+# evidence picks the cause.
 ERROR_CLASS_CAUSES = {
     "rate_limit": "quota_or_rate_limit",
     "quota": "quota_or_rate_limit",
@@ -117,6 +117,7 @@ RUN_ID_RE = re.compile(r"(\d{8})-(\d{6})")
 # and events.1.pi.jsonl.err (openswarm/bin/openswarm:4613).
 EVENT_RE = re.compile(r"^events\.[^.]+\.[a-z_]+\.jsonl(\.err)?$")
 MAX_SCAN_BYTES = 512 * 1024
+IN_PROGRESS_STATES = {"started", "starting", "queued", "routing", "running", "finalizing", "verifying"}
 
 
 def parse_ts(value):
@@ -174,8 +175,8 @@ def iter_run_dirs(directories):
 
     A root may be a runs directory (its children are runs) or a single run
     directory (it holds a result.json itself).  A run directory without a
-    result.json but with a status.json is reported too: the run left no
-    result, which is a different failure than a classified one.
+    result.json but with a status.json is reported too. In-flight runs count
+    toward the run total, but not toward failures while awaiting a result.
     """
     for directory in directories:
         root = Path(directory)
@@ -219,6 +220,9 @@ def read_run(run_dir):
     status = load_json(run_dir / "status.json")
     if not isinstance(status, dict):
         status = {}
+    # A result can be written before status.json is marked finished. Prefer
+    # that result over a stale in-flight state.
+    in_progress = not result and status.get("state") in IN_PROGRESS_STATES
     attempt = attempt_of(result)
     error_class = error_class_of(result)
     started = parse_ts(status.get("started")) or parse_ts(status.get("attempt_started"))
@@ -238,7 +242,7 @@ def read_run(run_dir):
     if created is not None:
         if started is None:
             started = created
-        if finished is None:
+        if finished is None and not in_progress:
             finished = created
     lane = result.get("lane") or status.get("lane") or "unknown"
     return {
@@ -248,7 +252,8 @@ def read_run(run_dir):
         "backend": result.get("backend") or status.get("backend"),
         "model": result.get("model") or status.get("model"),
         "title": result.get("title") or status.get("title") or "",
-        "status": result.get("status") or status.get("status"),
+        "status": result.get("status") or status.get("status") or status.get("state"),
+        "in_progress": in_progress,
         "error_class": error_class,
         "rc": attempt.get("rc"),
         "seconds": seconds,
@@ -333,6 +338,8 @@ def classify(record, evidence):
     """The cause hypothesis of a run and the signature used for comparisons."""
     error_class = record.get("error_class")
     causes = [item["cause"] for item in evidence]
+    if record.get("in_progress"):
+        return "in_progress", "none:in_progress"
     if not record.get("has_result"):
         # No result was available; the remote execution state is unknown.
         return "no_result", "none:no_result"
@@ -443,7 +450,8 @@ def harvest_failures(path):
 
 def summarise_lane(lane, records):
     """Aggregate the runs of one lane into a verdict."""
-    failures = [record for record in records if record.get("status") != "done"]
+    failures = [record for record in records
+                if record.get("status") != "done" and not record.get("in_progress")]
     signatures = Counter(record["signature"] for record in failures)
     dominant = signatures.most_common(1)[0][0] if signatures else None
     times = sorted(record["finished"] for record in failures if record.get("finished"))

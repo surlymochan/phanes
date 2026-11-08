@@ -26,6 +26,8 @@
    连挂 run 目录（巡查口径 9 个）的 `events.*.pi.jsonl.err` 与 broker 请求日志，跑一次小卡验证，
    证据记录且小卡成功结束后由总控决定是否摘 `PAUSE-GH2`。
 
+**验收状态：未完成。** 离线工具修复与测试不能证明 GH2 已恢复；当前没有现场成功试跑及回帖回执，不建议据此摘 `PAUSE-GH2`。
+
 ---
 
 ## 1. 事实与边界
@@ -62,8 +64,8 @@
 | rc = 75 或文本命中 `RATE_LIMIT_RE` | `rate_limit` | ✗ 不是 |
 | **rc ≠ 0 或没有最终报告** | **`exec_error`** | ✓ 命中 |
 
-⇒ **`exec_error` 只说明“executor 死了且没留下最终报告”，它本身不说明死因。**
-死因要回到执行器留下的两处产物里找：
+⇒ **`exec_error` 只说明“返回码非零或没有最终报告，且未命中更早的分类”，它本身不说明根因。**
+返回码为零但没有最终报告也会命中；返回码非零时可能仍有最终报告。根因要回到执行器留下的两处产物里找：
 
 * `events.<attempt>.<backend>.jsonl.err` —— executor 的 stderr
   （`openswarm/bin/openswarm:4613`，`_run_proc` 同时写 `.jsonl` 与 `.jsonl.err`）；
@@ -149,6 +151,10 @@ dmesg -T 2>/dev/null | grep -iE "killed process|out of memory" | tail -20
 > `result.json` / `status.json` / `events.*`，按执行器同一套正则归类，
 > 并输出**带文件名和行号的证据行**；`--broker-log` 会给出
 > `lane_silent_broker_alive`（broker 活着但这条 lane 一个请求都没发出去）这类判读结论。
+> 只有 `status.json` 且 `state` 为 `queued` / `routing` / `running` / `finalizing` /
+> `verifying`（或 `started` / `starting`）的 run 仍在途：计入 `runs`，不计入
+> `failures`、故障签名、连挂窗口或故障证据。已结束但缺 `result.json` 的记录仍报
+> `none:no_result`（执行状态未知）；已写出的最终结果优先于尚未更新的在途状态。
 
 ---
 
@@ -185,6 +191,16 @@ GH2 —— 同主机 M19 当日六连死（04:23 #1361 无提交、04:25 #1793�
 ---
 
 ## 6. 验收：GH2 试跑一张小卡 + 摘 `PAUSE-GH2`
+
+**以下是待执行流程，不是成功回执。** 本次执行仅限当前工作区且禁止 GitHub 写入，
+无法在 gores1 上试跑或回帖。现场验收证据如下，缺项补齐前维持验收未完成：
+
+| 必需证据 | 当前记录 |
+|---|---|
+| GH2 小卡 run id 与现场产物路径 | 未取得 |
+| 最终 `result.json` 的 `status=done`、`error_class` 非 `exec_error` | 未取得 |
+| 试跑分诊输出及现场日志证据行 | 未取得 |
+| issue #1734 成功回帖的回执 | 未取得；本任务禁止 GitHub 写入 |
 
 1. **先取证再恢复**：按 4.2 采集证据，把 `tools/lane-exec-error-triage.py` 的输出（带证据行）贴到本卡。
 2. **修复动作**：按 4.3 判读表处理（最常见是重建 broker socket / 修 `broker_socket` 配置）。
@@ -291,3 +307,15 @@ python3 -m pytest -q tools/tests/test_lane_exec_error_triage_1734.py \
 - 时间限制：run ID 不携带时区；缺少记录时间戳时工具仍以运行主机本地时区解析，跨时区副本请补齐带时区的 status 时间戳后再过滤或关联 broker 日志。
 
 本轮实际验证：`python3 -m pytest -q tools/tests/test_lane_exec_error_triage.py tools/tests/test_lane_exec_error_triage_1734.py tools/tests/test_gh2_exec_error_storm_1734.py`：29 passed；工具 `--self-test`：ok；迁移后 `lane status --help`、`lane assign --help`：退出码 0；`git diff --check`：通过。未在现场执行恢复或摘暂停。
+
+### 9.3 对基线 `09d8581` 的审查修复
+
+- **BLOCKER 1（在途 run 误计故障）**：`read_run()` 读取 `status.json.state`，无最终结果且处于在途状态时标记 `in_progress`，不再从 run id 推造结束时间；`classify()` 不再将其标为 `no_result`，`summarise_lane()` 将其排除在故障数、签名、证据与连挂窗口之外。对应测试：`test_status_only_in_flight_runs_are_not_failures` 覆盖五个在途状态；`test_in_flight_run_does_not_pollute_a_failure_burst` 验证真实故障统计不被在途日志污染；`test_final_result_wins_over_stale_running_state` 保留最终结果优先级。结果：通过；修复前两项回归复现误报，修复后通过，原有缺结果故障测试保留并通过。
+
+- **BLOCKER 2（现场成功试跑及回帖）**：仍阻塞，未完成。第 6 节单列缺失回执，明确离线测试不构成恢复证据；本任务只允许当前工作区操作且禁止 GitHub 写入，不能执行现场试跑或回帖。需要现场执行者补齐 run id、最终 `status/error_class`、日志与回帖回执，再由总控决定摘暂停。没有用离线 fixture 冒充现场成功。
+
+- **FOLLOW-UP（分类条件表述）**：第 2 节与工具内注释统一为“返回码非零或没有最终报告”，修正原先将两者同时成立的错误说法。条件与迁移后 `swrm/bin/swrm` 的 `executor_error_class()` 一致。
+
+路径对应：历史 `openswarm/bin/openswarm` 的执行器与 run 状态实现现位于 `swrm/bin/swrm`；本批次工具、测试和诊断文档仍分别位于原有 `tools/`、`tools/tests/`、`docs/`，本轮仅修改任务列出的三个文件，未修改旧 `openswarm/`。
+
+本轮本地验证：三个相关测试模块共 **32 passed**（含原有复现测试）；新增在途状态子测试通过。现场验收未运行，整卡不能标为完成；本轮不提交、不推送、不写 GitHub。
