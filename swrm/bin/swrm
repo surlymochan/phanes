@@ -3654,6 +3654,10 @@ def concurrency(st, policy):
 def route(prof, st, policy, exclude=()):
     r = policy["routing"]
     default_order = list(r["default_order"])
+    # Unknown and omitted task types use the ordinary implementation route.
+    # Keep the caller's profile untouched while giving the planner a stable
+    # type for the special review and low-difficulty routing checks below.
+    route_prof = {**prof, "type": prof.get("type") or "impl"}
 
     def prioritize(preferred):
         return [backend for backend in preferred if backend in default_order] + [
@@ -3685,6 +3689,10 @@ def route(prof, st, policy, exclude=()):
         order = [b for b in order if b not in exclude]
         skipped = {}
         for b in order:
+            backend_state = st.get(b) or {}
+            if backend_state.get("disabled"):
+                skipped[b] = "backend is disabled"
+                continue
             d, why = PLANNERS[b](p, st, policy, bool(p.get("backend")), notes)
             if d:
                 if p.get("model"):
@@ -3699,18 +3707,18 @@ def route(prof, st, policy, exclude=()):
         return None, order, skipped
 
     notes = []
-    plan_prof = prof
+    plan_prof = route_prof
     proxy = None
-    if prof["type"] in r["review_types"] and not prof.get("backend") and not prof.get("model"):
+    if route_prof["type"] in r["review_types"] and not route_prof.get("backend") and not route_prof.get("model"):
         # Resolve who would implement this work, so the review can be checked
         # against the implementer's family instead of a per-tier proxy. The
         # planners see the family/model as private profile keys; the caller's
         # profile is never mutated.
-        proxy_d, _, _ = attempt({**prof, "type": "impl"}, [])
+        proxy_d, _, _ = attempt({**route_prof, "type": "impl"}, [])
         if proxy_d:
             proxy = {"backend": proxy_d["backend"], "model": proxy_d.get("model"),
                      "family": compare_backend_family(proxy_d["backend"], proxy_d.get("model"), policy, st)}
-            plan_prof = {**prof, "_impl_family": proxy["family"], "_impl_model": proxy["model"]}
+            plan_prof = {**route_prof, "_impl_family": proxy["family"], "_impl_model": proxy["model"]}
     d, order, skipped = attempt(plan_prof, notes)
     if d and proxy:
         fam = compare_backend_family(d["backend"], d.get("model"), policy, st)
@@ -3825,9 +3833,10 @@ def provider_concurrency_limits(policy, keys):
     return limits
 
 
-# Tokens stay in this supervisor process. Lost supervisors intentionally leave a
-# persistent reservation for manual, evidence-backed recovery: no unsafe TTL.
+# Tokens stay in this supervisor process. Lost supervisors leave reservations
+# until the coordinator independently verifies an owner reboot and the lease expires.
 _FLEET_RESERVATIONS = {}
+_FLEET_RENEWALS = {}
 
 
 def fleet_guard_command():
@@ -3860,10 +3869,14 @@ def fleet_guard_call(command, payload):
 
 
 def release_fleet_slot(rdir):
-    item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
+    key = os.path.realpath(rdir)
+    item = _FLEET_RESERVATIONS.get(key)
     if not item:
         return True
     command, payload = item
+    renewal = _FLEET_RENEWALS.pop(key, None)
+    if renewal:
+        renewal[0].set()
     for attempt in range(3):
         try:
             fleet_guard_call(command, {"op": "release", "run_id": payload["run_id"], "token": payload["token"]})
@@ -3875,6 +3888,17 @@ def release_fleet_slot(rdir):
             time.sleep(0.2 * (attempt + 1))
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
     return True
+
+
+def renew_fleet_slot(command, payload, interval, stop):
+    """Keep a coordinator lease alive while this supervisor owns the run."""
+    while not stop.wait(interval):
+        try:
+            fleet_guard_call(command, {"op": "renew", "run_id": payload["run_id"], "token": payload["token"]})
+        except RuntimeError:
+            # Keep retrying. A coordinator outage must never be converted to a
+            # local release. TTL alone never authorizes coordinator recovery.
+            continue
 
 
 def executor_boundary_empty(rdir, boundary):
@@ -3903,6 +3927,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
     token = uuid.uuid4().hex
+    # The coordinator obtains kernel boot evidence over its own trusted channel.
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
     while True:
@@ -3937,14 +3962,22 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                         counts[key] += 1
             if all(counts[key] < cap for key, cap in limits.items()):
                 admitted = True
+                answer = {}
                 if command:
                     try:
-                        admitted = bool(fleet_guard_call(command, payload).get("admitted"))
+                        answer = fleet_guard_call(command, payload)
+                        admitted = bool(answer.get("admitted"))
                     except RuntimeError as error:
                         admitted = False
                         set_status(rdir, fleet_reservation_error=str(error))
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
+                    interval = max(0.1, float(answer.get("lease_ttl_seconds", 300)) / 3)
+                    stop = threading.Event()
+                    thread = threading.Thread(target=renew_fleet_slot, args=(command, payload, interval, stop),
+                                              daemon=True)
+                    _FLEET_RENEWALS[reservation_key] = (stop, thread)
+                    thread.start()
             else:
                 admitted = False
             if admitted and keep_waiting and not keep_waiting():
@@ -4756,8 +4789,8 @@ def cursor_usage(raw):
     for k in CURSOR_USAGE_KEYS:
         v = raw.get(k)
         try:
-            out[k] = int(v) if v is not None else 0
-        except (TypeError, ValueError):
+            out[k] = max(0, int(v)) if not isinstance(v, bool) else 0
+        except (TypeError, ValueError, OverflowError):
             out[k] = 0
     return out
 
@@ -4978,9 +5011,10 @@ def pi_usage(events_path):
                 continue
             u = m.get("usage") or {}
             for k in PI_USAGE_KEYS:
+                value = u.get(k)
                 try:
-                    usage[k] += int(u.get(k) or 0)
-                except (TypeError, ValueError):
+                    usage[k] += max(0, int(value)) if not isinstance(value, bool) else 0
+                except (TypeError, ValueError, OverflowError):
                     pass
             if m.get("stopReason") == "error" or m.get("errorMessage"):
                 errors.append(str(m.get("errorMessage") or "error")[:500])
@@ -5316,9 +5350,10 @@ def verify_against_baseline(cmd, ws, timeout):
         rel = os.path.relpath(ws["path"], ws["root"])
         p = subprocess.run(rewrite_verify_paths(cmd, ws["root"], bwt), shell=True, capture_output=True, text=True,
                            cwd=os.path.join(bwt, rel) if rel != "." else bwt, timeout=timeout)
-        return {"rc": p.returncode, "output": p.stdout + p.stderr}
+        output = p.stdout + p.stderr
+        return {"rc": p.returncode, "output": output, "failing": sorted(failing_tests(output))}
     except subprocess.TimeoutExpired:
-        return {"rc": 124, "output": ""}
+        return {"rc": 124, "output": "", "failing": []}
     finally:
         git(["worktree", "remove", "--force", bwt], ws["repo"])
 
@@ -5349,7 +5384,8 @@ def adjust_status_for_change_evidence(status, verify_note, *, commit, workspace_
 
 
 JUNK = ["__pycache__/**", "*.pyc", ".DS_Store", "node_modules/**", ".pytest_cache/**", ".venv/**", "*.egg-info/**"]
-NEVER_COMMIT = ["*_????????-????-????-????-????????????.jsonl", ".pi/", ".codex/", ".cursor/", ".agy/",
+NEVER_COMMIT = ["*_????????-????-????-????-????????????.jsonl", "openswarm-card-*.md",
+                ".pi/", ".codex/", ".cursor/", ".agy/",
                 "pi-session*.jsonl", "codex-session*.jsonl", "cursor-session*.jsonl",
                 "pi*.log", "codex*.log", "cursor*.log", "agy*.log"]
 
@@ -9050,7 +9086,13 @@ def lane_do_run(lane, spec, child, server, current):
                            **({"regress_label": spec["regress_label"]} if spec.get("regress_label") else {}),
                            **exec_pass_fields(False, False, bool(spec.get("verify")), None)})
             return status
-        return lane_finalize_run(lane, spec, ws, None, {}, error_class, 1, evp)
+        return lane_finalize_run(
+            lane, spec, ws, None, {}, error_class, 1, evp,
+            attempts=[{"backend": lane["backend"], "model": lane["model"],
+                       "effort": lane.get("effort"), "rc": 1,
+                       "seconds": round(NOW() - spec.get("started", NOW()), 3),
+                       "error_class": error_class, "meta": {"usage": {}},
+                       "events": evp, "error_tail": short(e, 500)}])
 
 
 def agy_quota_available(lane, child):
@@ -10539,6 +10581,20 @@ def cmd_batch(args, policy):
     validate_card_type(policy, getattr(args, "card_type", None))
     if args.per_host < 1 or args.poll_seconds <= 0 or (args.budget_minutes is not None and args.budget_minutes <= 0):
         raise ValueError("batch concurrency, budget and poll interval must be positive")
+    cards_directory = os.path.abspath(args.cards)
+    if not os.path.isdir(cards_directory):
+        raise ValueError("cards path must be a directory")
+    paths = sorted(path for path in glob.glob(os.path.join(glob.escape(cards_directory), "*"))
+                   if os.path.isfile(path))
+    if not paths:
+        bid = new_run_id()
+        summary = {"id": bid, "repo": args.repo, "base": args.base,
+                   "scope": getattr(args, "scope", "repo"), "state": "finished",
+                   "started": NOW(), "cards": [], "finished": NOW()}
+        batch_save(summary)
+        if args.detach:
+            print(json.dumps({"id": bid}))
+        return
     hosts = fleet_config()
     names = args.hosts.split(",")
     if len(set(names)) != len(names):
@@ -10550,9 +10606,6 @@ def cmd_batch(args, policy):
     repo = os.path.realpath(os.path.expanduser(host_repo(local, args.repo, local=True)))
     base = host_require(local, host_git(local, repo, ["rev-parse", "--verify", "--end-of-options",
                                                     (args.base or "HEAD") + "^{commit}"]), "base resolution").decode().strip()
-    paths = sorted(path for path in glob.glob(os.path.join(os.path.abspath(args.cards), "*")) if os.path.isfile(path))
-    if not paths:
-        raise ValueError("cards directory contains no files")
     minutes = args.budget_minutes if args.budget_minutes is not None else policy["run"]["timeout_seconds"] / 60
     backend = args.backend
     decision = None
@@ -10770,7 +10823,9 @@ def summarize_event(o):
             return "cmd", inp.get("command", "")
         return "tool", f"{part.get('tool')} {short(inp.get('filePath') or inp.get('path') or '', 120)}"
     if t == "message_end":
-        message = o.get("message") or {}
+        message = o.get("message")
+        if not isinstance(message, dict):
+            return None, None
         if message.get("role") == "assistant":
             return "msg", "".join(b.get("text", "") for b in message.get("content") or []
                                    if isinstance(b, dict) and b.get("type") == "text")
@@ -10834,6 +10889,9 @@ class WatchMessages:
             if tool_id:
                 self.tools.add(tool_id)
         kind, text = summarize_event(event)
+        if kind == "msg":
+            # Buffered chunks precede this message in the event stream.
+            rows.extend(self.flush())
         return rows + ([(kind, text)] if kind else [])
 
 
@@ -11262,6 +11320,9 @@ def run_digest(rid):
                         cmds += 1
                     if kind == "msg":
                         last = text
+        for kind, text in messages.flush():
+            if kind == "msg":
+                last = text
     end = st.get("finished") or now
     out = {"id": rid, "state": state, "status": st.get("status") or r.get("status"), "title": st.get("title"),
            "scope": st.get("scope", r.get("scope", "repo")),
