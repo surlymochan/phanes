@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class TrackedArtifactHygieneTests(unittest.TestCase):
     def test_tracked_tree_has_no_lane_reviews_or_shared_objects(self):
         tracked = subprocess.check_output(
-            ["git", "-C", str(ROOT), "ls-tree", "-r", "HEAD", "--name-only"],
+            ["git", "-C", str(ROOT), "ls-files"],
             text=True,
         ).splitlines()
         artifacts = [
