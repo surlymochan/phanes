@@ -1024,6 +1024,62 @@ def lane_in_fetch_backoff(st, now=None):
 def mark_done(state, n):
     state.setdefault("_done", []); state["_done"] = (state["_done"] + [n])[-200:]
 
+LANE_STREAK_FILE = "lane-streak.json"
+LANE_STREAK_LIMIT = 3
+
+def read_lane_streaks():
+    """Load only well-formed streak entries; damaged state is treated as empty."""
+    path = f"{D}/{LANE_STREAK_FILE}"
+    try:
+        with open(path) as stream: raw = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict): return {}
+    streaks = {}
+    for lane, entry in raw.items():
+        if (not isinstance(lane, str) or not lane or not isinstance(entry, dict)
+                or set(entry) != {"n", "runs"}):
+            continue
+        count, runs = entry["n"], entry["runs"]
+        if (isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= LANE_STREAK_LIMIT
+                or not isinstance(runs, list) or len(runs) != count
+                or any(not isinstance(run, str) or not run for run in runs)):
+            continue
+        streaks[lane] = {"n": count, "runs": runs[-LANE_STREAK_LIMIT:]}
+    return streaks
+
+def write_lane_streaks(streaks):
+    path = f"{D}/{LANE_STREAK_FILE}"
+    tmp = path + ".tmp"
+    with open(tmp, "w") as stream: json.dump(streaks, stream, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+def record_lane_terminal(lane, run, info, committed=False):
+    """Track consecutive failed terminal runs and pause a lane after three."""
+    streaks = read_lane_streaks()
+    if committed:
+        streaks.pop(lane, None)
+        write_lane_streaks(streaks)
+        return
+    status = info.get("status")
+    if status not in {"exec_error", "failed", None}:
+        streaks.pop(lane, None)
+        write_lane_streaks(streaks)
+        return
+    previous = streaks.get(lane, {"n": 0, "runs": []})
+    runs = (previous["runs"] + [str(run)])[-LANE_STREAK_LIMIT:]
+    count = min(previous["n"] + 1, LANE_STREAK_LIMIT)
+    streaks[lane] = {"n": count, "runs": runs}
+    write_lane_streaks(streaks)
+    if count < LANE_STREAK_LIMIT:
+        return
+    marker = f"{D}/PAUSE-{lane}"
+    if os.path.exists(marker): return
+    reason = f"auto:streak {time.strftime('%F %T')} {count}次 {','.join(runs)}"
+    with open(marker, "w") as stream: stream.write(reason + "\n")
+    with open(f"{D}/health.alert", "a") as stream: stream.write(reason + f" lane={lane}\n")
+    log(f"{lane} {reason}")
+
 def label_lane_failed(n, body):
     """Label the issue lane-failed and explain why in a comment."""
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
@@ -1188,6 +1244,7 @@ def finish(lane, cfg, st, info, state):
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
+        record_lane_terminal(lane, run, info, committed=True)
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
         ok, err, failures = harvest_fetch(lane, n, fetch, st)
@@ -1230,6 +1287,7 @@ def finish(lane, cfg, st, info, state):
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
+        record_lane_terminal(lane, run, info)
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
 def tick(lanes, state, last_warn):
