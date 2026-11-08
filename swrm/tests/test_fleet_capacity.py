@@ -38,17 +38,14 @@ class FleetCapacityTests(unittest.TestCase):
         self.probe_config.write_text(json.dumps(probes))
 
     def call(self, authenticated_host, **payload):
-<<<<<<< HEAD
         if payload.get('op') == 'status':
             deadline = time.monotonic() + 5
             while list(pathlib.Path(self.temp.name).glob('runs/*/fleet-release-pending.json')):
                 if time.monotonic() >= deadline:
                     self.fail('release worker did not drain its queue')
                 time.sleep(0.02)
-=======
         if payload.get('op') == 'acquire':
             payload.setdefault('boot_id', BOOT)
->>>>>>> 34b825af0bac3efca8e8740707b63f8d61f13d14
         argv = [str(BIN), authenticated_host]
         if os.name == "nt":  # Windows cannot CreateProcess a shebang script (WinError 193)
             argv = [sys.executable, *argv]
