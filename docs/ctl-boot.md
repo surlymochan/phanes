@@ -704,12 +704,25 @@ python3 ~/phanes-ctl/bin/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodi
 python3 ~/phanes-ctl/bin/disk-usage-probe.py --path / --top 10   # the usage probe of a host
 ```
 
-Offline proofs (no ssh, no live control plane state):
+Offline acceptance (run from the repository root; no remote SSH or live control
+plane state):
 
-```bash
-python3 tools/check-disk-watermark.py
-python3 -m unittest tools.tests.test_disk_watermark_guard
+```sh
+git diff --check && python3 tools/check-disk-watermark.py && python3 -m unittest tools.tests.test_disk_watermark_guard
 ```
+
+Use that complete command in the host verifier, rather than the prose placeholder
+`run the acceptance command(s) named in the issue`. The placeholder is not shell
+syntax and fails before any test runs. The `&&` chain preserves each failing
+check's exit status and stops immediately; a shell parse error is not evidence
+that the disk guard itself failed.
+
+The contract check covers probe allocation, hysteresis, concurrent foreign-marker
+writes, failed probes, the dispatch gate and the paired probe dependency. The
+unittest suite also exercises installation and replacement of the resident guard
+inside an isolated fake control-plane tree. Passing these offline checks does not
+claim a production deployment or a successful SSH probe of the live lane host;
+those remain separate operator verification steps above.
 
 ## ctl-loop child reaping and restart (Refs #951)
 
