@@ -651,8 +651,9 @@ print(json.dumps(out))
 '''
 
 # Kill only after the executor has independently confirmed the ledger, event, queue and
-# process evidence. Stable snapshots also require a kernel-confirmed stopped sandbox;
-# all errors are fail-closed. Runs are counted from the executor's own ledger, not AD health state.
+# process evidence. Every sandbox thread must remain in a local blocking wait with
+# unchanged scheduler counters; unavailable evidence is fail-closed. Runs are counted
+# from the executor's own ledger, not AD health state.
 REMOTE_STUCK_CLEANUP = REMOTE_STATE_HOME + r'''
 import glob,json,os,signal,sys,time
 L=sys.argv[1]; N=3
@@ -684,17 +685,30 @@ def children(pid):
   found=[]; todo=[pid]
   while todo:
     parent=todo.pop()
-    try: kids=[int(x) for x in open(f"{PROC_ROOT}/{parent}/task/{parent}/children").read().split()]
+    try:
+      tasks=glob.glob(f"{PROC_ROOT}/{parent}/task/[0-9]*")
+      if not tasks: return None
+      kids=sorted({int(x) for task in tasks for x in open(task+"/children").read().split()})
     except Exception: return None
+    kids=[kid for kid in kids if kid not in found]
     found.extend(kids); todo.extend(kids)
-  return found
+  return sorted(found)
 def proc(pid):
   try:
     raw=open(f"{PROC_ROOT}/{pid}/stat").read(); rest=raw[raw.rfind(")")+2:].split()
     wchan=open(f"{PROC_ROOT}/{pid}/wchan").read().strip()
-    syscall=open(f"{PROC_ROOT}/{pid}/syscall").read().strip()
     cmd=open(f"{PROC_ROOT}/{pid}/cmdline","rb").read().replace(b"\0",b" ").decode(errors="replace")
-    return {"pid":pid,"state":rest[0],"start":rest[19],"ticks":(rest[11],rest[12]),"wchan":wchan,"syscall":syscall,"cmd":cmd}
+    threads=[]
+    for task in sorted(glob.glob(f"{PROC_ROOT}/{pid}/task/[0-9]*")):
+      raw=open(task+"/stat").read(); fields=raw[raw.rfind(")")+2:].split()
+      wait=open(task+"/wchan").read().strip()
+      sched=tuple(int(x) for x in open(task+"/schedstat").read().split())
+      # schedstat is readable by a sibling SSH process without ptrace access.
+      # Zero/disabled accounting cannot establish absence of activity.
+      if len(sched)!=3 or sched[0]<=0 or sched[2]<=0 or not wait or wait=="0": return None
+      threads.append((task,fields[0],fields[19],fields[11],fields[12],wait,sched))
+    if not threads: return None
+    return {"pid":pid,"state":rest[0],"start":rest[19],"ticks":(rest[11],rest[12]),"wchan":wchan,"threads":threads,"cmd":cmd}
   except Exception: return None
 def snapshot(pids):
   rows=[proc(pid) for pid in pids]
@@ -735,17 +749,19 @@ tree2=children(pid)
 second=snapshot([pid]+tree2) if tree2 is not None else None
 if second is None or [r["pid"] for r in first] != [r["pid"] for r in second]:
   print(json.dumps({"cleaned":False,"reason":"process-tree-changed"})); sys.exit(0)
-if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["syscall"]!=b["syscall"]
+if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["threads"]!=b["threads"]
        for a,b in zip(first[1:],second[1:])):
   print(json.dumps({"cleaned":False,"reason":"sandbox-active"})); sys.exit(0)
-# Stable CPU/syscall snapshots alone cannot distinguish a network wait from a
-# deadlock. Only a fully stopped sandbox is conclusive here: every leaf is
-# stopped by the kernel and every ancestor is stopped or waiting on its child.
-# Other stalls remain suspects for manual inspection, never automatic TERM.
+# Three executed budgets without events plus stable local blocking waits establish
+# the operational stall. Check every thread: a sleeping main thread can otherwise
+# hide a working CPU/network thread. Exclude timers, socket/poll waits and unknown
+# kernel waits, even when their counters are stable. No ptrace-only syscall/IO
+# files are needed, and ordinary pipe/futex deadlocks need not be SIGSTOP'ed.
+local_waits={"do_wait","pipe_read","futex_wait_queue","futex_wait_queue_me",
+             "do_signal_stop","ptrace_stop"}
 for row in second[1:]:
-  kids=children(row["pid"])
-  if kids is None or (row["state"] not in ("T","t") and
-                      not (kids and row["wchan"]=="do_wait")):
+  if any(thread[1] not in ("S","T","t") or thread[5] not in local_waits
+         for thread in row["threads"]):
     print(json.dumps({"cleaned":False,"reason":"sandbox-progress-unproven"})); sys.exit(0)
 if any(a["start"]!=b["start"] or a["cmd"]!=b["cmd"] for a,b in zip(first,second)):
   print(json.dumps({"cleaned":False,"reason":"process-identity-changed"})); sys.exit(0)

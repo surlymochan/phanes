@@ -52,7 +52,10 @@ class LaneStuckTickTest(unittest.TestCase):
             rest = "S " + " ".join(str(value) for value in range(20))
             (proc / "stat").write_text(f"{pid} (fake-process) {rest}")
             (proc / "wchan").write_text(wchan)
-            (proc / "syscall").write_text("1 2 3")
+            task = proc / "task" / str(pid)
+            (task / "stat").symlink_to("../../stat")
+            (task / "wchan").symlink_to("../../wchan")
+            (task / "schedstat").write_text("1000000 0 1\n")
             (proc / "cmdline").write_bytes(cmd)
             (proc / "task" / str(pid) / "children").write_text(children)
 
@@ -185,7 +188,7 @@ class LaneStuckTickTest(unittest.TestCase):
             self.make_fake_process_tree(proc_root)
             (home / "lanes" / "M19").mkdir(parents=True)
             (home / "lanes" / "M19" / "state.json").write_text('{"child_pid":43210}')
-            (proc_root / "43211" / "syscall").unlink()
+            (proc_root / "43211/task/43211/schedstat").unlink()
             with mock.patch.dict(os.environ, {"AD_PROC_ROOT": str(proc_root)}):
                 self.assertFalse(self.run_probe(home)["cleaned"])
 
@@ -229,7 +232,72 @@ class LaneStuckTickTest(unittest.TestCase):
                                                       mock.call(43211, signal.SIGCONT),
                                                       mock.call(43210, signal.SIGTERM)])
 
+    def test_thread_activity_network_waits_and_missing_evidence_never_term(self):
+        cases = {
+            "active": "sandbox-active",
+            "active-worker": "sandbox-active",
+            "network-worker": "sandbox-progress-unproven",
+            "network": "sandbox-progress-unproven",
+            "timer": "sandbox-progress-unproven",
+            "hidden-wait": "rpc-not-waiting",
+            "disabled-accounting": "rpc-not-waiting",
+            "unreadable-accounting": "rpc-not-waiting",
+        }
+        for case, reason in cases.items():
+            with self.subTest(case=case), \
+                 tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+                home = Path(directory)
+                self.make_run_data(home)
+                proc_root = home / "proc"
+                self.make_fake_process_tree(proc_root)
+                (home / "lanes/M19").mkdir(parents=True)
+                (home / "lanes/M19/state.json").write_text('{"child_pid":43210}')
+                sandbox = proc_root / "43211"
+                (sandbox / "wchan").write_text({
+                    "network": "sock_recvmsg", "timer": "hrtimer_nanosleep",
+                    "hidden-wait": "0",
+                }.get(case, "pipe_read"))
+                task = sandbox / "task/43211"
+                if case.endswith("worker"):
+                    task = sandbox / "task/43212"
+                    task.mkdir()
+                    (task / "children").write_text("")
+                    (task / "stat").symlink_to("../../stat")
+                    (task / "wchan").write_text(
+                        "do_epoll_wait" if case == "network-worker" else "futex_wait_queue")
+                    (task / "schedstat").write_text("1000000 0 1\n")
+                if case == "disabled-accounting":
+                    (task / "schedstat").write_text("0 0 0\n")
+                if case == "unreadable-accounting":
+                    (task / "schedstat").unlink()
+
+                def sample_delay(seconds):
+                    if case in ("active", "active-worker"):
+                        (task / "schedstat").write_text("1000001 0 2\n")
+
+                output = io.StringIO()
+                with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(home), "AD_PROC_ROOT": str(proc_root)}), \
+                     mock.patch.object(sys, "argv", ["-", "M19"]), \
+                     mock.patch.object(os, "kill") as kill, \
+                     mock.patch.object(time, "sleep", side_effect=sample_delay), \
+                     contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit):
+                        exec(AUTODISPATCH.REMOTE_STUCK_CLEANUP, {})
+                result = json.loads(output.getvalue())
+                self.assertFalse(result["cleaned"])
+                self.assertEqual(result["reason"], reason)
+                kill.assert_not_called()
+
     def test_tick_real_term_and_engine_terminals_restore_backend_events(self):
+        self.check_tick_real_term_and_engine_terminals("pipe")
+
+    def test_tick_futex_deadlock_restores_backend_events(self):
+        self.check_tick_real_term_and_engine_terminals("futex")
+
+    def test_tick_stopped_sandbox_restores_backend_events(self):
+        self.check_tick_real_term_and_engine_terminals("stopped")
+
+    def check_tick_real_term_and_engine_terminals(self, blocking):
         # Adapt the RPC transport, clock and SSH, retaining the real turn driver,
         # workspace preparation, events, results and ledger. The stalled transport
         # also fails to close its child, leaving a real process tree for the probe
@@ -244,7 +312,11 @@ class LaneStuckTickTest(unittest.TestCase):
                          ("commit", "--allow-empty", "-qm", "fixture")):
                 subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
             sandbox = root / "bwrap.py"
-            sandbox.write_text("import os,signal,time\nos.kill(os.getpid(),signal.SIGSTOP)\ntime.sleep(300)\n")
+            sandbox.write_text({
+                "pipe": "import os\nr,w=os.pipe()\nos.read(r,1)\n",
+                "futex": "import threading\nlock=threading.Lock()\nlock.acquire()\nlock.acquire()\n",
+                "stopped": "import os,signal,time\nos.kill(os.getpid(),signal.SIGSTOP)\ntime.sleep(300)\n",
+            }[blocking])
             rpc_script = root / "pi_rpc.py"
             rpc_script.write_text(
                 "import json,os,pathlib,signal,subprocess,sys,time\n"
@@ -285,7 +357,7 @@ class LaneStuckTickTest(unittest.TestCase):
                         break
                     time.sleep(0.02)
                 else:
-                    self.fail("RPC did not enter wait on its stopped sandbox")
+                    self.fail("RPC did not enter wait on its blocked sandbox")
                 env = {"OPENSWARM_HOME": str(home), "AD_PROC_ROOT": "/proc",
                        "OPENSWARM_FLEET_GUARD_CONFIG": str(root / "disabled.json")}
                 with mock.patch.dict(os.environ, env):
@@ -326,16 +398,12 @@ class LaneStuckTickTest(unittest.TestCase):
                             self.close_attempted = True  # reproduce failed child shutdown
 
                     def local_ssh(argv, timeout=60, inp=None):
-                        # Run as the RPC's ancestor so Linux ptrace restrictions
-                        # permit /proc/<pid>/syscall; execute the unmodified probe.
-                        output = io.StringIO()
-                        with mock.patch.object(sys, "argv", ["-", *argv[argv.index("-")+1:]]), \
-                             contextlib.redirect_stdout(output):
-                            try:
-                                exec(inp, {})
-                            except SystemExit as error:
-                                self.assertEqual(error.code, 0)
-                        return 0, output.getvalue(), ""
+                        # Like SSH, this probe is a sibling of the resident RPC,
+                        # not its ancestor: ptrace_scope=1 applies in deployment.
+                        result = subprocess.run([sys.executable, "-", *argv[argv.index("-")+1:]],
+                                                input=inp, capture_output=True, text=True, timeout=timeout)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        return result.returncode, result.stdout, result.stderr
 
                     with mock.patch.object(AUTODISPATCH, "sh", side_effect=local_ssh), \
                          mock.patch.object(AUTODISPATCH, "audit_switches"), \
@@ -378,7 +446,7 @@ class LaneStuckTickTest(unittest.TestCase):
                                 sandbox_stat = Path(f"/proc/{(root / 'sandbox-pid').read_text()}/stat")
                                 if sandbox_stat.exists():
                                     self.assertEqual(sandbox_stat.read_text().split(") ", 1)[1][0], "Z",
-                                                     "cleaned must mean the stopped sandbox also exited")
+                                                     "cleaned must mean the blocked sandbox also exited")
                             audit = home / "lane-stuck-audit.jsonl"
                             self.assertEqual(len(audit.read_text().splitlines()) if audit.exists() else 0,
                                              1 if index >= 3 else 0)
