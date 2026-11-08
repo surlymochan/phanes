@@ -297,7 +297,7 @@ Check scripts (no SSH):
 - `python3 tools/check-codex-queue-heartbeat.py` — offline #988 contract check for a Codex status that stays `queued` with a provider rate-limit `queue_reason`. If both `queued_at` and `heartbeat_at` are older than **30 minutes**, the item must be reclaimed; a fresh heartbeat or another queue reason is preserved.
 - `python3 tools/check-ctl-loop-reap.py` — offline #951 contract check for ctl-loop heartbeat expiry, pid disappearance, child restart, and duplicate-instance prevention.
 - `python3 tools/check-ctl-hb-refresh.py` — offline #1263 contract check: static scan of ctl-loop ensuring the ib-refresh wall-clock wait loop writes ctl-loop.heartbeat using date and enforces REFRESH_CAP.
-- `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted.
+- `python3 tools/check-ready-refill-contract.py` — offline dual-mode refill contract (Refs #869, #1662). It creates a fake backlog and status snapshot with `_ready < 10`, then asserts the next tick's `filed N issue(s) from backlog` log. The check imports the shared `is_thin_card` predicate: a thin card is skipped and a thick card is accepted. It uses no live `~/phanes-ctl`, GitHub, git, SSH, or `gh issue create`; it also asserts `WARNING queue low` when local and repo backlog sources are exhausted, the `rejected/` quarantine (a thin card never blocks the rest of the batch and never overwrites an earlier card of the same name), the bounded refill retries while the queue read fails, and the single-planner gate (an unreadable planner query skips the creation).
 - `python3 tools/check-ad-ready-target.py` — offline #1242 AD ready-queue contract. With fake `ready`, `LOW`, and `TARGET` values, when `ready < LOW` the refill `need` is `max(TARGET - ready, ...)` (and reaches `TARGET`); `is_thin_card` rejects thin cards. It uses only a local fixture and never calls `gh`.
 - `python3 tools/check-ad-task-upload.py` — offline #920 contract check. It captures fake task content, asserts SSH stdin upload via `cat > /tmp/task-*.md`, and rejects a bare `scp` upload.
 - `python3 tools/check-fleet-batchmode-probe.py` — offline #954 contract check. It drives the production `ib-refresh` refresh path with a fake BatchMode probe runner: fake probe outputs with non-zero exit codes (such as `Permission denied` and `Connection closed`) never increment `hosts_ok`, while a zero exit code still does. It opens no SSH connection and touches no live instabox node.
@@ -472,6 +472,30 @@ Candidate issue cards are rejected if they are thin:
 
 ```bash
 python3 tools/check-ad-ready-target.py
+```
+
+### AD refill triggers when the pool runs dry (Refs #1662)
+
+The pool ran dry on 2026-11-02 (14 → 5 dispatchable issues) without a single mint record in
+`autodispatch.log`, and the 19:45 watchdog round found no usable card among the 21 cards of the
+local backlog. The refill triggers are therefore:
+
+- Below `LOW` the pool is topped up to `TARGET` (`need = max(TARGET - ready, starved, 0)`), not to
+  `LOW`: a pool that only reaches the threshold starves again before the next tick.
+- While the queue read fails the pool level is unknown. The refill works on the last known level
+  plus the cards minted since, and the consecutive failures are bounded
+  (`AD_QUEUE_FAIL_REFILL_MAX`, default 3): past the bound the AD mints nothing and waits for an
+  authoritative read, so a broken `gh` cannot flood the backlog with duplicate cards.
+- A card that cannot be run by a lane (no `# ` title, no `labels:` line, no body) is quarantined
+  in `backlog/rejected/` with its reason and never overwrites an earlier card of the same name;
+  the rest of the batch is still minted. The cards of the repo backlog (`docs/backlog/next/*.md`)
+  must carry the full planner contract (body and `验收：` line, see `is_thin_card` above) and are
+  skipped when they do not.
+- A planner query whose result cannot be parsed cannot prove that no planner is open: the
+  single-planner gate stays closed and the reason is logged.
+
+```bash
+python3 tools/check-ready-refill-contract.py
 ```
 
 Recommended heartbeat monitoring (no SSH and no restart): run this from the

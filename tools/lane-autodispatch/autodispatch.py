@@ -13,6 +13,16 @@ import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, 
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
+# The pool is topped up to TARGET when it drops below LOW: refilling to LOW only leaves the
+# pool at the threshold, so the lanes starve again before the next refill (Refs #1662).
+TARGET = int(os.environ.get("AD_TARGET", "20"))
+# A queue read that fails leaves the pool level unknown. The refill then works on the last
+# known level plus the cards minted since, and the number of consecutive failures is
+# bounded: past the bound the AD waits for an authoritative read instead of minting a new
+# batch every tick (Refs #1662).
+QUEUE_UNREADABLE_REFILL_MAX = int(os.environ.get("AD_QUEUE_FAIL_REFILL_MAX", "3"))
+MINT_EVIDENCE = {}  # what the last refill attempt did: rejected cards, planner gate (Refs #1662)
+LAST_MINT_LOG = 0.0  # throttle of the repeated "the planner gate blocked a new card" line
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
          "files outside it — not the main repo, not $HOME, not /tmp; for scratch files use $TMPDIR (inside the worktree, cleaned "
          "automatically) and leave cleanup to the executor. Do not push, do not open PRs, do not touch credentials, no network "
@@ -946,6 +956,8 @@ def status_snapshot(lanes, state, res, ready, blocked):
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
+    status["_queue_failures"] = int(state.get("_queue_failures", 0) or 0)
+    status["_minted"] = int(state.get("_minted", 0) or 0)
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
@@ -1582,8 +1594,12 @@ def tick(lanes, state, last_warn):
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
     update_busy_stale(lanes, state, res)
     if not tick_queue():
+        # the pool level is unknown: the refill works on the last known level and is bounded
+        # (Refs #1662)
+        refill_on_unreadable_queue(state)
         st = status_snapshot(lanes, state, res, None, None)
         st["_queue_error"] = queue_error or "queue unavailable"
+        st["_ready_estimate"] = pool_level(state)  # the level the refill worked on (not authoritative)
         with open(f"{D}/lanes-status.json", "w") as stream:
             json.dump(st, stream, ensure_ascii=False, indent=1)
         return last_warn
@@ -1608,22 +1624,123 @@ def tick(lanes, state, last_warn):
     short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
-    if ready < LOW or starve > 0:
+    need = refill_need(ready, low=LOW, target=TARGET, starved=starve)
+    filed = []
+    if need > 0:
         why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
         if mint_paused(scopes):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            filed = replenish(max(LOW - ready, starve), state)
+            filed = replenish(need, state)
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
-                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
+                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), need {need} card(s) (threshold {LOW}, target {TARGET}), none filed{mint_evidence()}"); last_warn = time.time()
+    # the level of this tick is authoritative: it replaces the estimate the AD used while the
+    # queue was unreadable, and the cards minted since then are counted on top of it (Refs #1662)
+    state["_ready"] = ready; state["_minted"] = len(filed); state["_queue_failures"] = 0
     state["_tick_at"] = now
     save_state(state)
     st = status_snapshot(lanes, state, res, ready, blocked)
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
+
+def refill_need(ready, low=None, target=None, starved=0):
+    """How many cards the pool needs (Refs #1662).
+
+    Below LOW the pool is topped up to TARGET, not to LOW: a pool that only reaches LOW
+    is refilled again on the next tick and the lanes starve in between.  A backend that
+    cannot be fed needs its own number of cards on top of that."""
+    low = LOW if low is None else low
+    target = TARGET if target is None else target
+    if ready < low: return max(target - ready, starved, 0)
+    return max(starved, 0)
+
+def card_defect(text, strict=False):
+    """Why a card cannot be minted as a lane-ready issue (None when it can).
+
+    A card needs a `# ` title, a `labels:` line and a body: without them a lane has
+    nothing to run.  A card of the repo backlog (`docs/backlog/next/*.md`, written by a
+    planner run) must also carry the published contract of that batch: a body of at least
+    two lines and an `验收：` acceptance line (the same rules as `is_thin_card` of
+    tools/check-ad-ready-target.py).  The local backlog is the operator's drop box: a card
+    there is minted as long as a lane can run it, because the acceptance line is the
+    convention of the planner cards and not of the local ones.  A card without any of that
+    can never be run by a lane, so minting it only fills the pool with dead cards
+    (Refs #1662)."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2: return "thin card: needs a title and a labels line"
+    if not lines[0].startswith("# "): return "thin card: the first line is not a '# ' title"
+    if not lines[1].startswith("labels:"): return "thin card: the second line is not a 'labels:' line"
+    if strict:
+        if len(lines) < 4: return "thin card: needs a title, a labels line, a body and an acceptance line"
+        if len(lines[2:]) < 2: return "thin card: no body"
+        if not any(line.startswith("验收：") for line in lines[2:]): return "thin card: no '验收：' acceptance line"
+    elif not lines[2:]: return "thin card: no body"
+    return None
+
+def mint_evidence():
+    """One-line summary of the last refill attempt, for the queue-low warning."""
+    parts = []
+    if MINT_EVIDENCE.get("rejected"): parts.append(f"{MINT_EVIDENCE['rejected']} card(s) rejected")
+    if MINT_EVIDENCE.get("planner"): parts.append(f"planner {MINT_EVIDENCE['planner']}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+def move_without_overwrite(source, destination):
+    """Move a backlog card without ever overwriting an earlier card of the same name.
+
+    The name is reserved with an exclusive create, so two AD processes cannot pick the
+    same free name; an existing card (a card already quarantined in `rejected/`, a card
+    already filed in `filed/`) keeps its content and the moved card gets the next free
+    serial suffix (Refs #1662)."""
+    stem, suffix = os.path.splitext(destination)
+    target = destination; serial = 0
+    while True:
+        try: handle = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            serial += 1; target = f"{stem}.{serial}{suffix}"; continue
+        os.close(handle)
+        try: os.replace(source, target)
+        except OSError:
+            os.unlink(target); raise
+        return target
+
+def pool_level(state):
+    """The pool level the AD knows: the last authoritative count plus the cards minted since.
+
+    While the queue cannot be read there is no authoritative count; the cards minted in the
+    meantime are added to the last known level, so a refill does not mint the same batch
+    over and over (Refs #1662)."""
+    ready = state.get("_ready")
+    if isinstance(ready, bool) or not isinstance(ready, int): return None
+    return ready + int(state.get("_minted", 0) or 0)
+
+def refill_on_unreadable_queue(state):
+    """Refill while the queue cannot be read, but only within a bounded number of retries.
+
+    The pool level is unknown when the queue read fails.  The AD mints against the last
+    known level (plus the cards it minted since), counts the consecutive failures and
+    mints nothing any more once the bound is reached: it then waits for an authoritative
+    read, so a broken `gh` cannot flood the backlog with duplicate cards (Refs #1662)."""
+    failures = int(state.get("_queue_failures", 0) or 0) + 1
+    state["_queue_failures"] = failures
+    level = pool_level(state)
+    if level is None:
+        log(f"queue unreadable #{failures}: pool level unknown, no card minted (waiting for an authoritative read)", brain=False)
+        save_state(state); return []
+    if failures > QUEUE_UNREADABLE_REFILL_MAX:
+        log(f"queue unreadable #{failures}: no card minted any more (bounded retries exhausted, waiting for an authoritative read)", brain=False)
+        save_state(state); return []
+    need = refill_need(level)
+    if need <= 0:
+        log(f"queue unreadable #{failures}: pool level {level} is above the threshold ({LOW}), no card minted", brain=False)
+        save_state(state); return []
+    log(f"queue unreadable #{failures}: minting {need} card(s) for the last known level ({level} dispatchable)", brain=False)
+    filed = replenish(need, state)
+    state["_minted"] = int(state.get("_minted", 0) or 0) + len(filed)
+    save_state(state)
+    return filed
 
 def file_issue(text, extra=()):
     lines = text.splitlines()
@@ -1659,13 +1776,32 @@ labels: <p1 或 p2>,backend:<pi|codex|agy>
 def replenish(k, state):
     """Queue refill, in order: (1) ~/phanes-ctl/autodispatch/backlog/*.md (`# title` / `labels: a,b` / body; moved to backlog/filed/);
     (2) docs/backlog/next/*.md on origin/main not yet imported (written by planner runs); (3) if still short and no planner
-    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/."""
-    bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); out = []
+    issue is open, file one planner issue asking a lane to write the next batch into docs/backlog/next/.
+
+    A card that does not satisfy the card rules (`card_defect`) is quarantined in backlog/rejected/
+    with its reason and the rest of the batch is still minted: one unusable card must never block
+    the whole refill, and the reason is logged so a silent pool can be diagnosed (Refs #1662).
+    A quarantined card never overwrites an earlier card of the same name (Refs #1662)."""
+    global LAST_MINT_LOG
+    if mint_paused():
+        log("replenish skipped: mint paused (PAUSE-MINT marker or the mint pause scope)", brain=False); return []
+    bd = f"{D}/backlog"; os.makedirs(f"{bd}/filed", exist_ok=True); os.makedirs(f"{bd}/rejected", exist_ok=True); out = []
+    MINT_EVIDENCE.clear(); MINT_EVIDENCE["need"] = k; rejected = 0
     for f in sorted(x for x in os.listdir(bd) if x.endswith(".md")):
-        if len(out) >= k: return out
-        try: out.append(file_issue(open(f"{bd}/{f}").read()))
-        except Exception as e: log(f"backlog {f}: {e}", brain=False); return out
-        os.replace(f"{bd}/{f}", f"{bd}/filed/{f}")
+        if len(out) >= k: break
+        try:
+            with open(f"{bd}/{f}") as stream: text = stream.read()
+        except OSError as e: log(f"backlog {f}: {e}", brain=False); continue
+        defect = card_defect(text)
+        if defect:
+            target = move_without_overwrite(f"{bd}/{f}", f"{bd}/rejected/{f}")
+            rejected += 1
+            log(f"backlog {f}: {defect} → {target}", brain=False); continue
+        try: out.append(file_issue(text))
+        except Exception as e:
+            log(f"backlog {f}: {e}", brain=False); continue  # one failing card must not block the batch
+        move_without_overwrite(f"{bd}/{f}", f"{bd}/filed/{f}")
+    MINT_EVIDENCE["rejected"] = rejected
     G = ["git", "-C", "/workspace/phanes-repo"]
     sh(G + ["fetch", "-q", "origin", "main"], timeout=120)
     rc, ls, _ = sh(G + ["ls-tree", "--name-only", "origin/main", "docs/backlog/next/"])
@@ -1673,20 +1809,49 @@ def replenish(k, state):
     for path in sorted(x for x in ls.split() if x.endswith(".md")) if not rc else []:
         if len(out) >= k: break
         if path in imp: continue
-        rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
-        imp.append(path); save_state(state)
-        try:
-            if rc or not text.startswith("#") or not text.splitlines()[1].startswith("labels:"): raise RuntimeError("bad format")
-            out.append(file_issue(text))
-        except Exception as e: log(f"repo backlog {path}: {e}", brain=False)
+        read_rc, text, _ = sh(G + ["show", f"origin/main:{path}"])
+        if read_rc: log(f"repo backlog {path}: read failed (rc={read_rc})", brain=False); continue
+        defect = card_defect(text, strict=True)
+        if defect:
+            imp.append(path); save_state(state)
+            log(f"repo backlog {path}: {defect} → skipped", brain=False); continue
+        try: issue = file_issue(text)
+        except Exception as e:
+            log(f"repo backlog {path}: {e}", brain=False); continue  # keep the card unimported: it is retried next tick
+        imp.append(path); save_state(state); out.append(issue)
     if len(out) < k:
         rc, o, _ = gh(["issue", "list", "--state", "open", "--label", "planner", "--json", "number"])
-        if not rc and json.loads(o) == []:
+        planners = None
+        if rc:
+            # the gate cannot prove that no planner is open: no card is minted (Refs #1662)
+            MINT_EVIDENCE["planner"] = f"issue list failed (rc={rc})"
+            log(f"planner query unreadable: gh issue list failed (rc={rc}); skip planner creation", brain=False)
+        else:
+            try:
+                planners = json.loads(o)
+                if not isinstance(planners, list): raise ValueError("the planner query did not return a JSON list")
+            except (ValueError, TypeError) as e:
+                planners = None
+                # an unreadable planner query cannot prove that no planner is open: the gate stays
+                # closed instead of filing a second planner card (Refs #1662)
+                MINT_EVIDENCE["planner"] = f"query unreadable ({str(e)[:60]})"
+                log(f"planner query unreadable: the planner JSON cannot be parsed ({e}); skip planner creation", brain=False)
+        if planners:
+            numbers = [i["number"] for i in planners if isinstance(i, dict) and i.get("number") is not None]
+            MINT_EVIDENCE["planner"] = f"issue #{numbers[0]} already open" if numbers else "a planner issue is already open"
+            if time.time() - LAST_MINT_LOG > 600:
+                log(f"planner issue already open ({', '.join('#' + str(n) for n in numbers) or 'unknown number'}): no new planner card minted", brain=False); LAST_MINT_LOG = time.time()
+        elif planners == []:
             rc, o, _ = gh(["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title"])
-            titles = "\n".join(f"- #{i['number']} {i['title']}" for i in json.loads(o)) if not rc else ""
+            titles = ""
+            if not rc:
+                try: titles = "\n".join(f"- #{i['number']} {i['title']}" for i in json.loads(o))
+                except (ValueError, TypeError, KeyError) as e: log(f"open issue list unreadable ({e}); the planner card carries no issue list", brain=False)
             tag = time.strftime("%Y%m%d-%H%M")
-            try: out.append(file_issue(PLANNER.format(k=20, tag=tag, open=titles)) + "(planner)")
-            except Exception as e: log(f"planner issue: {e}", brain=False)
+            try:
+                out.append(file_issue(PLANNER.format(k=20, tag=tag, open=titles)) + "(planner)"); MINT_EVIDENCE["planner"] = "card filed"
+            except Exception as e:
+                MINT_EVIDENCE["planner"] = f"card failed ({str(e)[:60]})"; log(f"planner issue: {e}", brain=False)
     return out
 
 def sleep_chunk(total=TICK, chunk=5):
