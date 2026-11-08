@@ -630,8 +630,8 @@ Watermark policy (the thresholds are the ones of the lane host):
 | Measured usage | State | Effect |
 | --- | --- | --- |
 | `>= 95%` | `block` | the host is paused (`PAUSE-HOST-<host>`) and the brain log gets an alert row |
-| `>= 87%` and `< 95%` | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
-| `< 87%` | `recovered` | the guard releases **its own** marker only |
+| `> 87%` and `< 95%` | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
+| `<= 87%` | `recovered` | the guard releases **its own** marker only |
 
 Ownership rules: the marker body starts with `auto:disk-watermark`, so the health
 sweep (`tools/check-health-pause.py`) may clear it — the guard restores its own
@@ -658,7 +658,11 @@ keep the old code alive), deploys `disk-watermark-guard.py` and
 `disk-usage-probe.py` next to each other into `~/phanes-ctl/bin`, wires the
 resident loop into the live `~/phanes-ctl/bin/start-control-plane`, updates the
 dispatcher that carries the gate and verifies that the resident guard of the new
-version really runs. Alerts go to `/workspace/phanes/brain/log.md`, the same
+version really runs. If a dispatcher is running, the installer checks that its
+restart entry identifies a dispatcher it can update before stopping any process;
+an unknown entry fails installation and preserves the running processes. A
+dispatcher that was stopped must be running again for installation to succeed.
+Alerts go to `/workspace/phanes/brain/log.md`, the same
 brain log used by the dispatcher. Set `DISK_WATERMARK_BRAIN_LOG` during installation
 to override this path for an isolated deployment. The probe counts allocated
 blocks throughout each directory tree by default; `--max-depth` explicitly
@@ -666,6 +670,11 @@ requests a partial scan.
 
 Review fixes and evidence:
 
+- Recovery boundary: the guard and offline check exercise 95% → 91% → 87%;
+  at 87% the own marker is removed, the independent gate opens and recovery is logged.
+- Dispatcher restart: installer tests cover the updated resident dispatcher's
+  heartbeat, an unknown restart entry preserving the old process, and a start
+  script that fails to restart the dispatcher returning an installation error.
 - B1: blocked state has no TTL; the real dispatch tick test removes the marker
   and ages the state past 30 minutes, then verifies that govpn2 gets no run.
 - B2: the probe scans all depths by default; a deep 1 MiB payload must be counted

@@ -44,6 +44,28 @@ version="$(sed -n 's/^GUARD_VERSION = \([0-9][0-9]*\).*/\1/p' "$guard_src")"
 version="${version:-0}"
 install_started="$(python3 -c 'import time; print(time.time())')"
 
+# Check the restart path before stopping any resident process. An unrecognised
+# start script must not leave a running control plane without its dispatcher.
+preflight_dispatcher() {
+  local pattern="$bin/autodispatch.py|$bin/lane-autodispatch"
+  local entry=""
+  if ! pgrep -f "$pattern" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -f "$start_script" ]]; then
+    entry="$(sed -n 's/^[[:space:]]*start_one[[:space:]]\{1,\}lane-autodispatch[[:space:]]\{1,\}"\([^"]*\)".*/\1/p' "$start_script" | head -1)"
+    entry="${entry//\$\{HOME\}/$HOME}"
+    entry="${entry//\$HOME/$HOME}"
+    entry="${entry//\$\{ctl\}/$ctl}"
+    entry="${entry//\$ctl/$ctl}"
+  fi
+  if [[ "$entry" != "$bin/autodispatch.py" && "$entry" != "$bin/lane-autodispatch" ]] ||
+     [[ ! -f "$entry" ]] || ! grep -q "Phanes lane autodispatcher" "$entry"; then
+    echo "FAIL: cannot verify the dispatcher restart entry in $start_script; running processes were preserved" >&2
+    return 1
+  fi
+}
+
 # 1. stop the resident guard that is still running: the loop is restarted below
 #    with the new files, so the old process must not survive the install.
 stop_running_guard() {
@@ -215,14 +237,6 @@ verify_dispatcher() {
     echo "OK: no dispatcher was running, the new code is used at the next start"
     return 0
   fi
-  # the start script only starts a dispatcher whose entry point exists
-  local entry
-  entry="$(sed -n 's/^start_one lane-autodispatch "\([^"]*\)".*/\1/p' "$start_script" | head -1)"
-  entry="${entry//\$HOME/$HOME}"
-  if [[ -z "$entry" || ! -e "$entry" ]]; then
-    echo "OK: the start script has no dispatcher entry point, nothing to restart"
-    return 0
-  fi
   local pids
   for _ in $(seq 1 50); do
     pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
@@ -236,6 +250,7 @@ verify_dispatcher() {
   return 1
 }
 
+preflight_dispatcher
 stop_running_guard
 stop_running_dispatcher
 deploy_guard

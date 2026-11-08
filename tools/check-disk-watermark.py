@@ -41,7 +41,7 @@ MARKER = f"PAUSE-HOST-{HOST}"
 DF_HEADER = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
 DF_BLOCKED = DF_HEADER + "/dev/sda1 1000000 950000 50000 95% /\n"
 DF_HELD = DF_HEADER + "/dev/sda1 1000000 910000 90000 91% /\n"
-DF_RECOVERED = DF_HEADER + "/dev/sda1 1000000 500000 500000 50% /\n"
+DF_RECOVERED = DF_HEADER + "/dev/sda1 1000000 870000 130000 87% /\n"
 
 
 def load(name, path):
@@ -144,8 +144,18 @@ def check_hysteresis(base):
     run_guard(base, pause_dir, brain_log, env)
     assert marker.read_text() == "auto:other-guard\n", marker.read_text()
 
-    # below the recovery threshold the guard releases its own marker only.
+    # At the recovery threshold a foreign marker still belongs to its owner.
+    env["PATH"] = fake_ssh(base, DF_RECOVERED)
+    done = run_guard(base, pause_dir, brain_log, env)
+    assert done.returncode == 0, done.stderr
+    assert marker.read_text() == "auto:other-guard\n", marker.read_text()
+
+    # Restore our own marker, then check release exactly at 87%.
     marker.unlink()
+    env["PATH"] = fake_ssh(base, DF_HELD)
+    done = run_guard(base, pause_dir, brain_log, env)
+    assert done.returncode == 0, done.stderr
+    assert marker.exists(), "the hold must restore our own marker before recovery"
     env["PATH"] = fake_ssh(base, DF_RECOVERED)
     done = run_guard(base, pause_dir, brain_log, env)
     assert done.returncode == 0, done.stderr

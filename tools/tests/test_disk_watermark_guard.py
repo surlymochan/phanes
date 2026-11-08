@@ -47,11 +47,12 @@ HOST = "govpn2"
 PAUSE_MARKER = f"PAUSE-HOST-{HOST}"
 
 # df -Pk output of the fake remote host: blocked (95%), inside the
-# block -> warn band (91%) and recovered (50%).
+# block -> warn band (91%), recovery boundary (87%) and healthy (50%).
 DF_HEADER = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
 DF_BLOCKED = DF_HEADER + "/dev/sda1 1000000 950000 50000 95% /\n"
 DF_HELD = DF_HEADER + "/dev/sda1 1000000 910000 90000 91% /\n"
-DF_RECOVERED = DF_HEADER + "/dev/sda1 1000000 500000 500000 50% /\n"
+DF_RECOVERED = DF_HEADER + "/dev/sda1 1000000 870000 130000 87% /\n"
+DF_HEALTHY = DF_HEADER + "/dev/sda1 1000000 500000 500000 50% /\n"
 
 
 def require(path, what):
@@ -306,7 +307,7 @@ class GuardRemoteMeasurementTests(unittest.TestCase):
         with scratch() as tmp:
             base = Path(tmp)
             fake = FakeSsh(base)
-            fake.set_df(DF_RECOVERED)
+            fake.set_df(DF_HEALTHY)
             pause_dir = base / "pause"
             brain_log = base / "brain.log"
             done = run_guard(pause_dir, brain_log, fake.env)
@@ -370,12 +371,16 @@ class GuardHysteresisTests(unittest.TestCase):
             self.assertFalse(any("recovered" in row.lower() for row in fresh),
                              f"the hold must not be reported as recovered: {fresh}")
 
-            # 87% is below the recovery threshold: the guard releases its own marker.
+            # At 87% the recovery threshold is reached: release our own marker.
             fake.set_df(DF_RECOVERED)
             done = run_guard(pause_dir, brain_log, fake.env)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertFalse(marker.exists(),
                              f"the recovery must release the pause of {HOST}: {done.stdout!r}")
+            state = json.loads((pause_dir / f"disk-watermark-{HOST}.json").read_text())
+            self.assertEqual(state["state"], "recovered")
+            self.assertFalse(state["blocked"])
+            self.assertTrue(any("state=recovered" in row for row in log_lines(brain_log)))
 
     def test_a_marker_cleared_by_another_sweep_is_restored(self):
         # The health sweep clears stale "auto:" host pauses
@@ -593,6 +598,12 @@ start_one() {
   local name="$1" cmd="$2"
   echo "start_one $name $cmd" >> "$ctl/started.log"
   case "$name" in
+    lane-autodispatch)
+      if [[ -x "$cmd" ]]; then
+        nohup bash -c "exec $cmd" >>"$ctl/dispatcher.log" 2>&1 &
+        echo $! >> "$ctl/started.pids"
+      fi
+      ;;
     *disk-watermark*)
       nohup bash -c "exec $cmd" >>"$ctl/loop.log" 2>&1 &
       echo $! >> "$ctl/started.pids"
@@ -701,9 +712,12 @@ echo "status:"
             ctl = self.build_control_plane(home / "phanes-ctl")
             fake = FakeSsh(base)
             fake.set_df(DF_BLOCKED)
-            live = ctl / "bin" / "autodispatch.py"
+            live = ctl / "bin" / "lane-autodispatch"
             live.write_text('#!/usr/bin/env python3\n"""Phanes lane autodispatcher (the old copy)."""\n'
                             "import time\ntime.sleep(600)\n")
+            live.chmod(0o755)
+            # Keep the real deployed dispatcher offline while it runs its loop.
+            (ctl / "autodispatch" / "PAUSE").write_text("test fixture\n")
             old = subprocess.Popen([sys.executable, str(live)],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.addCleanup(self.kill_pid, old.pid)
@@ -720,6 +734,51 @@ echo "status:"
             self.assertFalse(self.alive(old.pid),
                              "the installer must stop the dispatcher that is still running, "
                              "otherwise it keeps the old code without the disk gate")
+            self.assertTrue(self.wait_for(lambda: (ctl / "autodispatch" / "heartbeat").exists()),
+                            "the updated dispatcher must actually run, not just stop the old one")
+
+    def test_installer_rejects_an_unknown_restart_entry_before_stopping_dispatcher(self):
+        with scratch() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            ctl = self.build_control_plane(home / "phanes-ctl")
+            fake = FakeSsh(base)
+            live = ctl / "bin" / "autodispatch.py"
+            source = ('#!/usr/bin/env python3\n"""Phanes lane autodispatcher (the old copy)."""\n'
+                      "import time\ntime.sleep(600)\n")
+            live.write_text(source)
+            old = subprocess.Popen([sys.executable, str(live)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(self.kill_pid, old.pid)
+            time.sleep(0.5)
+            done = self.run_installer(ctl, home, fake.env)
+            self.assertNotEqual(done.returncode, 0,
+                                f"an unknown restart entry must fail: {done.stdout}\n{done.stderr}")
+            self.assertIn("FAIL:", done.stderr)
+            self.assertTrue(self.alive(old.pid),
+                            "preflight must preserve the running dispatcher if restart is unknown")
+            self.assertEqual(live.read_text(), source)
+
+    def test_installer_fails_if_the_start_script_does_not_restart_dispatcher(self):
+        with scratch() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            ctl = self.build_control_plane(home / "phanes-ctl")
+            fake = FakeSsh(base)
+            live = ctl / "bin" / "lane-autodispatch"
+            live.write_text('#!/usr/bin/env python3\n"""Phanes lane autodispatcher (the old copy)."""\n'
+                            "import time\ntime.sleep(600)\n")
+            live.chmod(0o755)
+            start = ctl / "bin" / "start-control-plane"
+            start.write_text(self.START_FIXTURE.replace('if [[ -x "$cmd" ]]; then', 'if false; then'))
+            old = subprocess.Popen([sys.executable, str(live)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(self.kill_pid, old.pid)
+            time.sleep(0.5)
+            done = self.run_installer(ctl, home, fake.env)
+            self.assertNotEqual(done.returncode, 0,
+                                f"a failed restart must fail installation: {done.stdout}\n{done.stderr}")
+            self.assertIn("dispatcher did not come back", done.stderr)
 
     def alive(self, pid):
         # A child that exited stays in the process table as a zombie until its parent

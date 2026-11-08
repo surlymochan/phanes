@@ -11,7 +11,7 @@ the reviews stall.  The guard is the resident loop of the box control plane:
   that the dispatcher reads) and writes an alert row into the brain log;
 * between the block and the recovery threshold it **keeps** the pause (the
   hysteresis band) and restores the marker when another sweep removed it;
-* below the recovery threshold it releases **its own** marker only: a pause
+* at or below the recovery threshold it releases **its own** marker only: a pause
   that belongs to another guard or to an operator is never taken over and never
   released;
 * a failed probe is never a healthy host: the guard fails closed (the lane
@@ -44,7 +44,7 @@ from pathlib import Path
 GUARD_VERSION = 1
 DEFAULT_HOST = "govpn2"
 BLOCK_PCT = 95          # at or above this usage the lane host is paused
-RECOVER_PCT = 87        # below this usage the guard releases its own pause
+RECOVER_PCT = 87        # at or below this usage the guard releases its own pause
 INTERVAL = 300          # seconds between two measurements of the resident loop
 SSH_TIMEOUT = 60        # seconds the remote probe may take
 MARKER_PREFIX = "auto:disk-watermark"   # the body prefix of the marker of this guard
@@ -93,12 +93,12 @@ def decide(used_pct, block_pct=BLOCK_PCT, recover_pct=RECOVER_PCT):
 
     `block`     - at or above the block threshold: the lane host is paused;
     `hold`      - between the thresholds: the lane host stays paused;
-    `recovered` - below the recovery threshold: the guard may release its own
+    `recovered` - at or below the recovery threshold: the guard may release its own
                   pause.
     """
     if used_pct >= block_pct:
         return "block"
-    if used_pct >= recover_pct:
+    if used_pct > recover_pct:
         return "hold"
     return "recovered"
 
