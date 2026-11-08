@@ -4,7 +4,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from tools import upstream_drift
 from tools.upstream_drift import (blob_id, classify, local_files, snapshot,
                                  unmarked_paths)
 
@@ -62,6 +64,33 @@ class UpstreamDriftTests(unittest.TestCase):
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
             with self.assertRaisesRegex(RuntimeError, "couldn't find remote ref|not our ref|fatal"):
                 snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
+
+    def test_snapshot_uses_requested_work_dir_for_scratch_and_cleans_it(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            root = Path(scratch)
+            remote = root / "upstream"
+            work_dir = root / "requested-work"
+            remote.mkdir()
+            work_dir.mkdir()
+            subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+            (remote / "tracked.txt").write_text("snapshot\n")
+            base_sha = commit(remote, "base")
+
+            init_locations = []
+            original_run = upstream_drift.run
+
+            def recording_run(args, *, cwd=None):
+                if args[:3] == ["git", "init", "--bare"]:
+                    init_locations.append(Path(args[3]))
+                return original_run(args, cwd=cwd)
+
+            with patch.object(upstream_drift, "run", side_effect=recording_run):
+                result = snapshot({"upstream_repo": str(remote)}, base_sha, work_dir)
+
+            self.assertEqual(result, {"tracked.txt": blob_id(b"snapshot\n")})
+            self.assertEqual(len(init_locations), 1)
+            self.assertEqual(init_locations[0].parent, work_dir)
+            self.assertFalse(init_locations[0].exists())
 
     def test_local_files_hash_symlink_targets(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
