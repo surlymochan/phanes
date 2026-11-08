@@ -51,6 +51,7 @@ ROOT = HERE.parent                      # swrm/
 REPO_ROOT = ROOT.parent                 # the worktree
 SWRM = ROOT / "bin" / "swrm"
 AUTODISPATCH = REPO_ROOT / "tools" / "lane-autodispatch" / "autodispatch.py"
+PAUSE_STORE = ROOT / "lib" / "dispatch" / "pause.py"
 
 HOST = "worker-a"
 LANE = "C1"
@@ -192,6 +193,13 @@ class FleetHealthPauseTests(unittest.TestCase):
         return rows[0]
 
     # ------------------------------------------------------------------ the pause store
+
+    def pause_store(self):
+        """The real pause-store API, reading the same records as the command."""
+        spec = importlib.util.spec_from_file_location("dispatch_pause_under_test", PAUSE_STORE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.PauseStore(self.home)
 
     def records(self):
         """Every pause record of the shared pause store."""
@@ -431,6 +439,36 @@ class FleetHealthPauseTests(unittest.TestCase):
         self.assertNotEqual(self.row(report)["decision"], "pause", report)
         self.assertFalse(self.scheduler_pauses_host(), "the recovered host is still paused")
 
+    def test_pause_store_api_recognizes_independent_health_hold(self):
+        """Operator resume cannot release health's hold, even between health checks."""
+        store = self.pause_store()
+        manual = store.pause(f"host:{HOST}", reason="operator: maintenance", now=time.time())
+        self.health("--apply")
+        self.assertIn(manual, store.active(time.time()))
+        self.assertTrue(store.resume(f"host:{HOST}"))
+        # Query before another health run, with no marker to mask a store defect.
+        for marker in self.markers():
+            marker.unlink()
+        later = time.time() + 30 * 24 * 3600
+        self.assertTrue(store.is_paused(host=HOST, now=later))
+        self.assertFalse(store.is_paused(host=HOST + "-other", now=later))
+        self.assertTrue(self.scheduler_pauses_host(later))
+        self.write_fake(disk_pct=10, mem_avail_mb=4096)
+        self.health("--apply")
+        self.assertFalse(store.is_paused(host=HOST, now=time.time()))
+        self.assertFalse(store.active(time.time()))
+
+    def test_pause_store_api_preserves_manual_pause_on_recovery(self):
+        store = self.pause_store()
+        manual = store.pause(f"host:{HOST}", reason="operator: maintenance", now=time.time())
+        self.health("--apply")
+        self.write_fake(disk_pct=10, mem_avail_mb=4096)
+        self.health("--apply")
+        self.assertEqual(store.active(time.time()), [manual])
+        self.assertTrue(store.is_paused(host=HOST, now=time.time()))
+        store.resume(f"host:{HOST}")
+        self.assertFalse(store.is_paused(host=HOST, now=time.time()))
+
     def test_the_health_command_and_the_scheduler_share_the_pause_directory(self):
         """The hold of the health check is written where the scheduler reads it."""
         self.health("--apply")
@@ -445,6 +483,7 @@ class FleetHealthPauseTests(unittest.TestCase):
                         "the health check did not write its marker into the configured pause directory")
         self.assertTrue(self.scheduler_pauses_host(),
                         "the scheduler does not read the configured pause directory")
+        self.assertTrue(self.pause_store().is_paused(host=HOST, now=time.time()))
 
     def test_the_thresholds_of_the_policy_decide_the_pause(self):
         """The thresholds the policy sets are the thresholds the health check judges with."""

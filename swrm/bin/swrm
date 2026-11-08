@@ -80,9 +80,11 @@ from typing import Callable, Optional, Sequence
 # Resolve the entrypoint itself so invocation through a symlink still finds
 # sibling modules, and SourceFileLoader-based tests get the same import path.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import evalid_roles
 import procboundary
+from lib.dispatch import pause as dispatch_pause
 
 
 def build_evalid_command(xflow_bin: str, *, request_file: str, output_file: str,
@@ -9970,15 +9972,12 @@ def fleet_health_pause_dir():
     markers), so the hold the health check writes here keeps the dispatchers away from
     a sick host.
     """
-    configured = envvar("PAUSE_DIR")
-    if configured:
-        return os.path.expanduser(configured)
-    return os.path.join(DATA, "pauses")
+    return dispatch_pause.pause_dir(DATA)
 
 
 def fleet_health_pause_path(scope):
     """The file of one pause record: the scope, escaped into a file name."""
-    return os.path.join(fleet_health_pause_dir(), urllib.parse.quote(scope, safe="") + ".json")
+    return str(dispatch_pause.PauseStore(DATA).path(scope))
 
 
 def fleet_health_marker_path(host):
@@ -9989,39 +9988,15 @@ def fleet_health_marker_path(host):
 def fleet_health_pause_records(now=None):
     """The active pause records of the store (an expired record is no pause)."""
     now = time.time() if now is None else now
-    records = []
-    directory = fleet_health_pause_dir()
-    try:
-        names = sorted(os.listdir(directory))
-    except OSError:
-        names = []
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        record = jload(os.path.join(directory, name), None)
-        if not isinstance(record, dict):
-            continue
-        scope = record.get("scope")
-        if not isinstance(scope, str) or not scope.strip():
-            continue
-        expires = record.get("expires_at")
-        if isinstance(expires, bool) or not isinstance(expires, (int, float)):
-            expires = None
-        elif expires <= now:
-            continue
-        records.append({"scope": scope.strip(), "reason": str(record.get("reason") or ""),
-                        "created_at": record.get("created_at"), "expires_at": expires})
-    return records
+    return dispatch_pause.PauseStore(DATA).active(now)
 
 
 def fleet_health_write_pause(scope, reason, now):
     """Write one pause record without an expiry: the hold ends when the host recovers."""
-    record = {"scope": scope, "created_at": now, "expires_at": None, "reason": reason}
     try:
-        jsave(fleet_health_pause_path(scope), record)
+        return dispatch_pause.PauseStore(DATA).pause(scope, reason=reason, now=now)
     except OSError as error:
         raise ValueError(f"cannot write the pause record of {scope}: {error}")
-    return record
 
 
 def fleet_health_release(scope):
