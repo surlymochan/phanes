@@ -13,6 +13,15 @@ const threadView = await readFile(threadViewPath, "utf8");
 
 describe("agent goals view", () => {
 
+  it("passes the full task snapshot to the goals view", async () => {
+    const [projection, caller] = await Promise.all([
+      readFile(join(projectRoot, "src/renderer/src/features/agent-threads/conversation-threads.ts"), "utf8"),
+      readFile(join(projectRoot, "src/renderer/src/features/conversation/ConversationThread.tsx"), "utf8"),
+    ]);
+    assert.match(projection.slice(projection.indexOf("  return {")), /\b(?:goals|tasks):\s*list\b/);
+    assert.match(caller, /tasks=\{current\(\)\.threads\.(?:goals|tasks)\}/);
+  });
+
   it("lets keyboard users switch between active and completed goal groups", () => {
     assert.match(threadView, /进行中\s*\/\s*Active goals/i);
     assert.match(threadView, /已完成\s*\/\s*Completed goals/i);
