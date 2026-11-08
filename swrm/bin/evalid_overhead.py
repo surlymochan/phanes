@@ -12,7 +12,10 @@ Two rules drive the numbers:
   own and never enters ``budget_seconds``. Without retry backoff, the recorded
   execution duration excludes verification and cleanup even when the lane has
   no ``attempt_started`` timestamp. Rate-limit backoff consumes budget; its
-  elapsed window uses the queue-adjusted ``started`` timestamp. An interrupted
+  duration comes from the attempt endpoint or recorded RATELIMIT events, never
+  from verification/cleanup time. Missing retry timing is a data quality error;
+  its budget total retains only the measured execution lower bound and the
+  queue exclusion assertion fails. An interrupted
   capacity wait is excluded separately because swrm shifts ``started`` only
   after admission. Queue time is never charged and never deducted twice.
 * Extra runs are the overhead of the L2 pipeline. The legacy flow already spent
@@ -200,6 +203,83 @@ def _usage_of(status: dict, result: dict) -> dict:
     return total
 
 
+def _retry_wait_seconds(run_dir: pathlib.Path, attempts: list) -> Optional[float]:
+    """Read completed retry waits, including jitter, from the saved event logs."""
+    count = sum(isinstance(attempt, dict) and attempt.get("error_class") == "rate_limit"
+                for attempt in attempts[:-1])
+    paths = []
+    for attempt in attempts:
+        events = attempt.get("events") if isinstance(attempt, dict) else None
+        if isinstance(events, str) and events:
+            # Receipts can refer to absolute paths on the original host. Read
+            # only the corresponding local run file, never another host path.
+            paths.append(run_dir / pathlib.Path(events).name)
+    if not paths:
+        paths = sorted(run_dir.glob("events.*.jsonl"))
+    waits = []
+    for path in dict.fromkeys(paths):
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict) or event.get("type") != "RATELIMIT":
+                        continue
+                    wait = _number(event.get("wait_seconds"))
+                    if wait is not None and wait >= 0:
+                        waits.append(wait)
+        except (OSError, UnicodeError):
+            continue
+    return sum(waits[:count]) if len(waits) >= count else None
+
+
+def _budget_excludes_queue(record: dict) -> bool:
+    """Audit against receipt evidence independently of the budget calculator.
+
+    The full queued-to-finished window bounds queue-free work. Execution and
+    retry receipts additionally detect charging queue inside that bound and
+    deducting an already excluded queue again, including with budget caps.
+    """
+    status, result = record["status"], record["result"]
+    queued_at = _parse_timestamp(status.get("queued_at"))
+    started = _parse_timestamp(status.get("started"))
+    finished = _parse_timestamp(status.get("finished"))
+    queued = record["queued_seconds"]
+    wall = (finished - queued_at).total_seconds() - queued if finished and queued_at else None
+    if wall is not None and record["budget_seconds"] > wall + 0.003:
+        return False
+    attempts = result.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts else None
+    interrupted = (result.get("error_class") in ("budget_exceeded", "stopped")
+                   or isinstance(last, dict)
+                   and last.get("error_class") in ("budget_exceeded", "stopped"))
+    unshifted = (queued_at is not None and started is not None
+                 and queued > max(0.0, (started - queued_at).total_seconds()) + 0.001)
+    execution = _number(result.get("seconds"))
+    endpoint = _parse_timestamp(status.get("attempt_started"))
+    last_seconds = _number(last.get("seconds")) if isinstance(last, dict) else None
+    if wall is not None and (interrupted or unshifted or execution is None):
+        expected = max(0.0, wall)
+    elif (endpoint is not None and queued_at is not None and started is not None
+          and last_seconds is not None and last_seconds >= 0
+          and endpoint >= started
+          and (finished is None or (finished - endpoint).total_seconds() >= last_seconds)):
+        expected = (endpoint - queued_at).total_seconds() + last_seconds - queued
+    elif execution is not None and execution >= 0:
+        wait = record["retry_wait_seconds"]
+        if wait is None:
+            return False
+        expected = execution + wait
+    else:
+        return False
+    allowance = _number(status.get("budget_minutes"))
+    if allowance is not None and allowance >= 0:
+        expected = min(expected, allowance * SECONDS_PER_MINUTE)
+    return abs(record["budget_seconds"] - expected) <= 0.003
+
+
 def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     """Read one run directory into stage, durations, queue time and usage."""
     status_path = run_dir / "status.json"
@@ -278,11 +358,13 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
     backoff = isinstance(attempts, list) and any(
         isinstance(attempt, dict) and attempt.get("error_class") == "rate_limit"
         for attempt in attempts[:-1])
+    retry_wait = None if backoff else 0.0
     # lane_do_run does not write attempt_started. When no retry backoff needs
     # accounting, seconds is the execution endpoint; finished also includes
     # verification and cleanup. It already excludes admitted capacity queues.
     if execution is not None and not backoff and not interrupted and not unshifted_queue:
         elapsed = execution
+    has_endpoint = False
     if isinstance(last, dict) and attempt_started is not None and started is not None:
         last_seconds = _number(last.get("seconds"))
         if (last_seconds is not None and last_seconds >= 0
@@ -290,8 +372,15 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
             attempt_end = (attempt_started - started).total_seconds() + last_seconds
             if attempt_end >= 0 and (window is None or attempt_end <= window):
                 elapsed = attempt_end
-    # Backoff without an attempt endpoint retains the available wall window;
-    # without a wall window, retain the recorded execution duration fallback.
+                has_endpoint = True
+    if (backoff and execution is not None and not has_endpoint
+            and not interrupted and not unshifted_queue):
+        retry_wait = _retry_wait_seconds(run_dir, attempts)
+        if retry_wait is None:
+            errors.append({"run_id": name, "field": "retry_wait_seconds", "error": "missing"})
+        # finished includes verification/cleanup. Without an endpoint or saved
+        # waits, execution is a lower bound, not evidence of the full budget.
+        elapsed = execution + (retry_wait or 0.0)
     # A run killed at its deadline cannot consume more than its allowance.
     budget_minutes = _number(status.get("budget_minutes"))
     allowance = None
@@ -311,6 +400,7 @@ def _run_record(run_dir: pathlib.Path) -> Optional[dict]:
             "change_id": str(change_id) if change_id is not None else None,
             "queued_seconds": float(queued), "execution_seconds": execution,
             "budget_seconds": budget, "budget_elapsed_seconds": elapsed or 0.0,
+            "status": status, "result": result, "retry_wait_seconds": retry_wait,
             "usage": _usage_of(status, result)}
 
 
@@ -340,7 +430,7 @@ def build_report(runs_dir: Any, stages: Optional[Sequence[str]] = None) -> dict:
         stage = record["stage"]
         if stage is None or stage not in buckets:
             continue
-        budget_checks.append(record["budget_seconds"] <= record["budget_elapsed_seconds"] + 1e-9)
+        budget_checks.append(_budget_excludes_queue(record))
         if stage in BASELINE_STAGES:
             baseline_runs.add((record["change_id"], stage))
         bucket = buckets[stage]

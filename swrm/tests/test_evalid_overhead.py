@@ -6,6 +6,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -218,6 +219,9 @@ class EvalidOverheadTests(unittest.TestCase):
                         {"seconds": 30, "error_class": None},
                     ],
                 }), encoding="utf-8")
+                (self.runs / run_id / "events.2.pi.jsonl").write_text(json.dumps({
+                    "type": "RATELIMIT", "retry": 1, "wait_seconds": 30,
+                }) + "\n", encoding="utf-8")
 
                 report = overhead.build_report(self.runs)
 
@@ -247,6 +251,111 @@ class EvalidOverheadTests(unittest.TestCase):
         self.assertEqual(report["stages"]["green"]["budget_seconds"], 90)
         self.assertTrue(report["budget_excludes_queue_seconds"])
         self.assertEqual(report["data_quality_errors"], [])
+
+    def test_lane_retry_budget_uses_recorded_backoff_without_finalization(self):
+        for index, wait in enumerate((30, 45.25, 0)):
+            with self.subTest(wait_seconds=wait):
+                run_id = f"lane-retry-{index}"
+                stage = ("Spec", "red", "Review")[index]
+                self.write_run(run_id, stage=stage, queued_at=100, started=120,
+                               execution_started=120, finished=240 + wait,
+                               queued_seconds=20, budget_minutes=5)
+                run = self.runs / run_id
+                (run / "result.json").write_text(json.dumps({
+                    "seconds": 60, "error_class": None,
+                    "attempts": [
+                        {"seconds": 30, "error_class": "rate_limit",
+                         "events": "/original/host/events.1.pi.jsonl"},
+                        {"seconds": 30, "error_class": None,
+                         "events": "/original/host/events.2.pi.jsonl"},
+                    ],
+                }), encoding="utf-8")
+                # Lane retries record the wait in the following attempt's log.
+                (run / "events.2.pi.jsonl").write_text(json.dumps({
+                    "type": "RATELIMIT", "retry": 1, "wait_seconds": wait,
+                }) + "\n", encoding="utf-8")
+
+                report = overhead.build_report(self.runs)
+
+                self.assertEqual(report["stages"][stage]["execution_seconds"], 60)
+                self.assertEqual(report["stages"][stage]["budget_seconds"], 60 + wait)
+                self.assertTrue(report["budget_excludes_queue_seconds"])
+                self.assertEqual(report["data_quality_errors"], [])
+                self.assertEqual(overhead.render_report(report),
+                                 overhead.render_report(overhead.build_report(self.runs)))
+
+    def test_retry_without_timing_evidence_does_not_charge_finalization(self):
+        self.write_run("unknown-retry", stage="red", queued_at=100, started=120,
+                       finished=270, queued_seconds=20, budget_minutes=5)
+        (self.runs / "unknown-retry" / "result.json").write_text(json.dumps({
+            "seconds": 60,
+            "attempts": [{"seconds": 30, "error_class": "rate_limit"},
+                         {"seconds": 30, "error_class": None}],
+        }), encoding="utf-8")
+
+        report = overhead.build_report(self.runs)
+
+        # No timestamp separates the unknown backoff from finalization. Keep
+        # the measured execution lower bound and reject the budget assertion.
+        self.assertEqual(report["stages"]["red"]["budget_seconds"], 60)
+        self.assertFalse(report["budget_excludes_queue_seconds"])
+        self.assertEqual(report["data_quality_errors"], [
+            {"run_id": "unknown-retry", "field": "retry_wait_seconds", "error": "missing"},
+        ])
+
+    def test_multiple_retry_waits_are_read_once_for_direct_and_lane_logs(self):
+        for index, log_offset in enumerate((0, 1)):
+            with self.subTest(log_offset=log_offset):
+                run_id = f"multiple-{index}"
+                stage = ("red", "green")[index]
+                self.write_run(run_id, stage=stage, queued_at=100, started=160,
+                               execution_started=120, finished=385,
+                               queued_seconds=60, budget_minutes=5)
+                run = self.runs / run_id
+                attempts = [{"seconds": 30, "error_class": error,
+                             "events": f"/original/events.{number}.pi.jsonl"}
+                            for number, error in enumerate(("rate_limit", "rate_limit", None), 1)]
+                (run / "result.json").write_text(json.dumps({
+                    "seconds": 90, "attempts": attempts,
+                }), encoding="utf-8")
+                for number, wait in enumerate((25, 50), 1):
+                    (run / f"events.{number + log_offset}.pi.jsonl").write_text(
+                        "[]\nnot-json\n" + json.dumps({
+                            "type": "RATELIMIT", "retry": number, "wait_seconds": wait,
+                        }) + "\n", encoding="utf-8")
+                before = {path.name: path.read_bytes() for path in run.iterdir()}
+
+                report = overhead.build_report(self.runs)
+
+                self.assertEqual(report["stages"][stage]["budget_seconds"], 165)
+                self.assertTrue(report["budget_excludes_queue_seconds"])
+                self.assertEqual(report["data_quality_errors"], [])
+                self.assertEqual(before, {path.name: path.read_bytes() for path in run.iterdir()})
+
+    def test_budget_assertion_detects_queue_charges_and_double_deductions(self):
+        self.write_run("audit", stage="red", queued_at=100, started=120,
+                       finished=240, queued_seconds=20, budget_minutes=5)
+        (self.runs / "audit" / "result.json").write_text(
+            json.dumps({"seconds": 60}), encoding="utf-8")
+        record = overhead._run_record(self.runs / "audit")
+        self.assertTrue(overhead.build_report(self.runs)["budget_excludes_queue_seconds"])
+
+        for incorrect in (80, 40):
+            with self.subTest(budget_seconds=incorrect):
+                # Both errors still fit inside finished - started. A check
+                # against the calculator's own elapsed value cannot catch them.
+                corrupted = dict(record, budget_seconds=incorrect, budget_elapsed_seconds=120)
+                with mock.patch.object(overhead, "_run_record", return_value=corrupted):
+                    report = overhead.build_report(self.runs)
+                self.assertFalse(report["budget_excludes_queue_seconds"])
+
+    def test_budget_assertion_checks_independent_queue_free_wall_window(self):
+        self.write_run("inconsistent", stage="red", queued_at=100, started=120,
+                       finished=150, queued_seconds=20, budget_minutes=5)
+        (self.runs / "inconsistent" / "result.json").write_text(
+            json.dumps({"seconds": 50}), encoding="utf-8")
+
+        self.assertFalse(overhead.build_report(self.runs)["budget_excludes_queue_seconds"])
 
     def test_budget_exhausted_during_rate_limit_wait_counts_the_wait(self):
         self.write_run("expired", stage="Review", queued_at=100, started=120,
