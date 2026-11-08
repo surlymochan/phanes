@@ -474,6 +474,40 @@ class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
                                                  lane_ref=False)
         self.assert_refused(result, gh_calls, sh_calls, heads=False)
 
+    def test_real_filter_failures_use_the_rejection_flow(self):
+        for failure in ("missing-ref", "missing-base", "git-exit", "timeout", "os-error"):
+            with self.subTest(failure=failure):
+                self.build_repo()
+                old, new = self.scenario_grown()
+                if failure == "missing-base":
+                    self.base = "0" * 40
+                real_run = subprocess.run
+
+                def filter_git(cmd, *args, **kwargs):
+                    if "merge-base" in cmd and "refs/fleet/lane" in cmd:
+                        if failure == "git-exit":
+                            return subprocess.CompletedProcess(cmd, 128, b"", b"filter git failed")
+                        if failure == "timeout":
+                            raise subprocess.TimeoutExpired(cmd, 120)
+                        if failure == "os-error":
+                            raise OSError("filter git unavailable")
+                    return real_run(cmd, *args, **kwargs)
+
+                with mock.patch.object(ad.subprocess, "run", side_effect=filter_git), \
+                     mock.patch.object(ad, "mark_done", wraps=ad.mark_done) as mark_done:
+                    result, gh_calls, sh_calls = self.harvest(
+                        old, new, real_filter=True, lane_ref=failure != "missing-ref")
+                self.assert_refused(result, gh_calls, sh_calls, heads=False)
+                self.assertTrue(result["done"], "the refused harvest still occupies the lane")
+                self.assertEqual(result["status"], "filter-failed")
+                self.assertTrue(result["error"])
+                ledger = (self.state / "runs" / "run.log").read_text(encoding="utf-8")
+                for evidence in ("harvest filter failed", result["error"]):
+                    self.assertIn(evidence, self.brain())
+                    self.assertIn(evidence, ledger)
+                mark_done.assert_called_once()
+                self.assertEqual(mark_done.call_args.args[0], {"_done": [ISSUE]})
+
     def test_unreadable_card_with_a_missing_harvest_branch_is_refused(self):
         # the card of the target PR cannot be read and the harvest branch does not exist
         # either: neither of the two may let the push pass (the review finding of #1833)

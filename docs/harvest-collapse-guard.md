@@ -111,3 +111,21 @@ tools/lane-autodispatch/test_harvest_filter.py tools/tests/test_lane_pr_validati
   `python3 -m pytest -q swrm/tests/test_lane_busy_stale.py` 为 15 passed；
   `python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。
 - 真实六例 SHA 回放继续使用上述宿主机清单与对象库命令，不将合成测试作为真实回放证据。
+
+## 第四轮审查 BLOCKER 修复映射（基于 71c786ac4）
+
+- B1（真实过滤器失败绕过拒绝流程）：`finish()` 的过滤异常分支保留 `filter-failed` 状态，
+  补齐 `lane-failed` 标签、brain 日志、`$D/runs/<run>.log` 失败台账及 `mark_done()`，
+  返回 `done=True` 释放车道。所有操作均在 push 和 PR 写入之前，不消耗 review 轮次。
+- 回归：`test_real_filter_failures_use_the_rejection_flow` 经过公开 `finish()` 和真实过滤器，
+  覆盖收割引用缺失（`real_filter=True, lane_ref=False`）、base 对象缺失，以及过滤器 Git
+  非零退出、超时和启动异常。检查无 push、PR 远端分支不变、无 PR 写入、标记 `lane-failed`、
+  brain/失败台账保留原因，且状态只增加 `_done`。修复前五种场景均因缺少 `lane-failed` 失败。
+- 保留已有塌缩护栏及复现测试；原 `openswarm/tests/` 测试继续对应
+  `tools/lane-autodispatch/test_harvest_collapse_guard.py`，不修改废弃目录。
+- 验证：`python3 -m pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py
+  tools/lane-autodispatch/test_harvest_filter.py tools/tests/test_lane_pr_validation.py
+  swrm/tests/test_lane_busy_stale.py` 为 66 passed、1 skipped、46 subtests passed；
+  `python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。
+- 真实六例 SHA 回放仍需宿主机提供上述清单及对象库；只读 GitHub 请求受沙箱 socket 限制，
+  本轮按任务附件核对，无 GitHub 写操作。

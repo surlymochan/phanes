@@ -1321,9 +1321,15 @@ def finish(lane, cfg, st, info, state):
         try:
             head, removed, empty = filter_harvest(f"refs/fleet/{lane}", st.get("base"))
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-            # fail closed: an undecided filter never pushes anything
-            log(f"{lane} #{n} run {run} harvest filter failed: {error}")
-            return {"done": False, "status": "filter-failed", "error": str(error), "missing": []}
+            # Fail closed before the collapse guard as well: record the refusal and
+            # release the lane instead of retrying an uncheckable harvest forever.
+            detail = f"harvest filter failed: {error}"
+            harvest_guard_record(run, detail)
+            log(f"{lane} #{n} run {run} {detail}")
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused: {detail}\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "filter-failed", "error": str(error), "missing": []}
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
         if empty:

@@ -131,6 +131,8 @@ fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head
 `AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败（含祖先检查超时、启动异常），
 均不推送、不改 PR、标记 `lane-failed`，并把 PR、前后 SHA、体量和原因写入 brain 日志和
 `$D/runs/<run>.log`（失败台账线索）。卡正文明确写 `整体重写：是` 可豁免。
+护栏之前的真实产物过滤器若因引用缺失或 Git 错误失败，同样标记 `lane-failed`、写 brain 和失败台账，
+返回 `filter-failed` / `done=True` 释放车道，不推送、不改 PR，也不消耗 review 轮次。
 
 对应测试：`python3 -m unittest tools/lane-autodispatch/test_harvest_collapse_guard.py`
 （`pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py` 等价）。
