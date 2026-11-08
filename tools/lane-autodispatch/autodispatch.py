@@ -1126,6 +1126,71 @@ def block_pr_validation(lane, cfg, st, info, state, title, body, missing):
 # (.lane-review/PR-N.md).  The rules are a list constant: one more artifact kind is
 # one more pattern. This legacy AD owns its filtering rules.
 HARVEST_EXCLUDE_PATTERNS = [re.compile(r"(^|/)\.[^/]*\.so$"), re.compile(r"(^|/)\.lane-review/")]
+HARVEST_COLLAPSE_THRESHOLD = float(os.environ.get("AD_HARVEST_COLLAPSE_THRESHOLD", "0.5"))
+
+def harvest_collapse_guard(issue, run, ref):
+    """Return (allowed, detail) for a fix/rebase harvest; git/metadata errors fail closed."""
+    rc, out, err = gh(["issue", "view", str(issue), "--json", "body"])
+    if rc:
+        return False, f"card body read failed: {err.strip()[-160:]}"
+    try:
+        payload = json.loads(out)
+        body = payload["body"]
+        if not isinstance(body, str): raise ValueError("body is not text")
+    except (ValueError, KeyError, TypeError) as error:
+        return False, f"card body parse failed: {error}"
+    if re.search(r"整体重写\s*[:：]?\s*(?:是|true|yes|允许|豁免)", body, re.I):
+        return True, "explicit overall rewrite waiver"
+    match = re.search(r"(?:重基\s*PR|fix\s*/\s*rebase\s*(?:PR)?|PR)\s*[：:# ]+\s*#?(\d+)\b", body, re.I)
+    if not match:
+        return True, "no target PR"
+    pr = match.group(1)
+    rc, out, err = gh(["pr", "view", pr, "--json", "headRefOid,baseRefOid"])
+    if rc:
+        return False, f"PR #{pr} metadata read failed: {err.strip()[-160:]}"
+    try:
+        pr_data = json.loads(out)
+        old, base = pr_data["headRefOid"], pr_data["baseRefOid"]
+        if not isinstance(old, str) or not isinstance(base, str) or not old or not base:
+            raise ValueError("missing PR head/base SHA")
+    except (ValueError, KeyError, TypeError) as error:
+        return False, f"PR #{pr} metadata parse failed: {error}"
+
+    def git(*args):
+        code, stdout, stderr = sh(["git", "-C", LOCAL, *args])
+        if code: raise RuntimeError(stderr.strip()[-160:] or f"git {args[0]} failed")
+        return stdout.strip()
+    before_size = after_size = "unknown"
+    try:
+        before_size = diff_size(base, old)
+        after_size = diff_size(base, ref)
+        rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, ref])
+        if rc == 1:
+            return False, f"PR #{pr} {old[:12]}->{git('rev-parse', ref)[:12]} sizes {before_size}->{after_size}: new head does not contain fix-before head"
+        if rc:
+            raise RuntimeError(err.strip()[-160:] or "git merge-base --is-ancestor failed")
+        reasons = []
+        for name, before, after in (("files", before_size[0], after_size[0]),
+                                    ("lines", before_size[1], after_size[1])):
+            if before and after < before * (1 - HARVEST_COLLAPSE_THRESHOLD):
+                reasons.append(f"{name} collapsed {before}->{after}")
+        if reasons:
+            return False, f"PR #{pr} {old[:12]}->{git('rev-parse', ref)[:12]} sizes {before_size}->{after_size}: {'; '.join(reasons)}"
+        return True, f"PR #{pr} ancestor and size check passed ({before_size}->{after_size})"
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        return False, f"PR #{pr} {old[:12]}->{ref[:12]} sizes {before_size}->{after_size}: git guard failed: {error}"
+
+def diff_size(base, head):
+    """Count changed paths and inserted+deleted lines relative to base."""
+    rc, paths, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--name-only", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff name-only failed")
+    rc, stats, err = sh(["git", "-C", LOCAL, "diff", "--no-renames", "--numstat", base, head])
+    if rc: raise RuntimeError(err.strip()[-160:] or "git diff numstat failed")
+    lines = 0
+    for row in stats.splitlines():
+        added, deleted, *_ = row.split("\t")
+        if added.isdigit() and deleted.isdigit(): lines += int(added) + int(deleted)
+    return len(paths.splitlines()) if paths else 0, lines
 
 def filter_harvest(ref, base):
     """Rebuild the harvested branch without the artifacts that never enter a PR.
@@ -1205,6 +1270,12 @@ def finish(lane, cfg, st, info, state):
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
+        allowed, guard_detail = harvest_collapse_guard(n, run, head)
+        if not allowed:
+            log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
+            label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused by #1833 collapse guard: {guard_detail}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "harvest-collapse-rejected", "error": guard_detail, "missing": []}
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])

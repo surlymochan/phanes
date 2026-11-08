@@ -119,6 +119,16 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 旧 dispatcher 及其离线回放工具已删除。仓内 AD 的过滤由
 `test_harvest_filter.py` 独立验证；不再与已删除的模块同步。
 
+## fix/rebase 收割塌缩护栏（Refs #1833）
+
+fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head/base；正文或 PR 元数据不可读、
+不可解析时拒绝收割。新 head 必须包含 fix 前 head，且相对 base 的变更文件数和增删行数分别
+不得下降超过 `AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败，
+均不推送、不改 PR、标记 `lane-failed`，并把 PR、前后 SHA、体量和原因写入 brain 日志。
+卡正文明确写 `整体重写：是` 可豁免；普通实现卡没有目标 PR 时不做 PR 收割比较。
+
+对应测试：`python3 -m unittest tools/lane-autodispatch/test_harvest_collapse_guard.py`。
+
 ## 开关来源审计（Refs #1827）
 
 `PAUSE*` / `EXCLUDE*` 文件是派发开关：今天它们被不明来源写入，事后追不到创建者，只能
