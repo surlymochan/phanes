@@ -8162,7 +8162,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             lane_abort_child(lane, child, turn)
             abort_deadline = now + 30
         if budget_hit and abort_deadline and now >= abort_deadline:
-            lane_record_event(event_file, {"type": "error", "error": "executor did not stop within 30s after interrupt"})
+            lane_record_event(event_file, {"type": "error", "source": "supervisor",
+                                          "error": "executor did not stop within 30s after interrupt"})
             child.close()
             return None, usage, "budget_exceeded", 124, event_file, "executor did not stop within 30s after interrupt"
         if spec.get("abort_requested") and not budget_hit and abort_deadline and now >= abort_deadline:

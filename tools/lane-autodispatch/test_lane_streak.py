@@ -74,6 +74,39 @@ class LaneStreakTickTest(unittest.TestCase):
             self.assertFalse((directory / "PAUSE-M19").exists())
         self.with_state_dir(run)
 
+    def test_third_failure_blocks_same_tick_dispatch_only_on_paused_lane(self):
+        def run(directory):
+            lanes = {name: {"host": "executor", "backend": "pi"} for name in ("M19", "M20")}
+            for run_id in ("run-1", "run-2"):
+                AUTODISPATCH.record_lane_terminal("M19", run_id, {"status": "exec_error"})
+            state = {"M19": {"issue": 1825, "run": "run-3", "host": "executor"}}
+            task = {"n": 2000, "backend": "pi", "prio": 1, "strict": False, "verify": False}
+
+            def terminal_run(lane, *args):
+                return {"lane": "idle", "run": {"status": "exec_error"} if lane == "M19" else None}
+
+            with mock.patch.object(AUTODISPATCH, "audit_switches"), \
+                 mock.patch.object(AUTODISPATCH, "pause_store_dir", return_value=str(directory / "pauses")), \
+                 mock.patch.object(AUTODISPATCH, "host_ok", return_value=True), \
+                 mock.patch.object(AUTODISPATCH, "remote", side_effect=terminal_run), \
+                 mock.patch.object(AUTODISPATCH, "label_lane_failed"), \
+                 mock.patch.object(AUTODISPATCH, "queue", return_value=[task]), \
+                 mock.patch.object(AUTODISPATCH, "deps_met", return_value=True), \
+                 mock.patch.object(AUTODISPATCH, "read_issue", return_value=("fresh", {})), \
+                 mock.patch.object(AUTODISPATCH, "sh", return_value=(0, "base refs/heads/main", "")), \
+                 mock.patch.object(AUTODISPATCH, "gh", return_value=(0, "", "")), \
+                 mock.patch.object(AUTODISPATCH, "dispatch", return_value=("new-run", None)) as dispatch, \
+                 mock.patch.object(AUTODISPATCH, "replenish", return_value=[]), \
+                 mock.patch.object(AUTODISPATCH, "status_snapshot", return_value={}):
+                AUTODISPATCH.tick(lanes, state, 0)
+
+            self.assertTrue((directory / "PAUSE-M19").exists())
+            dispatch.assert_called_once_with("M20", lanes["M20"], task, "base")
+            self.assertNotIn("M19", state)
+            self.assertEqual(state["M20"]["run"], "new-run")
+
+        self.with_state_dir(run)
+
     def test_corrupt_streak_entry_is_empty_and_does_not_pause_early(self):
         def run(directory):
             (directory / "lane-streak.json").write_text('{"M19":{"n":2,"runs":123}}')

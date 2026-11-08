@@ -13,7 +13,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("autodispatch", Path(__file__).with_name("autodispatch.py"))
@@ -29,7 +28,7 @@ class LaneStuckTickTest(unittest.TestCase):
             run_id = f"run-{index + 1}"
             run_dir = runs / run_id
             run_dir.mkdir(parents=True)
-            (run_dir / "events.1.pi.jsonl").write_text("")
+            (run_dir / "events.1.pi.jsonl").write_text('{"type":"lane_start","lane":"M19"}\n')
             status = {"state": "finished", "execution_started": 1}
             if queue_reason:
                 status["queue_reason"] = queue_reason
@@ -74,6 +73,31 @@ class LaneStuckTickTest(unittest.TestCase):
             self.assertFalse(result["cleaned"])
             self.assertEqual(result["reason"], "rpc-pid-unknown")
             self.assertFalse((home / "lane-stuck-audit.jsonl").exists())
+
+    def test_only_local_bookkeeping_is_excluded_from_executor_event_count(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+            home = Path(directory)
+            self.make_run_data(home)
+            path = home / "runs/run-2/events.1.pi.jsonl"
+            start = '{"type":"lane_start","lane":"M19"}\n'
+            for events, reason in (
+                    ("", "rpc-pid-unknown"),
+                    (start, "rpc-pid-unknown"),
+                    (start + json.dumps({"type": "error", "source": "supervisor",
+                                         "error": "executor did not stop within 30s after interrupt"}) + "\n",
+                     "rpc-pid-unknown"),
+                    (start + '{"type":"message","text":"working"}\n', "events-unknown-or-nonzero"),
+                    (start + '{"type":"error","error":"backend error"}\n', "events-unknown-or-nonzero"),
+                    (start + '{"type":"lane_start","lane":"M20"}\n', "events-unknown-or-nonzero"),
+                    (start + '{broken\n', "events-unknown-or-nonzero"),
+                    (start + '[]\n', "events-unknown-or-nonzero")):
+                with self.subTest(events=events):
+                    path.write_text(events)
+                    result = self.run_probe(home)
+                    self.assertFalse(result["cleaned"])
+                    self.assertEqual(result["reason"], reason)
+            path.unlink()
+            self.assertEqual(self.run_probe(home)["reason"], "events-unknown-or-nonzero")
 
     def test_tick_routes_budget_exceeded_terminal_through_cleanup_probe(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
@@ -165,11 +189,51 @@ class LaneStuckTickTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AD_PROC_ROOT": str(proc_root)}):
                 self.assertFalse(self.run_probe(home)["cleaned"])
 
+    def test_rpc_exit_alone_does_not_confirm_tree_cleanup(self):
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable), \
+                 tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
+                home = Path(directory)
+                self.make_run_data(home)
+                proc_root = home / "proc"
+                self.make_fake_process_tree(proc_root)
+                sandbox_stat = proc_root / "43211/stat"
+                sandbox_stat.write_text(sandbox_stat.read_text().replace(") S ", ") T "))
+                (proc_root / "43211/wchan").write_text("do_signal_stop")
+                (home / "lanes/M19").mkdir(parents=True)
+                (home / "lanes/M19/state.json").write_text('{"child_pid":43210}')
+
+                def deliver(pid, sig):
+                    path = proc_root / str(pid) / "stat"
+                    if pid == 43210:
+                        path.write_text(path.read_text().replace(") S ", ") Z "))
+                    elif sig == signal.SIGCONT:
+                        # The sandbox ignores TERM, or its exit cannot be read.
+                        path.write_text("" if unreadable else path.read_text().replace(") T ", ") S "))
+
+                output = io.StringIO()
+                with mock.patch.dict(os.environ, {"OPENSWARM_HOME": str(home), "AD_PROC_ROOT": str(proc_root)}), \
+                     mock.patch.object(sys, "argv", ["-", "M19"]), \
+                     mock.patch.object(os, "kill", side_effect=deliver) as kill, \
+                     mock.patch.object(time, "sleep"), \
+                     mock.patch.object(time, "time", side_effect=[0, 0, 1, 2]), \
+                     contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as stopped:
+                        exec(AUTODISPATCH.REMOTE_STUCK_CLEANUP, {})
+                self.assertEqual(stopped.exception.code, 0)
+                result = json.loads(output.getvalue())
+                self.assertFalse(result["cleaned"])
+                self.assertEqual(result["reason"], "tree-term-not-confirmed")
+                self.assertFalse((home / "lane-stuck-audit.jsonl").exists())
+                self.assertEqual(kill.call_args_list, [mock.call(43211, signal.SIGTERM),
+                                                      mock.call(43211, signal.SIGCONT),
+                                                      mock.call(43210, signal.SIGTERM)])
+
     def test_tick_real_term_and_engine_terminals_restore_backend_events(self):
-        # Only the executor turn driver and SSH transport are test adapters. swrm
-        # owns workspace preparation, execution_started, results and ledger; the
-        # probe reads real /proc and sends real TERM. No prebuilt terminal rows,
-        # simulated signal success, or handwritten recovery events are used.
+        # Adapt the RPC transport, clock and SSH, retaining the real turn driver,
+        # workspace preparation, events, results and ledger. The stalled transport
+        # also fails to close its child, leaving a real process tree for the probe
+        # to clean. Recovery events come from the restarted RPC fixture.
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2]) as directory:
             root = Path(directory)
             home, repo, control = root / "home", root / "repo", root / "control"
@@ -190,12 +254,15 @@ class LaneStuckTickTest(unittest.TestCase):
                 " sys.exit(0)\n"
                 "signal.signal(signal.SIGTERM,term)\n"
                 "if (root/'terminated').exists():\n"
-                " print(json.dumps({'type':'message','text':'backend recovered'}),flush=True)\n"
+                " report=json.dumps({'status':'done','summary':'backend recovered'})\n"
+                " print(json.dumps({'type':'agent_end','messages':[{'role':'assistant',"
+                "'content':[{'type':'text','text':report}]}]}),flush=True)\n"
                 " time.sleep(300)\n"
                 "else:\n"
                 " child=subprocess.Popen([sys.executable,str(root/'bwrap.py')])\n"
                 " (root/'sandbox-pid').write_text(str(child.pid))\n"
-                " child.wait()\n")
+                " child.wait()\n"
+                " time.sleep(300)\n")
             processes = []
 
             def start_rpc():
@@ -205,6 +272,9 @@ class LaneStuckTickTest(unittest.TestCase):
                 return process
 
             rpc = start_rpc()
+            other_lane = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"],
+                                          stdout=subprocess.PIPE, text=True)
+            processes.append(other_lane)
             old_d, old_brain = AUTODISPATCH.D, AUTODISPATCH.BRAIN_LOG
             AUTODISPATCH.D, AUTODISPATCH.BRAIN_LOG = str(control), str(control / "brain.log")
             try:
@@ -227,21 +297,33 @@ class LaneStuckTickTest(unittest.TestCase):
                     lane = {"name": "M19", "host": "local", "backend": "pi",
                             "model": "test", "repo": str(repo)}
 
-                    def turn(lane, child, spec, prompt, ws, rdir, *args, **kwargs):
-                        events = Path(rdir) / "events.1.pi.jsonl"
-                        events.touch()
-                        if spec["task"] == "crash":
-                            failed = subprocess.run([sys.executable, "-c", "raise SystemExit(1)"],
-                                                    capture_output=True)
-                            return None, {}, "exec_error", failed.returncode, str(events), None
-                        if (root / "terminated").exists():
-                            event = json.loads(rpc.stdout.readline())
-                            engine.lane_record_event(str(events), event)
-                            return {"status": "done"}, {}, None, 0, str(events), None
-                        deadline = spec["started"] + spec["budget_minutes"] * 60
-                        while time.time() < deadline:
-                            time.sleep(0.01)
-                        return None, {}, "budget_exceeded", 124, str(events), None
+                    class Transport:
+                        boundary = None
+
+                        def __init__(self):
+                            self.pid = rpc.pid
+                            self.close_attempted = False
+                            self.sent = []
+
+                        def alive(self):
+                            return rpc.poll() is None
+
+                        def send(self, message):
+                            self.sent.append(message["type"])
+
+                        def wait_response(self, *args):
+                            return {"success": True}
+
+                        def next_event(self, timeout=0):
+                            if index >= 5:
+                                return None  # RPC stream failure
+                            if (root / "terminated").exists():
+                                return json.loads(rpc.stdout.readline())
+                            clock[0] += 31  # advance through budget and interrupt grace
+                            return False
+
+                        def close(self):
+                            self.close_attempted = True  # reproduce failed child shutdown
 
                     def local_ssh(argv, timeout=60, inp=None):
                         # Run as the RPC's ancestor so Linux ptrace restrictions
@@ -255,10 +337,9 @@ class LaneStuckTickTest(unittest.TestCase):
                                 self.assertEqual(error.code, 0)
                         return 0, output.getvalue(), ""
 
-                    with mock.patch.object(engine, "lane_run_turn", side_effect=turn), \
-                         mock.patch.object(AUTODISPATCH, "sh", side_effect=local_ssh), \
+                    with mock.patch.object(AUTODISPATCH, "sh", side_effect=local_ssh), \
                          mock.patch.object(AUTODISPATCH, "audit_switches"), \
-                         mock.patch.object(AUTODISPATCH, "paused_scopes", return_value=set()), \
+                         mock.patch.object(AUTODISPATCH, "pause_store_dir", return_value=str(control / "pauses")), \
                          mock.patch.object(AUTODISPATCH, "host_ok", return_value=True), \
                          mock.patch.object(AUTODISPATCH, "label_lane_failed"), \
                          mock.patch.object(AUTODISPATCH, "queue", return_value=[]), \
@@ -273,14 +354,31 @@ class LaneStuckTickTest(unittest.TestCase):
                             run_id = f"run-{index}"
                             spec = {"run_id": run_id, "task": "crash" if index >= 5 else "test", "started": time.time(),
                                     "budget_minutes": 0.002, "read_only": True}
-                            child = SimpleNamespace(alive=lambda: rpc.poll() is None, boundary=None)
-                            result = engine.lane_do_run(lane, spec, child, None, {})
+                            clock = [time.time()]
+                            child = Transport()
+                            with mock.patch.object(engine, "NOW", side_effect=lambda: clock[0]):
+                                result = engine.lane_do_run(lane, spec, child, None, {})
                             self.assertEqual(result["status"], "budget_exceeded" if index < 4 else
                                              "done" if index == 4 else "failed")
                             status = json.loads((home / "runs" / run_id / "status.json").read_text())
                             self.assertTrue(status["execution_started"])
+                            events = [json.loads(line) for line in
+                                      (home / "runs" / run_id / "events.1.pi.jsonl").read_text().splitlines()]
+                            self.assertEqual(events[0], {"type": "lane_start", "lane": "M19"})
+                            if index < 4:
+                                self.assertEqual([event["type"] for event in events], ["lane_start", "error"])
+                                self.assertEqual(events[1]["source"], "supervisor")
+                                self.assertTrue(child.close_attempted)
+                                self.assertIn("abort", child.sent)
                             state["M19"] = {"issue": 1825 + index, "run": run_id, "host": "local"}
                             AUTODISPATCH.tick({"M19": lane}, state, 0)
+                            self.assertIsNone(other_lane.poll(), "cleanup must leave other lanes alone")
+                            if index == 3:
+                                rpc.wait(timeout=5)
+                                sandbox_stat = Path(f"/proc/{(root / 'sandbox-pid').read_text()}/stat")
+                                if sandbox_stat.exists():
+                                    self.assertEqual(sandbox_stat.read_text().split(") ", 1)[1][0], "Z",
+                                                     "cleaned must mean the stopped sandbox also exited")
                             audit = home / "lane-stuck-audit.jsonl"
                             self.assertEqual(len(audit.read_text().splitlines()) if audit.exists() else 0,
                                              1 if index >= 3 else 0)
@@ -298,7 +396,11 @@ class LaneStuckTickTest(unittest.TestCase):
                     process.stdout.close()
                 if (root / "sandbox-pid").exists():
                     try:
-                        os.kill(int((root / "sandbox-pid").read_text()), signal.SIGKILL)
+                        pid = int((root / "sandbox-pid").read_text())
+                        if Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0] != "Z":
+                            os.kill(pid, signal.SIGKILL)  # failure-only fixture cleanup
+                    except FileNotFoundError:
+                        pass
                     except ProcessLookupError:
                         pass
 

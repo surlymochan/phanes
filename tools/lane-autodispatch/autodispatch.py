@@ -667,8 +667,18 @@ def event_count(run):
   count=0
   for path in paths:
     try:
-      with open(path) as f: count += sum(1 for line in f if line.strip())
-    except OSError: return None
+      with open(path) as f:
+        for line in f:
+          if not line.strip(): continue
+          event=json.loads(line)
+          if not isinstance(event,dict): return None
+          # lane_start and the supervisor's interrupt timeout are local
+          # bookkeeping, not evidence that the executor produced any events.
+          if event.get("type")=="lane_start" and event.get("lane")==L: continue
+          if (event.get("type")=="error" and event.get("source")=="supervisor" and
+              event.get("error")=="executor did not stop within 30s after interrupt"): continue
+          count += 1
+    except (OSError,ValueError): return None
   return count
 def children(pid):
   found=[]; todo=[pid]
@@ -743,17 +753,28 @@ if any(a["start"]!=b["start"] or a["cmd"]!=b["cmd"] for a,b in zip(first,second)
 if second[0]["wchan"]!="do_wait" or second[0]["cmd"]!=first[0]["cmd"]:
   print(json.dumps({"cleaned":False,"reason":"rpc-state-changed"})); sys.exit(0)
 sent=[]
-for target in reversed([pid]+tree2):
-  try: os.kill(target,signal.SIGTERM); sent.append(target)
+for row in reversed(second):
+  target=row["pid"]
+  try:
+    os.kill(target,signal.SIGTERM); sent.append(target)
+    # A stopped process cannot handle TERM until resumed. Queue TERM first,
+    # then continue only the stopped members of this verified lane tree.
+    if row["state"] in ("T","t"): os.kill(target,signal.SIGCONT)
   except ProcessLookupError: pass
   except OSError: print(json.dumps({"cleaned":False,"reason":"term-failed","sent":sent})); sys.exit(0)
 if pid not in sent: print(json.dumps({"cleaned":False,"reason":"rpc-term-unconfirmed","sent":sent})); sys.exit(0)
+def exited(row):
+  try:
+    with open(f'{PROC_ROOT}/{row["pid"]}/stat') as f: raw=f.read()
+    rest=raw[raw.rfind(")")+2:].split()
+    return rest[0]=="Z" or rest[19]!=row["start"]
+  except FileNotFoundError: return not os.path.exists(f'{PROC_ROOT}/{row["pid"]}')
+  except (OSError,IndexError): return False
 deadline=time.time()+2
 while time.time()<deadline:
-  state=proc(pid)
-  if state is None or state["state"]=="Z": break
+  if all(exited(row) for row in second): break
   time.sleep(0.1)
-else: print(json.dumps({"cleaned":False,"reason":"rpc-term-not-confirmed","sent":sent})); sys.exit(0)
+else: print(json.dumps({"cleaned":False,"reason":"tree-term-not-confirmed","sent":sent})); sys.exit(0)
 audit={"at":time.strftime("%F %T"),"lane":L,"runs":ids,"pids":sent,"action":"SIGTERM","confirmed":True}
 try:
   with open(os.path.join(O,"lane-stuck-audit.jsonl"),"a") as f: f.write(json.dumps(audit)+"\n")
@@ -1449,6 +1470,9 @@ def tick(lanes, state, last_warn):
             if result.get("done"): state.pop(L); save_state(state)
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
         elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
+    # Terminal handling can create PAUSE markers. Apply them before considering
+    # any newly idle lane for dispatch in this same tick.
+    scopes = paused_scopes()
     update_busy_stale(lanes, state, res)
     try: q = queue()
     except Exception as e:
