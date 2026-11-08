@@ -10171,6 +10171,8 @@ def cmd_batch(args, policy):
                    "scope": getattr(args, "scope", "repo"), "state": "finished",
                    "started": NOW(), "cards": [], "finished": NOW()}
         batch_save(summary)
+        if args.detach:
+            print(json.dumps({"id": bid}))
         return
     hosts = fleet_config()
     names = args.hosts.split(",")

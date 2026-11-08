@@ -126,7 +126,9 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
 
     def test_empty_cards_with_default_base_and_detach_do_not_spawn_runner(self):
         policy = xs.load_policy()
-        with mock.patch.object(xs, "fleet_config") as fleet_config, \
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), \
+                mock.patch.object(xs, "fleet_config") as fleet_config, \
                 mock.patch.object(xs, "execute_batch") as execute, \
                 mock.patch.object(xs.subprocess, "Popen") as popen:
             xs.cmd_batch(self.args(detach=True), policy)
@@ -136,6 +138,7 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         paths = list((self.data / "batches").glob("*/summary.json"))
         self.assertEqual(len(paths), 1)
         summary = json.loads(paths[0].read_text())
+        self.assertEqual(json.loads(output.getvalue()), {"id": summary["id"]})
         self.assertEqual(summary["state"], "finished")
         self.assertIsNone(summary["base"])
         self.assertEqual(summary["cards"], [])
@@ -145,6 +148,28 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
                          f"# Batch {summary['id']}\n\nState: finished\n\n"
                          "| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |\n"
                          "| --- | --- | --- | --- | --- | --- | --- | --- |\n")
+
+    def test_empty_detached_cli_returns_id_for_status(self):
+        data = self.root / "empty-data"
+        env = {**os.environ, "OPENSWARM_HOME": str(data)}
+        command = [sys.executable, str(Path(_load.ROOT) / "bin" / "swrm"), "batch"]
+        proc = subprocess.run(command + ["--repo", "project", "--cards", str(self.cards),
+                                        "--hosts", "worker", "--base", "main", "--detach"],
+                              capture_output=True, text=True, timeout=10, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        reply = json.loads(proc.stdout)
+        summary_path = data / "batches" / reply["id"] / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        self.assertEqual(reply, {"id": summary["id"]})
+        self.assertEqual(summary["state"], "finished")
+        self.assertEqual(summary["base"], "main")
+        self.assertEqual(summary["cards"], [])
+        self.assertNotIn("runner_pid", summary)
+        self.assertFalse(summary_path.with_name("spec.json").exists())
+        status = subprocess.run(command + ["status", reply["id"]],
+                                capture_output=True, text=True, timeout=10, env=env)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout), summary)
 
     def test_invalid_cards_paths_fail_before_saving_or_starting_batch(self):
         regular_file = self.root / "card.md"
