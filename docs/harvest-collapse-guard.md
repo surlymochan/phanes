@@ -16,9 +16,9 @@ fix/rebase 轮没有在 PR 当前 head 上续改、只产出增量补丁时，AD
 3. **目标 PR**：只有 fix/rebase 卡才比对：正文里的 `重基PR：#1845`、`fix/rebase PR #1845`、
    `rebase PR #1845`、`fix PR #1845`。普通实现卡即使提到别的 PR 也不比对——否则普通收割会被拿
    别的 PR 的 head 去比而误拒。没有目标 PR 的卡照常收割。
-4. **祖先**：新 head 必须包含 fix 前 PR head（`git merge-base --is-ancestor`）。比对的是 lane
-   产出的分支 `refs/fleet/<lane>`：越界产物过滤（#1835）会重建提交对象，被推送的 head 因此不再
-   是原来的对象，但内容仍是那一轮的内容。
+4. **祖先**：实际推送的过滤后 head 必须包含 fix 前 PR head（`git merge-base --is-ancestor`）。
+   越界产物过滤（#1835）可能重建提交；即使过滤前 lane 引用包含旧 head，过滤后丢失祖先关系
+   仍拒绝推送，不能用内容相同代替祖先检查。
 5. **体量**：相对 base（PR 的 `baseRefOid`）比较 fix 前后的变更文件数与增删行数。任一项下降到阈值
    以下就拒绝（默认 50%，`AD_HARVEST_COLLAPSE_THRESHOLD` 可配；两个维度是“或”的关系）。
 6. **git 失败**：任何 git 命令失败都拒绝（fail closed）。
@@ -32,7 +32,7 @@ fix/rebase 轮没有在 PR 当前 head 上续改、只产出增量补丁时，AD
 | Finding | 修复 | 回归覆盖 |
 | --- | --- | --- |
 | B1：正文读取/解析失败被当作空正文，目标 PR 丢失后仍放行 | `harvest_card_body()` 把读失败、JSON 解析失败和“没有正文”分开，三种情况都在 push 前拒绝并记因 | `test_unreadable_card_body_is_refused`、`test_unparsable_card_body_is_refused`、`test_unreadable_card_with_a_missing_harvest_branch_is_refused` |
-| B2：事故回放使用合成提交，不能证明真实 SHA 的祖先与体量判定 | `test_replay_of_the_restore_manifest_refuses_every_incident` 从恢复清单取真实 before/after SHA 并实际调用 `finish`；清单的 SHA 只有在对象可达时才有意义，回放因此先从 AD 的仓库（`AD_LOCAL`、`~/work/phanes-repo`）把真实分支取进临时仓库 | 清单与真实对象都在时逐 PR 断言拒绝、判定是“塌缩/不包含”而不是“git 失败”；当前沙箱没有清单时该测试 skip，宿主机需设置 `AD_HARVEST_COLLAPSE_MANIFEST=<清单路径>` 重跑 |
+| B2：事故回放使用合成提交，不能证明真实 SHA 的祖先与体量判定 | `test_replay_of_the_restore_manifest_refuses_every_incident` 从恢复清单取真实 before/after/base SHA 并实际调用 `finish`；按 SHA 从 AD 的仓库（`AD_LOCAL`、`~/work/phanes-repo`）取进临时仓库，dispatch base 和 PR base 都使用该例的真实 base | 必须完整包含六个指定 PR（含 #1824），缺项、重复、缺 base 或对象不可达均失败；逐 PR 输出完整 SHA、base、体量和拒绝原因，判定必须是“塌缩/不包含”而不是“git 失败”；仅未提供清单时 skip |
 | 交付说明未逐条映射 B1/B2 | 本表 | 本表 + 下面的“测试对应” |
 
 ## 测试对应
@@ -57,3 +57,22 @@ fix/rebase 轮没有在 PR 当前 head 上续改、只产出增量补丁时，AD
 `tools/lane-autodispatch/autodispatch.py`，因此测试迁到同目录的 `test_harvest_collapse_guard.py`；
 不在已废弃的 `openswarm/` 下新增文件。部署运行副本 `~/phanes-ctl/bin/autodispatch.py` 需由部署流程
 同步仓内实现后才生效。
+
+## 本轮审查 BLOCKER 修复映射（基于 05ed7622e）
+
+- B1（过滤前祖先检查）：`harvest_collapse_guard` 删除过滤前引用参数，检查实际推送 SHA。
+  `test_filtered_head_must_contain_the_old_head` 经过真实过滤器重建历史，验证拒绝、无 push、
+  远端 PR 分支不变、`lane-failed` 和 brain 证据。
+- B2（错误 base / 部分回放通过）：回放同时设置 dispatch base 和 PR metadata base，严格要求
+  全部六例可达并逐例打印拒绝结果。`test_manifest_replay_uses_recorded_base_and_reports_all_six`
+  用本地测试对象验证 base 传递和六行输出；`test_manifest_replay_requires_every_incident` 验证
+  缺 #1824 必须失败。这两个用例只验证回放驱动，不作为真实事故证据。
+
+本沙箱没有恢复清单，未生成六例真实拒绝输出。宿主机需提供清单和对象库，保存下面命令的
+逐例输出用于 PR 交付（此任务不写 GitHub）：
+
+```sh
+AD_HARVEST_COLLAPSE_MANIFEST=<清单路径> AD_LOCAL=<真实对象仓库> python3 -m pytest -q -s tools/lane-autodispatch/test_harvest_collapse_guard.py
+```
+
+显式指定的清单不存在时测试失败；未指定且默认位置无清单时仅真实事故回放测试 skip。

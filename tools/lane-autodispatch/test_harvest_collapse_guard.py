@@ -66,7 +66,7 @@ MANIFEST_NAME = "restore-collapsed-heads-20261103.json"
 # The repositories that may hold the real commits of the collapsed PRs: the AD harvests
 # from them, so the box has them.  The real before/after heads only prove something when
 # the objects are there.
-AD_LOCAL = ad.LOCAL
+AD_LOCAL = os.environ.get("AD_LOCAL", ad.LOCAL)
 REAL_REPOSITORIES = (AD_LOCAL, os.path.expanduser("~/work/phanes-repo"),
                       os.path.expanduser("~/phanes-repo"))
 
@@ -76,6 +76,9 @@ def manifest_paths():
     candidates = [os.environ.get("AD_HARVEST_COLLAPSE_MANIFEST", ""),
                   str(Path.home() / "gocc" / "autodispatch" / "bak" / MANIFEST_NAME),
                   str(Path.home() / "phanes-ctl" / "autodispatch" / "bak" / MANIFEST_NAME)]
+    explicit = os.environ.get("AD_HARVEST_COLLAPSE_MANIFEST")
+    if explicit:
+        return [explicit]  # an explicitly requested but missing manifest must fail
     return [path for path in candidates if path and os.path.isfile(path)]
 
 
@@ -204,7 +207,7 @@ class HarvestFixture:
     # --- the harvest ----------------------------------------------------------------
 
     def harvest(self, old, new, *, card=CARD, body_error=None, pr_payload=None,
-                harvest_ref=None, lane_ref=True):
+                harvest_ref=None, lane_ref=True, real_filter=False):
         """Run the harvest of a lane result and return (result, gh calls, sh calls)."""
         self.old_head = old
         self.new_head = new
@@ -243,7 +246,8 @@ class HarvestFixture:
         info = {"branch": "branch", "commit": "commit", "repo": "repo"}
         with mock.patch.object(ad, "LOCAL", str(self.repo)), \
              mock.patch.object(ad, "harvest_fetch", return_value=(True, "", 0)), \
-             mock.patch.object(ad, "filter_harvest", return_value=(harvest_ref or new, [], False)), \
+             mock.patch.object(ad, "filter_harvest", return_value=(harvest_ref or new, [], False),
+                               side_effect=ad.filter_harvest if real_filter else None), \
              mock.patch.object(ad, "pr_validation_mode", return_value="warn"), \
              mock.patch.object(ad, "gh", side_effect=fake_gh), \
              mock.patch.object(ad, "sh", side_effect=spy_sh):
@@ -284,13 +288,14 @@ class HarvestFixture:
 
         The real before/after heads of the collapsed PRs only prove something when the
         objects are there: the replay then runs the ancestry and the size check on the
-        real history.  Without them the guard fails closed, which the test accepts."""
+        real history. Missing objects must fail the replay, not count as a rejection."""
         for source in REAL_REPOSITORIES:
-            if not os.path.isdir(os.path.join(source, ".git")): continue
+            if not os.path.exists(os.path.join(source, ".git")): continue
             fetch = subprocess.run(["git", "-C", str(self.repo), "fetch", "-q", source,
-                                    "+refs/heads/*:refs/remotes/real/*"], capture_output=True, text=True)
+                                    entry["base"], entry["before"], entry["after"]],
+                                   capture_output=True, text=True)
             if fetch.returncode: continue
-            if all(self.has_object(sha) for sha in (entry["before"], entry["after"])): return True
+            if all(self.has_object(entry[key]) for key in ("base", "before", "after")): return True
         return False
 
     def has_object(self, sha):
@@ -350,6 +355,21 @@ class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
         old, new = self.scenario_grown()
         result, gh_calls, sh_calls = self.harvest(old, new)
         self.assert_allowed(result, gh_calls, sh_calls)
+
+    def test_filtered_head_must_contain_the_old_head(self):
+        self.build_repo()
+        self.write(".lane-review/PR-1845.md", "review artifact\n")
+        self.write("old", self.lines(10))
+        old = self.commit("old with review artifact")
+        self.write("new", self.lines(10))
+        new = self.commit("fix")
+        result, gh_calls, sh_calls = self.harvest(old, new, real_filter=True)
+        self.assert_refused(result, gh_calls, sh_calls, heads=False)
+        self.assertIn("does not contain", result["error"])
+        check = next(cmd for cmd in sh_calls if "--is-ancestor" in cmd)
+        self.assertNotEqual(check[-1], new)
+        self.assertNotEqual(check[-1], "refs/fleet/lane")
+        self.assertIn(check[-1][:12], self.brain())
 
     def test_rewrite_marker_waives_the_guard(self):
         # a card that declares a full rewrite may replace the history and shrink the diff
@@ -446,6 +466,34 @@ class HarvestCollapseReplayTest(HarvestFixture, unittest.TestCase):
                 # the size rule itself must have fired, not just any refusal
                 self.assertIn("collapsed", self.brain(), self.brain())
 
+    def test_manifest_replay_uses_recorded_base_and_reports_all_six(self):
+        # Exercise the replay driver with locally available objects. These fixtures
+        # verify its wiring; they are not evidence for the six real incident SHAs.
+        self.build_repo()
+        old, new = self.scenario_lines_collapse()
+        entries = [dict(pr=str(item["pr"]), base=self.base, before=old, after=new)
+                   for item in RECORDED_INCIDENTS]
+        with mock.patch(__name__ + ".manifest_paths", return_value=["fixture"]), \
+             mock.patch(__name__ + ".manifest_entries", return_value=entries), \
+             mock.patch(__name__ + ".REAL_REPOSITORIES", (str(self.repo),)), \
+             mock.patch("builtins.print") as output:
+            self.test_replay_of_the_restore_manifest_refuses_every_incident()
+        reports = [call.args[0] for call in output.call_args_list
+                   if call.args and str(call.args[0]).startswith("PR #")]
+        self.assertEqual(len(reports), 6)
+        for entry, report in zip(entries, reports):
+            self.assertIn(f"PR #{entry['pr']} base={entry['base']}", report)
+            self.assertIn("sizes=(1, 100)->(1, 4) REJECT:", report)
+
+    def test_manifest_replay_requires_every_incident(self):
+        entries = [dict(pr=str(item["pr"]), base="a" * 40,
+                        before="b" * 40, after="c" * 40)
+                   for item in RECORDED_INCIDENTS[:-1]]
+        with mock.patch(__name__ + ".manifest_paths", return_value=["fixture"]), \
+             mock.patch(__name__ + ".manifest_entries", return_value=entries):
+            with self.assertRaisesRegex(AssertionError, "all six"):
+                self.test_replay_of_the_restore_manifest_refuses_every_incident()
+
     def test_replay_of_the_restore_manifest_refuses_every_incident(self):
         """The real before/after heads of the six collapsed PRs (the box keeps the manifest)."""
         paths = manifest_paths()
@@ -455,22 +503,35 @@ class HarvestCollapseReplayTest(HarvestFixture, unittest.TestCase):
                           "AD_HARVEST_COLLAPSE_MANIFEST=<path> to replay the six real SHA pairs")
         entries = manifest_entries(paths[0])
         self.assertTrue(entries, f"the manifest {paths[0]} carries no before/after heads")
-        replayed = 0
-        for entry in entries:
+        required = {str(incident["pr"]) for incident in RECORDED_INCIDENTS}
+        selected = [entry for entry in entries if entry["pr"] in required]
+        self.assertEqual({entry["pr"] for entry in selected}, required,
+                         "the manifest must include all six incident PRs, including #1824")
+        self.assertEqual(len(selected), len(required), "duplicate incident PRs in manifest")
+        for entry in selected:
             with self.subTest(pr=entry["pr"]):
+                for key in ("base", "before", "after"):
+                    self.assertRegex(entry[key] or "", r"^[0-9a-fA-F]{40}$",
+                                     f"PR #{entry['pr']} requires its real {key} SHA")
                 self.build_repo()
-                if not self.import_real_objects(entry):
-                    continue  # the real commits are not reachable: counted below
-                replayed += 1
-                result, gh_calls, sh_calls = self.harvest(entry["before"], entry["after"])
+                self.assertTrue(self.import_real_objects(entry),
+                                f"PR #{entry['pr']}: base/before/after objects are not reachable")
+                # Both dispatch/filter base and PR metadata must use the recorded base.
+                self.base = entry["base"]
+                card = f"重基PR：#{entry['pr']} {BRANCH}"
+                result, gh_calls, sh_calls = self.harvest(entry["before"], entry["after"],
+                                                         card=card)
                 self.assert_refused(result, gh_calls, sh_calls, heads=False)
-                # the real history is there: the verdict is a real one (the harvest
-                # replaced the PR), not the fail closed answer for an unknown object
-                self.assertTrue(any(word in self.brain()
-                                    for word in ("does not contain", "collapsed")), self.brain())
-        if not replayed:
-            self.skipTest("the real commits of the collapsed PRs are not reachable from this workspace; "
-                          "run the replay on the box, where the manifest and the AD's repository are")
+                detail = result.get("error") or ""
+                self.assertTrue(any(word in detail for word in ("does not contain", "collapsed")),
+                                detail)
+                self.assertIn(f"PR #{entry['pr']}", detail)
+                with mock.patch.object(ad, "LOCAL", str(self.repo)):
+                    before_size = ad.diff_size(entry["base"], entry["before"])
+                    after_size = ad.diff_size(entry["base"], entry["after"])
+                self.assertIn(f"{before_size}->{after_size}", detail)
+                print(f"PR #{entry['pr']} base={entry['base']} before={entry['before']} "
+                      f"after={entry['after']} sizes={before_size}->{after_size} REJECT: {detail}")
 
 
 if __name__ == "__main__":

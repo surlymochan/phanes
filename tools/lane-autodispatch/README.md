@@ -124,14 +124,16 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head/base；正文读不到、解析不了或
 没有正文时拒绝收割（读不到不等于空正文：没有正文就没有目标 PR，无从判断）。只有 fix/rebase 卡
 （`重基PR：#1845`、`fix/rebase PR #1845` 等）才比对，普通实现卡即使提到别的 PR 也不比对。
-新 head 必须包含 fix 前 head（比对 lane 产出的分支 `refs/fleet/<lane>`：越界产物过滤会重建提交
-对象），且相对 base 的变更文件数和增删行数分别不得下降超过
+实际推送的过滤后 head 必须包含 fix 前 head（越界产物过滤重建提交后仍须通过祖先检查），
+且相对 base 的变更文件数和增删行数分别不得下降超过
 `AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败，
 均不推送、不改 PR、标记 `lane-failed`，并把 PR、前后 SHA、体量和原因写入 brain 日志和
 `$D/runs/<run>.log`（失败台账线索）。卡正文明确写 `整体重写：是` 可豁免。
 
 对应测试：`python3 -m unittest tools/lane-autodispatch/test_harvest_collapse_guard.py`
 （`pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py` 等价）。
+真实事故回放需设置 `AD_HARVEST_COLLAPSE_MANIFEST=<清单路径>` 和 `AD_LOCAL=<对象仓库>`，
+加 `-s` 输出六个 PR 的完整 before/after/base SHA、体量与拒绝原因；提供清单后缺例或对象不可达均失败。
 
 ## 开关来源审计（Refs #1827）
 

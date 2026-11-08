@@ -1168,13 +1168,11 @@ def harvest_card_body(issue):
         return "", f"the card of #{issue} carries no body"
     return body, ""
 
-def harvest_collapse_guard(issue, ref, produced=None):
+def harvest_collapse_guard(issue, ref):
     """Return (allowed, detail) for the harvest of a fix/rebase round (Refs #1833).
 
-    `ref` is the head that would be pushed, `produced` the branch the lane produced
-    (the artifact filter may rebuild the commits, so the two are not always the same
-    object).  Every doubt refuses the push."""
-    produced = produced or ref
+    `ref` is the head that would actually be pushed after artifact filtering.
+    Rebuilt commits must also contain the old PR head. Every doubt refuses the push."""
     body, reason = harvest_card_body(issue)
     if reason: return False, reason
     if HARVEST_REWRITE_MARKER.search(body):
@@ -1203,14 +1201,13 @@ def harvest_collapse_guard(issue, ref, produced=None):
         return stdout.strip()
     try:
         new_sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
-        produced_sha = git("rev-parse", "--verify", f"{produced}^{{commit}}")
         before_size = diff_size(base, old)
         after_size = diff_size(base, ref)
     except (RuntimeError, OSError, subprocess.SubprocessError) as error:
         return False, f"PR #{pr} cannot be checked: {error}"
-    rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, produced])
+    rc, _, err = sh(["git", "-C", LOCAL, "merge-base", "--is-ancestor", old, new_sha])
     if rc == 1:
-        return False, (f"PR #{pr}: the new head {new_sha[:12]} (harvest {produced_sha[:12]}) does not contain "
+        return False, (f"PR #{pr}: the new head {new_sha[:12]} does not contain "
                        f"the head the PR had {old[:12]} (sizes {before_size}->{after_size})")
     if rc:
         return False, f"PR #{pr}: the ancestry check failed, refusing the push: {err.strip()[-160:]}"
@@ -1327,7 +1324,7 @@ def finish(lane, cfg, st, info, state):
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
-        allowed, guard_detail = harvest_collapse_guard(n, head, f"refs/fleet/{lane}")
+        allowed, guard_detail = harvest_collapse_guard(n, head)
         if not allowed:
             log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
             harvest_guard_record(run, guard_detail)
