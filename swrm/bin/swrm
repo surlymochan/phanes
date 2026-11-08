@@ -10884,6 +10884,9 @@ def run_digest(rid):
                         cmds += 1
                     if kind == "msg":
                         last = text
+        for kind, text in messages.flush():
+            if kind == "msg":
+                last = text
     end = st.get("finished") or now
     out = {"id": rid, "state": state, "status": st.get("status") or r.get("status"), "title": st.get("title"),
            "scope": st.get("scope", r.get("scope", "repo")),
