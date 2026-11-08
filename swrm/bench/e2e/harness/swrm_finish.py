@@ -70,14 +70,13 @@ def _is_result_receipt(obj: object) -> bool:
         return False
     if "status" in obj and not isinstance(obj["status"], str):
         return False
-    # Run receipts carry at least one field that does not appear on generic
-    # log/telemetry objects. run_dir and attempts also cover early failures
-    # where workspace preparation did not complete.
+    # Require run metadata: a generic result field also appears on telemetry.
+    # run_dir and attempts cover early failures where workspace preparation
+    # did not complete.
     return (
         isinstance(obj.get("run_dir"), str)
         or isinstance(obj.get("workspace"), dict)
         or isinstance(obj.get("attempts"), list)
-        or "result" in obj
     )
 
 

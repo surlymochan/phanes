@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -40,4 +42,18 @@ def test_receipt_keeps_support_for_multiple_stdout_objects():
 def test_receipt_requires_run_result_shape():
     telemetry = {"id": "metrics-456", "status": "usage", "event": "usage"}
 
+    assert extract_result_object(json.dumps(telemetry)) is None
+
+
+@pytest.mark.parametrize("result", ["ok", {"tokens": 7}, None])
+def test_receipt_ignores_trailing_log_with_result_field(result):
+    receipt = {
+        "id": "run-123",
+        "status": "done",
+        "workspace": {"mode": "worktree", "path": "/tmp/run-123"},
+    }
+    telemetry = {"id": "metrics-456", "event": "usage", "result": result}
+    stdout = json.dumps(receipt) + "\n" + json.dumps(telemetry)
+
+    assert extract_result_object(stdout) == receipt
     assert extract_result_object(json.dumps(telemetry)) is None
