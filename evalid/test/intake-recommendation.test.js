@@ -1,9 +1,23 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDemandProfile } from '../src/core/intake-recommendation.js';
+import { buildDemandProfile, buildWorkflowRecommendation } from '../src/core/intake-recommendation.js';
 
 describe('demand size validation', () => {
+  test('uses defaults and repository fallbacks for undefined optional CLI inputs', () => {
+    const optionalInputs = { repo_count: undefined, repositories: undefined, estimated_file_count: undefined };
+    for (const [input, repoCount] of [
+      [optionalInputs, 1],
+      [{ ...optionalInputs, repo_count: '2' }, 2],
+      [{ ...optionalInputs, repositories: ['one', 'two'] }, 2],
+    ]) {
+      const { profile } = buildWorkflowRecommendation(input);
+      assert.equal(profile.repo_count, repoCount);
+      assert.equal(profile.estimated_file_count, 1);
+    }
+    assert.equal(buildDemandProfile({ estimated_file_count: undefined, file_count: 4 }).estimated_file_count, 4);
+  });
+
   test('rejects repo counts that are not positive integers with a stable error', () => {
     for (const repo_count of [-1, 1.5, 'NaN']) {
       assert.throws(

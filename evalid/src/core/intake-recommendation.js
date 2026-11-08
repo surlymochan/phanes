@@ -90,11 +90,11 @@ function normalizeDemandType(type) {
 
 function normalizeRepoCount(input = {}) {
   let rawValue;
-  if (Object.hasOwn(input, 'repo_count')) {
+  if (input.repo_count !== undefined) {
     rawValue = input.repo_count;
   } else if (Array.isArray(input.repositories)) {
     rawValue = input.repositories.length;
-  } else if (Object.hasOwn(input, 'repositories')) {
+  } else if (input.repositories !== undefined) {
     rawValue = input.repositories;
   } else {
     return 1;
@@ -108,9 +108,9 @@ function normalizeRepoCount(input = {}) {
 }
 
 function normalizeEstimatedFileCount(input = {}) {
-  const rawValue = Object.hasOwn(input, 'estimated_file_count')
+  const rawValue = input.estimated_file_count !== undefined
     ? input.estimated_file_count
-    : Object.hasOwn(input, 'file_count')
+    : input.file_count !== undefined
       ? input.file_count
       : 1;
   const value = parseDemandSize(rawValue);
