@@ -196,6 +196,25 @@ class BrokerLogSummaryTests(unittest.TestCase):
                 self.assertEqual(report["pause_overlaps"]["requests"], 0)
                 self.assertEqual(report["pause_overlaps"]["failed"], 0)
 
+    def test_cli_json_tolerates_invalid_durations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "broker4-requests.jsonl"
+            log.write_text("\n".join([
+                slow_line("2026-11-01T23:40:00Z", 502, "M1", float("nan")),
+                slow_line("2026-11-01T23:41:00Z", 200, "M2", -5),
+                slow_line("2026-11-01T23:42:00Z", 200, "M3", 1e100),
+            ]) + "\n", encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = bls.main([str(log), "--json", "--slow", "60000"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["records"], 3)
+        self.assertEqual(data["bad_lines"], 0)
+        self.assertEqual([row["lane"] for row in data["slow"]], ["M1"])
+        self.assertIsNone(data["slow"][0]["ms"])
+        self.assertEqual(data["slow"][0]["start"], data["slow"][0]["end"])
+
     def test_pause_timezone_defaults_to_utc_plus_8(self):
         default = bls.parse_pause_lines([json.dumps(
             {"from": PAUSE_RECORD["from"], "to": PAUSE_RECORD["to"]})])[0]
