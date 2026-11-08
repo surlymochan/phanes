@@ -89,6 +89,9 @@ const usageCollector = () => {
         head += text;
         const trimmed = head.trimStart();
         if (!trimmed) return;  // only whitespace so far
+        // Network chunks may split the SSE field name (e.g. "ev" + "ent:").
+        // Keep the prefix until the format is known, then consume it once.
+        if (['event:', 'data:'].some(prefix => prefix.startsWith(trimmed))) return;
         if (trimmed.startsWith('event:') || trimmed.startsWith('data:')) {
           mode = 'sse';
           feedEvents(trimmed);

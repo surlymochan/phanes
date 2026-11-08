@@ -76,7 +76,15 @@ https.request = (_options, callback) => {
     upstream.headers = {'content-type': 'application/json'};
     upstream.complete = true;
     callback(upstream);
-    upstream.end(body);
+    const chunkSize = Number(process.env.FAKE_UPSTREAM_CHUNK_SIZE) || body.length;
+    let offset = 0;
+    const send = () => {
+      if (offset >= body.length) { upstream.end(); return; }
+      upstream.write(body.subarray(offset, offset + chunkSize));
+      offset += chunkSize;
+      setImmediate(send);
+    };
+    send();
   };
   return req;
 };
@@ -122,6 +130,40 @@ def hourly_tokens(payload):
 
 
 @unittest.skipUnless(shutil.which('node'), 'requires node')
+class PiBrokerUsageParserTests(unittest.TestCase):
+    def test_usage_parsing_is_independent_of_chunk_boundaries(self):
+        """Exercise the production collector without needing a Unix socket."""
+        data_stream = ''.join(line + '\n' for line in STREAMED_ANSWER.splitlines()
+                              if not line.startswith('event:'))
+        answers = [STREAMED_ANSWER, data_stream,
+                   ' \r\n' + STREAMED_ANSWER.replace('\n', '\r\n'),
+                   ' \n' + json.dumps(PROVIDER_ANSWER)]
+        script = '''
+const {readFileSync} = require('node:fs');
+const {runInNewContext} = require('node:vm');
+const assert = require('node:assert/strict');
+const source = readFileSync(process.argv[1], 'utf8');
+const collector = runInNewContext(source.slice(source.indexOf('const maxUsageBytes ='),
+  source.indexOf('// Per-request audit log')) + '\\nusageCollector;');
+for (const answer of JSON.parse(readFileSync(0, 'utf8'))) {
+  const body = Buffer.from(answer);
+  for (let size = 1; size <= 7; size++) {
+    const usage = collector();
+    for (let offset = 0; offset < body.length; offset += size)
+      usage.push(body.subarray(offset, offset + size));
+    usage.end();
+    assert.equal(usage.result().in, 120, `input tokens with chunk size ${size}`);
+    assert.equal(usage.result().out, 34, `output tokens with chunk size ${size}`);
+  }
+}
+'''
+        result = subprocess.run(['node', '-e', script, str(BROKER)],
+                                input=json.dumps(answers), capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+@unittest.skipUnless(shutil.which('node'), 'requires node')
 @unittest.skipIf(os.name == "nt",
                  "pi broker binds a '/'-rooted unix-domain socket by design; no Windows transport")
 class PiBrokerUsageTests(unittest.TestCase):
@@ -146,11 +188,12 @@ class PiBrokerUsageTests(unittest.TestCase):
         env.update(extra)
         return env
 
-    def _start_broker(self, answer, log=None):
+    def _start_broker(self, answer, log=None, chunk_size=0):
         """Start the broker with a stubbed provider and return (socket, log)."""
         log = log or (self.root / 'requests.jsonl')
-        path = self.root / 'broker.sock'
+        path = log.with_suffix('.sock')
         env = self._env(PI_BROKER_LOG=str(log),
+                        FAKE_UPSTREAM_CHUNK_SIZE=str(chunk_size),
                         FAKE_UPSTREAM_BODY=base64.b64encode(answer).decode('ascii'))
         proc = subprocess.Popen(['node', str(BROKER), str(path), str(self.module), 'allowed-model'],
                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -242,6 +285,28 @@ class PiBrokerUsageTests(unittest.TestCase):
                          'the input tokens of the provider must survive a long answer: %r' % row)
         self.assertEqual(outgoing, 34,
                          'the output tokens of the provider must survive a long answer: %r' % row)
+
+    def test_sse_usage_survives_network_chunk_boundaries(self):
+        """Partial event/data prefixes must not select the JSON parser."""
+        streams = {
+            'event': STREAMED_ANSWER,
+            'data': ''.join(line + '\n' for line in STREAMED_ANSWER.splitlines()
+                            if not line.startswith('event:')),
+        }
+        for name, stream in streams.items():
+            for size in range(1, 7):
+                with self.subTest(prefix=name, chunk_size=size):
+                    answer = stream.encode('utf-8')
+                    path, log = self._start_broker(
+                        answer, self.root / ('%s-%s.jsonl' % (name, size)), chunk_size=size)
+                    self.assertEqual(self._ask(path), answer)
+                    self.assertEqual(token_counters(self._row(log)), (120, 34))
+
+    def test_json_usage_survives_network_chunk_boundaries(self):
+        answer = json.dumps(PROVIDER_ANSWER).encode('utf-8')
+        path, log = self._start_broker(answer, chunk_size=1)
+        self.assertEqual(self._ask(path), answer)
+        self.assertEqual(token_counters(self._row(log)), (120, 34))
 
     def test_the_request_of_the_broker_reaches_the_burn_reading(self):
         """The real request log of the broker is what the burn reading measures.
