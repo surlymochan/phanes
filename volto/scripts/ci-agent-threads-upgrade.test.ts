@@ -1,6 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 
 const script = readFileSync(new URL("./agent-threads-upgrade-e2e.ts", import.meta.url), "utf8");
@@ -14,6 +15,13 @@ describe("agent thread upgrade host E2E", () => {
     expect(script).toMatch(/(?:session|task).{0,80}(?:retained|preserv|assert|equal)/i);
   });
 
+  test("launches the application entry instead of a database-only host", () => {
+    expect(script).toContain("_electron.launch(");
+    expect(script).toContain("--user-data-dir=");
+    expect(script).toContain("volto:renderer-loaded");
+    expect(script).not.toContain("new DatabaseCore(");
+  });
+
   test("checks migration state, retained data, and SQLite integrity after restart", () => {
     expect(script).toMatch(/schema_migrations/);
     expect(script).toMatch(/foreign_key_check/);
@@ -22,19 +30,21 @@ describe("agent thread upgrade host E2E", () => {
   });
 
   test("CI runs the focused upgrade E2E and uploads its report", () => {
-    expect(workflow).toContain("bun test scripts/agent-threads-upgrade-e2e.ts");
+    expect(workflow).toContain("bun test ./scripts/agent-threads-upgrade-e2e.ts ./scripts/ci-agent-threads-upgrade.test.ts");
+    expect(workflow).toContain("xvfb-run -a bun test ./scripts/agent-threads-upgrade-e2e.ts");
     expect(workflow).toContain("agent-threads-upgrade-e2e/report.json");
     expect(workflow).toContain("actions/upload-artifact");
+    expect(workflow).toContain("--exclude scripts/ci-agent-threads-upgrade.test.ts");
   });
 
-  test("runs the real host upgrade and restart against nonempty upstream data", () => {
-    const output = execFileSync(
-      "bun",
-      [resolve(import.meta.dirname, "agent-threads-upgrade-e2e.ts"), "--run-e2e"],
-      { cwd: resolve(import.meta.dirname, ".."), encoding: "utf8" },
+  test("runs the real host upgrade and restart against nonempty upstream data", async () => {
+    const { stdout: output } = await promisify(execFile)(
+      process.execPath,
+      ["test", "./scripts/agent-threads-upgrade-e2e.ts"],
+      { cwd: resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 240_000 },
     );
     expect(output).toContain('"passed": true');
     expect(output).toContain('"hostRestarted": true');
     expect(output).toContain('"retainedSessions": 1');
-  }, 30_000);
+  }, 240_000);
 });

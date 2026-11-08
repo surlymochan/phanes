@@ -3,25 +3,65 @@
 // (the app must be closed) and copied; only the copy changes. On the copy, a forced failure inside 48 must
 // roll back to the task table before the real host starts. Checks: each task with a conversation is a side
 // thread with the same values, and a task with
-// none is reported; every other table holds the same rows as before 48; every mailbox message that names
+// none is reported; every other table retains its upstream rows; every mailbox message that names
 // a task finds its thread; the integrity and foreign-key checks pass.
-//   bun test scripts/agent-threads-upgrade-e2e.ts [<openbot.db>]
+//   bun test ./scripts/agent-threads-upgrade-e2e.ts
+//   bun scripts/agent-threads-upgrade-e2e.ts --run-e2e --source=<openbot.db>
 // Writes .volto-build/agent-threads-upgrade-e2e/report.json with counts only, no message text or titles.
-import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { DatabaseCore } from "../src/backend/database/database-core";
-import { runCauseEffect } from "../src/backend/effect-boundary";
+import { promisify } from "node:util";
+import { type ElectronApplication, _electron } from "playwright-core";
 import { migrateVoltoDatabase } from "../src/backend/volto-database-schema";
+import { electronSafeStorageLaunchArguments, withoutElectronRuntimeFlags } from "./electron-spawn-env";
 
 const OUT = resolve(import.meta.dirname, "../.volto-build/agent-threads-upgrade-e2e");
+const ROOT = resolve(import.meta.dirname, "..");
 const THREAD_VERSION = 48;
+const E2E_TIMEOUT_MS = 240_000;
+let build: Promise<unknown> | undefined;
+
+/** Launch the real application entry, including createApplicationServices and AgentService.initialize. */
+async function startHost(profile: string): Promise<ElectronApplication> {
+  // The host acceptance command installs dependencies only. Build once if this is a fresh checkout.
+  if (!existsSync(join(ROOT, "out/main/index.js"))) {
+    build ??= promisify(execFile)(process.execPath, ["run", "build"], { cwd: ROOT, timeout: 180_000 });
+    await build;
+  }
+  const host = await _electron.launch({
+    executablePath: createRequire(import.meta.url)("electron"),
+    args: [...electronSafeStorageLaunchArguments(), ROOT, `--user-data-dir=${profile}`],
+    cwd: ROOT,
+    env: Object.fromEntries(
+      Object.entries(withoutElectronRuntimeFlags(process.env)).flatMap(([name, value]) =>
+        value === undefined ? [] : [[name, value]],
+      ),
+    ),
+    timeout: 30_000,
+  });
+  try {
+    assert.equal(await host.evaluate(({ app }) => app.getPath("userData")), profile);
+    const page = await host.firstWindow();
+    // This mark follows service initialization, IPC registration, and loading the real renderer.
+    await page.waitForFunction(() => Boolean(window.volto), undefined, { timeout: 30_000 });
+    const deadline = Date.now() + 30_000;
+    while (!(await host.evaluate(() => performance.getEntriesByName("volto:renderer-loaded").length > 0))) {
+      assert.ok(Date.now() < deadline, "the real host did not finish application startup");
+      await new Promise((done) => setTimeout(done, 100));
+    }
+    return host;
+  } catch (error) {
+    await host.close();
+    throw error;
+  }
+}
 const TASK_COLUMNS =
   "task_id, agent_id, thread_id, origin, title, outcome, error, created_at, updated_at, closed_at, last_event_sequence";
 
@@ -39,6 +79,8 @@ interface SourceReport {
   taskMessagesWithoutThread?: number;
   rolledBack?: boolean;
   hostStarted?: boolean;
+  hostPid?: number;
+  restartedHostPid?: number;
   hostRestarted?: boolean;
   retainedSessions?: number;
 }
@@ -99,6 +141,8 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
   }
 
   const db = new DatabaseSync(copy);
+  let application: ElectronApplication | undefined;
+  let connection: DatabaseSync | undefined;
   try {
     report.sourceVersion = version(db);
     assert.ok(report.sourceVersion < THREAD_VERSION, `the source is at version ${report.sourceVersion}, not a release`);
@@ -106,6 +150,12 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     assert.equal(version(db), THREAD_VERSION - 1);
 
     const before = tableHashes(db);
+    const retainedRows = new Map(
+      tableNames(db).filter((name) => name !== "projection_agent_tasks").map((name) => [
+        name,
+        db.prepare(`SELECT * FROM "${name}"`).all(),
+      ]),
+    );
     const tasks = db.prepare(`SELECT ${TASK_COLUMNS} FROM projection_agent_tasks ORDER BY task_id`).all();
     assert.ok(tasks.length > 0, "the upstream database has no task data to preserve");
     const threadIds = new Set(
@@ -120,7 +170,7 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     report.tables = before.size;
     report.rows = [...before.values()].reduce((sum, table) => sum + table.rows, 0);
 
-    // A failure inside 47 leaves the database as it was before 47.
+    // A failure inside 48 leaves the database as it was before 48.
     migrateUpTo(db, THREAD_VERSION - 1);
     assert.equal(version(db), THREAD_VERSION - 1);
     assert.deepEqual(tableHashes(db), before, "a failed migration 48 changed a table");
@@ -128,28 +178,48 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
 
     db.close();
 
-    // This is the same database startup path used by the desktop host. It performs the upgrade
-    // while opening the copied profile, then the second initialize models an app restart.
-    const host = new DatabaseCore({ userDataPath: profile });
-    await runCauseEffect(host.initialize());
+    application = await startHost(profile);
+    // Observe only: migrations and startup must run in the application process.
+    connection = new DatabaseSync(copy, { readOnly: true });
     report.hostStarted = true;
-    const latestVersion = version(host.connection);
+    report.hostPid = application.process().pid;
+    assert.notEqual(report.hostPid, process.pid, "the host must run in its own application process");
+    const latestVersion = version(connection);
     assert.ok(latestVersion >= THREAD_VERSION, `host stopped at migration ${latestVersion}`);
     assert.equal(
-      host.connection.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count,
+      connection.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count,
       kept.length,
       "the host did not retain every task as a session",
     );
     report.retainedSessions = kept.length;
 
-    const after = tableHashes(host.connection);
-    for (const [name, table] of before) {
-      if (name === "projection_agent_tasks") continue;
-      assert.deepEqual(after.get(name), table, `migration 48 changed ${name}`);
+    // Startup can add import receipts and events. Every upstream row must still have the same values.
+    for (const [name, rows] of retainedRows) {
+      const columns = connection.prepare(`PRAGMA table_info("${name}")`).all().map((row) => String(row.name));
+      const actual = connection.prepare(`SELECT * FROM "${name}"`).all();
+      for (const row of rows) {
+        assert.ok(
+          actual.some((candidate) => columns.every((column) => candidate[column] === row[column])),
+          `host startup changed an upstream row in ${name}`,
+        );
+      }
     }
+    const checkHostTasks = async () => {
+      assert.ok(application);
+      const page = await application.firstWindow();
+      for (const agentId of new Set(kept.map((task) => String(task.agent_id)))) {
+        const snapshot = await page.evaluate((id) => window.volto.agent.listTasks(id), agentId);
+        assert.deepEqual(
+          snapshot.tasks.map((task) => task.id).sort(),
+          kept.filter((task) => task.agent_id === agentId).map((task) => String(task.thread_id)).sort(),
+          "the real host API did not retain migrated task sessions",
+        );
+      }
+    };
+    await checkHostTasks();
 
     const threads = new Map(
-      host.connection
+      connection
         .prepare(
           `SELECT thread_id, agent_id, legacy_task_id, origin, title, title_source, outcome, error, created_at,
              updated_at, archived_at, last_event_sequence FROM projection_agent_threads`,
@@ -173,7 +243,7 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     }
     report.archivedThreads = [...threads.values()].filter((thread) => thread.archived_at !== null).length;
 
-    const taskIds = host.connection
+    const taskIds = connection
       .prepare(
         "SELECT json_extract(message_json, '$.taskId') AS task_id FROM projection_mailbox_messages WHERE json_extract(message_json, '$.taskId') IS NOT NULL",
       )
@@ -184,33 +254,50 @@ async function upgrade(source: string, workDirectory: string, index: number): Pr
     // app's boot step interrupts its queued delivery (`AgentTasks.endWorkOfGoneTasks`); the row stays.
     report.taskMessagesWithoutThread = taskIds.filter((id) => !threads.has(id)).length;
 
-    const integrity = host.connection.prepare("PRAGMA integrity_check").all();
+    const integrity = connection.prepare("PRAGMA integrity_check").all();
     assert.deepEqual(
       integrity.map((row) => row.integrity_check),
       ["ok"],
     );
-    assert.equal(host.connection.prepare("PRAGMA foreign_key_check").all().length, 0, "a foreign key has no row");
-    host.close();
+    assert.equal(connection.prepare("PRAGMA foreign_key_check").all().length, 0, "a foreign key has no row");
+    const migratedData = tableHashes(connection);
+    const migrationMarkers = connection.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+    connection.close();
+    connection = undefined;
+    await application.close();
+    application = undefined;
 
-    const restartedHost = new DatabaseCore({ userDataPath: profile });
-    await runCauseEffect(restartedHost.initialize());
+    application = await startHost(profile);
+    connection = new DatabaseSync(copy, { readOnly: true });
     report.hostRestarted = true;
-    assert.equal(version(restartedHost.connection), latestVersion, "the restarted host changed migration state");
+    report.restartedHostPid = application.process().pid;
+    assert.notEqual(report.restartedHostPid, report.hostPid, "restart must launch a new host process");
+    await checkHostTasks();
+    assert.equal(version(connection), latestVersion, "the restarted host changed migration state");
     assert.equal(
-      restartedHost.connection.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count,
+      connection.prepare("SELECT COUNT(*) AS count FROM projection_agent_threads").get()?.count,
       kept.length,
       "the restarted host did not retain migrated task sessions",
     );
-    assert.deepEqual(restartedHost.connection.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.deepEqual(connection.prepare("PRAGMA foreign_key_check").all(), []);
     assert.deepEqual(
-      restartedHost.connection.prepare("PRAGMA integrity_check").all().map((row) => row.integrity_check),
+      connection.prepare("PRAGMA integrity_check").all().map((row) => row.integrity_check),
       ["ok"],
     );
-    restartedHost.close();
+    assert.deepEqual(
+      connection.prepare("SELECT * FROM schema_migrations ORDER BY version").all(),
+      migrationMarkers,
+      "the restarted host changed migration markers",
+    );
+    for (const name of ["projection_threads", "projection_agent_threads"]) {
+      assert.deepEqual(tableHashes(connection).get(name), migratedData.get(name), `restart changed ${name}`);
+    }
     report.passed = true;
   } catch (error) {
     report.error = error instanceof Error ? error.message : String(error);
   } finally {
+    connection?.close();
+    await application?.close();
     try {
       db.close();
     } catch {}
@@ -242,8 +329,8 @@ async function createUpstreamFixture(path: string): Promise<void> {
 
 async function runE2E(): Promise<void> {
   await mkdir(OUT, { recursive: true });
-  const workDirectory = await mkdtemp(join(tmpdir(), "openbot-thread-upgrade-"));
-  let source = process.argv.slice(2).find((arg) => !arg.startsWith("--"));
+  const workDirectory = await mkdtemp(join(OUT, "work-"));
+  let source = process.argv.find((arg) => arg.startsWith("--source="))?.slice("--source=".length);
   try {
     if (!source) {
       source = join(workDirectory, "upstream-47.db");
@@ -260,4 +347,4 @@ async function runE2E(): Promise<void> {
 }
 
 if (process.argv.includes("--run-e2e")) await runE2E();
-else test("real host upgrades and restarts with upstream agent task data", runE2E);
+else test("real host upgrades and restarts with upstream agent task data", runE2E, E2E_TIMEOUT_MS);
