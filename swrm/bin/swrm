@@ -5316,9 +5316,10 @@ def verify_against_baseline(cmd, ws, timeout):
         rel = os.path.relpath(ws["path"], ws["root"])
         p = subprocess.run(rewrite_verify_paths(cmd, ws["root"], bwt), shell=True, capture_output=True, text=True,
                            cwd=os.path.join(bwt, rel) if rel != "." else bwt, timeout=timeout)
-        return {"rc": p.returncode, "output": p.stdout + p.stderr}
+        output = p.stdout + p.stderr
+        return {"rc": p.returncode, "output": output, "failing": sorted(failing_tests(output))}
     except subprocess.TimeoutExpired:
-        return {"rc": 124, "output": ""}
+        return {"rc": 124, "output": "", "failing": []}
     finally:
         git(["worktree", "remove", "--force", bwt], ws["repo"])
 
@@ -10392,7 +10393,9 @@ def summarize_event(o):
             return "cmd", inp.get("command", "")
         return "tool", f"{part.get('tool')} {short(inp.get('filePath') or inp.get('path') or '', 120)}"
     if t == "message_end":
-        message = o.get("message") or {}
+        message = o.get("message")
+        if not isinstance(message, dict):
+            return None, None
         if message.get("role") == "assistant":
             return "msg", "".join(b.get("text", "") for b in message.get("content") or []
                                    if isinstance(b, dict) and b.get("type") == "text")
