@@ -126,6 +126,10 @@ def _blocking_reason(intake: dict[str, Any]) -> str | None:
     for field in SCOPE_FIELDS:
         if field not in scope:
             return "missing_" + field
+    # An extension may carry requirements this gate cannot interpret. Route it
+    # through Spec rather than silently omitting it from the approved contract.
+    if scope.keys() - SCOPE_FIELDS:
+        return "unsupported_public_scope_field"
     checks = (("requirements", _requirements_reason),
               ("acceptance_commands", _commands_reason),
               ("expected_exit_code", _exit_code_reason),
@@ -148,8 +152,15 @@ def _requirements_reason(value: Any) -> str | None:
         return reason
     # Conservatively accept behavioral statements, not implementation goals
     # such as "Fix the bug". Unsupported prose goes through the full Spec run.
-    if not re.match(r"^(?:return|emit|print|write|reject|accept|exit|output)\s+\S",
-                    value.strip(), re.IGNORECASE):
+    behavior = re.match(r"^(?:return|emit|print|write|reject|accept|exit|output)\s+(\S.*)",
+                        value.strip(), re.IGNORECASE | re.DOTALL)
+    if behavior is None:
+        return "requirements_behavior_unspecified"
+    # Naming an action with a generic object adds no observable behavior, even
+    # when the other fields contain concrete examples ("Return a result.").
+    if re.fullmatch(r"(?:(?:a|an|the|some|any|correct|expected|valid|exact)\s+)*"
+                    r"(?:result|value|output|response|error|input|data|message|status|code)"
+                    r"[.!]?", behavior[1], re.IGNORECASE):
         return "requirements_behavior_unspecified"
     return None
 
@@ -196,6 +207,8 @@ def _output_reason(value: Any) -> str | None:
     for field in OUTPUT_FIELDS:
         if field not in value:
             return "missing_expected_output_" + field
+    if value.keys() - OUTPUT_FIELDS:
+        return "unsupported_expected_output_field"
     if value["stream"] not in OUTPUT_STREAMS:
         return "unknown_expected_output_stream"
     if value["match"] not in OUTPUT_MATCHES:
@@ -218,6 +231,8 @@ def _boundaries_reason(value: Any) -> str | None:
         for field in BOUNDARY_FIELDS:
             if field not in boundary:
                 return "boundary_missing_" + field
+        if boundary.keys() - BOUNDARY_FIELDS:
+            return "unsupported_boundary_field"
         if type(boundary["exit_code"]) is not int:
             return "boundary_exit_code_unknown"
         # A boundary may legitimately expect no output at all.
@@ -264,4 +279,11 @@ def _allowed_files_reason(value: Any) -> str | None:
             return "allowed_files_not_narrow"
         if path.endswith("/"):
             return "allowed_files_not_narrow"
+        # Resolve scope against this repository, independent of the caller's
+        # working directory. New files are allowed, existing directories are not.
+        try:
+            if (Path(__file__).resolve().parent.parent / path).is_dir():
+                return "allowed_files_not_narrow"
+        except (OSError, ValueError):
+            return "allowed_files_invalid"
     return None

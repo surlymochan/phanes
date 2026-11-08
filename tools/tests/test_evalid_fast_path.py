@@ -122,11 +122,26 @@ class FastPathContractTests(unittest.TestCase):
 
     def test_requirements_must_describe_observable_behavior(self):
         for text in ("Fix the bug.", "Fix.", "Update the implementation.",
-                     "Improve performance."):
+                     "Improve performance.", "Return a result.",
+                     "Return the expected value.", "Print the output.",
+                     "Accept any input."):
             with self.subTest(requirements=text):
                 intake = copy.deepcopy(self.intake)
                 intake["public_scope"]["requirements"] = text
                 self.assert_closed(intake, enabled=True)
+
+    def test_unrecognized_public_contract_fields_fail_closed(self):
+        # Unsupported requirements must go to Spec even when their values look
+        # concrete; otherwise the receipt silently drops part of the contract.
+        for location in ("scope", "output", "boundary"):
+            for value in ("unknown", None, "TBD", 30):
+                with self.subTest(location=location, value=value):
+                    intake = copy.deepcopy(self.intake)
+                    scope = intake["public_scope"]
+                    target = {"scope": scope, "output": scope["expected_output"],
+                              "boundary": scope["boundaries"][0]}[location]
+                    target["timeout"] = value
+                    self.assert_closed(intake, enabled=True)
 
     def test_unknown_command_arguments_fail_closed(self):
         for command in (["TBD"], ["unknown"], ["python3", "TBD"],
@@ -188,6 +203,19 @@ class FastPathContractTests(unittest.TestCase):
                 intake = copy.deepcopy(self.intake)
                 intake["public_scope"]["allowed_files"] = paths
                 self.assert_closed(intake, enabled=True)
+
+    def test_existing_directories_are_not_narrow_file_scopes(self):
+        for path in ("tools", "./tools", "tools/tests", "tools/../tools"):
+            with self.subTest(path=path):
+                intake = copy.deepcopy(self.intake)
+                intake["public_scope"]["allowed_files"] = [path]
+                self.assert_closed(intake, enabled=True)
+
+    def test_explicit_existing_and_new_files_are_narrow(self):
+        intake = copy.deepcopy(self.intake)
+        intake["public_scope"]["allowed_files"] = [
+            "tools/evalid_fast_path.py", "tools/new_fast_path_module.py"]
+        self.assertTrue(self.evaluate(intake, enabled=True)["eligible"])
 
     def test_label_and_short_text_do_not_override_missing_evidence(self):
         intake = copy.deepcopy(self.intake)
