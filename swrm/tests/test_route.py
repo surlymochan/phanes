@@ -193,6 +193,21 @@ class RoutingScenarios(unittest.TestCase):
         self.assertEqual(review["backend"], "ocgo")
         self.assertNotIn("degraded", review)
 
+    def test_26_unknown_or_empty_type_uses_default_route(self):
+        for task_type in ("custom-task", ""):
+            with self.subTest(task_type=task_type):
+                self.check(prof(task_type, 3), scenario(), {"ok": True, "backend": "codex"})
+
+        # A profile with no type is the empty-type form used by callers that
+        # omit the optional field. It should take the same stable default.
+        profile = {"difficulty": 3}
+        self.check(profile, scenario(), {"ok": True, "backend": "codex"})
+
+    def test_27_explicit_backend_and_model_win_for_unknown_type(self):
+        self.check({"type": "custom-task", "difficulty": 3, "backend": "deepseek",
+                    "model": "deepseek-flash"}, scenario(),
+                   {"ok": True, "backend": "deepseek", "model": "deepseek-flash"})
+
     def test_21_impl_does_not_spread(self):
         st = scenario(codex_week=0.90)
         newer = copy.deepcopy(next(m for m in st["ocgo"]["models"] if m["tier"] == "balanced"))
