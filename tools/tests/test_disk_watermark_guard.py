@@ -441,6 +441,47 @@ class DispatchGateTests(unittest.TestCase):
                              "the gate must open again after the recovery")
 
 
+class DispatchTickTests(unittest.TestCase):
+    """The real dispatch tick must not hand a card to a host the guard blocks."""
+
+    def test_the_tick_dispatches_no_card_to_the_blocked_host(self):
+        with scratch() as tmp, control_plane_home(tmp):
+            home = Path(tmp)
+            pause_dir = home / "phanes-ctl" / "autodispatch"
+            brain_log = home / "phanes-ctl" / "brain.log"
+            fake = FakeSsh(home)
+            fake.set_df(DF_BLOCKED)
+            done = run_guard(pause_dir, brain_log, fake.env)
+            self.assertEqual(done.returncode, 0, done.stderr)
+
+            dispatcher = load_autodispatch()
+            dispatcher.BRAIN_LOG = str(brain_log)      # the tick logs into the scratch brain log
+            dispatched = []
+            card = {"n": 1666, "title": "card", "body": "body", "labels": [], "prio": 3,
+                    "backend": None, "strict": False, "verify": False}
+            lanes = {"CX2": {"host": HOST, "backend": "pi"},
+                     "CX9": {"host": "other-host", "backend": "pi"}}
+            # the outside world is faked: no ssh, no gh, no planner backlog
+            dispatcher.remote = lambda lane, cfg, run="": {"lane": "idle"}
+            dispatcher.queue = lambda: [dict(card)]
+            dispatcher.label_state = lambda number, cache=None: ("fresh", "")
+            dispatcher.prefetch_labels = lambda numbers, cache=None: {}
+            dispatcher.replenish = lambda count, state: []
+            dispatcher.gh = lambda *args, **kwargs: (0, "", "")
+            dispatcher.sh = lambda *args, **kwargs: (0, "base-sha\n", "")
+            dispatcher.dispatch = (lambda lane, cfg, item, base:
+                                    (dispatched.append(lane) or "run-1", False))
+            state = {}
+            dispatcher.tick(lanes, state, time.time())
+            self.assertNotIn("CX2", state,
+                             "the dispatch tick must not give a card to a host the disk "
+                             f"watermark guard blocks: {state}")
+            self.assertNotIn("CX2", dispatched,
+                             "the dispatch tick must not dispatch to a blocked host")
+            self.assertIn("CX9", state,
+                          "a lane on a healthy host must still get its card")
+
+
 class InstallerTests(unittest.TestCase):
     """The installer must deploy the guard, its probe and the resident loop."""
 
@@ -549,7 +590,43 @@ echo "status:"
             self.assertTrue(self.wait_for(lambda: fake.calls()),
                             "the new resident guard must measure the remote host")
 
+    def test_the_installer_deploys_the_dispatcher_with_the_disk_gate(self):
+        # The independent disk gate lives in the dispatcher: the live AD must run
+        # the new code, and the AD that is still running must be replaced.
+        with scratch() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            ctl = self.build_control_plane(home / "phanes-ctl")
+            fake = FakeSsh(base)
+            fake.set_df(DF_BLOCKED)
+            live = ctl / "bin" / "autodispatch.py"
+            live.write_text('#!/usr/bin/env python3\n"""Phanes lane autodispatcher (the old copy)."""\n'
+                            "import time\ntime.sleep(600)\n")
+            old = subprocess.Popen([sys.executable, str(live)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(self.kill_pid, old.pid)
+            time.sleep(0.5)
+            self.assertTrue(self.alive(old.pid), "the fake old dispatcher must be running")
+            done = self.run_installer(ctl, home, fake.env)
+            self.assertEqual(done.returncode, 0,
+                             f"the installer must succeed: {done.stdout}\n{done.stderr}")
+            self.assertIn("DISK_WATERMARK_STATE_PREFIX", live.read_text(),
+                          "the installer must deploy the dispatcher with the independent disk gate")
+            deadline = time.time() + 20
+            while time.time() < deadline and self.alive(old.pid):
+                time.sleep(0.2)
+            self.assertFalse(self.alive(old.pid),
+                             "the installer must stop the dispatcher that is still running, "
+                             "otherwise it keeps the old code without the disk gate")
+
     def alive(self, pid):
+        # A child that exited stays in the process table as a zombie until its parent
+        # reaps it, and os.kill(pid, 0) still succeeds for a zombie: the old guard is
+        # reaped here, otherwise "the old guard still runs" would stay true forever.
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            pass
         try:
             os.kill(pid, 0)
         except OSError:

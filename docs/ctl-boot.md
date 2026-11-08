@@ -15,6 +15,7 @@ That script starts (if not already running):
 | lane-merge | `lane-merge` → `merge-loop.sh` | merge Linux-green `fleet/*` PRs | `~/phanes-ctl/autodispatch/merge-heartbeat` |
 | bus-worker-loop (`bus-worker`) | `bus-worker-loop` | GitHub issue bus mode 2 | `~/phanes-ctl/bus-worker/heartbeat`, `bus-worker/` |
 | health-loop | `health-loop` → `health-check.py` | disk/mem/ssh/quota probes; auto PAUSE-* | `~/phanes-ctl/autodispatch/health.heartbeat`, `health.json`, `health.alert` |
+| disk-watermark | `disk-watermark-guard.py --loop` | remote lane host disk watermark guard (Refs #1666) | `~/phanes-ctl/autodispatch/disk-watermark-<host>.json`, `~/phanes-ctl/brain.log` |
 
 ## Key loops: startup commands & heartbeats
 
@@ -603,6 +604,71 @@ never read, written or removed):
 python3 tools/check-health-hosts-ok-pause.py
 ```
 
+## Lane host disk watermark guard (Refs #1666)
+
+`govpn2` runs the CX2/CX4 review lanes; a full disk there stalls the reviews.  The
+guard is a resident loop of the box control plane that measures the **remote**
+filesystem of the lane host over ssh (the box and `govpn2` have very different
+disks, so the local disk says nothing about the lane host) and holds the lanes of
+that host while the disk is too full.
+
+| Artefact | Role |
+| --- | --- |
+| `tools/disk-usage-probe.py` | the usage probe: `used_pct` / `used_bytes` / `free_bytes` and the top directories, ranked by the **allocated** blocks (`st_blocks`), not by the apparent size (a sparse file looks huge but occupies nothing) |
+| `tools/disk-watermark-guard.py` | the guard: measures the host over ssh, applies the watermark policy, writes the alert row into the brain log and owns the pause marker |
+| `tools/install-disk-watermark-guard.sh` | the installer: deploys the guard **and** its probe dependency, wires the resident loop into the live `~/phanes-ctl/bin/start-control-plane`, replaces the guard that is still running and verifies the new version |
+| `tools/check-disk-watermark.py` | the offline contract check (no ssh, no live state) |
+
+Watermark policy (the thresholds are the ones of the lane host):
+
+| Measured usage | State | Effect |
+| --- | --- | --- |
+| `>= 95%` | `block` | the host is paused (`PAUSE-HOST-<host>`) and the brain log gets an alert row |
+| `>= 87%` and `< 95%` | `hold` | the pause **stays** (hysteresis): the lane is not released before the recovery threshold |
+| `< 87%` | `recovered` | the guard releases **its own** marker only |
+
+Ownership rules: the marker body starts with `auto:disk-watermark`, so the health
+sweep (`tools/check-health-pause.py`) may clear it — the guard restores its own
+marker on the next tick and the dispatcher keeps the gate closed through the
+independent state file below.  A marker that belongs to another guard or to an
+operator is never taken over and never released.  A **failed** probe is never a
+healthy host: the guard fails closed (the host stays paused) and says so in the
+brain log.
+
+The dispatch gate is independent of the pause marker: the dispatcher reads
+`~/phanes-ctl/autodispatch/disk-watermark-<host>.json` (written by the guard) and
+holds every lane of that host (`host:<host>` scope) even in the window where the
+health sweep has just cleared the marker.  A state that is older than 30 minutes
+is ignored, so a dead guard never blocks the fleet forever.
+
+Deploy (on the box, from the repository mirror):
+
+```bash
+bash tools/install-disk-watermark-guard.sh            # default: $HOME/phanes-ctl
+```
+
+The installer stops the resident guard that is still running (an old process would
+keep the old code alive), deploys `disk-watermark-guard.py` and
+`disk-usage-probe.py` next to each other into `~/phanes-ctl/bin`, wires the
+resident loop into the live `~/phanes-ctl/bin/start-control-plane`, updates the
+dispatcher that carries the gate and verifies that the resident guard of the new
+version really runs.
+
+Manual one-shots:
+
+```bash
+python3 ~/phanes-ctl/bin/disk-watermark-guard.py --pause-dir ~/phanes-ctl/autodispatch \
+    --brain-log ~/phanes-ctl/brain.log --host govpn2      # measure once and apply the policy
+python3 ~/phanes-ctl/bin/disk-usage-probe.py --path / --top 10   # the usage probe of a host
+```
+
+Offline proofs (no ssh, no live control plane state):
+
+```bash
+python3 tools/check-disk-watermark.py
+python3 -m unittest tools.tests.test_disk_watermark_guard
+```
+
 ## ctl-loop child reaping and restart (Refs #951)
 
 `~/phanes-ctl/bin/ctl-loop` is the supervisor for the resident `ad` (`lane-autodispatch`),
@@ -835,6 +901,7 @@ setsid nohup ~/phanes-ctl/bin/bus-worker-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/lane-merge >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/ctl-loop >/dev/null 2>&1 &
 setsid nohup ~/phanes-ctl/bin/health-loop >/dev/null 2>&1 &
+setsid nohup ~/phanes-ctl/bin/disk-watermark-guard.py --loop --pause-dir ~/phanes-ctl/autodispatch --brain-log ~/phanes-ctl/brain.log --host govpn2 >/dev/null 2>&1 &
 ~/phanes-ctl/bin/ib-refresh                  # manual certificate refresh preflight
 ```
 
