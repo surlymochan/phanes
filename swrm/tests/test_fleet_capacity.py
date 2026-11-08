@@ -64,6 +64,27 @@ class FleetCapacityTests(unittest.TestCase):
             if old is None: os.environ.pop('OPENSWARM_FLEET_GUARD_CONFIG', None)
             else: os.environ['OPENSWARM_FLEET_GUARD_CONFIG'] = old
 
+    def test_acquire_gives_up_after_three_slow_coordinator_responses(self):
+        rdir = pathlib.Path(self.temp.name, 'runs', 'slow-coordinator')
+
+        def bounded_backoff(_seconds):
+            if bounded_backoff.calls >= 2:
+                raise AssertionError('acquire kept retrying after three coordinator failures')
+            bounded_backoff.calls += 1
+
+        bounded_backoff.calls = 0
+        with mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
+                mock.patch.object(xs, 'fleet_guard_call', side_effect=RuntimeError('coordinator timeout')) as call, \
+                mock.patch.object(xs.time, 'sleep', side_effect=bounded_backoff):
+            admitted = xs.reserve_provider_slot(str(rdir), 'codex', None, {'concurrency': {'total': 1}},
+                                                keep_waiting=lambda: True)
+
+        self.assertFalse(admitted)
+        self.assertEqual(call.call_count, 3)
+        status = json.loads((rdir / 'status.json').read_text())
+        self.assertEqual(status['state'], 'queued')
+        self.assertIn('coordinator timeout', status['fleet_reservation_error'])
+
     def test_required_missing_configuration_fails_closed(self):
         with mock.patch.dict(os.environ, {'OPENSWARM_FLEET_GUARD_REQUIRED': '1',
                                           'OPENSWARM_FLEET_GUARD_CONFIG': os.path.join(self.temp.name, 'missing')}):
