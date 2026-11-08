@@ -8,8 +8,11 @@ State: ~/phanes-ctl/autodispatch/state.json   Log: ~/phanes-ctl/autodispatch/aut
 Pause: the swrm pause store ($OPENSWARM_HOME/pauses, written by `swrm pause <scope>`) and the
 legacy markers ~/phanes-ctl/autodispatch/PAUSE (whole loop), PAUSE-<LANE> (one lane),
 PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted). Both are read (Refs #1366).
+A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
+deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
 """
 import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
+from datetime import datetime, timezone
 HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
@@ -103,10 +106,17 @@ def ctl_state_dir():
     os.makedirs(directory, mode=0o700, exist_ok=True)
     return directory
 
-def pause_store_dir():
+def pause_home(home=None):
+    """The home that holds the pause store ($OPENSWARM_HOME by default).
+
+    An empty $OPENSWARM_HOME is no home at all: the fallback keeps the store path
+    absolute instead of turning it into a relative `pauses` directory."""
+    if home: return os.path.expanduser(home)
+    return os.path.expanduser(os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm")
+
+def pause_store_dir(home=None):
     """The swrm pause store ($OPENSWARM_HOME/pauses), the new home of the pause switches."""
-    home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm"
-    return os.path.join(os.path.expanduser(home), "pauses")
+    return os.path.join(pause_home(home), "pauses")
 
 def marker_scope(name):
     """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
@@ -117,14 +127,63 @@ def marker_scope(name):
     if name.startswith("PAUSE-") and len(name) > len("PAUSE-"): return f"lane:{name[len('PAUSE-'):]}"
     return None
 
-def pause_records(now=None):
+# The deadline of a legacy pause marker: the health loop writes `auto:cooldown:until=<epoch|ISO>`
+# (`tools/check-health-pause.py`), the quota loop `mm_remains:until=<ISO>`
+# (`tools/check-health-quota-fresh.py`). The deadline is separated from the rest of the body by a
+# colon or a space, so both shapes are read (Refs #1592).
+PAUSE_UNTIL_RE = re.compile(r"(?:^|[\s:])until=(\S+)", re.MULTILINE)
+# The markers whose expiry was already logged: one log line per marker, not one per tick.
+EXPIRED_PAUSE_LOGGED = set()
+
+def pause_until(body):
+    """The deadline of a legacy pause marker body (`until=<epoch|ISO>`), in epoch seconds.
+
+    A naive ISO timestamp is UTC, exactly like in `tools/check-health-pause.py`: a deadline
+    must not move with the timezone of the machine that reads it. None when the body carries
+    no readable deadline: such a marker never expires."""
+    match = PAUSE_UNTIL_RE.search(body or "")
+    if not match: return None
+    value = match.group(1)
+    try: return float(value)
+    except ValueError: pass
+    try: parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError: return None
+    if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+def marker_body(name):
+    """The body of a legacy pause marker (empty when the file cannot be read)."""
+    try:
+        with open(os.path.join(D, name)) as stream: return stream.read()
+    except OSError: return ""
+
+def marker_reason(name, body):
+    """The reason of a legacy marker: its name plus the first line of its body.
+
+    The body belongs to the reason: `auto:cooldown:until=...` says more than the file name,
+    and the operator finds the cause of the hold in the lane status (Refs #1592)."""
+    lines = (body or "").strip().splitlines()
+    first = lines[0].strip() if lines else ""
+    return f"legacy marker {name}: {first}" if first else f"legacy marker {name}"
+
+def log_expired_pause(name, deadline):
+    """Log once that the deadline of a legacy marker passed: the hold ends, the file stays."""
+    key = (name, deadline)
+    if key in EXPIRED_PAUSE_LOGGED: return
+    EXPIRED_PAUSE_LOGGED.add(key)
+    try: log(f"pause expired: {name} (until={deadline}) holds no lane any more; the marker stays as evidence", brain=False)
+    except Exception: pass
+
+def pause_records(now=None, home=None):
     """The active pause records: the swrm pause store plus the legacy PAUSE markers.
 
-    A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy marker
-    carries no clock, so it never expires. The result is sorted by scope."""
+    A store record carries a TTL (`expires_at`); an expired record is no pause. A legacy
+    marker carries its own deadline in the body (`until=<epoch|ISO>`); an expired marker is
+    no pause either, but the file stays on disk as evidence (the health loop owns the
+    removal). The result is sorted by scope."""
     now = time.time() if now is None else now
     records = []
-    store = pause_store_dir()
+    store = pause_store_dir(home)
     try: names = sorted(os.listdir(store))
     except OSError: names = []
     for name in names:
@@ -145,13 +204,19 @@ def pause_records(now=None):
     for name in names:
         scope = marker_scope(name)
         if scope is None: continue
-        records.append({"scope": scope, "reason": f"legacy marker: {name}", "created_at": 0.0,
-                        "expires_at": None, "source": "marker"})
+        body = marker_body(name)
+        deadline = pause_until(body)
+        if deadline is not None and deadline <= now:
+            log_expired_pause(name, deadline)  # the hold ends here, the marker file stays
+            continue
+        records.append({"scope": scope, "reason": marker_reason(name, body), "created_at": 0.0,
+                        "expires_at": deadline, "source": "marker"})
     return sorted(records, key=lambda row: row["scope"])
 
-def paused_scopes(now=None):
+def paused_scopes(now=None, records=None):
     """The scopes that are paused right now (the store and the legacy markers)."""
-    return {row["scope"] for row in pause_records(now)}
+    records = pause_records(now) if records is None else records
+    return {row["scope"] for row in records}
 
 def lane_paused(lane, cfg=None, scopes=None):
     """Whether a lane is paused by an all/lane/host/backend scope."""
@@ -162,6 +227,44 @@ def lane_paused(lane, cfg=None, scopes=None):
     if cfg.get("host") and f"host:{cfg['host']}" in scopes: return True
     if cfg.get("backend") and f"backend:{cfg['backend']}" in scopes: return True
     return False
+
+def pause_priority(row):
+    """The order in which the switches are read: the global PAUSE, then the pause store,
+    then the remaining legacy markers (Refs #1592)."""
+    if row.get("source") == "marker" and row.get("scope") == "all": return 0
+    if row.get("source") == "store": return 1
+    return 2
+
+def pause_reason(lane, cfg=None, records=None, now=None):
+    """Why a lane is paused right now (None when it is not paused).
+
+    The result names the scope that holds the lane, the switch it comes from, the reason of
+    the switch and the remaining seconds (None when the switch has no deadline). It is what
+    `lanes-status.json` shows, so the operator sees which switch stops the lane and for how
+    long (Refs #1592)."""
+    now = time.time() if now is None else now
+    records = pause_records(now) if records is None else records
+    cfg = cfg or {}
+    wanted = [f"lane:{lane}"]
+    if cfg.get("host"): wanted.append(f"host:{cfg['host']}")
+    if cfg.get("backend"): wanted.append(f"backend:{cfg['backend']}")
+    for row in sorted(records, key=pause_priority):
+        scope = row.get("scope")
+        if scope != "all" and scope not in wanted: continue
+        expires = row.get("expires_at")
+        remaining = None if expires is None else max(0, int(round(expires - now)))
+        return {"scope": scope, "source": row.get("source"), "reason": row.get("reason"),
+                "remaining_s": remaining}
+    return None
+
+def pause_reasons(lanes, records=None, now=None):
+    """The pause reason of every paused lane (the lane status view of the switches)."""
+    records = pause_records(now) if records is None else records
+    reasons = {}
+    for lane, cfg in lanes.items():
+        reason = pause_reason(lane, cfg, records, now)
+        if reason: reasons[lane] = reason
+    return reasons
 
 def mint_paused(scopes=None):
     """Whether the minting of new issues is paused (the PAUSE-MINT marker / the mint scope)."""
@@ -939,13 +1042,14 @@ def update_busy_stale(lanes, state, res):
             log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
     save_state(state)
 
-def status_snapshot(lanes, state, res, ready, blocked):
+def status_snapshot(lanes, state, res, ready, blocked, records=None):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
     status["_stale"] = sum(1 for L in lanes if state.get(L) and "stale_since" in state[L])
     status["_ready"] = ready
     status["_blocked"] = blocked
+    status["_pauses"] = pause_reasons(lanes, records)  # which switch holds every paused lane (Refs #1592)
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
@@ -1442,8 +1546,20 @@ def idle_metrics(state, now=None):
 
 def tick(lanes, state, last_warn):
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
-    scopes = paused_scopes()  # the swrm pause store and the legacy PAUSE markers (Refs #1366)
-    if "all" in scopes: return last_warn
+    records = pause_records()  # the swrm pause store and the legacy PAUSE markers (Refs #1366, #1592)
+    scopes = paused_scopes(records=records)
+    if "all" in scopes:
+        # Keep the pause visible even though this tick does no remote or queue work.
+        # Queue counts remain the last observed values while dispatch is stopped.
+        path = f"{D}/lanes-status.json"
+        try:
+            with open(path) as stream: previous = json.load(stream)
+        except (OSError, ValueError): previous = {}
+        if not isinstance(previous, dict): previous = {}
+        res = {L: {"lane": "paused"} for L in lanes}
+        st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
+        with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
+        return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     idle_books(state)  # the idle bookkeeping of the state exists from the first tick on
@@ -1620,7 +1736,7 @@ def tick(lanes, state, last_warn):
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     state["_tick_at"] = now
     save_state(state)
-    st = status_snapshot(lanes, state, res, ready, blocked)
+    st = status_snapshot(lanes, state, res, ready, blocked, records)
     with open(f"{D}/lanes-status.json", "w") as stream:
         json.dump(st, stream, ensure_ascii=False, indent=1)
     return last_warn
