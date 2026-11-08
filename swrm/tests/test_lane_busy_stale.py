@@ -334,8 +334,8 @@ class AutodispatchBusyStaleTests(unittest.TestCase):
     def test_reviewed_binary_artifacts_are_absent(self):
         root = Path(__file__).resolve().parents[2]
         for directory in ("openswarm/tests", "swrm/tests"):
-            for name in (".dde4fd5ffeb7d431-00000000.so", ".dde4fd5ffebede34-00000000.so"):
-                self.assertFalse((root / directory / name).exists())
+            artifacts = list((root / directory).glob("*.so"))
+            self.assertEqual(artifacts, [], f"unexpected shared-library artifacts in {directory}")
 
 
 # #1786 review closure (migration: openswarm/bin/openswarm -> swrm/bin/swrm;
