@@ -329,6 +329,47 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(self.git("-C", str(wt), "config", "lane.test-marker"), "keep")
         self.assertEqual(list(wt.parent.glob("wt.backup-*")), [])
 
+    def test_lane_handoff_publishes_reported_commit_after_executor_checkout(self):
+        with mock.patch.dict(os.environ, self.env):
+            functions = runpy.run_path(str(CLI))
+            lane = {"repo": str(self.repo), "name": self.lane_name, "backend": "pi", "model": "fake-model"}
+            for checkout in ("original", "branch", "detached"):
+                with self.subTest(checkout=checkout):
+                    run_id = f"handoff-{checkout}"
+                    ws = functions["lane_prepare_workspace"](lane, run_id)
+                    wt = pathlib.Path(ws["root"])
+                    if checkout == "branch":
+                        self.git("-C", str(wt), "checkout", "-q", "-b", "executor-result")
+                    elif checkout == "detached":
+                        self.git("-C", str(wt), "checkout", "-q", "--detach")
+                    (wt / "result.txt").write_text(f"{checkout}\n")
+                    self.git("-C", str(wt), "add", "result.txt")
+                    self.git("-C", str(wt), "-c", "user.name=Lane Test", "-c",
+                             "user.email=lane-test@example.invalid", "commit", "-q", "-m", run_id)
+                    head = self.git("-C", str(wt), "rev-parse", "HEAD")
+                    missing = subprocess.run(["git", "cat-file", "-e", head], cwd=self.repo,
+                                             capture_output=True)
+                    self.assertNotEqual(missing.returncode, 0)
+                    spec = {"run_id": run_id, "task": "deliver executor commit", "started": time.time(),
+                            "budget_minutes": 1}
+
+                    result = functions["lane_finalize_run"](
+                        lane, spec, ws, {"status": "done", "files_changed": ["result.txt"]}, {}, None, 0, None)
+
+                    self.assertEqual(result["status"], "done")
+                    self.assertEqual(result["commit"], head)
+                    self.assertEqual(result["branch"], ws["branch"])
+                    self.assertEqual(self.git("rev-parse", ws["branch"]), head)
+                    self.assertEqual(self.git("show", f"{head}:result.txt"), checkout)
+                    self.assertIn(f"merge --no-ff {ws['branch']}", result["merge_hint"])
+                    self.assertEqual(self.git("rev-parse", "HEAD"), ws["base"])
+                    self.assertEqual(self.git("status", "--porcelain"), "")
+                    self.assertEqual(self.git("-C", str(wt), "branch", "--show-current"), "")
+                    ledger = [json.loads(line) for line in (self.data / "ledger.jsonl").read_text().splitlines()]
+                    entry = next(row for row in ledger if row["id"] == run_id)
+                    self.assertEqual(entry["commit"], head)
+                    self.assertEqual(entry["area"], ["result.txt"])
+
     def test_upgrade_preserves_shared_clone_history_and_index_after_source_gc(self):
         base = self.git("rev-parse", "HEAD")
         (self.repo / "temporary.txt").write_text("borrowed object\n")
