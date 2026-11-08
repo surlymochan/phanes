@@ -114,29 +114,30 @@ def copy_repo(src: Path, dest: Path) -> None:
 
 def run_shell(command: str, cwd: Path, timeout: int) -> dict:
     started = time.monotonic()
-    try:
-        proc = subprocess.run(
-            command,
-            cwd=cwd,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
-        timed_out = False
-        code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        code = 124
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", "replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", "replace")
+    # The session leader's pid is also its process-group id. Keep it even if
+    # the shell exits before a descendant holding our output pipes does.
+    with subprocess.Popen(
+        command,
+        cwd=cwd,
+        shell=True,
+        text=True,
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            timed_out = False
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            code = 124
+            kill_process_group(proc.pid)
+            # communicate() resumes draining its buffers; do not concatenate
+            # TimeoutExpired.output, which would duplicate the captured prefix.
+            stdout, stderr = proc.communicate()
     return {
         "command": command,
         "exit_code": code,

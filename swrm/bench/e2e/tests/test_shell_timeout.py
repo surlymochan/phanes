@@ -135,5 +135,32 @@ class ShellTimeoutTests(unittest.TestCase):
         self.assertIn("stderr-line", result["stderr_tail"])
 
 
+    def test_completed_commands_preserve_status_and_streams(self):
+        for code in (0, 7):
+            result = run_shell(f"printf out; printf err >&2; exit {code}", self.workdir, 2)
+            self.assertEqual(result["exit_code"], code)
+            self.assertEqual(result["passed"], code == 0)
+            self.assertFalse(result["timed_out"])
+            self.assertEqual(result["stdout_tail"], "out")
+            self.assertEqual(result["stderr_tail"], "err")
+
+    def test_timeout_kills_child_after_shell_exits_and_keeps_bounded_tails(self):
+        child = self.workdir / "child.py"
+        child.write_text(
+            "import signal,sys,time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('x' * 2500 + 'ENDOUT', flush=True)\n"
+            "print('y' * 2500 + 'ENDERR', file=sys.stderr, flush=True)\n"
+            "time.sleep(30)\n", encoding="utf-8")
+        command = f"{shlex.quote(sys.executable)} {shlex.quote(str(child))} & exit 0"
+        started = time.monotonic()
+        result = run_shell(command, self.workdir, 1)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["exit_code"], 124)
+        self.assertEqual(result["stdout_tail"], "x" * 1993 + "ENDOUT\n")
+        self.assertEqual(result["stderr_tail"], "y" * 1993 + "ENDERR\n")
+
+
 if __name__ == "__main__":
     unittest.main()
