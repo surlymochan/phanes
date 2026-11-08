@@ -3824,8 +3824,8 @@ def provider_concurrency_limits(policy, keys):
     return limits
 
 
-# Tokens stay in this supervisor process. Lost supervisors intentionally leave a
-# persistent reservation for manual, evidence-backed recovery: no unsafe TTL.
+# Confirmed tokens are cached here; acquire tokens are also journaled before sending.
+# Unknown executor liveness still requires evidence-backed recovery, never an unsafe TTL.
 _FLEET_RESERVATIONS = {}
 
 
@@ -3862,28 +3862,71 @@ def fleet_guard_call(command, payload):
         raise RuntimeError(f"fleet capacity coordinator unavailable: {error}")
 
 
+def start_fleet_release_worker(rdir):
+    """Detach retries so a dead tunnel cannot delay executor finalization."""
+    try:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "_fleet-release", rdir],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as error:
+        # The durable record is also scanned on the next CLI/supervisor startup.
+        print(f"fleet capacity release worker unavailable: {error}", file=sys.stderr)
+
+
+def retry_fleet_release(rdir):
+    path = os.path.join(rdir, "fleet-release-pending.json")
+    pending = jload(path, None)
+    if not pending:
+        return True
+    try:
+        fleet_guard_call(pending["command"], pending["payload"])
+    except RuntimeError as error:
+        pending.update(attempts=pending.get("attempts", 0) + 1, error=str(error))
+        jsave(path, pending)
+        return False
+    os.unlink(path)
+    reservation = os.path.join(rdir, "fleet-reservation.json")
+    if os.path.exists(reservation):
+        os.unlink(reservation)
+    _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
+    set_status(rdir, fleet_release_pending=False, fleet_reservation_error=None)
+    return True
+
+
+def fleet_release_worker(rdir):
+    # Multiple startup scans may find the same record; only one worker owns it.
+    if not os.path.exists(os.path.join(rdir, "fleet-release-pending.json")):
+        return
+    with open(os.path.join(rdir, "fleet-release.lock"), "a") as lock:
+        try:
+            _flock(lock, LOCK_EX | LOCK_NB)
+        except OSError:
+            return
+        attempt = 0
+        while not retry_fleet_release(rdir):
+            time.sleep(min(60, 0.2 * 2 ** min(attempt, 9)))
+            attempt += 1
+
+
 def release_fleet_slot(rdir):
     item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
+    saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
+    if not item and saved:
+        item = saved["command"], saved["payload"]
     if not item:
         return True
     command, payload = item
-    for attempt in range(3):
-        try:
-            fleet_guard_call(command, {"op": "release", "run_id": payload["run_id"], "token": payload["token"]})
-            break
-        except RuntimeError as error:
-            if attempt == 2:
-                pending = {"command": command, "payload": {"op": "release", "run_id": payload["run_id"],
-                                                               "token": payload["token"]},
-                           "attempts": attempt + 1, "error": str(error), "created": NOW()}
-                jsave(os.path.join(rdir, "fleet-release-pending.json"), pending)
-                set_status(rdir, fleet_reservation_error=str(error), fleet_release_pending=True)
-                print(f"fleet capacity release failed after {attempt + 1} attempts; queued retry: {rdir}",
-                      file=sys.stderr)
-                return False
-            time.sleep(0.2 * (attempt + 1))
-    _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
-    return True
+    pending = {"command": command, "payload": {"op": "release", "run_id": payload["run_id"],
+                                                "token": payload["token"]},
+               "attempts": 0, "created": NOW()}
+    jsave(os.path.join(rdir, "fleet-release-pending.json"), pending)
+    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+    set_status(rdir, fleet_release_pending=True,
+               state="routing" if status.get("state") == "running" else status.get("state", "routing"))
+    # Keep the in-process ownership marker until acknowledgement. Callers such as
+    # consult use it to avoid deleting the durable queue during workspace cleanup.
+    start_fleet_release_worker(rdir)
+    return False
 
 
 def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_waiting=None, poll=0.1):
@@ -3896,9 +3939,18 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     status_path = os.path.join(rdir, "status.json")
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
-    token = uuid.uuid4().hex
+    if os.path.exists(os.path.join(rdir, "fleet-release-pending.json")):
+        start_fleet_release_worker(rdir)
+        set_status(rdir, state="queued", queue_reason="capacity-unreachable", capacity_unreachable=True)
+        return False
+    saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
+    command = saved["command"] if saved else command
+    token = saved["payload"]["token"] if saved else uuid.uuid4().hex
     payload = {"op": "acquire", "token": token, "run_id": os.path.basename(rdir),
                "backend": backend, "provider": provider}
+    if command:
+        # Persist before sending: a timeout may follow a successful remote commit.
+        jsave(os.path.join(rdir, "fleet-reservation.json"), {"command": command, "payload": payload})
     coordinator_failures = 0
     while True:
         with open(lock_path, "a") as lock:
@@ -3952,11 +4004,16 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                                 lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys,
                                                  queue_reason="capacity-unreachable",
                                                  capacity_unreachable=True)
+                            if keep_waiting and not keep_waiting():
+                                release_fleet_slot(rdir)
                             return False
                         time.sleep(0.2 * (2 ** (coordinator_failures - 1)))
                         continue
                     else:
                         coordinator_failures = 0
+                        set_status(rdir, capacity_unreachable=False, fleet_reservation_error=None)
+                        if lane_name:
+                            lane_write_state(lane_name, capacity_unreachable=False, queue_reason=None)
                 if admitted and command:
                     _FLEET_RESERVATIONS[reservation_key] = (command, payload)
             else:
@@ -3967,7 +4024,7 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                 return False
             if admitted:
                 set_status(rdir, state="running", backend=backend, provider=provider,
-                           concurrency_keys=keys, fleet_reservation_error=None, queue_reason=None,
+                           concurrency_keys=keys, fleet_reservation_error=None, queue_reason=None, capacity_unreachable=False,
                            **({"lane": lane_name} if lane_name else {}))
                 if lane_name:
                     lane_write_state(lane_name, turn_state="running", concurrency_keys=keys)
@@ -3978,6 +4035,8 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
             if lane_name:
                 lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys)
         if keep_waiting and not keep_waiting():
+            # No executor started, so even an uncertain acquire can be released.
+            release_fleet_slot(rdir)
             return False
         time.sleep(max(1.0 if command else 0.01, poll))
 
@@ -4069,6 +4128,8 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
             stopped = bool(status.get("stop_requested"))
             queued_from = status.get("queued_at", queue_start) if first_attempt == 1 and not attempts else queue_start
             set_status(rdir, queued_seconds=round(status.get("queued_seconds", 0) + max(0, NOW() - queued_from), 3))
+            if status.get("capacity_unreachable") and not stopped:
+                return attempts, None, "capacity-unreachable"
             error_class = "stopped" if stopped else "budget_exceeded"
             attempts.append({"backend": backend, "model": decision.get("model"), "effort": decision.get("effort"),
                              "rc": 130 if stopped else 124, "seconds": 0, "error_class": error_class,
@@ -5632,6 +5693,9 @@ def cmd_run(args, policy):
         tried.append(b)
         current_attempts, final, err_class = run_executor_with_rate_limit(
             b, decision, st, prompt, ws["path"], rdir, deadline, policy, first_attempt=len(attempts) + 1)
+        if err_class == "capacity-unreachable":
+            print(json.dumps(jload(f"{rdir}/status.json", {}), ensure_ascii=False))
+            return
         deadline = (jload(f"{rdir}/status.json", {}) or {}).get("deadline", deadline)
         attempts.extend(current_attempts)
         if err_class == "model_unavailable":  # same backend, next model in the tier
@@ -6168,11 +6232,16 @@ def invoke_reviewer(reviewer, prompt, repo, rdir, policy):
             git(["worktree", "remove", "--force", review_worktree], original_repo, timeout=60)
             shutil.rmtree(review_worktree, ignore_errors=True)
         save_raw()
-        if acquired and safe_release and release_fleet_slot(slot_dir):
+        if acquired and safe_release:
+            released = release_fleet_slot(slot_dir)
             set_status(slot_dir, state="finished", finished=NOW())
-            shutil.rmtree(slot_dir, ignore_errors=True)
+            if released:
+                shutil.rmtree(slot_dir, ignore_errors=True)
         elif not acquired:
-            shutil.rmtree(slot_dir, ignore_errors=True)
+            if os.path.exists(os.path.join(slot_dir, "fleet-reservation.json")):
+                release_fleet_slot(slot_dir)
+            else:
+                shutil.rmtree(slot_dir, ignore_errors=True)
 
 
 def update_peer_review_ledger(run_id, peer_review):
@@ -8460,11 +8529,13 @@ def lane_do_run(lane, spec, child, server, current):
     ws = None
     turn, pending = {}, []
     try:
-        ws = lane_prepare_workspace(lane, rid, spec.get("base"))
+        ws = spec.pop("_capacity_workspace", None)
+        resuming_capacity = ws is not None
+        ws = ws or lane_prepare_workspace(lane, rid, spec.get("base"))
         if ws.get("workspace_note"):
             set_status(rdir, workspace_note=ws["workspace_note"])
         ws["prepare"] = []
-        prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_executor")
+        prepared = None if resuming_capacity else run_workspace_prepare(ws["repo"], ws["root"], "before_executor")
         if prepared:
             ws["prepare"].append(prepared)
             if prepared["rc"] != 0:
@@ -8499,16 +8570,22 @@ def lane_do_run(lane, spec, child, server, current):
             if model not in models:
                 models.append(model)
         allow_fallback = len(models) > 1
-        attempts = []
+        resume = spec.pop("_capacity_resume", {})
+        attempts = resume.get("attempts", [])
         final, usage, error_class, rc, evp, error_tail = None, {}, "exec_error", 1, None, None
         attempt_lane = lane
-        attempt_number = 0
-        forbidden_retried = False
+        attempt_number = resume.get("attempt_number", 0)
+        forbidden_retried = resume.get("forbidden_retried", False)
         _, max_rate_retries = rate_limit_policy(load_policy())
         for number, model in enumerate(models, 1):
+            if number < resume.get("model_number", 1):
+                continue
             attempt_lane = dict(lane, model=model)
             turn, pending = {}, []
-            retries, continuation, retry_prompt = 0, False, prompt
+            retries, continuation, retry_prompt = (resume.get("retries", 0),
+                                                    resume.get("continuation", False),
+                                                    resume.get("retry_prompt", prompt))
+            resume = {}
             while True:
                 attempt_number += 1
                 provider = execution_provider(attempt_lane["backend"], lane=attempt_lane)
@@ -8523,6 +8600,14 @@ def lane_do_run(lane, spec, child, server, current):
 
                 if not reserve_provider_slot(os.path.join(RUNS, rid), attempt_lane["backend"], provider,
                                              load_policy(), lane_name=lane["name"], keep_waiting=keep_waiting):
+                    status = jload(os.path.join(rdir, "status.json"), {}) or {}
+                    if status.get("capacity_unreachable") and keep_waiting():
+                        spec["_capacity_workspace"] = ws
+                        spec["_capacity_resume"] = dict(attempts=attempts, attempt_number=attempt_number - 1,
+                                                        forbidden_retried=forbidden_retried, model_number=number,
+                                                        retries=retries, continuation=continuation,
+                                                        retry_prompt=retry_prompt)
+                        return {"state": "queued", "queue_reason": "capacity-unreachable"}
                     queued_from = spec.get("queued_at", queue_start) if first_start else queue_start
                     spec["queued_seconds"] = spec.get("queued_seconds", 0) + max(0, NOW() - queued_from)
                     set_status(rdir, queued_seconds=round(spec["queued_seconds"], 3))
@@ -8746,6 +8831,7 @@ def cmd_lane_serve(lane, policy):
         if current.get("run_id"):
             spec = current
             down_after = False
+            outcome = {}
             # Run against the existing child. A crash is finalized below, and then restart backoff applies.
             try:
                 if lane["backend"] == "codex" and child:
@@ -8753,10 +8839,18 @@ def cmd_lane_serve(lane, policy):
                         RUNS, spec["run_id"], f"events.1.{lane['backend']}.jsonl")
                     active_lane = lanes_by_name([lane["name"]])[0]
                     child, _ = lane_refresh_codex_child_if_stale(active_lane, child, policy, evp)
-                lane_do_run(lanes_by_name([lane["name"]])[0], spec, child, server, current)
+                outcome = lane_do_run(lanes_by_name([lane["name"]])[0], spec, child, server, current)
+                if outcome.get("state") == "queued":
+                    # Yield to control messages during backoff, preserving the assignment.
+                    end = NOW() + 30
+                    while NOW() < end and not spec.get("abort_requested") and not spec.get("down_requested"):
+                        lane_control_messages(server, lane, spec, child, {}, [])
+                        time.sleep(0.1)
+                    continue
             finally:
                 down_after = bool(spec.get("down_requested"))
-                current.clear()
+                if outcome.get("state") != "queued":
+                    current.clear()
             if child and child.alive():
                 lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None)
             else:
@@ -12119,6 +12213,11 @@ def cmd_regress_compare(args):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "_fleet-release":
+        fleet_release_worker(sys.argv[2])
+        return
+    for path in glob.glob(os.path.join(RUNS, "*", "fleet-release-pending.json")):
+        start_fleet_release_worker(os.path.dirname(path))
     ap = argparse.ArgumentParser(prog="swrm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     consult_module().add_parser(sub)

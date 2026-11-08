@@ -8,7 +8,6 @@
 - `docs/fleet-topology-expected.md:6-18`（Fleet topology 各主机并发限额约定）
 - `docs/dual-mode-ssh.md:32-41,53-75`（ControlMaster 配置与 SSH fleet 拓扑）
 - `swrm/bin/swrm:3345-3354`（`fleet_guard_call` 超时与 fail-closed 准入）
-- `swrm/bin/swrm:3370-3375`（`fleet_recovery_ttl_seconds` 600s 保护）
 - `swrm/bin/fleet-capacity:12-34,90-115`（`fleet-capacity` 限额、status 与 recover 机制）
 
 ---
@@ -49,11 +48,13 @@
    - `fleet_guard_call` 对每次协调器调用设置 8 秒硬超时；acquire 最多连续尝试 3 次，按 0.2s、0.4s 退避。
    - 连续失败时 run 保持 `queued`，状态写入 `queue_reason: capacity-unreachable`、`capacity_unreachable: true` 与最后错误；stderr 记录 acquire 失败次数。
    - acquire 仅在确认获得 reservation 后启动执行器，协调器不可达不会误判为容量不足。
-   - release 最多尝试 3 次；仍失败时保留 reservation，并在 run 目录写入 `fleet-release-pending.json` 供后续补发/清扫处理。
+   - acquire 发出前先写入 `fleet-reservation.json`；响应丢失后仍使用同一 token 重试和恢复，避免丢失协调器上已经提交的预约。
+   - acquire 连续失败后调用方返回 queued，不进入 finalizing，也不记为 budget_exceeded；lane 保留当前任务，在可处理控制消息的 30 秒退避后重新准入。
+   - release 先写入 `fleet-release-pending.json`，由独立进程补发，结束流程不等待网络。补发单次仍有 8 秒超时，失败后指数退避至 60 秒，成功后删除待发记录。CLI/常驻 supervisor 启动会扫描 runs 下的待发记录，重启补发进程；每个 run 的文件锁避免重复消费者。
 
-3. **TTL 超时回收对齐（600s）**：
-   - 依据 `swrm/bin/swrm:3370-3375`，协调器保留预约的默认恢复 TTL 为 `recovery_ttl_seconds = 600`（600 秒）。
-   - 该 600s TTL 与退避上限窗口一致。即使 runner 因隧道断开崩溃或长时间处于最大退避，协调器上的孤儿记录在 600s 超时后仍可经本地存活检测通过 `op: "recover"` 正常清理（`swrm/bin/fleet-capacity:103-115`），避免 slot 被永久占用。
+3. **预约清扫兜底**：
+   - 预约不会仅因年龄超过 600 秒自动过期。acquire 结果未知时保留 token 证据，后续以同一 token 恢复；已结束执行器的 release 可安全幂等补发。
+   - supervisor 异常退出且执行器生死未知的预约，仍需依据本机进程证据确认全部执行器已停止，再使用显式 `recover`；不通过 TTL 释放可能仍在执行的 slot。
 
 4. **派发节拍平缓**：
    - box 上的 `lane-autodispatch` 循环按 60s 一 tick 运行（`brain/autopilot.md:10-11`），保证派发层不会对正在退避的主机产生密集连接冲击。
@@ -142,7 +143,7 @@ python3 swrm/bin/fleet-capacity broker <<< '{"op":"status"}'
 
 - **`reservations` 列表**：
   - 检查是否存在 `host: "relay.example.invalid"` 的陈旧 reservation。
-  - 计算 `created` 距离当前时间的秒数：若已超过 600s，需评估是否发生 runner 断开而未 release，可由 owner 进行 TTL recover。
+  - 计算 `created` 距离当前时间的秒数：若已超过 600s，需评估是否发生 runner 断开而未 release，可由 owner 确认执行器停止后进行显式 recover。
 - **总数与限额对比**：
   - 核对 `reservations` 总数是否达到 `LIMITS["total"]`（8 或 `topology.json` 中的配置值，见 `swrm/bin/fleet-capacity:13-31`）。
   - 核对 `host:relay.example.invalid` 与 `host:broker` 的实际占用数是否触顶导致后续任务被 `blocked`。
