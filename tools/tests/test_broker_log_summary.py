@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 
@@ -56,6 +57,34 @@ TODAY_FRAGMENT = (
 
 
 class BrokerLogSummaryTests(unittest.TestCase):
+    def test_timezone_offsets_reject_out_of_range_components(self):
+        for value in ("+00:60", "-00:60", "+00:99", "-00:99",
+                      "+24:00", "-24:00", "+99:00", "-99:00"):
+            with self.subTest(value=value):
+                with self.assertRaises(bls.argparse.ArgumentTypeError):
+                    bls.parse_tz(value)
+
+    def test_timezone_offsets_accept_valid_boundaries(self):
+        for value, expected in (("+00:00", timedelta(0)),
+                                ("-00:00", timedelta(0)),
+                                ("Z", timedelta(0)),
+                                ("+23:59", timedelta(hours=23, minutes=59)),
+                                ("-23:59", timedelta(hours=-23, minutes=-59))):
+            with self.subTest(value=value):
+                self.assertEqual(bls.parse_tz(value).utcoffset(None), expected)
+
+    def test_cli_rejects_invalid_timezone_without_traceback(self):
+        for value in ("+00:60", "-00:60", "+00:99", "-00:99",
+                      "+24:00", "-24:00", "+99:00", "-99:00"):
+            with self.subTest(value=value):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        bls.main(["--tz=" + value, "missing.jsonl"])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("argument --tz:", err.getvalue())
+                self.assertNotIn("Traceback", err.getvalue())
+
     def test_today_fragment_is_quota_or_rate_limit(self):
         report = run_report(TODAY_FRAGMENT)
         self.assertEqual(report["verdict"], "quota_or_rate_limit")
