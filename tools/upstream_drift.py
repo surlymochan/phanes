@@ -26,8 +26,8 @@ def run(args: list[str], *, cwd: Path | None = None) -> str:
     return result.stdout
 
 
-def run_bytes(args: list[str]) -> bytes:
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run_bytes(args: list[str], *, cwd: Path | None = None) -> bytes:
+    result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
     return result.stdout
@@ -169,8 +169,8 @@ def pr_changed_paths() -> set[str]:
     if not base_ref:
         return set()
     run(["git", "fetch", "--no-tags", "origin", base_ref], cwd=ROOT)
-    output = run(["git", "diff", "--name-only", "-z", f"origin/{base_ref}...HEAD"], cwd=ROOT)
-    return {path for path in output.split("\0") if path}
+    output = run_bytes(["git", "diff", "--name-only", "-z", f"origin/{base_ref}...HEAD"], cwd=ROOT)
+    return {os.fsdecode(path) for path in output.split(b"\0") if path}
 
 
 def marks_upstream(title: str) -> bool:

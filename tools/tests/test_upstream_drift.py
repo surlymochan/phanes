@@ -67,7 +67,8 @@ class UpstreamDriftTests(unittest.TestCase):
                            check=True, capture_output=True)
             subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)],
                            check=True, capture_output=True)
-            names = ["space name.txt", "非ASCII.txt", "line\nbreak.txt"]
+            names = ["space name.txt", "非ASCII.txt", "line\nbreak.txt",
+                     "crlf\r\nbreak.txt", "cr\rbreak.txt"]
             (root / "demo").mkdir()
             for name in names:
                 (root / "demo" / name).write_text("changed\n")
