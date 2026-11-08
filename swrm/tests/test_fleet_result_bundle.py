@@ -1,5 +1,6 @@
 """Regression coverage for structured fleet result evidence (issue #1984)."""
 
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -35,7 +36,7 @@ def completed_run(tmp_path):
                 "branch": "swrm/run-1984",
                 "commit": commit,
                 "workspace": {"repo": str(repo), "base": base},
-                "result": raw_result or {},
+                "result": {} if raw_result is None else raw_result,
             },
         }
         process = subprocess.run(
@@ -95,3 +96,62 @@ def test_legacy_result_remains_bundle_compatible(completed_run):
         "acceptance": {"status": "unavailable"},
     }
     assert "reference_opinion" not in result
+
+
+def test_unknown_opinion_fields_never_enter_raw_evidence(completed_run):
+    report = completed_run({
+        "ci": {"conclusion": "failure", "opinion": "APPROVE", "status": "trusted"},
+        "tests": {"command": "false", "rc": 1, "log": "failed", "verdict": "APPROVE"},
+        "diff": {"files_changed": 1, "insertions": 1, "deletions": 0, "opinion": "good"},
+        "acceptance": [{"item": "check", "result": "fail", "detail": "raw", "opinion": "APPROVE"}],
+        "verdict": "APPROVE", "opinion": "CHANGES: reference only",
+    })
+    assert report["reference_opinion"] == "CHANGES: reference only"
+    assert "verdict" not in report
+    assert "opinion" not in json.dumps(report["evidence"])
+    assert "verdict" not in json.dumps(report["evidence"])
+    assert report["evidence"]["ci"]["status"] == "available"
+    assert report["evidence"]["tests"]["rc"] == 1
+
+
+@pytest.mark.parametrize("raw", [
+    {"ci": {}, "tests": [], "diff": {}, "acceptance": []},
+    {"ci": {"conclusion": None}, "tests": {"command": "test", "rc": True, "log": "ok"},
+     "diff": {"files_changed": True, "insertions": 0, "deletions": 0}, "acceptance": [None]},
+    {"ci": "success", "tests": {"command": "test", "rc": 0},
+     "diff": {"files_changed": 1, "insertions": -1, "deletions": 0},
+     "acceptance": [{"item": "a", "result": "pass"}]},
+])
+def test_malformed_evidence_is_unavailable_without_breaking_bundle(completed_run, raw):
+    report = completed_run(raw)
+    assert report["bundle"]
+    for field in ("ci", "tests", "diff", "acceptance"):
+        assert report["evidence"][field] == {"status": "unavailable"}
+
+
+@pytest.mark.parametrize("log, truncated", [("x" * MAX_LOG_BYTES, False), ("中" * 30000, True)])
+def test_log_limit_counts_utf8_bytes_without_splitting_characters(completed_run, log, truncated):
+    tests = completed_run({"tests": {"command": "test", "rc": 0, "log": log}})["evidence"]["tests"]
+    assert tests["truncated"] is truncated
+    assert len(tests["log"].encode("utf-8")) <= MAX_LOG_BYTES
+    assert log.startswith(tests["log"])
+    assert "\ufffd" not in tests["log"]
+
+
+@pytest.mark.parametrize("raw", ["APPROVE: legacy text", "", [], False])
+def test_legacy_text_result_is_not_promoted_to_evidence(completed_run, raw):
+    report = completed_run(raw)
+    assert all(report["evidence"][key] == {"status": "unavailable"}
+               for key in ("ci", "tests", "diff", "acceptance"))
+    assert "reference_opinion" not in report
+
+
+def test_evidence_extension_keeps_a_real_bundle_of_the_recorded_head(completed_run, tmp_path):
+    report = completed_run({"tests": {"command": "false", "rc": 1, "log": ""}})
+    bundle = tmp_path / "decoded.bundle"
+    bundle.write_bytes(base64.b64decode(report["bundle"], validate=True))
+    heads = subprocess.check_output(["git", "bundle", "list-heads", str(bundle)], text=True)
+    assert heads.strip() == report["commit"] + " refs/heads/" + report["branch"]
+    assert report["evidence"]["tests"] == {
+        "status": "available", "command": "false", "rc": 1, "log": "", "truncated": False}
+    assert "reference_opinion" not in report
