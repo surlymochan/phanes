@@ -52,6 +52,8 @@
    - acquire 连续失败后返回 queued，不进入 finalizing，也不记为 budget_exceeded；lane 保留当前任务，在可处理控制消息的 30 秒退避后重新准入。独立 run 的 runner 也保持存活，在可响应停止请求的 30 秒退避后重试同一任务、工作区和 token，协调器恢复后自动继续执行。
    - acquire 网络调用和退避不持有本机 provider-concurrency 全局锁；确认远端准入后重新加锁检查本机限额，避免慢链路拖延其他本机任务或并发超限。
    - release 先写入 `fleet-release-pending.json`，由独立进程补发，结束流程不等待网络。补发单次仍有 8 秒超时，失败后指数退避至 60 秒，成功后删除待发记录。CLI/常驻 supervisor 启动会扫描 runs 下的待发记录，重启补发进程；每个 run 的文件锁避免重复消费者。
+   - release worker 的状态确认与 runner 的终态写入共用每个 run 的 `status.lock`，保护整个读取、合并、写入过程，避免旧快照覆盖 `finished` 或结束结果；锁内不调用协调器。
+   - lane 在 capacity-unreachable 的 30 秒退避期间收到 abort/down 时，将当前 run 正常结束为 stopped，并把响应未知的 acquire token 交给持久 release 补发队列；down 随后停止 supervisor，abort 后仍可接收新任务。停止时不再发起 acquire。
    - release 落盘后立即移交进程内预约所有权，允许 AGY 上游 403 的既有重试路径继续；下一次 acquire 等待待发记录确认清除后才发起新预约，避免跨进程缓存残留或旧 release 删除新 token。
    - 等待旧 release 确认时，每 0.1 秒检查待发记录和停止请求，最多等待 24.6 秒（与 3 次 8 秒调用及退避的窗口一致），不占用本机准入锁。正常的异步进程启动延迟不会立即触发不可达降级；超出窗口仍未确认才记录耗时并将 run/lane 标记为 `capacity-unreachable`，保留待发记录与 token 供后续恢复。
    - consult 未获准入也可能已经在远端提交预约；结束时按落盘 token 补发 release，清理临时目录前检查预约和待发记录，保留全部恢复凭据。

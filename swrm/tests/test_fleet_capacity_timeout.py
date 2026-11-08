@@ -112,6 +112,60 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
         self.assertNotIn(str(self.rdir), xs._FLEET_RESERVATIONS)
         self.assertTrue((self.rdir / 'fleet-release-pending.json').exists())
 
+    def test_release_ack_cannot_overwrite_concurrent_run_completion(self):
+        xs.set_status(str(self.rdir), state='running', fleet_release_pending=True)
+        pending = self.rdir / 'fleet-release-pending.json'
+        xs.jsave(str(pending), {'command': ['guard'], 'payload': {'op': 'release', 'token': 'a' * 32}})
+        snapshot_read, resume, completed = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        load = xs.jload
+
+        def paused_load(path, default=None):
+            row = load(path, default)
+            if threading.current_thread() is worker and path == str(self.rdir / 'status.json'):
+                snapshot_read.set()
+                if not resume.wait(5):
+                    raise TimeoutError('release worker was not resumed')
+            return row
+
+        def release():
+            try:
+                xs.retry_fleet_release(str(self.rdir))
+            except Exception as error:
+                errors.append(error)
+
+        def finalize():
+            try:
+                xs.set_status(str(self.rdir), state='finished', result='complete')
+            except Exception as error:
+                errors.append(error)
+            finally:
+                completed.set()
+
+        worker = threading.Thread(target=release)
+        finalizer = threading.Thread(target=finalize)
+        with mock.patch.object(xs, 'jload', side_effect=paused_load), \
+                mock.patch.object(xs, 'fleet_guard_call', return_value={'ok': True}):
+            worker.start()
+            try:
+                self.assertTrue(snapshot_read.wait(5))
+                finalizer.start()
+                # Without serialization this finishes before the stale worker write.
+                completed.wait(0.2)
+            finally:
+                resume.set()
+                worker.join(5)
+                if finalizer.ident is not None:
+                    finalizer.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(finalizer.is_alive())
+        self.assertEqual(errors, [])
+        status = load(str(self.rdir / 'status.json'))
+        self.assertEqual(status['state'], 'finished')
+        self.assertEqual(status['result'], 'complete')
+        self.assertFalse(status['fleet_release_pending'])
+        self.assertFalse(pending.exists())
+
     def test_pending_release_waits_for_delayed_ack_before_new_acquire(self):
         token = 'a' * 32
         saved = self.rdir / 'fleet-reservation.json'
@@ -432,6 +486,82 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
         self.assertNotIn(str(self.rdir), xs._FLEET_RESERVATIONS)
+
+    def test_lane_stop_during_capacity_backoff_finalizes_and_queues_release(self):
+        for operation in ('down', 'abort'):
+            with self.subTest(operation=operation):
+                self._check_lane_stop_during_capacity_backoff(operation)
+
+    def _check_lane_stop_during_capacity_backoff(self, operation):
+        lane = {'name': 'test', 'backend': 'pi', 'model': 'fake', 'repo': str(self.root)}
+        run_id = 'stop-' + operation
+        rdir = self.root / 'runs' / run_id
+        lane_root = self.root / 'lane'
+        (lane_root / 'wt').mkdir(parents=True, exist_ok=True)
+        ws = {'mode': 'cwd', 'repo': str(self.root), 'root': str(self.root), 'path': str(self.root)}
+        clock = [100.0]
+        assigned, stopped = [], []
+        requests = []
+        child = mock.Mock()
+        child.alive.return_value = True
+
+        def control(server, active_lane, current, child, turn, pending):
+            if not assigned:
+                current.update(run_id=run_id, started=clock[0], queued_at=clock[0],
+                               budget_minutes=1, task='task')
+                assigned.append(True)
+            elif not current.get('run_id'):
+                return True
+            elif current.get('_capacity_workspace') and not stopped:
+                status = xs.jload(str(rdir / 'status.json'), {})
+                self.assertEqual(status['queue_reason'], 'capacity-unreachable')
+                current.update(stop_requested=True, abort_requested=True)
+                if operation == 'down':
+                    current['down_requested'] = True
+                stopped.append(True)
+            return False
+
+        def coordinator(command, payload):
+            requests.append(dict(payload))
+            raise RuntimeError('response lost after commit')
+
+        with contextlib.ExitStack() as stack:
+            for name, kwargs in {
+                'DATA': {'new': str(self.root)}, 'RUNS': {'new': str(self.root / 'runs')},
+                'NOW': {'side_effect': lambda: clock[0]},
+                'lane_ctl_listener': {}, 'lane_root': {'return_value': str(lane_root)},
+                'lane_child': {'return_value': child}, 'lane_write_state': {},
+                'lane_control_messages': {'side_effect': control},
+                'lanes_by_name': {'return_value': [lane]},
+                'lane_prepare_workspace': {'return_value': ws},
+                'run_workspace_prepare': {'return_value': None}, 'load_policy': {'return_value': {}},
+                'add_lessons_to_prompt': {'side_effect': lambda p, *a: (p, [])},
+                'add_patterns_to_prompt': {'side_effect': lambda p, *a: (p, [])},
+                'fleet_guard_command': {'return_value': ['guard']},
+                'fleet_guard_call': {'side_effect': coordinator},
+                'start_fleet_release_worker': {}, 'git': {'return_value': (0, '', '')},
+                'finalize_workspace': {'return_value': {'commit': None}},
+                'changed_paths': {'return_value': []}, 'append_ledger': {}, 'cleanup_executor_tmp': {},
+            }.items():
+                stack.enter_context(mock.patch.object(xs, name, **kwargs))
+            turn = stack.enter_context(mock.patch.object(xs, 'lane_run_turn'))
+            stack.enter_context(mock.patch.object(xs.time, 'sleep',
+                                                 side_effect=lambda s: clock.__setitem__(0, clock[0] + s)))
+            xs.cmd_lane_serve(lane, {})
+        turn.assert_not_called()
+        self.assertEqual(stopped, [True])
+        self.assertEqual(len(requests), 3)
+        status = xs.jload(str(rdir / 'status.json'), {})
+        self.assertEqual(status['state'], 'finished')
+        self.assertEqual(status['status'], 'stopped')
+        result = xs.jload(str(rdir / 'result.json'), {})
+        self.assertEqual(result['error_class'], 'stopped')
+        self.assertEqual(result['attempts'][-1]['rc'], 130)
+        pending = xs.jload(str(rdir / 'fleet-release-pending.json'), {})
+        self.assertEqual(pending['payload']['op'], 'release')
+        self.assertEqual(pending['payload']['token'], requests[0]['token'])
+        self.assertNotIn(str(rdir), xs._FLEET_RESERVATIONS)
+        child.close.assert_called_once()
 
     def test_lane_capacity_failure_does_not_finalize(self):
         lane = {'name': 'test', 'backend': 'pi', 'model': 'fake'}

@@ -3790,10 +3790,15 @@ AUTH_ERROR_RE = re.compile(r"(authentication required|not authenticated|unauthen
 
 
 def set_status(rdir, **kw):
-    s = jload(f"{rdir}/status.json", {}) or {}
-    s.update(kw)
-    s["updated"] = NOW()
-    jsave(f"{rdir}/status.json", s)
+    os.makedirs(rdir, exist_ok=True)
+    # Detached release acknowledgements must merge with runner finalization.
+    # Lock the whole read/modify/write, using a file that jsave never replaces.
+    with open(os.path.join(rdir, "status.lock"), "a") as lock:
+        _flock(lock, LOCK_EX)
+        s = jload(f"{rdir}/status.json", {}) or {}
+        s.update(kw)
+        s["updated"] = NOW()
+        jsave(f"{rdir}/status.json", s)
 
 
 def concurrency_keys(backend, provider=None):
@@ -8645,8 +8650,14 @@ def lane_do_run(lane, spec, child, server, current):
                     return (not (spec.get("abort_requested") or spec.get("down_requested"))
                             and (first_start or queue_start < deadline) and child.alive())
 
-                if not reserve_provider_slot(os.path.join(RUNS, rid), attempt_lane["backend"], provider,
-                                             load_policy(), lane_name=lane["name"], keep_waiting=keep_waiting):
+                may_acquire = keep_waiting()
+                if not may_acquire:
+                    # A queued turn has no executor; release even an unknown
+                    # acquire before finalizing, without another network call.
+                    release_fleet_slot(rdir)
+                if not may_acquire or not reserve_provider_slot(
+                        os.path.join(RUNS, rid), attempt_lane["backend"], provider,
+                        load_policy(), lane_name=lane["name"], keep_waiting=keep_waiting):
                     status = jload(os.path.join(rdir, "status.json"), {}) or {}
                     if status.get("capacity_unreachable") and keep_waiting():
                         spec["_capacity_workspace"] = ws
@@ -8872,7 +8883,7 @@ def cmd_lane_serve(lane, policy):
                 backoff = min(backoff * 2, 60)
         pending = []
         down = lane_control_messages(server, lane, current, child, {}, pending)
-        if down or current.get("down_requested"):
+        if (down or current.get("down_requested")) and not current.get("run_id"):
             shutdown = True
             continue
         if current.get("run_id"):
