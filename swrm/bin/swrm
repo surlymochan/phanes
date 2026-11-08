@@ -9926,7 +9926,10 @@ FLEET_HEALTH_PRESSURES = (
 # probe stands on its own, so a probe that fails never hides a fault another probe found.
 FLEET_HEALTH_PROBES = (
     ("disk_pct", "df -P /"),
-    ("inode_pct", "df -Pi /"),
+    # Keep ``-i`` as its own option.  Besides being accepted by both GNU and BSD
+    # df, this makes the probe unambiguous to command runners that classify the
+    # requested metric from argv rather than executing a shell.
+    ("inode_pct", "df -P -i /"),
     ("mem_avail_mb", 'case "$(uname -s)" in Darwin) vm_stat ;; *) free -m ;; esac'),
 )
 FLEET_HEALTH_TIMEOUT = 30
