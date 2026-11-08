@@ -9,6 +9,73 @@ describe("Nibiru A2A terminal result delivery", () => {
     server = undefined;
   });
 
+  test("omits output containing credentials or provider diagnostics for every terminal status", async () => {
+    const bodies: Array<{ output?: string }> = [];
+    const logs: string[] = [];
+    const token = "secret-test-token";
+    const providerError = "raw provider failure: private details";
+    const sender = createNibiruResultSender({
+      endpoint: "https://nibiru.example/results",
+      token,
+      log: (message) => logs.push(message),
+      fetch: (async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    for (const terminal of ["completed", "failed", "interrupted"] as const) {
+      for (const output of [token, providerError, `${token} raw provider failure`]) {
+        await sender.sendTerminalResult({
+          idempotencyKey: `${terminal}-${bodies.length}`,
+          taskId: `task-${terminal}`,
+          terminal,
+          output,
+          providerError,
+        });
+      }
+    }
+
+    expect(bodies).toHaveLength(9);
+    expect(bodies.every((body) => !Object.hasOwn(body, "output"))).toBe(true);
+    const serialized = JSON.stringify({ bodies, logs });
+    expect(serialized).not.toContain(token);
+    expect(serialized).not.toContain("raw provider failure");
+  });
+
+  test("preserves safe output and permits another callback after retry exhaustion", async () => {
+    const bodies: unknown[] = [];
+    const logs: string[] = [];
+    const sender = createNibiruResultSender({
+      endpoint: "https://nibiru.example/results",
+      token: "secret-test-token",
+      maxRetries: 1,
+      retryDelayMs: 0,
+      log: (message) => logs.push(message),
+      fetch: (async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        if (bodies.length <= 2) throw new Error("secret-test-token raw provider failure");
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+    const result = {
+      idempotencyKey: "task-retry",
+      taskId: "task-retry",
+      terminal: "completed" as const,
+      output: "safe completed result",
+      providerError: "raw provider failure",
+    };
+
+    await expect(sender.sendTerminalResult(result)).rejects.toThrow("Nibiru result delivery failed after retries.");
+    await Promise.all([sender.sendTerminalResult(result), sender.sendTerminalResult(result)]);
+    await sender.sendTerminalResult(result);
+
+    expect(bodies).toHaveLength(3);
+    expect(bodies.every((body) => (body as { output: string }).output === result.output)).toBe(true);
+    expect(logs.join("\n")).not.toContain("secret-test-token");
+    expect(logs.join("\n")).not.toContain("raw provider failure");
+  });
+
   test("sends each terminal result, retries transient failures, and deduplicates confirmed callbacks", async () => {
     const requests: Array<{ body: unknown; authorization: string | null }> = [];
     const logs: string[] = [];
