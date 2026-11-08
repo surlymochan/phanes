@@ -3685,6 +3685,10 @@ def route(prof, st, policy, exclude=()):
         order = [b for b in order if b not in exclude]
         skipped = {}
         for b in order:
+            backend_state = st.get(b) or {}
+            if backend_state.get("disabled"):
+                skipped[b] = "backend is disabled"
+                continue
             d, why = PLANNERS[b](p, st, policy, bool(p.get("backend")), notes)
             if d:
                 if p.get("model"):
