@@ -1396,6 +1396,9 @@ def tick(lanes, state, last_warn):
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
+    # Successful dispatches consumed these lanes this tick: they cannot provide a fallback
+    # for the remaining queue. Keep memory-rejected lanes for their diagnostics (Refs #1712).
+    usable_lanes = [L for L in usable_lanes if not state.get(L)]
     # the lanes that were skipped for the host memory in this round (Refs #1712)
     memory_blocked = {L: memory_verdict[L][1] for L in usable_lanes if not memory_verdict[L][0]}
     # a task is blocked by the host memory only when EVERY lane that could take it was skipped:

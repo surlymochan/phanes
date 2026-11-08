@@ -418,6 +418,28 @@ class TickMemoryPrecheckTest(TickHarness, unittest.TestCase):
         self.assertEqual(snapshot["blocked"], 1)  # counted once, never twice
         self.assertEqual(snapshot["ready"], 0)
 
+    def test_a_backend_consumed_this_tick_cannot_keep_a_remaining_task_ready(self):
+        # B1: pi takes its strict card first; its occupied lane cannot rescue the plain
+        # card from the 135 MB codex host, regardless of lane iteration order.
+        cards = [issue(1713, "pi session task", ("lane-ready", "backend:pi", "strict-backend")),
+                 issue(1712, "plain card", ("lane-ready",))]
+        for order in (("CX10", "PI1"), ("PI1", "CX10")):
+            with self.subTest(order=order):
+                configs = {"CX10": {"host": "gores2", "backend": "codex"},
+                           "PI1": {"host": "gores1", "backend": "pi"}}
+                dispatched, logs = self.run_tick(cards, lanes={L: configs[L] for L in order},
+                                                 remote_info={"memory_available_mb": 135})
+                self.assertEqual(dispatched, [("PI1", 1713)])
+                snapshot = self.snapshots[-1]
+                self.assertEqual(snapshot["ready"], 0)
+                self.assertEqual(snapshot["blocked"], 1)
+                self.assertEqual(set(snapshot["blocked_memory"]), {1712})
+                reason = snapshot["blocked_memory"][1712]
+                self.assertEqual(reason["reason"], "blocked-by-host-memory")
+                self.assertEqual(reason["hosts"]["gores2"],
+                                 {"available_mb": 135, "threshold_mb": 400, "lanes": ["CX10"]})
+                self.assertTrue(any("blocked #1712: blocked-by-host-memory" in line for line in logs))
+
     def test_the_blocked_diagnostics_carry_the_reason_code(self):
         lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
         self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
