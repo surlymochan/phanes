@@ -122,6 +122,8 @@ $XS lane abort C1                          # or $XS stop <run-id>
 $XS lane down C1 K1 M1
 $XS lane launchd-plist C1                  # print only; install the plist yourself if wanted
 $XS lane systemd-unit K1                   # print a system unit only; install it yourself if wanted
+$XS lane supervise K1 --print              # print a POSIX process supervisor script
+$XS lane supervise --broker --print        # print the Pi broker supervisor script
 ```
 
 `lane assign` refuses a non-idle lane and immediately returns the normal run id. A provider cap in
@@ -139,6 +141,16 @@ aborts an active turn and stops its child and supervisor. The printed LaunchAgen
 systemd unit uses `Restart=always`, `MemoryMax=900M`, `CPUQuota=150%`, and `Nice=10`; neither is installed
 automatically. On small Linux lane hosts, omit `--verify` to keep verification load off the agent host; the planner
 can verify elsewhere.
+
+`lane supervise` prints a POSIX `sh` supervisor for hosts without systemd: pidfiles under
+`$OPENSWARM_HOME/supervise/`, log under `$OPENSWARM_HOME/logs/<name>.log` (rotated at 10 MiB), restart with a
+1, 2, 4 ... 60 second backoff, and the subcommands `start`, `run`, `stop` and `status`. The script is always
+written to stdout; `--print` only states that intent. `stop` stops the restarts first, then asks the lane to shut
+itself down with `lane down` (bounded by `OPENSWARM_SUPERVISE_DOWN_TIMEOUT`, 20 seconds), and only then
+terminates the process tree, so the executor of the lane does not survive as an orphan. The broker script uses
+`~/Library/Caches/swrm-pi-broker/broker.sock` by default; point the Pi runtime at the same socket with
+`OPENSWARM_PI_BROKER_SOCKET` and set `OPENSWARM_PI_AUTH_MODULE` or `OPENSWARM_PI_RUNTIME` when the Pi install
+is not below `~/.local`.
 
 Cursor ACP selects an exact model value first; otherwise a base name such as `composer-2.5` resolves to a unique
 parameterized value (`composer-2.5[fast=true]`). Ambiguity fails with the matches. State and results record the resolved value.
@@ -289,6 +301,7 @@ Grouped by what the command does. `swrm <command> --help` lists every flag.
 | `lane down` | Stop lane turns, children, and supervisors. | `$XS lane down C1 K1` |
 | `lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `$XS lane launchd-plist C1` |
 | `lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `$XS lane systemd-unit K1` |
+| `lane supervise` | Print a POSIX process supervisor script for a lane or the Pi broker. | `$XS lane supervise K1 --print` / `$XS lane supervise --broker --print` |
 | `batch` | Queue task cards across fleet hosts and collect their branches. | `$XS batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `batch status` | Show the state of one batch. | `$XS batch status <batch-id>` |
 | `bus init` | Create the bus labels, issue template, and protocol README. | `$XS bus init acme/swrm-bus` |

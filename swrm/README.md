@@ -222,6 +222,7 @@ Every subcommand, grouped by what it does. `swrm <command> --help` lists all fla
 | `swrm lane down` | Stop lane turns, children, and supervisors. | `swrm lane down C1 K1` |
 | `swrm lane launchd-plist` | Print an uninstalled LaunchAgent plist for a lane. | `swrm lane launchd-plist C1` |
 | `swrm lane systemd-unit` | Print an uninstalled systemd unit for a lane. | `swrm lane systemd-unit K1` |
+| `swrm lane supervise` | Print a POSIX process supervisor script for a lane or the Pi broker. | `swrm lane supervise K1 --print` / `swrm lane supervise --broker --print` |
 | `swrm batch` | Queue task cards across fleet hosts and collect their branches. | `swrm batch --repo project --cards ./cards --hosts worker,sandbox --per-host 1 --backend pi --budget-minutes 20 --detach` |
 | `swrm batch status` | Show the state of one batch. | `swrm batch status <batch-id>` |
 | `swrm bus init` | Create the bus labels, issue template, and protocol README. | `swrm bus init acme/swrm-bus` |
@@ -477,7 +478,30 @@ swrm lane abort C1                  # swrm stop <run-id> also aborts a lane turn
 swrm lane down C1 K1 M1
 swrm lane launchd-plist C1           # prints a KeepAlive LaunchAgent plist; does not install it
 swrm lane systemd-unit K1             # prints a system systemd unit; does not install it
+swrm lane supervise K1 --print         # prints a POSIX process supervisor script
+swrm lane supervise --broker --print   # prints the Pi broker supervisor script
 ```
+
+`swrm lane supervise` prints a POSIX `sh` supervisor for hosts without systemd: it keeps a pidfile per
+supervised process under `$OPENSWARM_HOME/supervise/`, writes the log to `$OPENSWARM_HOME/logs/<name>.log`,
+rotates that log at 10 MiB, and restarts a crashed command with an exponential backoff of 1, 2, 4 ... 60
+seconds. The script understands `start` (detached from the terminal, prints the supervisor pid), `run` (in the
+foreground), `stop` and `status`; the script itself is always written to stdout, `--print` only states that
+intent. The supervised command runs in its own session, so `stop` reaches the executor the command started and
+not only the command itself; the tree walk uses `pgrep -P` (or `ps`), so it works on Linux and macOS.
+
+`stop` first tells the supervisor to stop restarting the command, then asks the lane to shut itself down with
+`swrm lane down <lane>` (bounded by `OPENSWARM_SUPERVISE_DOWN_TIMEOUT`, 20 seconds by default), so the lane
+cleans up its own executor, lane state and control socket. Only if that does not finish does the script
+terminate the process tree itself, and the pidfile only disappears together with the supervisor, so a second
+supervisor cannot start while the first one is still alive. `OPENSWARM_SUPERVISE_STOP_TIMEOUT` (15 seconds)
+bounds the wait for the supervisor and `OPENSWARM_SUPERVISE_BACKOFF` (1 second) the first backoff window.
+
+The broker script supervises `pi-minimax-broker.mjs` on `~/Library/Caches/swrm-pi-broker/broker.sock` by
+default; it creates the socket directory, removes a stale socket only when the connection is refused, and
+starts the broker with the socket, the Pi auth module and the model. Point the Pi runtime at the same socket
+with `OPENSWARM_PI_BROKER_SOCKET` and, if the auth module is not found, set `OPENSWARM_PI_AUTH_MODULE` or
+`OPENSWARM_PI_RUNTIME`; `OPENSWARM_PI_NODE` overrides the node binary.
 
 Lane runs use the normal `runs/<id>` files, `swrm/<id>` commit branch, host verification, ledger, `watch`,
 `runs`, and `report` paths. `--base REV` selects the commit used to reset a lane worktree for one assignment.
