@@ -18,8 +18,10 @@ This probe is that reader.  It answers two questions and alarms on both:
   heartbeat is not proof of life.
 
 The probe is offline and read-only: it never starts, stops or touches the dispatcher.
-Run it periodically (the health loop does the same) and treat a non-zero exit as an
-alarm.  ``--json`` prints the same verdict for a monitor.
+``swrm fleet status`` includes this verdict in its text and JSON health output.
+``swrm fleet health`` exits non-zero on an alarm; ``swrm fleet health --watch 60``
+rechecks both signals every minute in an independent monitor process, including when
+the dispatcher exits or hangs. ``--json`` prints the same verdict for a monitor.
 
 The paths follow the writer (``tools/lane-autodispatch/autodispatch.py``): the file is
 ``<state dir>/lanes-status.json``, the state dir is ``~/phanes-ctl/autodispatch`` by

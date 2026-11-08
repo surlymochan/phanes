@@ -9743,7 +9743,42 @@ def fleet_snapshot():
             "lane_config_error": config_error}
 
 
+def lanes_health_probe():
+    """Load the control-plane reader shared with the standalone health probe."""
+    path = Path(__file__).resolve().parents[2] / "tools" / "check-lanes-status-stall.py"
+    spec = importlib.util.spec_from_file_location("lanes_health_probe", path)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    return probe
+
+
+def lanes_health_report(probe):
+    snapshot = probe.snapshot_report(probe.lanes_status_path())
+    writer = probe.writer_report()
+    alerts = probe.alerts(snapshot, writer)
+    return {"ok": not alerts, "snapshot": snapshot, "writer": writer, "alerts": alerts}
+
+
+def cmd_fleet_health(args):
+    """Recheck the snapshot and writer each period, independently of dispatch ticks."""
+    probe = lanes_health_probe()
+    interval = args.watch
+    if interval is not None and interval <= 0:
+        raise ValueError("--watch must be greater than zero")
+    while True:
+        report = lanes_health_report(probe)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False), flush=True)
+        else:
+            print(probe.render(report["snapshot"], report["writer"], report["alerts"]), flush=True)
+        if interval is None:
+            raise SystemExit(0 if report["ok"] else 1)
+        time.sleep(interval)
+
+
 def cmd_fleet(args):
+    if args.fleet_cmd == "health":
+        return cmd_fleet_health(args)
     if args.fleet_cmd == "_snapshot":
         print(json.dumps(fleet_snapshot(), ensure_ascii=False))
         return
@@ -9794,9 +9829,15 @@ def cmd_fleet(args):
         else:
             row["status"] = "reachable"
         rows.append(row)
+    probe = lanes_health_probe()
+    control_plane = lanes_health_report(probe)
+    ok = control_plane["ok"] and all(row["status"] == "reachable" for row in rows)
     if args.json:
-        print(json.dumps({"hosts": rows}, indent=2, ensure_ascii=False))
+        print(json.dumps({"hosts": rows, "control_plane": control_plane,
+                          "ok": ok, "status": "ok" if ok else "degraded"}, indent=2, ensure_ascii=False))
     else:
+        if control_plane["snapshot"]["status"] != "missing" or control_plane["writer"]["status"] != "unknown":
+            print(probe.render(control_plane["snapshot"], control_plane["writer"], control_plane["alerts"]))
         for row in rows:
             state = row["status"]
             print(f"{row['name']}  {state}  lanes={len(row['lanes'])} active={len(row['active_runs'])}")
@@ -12312,6 +12353,10 @@ def main():
     fleet_sub = sp.add_subparsers(dest="fleet_cmd", required=True)
     fp = fleet_sub.add_parser("status")
     fp.add_argument("--json", action="store_true")
+    fp = fleet_sub.add_parser("health", help="check control-plane snapshot freshness and writer liveness")
+    fp.add_argument("--json", action="store_true")
+    fp.add_argument("--watch", type=float, metavar="SECONDS",
+                    help="repeat health checks at this interval (for example, 60)")
     fp = fleet_sub.add_parser("exec")
     fp.add_argument("--timeout", type=float, default=300)
     fp.add_argument("host")

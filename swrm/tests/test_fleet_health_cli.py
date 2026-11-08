@@ -8,7 +8,7 @@ kept dispatching, and no reader noticed.
 The reader is ``tools/check-lanes-status-stall.py``: an offline probe that judges the
 snapshot (fresh / expired, with the last ``_at``) and the liveness of its writer (the
 heartbeat of the dispatcher loop and the pid file), and alarms on both.  The tests below
-drive the probe the way the health loop does -- as a command, with an isolated home -- and
+drive the probe and swrm fleet health as commands, with an isolated home, and
 pin the contract the issue asks for:
 
 * a frozen snapshot is reported as expired, with the last ``_at``, and the probe fails;
@@ -20,6 +20,9 @@ pin the contract the issue asks for:
 """
 import importlib.machinery
 import importlib.util
+import argparse
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -199,6 +202,77 @@ class LanesStatusHealthProbeTest(unittest.TestCase):
             run_probe(["--lanes-status-file", str(snapshot)], home)
             after = {path: path.stat().st_mtime_ns for path in home.rglob("*") if path.is_file()}
             self.assertEqual(before, after, "the probe wrote into the control plane home")
+
+
+class FleetHealthIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import _load
+        cls.swrm = _load.load()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=REPO_ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.home, self.snapshot = fixture(self.tmp.name, STALLED_AT)
+        self.state = self.snapshot.parent
+        self.environment = mock.patch.dict(os.environ, {
+            "OPENSWARM_AD_STATE_DIR": str(self.state),
+            "OPENSWARM_CTL_STATE_DIR": str(self.home / "state"),
+            "OPENSWARM_LANES_STATUS_FILE": str(self.snapshot),
+        })
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def test_existing_fleet_status_reports_stale_in_text_and_overall_json(self):
+        for as_json in (False, True):
+            with self.subTest(json=as_json), mock.patch.object(self.swrm, "fleet_config", return_value={}), \
+                    mock.patch.object(self.swrm, "instabox_states", return_value={}), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="status", json=as_json))
+                if as_json:
+                    result = json.loads(output.getvalue())
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["status"], "degraded")
+                    self.assertEqual(result["control_plane"]["snapshot"]["at"], STALLED_AT)
+                else:
+                    self.assertIn("WARNING", output.getvalue())
+                    self.assertIn("stale", output.getvalue())
+                    self.assertIn(STALLED_AT, output.getvalue())
+
+    def test_health_cli_detects_dead_writer_with_fresh_heartbeat(self):
+        self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
+        (self.state / "autodispatch.pid").write_text(json.dumps({"pid": dead_pid()}))
+        environment = dict(os.environ, HOME=str(self.home), OPENSWARM_HOME=str(self.home / "swrm"))
+        result = subprocess.run([sys.executable, str(REPO_ROOT / "swrm/bin/swrm"),
+                                 "fleet", "health", "--json"], env=environment,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["writer"]["status"], "dead")
+
+    def test_periodic_health_rechecks_after_snapshot_stalls_and_writer_exits(self):
+        self.snapshot.write_text(json.dumps({"_at": time.strftime("%F %T")}))
+        pid_file = self.state / "autodispatch.pid"
+        pid_file.write_text(json.dumps({"pid": os.getpid()}))
+        calls = []
+
+        def next_period(seconds):
+            calls.append(seconds)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            self.snapshot.write_text(json.dumps({"_at": STALLED_AT}))
+            pid_file.write_text(json.dumps({"pid": dead_pid()}))
+
+        with mock.patch.object(self.swrm.time, "sleep", side_effect=next_period), \
+                contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(KeyboardInterrupt):
+            self.swrm.cmd_fleet(argparse.Namespace(fleet_cmd="health", json=True, watch=60))
+        first, second = map(json.loads, output.getvalue().splitlines())
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["snapshot"]["status"], "stale")
+        self.assertEqual(second["writer"]["status"], "dead")
+        self.assertEqual(calls, [60, 60])
 
 
 class mock_environ:
