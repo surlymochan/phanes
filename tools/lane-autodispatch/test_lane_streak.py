@@ -82,6 +82,20 @@ class LaneStreakTickTest(unittest.TestCase):
             self.assertEqual(AUTODISPATCH.read_lane_streaks()["M19"], {"n": 1, "runs": ["run-3"]})
         self.with_state_dir(run)
 
+    def test_missing_or_malformed_streak_file_starts_clean(self):
+        def run(directory):
+            path = directory / "lane-streak.json"
+            for damaged in (None, "{not json", '{"M19":{"n":99,"runs":["old"]}}'):
+                if damaged is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(damaged)
+                AUTODISPATCH.record_lane_terminal("M19", "run-1", {"status": "exec_error"})
+                self.assertFalse((directory / "PAUSE-M19").exists())
+                self.assertEqual(AUTODISPATCH.read_lane_streaks().get("M19"),
+                                 {"n": 1, "runs": ["run-1"]})
+        self.with_state_dir(run)
+
     def test_existing_pause_marker_is_not_rewritten_or_realerted(self):
         def run(directory):
             marker = directory / "PAUSE-M19"
