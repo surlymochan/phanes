@@ -547,12 +547,35 @@ The value is part of the app bundle. Do not put a secret in it.
 1. Use your own Expo project for the build. Set `owner` and `extra.eas.projectId` in `app.json` to
    your project, and set `updates.url` to your project, so the build does not receive updates from
    the hosted project.
-2. In the Expo dashboard, open your project, then **Environment variables**. Select the built-in
+2. Use an active Apple Developer membership and identifiers owned by your Apple Developer team.
+   The checked-in `run.openbot.mobile` identifiers belong to the hosted app. Before the first
+   build, change these fields under `expo` in your local `app.json`. The examples use
+   `com.example.volto`; replace that prefix with your own unique bundle ID.
+
+   | Field | Example value |
+   | --- | --- |
+   | `ios.bundleIdentifier` | `com.example.volto` |
+   | `plugins` → `./plugins/with-share-target` → `ios.extensionBundleIdentifier` | `com.example.volto.ShareExtension` |
+   | `plugins` → `expo-widgets` → `bundleIdentifier` | `com.example.volto.ExpoWidgetsTarget` |
+   | `plugins` → `./plugins/with-notification-service` → `bundleIdentifier` | `com.example.volto.NotificationService` |
+   | `plugins` → `./plugins/with-share-target` → `ios.appGroupId` | `group.com.example.volto` |
+   | `plugins` → `expo-widgets` → `groupIdentifier` | `group.com.example.volto` |
+   | `plugins` → `./plugins/with-notification-service` → `groupIdentifier` | `group.com.example.volto` |
+
+   Register the app bundle ID, all three extension bundle IDs, and the App Group in your Apple
+   Developer team. Enable App Groups for the app and each extension, and assign the same group
+   to all four App IDs. Keep the group value the same in all three plugin settings above.
+   Use signing credentials from that team. Let EAS create or select a provisioning profile for
+   each of the four targets with these identifiers and entitlements. See
+   [Apple App Groups setup](https://developer.apple.com/help/account/identifiers/register-an-app-group)
+   and [EAS app extension signing](https://docs.expo.dev/build-reference/app-extensions/).
+   For TestFlight, create an app in your own App Store Connect account with the new app bundle ID.
+3. In the Expo dashboard, open your project, then **Environment variables**. Select the built-in
    `production` environment and add `EXPO_PUBLIC_VOLTO_API_URL` with your account service origin.
    Use `Plain text` or `Sensitive` visibility. A `Secret` variable is not available to a local build.
    This configuration needs no custom environment or paid Expo plan. See
    [Expo environment variables](https://docs.expo.dev/eas/environment-variables/manage/).
-3. Build with the `self-hosted` profile. It reads the account service address from your project's
+4. Build with the `self-hosted` profile. It reads the account service address from your project's
    `production` EAS environment, uses the `self-hosted` update channel, and keeps
    `EXPO_PUBLIC_APP_ENV=production`.
 
@@ -562,8 +585,10 @@ The value is part of the app bundle. Do not put a secret in it.
    ```
 
    For a build on your own Mac, add `--local`. The command writes the `.ipa` file. See
-   [Local TestFlight build](#local-testflight-build) for the signing and upload steps.
-4. Install the build on the phone, and sign in with an email address. The code comes from your SMTP
+   [Local TestFlight build](#local-testflight-build) for the signing and upload steps. Keep the
+   `self-hosted` build command above when adding `--local`; the shortcut in that section selects
+   `production`. Upload the IPA to the App Store Connect app you created for your bundle ID.
+5. Install the build on the phone, and sign in with an email address. The code comes from your SMTP
    account. The phone then uses your account service for the session, the server directory, and the
    profile.
 
