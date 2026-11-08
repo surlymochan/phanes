@@ -149,6 +149,53 @@ def test_success_without_counter_does_not_create_state_directory(tmp_path, monke
     assert not (tmp_path / "absent").exists()
 
 
+@pytest.mark.parametrize("prior_failures", [0, 2])
+def test_finish_label_timeout_counts_run_once_after_state_reload(tmp_path, monkeypatch, prior_failures):
+    """A retried GitHub update must not turn one failed run into three failures."""
+    setup_brake(tmp_path, monkeypatch)
+    for number in range(prior_failures):
+        AD.note_lane_failure("CX9", number, "exec_error", seconds=45)
+    state = {"CX9": {"issue": 1711, "run": "run-1711"}}
+    AD.save_state(state)
+    info = {"status": "failed", "seconds": 45, "error_class": "exec_error"}
+
+    def label_timeout(*args):
+        raise TimeoutError("GitHub label update timed out")
+
+    monkeypatch.setattr(AD, "label_lane_failed", label_timeout)
+    for _ in range(3):
+        # The failure ledger and unfinished run both survive an AD restart.
+        state = json.loads((tmp_path / "state.json").read_text())
+        with pytest.raises(TimeoutError, match="GitHub label update timed out"):
+            AD.finish("CX9", {"host": "test-host"}, state["CX9"], info, state)
+        runs = AD.load_lane_failures()["CX9"]["runs"]
+        assert len(runs) == prior_failures + 1
+        assert state == {"CX9": {"issue": 1711, "run": "run-1711"}}
+        assert (tmp_path / "PAUSE-CX9").exists() == (prior_failures == 2)
+    assert runs[-1]["run"] == "run-1711"
+    alerts = tmp_path / "health.alert"
+    if prior_failures == 2:
+        assert len(alerts.read_text().splitlines()) == 1
+    else:
+        assert not alerts.exists()
+
+    monkeypatch.setattr(AD, "label_lane_failed", lambda *args: None)
+    result = AD.finish("CX9", {"host": "test-host"}, state["CX9"], info, state)
+    assert result["done"] and 1711 in state["_done"]
+    assert len(AD.load_lane_failures()["CX9"]["runs"]) == prior_failures + 1
+
+
+def test_distinct_runs_of_same_issue_count_separately(tmp_path, monkeypatch):
+    setup_brake(tmp_path, monkeypatch)
+    monkeypatch.setattr(AD, "label_lane_failed", lambda *args: None)
+    info = {"status": "failed", "seconds": 45, "error_class": "exec_error"}
+    for number in range(1, 4):
+        st = {"issue": 1711, "run": f"run-{number}"}
+        assert AD.finish("CX9", {"host": "test-host"}, st, info, {})["done"]
+        assert len(AD.load_lane_failures()["CX9"]["runs"]) == number
+        assert (tmp_path / "PAUSE-CX9").exists() == (number == 3)
+
+
 # #1711 review evidence (paths relative to the repository; results: PASS):
 # B1 (runtime): tools/lane-autodispatch/autodispatch.py:702 ->
 # test_remote_seconds_projection (45s / 181s / unknown): PASS, real SSH-reader projection.
@@ -177,4 +224,10 @@ def test_success_without_counter_does_not_create_state_directory(tmp_path, monke
 # 120s failures ending at 1000 / 1190 / 1380 count 1 / 2 / 3 and block card 4.
 # FOLLOW-UP: health.alert is covered by B2; the external health-loop's health.json
 # aggregation and the supervisor's choice of health input need host verification.
+# Third-review B1 (duplicate run counting): autodispatch.py:190, :209, :1258 ->
+# test_finish_label_timeout_counts_run_once_after_state_reload (0 / 2 prior failures):
+# PASS; three GitHub timeouts and a successful retry count once using the persisted run ID.
+# test_distinct_runs_of_same_issue_count_separately: PASS; three distinct runs still brake.
+# These two tests cover tools/lane-autodispatch/autodispatch.py; the timeout regression
+# failed on baseline 94ce9a6e1166b4583671f198d7acedc5cbdb2d39 before this fix.
 # No commit or GitHub comment is created under the execution task's explicit restrictions.

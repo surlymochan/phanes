@@ -187,7 +187,7 @@ def save_lane_failures(data):
     with open(temporary, "w", encoding="utf-8") as stream: json.dump(data, stream, ensure_ascii=False, indent=1)
     os.replace(temporary, lane_failures_path())
 
-def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=None):
+def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=None, run=None):
     """Track measured quick no-commit runs and brake a lane after N consecutive failures (Refs #1711)."""
     failures = load_lane_failures()
     if committed:
@@ -204,8 +204,12 @@ def note_lane_failure(lane, issue, reason, seconds=None, committed=False, now=No
     now = time.time() if now is None else now
     previous = failures.get(lane, {})
     runs = previous.get("runs", []) if isinstance(previous, dict) else []
+    # finish() can retry after a GitHub timeout, including after an AD restart.
+    # Deduplicate by run, since the same issue may legitimately run more than once.
+    if run and any(row.get("run") == run for row in runs):
+        return len(runs)
     # Dispatch waits do not break consecutive failures; only the completed run is timed.
-    runs = [*runs, {"at": now, "issue": int(issue), "reason": str(reason or "unknown"), "seconds": seconds}]
+    runs = [*runs, {"at": now, "issue": int(issue), "reason": str(reason or "unknown"), "seconds": seconds, "run": run}]
     failures[lane] = {"runs": runs}
     save_lane_failures(failures)
     if len(runs) >= max(1, LANE_FAILURE_LIMIT):
@@ -1251,7 +1255,7 @@ def finish(lane, cfg, st, info, state):
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
         note_lane_failure(lane, n, info.get("error_class") or info.get("status"),
-                          seconds=info.get("seconds"), committed=False)
+                          seconds=info.get("seconds"), committed=False, run=run)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
