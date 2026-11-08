@@ -112,6 +112,85 @@ class FleetCapacityTimeoutTests(unittest.TestCase):
         self.assertNotIn(str(self.rdir), xs._FLEET_RESERVATIONS)
         self.assertTrue((self.rdir / 'fleet-release-pending.json').exists())
 
+    def test_pending_release_waits_for_delayed_ack_before_new_acquire(self):
+        token = 'a' * 32
+        saved = self.rdir / 'fleet-reservation.json'
+        payload = {'run_id': 'slow', 'token': token}
+        xs.jsave(str(saved), {'command': ['guard'], 'payload': payload})
+        xs._FLEET_RESERVATIONS[str(self.rdir)] = (['guard'], payload)
+        clock = [0.0]
+        requests = []
+
+        def coordinator(command, payload):
+            requests.append(dict(payload))
+            return {'ok': True, 'admitted': True}
+
+        def wait(seconds):
+            clock[0] += seconds
+            if clock[0] >= 0.8 and not requests:
+                self.assertTrue(xs.retry_fleet_release(str(self.rdir)))
+
+        with mock.patch.object(xs, 'DATA', str(self.root)), \
+                mock.patch.object(xs, 'RUNS', str(self.root / 'runs')), \
+                mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
+                mock.patch.object(xs, 'fleet_guard_call', side_effect=coordinator), \
+                mock.patch.object(xs, 'start_fleet_release_worker'), \
+                mock.patch.object(xs.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(xs.time, 'sleep', side_effect=wait), \
+                mock.patch.object(xs, 'lane_write_state'):
+            self.assertFalse(xs.release_fleet_slot(str(self.rdir)))
+            self.assertTrue(xs.reserve_provider_slot(str(self.rdir), 'agy', None, {}, lane_name='test'))
+        self.assertGreaterEqual(clock[0], 0.8)
+        self.assertEqual([r['op'] for r in requests], ['release', 'acquire'])
+        self.assertEqual(requests[0]['token'], token)
+        self.assertNotEqual(requests[1]['token'], token)
+        self.assertEqual(json.loads(saved.read_text())['payload']['token'], requests[1]['token'])
+        self.assertFalse(xs.jload(str(self.rdir / 'status.json'), {})['capacity_unreachable'])
+
+    def test_pending_release_wait_is_bounded_and_preserves_credentials(self):
+        pending = self.rdir / 'fleet-release-pending.json'
+        record = {'command': ['guard'], 'payload': {'op': 'release', 'run_id': 'slow', 'token': 'a' * 32}}
+        xs.jsave(str(pending), record)
+        clock = [0.0]
+        log = io.StringIO()
+        with mock.patch.object(xs, 'DATA', str(self.root)), \
+                mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
+                mock.patch.object(xs, 'fleet_guard_call') as call, \
+                mock.patch.object(xs, 'start_fleet_release_worker'), \
+                mock.patch.object(xs.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(xs.time, 'sleep',
+                                  side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+                mock.patch.object(xs, 'lane_write_state') as lane_state, \
+                contextlib.redirect_stderr(log):
+            self.assertFalse(xs.reserve_provider_slot(str(self.rdir), 'agy', None, {}, lane_name='test'))
+        call.assert_not_called()
+        self.assertGreaterEqual(clock[0], 24)
+        self.assertLess(clock[0], 25)
+        self.assertEqual(json.loads(pending.read_text()), record)
+        self.assertFalse((self.rdir / 'fleet-reservation.json').exists())
+        self.assertEqual(xs.jload(str(self.rdir / 'status.json'), {})['queue_reason'], 'capacity-unreachable')
+        self.assertTrue(lane_state.call_args.kwargs['capacity_unreachable'])
+        self.assertIn('release', log.getvalue())
+        self.assertIn('capacity-unreachable', log.getvalue())
+
+    def test_pending_release_wait_can_be_cancelled(self):
+        pending = self.rdir / 'fleet-release-pending.json'
+        xs.jsave(str(pending), {'command': ['guard'], 'payload': {'op': 'release', 'token': 'a' * 32}})
+        clock = [0.0]
+        with mock.patch.object(xs, 'DATA', str(self.root)), \
+                mock.patch.object(xs, 'fleet_guard_command', return_value=['guard']), \
+                mock.patch.object(xs, 'fleet_guard_call') as call, \
+                mock.patch.object(xs, 'start_fleet_release_worker'), \
+                mock.patch.object(xs.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(xs.time, 'sleep',
+                                  side_effect=lambda s: clock.__setitem__(0, clock[0] + s)):
+            self.assertFalse(xs.reserve_provider_slot(str(self.rdir), 'agy', None, {},
+                                                     keep_waiting=lambda: clock[0] < 0.3))
+        call.assert_not_called()
+        self.assertLess(clock[0], 0.5)
+        self.assertTrue(pending.exists())
+        self.assertFalse(xs.jload(str(self.rdir / 'status.json'), {}).get('capacity_unreachable'))
+
     def test_consult_lost_acquire_responses_keep_release_credentials(self):
         slot = self.root / 'runs' / 'consult-slot-lost'
         requests = []

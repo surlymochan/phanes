@@ -3948,15 +3948,30 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     pending_path = os.path.join(rdir, "fleet-release-pending.json")
     if os.path.exists(pending_path):
         start_fleet_release_worker(rdir)
-        # Usually the previous turn's release completes before the next turn.
-        # Allow its local acknowledgement to arrive without any network wait here.
-        for delay in (0.2, 0.4):
-            if not os.path.exists(pending_path) or (keep_waiting and not keep_waiting()):
-                break
-            time.sleep(delay)
-        if os.path.exists(pending_path):
-            set_status(rdir, state="queued", queue_reason="capacity-unreachable", capacity_unreachable=True)
-            return False
+        # A healthy detached worker may take longer than acquire's backoff just
+        # to start. Allow the same window as three 8s calls plus their backoff,
+        # without doing network I/O here or holding the local admission lock.
+        release_started = time.monotonic()
+        release_deadline = release_started + 3 * 8 + 0.2 + 0.4
+        set_status(rdir, state="queued", queue_reason="capacity release pending", capacity_unreachable=False)
+        if lane_name:
+            lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys,
+                             queue_reason="capacity release pending", capacity_unreachable=False)
+        while os.path.exists(pending_path):
+            if keep_waiting and not keep_waiting():
+                return False
+            remaining = release_deadline - time.monotonic()
+            if remaining <= 0:
+                error = (f"fleet capacity release acknowledgement timed out after "
+                         f"{time.monotonic() - release_started:.2f}s; capacity-unreachable")
+                print(error, file=sys.stderr)
+                set_status(rdir, state="queued", queue_reason="capacity-unreachable", capacity_unreachable=True,
+                           fleet_reservation_error=error)
+                if lane_name:
+                    lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys,
+                                     queue_reason="capacity-unreachable", capacity_unreachable=True)
+                return False
+            time.sleep(min(0.1, remaining))
     saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
     command = saved["command"] if saved else command
     token = saved["payload"]["token"] if saved else uuid.uuid4().hex
