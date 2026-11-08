@@ -1004,6 +1004,56 @@ class AgyStartupRegressionTests(unittest.TestCase):
         result = self.run_turn("second startup crash", early=True)
         self.assertEqual(result[2], "executor_start_failed")
 
+    def assert_interrupted_startup_exit(self, eof, interruption, after_restart=False):
+        xs, mock = self.xs, self.mock
+        clock = [100.0]
+        spec = {"started": 100, "budget_minutes": 1}
+        if interruption == "already_stopped":
+            spec["abort_requested"] = True
+        child = mock.Mock(pid=123)
+        child.alive.return_value = False
+        child.proc.poll.return_value = 2
+        child.stderr_text.return_value = "startup crash"
+        child.next_event.return_value = eof
+
+        def control(*args):
+            if child.start.call_count < (2 if after_restart else 1):
+                return
+            if interruption == "budget":
+                clock[0] = 160.0
+            else:
+                spec["abort_requested"] = True
+
+        with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
+             mock.patch.object(xs, "set_status") as status, \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages", side_effect=control), \
+             mock.patch.object(xs, "lane_abort_child") as abort:
+            result = xs.lane_run_turn(self.lane, child, spec, "same prompt", {"path": self.tmp.name},
+                                      self.tmp.name, None, {}, [])
+        self.assertEqual(child.start.call_count, 2 if after_restart else 1)
+        abort.assert_called_once()
+        self.assertEqual(result[2:4], ("budget_exceeded", 124) if interruption == "budget" else ("stopped", 130))
+        if not after_restart:
+            self.assertFalse(any("executor_restarts" in call.kwargs for call in status.call_args_list))
+
+    def test_abort_requested_does_not_retry_startup_exit(self):
+        for eof in (None, False):
+            with self.subTest(eof=eof):
+                self.assert_interrupted_startup_exit(eof, "already_stopped")
+
+    def test_stop_during_turn_preserves_stopped_classification(self):
+        for eof in (None, False):
+            for after_restart in (False, True):
+                with self.subTest(eof=eof, after_restart=after_restart):
+                    self.assert_interrupted_startup_exit(eof, "stop", after_restart)
+
+    def test_budget_exhaustion_preserves_budget_classification(self):
+        for eof in (None, False):
+            for after_restart in (False, True):
+                with self.subTest(eof=eof, after_restart=after_restart):
+                    self.assert_interrupted_startup_exit(eof, "budget", after_restart)
+
     def test_stdout_eof_reaps_each_child_before_restart_and_diagnosis(self):
         xs, mock = self.xs, self.mock
         child = mock.Mock(pid=123)

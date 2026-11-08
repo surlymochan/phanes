@@ -8180,7 +8180,7 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     def retry_agy_start(detail, exited_at):
         """Restart a headless agy process once when it exits before a stable turn starts."""
         nonlocal agy_started_at, agy_saw_executor_event, agy_start_restarts
-        if (not lane_headless(lane) or spec.get("risk_blocks")
+        if (not lane_headless(lane) or spec.get("risk_blocks") or spec.get("abort_requested") or budget_hit
                 or (agy_saw_executor_event and exited_at - agy_started_at >= agy_start_grace_s)):
             return False
         proc = getattr(child, "proc", None)
@@ -8237,6 +8237,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                     if msg is False:
                         exited_at = NOW()
                         child.reap_after_stdout_eof()
+                        # EOF acknowledges an interrupted turn; preserve its stop/budget result below.
+                        if spec.get("abort_requested") or budget_hit:
+                            break
                         if agy_resume_steer():
                             continue
                         if retry_agy_start("resident executor process exited", exited_at):
@@ -8251,6 +8254,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
             if lane_headless(lane):
                 exited_at = NOW()
                 child.reap_after_stdout_eof()
+                if spec.get("abort_requested") or budget_hit:
+                    break
                 if agy_resume_steer():
                     continue
                 if retry_agy_start("resident executor stdout closed", exited_at):
