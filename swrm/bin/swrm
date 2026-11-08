@@ -8145,7 +8145,9 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
         text = detail or ""
         if lane_headless(lane):
             text = child.stderr_text()[-600:] or text
-            if agy_start_failures:
+            # Only two qualifying startup exits exhaust the retry. A later auth
+            # failure or running-turn disconnect keeps its own classification.
+            if len(agy_start_failures) == 2:
                 failures = "; ".join(agy_start_failures)
                 return "executor_start_failed", f"startup failed after {failures}"
         if AUTH_ERROR_RE.search(text):
@@ -8157,7 +8159,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
     def retry_agy_start(detail):
         """Restart a headless agy process once when it exits before a stable turn starts."""
         nonlocal agy_started_at, agy_saw_executor_event, agy_start_restarts
-        if not lane_headless(lane) or (agy_saw_executor_event and NOW() - agy_started_at >= agy_start_grace_s):
+        if (not lane_headless(lane) or spec.get("risk_blocks")
+                or (agy_saw_executor_event and NOW() - agy_started_at >= agy_start_grace_s)):
             return False
         proc = getattr(child, "proc", None)
         exit_code = proc.poll() if proc else None
@@ -8219,7 +8222,8 @@ def lane_run_turn(lane, child, spec, prompt, ws, rdir, server, turn, pending, at
                         return None, usage, error_class, 1, event_file, detail
                 else:
                     return None, usage, "risk_blocked" if spec.get("risk_blocks") else "exec_error", 1, event_file, "resident executor process exited"
-            continue
+            if msg is False:
+                continue
         if msg is None:
             if lane_headless(lane):
                 if agy_resume_steer():
@@ -8663,7 +8667,7 @@ def lane_do_run(lane, spec, child, server, current):
                     child.close()
                 stopped_early = lane["backend"] == "agy" and spec.get("_agy_finished_early")
                 if (not stopped_early or not child.alive()) and (error_class in (None, "rate_limit")
-                        or spec.get("_turn_completed") or (error_class == "upstream_forbidden"
+                        or spec.get("_turn_completed") or (error_class in ("upstream_forbidden", "executor_start_failed")
                                                            and lane["backend"] == "agy" and not child.alive())):
                     if executor_boundary_empty(rdir, getattr(child, "boundary", None)):
                         release_fleet_slot(rdir)

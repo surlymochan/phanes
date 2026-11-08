@@ -97,6 +97,20 @@ def pause_store_dir():
     home = os.environ.get("OPENSWARM_HOME") or os.environ.get("XSWARM_HOME") or f"{HOME}/.claude/swrm"
     return os.path.join(os.path.expanduser(home), "pauses")
 
+def pause_executor_start_lane(lane):
+    """Cool down only the failing executor's lane; the card has not had an attempt."""
+    now = time.time()
+    scope = f"lane:{lane}"
+    directory = pause_store_dir()
+    os.makedirs(directory, exist_ok=True)
+    record = {"scope": scope, "reason": "auto:executor_start_failed", "created_at": now,
+              "expires_at": now + 600}
+    # Write atomically so dispatch never observes a partially written pause.
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+        temporary = stream.name
+        json.dump(record, stream)
+    os.replace(temporary, os.path.join(directory, hashlib.sha256(scope.encode()).hexdigest() + ".json"))
+
 def marker_scope(name):
     """The pause scope of a legacy PAUSE marker file name, or None when it is none."""
     if name == "PAUSE": return "all"
@@ -1227,6 +1241,14 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        if info.get("error_class") == "executor_start_failed":
+            pause_executor_start_lane(lane)
+            rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                             "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+            if rc:
+                return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+            log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
+            return {"done": True, "status": "lane-ready", "error": None, "missing": []}
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
@@ -1269,6 +1291,7 @@ def tick(lanes, state, last_warn):
             json.dump(st, stream, ensure_ascii=False, indent=1)
         return last_warn
     for i in q: i["deps_ok"] = deps_met(i)
+    scopes = paused_scopes()  # harvest may have cooled down a lane during this tick
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
     base = None

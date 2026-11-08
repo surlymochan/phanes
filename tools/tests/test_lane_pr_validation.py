@@ -326,5 +326,65 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
         self.assertEqual(result["missing"], ["PR 正文缺少验收段或 Verify 段"])
 
 
+class ExecutorStartHarvestTests(unittest.TestCase):
+    def test_start_failure_requeues_without_count_and_pauses_lane(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
+             mock.patch.object(MODULE, "gh", return_value=(0, "", "")) as gh, \
+             mock.patch.object(MODULE, "log"), \
+             mock.patch.object(MODULE.time, "time", return_value=1000):
+            state = {"_done": [12]}
+            result = MODULE.finish("A1", CFG, {"issue": 1595, "run": RUN},
+                                   {"status": "failed", "error_class": "executor_start_failed"}, state)
+            self.assertEqual(result["status"], "lane-ready")
+            self.assertTrue(result["done"])
+            self.assertEqual(state["_done"], [12])
+            edits = [c.args[0] for c in gh.call_args_list if c.args[0][:2] == ["issue", "edit"]]
+            self.assertIn("--add-label", edits[0])
+            self.assertEqual(edits[0][-1], "lane-ready")
+            records = MODULE.pause_records(now=1000)
+            self.assertEqual([(r["scope"], r["expires_at"]) for r in records], [("lane:A1", 1600)])
+            self.assertTrue(MODULE.lane_paused("A1", scopes=MODULE.paused_scopes(now=1599)))
+            self.assertFalse(MODULE.lane_paused("A1", scopes=MODULE.paused_scopes(now=1600)))
+
+    def test_failed_requeue_keeps_harvest_pending(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
+             mock.patch.object(MODULE, "gh", return_value=(1, "", "labels unavailable")), \
+             mock.patch.object(MODULE, "log"):
+            state = {}
+            result = MODULE.finish("A1", CFG, {"issue": 1595, "run": RUN},
+                                   {"error_class": "executor_start_failed"}, state)
+            self.assertFalse(result["done"])
+            self.assertNotIn("_done", state)
+
+
+    def test_tick_harvest_requeues_and_honors_new_pause_immediately(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            for name in ("audit_switches", "host_good", "host_fail", "log", "save_state",
+                         "update_busy_stale", "prefetch_labels", "replenish"):
+                stack.enter_context(mock.patch.object(MODULE, name))
+            stack.enter_context(mock.patch.object(MODULE, "D", directory))
+            stack.enter_context(mock.patch.object(MODULE, "pause_store_dir", return_value=directory))
+            stack.enter_context(mock.patch.object(MODULE, "host_ok", return_value=True))
+            stack.enter_context(mock.patch.object(MODULE, "gh", return_value=(0, "", "")))
+            stack.enter_context(mock.patch.object(MODULE, "remote", return_value={
+                "lane": "idle", "run": {"error_class": "executor_start_failed"}}))
+            stack.enter_context(mock.patch.object(MODULE, "queue", return_value=[{"n": 1595}]))
+            stack.enter_context(mock.patch.object(MODULE, "deps_met", return_value=True))
+            stack.enter_context(mock.patch.object(MODULE, "freshen_queue", side_effect=lambda q, s: q))
+            stack.enter_context(mock.patch.object(MODULE, "can_take", return_value=True))
+            stack.enter_context(mock.patch.object(MODULE, "label_state", return_value=("fresh", "")))
+            stack.enter_context(mock.patch.object(MODULE, "sh", return_value=(0, "abcdef", "")))
+            dispatch = stack.enter_context(mock.patch.object(MODULE, "dispatch", return_value=("new-run", None)))
+            stack.enter_context(mock.patch.object(MODULE, "status_snapshot", return_value={}))
+            state = {"A1": {"issue": 1595, "run": RUN}}
+            MODULE.tick({"A1": CFG}, state, 0)
+            self.assertNotIn("A1", state)
+            self.assertEqual(state["_done"], [])
+            self.assertTrue(MODULE.lane_paused("A1"))
+            dispatch.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

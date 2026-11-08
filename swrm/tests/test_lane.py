@@ -927,5 +927,99 @@ def process_alive(pid):
         return False
 
 
+
+class AgyStartupRegressionTests(unittest.TestCase):
+    """Drive the production turn and admission paths without a control socket."""
+
+    def setUp(self):
+        from unittest import mock
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("agy_start_regression", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.xs = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.xs)
+        self.mock = mock
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
+        self.addCleanup(self.tmp.cleanup)
+        self.lane = {"name": "L1", "backend": "agy", "model": "test"}
+
+    def run_turn(self, second_error, late=False, drained=False):
+        xs, mock = self.xs, self.mock
+        clock = [100.0]
+        child = mock.Mock(pid=123)
+        child.proc.poll.return_value = 2
+        child.stderr_text.side_effect = lambda: second_error if child.start.call_count > 1 else "first startup crash"
+        events = iter([None, {"type": "init", "conversation_id": "conv-1"}, None] if late else [None, None])
+
+        def next_event(timeout):
+            event = next(events)
+            if late and child.start.call_count > 1 and event is None:
+                clock[0] += 6
+            return event
+
+        if drained:
+            events = iter([None, False, {"type": "init", "conversation_id": "conv-1"}, None])
+            child.alive.return_value = False
+        child.next_event.side_effect = next_event
+        spec = {"started": 100, "budget_minutes": 1}
+        with mock.patch.object(xs, "NOW", side_effect=lambda: clock[0]), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "lane_control_messages"), \
+             mock.patch.object(xs, "enforced_risk", return_value=None):
+            result = xs.lane_run_turn(self.lane, child, spec, "same prompt", {"path": self.tmp.name},
+                                      self.tmp.name, None, {}, [])
+        self.assertEqual(child.start.call_count, 2)
+        return result
+
+    def test_start_crash_then_auth_preserves_auth(self):
+        result = self.run_turn("FatalAuthenticationError: authentication required")
+        self.assertEqual(result[2], "auth")
+        self.assertIn("authentication required", result[5])
+
+    def test_start_crash_then_late_disconnect_is_exec_error(self):
+        result = self.run_turn("later disconnect", late=True)
+        self.assertEqual(result[2], "exec_error")
+        self.assertIn("later disconnect", result[5])
+
+    def test_drained_event_marks_restarted_executor_as_running(self):
+        result = self.run_turn("later disconnect", late=True, drained=True)
+        self.assertEqual(result[2], "exec_error")
+
+    def test_two_start_crashes_include_both_diagnostics(self):
+        result = self.run_turn("second startup crash")
+        self.assertEqual(result[2], "executor_start_failed")
+        self.assertEqual(result[5].count("exit code 2"), 2)
+        self.assertIn("first startup crash", result[5])
+        self.assertIn("second startup crash", result[5])
+
+    def test_start_crash_releases_empty_fleet_reservation(self):
+        xs, mock = self.xs, self.mock
+        spec = {"run_id": "startup", "task": "task", "started": 100, "budget_minutes": 1}
+        rdir = os.path.join(self.tmp.name, "startup")
+        os.mkdir(rdir)
+        child = mock.Mock()
+        child.alive.return_value = False
+        ws = {"repo": self.tmp.name, "root": self.tmp.name, "path": self.tmp.name}
+        with mock.patch.object(xs, "RUNS", self.tmp.name), \
+             mock.patch.object(xs, "lane_prepare_workspace", return_value=ws), \
+             mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
+             mock.patch.object(xs, "add_lessons_to_prompt", side_effect=lambda p, *a: (p, [])), \
+             mock.patch.object(xs, "add_patterns_to_prompt", side_effect=lambda p, *a: (p, [])), \
+             mock.patch.object(xs, "load_policy", return_value={}), \
+             mock.patch.object(xs, "NOW", return_value=100), \
+             mock.patch.object(xs, "set_status"), \
+             mock.patch.object(xs, "reserve_provider_slot", return_value=True), \
+             mock.patch.object(xs, "lane_run_turn", return_value=(None, {}, "executor_start_failed", 1, "events", "two crashes")), \
+             mock.patch.object(xs, "executor_boundary_empty", return_value=True), \
+             mock.patch.object(xs, "release_fleet_slot") as release, \
+             mock.patch.object(xs, "lane_finalize_run") as finalize:
+            xs.lane_do_run(self.lane, spec, child, None, None)
+        finalize.assert_called_once()
+        self.assertEqual(finalize.call_args.args[5], "executor_start_failed")
+        release.assert_called_once_with(rdir)
+
+
 if __name__ == "__main__":
     unittest.main()
