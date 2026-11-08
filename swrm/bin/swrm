@@ -4764,8 +4764,8 @@ def cursor_usage(raw):
     for k in CURSOR_USAGE_KEYS:
         v = raw.get(k)
         try:
-            out[k] = int(v) if v is not None else 0
-        except (TypeError, ValueError):
+            out[k] = max(0, int(v)) if not isinstance(v, bool) else 0
+        except (TypeError, ValueError, OverflowError):
             out[k] = 0
     return out
 
@@ -4986,9 +4986,10 @@ def pi_usage(events_path):
                 continue
             u = m.get("usage") or {}
             for k in PI_USAGE_KEYS:
+                value = u.get(k)
                 try:
-                    usage[k] += int(u.get(k) or 0)
-                except (TypeError, ValueError):
+                    usage[k] += max(0, int(value)) if not isinstance(value, bool) else 0
+                except (TypeError, ValueError, OverflowError):
                     pass
             if m.get("stopReason") == "error" or m.get("errorMessage"):
                 errors.append(str(m.get("errorMessage") or "error")[:500])
