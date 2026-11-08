@@ -899,23 +899,42 @@ def review_evidence_errors(evidence):
     return errors
 
 
+REVIEW_VERDICT_RE = re.compile(
+    r"(?i)(?<![a-z])(?:approve|approved|approves|request changes|changes|lgtm|verdict|verdicts|blocked)(?![a-z])"
+    r"|通过|不通过|批准|驳回|同意|拒绝")
+
+
 def review_evidence_body(evidence, summary):
     """Keep raw fields in fixed sections and the opinion in a separate quoted block.
 
     JSON escaping preserves multiline raw values without letting them create new
-    Markdown headings. Lane text is never used as acceptance or CI evidence.
+    Markdown headings. Raw fields containing verdict words are retained verbatim
+    in the reference block, with a pointer in their original evidence section.
     """
-    def raw(value):
-        return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("`", "\\u0060")
-    parts = ["## CI\n" + raw(evidence["ci"]),
-             "## 测试日志摘要\n" + raw(evidence["tests"]),
-             "## diff 统计\n" + raw(evidence["diff"]),
+    references = []
+    def has_verdict(value):
+        if isinstance(value, dict):
+            return any(has_verdict(key) or has_verdict(item) for key, item in value.items())
+        if isinstance(value, list): return any(has_verdict(item) for item in value)
+        return isinstance(value, str) and REVIEW_VERDICT_RE.search(value)
+
+    def raw(value, label):
+        encoded = json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("`", "\\u0060")
+        if has_verdict(value):
+            references.append(f"原始证据 {label}: {encoded}")
+            return "原始内容含判定词，见参考段"
+        return encoded
+    parts = ["## CI\n" + raw(evidence["ci"], "ci"),
+             "## 测试日志摘要\n" + raw(evidence["tests"], "tests"),
+             "## diff 统计\n" + raw(evidence["diff"], "diff"),
              "验收：原始核查清单\n" + "\n".join(
-                 f"- [{'x' if item['ok'] else ' '}] {raw(item['text'])}"
-                 for item in evidence["acceptance"])]
+                 f"- [{'x' if item['ok'] else ' '}] {raw(item['text'], f'acceptance[{index}].text')}"
+                 for index, item in enumerate(evidence["acceptance"]))]
     if summary:
+        references.extend(str(summary).splitlines())
+    if references:
         parts.append("## Lane 意见（参考、不算判定）\n" + "\n".join(
-            "> " + line for line in str(summary).splitlines()))
+            "> " + line for line in references))
     return parts
 
 
