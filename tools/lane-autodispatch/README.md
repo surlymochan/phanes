@@ -124,6 +124,8 @@ summary/tests、host verify rc）拼出 PR 标题与正文，再逐项校验：
 fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head/base；正文读不到、解析不了或
 没有正文时拒绝收割（读不到不等于空正文：没有正文就没有目标 PR，无从判断）。只有 fix/rebase 卡
 （`重基PR：#1845`、`fix/rebase PR #1845` 等）才比对，普通实现卡即使提到别的 PR 也不比对。
+目标 PR 的两个 SHA 由只读 `gh api repos/<owner>/<repo>/pulls/<pr>` 的 `head.sha` / `base.sha`
+获取；`gh pr view --json` 不提供 `baseRefOid`。API 失败或元数据解析失败同样拒绝收割。
 实际推送的过滤后 head 必须包含 fix 前 head（越界产物过滤重建提交后仍须通过祖先检查），
 且相对 base 的变更文件数和增删行数分别不得下降超过
 `AD_HARVEST_COLLAPSE_THRESHOLD`（默认 `0.5`）。任一维度超限、或 git 检查失败，

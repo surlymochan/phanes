@@ -1182,14 +1182,16 @@ def harvest_collapse_guard(issue, ref):
         return True, "the card names no target PR: there is nothing to compare with"
     pr = match.group(1)
     try:
-        rc, out, err = gh(["pr", "view", pr, "--json", "headRefOid,baseRefOid"])
+        # pr view exposes no baseRefOid. REST provides both SHAs in one response;
+        # call sh directly because gh api has no -R option (the gh helper adds it).
+        rc, out, err = sh(["gh", "api", f"repos/{REPO}/pulls/{pr}"], timeout=60)
     except (OSError, subprocess.SubprocessError) as error:
         return False, f"PR #{pr} cannot be read: {error!r}"
     if rc:
         return False, f"PR #{pr} cannot be read (gh rc={rc}): {err.strip()[-160:]}"
     try:
         pr_data = json.loads(out)
-        old, base = pr_data["headRefOid"], pr_data["baseRefOid"]
+        old, base = pr_data["head"]["sha"], pr_data["base"]["sha"]
         if not isinstance(old, str) or not isinstance(base, str) or not old or not base:
             raise ValueError("missing PR head/base SHA")
     except (ValueError, KeyError, TypeError) as error:

@@ -19,7 +19,8 @@ fix/rebase 轮没有在 PR 当前 head 上续改、只产出增量补丁时，AD
 4. **祖先**：实际推送的过滤后 head 必须包含 fix 前 PR head（`git merge-base --is-ancestor`）。
    越界产物过滤（#1835）可能重建提交；即使过滤前 lane 引用包含旧 head，过滤后丢失祖先关系
    仍拒绝推送，不能用内容相同代替祖先检查。
-5. **体量**：相对 base（PR 的 `baseRefOid`）比较 fix 前后的变更文件数与增删行数。任一项下降到阈值
+5. **体量**：使用 `gh api repos/<owner>/<repo>/pulls/<pr>` 一次读取 PR 的 `head.sha` 和 `base.sha`，
+   相对该 base 比较 fix 前后的变更文件数与增删行数。任一项下降到阈值
    以下就拒绝（默认 50%，`AD_HARVEST_COLLAPSE_THRESHOLD` 可配；两个维度是“或”的关系）。
 6. **git 失败**：任何 git 命令失败都拒绝（fail closed）。
 
@@ -76,3 +77,22 @@ AD_HARVEST_COLLAPSE_MANIFEST=<清单路径> AD_LOCAL=<真实对象仓库> python
 ```
 
 显式指定的清单不存在时测试失败；未指定且默认位置无清单时仅真实事故回放测试 skip。
+
+## 本轮审查 BLOCKER 修复映射（基于 e1f9d8109）
+
+- B1（`gh pr view` 不支持 `baseRefOid`）：改用只读 REST PR 接口的 `head.sha` / `base.sha`，
+  从同一响应获取两个提交，避免依赖本地可能过期的 base 分支引用。
+  `gh api` 不接受 `-R`，因此直接调用 `sh`，仓库名写入 endpoint。
+  接口与参数参见 [GitHub REST PR 文档](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)
+  和 [gh api 手册](https://cli.github.com/manual/gh_api)。
+- 回归：假 `gh pr view` 现在拒绝虚构字段；`test_rest_pr_metadata_allows_a_normal_fix`
+  在修复前因 `Unknown JSON field: "baseRefOid"` 失败，修复后验证真实 Git 历史正常放行，
+  且请求为不带 `-R` 的 REST endpoint。
+  `test_unreadable_or_unparsable_pr_metadata_is_refused` 和
+  `test_missing_or_invalid_pr_sha_is_refused` 覆盖 API 失败、坏 JSON、缺失及无效 SHA 的拒绝路径。
+  原有塌缩、祖先、正文和回放测试继续保留；真实事故 SHA 回放仍需上述宿主机清单与对象库。
+
+本轮验证：`python3 -m pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py
+tools/lane-autodispatch/test_harvest_filter.py tools/tests/test_lane_pr_validation.py`
+为 49 passed、1 skipped、20 subtests passed（skip 为真实事故清单缺失）；
+`python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。

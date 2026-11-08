@@ -206,7 +206,7 @@ class HarvestFixture:
 
     # --- the harvest ----------------------------------------------------------------
 
-    def harvest(self, old, new, *, card=CARD, body_error=None, pr_payload=None,
+    def harvest(self, old, new, *, card=CARD, body_error=None, pr_payload=None, pr_error=None,
                 harvest_ref=None, lane_ref=True, real_filter=False):
         """Run the harvest of a lane result and return (result, gh calls, sh calls)."""
         self.old_head = old
@@ -226,10 +226,10 @@ class HarvestFixture:
                     return body_error
                 return (0, json.dumps({"body": card, "labels": []}), "")
             if args[:2] == ["pr", "view"]:
-                payload = {"number": PR, "headRefName": BRANCH, "headRefOid": old,
-                           "baseRefOid": self.base}
-                payload.update(pr_payload or {})
-                return (0, json.dumps(payload), "")
+                # Match the real CLI: this field is not available via pr view.
+                if "baseRefOid" in args[args.index("--json") + 1].split(","):
+                    return (1, "", 'Unknown JSON field: "baseRefOid"')
+                return (0, json.dumps({"headRefOid": old, "baseRefName": "main"}), "")
             if args[:2] == ["pr", "list"]:
                 return (0, json.dumps([{"number": PR, "headRefName": BRANCH}]), "")
             return (0, "", "")
@@ -239,6 +239,14 @@ class HarvestFixture:
         def spy_sh(cmd, timeout=120, inp=None):
             """Run the command for real (the git reads of the guard need it) and record it."""
             sh_calls.append(cmd)
+            if isinstance(cmd, list) and cmd[:2] == ["gh", "api"]:
+                # gh api has no -R option; the endpoint must identify the repo.
+                target = card.split("重基PR：#", 1)[1].split()[0]
+                self.assertEqual(cmd, ["gh", "api", f"repos/{ad.REPO}/pulls/{target}"])
+                if pr_error is not None:
+                    return pr_error
+                payload = {"head": {"sha": old}, "base": {"sha": self.base}}
+                return (0, json.dumps(payload if pr_payload is None else pr_payload), "")
             return real_sh(cmd, timeout=timeout, inp=inp)
 
         state = {}
@@ -383,8 +391,39 @@ class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
         self.build_repo()
         old, new = self.scenario_grown()
         missing = "0" * 40
-        result, gh_calls, sh_calls = self.harvest(old, new, pr_payload={"headRefOid": missing})
+        result, gh_calls, sh_calls = self.harvest(
+            old, new, pr_payload={"head": {"sha": missing}, "base": {"sha": self.base}})
         self.assert_refused(result, gh_calls, sh_calls, heads=False)
+
+    def test_rest_pr_metadata_allows_a_normal_fix(self):
+        self.build_repo()
+        old, new = self.scenario_grown()
+        result, gh_calls, sh_calls = self.harvest(old, new)
+        self.assert_allowed(result, gh_calls, sh_calls)
+        self.assertIn(["gh", "api", f"repos/{ad.REPO}/pulls/{PR}"], sh_calls)
+        self.assertFalse(any(args[:2] == ["pr", "view"] for args in gh_calls))
+
+    def test_unreadable_or_unparsable_pr_metadata_is_refused(self):
+        errors = ((1, "", "API unavailable"), (0, "not json", ""))
+        for error in errors:
+            with self.subTest(error=error):
+                self.build_repo()
+                old, new = self.scenario_grown()
+                result, gh_calls, sh_calls = self.harvest(old, new, pr_error=error)
+                self.assert_refused(result, gh_calls, sh_calls, heads=False)
+                self.assertIn("cannot be", result["error"])
+
+    def test_missing_or_invalid_pr_sha_is_refused(self):
+        for payload in ({}, None, [], {"head": None, "base": {}},
+                        {"head": {"sha": ""}, "base": {"sha": "a" * 40}},
+                        {"head": {"sha": "a" * 40}, "base": {"sha": 42}}):
+            with self.subTest(payload=payload):
+                self.build_repo()
+                old, new = self.scenario_grown()
+                result, gh_calls, sh_calls = self.harvest(
+                    old, new, pr_error=(0, json.dumps(payload), ""))
+                self.assert_refused(result, gh_calls, sh_calls, heads=False)
+                self.assertIn("metadata cannot be parsed", result["error"])
 
     def test_unreadable_card_body_is_refused(self):
         # a card whose body cannot be read is not an empty card: without the target PR the
