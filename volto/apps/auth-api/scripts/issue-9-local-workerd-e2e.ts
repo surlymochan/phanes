@@ -3,7 +3,7 @@
 // The report is written to .volto-build/issue-9-local-workerd-e2e/report.json.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,6 +18,10 @@ const token = "issue-9-local-server-claims-admin-token";
 const email = `issue-9-${crypto.randomUUID()}@example.test`;
 const requests: Array<{ path: string; status: number }> = [];
 const logs: string[] = [];
+const starts: number[] = [];
+let persistDir: string | undefined;
+let stateLink: string | undefined;
+let cleaned = false;
 let child: ReturnType<typeof spawn> | undefined;
 let error: string | undefined;
 
@@ -118,12 +122,52 @@ async function waitForWorker(base: string): Promise<void> {
   throw new Error(`Local Worker did not become ready: ${logs.join("").slice(-8_000)}`);
 }
 
+async function stopWorker(): Promise<void> {
+  if (!child || child.exitCode !== null) return;
+  const stopping = child;
+  stopping.kill("SIGTERM");
+  await new Promise<void>((done) => {
+    const timeout = setTimeout(() => {
+      stopping.kill("SIGKILL");
+      done();
+    }, 5_000);
+    stopping.once("exit", () => {
+      clearTimeout(timeout);
+      done();
+    });
+  });
+  child = undefined;
+}
+
+function startWorker(port: number, environment: NodeJS.ProcessEnv): void {
+  starts.push(Date.now());
+  child = spawn(
+    "bun",
+    ["run", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+    { cwd: APP, env: environment, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  child.stdout?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+  child.stderr?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+}
+
 let passed = false;
 try {
+  persistDir = await mkdtemp(join(ROOT, ".volto-build/issue-9-workerd-state-"));
+  // Wrangler and the Vite plugin use .wrangler/state by default. Point that path at this run's
+  // isolated directory so the migration and both Worker processes use the same database.
+  stateLink = join(APP, ".wrangler/state");
+  try {
+    await lstat(stateLink);
+    throw new Error(`Refusing to replace existing local Wrangler state at ${stateLink}`);
+  } catch (cause) {
+    if (cause instanceof Error && !("code" in cause && cause.code === "ENOENT")) throw cause;
+  }
+  await mkdir(join(APP, ".wrangler"), { recursive: true });
+  await symlink(persistDir, stateLink, "dir");
   // Build the local D1 schema before starting workerd. This uses Wrangler's local SQLite state only.
   // Wrangler 4.x has no `--yes` flag here: it skips the confirmation when the command runs without
   // a terminal, which the piped output of this script already is.
-  const migrate = spawn("bun", ["run", "wrangler", "d1", "migrations", "apply", "DB", "--local"], {
+  const migrate = spawn("bun", ["run", "wrangler", "d1", "migrations", "apply", "DB", "--local", "--persist-to", persistDir], {
     cwd: APP,
     env: cleanEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
@@ -140,13 +184,7 @@ try {
   const port = await freePort();
   const environment = cleanEnvironment();
   delete environment.AUTH_EXPOSE_DEVELOPMENT_CODE;
-  child = spawn("bun", ["run", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
-    cwd: APP,
-    env: environment,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  child.stdout?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
-  child.stderr?.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+  startWorker(port, environment);
 
   const base = `http://127.0.0.1:${port}`;
   await waitForWorker(base);
@@ -191,27 +229,32 @@ try {
   const session = await redeemed.json();
   assert.ok(stringField(session, "sessionToken"));
   assert.equal(redeemedEmail(session), email);
+
+  const sessionToken = stringField(session, "sessionToken");
+  assert.ok(sessionToken);
+  await stopWorker();
+  if (stateLink) await unlink(stateLink).catch(() => undefined);
+  startWorker(port, environment);
+  await waitForWorker(base);
+
+  const persistedSession = await request(base, "/api/browser/session", {
+    headers: { Cookie: `__Host-openbot-web=${sessionToken}` },
+  });
+  assert.equal(persistedSession.status, 200, "the redeemed account session must survive a workerd restart");
+  assert.equal(redeemedEmail(await persistedSession.json()), email);
   passed = true;
 } catch (cause) {
   error = cause instanceof Error ? cause.message : String(cause);
 } finally {
-  if (child && child.exitCode === null) {
-    child.kill("SIGTERM");
-    await new Promise<void>((done) => {
-      const timeout = setTimeout(() => {
-        child?.kill("SIGKILL");
-        done();
-      }, 5_000);
-      child?.once("exit", () => {
-        clearTimeout(timeout);
-        done();
-      });
-    });
+  await stopWorker();
+  if (persistDir) {
+    await rm(persistDir, { recursive: true, force: true });
+    cleaned = true;
   }
   await mkdir(join(ROOT, ".volto-build/issue-9-local-workerd-e2e"), { recursive: true });
   await writeFile(
     REPORT,
-    `${JSON.stringify({ passed, requests, error, logs: logs.join("").slice(-8_000) }, null, 2)}\n`,
+    `${JSON.stringify({ passed, starts: starts.length, persistentSessionRead: requests.some(({ path, status }) => path === "/api/browser/session" && status === 200), cleaned, requests, error, logs: logs.join("").slice(-8_000) }, null, 2)}\n`,
   );
   process.stdout.write(`${passed ? "PASS" : "FAIL"}${error ? `: ${error}` : ""}: report in ${REPORT}\n`);
   if (!passed) process.exitCode = 1;
