@@ -738,12 +738,7 @@ def review_running(lanes, state):
     return {lane: 1 if (state.get(lane) or {}).get("class") == "verify" else 0 for lane in lanes}
 
 def review_backlog(lanes, state):
-    """The review load of every review lane: the reviews it runs plus the reviews that
-    wait for it (the review queue of the lane and the reviews in flight) (Refs #1701).
-
-    The waiting part is the forecast of the queue spread (`_review_waiting`): it is the
-    report of the last tick, not an input of the assignment - a lane is never blocked by
-    its own queue entry, a free lane always takes a review."""
+    """Running reviews plus the complete waiting queue from the latest tick."""
     state = state or {}
     running = review_running(lanes, state)
     waiting = state.get("_review_waiting") or {}
@@ -814,7 +809,7 @@ def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfg
                     if lane_cfgs is None or can_take(lane_cfgs[lane].get("backend"), card, lane)]
         if not eligible: continue
         lane, snapshot = pick_reviewer(order, counts, max_in_flight=max_in_flight,
-                                      eligible=eligible, log=log, pr=card["n"])
+                                      eligible=eligible, log=log, pr=review_target_pr(card))
         if lane is None:
             # every free review lane is at its cap: the review waits for a free lane
             # (pick_reviewer logged the decision with the backlog snapshot)
@@ -825,23 +820,27 @@ def plan_reviews(idle_review_ids, pending, running, max_in_flight=None, lane_cfg
     return plan, snapshots
 
 def review_waiting_counts(review_ids, pending, running, max_in_flight=None):
-    """The review cards that wait for a lane, counted per lane (Refs #1701).
+    """Spread the entire waiting queue for backlog accounting, without admitting it.
 
-    The waiting cards are the review queue of the lanes: they are spread over the review
-    lanes the way the backlog rule would spread them, so the report shows where the queue
-    would go. The cards that do not fit any lane stay in the queue. The count is a report
-    of the last tick, never an input of the assignment: a free lane takes a review even
-    when the queue of the last tick named it."""
-    counts, current = {}, dict(running)
-    # the forecast has its own rotation cursor: the report of the queue must not shift
-    # the rotation of the assignment
-    rotation = {}
+    The execution cap limits admission, not visibility: even when every lane is at
+    capacity, every waiting card must appear in the backlog. This forecast uses a
+    private cursor so counting cannot consume an actual assignment's turn.
+    """
+    counts, current, rotation = {}, dict(running), {}
     for card in pending:
-        lane, _ = pick_reviewer(review_ids, current, max_in_flight=max_in_flight, rotation=rotation)
-        if lane is None: break  # every review lane is at its cap: the cards wait in the queue
+        lane, _ = pick_reviewer(review_ids, current, rotation=rotation)
+        if lane is None: break
         counts[lane] = counts.get(lane, 0) + 1
         current[lane] = current.get(lane, 0) + 1
     return counts
+
+def review_target_pr(card):
+    """Read the target PR, never substitute the verification issue number."""
+    target = re.search(r"(?mi)^[ \t]*目标 PR[^\S\r\n]*[:：][ \t]*([^\r\n]+)", card.get("body", ""))
+    if not target: return "unknown"
+    number = re.search(r"(?:#|/pull/)([0-9]+)\b", target[1])
+    if not number: number = re.fullmatch(r"[ \t]*([0-9]+)[ \t]*", target[1])
+    return number[1] if number else "unknown"
 
 def idle_lane_names(lanes, state, res, scopes):
     """The lanes that can take a card right now (healthy, not paused and idle)."""
@@ -1405,37 +1404,17 @@ def tick(lanes, state, last_warn):
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
     base = None
-    # --- review lanes by backlog (Refs #1701) --------------------------------------------
-    # The review cards are planned over the review lanes before the dispatch loop: the lane
-    # with the smallest in-flight backlog takes them, equal backlogs rotate, and a lane at
-    # its cap is skipped - the review waits for a free lane instead of piling up on one.
-    # The load of a lane is the reviews it runs plus the cards the plan gave it: the queue
-    # is re-planned every tick, so a lane is never blocked by its own queue entry.
+    # Choose at admission time: a work dispatch must not strand a review on an
+    # obsolete plan. Waiting cards are counted separately from admitted runs.
     review_ids = review_lanes(lanes)
-    idle_lanes = idle_lane_names(lanes, state, res, scopes)
-    idle_review_ids = [L for L in review_ids if L in idle_lanes]
-    review_loads = review_running(review_ids, state)
-    review_plan, review_snapshots = {}, {}
-    if review_ids and idle_review_ids:
-        pending_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
-        if pending_reviews:
-            # every free review lane may take a review: the verify share reserves a lane for
-            # the verify class, it does not limit it to that lane (the reserve is a floor)
-            review_plan, review_snapshots = plan_reviews(idle_review_ids, pending_reviews, review_loads,
-                                                         REVIEW_MAX_IN_FLIGHT, lanes,
-                                                         log=lambda row: log(row, brain=False),
-                                                         review_ids=review_ids)
-    for L, cfg in lanes.items():
+    remaining = list(lanes)
+    while remaining:
+        L = remaining.pop(0)
+        cfg = lanes[L]
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
         pick = None
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
-        # a review card belongs to the lane it was planned for (Refs #1701): a review card
-        # planned for another lane (or for no lane at all, because every review lane is at
-        # its cap) waits instead of piling up on this lane
-        if is_review_lane(L):
-            planned = {card["n"] for card in review_plan.get(L, [])}
-            candidates = [i for i in candidates if not i.get("verify") or i["n"] in planned]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
         if AD_VERIFY_SHARE_ENABLED:
             idle = idle_lane_names(lanes, state, res, scopes)
@@ -1465,6 +1444,25 @@ def tick(lanes, state, last_warn):
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
         if not pick: continue
+        if pick.get("verify"):
+            running = review_running(review_ids, state)
+            waiting = [i for i in q if i is not pick and i.get("deps_ok", True) and i.get("verify")]
+            queued = review_waiting_counts(review_ids, waiting, running)
+            loads = {lane: running[lane] + queued.get(lane, 0) for lane in review_ids}
+            # Waiting cards have not been admitted. Servicing a queue head must
+            # remain possible even when the waiting queue exceeds execution capacity.
+            eligible = [lane for lane in [L, *remaining] if lane in review_ids
+                        and lane in idle_lane_names(lanes, state, res, scopes)
+                        and running[lane] < REVIEW_MAX_IN_FLIGHT
+                        and can_take(lanes[lane]["backend"], pick, lane)]
+            chosen, snapshot = pick_reviewer(review_ids, loads, eligible=eligible,
+                                             pr=review_target_pr(pick),
+                                             log=lambda row: log(row, brain=False))
+            if chosen is None: continue
+            if chosen != L:
+                remaining.remove(chosen)
+                remaining.insert(0, L)
+                L, cfg = chosen, lanes[chosen]
         if base is None:
             _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
@@ -1475,20 +1473,20 @@ def tick(lanes, state, last_warn):
         if pick.get("verify"):
             # the review decision goes to the log with the backlog snapshot of that moment
             # (the PR, the chosen lane and the load of every review lane) (Refs #1701)
-            snapshot = {**review_loads, **(review_snapshots.get(pick["n"]) or {})}
             backlog = ", ".join(f"{lane}={snapshot[lane]}" for lane in review_ids)
-            log(f"review assignment: PR #{pick['n']} → lane {L} (backlog: {backlog})")
+            log(f"review assignment: PR #{review_target_pr(pick)} → lane {L} (backlog: {backlog})")
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
-    # the review cards that wait for a lane are the review queue of that lane: the next
-    # tick counts them in the backlog of the lane, so a lane that already carries
-    # reviews is not given more of them (Refs #1701)
+    # Publish the complete remaining queue, including overflow beyond the admission cap.
     if review_ids:
         running = review_running(review_ids, state)
         waiting_reviews = [i for i in q if i.get("deps_ok", True) and i.get("verify")]
         state["_review_waiting"] = review_waiting_counts(review_ids, waiting_reviews, running, REVIEW_MAX_IN_FLIGHT)
+        if waiting_reviews:
+            backlog = ", ".join(f"{lane}={count}" for lane, count in review_backlog(review_ids, state).items())
+            log(f"review queue: {len(waiting_reviews)} card(s) wait (backlog: {backlog})", brain=False)
         save_state(state)
     blocked = sum(not i["deps_ok"] for i in q)
     ready = len(q) - blocked

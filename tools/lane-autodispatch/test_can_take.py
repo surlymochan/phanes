@@ -414,6 +414,19 @@ class ReviewBacklogAssignmentTest(unittest.TestCase):
         self.assertEqual([plan[lane][0]["n"] for lane in self.LANES], [1, 2, 3])
         self.assertEqual(sorted(snapshots), [1, 2, 3])
 
+    def test_target_pr_accepts_a_url_and_never_falls_back_to_issue_number(self):
+        self.assertEqual(AUTODISPATCH.review_target_pr({"n": 1, "body": VERIFY_BODY}), "1785")
+        self.assertEqual(AUTODISPATCH.review_target_pr(
+            {"n": 1, "body": "目标 PR: https://github.com/org/repo/pull/1785"}), "1785")
+        self.assertEqual(AUTODISPATCH.review_target_pr({"n": 1}), "unknown")
+
+    def test_waiting_counts_do_not_drop_overflow_at_the_cap_or_advance_rotation(self):
+        rotation = copy.deepcopy(AUTODISPATCH.REVIEW_ROTATION)
+        counts = AUTODISPATCH.review_waiting_counts(
+            self.LANES, [{"n": n} for n in range(5)], dict.fromkeys(self.LANES, 1), 1)
+        self.assertEqual(counts, {"CX2": 2, "CX4": 1, "CX5": 2})
+        self.assertEqual(AUTODISPATCH.REVIEW_ROTATION, rotation)
+
     def test_the_plan_skips_the_lane_that_is_at_its_cap(self):
         # CX2 already runs a review (its load is the cap): the card goes to another lane
         plan, _ = AUTODISPATCH.plan_reviews(
@@ -455,14 +468,14 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
                                          self.LANES, state)
         self.assertEqual(dispatched, [("CX5", 1)])
         line = [row for row in logs if "review assignment" in row][0]
-        self.assertIn("PR #1", line)
+        self.assertIn("PR #1785 →", line)
         self.assertIn("lane CX5", line)
         self.assertIn("CX2=1", line)   # the load of every review lane is in the log
         self.assertIn("CX4=0", line)
         self.assertIn("CX5=0", line)
         # the decision itself is logged with the same backlog snapshot
         plan = [row for row in logs if "review plan" in row][0]
-        self.assertIn("PR #1", plan)
+        self.assertIn("PR #1785 →", plan)
         self.assertIn("lane CX5", plan)
         self.assertIn("CX2=1", plan)
 
@@ -486,6 +499,43 @@ class ReviewBacklogTickTest(TickHarness, unittest.TestCase):
         dispatched, _ = self.run_tick([issue(1, VERIFY_BODY, ("lane-ready", "verify-intent"))],
                                       self.LANES, state)
         self.assertEqual(dispatched, [("CX4", 1)])
+
+    def test_work_dispatch_does_not_strand_a_review_on_its_old_plan(self):
+        rows = [issue(1, VERIFY_BODY, ("lane-ready", "verify-intent")),
+                issue(10, "work", ("lane-ready", "backend:codex"))]
+        dispatched, logs = self.run_tick(rows, self.LANES)
+        self.assertEqual(dispatched, [("CX2", 10), ("CX4", 1)])
+        assignment = next(row for row in logs if "review assignment" in row)
+        self.assertIn("PR #1785 → lane CX4", assignment)
+        self.assertIn("CX2=0", assignment)  # CX2 runs work, not a planned review
+
+    def test_two_reviews_are_reassigned_after_priority_work(self):
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in (1, 2)]
+        rows.append(issue(10, "work", ("lane-ready", "backend:codex")))
+        dispatched, logs = self.run_tick(rows, self.LANES)
+        self.assertEqual(dispatched, [("CX2", 10), ("CX4", 1), ("CX5", 2)])
+        assignments = [row for row in logs if "review assignment" in row]
+        # At the first decision one review really waits; at the second none do.
+        self.assertIn("CX2=1, CX4=0, CX5=0", assignments[0])
+        self.assertIn("CX2=0, CX4=1, CX5=0", assignments[1])
+
+    def test_waiting_overflow_is_counted_even_when_all_lanes_are_at_capacity(self):
+        state = {}
+        for lane in self.LANES:
+            state.update(self.busy(lane, "verify"))
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 6)]
+        dispatched, logs = self.run_tick(rows, self.LANES, state)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.last_state["_review_waiting"], {"CX2": 2, "CX4": 1, "CX5": 2})
+        self.assertTrue(any("CX2=3, CX4=2, CX5=3" in row for row in logs))
+
+    def test_a_queue_larger_than_capacity_can_still_be_serviced(self):
+        rows = [issue(n, VERIFY_BODY, ("lane-ready", "verify-intent")) for n in range(1, 9)]
+        dispatched, logs = self.run_tick(rows, self.LANES)
+        self.assertEqual(len(dispatched), 3)
+        self.assertEqual(sum(self.last_state["_review_waiting"].values()), 5)
+        assignment = next(row for row in logs if "review assignment" in row)
+        self.assertIn("CX2=2, CX4=3, CX5=2", assignment)
 
     def test_the_reviews_rotate_over_the_review_lanes(self):
         # the reviews rotate over the review lanes: no lane reviews a second round while
