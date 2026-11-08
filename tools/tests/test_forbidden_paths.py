@@ -57,6 +57,12 @@ class ForbiddenPathsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("FORBIDDEN M openswarm/x.py", result.stdout)
 
+    def test_added_openswarm(self):
+        self.write("openswarm/y.py")
+        result = self.diff()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FORBIDDEN A openswarm/y.py", result.stdout)
+
     def test_deleted_openswarm(self):
         (self.root / "openswarm/x.py").unlink()
         result = self.diff()
@@ -79,8 +85,17 @@ class ForbiddenPathsTest(unittest.TestCase):
 
     def test_tree(self):
         result = self.check("--tree")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("forbidden-paths: OK", result.stdout)
+
+    def test_tree_other_rules(self):
+        for path in ("nested/.tmp/a", "a/.lane-review/history.md", "openswarm/x.so", "swrm/x.bak-1"):
+            self.write(path)
+        self.commit()
+        result = self.check("--tree")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("FORBIDDEN A openswarm/x.py", result.stdout)
+        for path in ("nested/.tmp/a", "a/.lane-review/history.md", "openswarm/x.so", "swrm/x.bak-1"):
+            self.assertIn(f"FORBIDDEN A {path}", result.stdout)
 
     def test_review_and_backup(self):
         self.write("a/.lane-review/history.md")

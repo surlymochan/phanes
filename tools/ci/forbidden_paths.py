@@ -11,7 +11,7 @@ from pathlib import Path
 ALLOW_FILE = Path(__file__).with_name("forbidden_paths.allow")
 
 
-def rule_for(path):
+def rule_for(path, tree=False):
     parts = path.split("/")
     if ".tmp" in parts[:-1]:
         return ".tmp/"
@@ -21,7 +21,7 @@ def rule_for(path):
         return "*.so"
     if ".bak" in parts[-1]:
         return "*.bak*"
-    if len(parts) > 1 and parts[0] == "openswarm":
+    if not tree and len(parts) > 1 and parts[0] == "openswarm":
         return "openswarm/"
     return None
 
@@ -54,7 +54,7 @@ def main():
     forbidden = False
     for status, raw_path in entries:
         path = raw_path.decode("utf-8", errors="surrogateescape")
-        rule = rule_for(path)
+        rule = rule_for(path, tree=args.tree)
         if rule and not any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns):
             print(f"FORBIDDEN {status} {path} ({rule})")
             forbidden = True
