@@ -1101,6 +1101,58 @@ def queue_class_limits(lanes, state, idle):
     work_busy = sum(1 for L in active if state.get(L) and (state[L].get("class") != "verify"))
     return max(0, reserve - verify_busy), max(0, total - reserve - work_busy)
 
+VERIFY_METRICS_KEY = "_verify_metrics"
+VERIFY_HISTOGRAM_BUCKETS = (60, 300, 900, 1800, 3600)
+
+def verify_metrics(state):
+    """Persistent measurements for verify cards and their dispatch-share window."""
+    metrics = state.setdefault(VERIFY_METRICS_KEY, {"cards": {}, "dispatches": {"verify": 0, "all": 0},
+                                                     "work_cap_hits": 0})
+    metrics.setdefault("cards", {})
+    metrics.setdefault("dispatches", {}).setdefault("verify", 0)
+    metrics.setdefault("dispatches", {}).setdefault("all", 0)
+    metrics.setdefault("work_cap_hits", 0)
+    return metrics
+
+def verify_record(state, issue):
+    return verify_metrics(state)["cards"].get(str(issue))
+
+def record_verify_time(state, issue, point, at=None):
+    record = verify_record(state, issue)
+    if record is not None:
+        record.setdefault(point, time.time() if at is None else at)
+
+def verify_histogram(state, point):
+    """Histogram durations from queued to dispatched or verdict."""
+    counts = {}
+    edges = (0,) + VERIFY_HISTOGRAM_BUCKETS
+    for low, high in zip(edges, edges[1:]): counts[f"{low}-{high}"] = 0
+    counts[f"{VERIFY_HISTOGRAM_BUCKETS[-1]}+"] = 0
+    for record in verify_metrics(state)["cards"].values():
+        end = record.get(point)
+        start = record.get("queued")
+        if end is None or start is None: continue
+        duration = max(0.0, float(end) - float(start))
+        bucket = next((f"{low}-{high}" for low, high in zip(edges, edges[1:])
+                       if low <= duration < high), f"{VERIFY_HISTOGRAM_BUCKETS[-1]}+")
+        counts[bucket] += 1
+    return {key: value for key, value in counts.items() if value}
+
+def observe_verify_verdicts(state):
+    """Poll tracked cards, including harvested cards no longer represented by a lane."""
+    metrics = verify_metrics(state)
+    for issue, record in metrics["cards"].items():
+        if record.get("verdict") is not None: continue
+        try:
+            rc, output, _ = gh(["issue", "view", str(issue), "--json", "state,labels"])
+            if rc: continue
+            card = json.loads(output)
+            labels = label_names(card)
+            if card.get("state") == "CLOSED" or any(label == "verdict" or label.startswith("verdict:") for label in labels):
+                record["verdict"] = time.time()
+        except (OSError, ValueError, TypeError):
+            continue
+
 def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
     except Exception: return 1e9
@@ -1337,6 +1389,13 @@ def status_snapshot(lanes, state, res, ready, blocked, records=None):
     status["_idle_open_s"] = idle_open_s    # the gap the idle lanes are in right now
     status["_idle_worst_s"] = max(idle_open_s.values(), default=0.0)
     status["_at"] = time.strftime("%F %T")
+    metrics = verify_metrics(state)
+    status["_verify_wait_histogram"] = verify_histogram(state, "dispatched")
+    status["_verify_cycle_histogram"] = verify_histogram(state, "verdict")
+    status["_verify_deficit"] = metrics.get("deficit", 0)
+    dispatches = metrics["dispatches"]
+    status["_verify_share"] = (dispatches["verify"] / dispatches["all"] if dispatches["all"] else 0.0)
+    status["_work_cap_hits"] = metrics["work_cap_hits"]
     return status
 
 def classify_dispatch_fetch_error(error):
@@ -1742,6 +1801,7 @@ def finish(lane, cfg, st, info, state):
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
         if empty:
+            record_verify_time(state, n, "evidence_ready")
             label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
@@ -1750,6 +1810,7 @@ def finish(lane, cfg, st, info, state):
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}
         _, lj, _ = gh(["issue", "view", str(n), "--json", "labels"])
         if "lane-pr" in lj:
+            record_verify_time(state, n, "evidence_ready")
             gh(["issue", "comment", str(n), "--body", f"Lane {lane} also finished this issue (run `{run}`, duplicate dispatch); branch `{b}` pushed for comparison, no second PR opened."])
             log(f"{lane} finished #{n} (run {run}) duplicate → branch {b}, no PR"); mark_done(state, n)
             return {"done": True, "status": "duplicate", "error": None, "missing": []}
@@ -1765,9 +1826,11 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        record_verify_time(state, n, "evidence_ready")
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        record_verify_time(state, n, "evidence_ready")
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
@@ -2000,6 +2063,10 @@ def tick(lanes, state, last_warn):
             log(f"queue error: {e}", brain=False)
             return False
         for i in q: i["deps_ok"] = deps_met(i)
+        metrics = verify_metrics(state)
+        for item in q:
+            if item.get("verify"):
+                metrics["cards"].setdefault(str(item["n"]), {"issue": item["n"], "queued": now})
         # one authoritative read per issue per tick, shared by all dispatches and the count
         prefetch_labels([i["n"] for i in q])
         return True
@@ -2033,12 +2100,15 @@ def tick(lanes, state, last_warn):
                     and (name in freed_lanes or res[name].get("lane") == "idle")
                     and host_ok(c["host"]) and not lane_paused(name, c, scopes)]
             verify_slots, work_slots = queue_class_limits(lanes, state, idle)
+            metrics = verify_metrics(state)
+            metrics["deficit"] = verify_slots
             # The work class may hold at most `total - reserve` lanes: with no work slot left it takes
             # no further lane, the work cards in flight keep the lanes they hold (Refs #1864). The cap
             # is a limit, not a preference: a waiting work card is not dispatched on any lane.
             if not work_slots:
                 waiting = [i for i in candidates if not i.get("verify")]
                 if waiting:
+                    metrics["work_cap_hits"] += 1
                     log(f"queue share: {L} work class at its cap (work slots=0, verify deficit={verify_slots}); "
                         f"{len(waiting)} work card(s) wait", brain=False)
                 candidates = [i for i in candidates if i.get("verify")]
@@ -2065,6 +2135,11 @@ def tick(lanes, state, last_warn):
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        metrics = verify_metrics(state)
+        metrics["dispatches"]["all"] += 1
+        if pick.get("verify"):
+            metrics["dispatches"]["verify"] += 1
+            record_verify_time(state, pick["n"], "dispatched", time.time())
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -2140,6 +2215,7 @@ def tick(lanes, state, last_warn):
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
     state["_tick_at"] = now
+    observe_verify_verdicts(state)
     save_state(state)
     st = status_snapshot(lanes, state, res, ready, blocked, records)
     with open(f"{D}/lanes-status.json", "w") as stream:
