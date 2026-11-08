@@ -150,6 +150,27 @@ class EvalidSolPilotTests(unittest.TestCase):
         (folder / "result.json").write_text("[" * 2000 + "]" * 2000)
         self.assert_rejected_for("invalid_receipt")
 
+    def test_native_seconds_receipts_use_execution_time_directly(self):
+        for seconds, queued, expected_rc in ((55, 20, 0), (55, 100, 0), (61, 20, 1)):
+            with self.subTest(seconds=seconds, queued=queued):
+                folder = self.runs / "spec-1"
+                if folder.exists():
+                    (folder / "result.json").unlink()
+                    folder.rmdir()
+                receipt = self.receipt(seconds=seconds, queued_seconds=queued)
+                del receipt["duration_seconds"]
+                (folder / "result.json").write_text(json.dumps(receipt), encoding="utf-8")
+                rc, report = self.evaluate()
+                self.assertEqual(rc, expected_rc)
+                self.assertEqual(report["samples"], [
+                    {"execution_seconds": float(seconds), "run_id": "spec-1"}])
+                self.assertEqual(report["reasons"], [] if expected_rc == 0 else [
+                    {"run_id": "spec-1", "reason": "execution_timeout"}])
+
+    def test_invalid_native_seconds_cannot_fall_back_to_duration(self):
+        self.receipt(seconds=None)
+        self.assert_rejected_for("invalid_seconds")
+
     def test_wrong_actual_model_rejects_role_pool(self):
         self.receipt(model="gpt-6.1-terra")
         self.assert_rejected_for("profile_mismatch:model")

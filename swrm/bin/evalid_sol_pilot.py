@@ -5,7 +5,8 @@ Read RUNS/<run_id>/result.json receipts, never dispatch or enable a pool.
 Exit 0 means the supplied evidence meets the gate; exit 1 rejects it.
 The report checks receipt metadata, not artifact contents or live quota.
 Reasons are ordered by directory then by validation field, with sample-count
-failure first. Queue time is subtracted only after validating both durations.
+failure first. Native seconds already excludes queue time; legacy total
+duration_seconds includes it and requires subtraction after validation.
 """
 import argparse
 import json
@@ -33,17 +34,21 @@ def validate_receipt(receipt, run_id, max_execution_seconds):
             reasons.append(f"profile_mismatch:{field}")
     if receipt.get("status") != "done":
         reasons.append("invalid_terminal_status")
-    duration, queued = receipt.get("duration_seconds"), receipt.get("queued_seconds")
+    # swrm sums attempt seconds measured after provider-slot admission.
+    # Keep support for the total-duration receipts used by offline fixtures.
+    native_seconds = "seconds" in receipt
+    duration_field = "seconds" if native_seconds else "duration_seconds"
+    duration, queued = receipt.get(duration_field), receipt.get("queued_seconds")
     execution = None
     if not nonnegative_number(duration):
-        reasons.append("invalid_duration_seconds")
+        reasons.append(f"invalid_{duration_field}")
     if not nonnegative_number(queued):
         reasons.append("invalid_queued_seconds")
     if nonnegative_number(duration) and nonnegative_number(queued):
-        if queued > duration:
+        if not native_seconds and queued > duration:
             reasons.append("queued_exceeds_duration")
         else:
-            execution = float(duration - queued)
+            execution = float(duration if native_seconds else duration - queued)
             if execution > max_execution_seconds:
                 reasons.append("execution_timeout")
     usage = receipt.get("usage")
