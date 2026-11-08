@@ -1079,6 +1079,120 @@ def label_lane_failed(n, body):
     gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-failed"])
     gh(["issue", "comment", str(n), "--body", body])
 
+def budget_window_open(lane, cfg, info):
+    """Return True only when the backend window is positively known to be open.
+
+    AD_BUDGET_PROBE_CMD is an operator supplied command that prints JSON quota state.
+    Unknown or malformed output fails closed: a held card stays held until a later tick
+    can confirm recovery.
+    """
+    command = os.environ.get("AD_BUDGET_PROBE_CMD", "").strip()
+    if not command: return False
+    try:
+        proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=20)
+        if proc.returncode: return False
+        payload = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    if not isinstance(payload, dict): return False
+    def exhausted(value):
+        if isinstance(value, dict):
+            if value.get("exhausted") is True: return True
+            if value.get("exhausted") is False: return False
+            used = value.get("used_percentage", value.get("used_percent"))
+            if isinstance(used, (int, float)) and not isinstance(used, bool): return used >= 100
+        return None
+    # A payload may expose one window or nested backend windows. Any explicitly
+    # exhausted window keeps the hold; unrelated metadata is ignored.
+    rows = []
+    def visit(value):
+        if isinstance(value, dict):
+            status = exhausted(value)
+            if status is not None: rows.append(status)
+            for child in value.values(): visit(child)
+        elif isinstance(value, list):
+            for child in value: visit(child)
+    visit(payload)
+    states = rows
+    return bool(states) and not any(states)
+
+def budget_holds(state):
+    holds = state.get("_budget_requeue")
+    if not isinstance(holds, dict): holds = {}; state["_budget_requeue"] = holds
+    counts = state.get("_budget_failures")
+    if not isinstance(counts, dict): counts = {}; state["_budget_failures"] = counts
+    return holds, counts
+
+def clear_budget_history(state, issue):
+    """Forget the consecutive budget failures when a card reaches another terminal flow."""
+    holds, counts = budget_holds(state)
+    holds.pop(str(issue), None); counts.pop(str(issue), None)
+
+def release_recovered_budget_holds(state, lanes):
+    """Return held cards to lane-ready only after the window query confirms recovery."""
+    holds, _ = budget_holds(state)
+    for issue, hold in list(holds.items()):
+        if not isinstance(hold, dict): continue
+        if hold.get("terminal_pending"):
+            lane = hold.get("lane", "lane")
+            host = (lanes.get(lane) or {}).get("host", "unknown")
+            body = (f"Lane {lane} ({host}, run `{hold.get('run')}`) ended `{hold.get('status')}` without a commit "
+                    f"after {hold.get('tries')} budget-window failures (error_class `{hold.get('error_class')}`).\n\n"
+                    f"Executor summary: {hold.get('summary', '')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress",
+                             "--remove-label", "lane-ready", "--add-label", "lane-failed"])
+            if rc:
+                log(f"budget failure #{issue}: terminal label write failed ({err.strip()[-120:]}); retaining hold", brain=False)
+                continue
+            gh(["issue", "comment", str(issue), "--body", body])
+            _, counts = budget_holds(state)
+            holds.pop(issue, None); counts.pop(str(issue), None)
+            mark_done(state, int(issue))
+            continue
+        lane = hold.get("lane")
+        cfg = lanes.get(lane, {})
+        if not budget_window_open(lane, cfg, hold): continue
+        rc, _, err = gh(["issue", "edit", str(issue), "--remove-label", "in-progress"])
+        if rc:
+            log(f"budget hold #{issue}: window recovered but labels could not be updated ({err.strip()[-120:]})", brain=False)
+            continue
+        holds.pop(issue, None)
+        log(f"budget hold #{issue}: backend window recovered; returned to lane-ready", brain=False)
+    save_state(state)
+
+def budget_failure(info):
+    """Recognize an executor budget death without classifying quota or real failures."""
+    if (info.get("status") or "").lower() == "budget_exceeded": return True
+    if (info.get("error_class") or "").lower() == "budget_exceeded": return True
+    return bool(re.search(r"\b(?:budget_exceeded|token plan.{0,40}(?:limit|quota)|budget window exhausted)\b",
+                          info.get("summary") or "", re.I))
+
+def terminal_budget_failure(n, lane, cfg, st, info, state, tries):
+    """Schedule the terminal label on the next tick; retain the durable count meanwhile."""
+    holds, _ = budget_holds(state)
+    holds[str(n)] = {"issue": n, "lane": lane, "run": st["run"], "tries": tries,
+                     "terminal_pending": True, "status": info.get("status"),
+                     "error_class": info.get("error_class"), "summary": info.get("summary", ""),
+                     "at": time.time()}
+    save_state(state)
+    return {"done": True, "status": "budget-terminal-pending", "error": None, "missing": []}
+
+def hold_budget_failure(lane, cfg, st, info, state):
+    """Free the lane while keeping the issue claimed until its backend window recovers."""
+    n = st["issue"]
+    holds, counts = budget_holds(state)
+    key = str(n)
+    tries = int(counts.get(key, 0) or 0) + 1
+    counts[key] = tries
+    maximum = int(os.environ.get("AD_BUDGET_REQUEUE_MAX", "2"))
+    if tries >= max(1, maximum):
+        return terminal_budget_failure(n, lane, cfg, st, info, state, tries)
+    holds[key] = {"issue": n, "lane": lane, "run": st["run"], "tries": tries,
+                  "at": time.time(), "summary": info.get("summary", "")}
+    save_state(state)
+    log(f"{lane} #{n} run {st['run']} budget-exceeded ({tries}/{maximum}); held pending window recovery", brain=False)
+    return {"done": True, "status": "budget-held", "error": None, "missing": []}
+
 def harvest_fetch(lane, n, fetch, st):
     """Fetch a finished lane branch with bounded attempts.
 
@@ -1253,6 +1367,7 @@ def finish(lane, cfg, st, info, state):
         if empty:
             label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
                                f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+            clear_budget_history(state, n)
             mark_done(state, n)
             return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
@@ -1274,11 +1389,15 @@ def finish(lane, cfg, st, info, state):
         rc, out, err = gh(["pr", "create", "--base", "main", "--head", b, "--title", title, "--body", body])
         url = (out.strip().splitlines() or [""])[-1] if not rc else f"(pr create failed: {err.strip()[-160:]})"
         gh(["issue", "edit", str(n), "--remove-label", "in-progress", "--remove-label", "lane-ready", "--add-label", "lane-pr"])
+        clear_budget_history(state, n)
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
+        if budget_failure(info):
+            return hold_budget_failure(lane, cfg, st, info, state)
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
+        clear_budget_history(state, n)
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")
         return {"done": True, "status": "lane-failed", "error": None, "missing": []}
 
@@ -1464,6 +1583,7 @@ def tick(lanes, state, last_warn):
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
         if errs: host_fail(h, errs[0]["error"]); seen.add(h)
         else: host_good(h); seen.add(h)
+    release_recovered_budget_holds(state, lanes)
     q = None
     queue_failed = False
     queue_error = ""

@@ -415,6 +415,39 @@ lane state):
 python3 tools/check-ad-harvest-backoff.py
 ```
 
+### Budget-window failures (Refs #1668)
+
+An executor run that ends without a commit with `status` or `error_class` set to
+`budget_exceeded` is held with `in-progress`, which frees its lane without treating
+the card as failed. The AD only removes that hold after it positively confirms that
+the backend window is open. Configure `AD_BUDGET_PROBE_CMD` in the autodispatch
+process environment with a command that prints JSON quota state, for example
+`{"exhausted": false}` or `{"five_hour": {"used_percentage": 0}}`. Missing,
+invalid, failed, or still-exhausted probe results keep the card held for a later tick;
+there is no fixed-delay requeue. The per-card consecutive failure count survives a
+requeue and the second budget death (`AD_BUDGET_REQUEUE_MAX`, default `2`) closes the
+card through the ordinary `lane-failed` flow. A later tick clears its terminal
+bookkeeping after the label update succeeds.
+
+**B1:** `result.json` has no required top-level reset timestamp, so AD checks the
+configured window probe before releasing a hold and keeps it held on unknown state.
+`test_the_card_stays_held_while_the_window_is_exhausted` and
+`test_the_card_returns_to_the_queue_when_the_window_recovered` exercise the real
+harvest-to-requeue ticks. **B2:** `_budget_failures` persists by issue across requeue;
+the terminal label update is retried if it fails, and the next tick removes the hold
+and count only after it succeeds. `test_the_budget_failure_count_survives_a_requeue`
+and `test_the_bookkeeping_of_a_card_is_cleaned_up_when_it_leaves_the_hold` cover that
+flow. `test_a_budget_failure_is_not_a_card_failure` also checks that the harvest
+returns the result structure expected by `tick()` and releases the lane; the real
+failure guard is `test_a_real_failure_keeps_the_lane_failed_flow`.
+
+The offline end-to-end regression drives real `tick()` harvesting, hold, window
+recovery, re-dispatch, and terminal cleanup against a fake fleet:
+
+```bash
+cd tools/lane-autodispatch && python3 -m unittest test_budget_requeue -v
+```
+
 ### AD queue share for verify cards (Refs #1794)
 
 The dispatch queue is split into two classes: **verify cards** (`verify-intent` label +
