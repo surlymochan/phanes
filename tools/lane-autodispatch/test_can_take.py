@@ -173,8 +173,12 @@ class TickHarness:
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
 
     def run_tick(self, issues, lanes=None, state=None, remote_info=None):
-        """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
+        """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs).
+
+        The recorded side effects stay readable on the harness: `self.edits` (the label
+        edits), `self.snapshots` (the lane status counts) and `self.replenish_calls`."""
         dispatched, logs, edits = [], [], []
+        snapshots, replenish_calls = [], []
 
         def fake_gh(args, timeout=60):
             if args[:2] == ["issue", "list"]:
@@ -194,6 +198,10 @@ class TickHarness:
             dispatched.append((lane, item["n"]))
             return "run-1", None
 
+        def fake_status_snapshot(lanes_, state_, res_, ready, blocked, blocked_memory=None):
+            snapshots.append({"ready": ready, "blocked": blocked, "blocked_memory": blocked_memory})
+            return {}
+
         patched = ("D", "gh", "sh", "log", "host_ok", "host_fail", "host_good", "remote", "deps_met",
                    "dispatch", "replenish", "save_state", "status_snapshot")
         saved = {name: getattr(AUTODISPATCH, name) for name in patched}
@@ -210,9 +218,9 @@ class TickHarness:
                 AUTODISPATCH.remote = lambda lane, cfg, run="": {"lane": "idle", **(remote_info or {})}
                 AUTODISPATCH.deps_met = lambda item: True
                 AUTODISPATCH.dispatch = fake_dispatch
-                AUTODISPATCH.replenish = lambda k, state: []
+                AUTODISPATCH.replenish = lambda k, state: replenish_calls.append(k) or []
                 AUTODISPATCH.save_state = lambda state: None
-                AUTODISPATCH.status_snapshot = lambda *a, **k: {}
+                AUTODISPATCH.status_snapshot = fake_status_snapshot
                 AUTODISPATCH.VERIFY_REJECT_LOGGED.clear()
                 # tick() writes lanes-status.json without closing it: the warning is pre-existing
                 with warnings.catch_warnings():
@@ -221,6 +229,9 @@ class TickHarness:
         finally:
             for name, value in saved.items():
                 setattr(AUTODISPATCH, name, value)
+        self.edits = edits
+        self.snapshots = snapshots
+        self.replenish_calls = replenish_calls
         return dispatched, logs
 
 
@@ -311,6 +322,129 @@ class TickMemoryPrecheckTest(TickHarness, unittest.TestCase):
         )
         self.assertEqual(dispatched, [])
         self.assertTrue(any("gores2" in line and "135" in line and "400" in line for line in logs))
+
+    def test_a_codex_task_is_dispatched_when_the_host_has_enough_memory(self):
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+        dispatched, logs = self.run_tick(
+            [issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+            lanes=lanes,
+            remote_info={"memory_available_mb": 900},
+        )
+        self.assertEqual(dispatched, [("CX10", 1712)])
+        self.assertFalse(any("blocked-by-host-memory" in line for line in logs))
+
+    def test_the_135mb_sample_blocks_the_codex_task_but_not_the_pi_task(self):
+        # The replay of the gores2 sample: the codex task waits for the host, the pi task runs.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}, "PI1": {"host": "gores2", "backend": "pi"}}
+        codex_card = issue(1712, "codex session task", ("lane-ready", "backend:codex", "strict-backend"))
+        pi_card = issue(1713, "pi session task", ("lane-ready", "backend:pi"))
+        dispatched, logs = self.run_tick([codex_card, pi_card], lanes=lanes,
+                                         remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [("PI1", 1713)])  # the pi lane is not gated by the codex budget
+        self.assertTrue(any("blocked-by-host-memory" in line and "gores2" in line for line in logs))
+        snapshot = self.snapshots[-1]
+        self.assertEqual(snapshot["blocked"], 1)  # the codex card waits for the host
+        self.assertEqual(snapshot["ready"], 0)
+
+    def test_a_pi_lane_is_not_gated_by_the_codex_budget(self):
+        lanes = {"PI1": {"host": "gores2", "backend": "pi"}}
+        dispatched, _ = self.run_tick([issue(1713, "pi session task", ("lane-ready", "backend:pi"))],
+                                      lanes=lanes, remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [("PI1", 1713)])
+
+    def test_the_host_threshold_configuration_wins(self):
+        # The lane configuration carries the threshold of its host: 135 MB is enough there.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex", "memory_min_mb": 128}}
+        dispatched, _ = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                      lanes=lanes, remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [("CX10", 1712)])
+
+    def test_a_higher_host_threshold_blocks_the_lane(self):
+        lanes = {"CX10": {"host": "gores2", "backend": "codex", "memory_min_mb": 512}}
+        dispatched, logs = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                         lanes=lanes, remote_info={"memory_available_mb": 400})
+        self.assertEqual(dispatched, [])
+        self.assertTrue(any("512" in line for line in logs))
+
+    def test_the_per_host_environment_threshold_wins(self):
+        os.environ["AD_MEMORY_MIN_MB_GORES2"] = "128"
+        try:
+            lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+            dispatched, _ = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                          lanes=lanes, remote_info={"memory_available_mb": 135})
+            self.assertEqual(dispatched, [("CX10", 1712)])
+        finally:
+            del os.environ["AD_MEMORY_MIN_MB_GORES2"]
+
+    def test_the_codex_budget_reads_the_environment(self):
+        os.environ["AD_CODEX_MEMORY_MIN_MB"] = "256"
+        try:
+            self.assertEqual(AUTODISPATCH.backend_memory_min_mb("codex"), 256)
+            lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+            dispatched, _ = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                          lanes=lanes, remote_info={"memory_available_mb": 300})
+            self.assertEqual(dispatched, [("CX10", 1712)])  # 300 MB >= the configured 256 MB
+        finally:
+            del os.environ["AD_CODEX_MEMORY_MIN_MB"]
+
+    def test_the_skip_is_not_a_lane_failure(self):
+        # The card keeps its lane-ready label: no lane-failed, no comment, no done marker.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+        dispatched, logs = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                         lanes=lanes, remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [])
+        self.assertFalse([edit for edit in self.edits if "lane-failed" in edit])
+        self.assertFalse([edit for edit in self.edits if "lane-pr" in edit])
+        self.assertFalse([line for line in logs if "lane-failed" in line])
+
+    def test_another_backend_takes_the_task_the_codex_lane_may_not_run(self):
+        # The codex lane is skipped for the host memory, the pi lane runs the card: the card is
+        # not blocked and the queue is not refilled for it.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}, "PI1": {"host": "gores1", "backend": "pi"}}
+        dispatched, _ = self.run_tick([issue(1712, "plain card", ("lane-ready",))], lanes=lanes,
+                                      remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [("PI1", 1712)])
+        snapshot = self.snapshots[-1]
+        self.assertEqual(snapshot["blocked"], 0)
+        self.assertEqual(snapshot["blocked_memory"], {})
+
+    def test_a_task_without_another_backend_is_blocked_once(self):
+        # Two codex lanes of the same low-memory host reject the same card: it counts once.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}, "CX11": {"host": "gores2", "backend": "codex"}}
+        dispatched, _ = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                      lanes=lanes, remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [])
+        snapshot = self.snapshots[-1]
+        self.assertEqual(snapshot["blocked"], 1)  # counted once, never twice
+        self.assertEqual(snapshot["ready"], 0)
+
+    def test_the_blocked_diagnostics_carry_the_reason_code(self):
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+        self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                      lanes=lanes, remote_info={"memory_available_mb": 135})
+        rows = self.snapshots[-1]["blocked_memory"][1712]
+        self.assertEqual(rows["reason"], "blocked-by-host-memory")
+        host = rows["hosts"]["gores2"]
+        self.assertEqual(host["available_mb"], 135)
+        self.assertEqual(host["threshold_mb"], 400)
+        self.assertEqual(host["lanes"], ["CX10"])
+
+    def test_a_blocked_queue_does_not_trigger_a_refill(self):
+        # The queue is long enough, the host is not: no new issue is minted for it.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+        cards = [issue(1700 + n, "codex session task", ("lane-ready", "backend:codex", "strict-backend"))
+                 for n in range(12)]
+        dispatched, _ = self.run_tick(cards, lanes=lanes, remote_info={"memory_available_mb": 135})
+        self.assertEqual(dispatched, [])
+        self.assertEqual(self.replenish_calls, [])
+
+    def test_an_unreadable_memory_never_blocks_a_lane(self):
+        # The probe failed (no memory in the status): the dispatch stays as it was.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+        dispatched, logs = self.run_tick([issue(1712, "codex session task", ("lane-ready", "backend:codex"))],
+                                         lanes=lanes)
+        self.assertEqual(dispatched, [("CX10", 1712)])
+        self.assertFalse(any("blocked-by-host-memory" in line for line in logs))
 
 
 class TickWorkClassCapTest(TickHarness, unittest.TestCase):

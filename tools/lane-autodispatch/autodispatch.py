@@ -83,6 +83,103 @@ AD_VERIFY_SHARE_ENABLED = os.environ.get("AD_VERIFY_SHARE_ENABLED", "0").lower()
 VERIFY_SHARE = env_number("AD_VERIFY_SHARE", 0.2)
 VERIFY_MIN = env_number("AD_VERIFY_MIN", 1, int)
 
+# --- host memory admission (Refs #1712) ----------------------------------------------------
+# A codex session needs extra memory on the lane host. gores2 (1.6 GB in total) had 135 MB
+# available once: dispatching a codex lane there is a guaranteed OOM. The AD therefore reads
+# the available memory of the target host (the status shim reports it) before it dispatches
+# and skips the lane when the host is below the threshold.
+#
+# The threshold follows the backend that would RUN the task (the lane), not the pin of the
+# card: a non-strict `backend:pi` card may be taken by a codex lane, and that codex session
+# needs the codex budget. The pi/agy budgets are counted elsewhere, so their default
+# threshold is 0 (no gate) until an operator configures one.
+#
+# The precheck never labels an issue lane-failed and never writes a PAUSE (a low-memory host
+# recovers on its own): only the dispatch selection of this round changes.
+MEMORY_REASON = "blocked-by-host-memory"
+MEMORY_MIN_MB_ENV = "AD_MEMORY_MIN_MB"             # global override for every backend
+MEMORY_MIN_MB_CODEX_ENV = "AD_CODEX_MEMORY_MIN_MB"  # the codex session budget (default 400 MB)
+BACKEND_MEMORY_MIN_MB = {}                         # the other backends: their budget is counted elsewhere
+
+def backend_memory_min_mb(backend):
+    """The default memory budget of a backend (MB); 0 means the backend is not gated.
+
+    The codex session budget has its own environment variable (`AD_CODEX_MEMORY_MIN_MB`,
+    400 MB by default). The pi/agy budgets are counted elsewhere, so they stay 0 until an
+    operator configures one."""
+    if backend == "codex": return int(env_number(MEMORY_MIN_MB_CODEX_ENV, 400, int))
+    return int(BACKEND_MEMORY_MIN_MB.get(backend, 0))
+
+def memory_threshold_mb(cfg=None, backend=None):
+    """The available-memory threshold (MB) of a lane; 0 means the lane is not gated.
+
+    The ladder: the lane configuration (`memory_min_mb` in lanes.json) wins, then the
+    per-host environment (`AD_MEMORY_MIN_MB_<HOST>`), then the global `AD_MEMORY_MIN_MB`,
+    then the backend default (a codex lane needs `AD_CODEX_MEMORY_MIN_MB`, 400 MB)."""
+    cfg = cfg or {}
+    backend = backend or cfg.get("backend")
+    host = str(cfg.get("host") or "")
+    values = [cfg.get("memory_min_mb")]
+    if host:
+        values.append(os.environ.get(f"{MEMORY_MIN_MB_ENV}_{re.sub(r'[^A-Za-z0-9]', '_', host).upper()}"))
+    values.append(os.environ.get(MEMORY_MIN_MB_ENV))
+    for value in values:
+        if value is None or value == "": continue
+        try: number = float(value)
+        except (TypeError, ValueError): continue
+        return max(0, int(number))
+    return backend_memory_min_mb(backend)
+
+def memory_precheck(cfg, available_mb):
+    """The memory verdict of a lane before a dispatch: (allowed, reason).
+
+    `reason` is None when the lane may run. Otherwise it carries the diagnostics of the
+    skip: the reason code, the host, the available memory and the threshold. An unreadable
+    memory (the probe failed) never blocks a lane: the dispatch stays as it was."""
+    threshold = memory_threshold_mb(cfg)
+    if threshold <= 0: return True, None
+    try: available = int(available_mb)
+    except (TypeError, ValueError): return True, None
+    if available >= threshold: return True, None
+    return False, {"reason": MEMORY_REASON, "host": (cfg or {}).get("host"),
+                   "available_mb": available, "threshold_mb": threshold,
+                   "backend": (cfg or {}).get("backend")}
+
+def memory_blocked_tasks(queue, lanes, usable, memory_blocked):
+    """The tasks that no lane of this round can take because of the host memory (Refs #1712).
+
+    A task counts once, however many lanes rejected it: it is blocked only when EVERY lane
+    that could take it was skipped for the host memory. A task another backend can still run
+    stays ready. The per-host diagnostics of the rejection are kept."""
+    blocked = {}
+    for item in queue:
+        if not item.get("deps_ok", True): continue
+        takers = [L for L in usable if lanes[L].get("backend") and can_take(lanes[L]["backend"], item, L)]
+        rejected = [L for L in takers if L in memory_blocked]
+        if not takers or len(rejected) != len(takers): continue
+        hosts = {}
+        for L in rejected:
+            reason = memory_blocked[L]
+            host = hosts.setdefault(str(reason.get("host")),
+                                    {"available_mb": reason.get("available_mb"),
+                                     "threshold_mb": reason.get("threshold_mb"), "lanes": []})
+            host["lanes"].append(L)
+        blocked[item["n"]] = {"reason": MEMORY_REASON, "hosts": hosts}
+    return blocked
+
+def blocked_memory_reasons(blocked_memory):
+    """The blocked-diagnostics rows of the host-memory blocks (Refs #1712; input of #1687).
+
+    One row per blocked task and host: the reason code, the host, the available memory and
+    the threshold that rejected the lane."""
+    rows = []
+    for number, row in sorted((blocked_memory or {}).items()):
+        for host, info in sorted(row.get("hosts", {}).items()):
+            rows.append({"issue": number, "reason": row.get("reason", MEMORY_REASON), "host": host,
+                         "available_mb": info.get("available_mb"), "threshold_mb": info.get("threshold_mb"),
+                         "lanes": info.get("lanes", [])})
+    return rows
+
 def ctl_state_dir():
     directory = os.path.expanduser(os.environ.get("OPENSWARM_CTL_STATE_DIR", f"{HOME}/phanes-ctl/state"))
     os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -624,6 +721,23 @@ out={"lane":None,"run":None}
 try:
   ls=json.load(open(f"{O}/lanes/{L}/state.json")); out["lane"]=ls.get("state"); out["current_run"]=ls.get("current_run")
 except Exception as e: out["lane"]="unknown"
+def mem_available_mb():
+  """The available memory of this host in MB (None when it cannot be read)."""
+  try:
+    for line in open("/proc/meminfo"):
+      if line.startswith("MemAvailable:"): return int(line.split()[1])//1024
+  except Exception: pass
+  try:
+    import subprocess
+    free=subprocess.run(["free","-m"],capture_output=True,text=True,timeout=10).stdout
+    for line in free.splitlines():
+      if line.lower().startswith("mem:"):
+        parts=line.split()
+        if len(parts)>=7: return int(parts[6])   # `free` >= 3.3: the available column
+        if len(parts)>=4: return int(parts[3])   # old `free`: the free column
+  except Exception: pass
+  return None
+out["memory_available_mb"]=mem_available_mb()
 if R:
   p=f"{O}/runs/{R}/result.json"
   if os.path.exists(p):
@@ -874,12 +988,16 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
-def status_snapshot(lanes, state, res, ready, blocked):
+def status_snapshot(lanes, state, res, ready, blocked, blocked_memory=None):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: ("busy #%s" % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L))
     status["_ready"] = ready
     status["_blocked"] = blocked
+    # the host-memory blocks are part of the blocked diagnostics (#1687): the reason code,
+    # the host, the available memory and the threshold of every blocked task (Refs #1712)
+    status["_blocked_memory"] = len(blocked_memory or {})
+    status["_blocked_reasons"] = blocked_memory_reasons(blocked_memory)
     status["_stale_stripped_n"] = STALE_STRIPPED_N
     status["_stale_search_skips"] = STALE_STRIPPED_N
     status["_stale_lane_failed_skips"] = STALE_LANE_FAILED_N
@@ -1217,9 +1335,24 @@ def tick(lanes, state, last_warn):
     # one authoritative read per issue per tick, shared by the dispatch candidates and the count
     prefetch_labels([i["n"] for i in q])
     base = None
+    # the memory verdict of every lane of this round (Refs #1712): the backend that would RUN
+    # the task decides the budget, not the pin of the card (a codex lane may take a pi card)
+    memory_verdict = {L: memory_precheck(cfg, res.get(L, {}).get("memory_available_mb"))
+                       for L, cfg in lanes.items()}
+    usable_lanes = []
     for L, cfg in lanes.items():
         r = res[L]
         if "error" in r or not host_ok(cfg["host"]) or state.get(L) or r.get("lane") != "idle" or lane_paused(L, cfg, scopes): continue
+        usable_lanes.append(L)
+        allowed, mem_reason = memory_verdict.get(L, (True, None))
+        if not allowed:
+            # The host has too little memory for this backend: the lane is skipped for this
+            # round only. The issue is NOT labelled lane-failed, no host backoff is written and
+            # no PAUSE is written (the host may recover within minutes).
+            log(f"skip lane {L}: {mem_reason['reason']} host {mem_reason['host']} "
+                f"available {mem_reason['available_mb']}MB < threshold {mem_reason['threshold_mb']}MB "
+                f"(backend {mem_reason['backend']})", brain=False)
+            continue
         pick = None
         candidates = [i for i in q if i.get("deps_ok", True) and can_take(cfg["backend"], i, L)]
         candidates.sort(key=lambda i: rank(cfg["backend"], i))
@@ -1263,23 +1396,40 @@ def tick(lanes, state, last_warn):
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {base[:8]}")
     # stale search rows are not dispatchable: drop them (and log the skip) before counting
     q = freshen_queue(q, state)
-    blocked = sum(not i["deps_ok"] for i in q)
+    # the lanes that were skipped for the host memory in this round (Refs #1712)
+    memory_blocked = {L: memory_verdict[L][1] for L in usable_lanes if not memory_verdict[L][0]}
+    # a task is blocked by the host memory only when EVERY lane that could take it was skipped:
+    # a task another backend can still run stays ready, and a task counts once (Refs #1712)
+    blocked_memory = memory_blocked_tasks(q, lanes, usable_lanes, memory_blocked)
+    for number, row in sorted(blocked_memory.items()):
+        for host, info in sorted(row["hosts"].items()):
+            log(f"blocked #{number}: {row['reason']} host {host} available {info['available_mb']}MB "
+                f"< threshold {info['threshold_mb']}MB", brain=False)
+    blocked_deps = sum(not i["deps_ok"] for i in q)
+    blocked = blocked_deps + len(blocked_memory)
     ready = len(q) - blocked
     # refill when the queue is short, or when some backend's lanes could not all be fed (counting cross-pin fallback)
-    short = {b: sum(c["backend"] == b for c in lanes.values()) - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
+    # a lane skipped for the host memory cannot take work this round: it never starves its backend
+    short = {b: sum(1 for L, c in lanes.items() if c["backend"] == b and L not in memory_blocked)
+             - sum(1 for i in q if i.get("deps_ok", True) and can_take(b, i, verify_gate=False))
              for b in {c["backend"] for c in lanes.values()}}
     starve = max(short.values(), default=0)
-    if ready < LOW or starve > 0:
-        why = f"queue low ({ready} < {LOW})" if ready < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
+    # the refill follows the queue length: a task that waits for a low-memory host is still
+    # queued work, it must not trigger a refill of its own (Refs #1712)
+    queued = len(q) - blocked_deps
+    if queued < LOW or starve > 0:
+        why = f"queue low ({queued} < {LOW})" if queued < LOW else f"backend starved ({', '.join(f'{b} short {k}' for b, k in short.items() if k > 0)})"
         if mint_paused(scopes):
             if time.time() - last_warn > 600:
                 log(f"{why}: mint paused, no new issue minted", brain=False); last_warn = time.time()
         else:
-            filed = replenish(max(LOW - ready, starve), state)
+            filed = replenish(max(LOW - queued, starve), state)
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
-                log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
-    st = status_snapshot(lanes, state, res, ready, blocked)
+                log(f"WARNING queue low: {queued} queued lane-ready issue(s) left "
+                    f"(+{blocked_deps} waiting on 依赖, +{len(blocked_memory)} blocked by host memory), "
+                    f"backlog/ empty (threshold {LOW})"); last_warn = time.time()
+    st = status_snapshot(lanes, state, res, ready, blocked, blocked_memory)
     json.dump(st, open(f"{D}/lanes-status.json", "w"), ensure_ascii=False, indent=1)
     return last_warn
 
