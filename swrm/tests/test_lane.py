@@ -568,6 +568,33 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "gemini-3.8-flash-medium")
         self.assertEqual(calls[0][calls[0].index("--output-format") + 1], "stream-json")
 
+    def test_agy_startup_crash_restarts_once_and_succeeds(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "startup-crash-once"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["executor_restarts"], 1)
+        self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
+        self.assertEqual(result["backend"], "agy")
+
+    def test_agy_repeated_startup_crash_has_distinct_error_class(self):
+        self.set_config("agy")
+        self.env["FAKE_AGY_MODE"] = "startup-crash-always"
+        self.env["FAKE_AGY_STARTUP_CRASH_MARKER"] = str(self.root / "agy-startup-count")
+        self.start_lane()
+        run_id = self.assign("add the fixture change")
+
+        state = self.wait_run(run_id)
+        result = json.loads((self.data / "runs" / run_id / "result.json").read_text())
+        self.assertEqual(state["error_class"], "executor_start_failed")
+        self.assertIn("startup failed before executor event", result["attempts"][-1]["error_tail"])
+        self.assertEqual((self.root / "agy-startup-count").read_text(), "2")
+
     def test_agy_steer_aborts_the_process_and_resumes_the_conversation(self):
         self.set_config("agy")
         self.start_lane()
