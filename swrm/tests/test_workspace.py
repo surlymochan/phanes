@@ -279,6 +279,26 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual(new, expect_new)
             xs.cleanup_worktree(ws, fin["commit"])
 
+    def test_empty_baseline_verify_result_has_no_new_failures(self):
+        write(os.path.join(self.repo, "check.py"), "pass\n")
+        sh("git", "add", "check.py", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "check", cwd=self.repo)
+
+        ws = xs.prepare_workspace(self.repo, "empty-baseline", True)
+        fin = xs.finalize_workspace(ws, "t", "codex", self.rdir, keep=True)
+        self.addCleanup(xs.cleanup_worktree, ws, fin["commit"])
+        verify = xs.run_verify("python3 check.py", ws["root"], 30)
+        baseline = xs.verify_against_baseline("python3 check.py", ws, 30)
+
+        self.assertIsNone(fin["commit"])
+        self.assertEqual(verify["rc"], 0)
+        self.assertEqual(verify["failing"], [])
+        self.assertEqual(xs.adjust_status_for_verify("done", verify), ("done", None))
+        self.assertEqual(baseline["rc"], 0)
+        self.assertEqual(baseline["output"], "")
+        self.assertEqual(baseline["failing"], [])
+        self.assertEqual(sorted(set(verify["failing"]) - set(baseline["failing"])), [])
+
     def test_secret_print_rule_targets_credentials_only(self):
         import re
         rx = re.compile(next(r for r, n in xs.DEFAULT_RISKS if n == "possible secret print"), re.I)
