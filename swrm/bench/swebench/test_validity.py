@@ -177,6 +177,21 @@ class ValidityTest(unittest.TestCase):
 
         self.assertEqual(records[0]["reasons"], ["usage cap hit during run"])
 
+    def test_last_assistant_without_stop_reason_clears_earlier_error(self):
+        self.add_run("inst-1", "baseline", 1, ["task-1"])
+        self.add_pi("task-1", "minimaxi/MiniMax-M3.1-Flash-Preview")
+        self.add_events("inst-1", "baseline", 1, [{"stopReason": "error"}], "a-events.jsonl")
+        self.add_events("inst-1", "baseline", 1, [], "c-events.jsonl")
+
+        for assistant in ({}, {"stopReason": None}):
+            with self.subTest(assistant=assistant):
+                self.add_events("inst-1", "baseline", 1, [assistant], "b-events.jsonl")
+
+                records, _ = self.run_validity(["baseline"], ["inst-1"])
+
+                self.assertEqual(records[0]["status"], "valid")
+                self.assertEqual(records[0]["reasons"], [])
+
     def test_harness_error_reason_is_truncated(self):
         self.add_run("inst-1", "baseline", 1, harness_error="H" * 150)
 
