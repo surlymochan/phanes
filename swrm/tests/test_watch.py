@@ -24,22 +24,18 @@ def update(kind, **fields):
 
 class WatchTests(unittest.TestCase):
     def test_run_snapshot_keeps_assistant_text_from_event_without_lane(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            runs = pathlib.Path(tmp) / "runs"
-            rdir = runs / "r1"
-            rdir.mkdir(parents=True)
-            events = rdir / "events.jsonl"
-            events.write_text(json.dumps(update("agent_message_chunk", content={
-                "type": "text", "text": "heartbeat text"})) + "\n")
-            xs.jsave(str(rdir / "status.json"), {"state": "running", "events": str(events),
-                                                   "started": xs.NOW() - 60})
+        event = update("agent_message_chunk", content={"type": "text", "text": "heartbeat text"})
+        state = {"state": "running", "events": "events.jsonl", "started": 60}
+        with mock.patch.object(xs, "jload", side_effect=[state, {}]), \
+                mock.patch.object(xs, "NOW", return_value=120), \
+                mock.patch.object(xs.os.path, "exists", return_value=True), \
+                mock.patch.object(xs.os.path, "getmtime", return_value=60), \
+                mock.patch.object(xs, "open", mock.mock_open(read_data=json.dumps(event) + "\n"), create=True):
+            snapshot = xs.run_digest("r1")
 
-            with mock.patch.object(xs, "RUNS", str(runs)):
-                snapshot = xs.run_digest("r1")
-
-            self.assertEqual(snapshot["last_msg"], "heartbeat text")
-            self.assertNotIn("lane", snapshot)
-            json.dumps(snapshot)
+        self.assertEqual(snapshot["last_msg"], "heartbeat text")
+        self.assertNotIn("lane", snapshot)
+        json.dumps(snapshot)
 
     def test_pi_only_emits_completed_assistant_messages(self):
         messages = xs.WatchMessages()
