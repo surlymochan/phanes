@@ -1,5 +1,6 @@
 """Peer reviews use stubbed reviewers and local git fixtures only."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -67,21 +68,25 @@ class PeerReviewTests(unittest.TestCase):
         self.assertEqual((self.repo / "module.py").read_text(), "value = 2\n")
         self.assertEqual(len(self.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 1)
 
-    def test_timed_out_review_releases_the_fleet_reservation(self):
+    def test_timed_out_review_retains_the_fleet_reservation_without_boundary(self):
         guard = self.root / 'guard.json'
         coordinator = Path(_load.ROOT) / 'bin/fleet-capacity'
         guard.write_text(json.dumps({'command': [str(coordinator), 'broker']}))
         script = self.root / 'slow-review.py'
         script.write_text('import time\ntime.sleep(30)\n')
         env = {'OPENSWARM_FLEET_GUARD_CONFIG': str(guard), 'OPENSWARM_FLEET_CAPACITY_DIR': str(self.root / 'capacity')}
-        with mock.patch.dict(os.environ, env), mock.patch.object(xs, 'review_command', return_value=[sys.executable, str(script)]):
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(xs.procboundary.CgroupBoundary, 'create', return_value=None), \
+             mock.patch.object(xs, 'review_command', return_value=[sys.executable, str(script)]):
             with self.assertRaisesRegex(RuntimeError, 'reviewer timed out'):
                 xs.invoke_reviewer({'backend': 'agy'}, 'review', str(self.repo), str(self.run_dir),
                                    {'review': {'timeout_seconds': 2}})
             coordinator_cmd = [sys.executable, str(coordinator)] if os.name == 'nt' else [str(coordinator)]
             status = subprocess.run([*coordinator_cmd, 'broker'], input=json.dumps({'op': 'status'}),
                                     text=True, capture_output=True, check=True)
-        self.assertEqual(json.loads(status.stdout)['reservations'], [])
+            self.assertTrue(json.loads(status.stdout)['reservations'])
+            for slot in self.runs.glob('review-slot-*'):
+                xs.release_fleet_slot(str(slot))
 
     def test_perform_review_stores_findings_and_peer_ledger_fields(self):
         findings = [{"severity": "P1", "path": "module.py", "line": 1,
@@ -95,10 +100,55 @@ class PeerReviewTests(unittest.TestCase):
         self.assertIn("Diff:", invoke.call_args.args[1])
         saved = json.loads((self.run_dir / "review.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["by"], "pi:pi-model")
+        rules = invoke.call_args.args[1].split("\n\nRun:", 1)[0]
+        rules_hash = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12], rules_hash)
+        changed_rules = rules[:-1] + (" " if rules[-1] != " " else "!")
+        self.assertNotEqual(hashlib.sha256(changed_rules.encode("utf-8")).hexdigest()[:12], rules_hash)
+        self.assertEqual(saved.get("rules_hash"), rules_hash)
         ledger = json.loads(Path(xs.LEDGER).read_text(encoding="utf-8"))
         self.assertEqual(ledger["peer_review"], {"by": "pi:pi-model", "verdict": "changes",
                                                   "p0": 0, "p1": 1, "p2": 0})
         self.assertEqual(ledger["review_findings"], {"p0": 0, "p1": 1, "p2": 0})
+
+    def test_review_rules_hash_is_stable_and_tracks_rule_changes(self):
+        rules = "Review only concrete bugs.\nReturn JSON."
+        self.assertEqual(xs.review_rules_hash(rules), xs.review_rules_hash(rules))
+        self.assertNotEqual(xs.review_rules_hash(rules), xs.review_rules_hash(rules + "!"))
+
+    def test_review_rules_hash_uses_twelve_sha256_hex_digits_of_utf8(self):
+        for rules in ("", "abc", "Review only concrete bugs.\nReturn JSON.", "评审规则\n只报告缺陷。"):
+            with self.subTest(rules=rules):
+                expected = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:12]
+                actual = xs.review_rules_hash(rules)
+                self.assertEqual(actual, expected)
+                self.assertRegex(actual, r"^[0-9a-f]{12}$")
+
+    def test_review_event_hash_tracks_rules_but_not_run_context(self):
+        original_prompt = xs.peer_review_prompt
+        rules = original_prompt("run-1", "base", "branch", "diff").split("\n\nRun:", 1)[0]
+        changed_rules = rules[:-1] + "!"
+        payload = {"findings": [], "verdict": "approve"}
+        contexts = ((str(self.repo), "base-a", "branch-a", "first diff"),
+                    (str(self.repo), "base-b", "branch-b", "different diff\n\nRun: untrusted"))
+        hashes = []
+        with mock.patch.object(xs, "review_available", return_value={
+                "pi": {"backend": "pi", "binary": "/fake/pi"}}), \
+                mock.patch.object(xs, "invoke_reviewer", return_value=payload) as invoke:
+            for context, active_rules in ((contexts[0], rules), (contexts[1], rules),
+                                          (contexts[1], changed_rules)):
+                prompt = original_prompt("run-1", *context[1:])
+                prompt = active_rules + prompt[len(rules):]
+                with mock.patch.object(xs, "review_diff", return_value=context), \
+                        mock.patch.object(xs, "peer_review_prompt", return_value=prompt):
+                    xs.perform_peer_review("run-1", "pi", {})
+                self.assertEqual(invoke.call_args.args[1], prompt)
+                saved = json.loads((self.run_dir / "review.json").read_text(encoding="utf-8"))
+                expected = hashlib.sha256(active_rules.encode("utf-8")).hexdigest()[:12]
+                self.assertEqual(saved["rules_hash"], expected)
+                hashes.append(saved["rules_hash"])
+        self.assertEqual(hashes[0], hashes[1])
+        self.assertNotEqual(hashes[1], hashes[2])
 
     def test_family_selection_uses_policy_order_and_opposite_family(self):
         available = {backend: {"backend": backend, "binary": f"/fake/{backend}"}
