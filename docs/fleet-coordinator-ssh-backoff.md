@@ -49,8 +49,11 @@
    - 连续失败时 run 保持 `queued`，状态写入 `queue_reason: capacity-unreachable`、`capacity_unreachable: true` 与最后错误；stderr 记录 acquire 失败次数。
    - acquire 仅在确认获得 reservation 后启动执行器，协调器不可达不会误判为容量不足。
    - acquire 发出前先写入 `fleet-reservation.json`；响应丢失后仍使用同一 token 重试和恢复，避免丢失协调器上已经提交的预约。
-   - acquire 连续失败后调用方返回 queued，不进入 finalizing，也不记为 budget_exceeded；lane 保留当前任务，在可处理控制消息的 30 秒退避后重新准入。
+   - acquire 连续失败后返回 queued，不进入 finalizing，也不记为 budget_exceeded；lane 保留当前任务，在可处理控制消息的 30 秒退避后重新准入。独立 run 的 runner 也保持存活，在可响应停止请求的 30 秒退避后重试同一任务、工作区和 token，协调器恢复后自动继续执行。
+   - acquire 网络调用和退避不持有本机 provider-concurrency 全局锁；确认远端准入后重新加锁检查本机限额，避免慢链路拖延其他本机任务或并发超限。
    - release 先写入 `fleet-release-pending.json`，由独立进程补发，结束流程不等待网络。补发单次仍有 8 秒超时，失败后指数退避至 60 秒，成功后删除待发记录。CLI/常驻 supervisor 启动会扫描 runs 下的待发记录，重启补发进程；每个 run 的文件锁避免重复消费者。
+   - release 落盘后立即移交进程内预约所有权，允许 AGY 上游 403 的既有重试路径继续；下一次 acquire 等待待发记录确认清除后才发起新预约，避免跨进程缓存残留或旧 release 删除新 token。
+   - consult 未获准入也可能已经在远端提交预约；结束时按落盘 token 补发 release，清理临时目录前检查预约和待发记录，保留全部恢复凭据。
 
 3. **预约清扫兜底**：
    - 预约不会仅因年龄超过 600 秒自动过期。acquire 结果未知时保留 token 证据，后续以同一 token 恢复；已结束执行器的 release 可安全幂等补发。

@@ -3884,12 +3884,13 @@ def retry_fleet_release(rdir):
         pending.update(attempts=pending.get("attempts", 0) + 1, error=str(error))
         jsave(path, pending)
         return False
-    os.unlink(path)
     reservation = os.path.join(rdir, "fleet-reservation.json")
     if os.path.exists(reservation):
         os.unlink(reservation)
     _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
     set_status(rdir, fleet_release_pending=False, fleet_reservation_error=None)
+    # Publish acknowledgement last, before a caller can send its next acquire.
+    os.unlink(path)
     return True
 
 
@@ -3909,6 +3910,10 @@ def fleet_release_worker(rdir):
 
 
 def release_fleet_slot(rdir):
+    if os.path.exists(os.path.join(rdir, "fleet-release-pending.json")):
+        _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
+        start_fleet_release_worker(rdir)
+        return False
     item = _FLEET_RESERVATIONS.get(os.path.realpath(rdir))
     saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
     if not item and saved:
@@ -3923,8 +3928,9 @@ def release_fleet_slot(rdir):
     status = jload(os.path.join(rdir, "status.json"), {}) or {}
     set_status(rdir, fleet_release_pending=True,
                state="routing" if status.get("state") == "running" else status.get("state", "routing"))
-    # Keep the in-process ownership marker until acknowledgement. Callers such as
-    # consult use it to avoid deleting the durable queue during workspace cleanup.
+    # Executor ownership ends here; the durable queue now owns the release.
+    # A detached worker cannot update its parent's in-memory cache.
+    _FLEET_RESERVATIONS.pop(os.path.realpath(rdir), None)
     start_fleet_release_worker(rdir)
     return False
 
@@ -3939,10 +3945,18 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
     status_path = os.path.join(rdir, "status.json")
     command = fleet_guard_command()
     reservation_key = os.path.realpath(rdir)
-    if os.path.exists(os.path.join(rdir, "fleet-release-pending.json")):
+    pending_path = os.path.join(rdir, "fleet-release-pending.json")
+    if os.path.exists(pending_path):
         start_fleet_release_worker(rdir)
-        set_status(rdir, state="queued", queue_reason="capacity-unreachable", capacity_unreachable=True)
-        return False
+        # Usually the previous turn's release completes before the next turn.
+        # Allow its local acknowledgement to arrive without any network wait here.
+        for delay in (0.2, 0.4):
+            if not os.path.exists(pending_path) or (keep_waiting and not keep_waiting()):
+                break
+            time.sleep(delay)
+        if os.path.exists(pending_path):
+            set_status(rdir, state="queued", queue_reason="capacity-unreachable", capacity_unreachable=True)
+            return False
     saved = jload(os.path.join(rdir, "fleet-reservation.json"), None)
     command = saved["command"] if saved else command
     token = saved["payload"]["token"] if saved else uuid.uuid4().hex
@@ -3952,7 +3966,9 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
         # Persist before sending: a timeout may follow a successful remote commit.
         jsave(os.path.join(rdir, "fleet-reservation.json"), {"command": command, "payload": payload})
     coordinator_failures = 0
+    fleet_admitted = not command
     while True:
+        cancelled = False
         with open(lock_path, "a") as lock:
             _flock(lock, LOCK_EX)
             active = {}
@@ -3982,47 +3998,11 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                 for key in counts:
                     if key in row_keys:
                         counts[key] += 1
-            if all(counts[key] < cap for key, cap in limits.items()):
-                admitted = True
-                if command:
-                    try:
-                        admitted = bool(fleet_guard_call(command, payload).get("admitted"))
-                    except RuntimeError as error:
-                        coordinator_failures += 1
-                        admitted = False
-                        set_status(rdir, fleet_reservation_error=str(error),
-                                   capacity_unreachable=coordinator_failures >= 3)
-                        print(f"fleet capacity acquire failed after coordinator call ({coordinator_failures}/3): {error}",
-                              file=sys.stderr)
-                        if coordinator_failures >= 3:
-                            set_status(rdir, state="queued", backend=backend, provider=provider,
-                                       concurrency_keys=keys, queue_reason="capacity-unreachable",
-                                       capacity_unreachable=True,
-                                       fleet_reservation_error=f"{error} (3 attempts; capacity-unreachable)",
-                                       **({"lane": lane_name} if lane_name else {}))
-                            if lane_name:
-                                lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys,
-                                                 queue_reason="capacity-unreachable",
-                                                 capacity_unreachable=True)
-                            if keep_waiting and not keep_waiting():
-                                release_fleet_slot(rdir)
-                            return False
-                        time.sleep(0.2 * (2 ** (coordinator_failures - 1)))
-                        continue
-                    else:
-                        coordinator_failures = 0
-                        set_status(rdir, capacity_unreachable=False, fleet_reservation_error=None)
-                        if lane_name:
-                            lane_write_state(lane_name, capacity_unreachable=False, queue_reason=None)
-                if admitted and command:
-                    _FLEET_RESERVATIONS[reservation_key] = (command, payload)
-            else:
-                admitted = False
+            local_available = all(counts[key] < cap for key, cap in limits.items())
+            admitted = local_available and fleet_admitted
             if admitted and keep_waiting and not keep_waiting():
-                # The coordinator call may have overlapped cancellation or expiry.
-                release_fleet_slot(rdir)
-                return False
-            if admitted:
+                cancelled = True
+            if admitted and not cancelled:
                 set_status(rdir, state="running", backend=backend, provider=provider,
                            concurrency_keys=keys, fleet_reservation_error=None, queue_reason=None, capacity_unreachable=False,
                            **({"lane": lane_name} if lane_name else {}))
@@ -4034,6 +4014,43 @@ def reserve_provider_slot(rdir, backend, provider, policy, lane_name=None, keep_
                        **({"lane": lane_name} if lane_name else {}))
             if lane_name:
                 lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys)
+        if cancelled:
+            release_fleet_slot(rdir)
+            return False
+        # Network calls and backoff never hold the global local-admission lock.
+        # After remote admission, loop to recheck local caps under that lock.
+        if local_available and command and not fleet_admitted:
+            try:
+                fleet_admitted = bool(fleet_guard_call(command, payload).get("admitted"))
+            except RuntimeError as error:
+                coordinator_failures += 1
+                set_status(rdir, fleet_reservation_error=str(error),
+                           queue_reason="capacity coordinator retry",
+                           capacity_unreachable=coordinator_failures >= 3)
+                print(f"fleet capacity acquire failed after coordinator call ({coordinator_failures}/3): {error}",
+                      file=sys.stderr)
+                if coordinator_failures >= 3:
+                    set_status(rdir, queue_reason="capacity-unreachable", capacity_unreachable=True,
+                               fleet_reservation_error=f"{error} (3 attempts; capacity-unreachable)")
+                    if lane_name:
+                        lane_write_state(lane_name, turn_state="queued", concurrency_keys=keys,
+                                         queue_reason="capacity-unreachable", capacity_unreachable=True)
+                    if keep_waiting and not keep_waiting():
+                        release_fleet_slot(rdir)
+                    return False
+                if keep_waiting and not keep_waiting():
+                    release_fleet_slot(rdir)
+                    return False
+                time.sleep(0.2 * (2 ** (coordinator_failures - 1)))
+                continue
+            else:
+                coordinator_failures = 0
+                set_status(rdir, capacity_unreachable=False, fleet_reservation_error=None)
+                if lane_name:
+                    lane_write_state(lane_name, capacity_unreachable=False, queue_reason=None)
+                if fleet_admitted:
+                    _FLEET_RESERVATIONS[reservation_key] = (command, payload)
+                    continue
         if keep_waiting and not keep_waiting():
             # No executor started, so even an uncertain acquire can be released.
             release_fleet_slot(rdir)
@@ -4127,7 +4144,11 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
             status = jload(os.path.join(rdir, "status.json"), {}) or {}
             stopped = bool(status.get("stop_requested"))
             queued_from = status.get("queued_at", queue_start) if first_attempt == 1 and not attempts else queue_start
-            set_status(rdir, queued_seconds=round(status.get("queued_seconds", 0) + max(0, NOW() - queued_from), 3))
+            waited = max(0, NOW() - queued_from)
+            queued_seconds = (max(status.get("queued_seconds", 0), waited) if first_attempt == 1 and not attempts
+                              else status.get("queued_seconds", 0) + waited)
+            set_status(rdir, queued_seconds=round(queued_seconds, 3),
+                       deadline=budget_deadline + max(0, NOW() - queue_start))
             if status.get("capacity_unreachable") and not stopped:
                 return attempts, None, "capacity-unreachable"
             error_class = "stopped" if stopped else "budget_exceeded"
@@ -4143,8 +4164,10 @@ def run_executor_with_rate_limit(backend, decision, state, prompt, wd, rdir, bud
             budget_deadline = admitted_at + float(status["budget_minutes"]) * 60
         else:
             budget_deadline += max(0, admitted_at - queue_start)
-        queued_seconds = status.get("queued_seconds", 0) + max(
-            0, admitted_at - (status.get("queued_at", queue_start) if first_attempt == 1 and not attempts else queue_start))
+        waited = max(0, admitted_at - (status.get("queued_at", queue_start)
+                                     if first_attempt == 1 and not attempts else queue_start))
+        queued_seconds = (max(status.get("queued_seconds", 0), waited) if first_attempt == 1 and not attempts
+                          else status.get("queued_seconds", 0) + waited)
         effective_start = (status.get("started", admitted_at) + max(0, admitted_at - queue_start)
                            if status.get("execution_started") else admitted_at)
         set_status(rdir, state="running", backend=backend, model=decision.get("model"),
@@ -5693,11 +5716,20 @@ def cmd_run(args, policy):
         tried.append(b)
         current_attempts, final, err_class = run_executor_with_rate_limit(
             b, decision, st, prompt, ws["path"], rdir, deadline, policy, first_attempt=len(attempts) + 1)
-        if err_class == "capacity-unreachable":
-            print(json.dumps(jload(f"{rdir}/status.json", {}), ensure_ascii=False))
-            return
         deadline = (jload(f"{rdir}/status.json", {}) or {}).get("deadline", deadline)
         attempts.extend(current_attempts)
+        if err_class == "capacity-unreachable":
+            # Stay alive to retry this same run/workspace when the coordinator
+            # recovers. Each acquire batch is bounded; queued time is not budget.
+            queue_start = NOW()
+            print(f"fleet capacity acquire: capacity-unreachable; run {rid} queued, retry in 30s",
+                  file=sys.stderr)
+            wait_run_rate_limit(30, rdir, float("inf"))
+            waited = max(0, NOW() - queue_start)
+            deadline += waited
+            status = jload(f"{rdir}/status.json", {}) or {}
+            set_status(rdir, deadline=deadline, queued_seconds=round(status.get("queued_seconds", 0) + waited, 3))
+            continue
         if err_class == "model_unavailable":  # same backend, next model in the tier
             trip_breaker(f"{b}/{decision['model']}", policy, attempts[-1].get("error_tail") or "model unavailable")
         if err_class == "rate_limit" and b in ("pi", "codex", "cursor", "agy"):
