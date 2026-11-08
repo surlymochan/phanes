@@ -334,7 +334,7 @@ class AutodispatchBusyStaleTests(unittest.TestCase):
     def test_reviewed_binary_artifacts_are_absent(self):
         root = Path(__file__).resolve().parents[2]
         for directory in ("openswarm/tests", "swrm/tests"):
-            artifacts = list((root / directory).glob("*.so"))
+            artifacts = [path for path in (root / directory).iterdir() if path.is_file() and path.suffix == ".so"]
             self.assertEqual(artifacts, [], f"unexpected shared-library artifacts in {directory}")
 
 
