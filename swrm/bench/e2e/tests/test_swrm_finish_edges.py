@@ -51,6 +51,26 @@ def test_receipt_ignores_trailing_telemetry_with_attempt_metadata():
     assert extract_result_object(json.dumps(telemetry)) is None
 
 
+@pytest.mark.parametrize(
+    "run_context",
+    [
+        {"workspace": {"mode": "worktree"}},
+        {"run_dir": "/tmp/swrm/runs/metrics-456"},
+    ],
+)
+def test_receipt_ignores_trailing_statusless_telemetry_with_run_context(run_context):
+    receipt = {
+        "id": "run-123",
+        "status": "done",
+        "workspace": {"mode": "worktree", "path": "/tmp/run-123"},
+    }
+    telemetry = {"id": "metrics-456", "event": "usage", "count": 7, **run_context}
+    stdout = json.dumps(receipt) + "\n" + json.dumps(telemetry)
+
+    assert extract_result_object(stdout) == receipt
+    assert extract_result_object(json.dumps(telemetry)) is None
+
+
 def test_receipt_keeps_support_for_multiple_stdout_objects():
     receipt = {
         "id": "run-789",

@@ -79,11 +79,8 @@ def _is_result_receipt(obj: object) -> bool:
     )
     if obj.get("status") in terminal_statuses and has_run_context:
         return True
-    # A statusless result can still be recognized by its run context. Without
-    # that context, require the top-level usage summary as well as attempts;
-    # telemetry events may carry attempt metadata but are not run receipts.
-    if "status" not in obj and has_run_context:
-        return True
+    # Statusless receipts must include executor attempts and a top-level usage
+    # summary; run context alone is also common on unrelated telemetry events.
     attempts = obj.get("attempts")
     has_executor_attempts = isinstance(attempts, list) and bool(attempts) and all(
         isinstance(attempt, dict)
