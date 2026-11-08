@@ -18,6 +18,7 @@ describe("agent thread upgrade host E2E", () => {
   test("launches the application entry instead of a database-only host", () => {
     expect(script).toContain("_electron.launch(");
     expect(script).toContain("--user-data-dir=");
+    expect(script).toContain('...(process.platform === "linux" ? ["--no-sandbox"] : [])');
     expect(script).toContain("volto:renderer-loaded");
     expect(script).not.toContain("new DatabaseCore(");
   });

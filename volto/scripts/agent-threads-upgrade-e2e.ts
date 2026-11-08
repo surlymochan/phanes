@@ -37,7 +37,12 @@ async function startHost(profile: string): Promise<ElectronApplication> {
   }
   const host = await _electron.launch({
     executablePath: createRequire(import.meta.url)("electron"),
-    args: [...electronSafeStorageLaunchArguments(), ROOT, `--user-data-dir=${profile}`],
+    args: [
+      ...electronSafeStorageLaunchArguments(),
+      ...(process.platform === "linux" ? ["--no-sandbox"] : []),
+      ROOT,
+      `--user-data-dir=${profile}`,
+    ],
     cwd: ROOT,
     env: Object.fromEntries(
       Object.entries(withoutElectronRuntimeFlags(process.env)).flatMap(([name, value]) =>
