@@ -2,8 +2,8 @@
 
 本文记录 **2026-11-02** 基线的 box 控制面 fleet topology，用于检查配置与
 实际 lane 容量是否符合约定。Instabox 主机已经退役，受控远端 host 固定为
-`worker`、`gores2`、`worker-a.example.invalid`、`relay.example.invalid`、
-`broker`；控制面在 **box**，box 是本机，不属于受控 fleet host。总 lane 数
+`gores1`、`gores2`、`govpn`、`govpn2`、`gorelay`、
+`gocc`；控制面在 **box**，box 是本机，不属于受控 fleet host。总 lane 数
 应为 **≥10**。
 
 ## Host 限额
@@ -14,41 +14,43 @@
 
 ```json
 {
-  "hosts": ["worker", "gores2", "worker-a.example.invalid", "relay.example.invalid", "broker"],
+  "hosts": ["gores1", "gores2", "govpn", "govpn2", "gorelay", "gocc"],
   "limits": {
-    "total": 10,
-    "host:worker": 3,
+    "total": 11,
+    "host:gores1": 3,
     "host:gores2": 2,
-    "host:worker-a.example.invalid": 2,
-    "host:relay.example.invalid": 2,
-    "host:broker": 1
+    "host:govpn": 1,
+    "host:govpn2": 1,
+    "host:gorelay": 2,
+    "host:gocc": 2
   }
 }
 ```
 
 | Host | 最大 lane 数 | 允许的 backend |
 |---|---:|---|
-| `worker` | 3 | `pi` |
+| `gores1` | 3 | `pi` |
 | `gores2` | 2 | `pi` |
-| `worker-a.example.invalid` | 2 | `codex` |
-| `relay.example.invalid` | 2 | `codex` |
-| `broker` | 1 | `agy` |
+| `govpn` | 1 | `codex` |
+| `govpn2` | 1 | `codex` |
+| `gorelay` | 2 | `codex` |
+| `gocc` | 2 | `agy` |
 
-上述限额合计为 10 个 lane 的上限；实际可用总量不得低于 10。`copilot`
+上述限额合计为 11 个 lane 的上限；实际可用总量不得低于 10。`copilot`
 不属于受控 fleet host，也不得配置为 lane backend。
 
 ## Backend 限额
 
 | Backend | 期望限额 | 说明 |
 |---|---:|---|
-| MiniMax / `pi` | 5 | 受控 fleet 远程 lane，配比 50% |
+| MiniMax / `pi` | 5 | 受控 fleet 远程 lane |
 | Codex / `codex` | 4 | 受控 fleet 远程 lane |
-| `agy` | 1 | 受控 fleet 远程 lane，配比 10% |
+| `agy` | 2 | 受控 fleet 远程 lane |
 | `copilot` | 0 | 仅远程可选；不属于受控 fleet host，受控限额为 0 |
 
-配比按 2026-11-02 基线：MiniMax 50%、Codex 30%、agy 10%、Copilot 10%。
-Copilot 仅远程可选、受控限额为 0，它的份额不在受控 fleet 的 10 个 lane
-内；受控 fleet 因此按 pi 5 / codex 4 / agy 1 分配。
+历史 backend 配比为 MiniMax 50%、Codex 30%、agy 10%、Copilot 10%。
+Copilot 仅远程可选、受控限额为 0；当前按主机容量分配 pi 5 / codex 4 /
+agy 2，共 11 个受控 lane，满足 Codex ≥4、agy 2 的容量要求。
 
 这些是 box 控制面应维护的期望值；主机集合和 SSH fleet 的基础约定见
 [`docs/dual-mode-ssh.md`](dual-mode-ssh.md)，2026-11-02 事实基线与 Copilot

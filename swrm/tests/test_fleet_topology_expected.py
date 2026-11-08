@@ -2,7 +2,7 @@
 
 Issue #1480 rewrites `docs/fleet-topology-expected.md` to the 2026-11-02
 baseline: the retired Instabox hosts are gone and the remaining remote hosts
-carry the ten lanes of the current fleet. This module pins the expected
+carry at least ten lanes of the current fleet. This module pins the expected
 values, while `test_fleet_topology_baseline.py` pins the invariants that keep
 the document from drifting back to the retired fleet.
 
@@ -22,11 +22,12 @@ BASELINE_DATE = "2026-11-02"
 # The 2026-11-02 remote fleet: the control plane runs on box, which is not a
 # controlled fleet host (docs/fusion-openbot-swrm-v0.2.md).
 BASELINE_HOSTS = (
-    "worker",
+    "gores1",
     "gores2",
-    "worker-a.example.invalid",
-    "relay.example.invalid",
-    "broker",
+    "govpn",
+    "govpn2",
+    "gorelay",
+    "gocc",
 )
 
 # The retired Instabox hosts, spelled as raw `ib1`-`ib5` aliases and as the
@@ -42,14 +43,27 @@ class FleetTopologyExpectedTests(unittest.TestCase):
     def test_no_retired_instabox_hosts_or_limits(self):
         self.assertFalse(any(RETIRED_HOST.search(host) for host in self.topology["hosts"]))
         self.assertFalse(any(
-            RETIRED_HOST.search(key.removeprefix("host:"))
+            RETIRED_HOST.search(key)
             for key in self.topology["limits"]
-            if key.startswith("host:")
         ))
 
     def test_baseline_hosts_are_present(self):
         for host in BASELINE_HOSTS:
             self.assertIn(host, self.topology["hosts"])
+
+    def test_guard_rejects_retired_hosts_and_all_limit_key_forms(self):
+        for host in ("ib0", "ib6", "ib123"):
+            with self.subTest(host=host):
+                self.topology["hosts"].append(host)
+                with self.assertRaises(AssertionError):
+                    self.test_no_retired_instabox_hosts_or_limits()
+                self.topology["hosts"].pop()
+            for key in (host, f"host:{host}", f"backend:{host}"):
+                with self.subTest(key=key):
+                    self.topology["limits"][key] = 1
+                    with self.assertRaises(AssertionError):
+                        self.test_no_retired_instabox_hosts_or_limits()
+                    del self.topology["limits"][key]
 
     def test_baseline_date_is_recorded(self):
         self.assertIn(BASELINE_DATE, self.text)

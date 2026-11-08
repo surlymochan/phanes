@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = ROOT / "docs" / "fleet-topology-expected.md"
 DUAL_MODE = ROOT / "docs" / "dual-mode-ssh.md"
+ENV_EXAMPLE = ROOT / "docs" / "examples" / "hub-bridge.env.example"
 
 
 def fenced_json(document):
@@ -26,7 +27,7 @@ def fenced_json(document):
 
 
 def exported_json(document, variable):
-    match = re.search(rf"export {variable}='([^']+)'", document)
+    match = re.search(rf"^(?:export )?{variable}='([^']+)'", document, re.MULTILINE)
     if not match:
         raise AssertionError(f"dual-mode-ssh.md is missing {variable}")
     return json.loads(match.group(1))
@@ -65,6 +66,31 @@ class FleetTopologyDocumentationTests(unittest.TestCase):
         backends = exported_json(self.dual_mode_text, "OPENSWARM_AUTO_HOST_BACKENDS")
         local_host = exported_value(self.dual_mode_text, "OPENSWARM_AUTO_LOCAL_HOST")
         self.assertEqual(set(backends) - {local_host}, set(self.topology["hosts"]))
+
+    def test_ssh_configuration_covers_every_fleet_host(self):
+        hosts = re.search(r"^Host (.+)$", self.dual_mode_text, re.MULTILINE)
+        self.assertIsNotNone(hosts)
+        self.assertEqual(set(hosts.group(1).split()), set(self.topology["hosts"]))
+
+    def test_environment_example_matches_runbook(self):
+        environment = ENV_EXAMPLE.read_text(encoding="utf-8")
+        for variable in ("OPENSWARM_AUTO_FLEET_HOSTS", "OPENSWARM_AUTO_HOST_BACKENDS"):
+            self.assertEqual(
+                exported_json(environment, variable),
+                exported_json(self.dual_mode_text, variable),
+            )
+
+    def test_backend_capacity_and_control_plane_exclusion(self):
+        backends = exported_json(self.dual_mode_text, "OPENSWARM_AUTO_HOST_BACKENDS")
+        self.assertEqual(backends["box"], [])
+        self.assertNotIn("box", self.topology["hosts"])
+        capacity = {"pi": 0, "codex": 0, "agy": 0}
+        for host in self.topology["hosts"]:
+            self.assertEqual(len(backends[host]), 1)
+            capacity[backends[host][0]] += self.topology["limits"][f"host:{host}"]
+        self.assertGreaterEqual(capacity["codex"], 4)
+        self.assertEqual(capacity["agy"], 2)
+        self.assertEqual(sum(capacity.values()), self.topology["limits"]["total"])
 
 
 if __name__ == "__main__":
