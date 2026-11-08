@@ -7238,15 +7238,22 @@ def lane_worktree_matches(repo, wt):
     rc, root, _ = lane_git(["rev-parse", "--show-toplevel"], wt)
     if rc or os.path.realpath(root) != os.path.realpath(wt):
         return False
-    rc, wt_common, _ = lane_git(["rev-parse", "--git-common-dir"], wt)
-    rc2, repo_common, _ = lane_git(["rev-parse", "--git-common-dir"], repo)
-    if rc or rc2:
+    rc, git_dir, _ = lane_git(["rev-parse", "--absolute-git-dir"], wt)
+    if rc or os.path.realpath(git_dir) != os.path.realpath(os.path.join(wt, ".git")):
         return False
-    if not os.path.isabs(wt_common):
-        wt_common = os.path.join(wt, wt_common)
-    if not os.path.isabs(repo_common):
-        repo_common = os.path.join(repo, repo_common)
-    return os.path.realpath(wt_common) == os.path.realpath(repo_common)
+    # Lane workspaces keep their writable Git metadata locally while sharing only
+    # immutable objects with the configured repository.
+    alternates = os.path.join(git_dir, "objects", "info", "alternates")
+    if not os.path.isfile(alternates):
+        return False
+    with open(alternates) as stream:
+        paths = [os.path.realpath(line.strip()) for line in stream if line.strip()]
+    rc, repo_objects, _ = lane_git(["rev-parse", "--git-path", "objects"], repo)
+    if rc:
+        return False
+    if not os.path.isabs(repo_objects):
+        repo_objects = os.path.join(repo, repo_objects)
+    return os.path.realpath(repo_objects) in paths
 
 
 def lane_rebuild_worktree(repo, wt, base):
@@ -7257,9 +7264,12 @@ def lane_rebuild_worktree(repo, wt, base):
         if os.path.lexists(wt):
             shutil.rmtree(wt, ignore_errors=True)
     lane_git(["worktree", "prune"], repo, timeout=300)
-    rc, _, err = lane_git(["worktree", "add", "--detach", "-q", wt, base], repo, timeout=300)
+    rc, _, err = lane_git(["clone", "--shared", "--no-checkout", "-q", repo, wt], repo, timeout=300)
     if rc:
-        raise RuntimeError(f"lane worktree rebuild failed: {err[:250]}")
+        raise RuntimeError(f"lane worktree clone failed: {err[:250]}")
+    rc, _, err = lane_git(["checkout", "--detach", base], wt, timeout=300)
+    if rc:
+        raise RuntimeError(f"lane worktree checkout failed: {err[:250]}")
 
 
 def lane_prepare_workspace(lane, rid, base_rev=None):
@@ -8287,6 +8297,13 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
            if read_only or evidence_error else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
+    if fin.get("commit") and ws.get("mode") == "worktree" and ws.get("lane"):
+        # The lane's executor-writable clone owns its refs. Publish the completed
+        # branch ref into the configured repository so the normal merge hint works.
+        ref = f"refs/heads/{ws['branch']}"
+        rc, _, err = git(["fetch", ws["root"], f"{ref}:{ref}"], ws["repo"], timeout=300)
+        if rc:
+            raise RuntimeError(f"lane branch handoff failed: {err.strip()[:250]}")
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (final or {}).get("files_changed"))
     if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role"):
         for command in (["checkout", "--detach", "-f", ws["base"]],
@@ -8656,17 +8673,15 @@ def cmd_lane_serve(lane, policy):
         wt = os.path.join(lane_root(name), "wt")
         # Create the fixed worktree before launching a cwd-bound Pi child.
         os.makedirs(lane_root(name), exist_ok=True)
-        if not os.path.exists(wt):
-            repo = os.path.realpath(lane["repo"])
-            rc, top, err = lane_git(["rev-parse", "--show-toplevel"], repo)
-            if rc:
-                raise RuntimeError(f"lane repo is not a git checkout: {err or repo}")
-            rc, base, err = lane_git(["rev-parse", "--verify", "HEAD^{commit}"], top)
-            if rc:
-                raise RuntimeError(f"lane repo has no commit: {err}")
-            rc, _, err = lane_git(["worktree", "add", "--detach", "-q", wt, base], top, timeout=300)
-            if rc:
-                raise RuntimeError(f"lane worktree creation failed: {err[:250]}")
+        repo = os.path.realpath(lane["repo"])
+        rc, top, err = lane_git(["rev-parse", "--show-toplevel"], repo)
+        if rc:
+            raise RuntimeError(f"lane repo is not a git checkout: {err or repo}")
+        rc, base, err = lane_git(["rev-parse", "--verify", "HEAD^{commit}"], top)
+        if rc:
+            raise RuntimeError(f"lane repo has no commit: {err}")
+        if not lane_worktree_matches(top, wt):
+            lane_rebuild_worktree(top, wt, base)
         child = lane_child(lane, wt, policy)
         lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
                          turn_state=None, concurrency_keys=[])

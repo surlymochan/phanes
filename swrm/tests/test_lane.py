@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import pathlib
+import runpy
 import shutil
 import socket
 import subprocess
@@ -248,7 +249,8 @@ class LaneTests(unittest.TestCase):
     def test_lane_git_metadata_is_inside_executor_writable_worktree(self):
         wt = self.data / "lanes" / self.lane_name / "wt"
         wt.parent.mkdir(parents=True)
-        self.git("worktree", "add", "--detach", "-q", str(wt), "HEAD")
+        lane_rebuild_worktree = runpy.run_path(str(CLI))["lane_rebuild_worktree"]
+        lane_rebuild_worktree(str(self.repo), str(wt), self.git("rev-parse", "HEAD"))
         git_dir = pathlib.Path(self.git("-C", str(wt), "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = wt / git_dir
