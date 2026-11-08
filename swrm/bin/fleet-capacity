@@ -1,5 +1,24 @@
 #!/usr/bin/env python3
-"""Atomic fleet admission. Reservations persist until explicitly released, even after a crash."""
+"""Atomic fleet admission; a lease timeout alone never proves executor death.
+
+Recovery protocol (over the existing forced-command authenticated transport):
+* acquire records the owner's /proc/sys/kernel/random/boot_id. Each host role
+  must identify one kernel, and its authenticated client must report that ID
+  accurately. Credentials remain in the SSH transport, never in this database.
+* After an owner reboot, its next acquire, or an explicit request
+  {"op":"attest_boot","boot_id":"<current kernel boot ID>"}, fences older
+  boots for that authenticated owner only. A broker cannot attest for a worker.
+* status exposes a public recovery_id, not the supervisor's reservation token.
+  The broker or owner can send {"op":"recover","host":"worker",
+  "run_id":"<status run_id>","recovery_id":"<status recovery_id>"}.
+  Both TTL expiry and recorded owner reboot evidence are required atomically.
+
+A supervisor crash or network partition on the same boot retains capacity until
+normal boundary-checked release or owner reboot. Rows without boot evidence
+(including legacy/unsupported platforms) require normal owner release; inventing
+an expiry or a generic confirmation never makes them safe to recover.
+"""
+import hashlib
 import json
 import math
 import os
@@ -94,7 +113,7 @@ try:
             result = json.loads(bundle.stdout)
         print(json.dumps({'ok': process.returncode == 0, 'result': result}, separators=(',', ':')))
         sys.exit(0 if process.returncode == 0 else 1)
-    if op not in ('acquire', 'release', 'status', 'recover', 'renew'):
+    if op not in ('acquire', 'release', 'status', 'recover', 'renew', 'attest_boot'):
         raise ValueError('invalid operation')
     root = Path(os.environ.get('OPENSWARM_FLEET_CAPACITY_DIR') or
                 (Path(_home()) / '.claude/swrm-fleet-capacity'))
@@ -107,12 +126,38 @@ try:
     columns = {row[1] for row in db.execute('PRAGMA table_info(reservations)')}
     if 'lease_expires' not in columns:
         db.execute('ALTER TABLE reservations ADD COLUMN lease_expires REAL')
+    if 'boot_id' not in columns:
+        db.execute('ALTER TABLE reservations ADD COLUMN boot_id TEXT')
+    # The forced-command SSH identity authenticates this evidence, not a token
+    # or a broker's assertion about a remote process tree. Retired boot IDs are
+    # permanent fences: delayed requests from an old supervisor cannot revive it.
+    db.execute('CREATE TABLE IF NOT EXISTS host_boots (host TEXT NOT NULL, boot_id TEXT NOT NULL, '
+               'retired INTEGER NOT NULL, PRIMARY KEY(host,boot_id))')
+    boot_id = request.get('boot_id')
+    if boot_id is not None and (not isinstance(boot_id, str) or
+                               not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot_id)):
+        raise ValueError('invalid kernel boot id')
+    if op == 'attest_boot' or (op == 'acquire' and boot_id is not None):
+        if boot_id is None or request.get('host') is not None:
+            raise ValueError('boot evidence requires the authenticated owner and kernel boot id')
+        previous = db.execute('SELECT retired FROM host_boots WHERE host=? AND boot_id=?',
+                              (host, boot_id)).fetchone()
+        if previous and previous[0]:
+            raise ValueError('retired host boot cannot be reused')
+        if previous is None:
+            db.execute('UPDATE host_boots SET retired=1 WHERE host=?', (host,))
+            db.execute('INSERT INTO host_boots VALUES (?,?,0)', (host, boot_id))
     now = time.time()
     db.execute('UPDATE reservations SET lease_expires=CASE WHEN created>0 THEN created+? ELSE ? END '
                'WHERE lease_expires IS NULL', (LEASE_TTL, now + LEASE_TTL))
-    if op == 'status':
-        rows = db.execute('SELECT host,run_id,backend,provider,created,lease_expires FROM reservations ORDER BY created').fetchall()
-        out = {'ok': True, 'reservations': [dict(zip(('host','run_id','backend','provider','created','lease_expires'), row)) for row in rows]}
+    if op == 'attest_boot':
+        out = {'ok': True}
+    elif op == 'status':
+        rows = db.execute('SELECT host,run_id,backend,provider,created,lease_expires,boot_id,token '
+                          'FROM reservations ORDER BY created').fetchall()
+        out = {'ok': True, 'reservations': [dict(
+            zip(('host','run_id','backend','provider','created','lease_expires','boot_id','recovery_id'),
+                (*row[:-1], hashlib.sha256(row[-1].encode()).hexdigest()))) for row in rows]}
     elif op == 'renew':
         token, run_id = request.get('token'), request.get('run_id')
         if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
@@ -121,6 +166,10 @@ try:
             raise ValueError('invalid run id')
         if request.get('host') is not None or request.get('lease_expires') is not None:
             raise ValueError('owner and lease expiry are coordinator-controlled')
+        row = db.execute('SELECT boot_id FROM reservations WHERE token=?', (token,)).fetchone()
+        if row and row[0] and db.execute('SELECT retired FROM host_boots WHERE host=? AND boot_id=?',
+                                        (host, row[0])).fetchone() == (1,):
+            raise ValueError('reservation host boot is retired')
         expires = now + LEASE_TTL
         count = db.execute('UPDATE reservations SET lease_expires=? WHERE token=? AND host=? AND run_id=?',
                            (expires, token, host, run_id)).rowcount
@@ -128,23 +177,34 @@ try:
             raise ValueError('reservation owner mismatch or reservation missing')
         out = {'ok': True, 'lease_expires': expires, 'lease_ttl_seconds': LEASE_TTL}
     elif op == 'recover':
-        # The authenticated owner can recover itself; the broker operator can
-        # recover any owner only after the coordinator lease has expired.
+        # TTL is only a minimum age. Only authenticated evidence that the
+        # owning kernel has rebooted can prove its entire process tree is gone.
+        # Missing evidence (including pre-migration rows) always fails closed.
         owner, run_id = request.get('host'), request.get('run_id')
-        token = request.get('token')
+        token, recovery_id = request.get('token'), request.get('recovery_id')
         if owner not in ('broker', 'worker', 'local') or not isinstance(run_id, str) or not run_id:
             raise ValueError('invalid reservation owner or run id')
-        if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
-            raise ValueError('invalid token')
         if host != owner and host != 'broker':
             raise ValueError('recovery owner mismatch')
-        count = db.execute('DELETE FROM reservations WHERE token=? AND host=? AND run_id=? AND lease_expires<=?',
-                           (token, owner, run_id, now)).rowcount
-        if not count:
-            row = db.execute('SELECT lease_expires FROM reservations WHERE token=? AND host=? AND run_id=?',
-                             (token, owner, run_id)).fetchone()
-            if row:
+        if token is not None:
+            if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
+                raise ValueError('invalid token')
+            recovery_id = hashlib.sha256(token.encode()).hexdigest()
+        if not isinstance(recovery_id, str) or not re.fullmatch(r'[0-9a-f]{64}', recovery_id):
+            raise ValueError('invalid recovery id')
+        rows = db.execute('SELECT token,lease_expires,boot_id FROM reservations WHERE host=? AND run_id=?',
+                          (owner, run_id)).fetchall()
+        count = 0
+        for stored_token, expires, stored_boot in rows:
+            if hashlib.sha256(stored_token.encode()).hexdigest() != recovery_id:
+                continue
+            if expires > now:
                 raise ValueError('reservation lease has not expired')
+            retired = db.execute('SELECT retired FROM host_boots WHERE host=? AND boot_id=?',
+                                 (owner, stored_boot)).fetchone()
+            if retired != (1,):
+                raise ValueError('authenticated owner reboot evidence required; TTL alone is insufficient')
+            count = db.execute('DELETE FROM reservations WHERE token=?', (stored_token,)).rowcount
         out = {'ok': True, 'recovered': count}
     else:
         token, run_id = request.get('token'), request.get('run_id')
@@ -163,6 +223,9 @@ try:
             if backend not in ALLOWED or provider not in (None, 'minimax-cn'):
                 raise ValueError('invalid backend/provider')
             if old:
+                stored_boot = db.execute('SELECT boot_id FROM reservations WHERE token=?', (token,)).fetchone()[0]
+                if stored_boot != boot_id:
+                    raise ValueError('reservation boot mismatch')
                 if old != (host,run_id,backend,provider):
                     raise ValueError('reservation token conflict')
                 out = {'ok': True, 'admitted': True, 'existing': True,
@@ -180,8 +243,9 @@ try:
                 if blocked:
                     out = {'ok': True, 'admitted': False, 'blocked': blocked}
                 else:
-                    db.execute('INSERT INTO reservations VALUES (?,?,?,?,?,?,?)',
-                               (token,host,run_id,backend,provider,now,now + LEASE_TTL))
+                    db.execute('INSERT INTO reservations (token,host,run_id,backend,provider,created,lease_expires,boot_id) '
+                               'VALUES (?,?,?,?,?,?,?,?)',
+                               (token,host,run_id,backend,provider,now,now + LEASE_TTL,boot_id))
                     out = {'ok': True, 'admitted': True, 'lease_expires': now + LEASE_TTL,
                            'lease_ttl_seconds': LEASE_TTL}
     db.execute('COMMIT')
