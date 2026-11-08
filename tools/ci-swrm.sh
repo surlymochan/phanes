@@ -54,7 +54,15 @@ fi
 
 # Keep tests and offline probes away from the operator's control plane.
 mkdir -p "$root/.tmp/test-tmp"
-export TMPDIR="$root/.tmp/test-tmp"
+# The tests bind AF_UNIX sockets (the lane control socket) below the temporary
+# directory, and a socket path is limited to about 108 bytes: a long checkout path
+# makes those tests fail before they test anything.  The temporary directory of the
+# checkout is used when it is short enough, the system one otherwise.
+if [ "${#root}" -gt 40 ]; then
+  export TMPDIR="${SWRM_CI_TMPDIR:-/tmp}"
+else
+  export TMPDIR="$root/.tmp/test-tmp"
+fi
 test_home="$(mktemp -d "$TMPDIR/ci.XXXXXX")"
 while IFS= read -r name; do
   unset "$name"

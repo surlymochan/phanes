@@ -22,6 +22,7 @@ ERROR_CLASSES = {
     "none",
     "auth",
     "base_unavailable",
+    "broker_unavailable",
     "budget_exceeded",
     "budget_exceeded_daily",
     "bus_error",

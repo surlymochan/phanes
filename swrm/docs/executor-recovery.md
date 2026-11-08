@@ -34,6 +34,59 @@ resident RPC Pi keeps its session inside the sandbox. A missing bridge, unsuppor
 host, unapproved model or unisolated binary fails closed. Do not turn off
 `pi.require_isolation` on a host containing credentials or other valuable data.
 
+The broker is the single point of failure of a Pi host: every Pi run of that host
+goes through its socket. The executor therefore probes the socket before every Pi
+dispatch, restarts a dead broker with a capped exponential backoff and verifies the
+fresh broker with a minimal session before it releases the channel again. The minimal
+session creates no run and spends no run budget; a broker that answers a connection
+but fails that session keeps the host interrupted. The recovery state of every host
+lives in `<OPENSWARM_HOME>/broker-recovery.json`, the reconnect events (host, attempt,
+result) are appended to the brain log (`<OPENSWARM_HOME>/brain.log` by default), and
+`swrm fleet status` reports a host whose Pi channel is interrupted as an alert — the
+other backends of that host keep working. A Pi run that cannot use the broker ends
+with the error class `broker_unavailable`, not with a vague `exec_error`.
+
+Configure the recovery in `policy.local.json` under `pi.broker`:
+
+| key | meaning |
+| --- | --- |
+| `attempts` | how often a dead socket is restarted before the host is declared interrupted |
+| `backoff_base_s`, `backoff_cap_s` | the reconnect backoff: doubling, capped |
+| `restart_cmd` | the local command that starts the broker again; the default `bin/pi-broker-restart` starts the broker of this deployment on the probed socket, `none` disables the restart |
+| `restart_grace_s` | how long the restart command may stay in the foreground before it counts as the broker itself |
+| `socket_wait_s` | how long a restarted broker may need before its socket answers |
+| `session_timeout_s` | how long the budget-free minimal session may wait for the broker |
+| `alert_failures` | consecutive failed reconnects before the fleet status warns about the host (the number of attempts by default) |
+| `brain_log` | the file the reconnect events are written to (default `<OPENSWARM_HOME>/brain.log`) |
+
+The default restart command is `bin/pi-broker-restart`: it starts
+`bin/pi-minimax-broker.mjs` with the credential store and the model of the host
+(`$OPENSWARM_PI_NODE`, `$OPENSWARM_PI_AUTH_MODULE` and `$OPENSWARM_PI_ISOLATED_MODEL`
+override the defaults), removes a stale socket and stays in the foreground — it is the
+broker. The executor starts it detached, hands it the socket it probes
+(`$OPENSWARM_PI_BROKER_SOCKET`) and reads the reason of a failed restart from
+`<OPENSWARM_HOME>/broker-restart.log`. A host whose broker is managed by a service
+manager sets `restart_cmd` to `none`: the failure is then reported instead of a
+second broker being started.
+
+Only a Pi run that really uses the socket is gated by this: `exec_pi` probes when the
+binary is the isolated launcher, and a resident Pi lane probes when it names a
+`broker_socket` or when `pi.require_isolation` is on. A plain (unisolated) Pi run
+never touches the broker.
+
+### Delivery mapping of the lane review of PR #1778 (round 2)
+
+Every blocker of the review is mapped to the files that close it, to the tests that
+prove it and to the result of the local run. The line numbers are the ones of the
+delivered files.
+
+| blocker | changed file and line | test | result |
+| --- | --- | --- | --- |
+| B1 — a dead broker has to be restarted automatically, with the default configuration | `swrm/policy.json:238` (`pi.broker.restart_cmd` = `bin/pi-broker-restart`), `swrm/bin/pi-broker-restart:90` (the script starts the broker of this deployment on the probed socket), `swrm/bin/swrm:3671` (`pi_broker_settings`), `swrm/bin/swrm:3707` (`pi_broker_restart_argv`), `swrm/bin/swrm:3747` (`pi_broker_restart`) | `DefaultBrokerRestartTests.test_the_default_restart_command_is_the_one_of_the_deployment`, `DefaultBrokerRestartTests.test_the_default_restart_command_brings_the_broker_back`, `DefaultBrokerRestartTests.test_the_restart_command_reports_why_it_failed`, `BrokerRestartScriptTests.test_the_script_execs_the_broker_on_the_given_socket`, `BrokerRestartScriptTests.test_the_script_removes_a_stale_socket`, `BrokerRestartScriptTests.test_the_script_refuses_a_path_that_is_not_a_socket`, `ExecutorBrokerDispatchTests.test_a_dead_socket_is_restarted_and_the_dispatch_continues` | pass |
+| B1 — the recovery runs before the dispatch, the alert reaches the health output | `swrm/bin/swrm:3804` (`pi_broker_ensure_ready`), `swrm/bin/swrm:5282` (`exec_pi`), `swrm/bin/swrm:8302` (`lane_run_turn`), `swrm/bin/swrm:3846` (`pi_broker_channel_status`), `swrm/bin/swrm:10033` (`fleet_pi_channel_alert`), `swrm/bin/swrm:10126` (`cmd_fleet`), `swrm/bin/broker_recovery.py:196` (`BrokerRecovery`) | `ExecutorBrokerDispatchTests.test_the_pi_dispatch_reports_the_broker_instead_of_a_vague_error`, `ExecutorBrokerDispatchTests.test_the_lane_dispatch_reports_the_broker_instead_of_a_vague_error`, `ExecutorBrokerDispatchTests.test_a_broker_that_stays_dead_alerts_the_host`, `ExecutorBrokerDispatchTests.test_the_health_output_reports_an_interrupted_pi_channel`, `FleetPiChannelTests.test_a_broken_pi_channel_is_an_alert_not_a_pause`, `BrokerRecoveryTests.test_a_broker_that_stays_dead_keeps_the_host_interrupted_and_alerts` | pass |
+| B2 — dispatch level coverage: the lane really runs after the recovery, a failed validation keeps the dispatch blocked | `swrm/tests/test_broker_recovery.py:743` (`BrokerDispatchIntegrationTests`: `swrm lane up` + `swrm lane assign`) | `BrokerDispatchIntegrationTests.test_the_dispatch_continues_after_the_broker_was_restarted`, `BrokerDispatchIntegrationTests.test_a_failed_validation_keeps_the_dispatch_blocked`, `BrokerDispatchIntegrationTests.test_a_dead_broker_without_a_restart_keeps_the_dispatch_blocked`, `BrokerRecoveryTests.test_a_failed_validation_keeps_the_interrupted_marker`, `BrokerRecoveryTests.test_an_interrupted_channel_is_only_released_by_a_validated_session` | pass |
+| follow-up — the minimal session must not block the dispatch forever | `swrm/bin/swrm:3790` (`pi_broker_minimal_session`), `swrm/policy.json:241` (`session_timeout_s`) | `BrokerRecoveryTests.test_the_minimal_session_answers_on_a_live_broker`, `ExecutorBrokerDispatchTests.test_the_health_output_reports_an_interrupted_pi_channel` | pass |
+
 Copilot on macOS uses the normal GitHub device login. If the system keychain is
 unavailable, its CLI may store the credential in plaintext under `COPILOT_HOME`;
 restrict the directory and files to the owning account and treat that location as a
