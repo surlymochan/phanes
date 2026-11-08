@@ -124,6 +124,47 @@ class BatchTests(FakeFleetFixture, unittest.TestCase):
         self.assertIn("| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |", markdown)
         self.assertEqual(markdown.count("| --- | --- | --- | --- | --- | --- | --- | --- |"), 1)
 
+    def test_empty_cards_with_default_base_and_detach_do_not_spawn_runner(self):
+        policy = xs.load_policy()
+        with mock.patch.object(xs, "fleet_config") as fleet_config, \
+                mock.patch.object(xs, "execute_batch") as execute, \
+                mock.patch.object(xs.subprocess, "Popen") as popen:
+            xs.cmd_batch(self.args(detach=True), policy)
+        fleet_config.assert_not_called()
+        execute.assert_not_called()
+        popen.assert_not_called()
+        paths = list((self.data / "batches").glob("*/summary.json"))
+        self.assertEqual(len(paths), 1)
+        summary = json.loads(paths[0].read_text())
+        self.assertEqual(summary["state"], "finished")
+        self.assertIsNone(summary["base"])
+        self.assertEqual(summary["cards"], [])
+        self.assertNotIn("runner_pid", summary)
+        self.assertFalse(paths[0].with_name("spec.json").exists())
+        self.assertEqual(paths[0].with_name("summary.md").read_text(),
+                         f"# Batch {summary['id']}\n\nState: finished\n\n"
+                         "| Card | Host | Status | Verify rc | Branch | Commit | Seconds | Summary |\n"
+                         "| --- | --- | --- | --- | --- | --- | --- | --- |\n")
+
+    def test_invalid_cards_paths_fail_before_saving_or_starting_batch(self):
+        regular_file = self.root / "card.md"
+        regular_file.write_text("card")
+        policy = xs.load_policy()
+        for path in (self.root / "missing", regular_file):
+            for detach in (False, True):
+                with self.subTest(path=path, detach=detach), \
+                        mock.patch.object(xs, "fleet_config") as fleet_config, \
+                        mock.patch.object(xs, "batch_save") as save, \
+                        mock.patch.object(xs, "execute_batch") as execute, \
+                        mock.patch.object(xs.subprocess, "Popen") as popen:
+                    with self.assertRaisesRegex(ValueError, "cards path must be a directory"):
+                        xs.cmd_batch(self.args(cards=str(path), detach=detach), policy)
+                    fleet_config.assert_not_called()
+                    save.assert_not_called()
+                    execute.assert_not_called()
+                    popen.assert_not_called()
+        self.assertFalse((self.data / "batches").exists())
+
     def test_batch_launch_passes_path_hints_to_remote_run(self):
         card = self.cards / "one.md"
         card.write_text("Update src/widget.py")

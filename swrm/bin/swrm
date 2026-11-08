@@ -10161,7 +10161,10 @@ def cmd_batch(args, policy):
     validate_card_type(policy, getattr(args, "card_type", None))
     if args.per_host < 1 or args.poll_seconds <= 0 or (args.budget_minutes is not None and args.budget_minutes <= 0):
         raise ValueError("batch concurrency, budget and poll interval must be positive")
-    paths = sorted(path for path in glob.glob(os.path.join(os.path.abspath(args.cards), "*")) if os.path.isfile(path))
+    cards_directory = os.path.abspath(args.cards)
+    if not os.path.isdir(cards_directory):
+        raise ValueError("cards path must be a directory")
+    paths = sorted(path for path in glob.glob(os.path.join(cards_directory, "*")) if os.path.isfile(path))
     if not paths:
         bid = new_run_id()
         summary = {"id": bid, "repo": args.repo, "base": args.base,
