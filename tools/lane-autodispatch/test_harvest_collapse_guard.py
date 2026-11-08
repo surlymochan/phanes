@@ -356,6 +356,49 @@ class HarvestCollapseGuardTest(HarvestFixture, unittest.TestCase):
         result, gh_calls, sh_calls = self.harvest(old, new)
         self.assert_refused(result, gh_calls, sh_calls, sizes=(100, 4))
 
+    def test_complete_collapse_uses_the_rejection_flow(self):
+        # A real filter reports an empty tree diff when a fix undoes the entire
+        # PR. It still needs the target PR's metadata and the guard's audit trail.
+        self.build_repo()
+        self.write("old", self.lines(10))
+        old = self.commit("old")
+        (self.repo / "old").unlink()
+        new = self.commit("undo the entire PR")
+        with mock.patch.object(ad, "mark_done", wraps=ad.mark_done) as mark_done:
+            result, gh_calls, sh_calls = self.harvest(old, new, real_filter=True)
+        self.assert_refused(result, gh_calls, sh_calls)
+        self.assertEqual(result["status"], "harvest-collapse-rejected")
+        self.assertTrue(result["done"])
+        self.assertIn(["gh", "api", f"repos/{ad.REPO}/pulls/{PR}"], sh_calls)
+        ledger = (self.state / "runs" / "run.log").read_text(encoding="utf-8")
+        for evidence in (f"PR #{PR}", old[:12], new[:12], "(1, 10)->(0, 0)", "collapsed"):
+            self.assertIn(evidence, result["error"])
+            self.assertIn(evidence, self.brain())
+            self.assertIn(evidence, ledger)
+        mark_done.assert_called_once()
+        self.assertEqual(mark_done.call_args.args[0], {"_done": [ISSUE]})
+
+    def test_empty_harvest_still_reads_the_card_and_records_refusal(self):
+        cases = ((CARD, (1, "", "body unavailable"), "harvest-collapse-rejected", "cannot be read"),
+                 (CARD, (0, "not json", ""), "harvest-collapse-rejected", "cannot be parsed"),
+                 (PLAIN_CARD, None, "lane-failed", "no effective change"),
+                 (REWRITE_CARD, None, "lane-failed", "no effective change"))
+        for card, body_error, status, reason in cases:
+            with self.subTest(card=card, body_error=body_error):
+                self.build_repo()
+                self.write("old", self.lines(10))
+                old = self.commit("old")
+                (self.repo / "old").unlink()
+                new = self.commit("undo the entire PR")
+                result, gh_calls, sh_calls = self.harvest(
+                    old, new, card=card, body_error=body_error, real_filter=True)
+                self.assert_refused(result, gh_calls, sh_calls, heads=False)
+                self.assertEqual(result["status"], status)
+                self.assertTrue(result["done"])
+                self.assertIn(reason, self.brain())
+                ledger = (self.state / "runs" / "run.log").read_text(encoding="utf-8")
+                self.assertIn(reason, ledger)
+
     def test_head_that_does_not_contain_the_old_head_is_refused(self):
         self.build_repo()
         old, new = self.scenario_replaced()

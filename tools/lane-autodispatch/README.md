@@ -133,6 +133,8 @@ fix/rebase 卡重新推送到 PR 分支前，AD 读取卡正文和目标 PR head
 `$D/runs/<run>.log`（失败台账线索）。卡正文明确写 `整体重写：是` 可豁免。
 护栏之前的真实产物过滤器若因引用缺失或 Git 错误失败，同样标记 `lane-failed`、写 brain 和失败台账，
 返回 `filter-failed` / `done=True` 释放车道，不推送、不改 PR，也不消耗 review 轮次。
+过滤后为空的 diff 也先经过塌缩护栏：完全撤销 PR 的修复仍记录 PR、前后 SHA、体量和拒绝原因。
+普通卡或整体重写豁免卡的空 diff 仍不推送，并记录 brain 日志和失败台账后释放车道。
 
 对应测试：`python3 -m unittest tools/lane-autodispatch/test_harvest_collapse_guard.py`
 （`pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py` 等价）。

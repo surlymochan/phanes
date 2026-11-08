@@ -1332,11 +1332,8 @@ def finish(lane, cfg, st, info, state):
             return {"done": True, "status": "filter-failed", "error": str(error), "missing": []}
         if removed:
             log(f"{lane} #{n} run {run} harvest excluded: {json.dumps(removed, ensure_ascii=True)}")
-        if empty:
-            label_lane_failed(n, f"Lane {lane} run `{run}` has no effective change after the artifact filter "
-                               f"({len(removed)} excluded path(s)).\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
-            mark_done(state, n)
-            return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
+        # An empty diff can be a fix that undoes the entire PR. Check it before
+        # the empty-harvest exit so the refusal records the PR, heads and sizes.
         allowed, guard_detail = harvest_collapse_guard(n, head)
         if not allowed:
             log(f"{lane} #{n} run {run} harvest collapse guard rejected: {guard_detail}")
@@ -1344,6 +1341,15 @@ def finish(lane, cfg, st, info, state):
             label_lane_failed(n, f"Lane {lane} run `{run}` harvest refused by #1833 collapse guard: {guard_detail}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
             mark_done(state, n)
             return {"done": True, "status": "harvest-collapse-rejected", "error": guard_detail, "missing": []}
+        if empty:
+            detail = (f"no effective change after the artifact filter ({len(removed)} excluded path(s)); "
+                      f"{guard_detail}")
+            log(f"{lane} #{n} run {run} harvest refused: {detail}")
+            harvest_guard_record(run, detail)
+            label_lane_failed(n, f"Lane {lane} run `{run}` has {detail}.\n\n"
+                               "Label `lane-failed`; re-add `lane-ready` to retry.")
+            mark_done(state, n)
+            return {"done": True, "status": "lane-failed", "error": "empty after artifact filtering", "missing": []}
         log(f"{lane} #{n} run {run} harvest collapse guard: {guard_detail}", brain=False)
         rc, _, err = sh(["git", "-C", LOCAL, "push", "-q", "origin", f"{head}:refs/heads/{b}"], timeout=180)
         if rc: return {"done": False, "status": "push-failed", "error": f"push failed: {err.strip()[-200:]}", "missing": []}

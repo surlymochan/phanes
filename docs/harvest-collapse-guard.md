@@ -129,3 +129,25 @@ tools/lane-autodispatch/test_harvest_filter.py tools/tests/test_lane_pr_validati
   `python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。
 - 真实六例 SHA 回放仍需宿主机提供上述清单及对象库；只读 GitHub 请求受沙箱 socket 限制，
   本轮按任务附件核对，无 GitHub 写操作。
+
+## 第五轮审查 BLOCKER 修复映射（基于 5bb47717e）
+
+- B1（完全塌缩被 empty 提前返回，缺少日志和失败台账）：`finish()` 在处理过滤后的
+  empty 结果前调用现有塌缩护栏。完全撤销 PR 的 fix 会读取目标 PR 元数据，按
+  `(1, 10)->(0, 0)` 等实际体量拒绝，并沿用包含 PR 号、前后 SHA、体量和原因的
+  brain 日志、`$D/runs/<run>.log`、`lane-failed` 和 `mark_done()` 流程。
+  普通卡及整体重写豁免卡的空 diff 仍拒绝推送，且补齐 brain 日志及失败台账。
+- 回归：`test_complete_collapse_uses_the_rejection_flow` 用真实 Git 仓库、真实过滤器
+  和公开 `finish()` 入口构造新增文件后完全撤销的历史；修改前因 brain 日志为空失败，
+  修改后检查 PR 查询、前后 SHA、零体量、原因、失败台账及状态只增加 `_done`。
+  `test_empty_harvest_still_reads_the_card_and_records_refusal` 覆盖空 diff 的正文读取失败、
+  JSON 解析失败、普通卡及豁免卡，均验证不推送、不改远端 PR 分支、不写 PR、记录失败。
+- 验证：`python3 -m pytest -q tools/lane-autodispatch/test_harvest_collapse_guard.py
+  tools/lane-autodispatch/test_harvest_filter.py tools/tests/test_lane_pr_validation.py
+  swrm/tests/test_lane_busy_stale.py` 为 68 passed、1 skipped；
+  `python3 tools/check-ad-harvest-backoff.py` 输出 `ad harvest fetch backoff: OK`。
+- 保留已有测试，旧 `openswarm/tests/test_harvest_collapse_guard.py` 的迁移对应路径仍为
+  `tools/lane-autodispatch/test_harvest_collapse_guard.py`，不修改废弃目录。
+  只读 gh 访问 issue/PR diff 均连接失败，按本卡附件核对；无 GitHub 写操作。
+  真实事故 SHA 回放仍需宿主机提供清单及对象库并保存六例输出：
+  `AD_HARVEST_COLLAPSE_MANIFEST=<清单路径> AD_LOCAL=<对象仓库> python3 -m pytest -q -s tools/lane-autodispatch/test_harvest_collapse_guard.py`。
