@@ -7166,7 +7166,7 @@ def lane_recovery_event(lane, spec, event_file, reason=None):
 
 def lane_recover_assignment(lane, previous_state):
     rid = previous_state.get("current_run")
-    if not rid or previous_state.get("state") != "busy":
+    if not rid or previous_state.get("state") not in ("busy", "starting", "crashed"):
         return None, "no busy run was recorded"
     status = jload(os.path.join(RUNS, rid, "status.json"), {}) or {}
     if status.get("state") not in ("queued", "running") or status.get("lane") != lane["name"]:
@@ -8571,6 +8571,8 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ancestor_rc, _, _ = git(["merge-base", "--is-ancestor", ws["base"], head.strip()], ws["root"])
             changed = changed or ancestor_rc == 0
     read_only = spec.get("read_only") or spec.get("card_type") in READ_ONLY_CARD_TYPES
+    # A failed prepare must leave interrupted progress (including the index) intact.
+    preserve_failed_recovery = spec.get("_recovered") and error_class == "prepare_failed"
     evidence_error = None
     collected_artifacts = []
     if spec.get("evalid_role"):
@@ -8579,9 +8581,10 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
             ws, spec["artifact_sink"], spec["evalid_output"], rid, "executor")
     fin = ({"branch": None, "commit": None, "diffstat": "", "excluded_files": [],
             "patch": None, "worktree": ws["root"], "merge_hint": None}
-           if read_only or evidence_error else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
+           if read_only or evidence_error or preserve_failed_recovery
+           else finalize_workspace(ws, title, lane["backend"], rdir, keep=True))
     read_only_output = read_only and read_only_output_exists(ws.get("path"), (final or {}).get("files_changed"))
-    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role"):
+    if read_only and ws.get("mode") == "worktree" and not spec.get("evalid_role") and not preserve_failed_recovery:
         for command in (["checkout", "--detach", "-f", ws["base"]],
                         ["clean", "-ffdx", "-e", "/.swrm-tmp/"],
                         ["branch", "-D", ws["branch"]]):
@@ -8595,7 +8598,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                                                collected_artifacts, lane_git)
     verify = None
     prepare_error = None
-    if spec.get("verify") and not evidence_error and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
+    if spec.get("verify") and not evidence_error and not preserve_failed_recovery and error_class not in ("risk_blocked", "rate_limit") and (final is not None or changed):
         if read_only or lockfiles_changed(ws):
             prepared = run_workspace_prepare(ws["repo"], ws["root"], "before_verify")
             if prepared:
@@ -8655,12 +8658,12 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
         read_only=read_only, verify=verify)
     if evidence_error:
         status, verify_note, error_class = "failed", evidence_error, "evalid_evidence_infra"
-    if read_only and verify and not evidence_error:
+    if read_only and verify and not evidence_error and not preserve_failed_recovery:
         for command in (["reset", "--hard", ws["base"]], ["clean", "-ffdx", "-e", "/.swrm-tmp/"]):
             cleanup_rc, _, cleanup_err = lane_git(command, ws["root"])
             if cleanup_rc:
                 raise RuntimeError(f"review worktree cleanup failed: {cleanup_err[:250]}")
-    if ws.get("mode") == "worktree" and not read_only and not evidence_error:
+    if ws.get("mode") == "worktree" and not read_only and not evidence_error and not preserve_failed_recovery:
         detach_at = fin.get("commit") or ws["base"]
         lane_git(["checkout", "--detach", detach_at], ws["root"])
     out = {"id": rid, "status": status, "error_class": error_class, "title": title, "lane": lane["name"],
@@ -8710,7 +8713,7 @@ def lane_finalize_run(lane, spec, ws, final, usage, error_class, rc, event_file,
                    "patterns_injected": spec.get("patterns_injected", [])})
     set_status(rdir, state="finished", status=status, finished=NOW(), commit=fin.get("commit"), lane=lane["name"],
                scope=spec.get("scope", "repo"))
-    if not evidence_error:
+    if not evidence_error and not preserve_failed_recovery:
         cleanup_executor_tmp(ws.get("root") or ws["path"])
     return out
 
@@ -8735,9 +8738,11 @@ def lane_do_run(lane, spec, child, server, current):
                 evp = os.path.join(rdir, f"events.1.{lane['backend']}.jsonl")
                 open(evp, "a").close()
                 lane_record_event(evp, {"type": "error", "error": "workspace prepare failed"})
-                # lane_prepare_workspace already reset and cleaned this worktree, so discard only prepare artifacts.
-                lane_git(["reset", "--hard", ws["base"]], ws["root"])
-                lane_git(["clean", "-fdx"], ws["root"])
+                # A resumed worktree contains progress from before this prepare step.
+                # Only fresh runs can safely discard prepare artifacts.
+                if not spec.get("_recovered"):
+                    lane_git(["reset", "--hard", ws["base"]], ws["root"])
+                    lane_git(["clean", "-fdx"], ws["root"])
                 attempt = {"backend": lane["backend"], "model": lane["model"], "effort": lane.get("effort"),
                            "rc": prepared["rc"], "seconds": prepared["seconds"], "error_class": "prepare_failed",
                            "meta": {"usage": {}}, "events": evp, "error_tail": None}
@@ -8948,13 +8953,14 @@ def cmd_lane_serve(lane, policy):
     current, child = {}, None
     previous_state = jload(lane_state_path(name), {}) or {}
     recovered, recovery_error = lane_recover_assignment(lane, previous_state)
-    if previous_state.get("state") == "busy" and previous_state.get("current_run"):
+    if previous_state.get("current_run"):
         old_child = previous_state.get("child_pid")
         if isinstance(old_child, int) and old_child > 1:
             kill_tree(old_child, grace=1)
     started, backoff, next_start = NOW(), 1, 0
     lane_write_state(name, name=name, backend=lane["backend"], model=lane["model"], effort=lane.get("effort"),
-                     state="starting", supervisor_pid=os.getpid(), child_pid=None, current_run=None,
+                     state="starting", supervisor_pid=os.getpid(), child_pid=None,
+                     current_run=recovered["run_id"] if recovered else None,
                      started=started, last_error=None, resolved_model=None)
     quota_state = jload(lane_state_path(name), {}) or {}
     if lane["backend"] == "agy" and quota_state.get("quota_model") == lane["model"]:
@@ -8983,9 +8989,10 @@ def cmd_lane_serve(lane, policy):
             rc, _, err = lane_git(["worktree", "add", "--detach", "-q", wt, base], top, timeout=300)
             if rc:
                 raise RuntimeError(f"lane worktree creation failed: {err[:250]}")
-        child = lane_child(lane, wt, policy)
         if recovered:
             current.update(recovered)
+        child = lane_child(lane, wt, policy)
+        if recovered:
             lane_write_state(name, state="busy", child_pid=child.pid, current_run=recovered["run_id"],
                              turn_state="queued", last_error=None, last_activity=NOW())
             recovery_file = recovered.get("_event_file") or os.path.join(
@@ -8994,7 +9001,7 @@ def cmd_lane_serve(lane, policy):
                                               "level": recovered["_recovery_level"],
                                               "point": recovered["_recovery_point"]})
         else:
-            lane_write_state(name, state="idle", child_pid=child.pid, last_error=None,
+            lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None,
                              turn_state=None, concurrency_keys=[])
             if recovery_error and previous_state.get("current_run"):
                 rid = previous_state["current_run"]
@@ -9033,8 +9040,10 @@ def cmd_lane_serve(lane, policy):
                 wt = os.path.join(lane_root(name), "wt")
                 child = lane_child(lane, wt, policy)
                 backoff = 1
-                lane_write_state(name, state="idle", child_pid=child.pid, current_run=None, last_error=None,
-                                 turn_state=None, concurrency_keys=[])
+                lane_write_state(name, state="busy" if current.get("run_id") else "idle",
+                                 child_pid=child.pid, current_run=current.get("run_id"), last_error=None,
+                                 turn_state="queued" if current.get("run_id") else None,
+                                 **({} if current.get("run_id") else {"concurrency_keys": []}))
             except Exception as e:
                 traceback.print_exc()
                 lane_write_state(name, state="crashed", child_pid=None, last_error=short(e, 500))
@@ -9045,7 +9054,7 @@ def cmd_lane_serve(lane, policy):
         if down or current.get("down_requested"):
             shutdown = True
             continue
-        if current.get("run_id"):
+        if current.get("run_id") and child:
             spec = current
             down_after = False
             # Run against the existing child. A crash is finalized below, and then restart backoff applies.

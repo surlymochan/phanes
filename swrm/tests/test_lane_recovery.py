@@ -1,3 +1,5 @@
+import contextlib
+import itertools
 import json
 import os
 import pathlib
@@ -69,6 +71,119 @@ class LaneRecoveryTests(unittest.TestCase):
         with mock.patch.object(xs, "DATA", str(self.data)):
             ws = xs.lane_prepare_workspace(self.lane, self.run_id, self.git("rev-parse", "HEAD"), preserve=True)
         self.assertEqual((pathlib.Path(ws["root"]) / "partial.txt").read_text(), "unfinished work\n")
+
+    def test_failed_prepare_preserves_recovered_workspace_and_local_commits(self):
+        self.setup_run()
+        (self.wt / "local.txt").write_text("local commit\n")
+        self.git("add", "local.txt", cwd=self.wt)
+        self.git("commit", "-qm", "local progress", cwd=self.wt)
+        head = self.git("rev-parse", "HEAD", cwd=self.wt)
+        (self.wt / "base.txt").write_text("staged progress\n")
+        self.git("add", "base.txt", cwd=self.wt)
+        (self.wt / "base.txt").write_text("unstaged progress\n")
+        (self.wt / "partial.txt").write_text("unfinished work\n")
+        (self.wt / ".gitignore").write_text("ignored.txt\n")
+        (self.wt / "ignored.txt").write_text("ignored progress\n")
+        before = self.git("status", "--porcelain", "--ignored", cwd=self.wt)
+        staged = self.git("diff", "--cached", cwd=self.wt)
+        spec, error = self.recover()
+        self.assertIsNone(error)
+        spec.update(started=xs.NOW(), verify="must not run")
+        policy = xs.load_policy()
+        policy.setdefault("workspace", {})["prepare"] = {str(self.repo): "exit 42"}
+        with mock.patch.object(xs, "DATA", str(self.data)), \
+                mock.patch.object(xs, "RUNS", str(self.runs)), \
+                mock.patch.object(xs, "append_ledger"), \
+                mock.patch.object(xs, "load_policy", return_value=policy), \
+                mock.patch.object(xs, "run_verify") as verify:
+            result = xs.lane_do_run(self.lane, spec, mock.Mock(), mock.Mock(), spec)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_class"], "prepare_failed")
+        self.assertEqual(result["attempts"][0]["rc"], 42)
+        verify.assert_not_called()
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.wt), head)
+        self.assertEqual(self.git("branch", "--show-current", cwd=self.wt), f"swrm/{self.run_id}")
+        self.assertEqual(self.git("status", "--porcelain", "--ignored", cwd=self.wt), before)
+        self.assertEqual(self.git("diff", "--cached", cwd=self.wt), staged)
+        self.assertEqual((self.wt / "base.txt").read_text(), "unstaged progress\n")
+        self.assertEqual((self.wt / "partial.txt").read_text(), "unfinished work\n")
+        self.assertEqual((self.wt / "ignored.txt").read_text(), "ignored progress\n")
+
+    @contextlib.contextmanager
+    def serve_context(self):
+        with mock.patch.object(xs, "DATA", str(self.data)), \
+                mock.patch.object(xs, "RUNS", str(self.runs)), \
+                mock.patch.object(xs, "lane_config", return_value=[self.lane]), \
+                mock.patch.object(xs, "lanes_by_name", return_value=[self.lane]), \
+                mock.patch.object(xs, "lane_ctl_listener", return_value=mock.Mock()), \
+                mock.patch.object(xs, "lane_control_messages", return_value=False), \
+                mock.patch.object(xs.traceback, "print_exc"):
+            yield
+
+    def test_restart_during_recovery_keeps_run_identifiable(self):
+        self.setup_run()
+
+        class SupervisorStopped(BaseException):
+            pass
+
+        with self.serve_context(), \
+                mock.patch.object(xs, "lane_child", side_effect=SupervisorStopped):
+            with self.assertRaises(SupervisorStopped):
+                xs.cmd_lane_serve(self.lane, {})
+            state = xs.jload(xs.lane_state_path("L1"))
+            self.assertEqual(state["state"], "starting")
+            self.assertEqual(state["current_run"], self.run_id)
+            spec, error = xs.lane_recover_assignment(self.lane, state)
+        self.assertIsNone(error)
+        self.assertEqual(spec["run_id"], self.run_id)
+
+    def test_restart_after_child_launch_failure_keeps_run_identifiable(self):
+        self.setup_run()
+
+        class SupervisorStopped(BaseException):
+            pass
+
+        with self.serve_context(), \
+                mock.patch.object(xs, "NOW", return_value=100), \
+                mock.patch.object(xs, "lane_child", side_effect=RuntimeError("launch failed")), \
+                mock.patch.object(xs.select, "select", side_effect=SupervisorStopped), \
+                mock.patch.object(xs, "lane_do_run") as run:
+            with self.assertRaises(SupervisorStopped):
+                xs.cmd_lane_serve(self.lane, {})
+            state = xs.jload(xs.lane_state_path("L1"))
+            self.assertEqual(state["state"], "crashed")
+            self.assertEqual(state["current_run"], self.run_id)
+            spec, error = xs.lane_recover_assignment(self.lane, state)
+        run.assert_not_called()
+        self.assertIsNone(error)
+        self.assertEqual(spec["run_id"], self.run_id)
+
+    def test_child_launch_retry_resumes_same_run_without_restarting_supervisor(self):
+        self.setup_run()
+        child = mock.Mock(pid=12345)
+
+        def finish_run(lane, spec, executor, server, current):
+            self.assertIs(executor, child)
+            self.assertEqual(spec["run_id"], self.run_id)
+            self.assertTrue(spec["_recovered"])
+            state = xs.jload(xs.lane_state_path("L1"))
+            self.assertEqual(state["state"], "busy")
+            self.assertEqual(state["current_run"], self.run_id)
+            spec["down_requested"] = True
+
+        def check_pending_run(server, lane, current, executor, turn, pending):
+            self.assertEqual(current.get("run_id"), self.run_id)
+            return False
+
+        with self.serve_context(), \
+                mock.patch.object(xs, "NOW", side_effect=itertools.count(100, 10)), \
+                mock.patch.object(xs, "lane_child", side_effect=[RuntimeError("launch failed"), child]) as launch, \
+                mock.patch.object(xs, "lane_control_messages", side_effect=check_pending_run), \
+                mock.patch.object(xs, "lane_do_run", side_effect=finish_run) as run:
+            xs.cmd_lane_serve(self.lane, {})
+        self.assertEqual(launch.call_count, 2)
+        run.assert_called_once()
+        self.assertEqual(len(list(self.runs.iterdir())), 1)
 
     def test_pushed_commit_recovers_at_remote_tip(self):
         self.setup_run()
