@@ -14,8 +14,10 @@ phanes/evalid/bench/results/llm-*.jsonl
 # Stray build artifacts of the lane tooling: a Zig build (uucode) that runs inside
 # swrm/tests/ leaves a hidden shared object behind, and `git add -A` used to sweep
 # it into the change. The binaries are identical to each other and unrelated to any
-# feature, so they must never be tracked.
+# feature, so they must never be tracked. The deprecated openswarm/ copy is still
+# in the tree (Refs #1894) and its build leftovers landed there (Refs #1738).
 swrm/tests/.*.so
+openswarm/tests/.*.so
 
 # Local caches of the test runs: never part of a change.
 __pycache__/

@@ -57,6 +57,15 @@ class HarvestFilterTest(unittest.TestCase):
         self.assertFalse(empty)
         self.assertEqual(self.files(head), ["base", "good"])
 
+    def test_the_legacy_site_is_excluded_too(self):
+        # the deprecated openswarm/ copy is still in the tree and its build
+        # leftovers landed there (Refs #1738): the rule is path-agnostic.
+        self.commit(["openswarm/tests/.dde4xxx-00000000.so", "good"])
+        head, removed, empty = ad.filter_harvest("HEAD", self.base)
+        self.assertEqual(removed, ["openswarm/tests/.dde4xxx-00000000.so"])
+        self.assertFalse(empty)
+        self.assertEqual(self.files(head), ["base", "good"])
+
     def test_clean(self):
         self.commit(["good"])
         self.assertEqual(ad.filter_harvest("HEAD", self.base), ("HEAD", [], False))
