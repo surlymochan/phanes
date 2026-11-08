@@ -937,38 +937,86 @@ def dispatch_fetch_health(now=None):
                             "last_error": recent[-1]["error"]}
     return result
 
-def dispatch_base_fetch(host, repo_path, base, fetch_command=None):
-    """Fetch a missing base with bounded retries and a configured mirror fallback."""
-    command = fetch_command or base_fetch_command(repo_path, BASE_REPO_URL, BASE_BRANCH)
-    attempts = max(1, DISPATCH_FETCH_RETRIES)
-    fallback_after = max(1, DISPATCH_FETCH_FALLBACK_AFTER)
-    mirror = os.environ.get("AD_BASE_FETCH_MIRROR")
+def dispatch_fetch_policy(host, cfg=None):
+    """Lane fetch_policy overrides AD_FETCH_HOST_POLICIES[host] and global defaults.
+
+    Keys: retries (total attempts), delay (initial exponential backoff), fallback_after.
+    The AD controller is the reachable seed host; no target-side mirror is required.
+    """
+    policies = json.loads(os.environ.get("AD_FETCH_HOST_POLICIES", "{}"))
+    policy = {"retries": DISPATCH_FETCH_RETRIES, "delay": DISPATCH_FETCH_RETRY_DELAY,
+              "fallback_after": DISPATCH_FETCH_FALLBACK_AFTER}
+    policy.update(policies.get(host, {}))
+    policy.update((cfg or {}).get("fetch_policy", {}))
+    return {"retries": max(1, int(policy["retries"])),
+            "delay": max(0, float(policy["delay"])),
+            "fallback_after": max(1, int(policy["fallback_after"]))}
+
+
+def dispatch_git_network(host, command, operation, policy, fallback=None):
+    """Apply one policy to main/PR fetch, controller fetch and seed push.
+
+    Only network commands enter this function, so assign errors never inflate health.
+    Successful retries retain the recent failures for diagnosis.
+    """
     last_error = ""
-    for attempt in range(1, attempts + 1):
-        rc, _, last_error = sh(ssh_argv(ssh_opts(host), host, command), timeout=180)
+    for attempt in range(1, policy["retries"] + 1):
+        rc, out, last_error = sh(command, timeout=180)
         if not rc:
-            return
+            return out
         record_dispatch_fetch_failure(host, last_error)
-        # Once the configured fallback threshold is reached, stop spending time on
-        # the flaky upstream and try the mirror. Without a mirror, keep using the
-        # full bounded retry budget.
-        if attempt < attempts and not (mirror and attempt >= fallback_after):
-            delay = DISPATCH_FETCH_RETRY_DELAY * (2 ** (attempt - 1))
-            log(f"{host} base fetch failed ({attempt}/{attempts}); retrying in {delay:g}s: {last_error.strip()[-100:]}", brain=False)
+        if fallback and attempt >= policy["fallback_after"]:
+            log(f"{host} {operation} threshold reached; falling back to controller seed push", brain=False)
+            return fallback()
+        if attempt < policy["retries"]:
+            delay = policy["delay"] * (2 ** (attempt - 1))
+            log(f"{host} {operation} failed ({attempt}/{policy['retries']}); retrying in {delay:g}s: {last_error.strip()[-100:]}", brain=False)
             time.sleep(delay)
-        elif mirror and attempt >= fallback_after:
-            break
-    # Operators can configure a reachable mirror/seed endpoint per host. The object is
-    # still validated by cat-file in dispatch() before lane assignment.
-    if mirror and attempt >= fallback_after:
-        log(f"{host} base fetch threshold reached; falling back to configured seed mirror {mirror}", brain=False)
-        rc, _, fallback_error = sh(ssh_argv(ssh_opts(host), host,
-            base_fetch_command(repo_path, mirror, BASE_BRANCH)), timeout=180)
-        if not rc:
-            return
-        record_dispatch_fetch_failure(host, fallback_error)
-        last_error = f"{last_error}; mirror fetch: {fallback_error}"
-    raise RuntimeError(f"base fetch failed on {host} after {attempts} attempts: {last_error.strip()[-160:]}")
+    # Exhausting a shorter retry budget also invokes the seed path.
+    if fallback:
+        log(f"{host} {operation} retries exhausted; falling back to controller seed push", brain=False)
+        return fallback()
+    raise RuntimeError(f"{operation} failed on {host}: {last_error.strip()[-160:]}")
+
+
+def dispatch_seed_push(host, repo_path, base, branch, policy):
+    """Fetch on the reachable AD controller, then seed objects over SSH.
+
+    Use a private bare repository and a unique non-checked-out target ref. Never
+    update main or the target worktree. dispatch() still checks the exact base.
+    """
+    os.makedirs(D, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="seed-", dir=D) as directory:
+        rc, _, err = sh(["git", "init", "--bare", "-q", directory])
+        if rc:
+            raise RuntimeError(f"seed init: {err.strip()[-160:]}")
+        source = os.environ.get("AD_BASE_FETCH_MIRROR") or BASE_REPO_URL
+        dispatch_git_network(host, ["git", "-C", directory, "fetch", "-q", source, f"{branch}:refs/seed/head"],
+                             "seed fetch", policy)
+        # Main may have advanced or been rewritten. Obtain the requested commit,
+        # rather than silently seeding a different base from FETCH_HEAD.
+        rc, _, _ = sh(["git", "-C", directory, "cat-file", "-e", f"{base}^{{commit}}"])
+        if rc:
+            dispatch_git_network(host, ["git", "-C", directory, "fetch", "-q", source, base],
+                                 "seed base fetch", policy)
+        ref = f"refs/swrm-seed/{os.path.basename(directory)}"
+        command = ["git", "-c", f"core.sshCommand={shlex.join(['ssh'] + ssh_opts(host))}",
+                   "-C", directory, "push", "-q", f"{host}:{repo_path}", f"{base}:{ref}/base", f"refs/seed/head:{ref}/head"]
+        dispatch_git_network(host, command, "seed push", policy)
+
+
+def dispatch_base_fetch(host, repo_path, base, fetch_command=None, cfg=None, branch=None):
+    """Fetch main or a PR head, falling back to a controller seed push."""
+    branch = branch or BASE_BRANCH
+    command = fetch_command or base_fetch_command(repo_path, BASE_REPO_URL, branch)
+    policy = dispatch_fetch_policy(host, cfg)
+    operation = "base fetch" if branch == BASE_BRANCH else "PR head fetch"
+    try:
+        return dispatch_git_network(
+            host, ssh_argv(ssh_opts(host), host, command), operation, policy,
+            fallback=lambda: dispatch_seed_push(host, repo_path, base, branch, policy))
+    except RuntimeError as error:
+        raise RuntimeError(f"{operation} failed on {host}: {error}") from error
 
 def dispatch_failed(lane, cfg, item, error):
     """A failed dispatch drops the in-progress label and backs the host off (transient, unchanged)."""
@@ -988,6 +1036,12 @@ def dispatch(lane, cfg, item, base):
     # Refs #1810: the base commit must exist in the target repo before the lane is assigned. The
     # target repo lags behind upstream, so a missing base is fetched and the check is repeated; the
     # check itself is not relaxed (a base that stays missing is still an error).
+    pr = item.get("pr")
+    if pr is None:
+        match = re.search(r"(?:重基\s*PR|目标\s*PR)\s*[:：]\s*#?(\d+)", item["body"], re.I)
+        pr = int(match.group(1)) if match else None
+    if pr is not None:
+        dispatch_base_fetch(h, R, base, cfg=cfg, branch=f"refs/pull/{int(pr)}/head")
     cmd = f"{base_check_command(R, base)} && {assign}"
     for attempt in range(1, DISPATCH_BASE_FETCH_ATTEMPTS + 1):
         rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
@@ -998,7 +1052,7 @@ def dispatch(lane, cfg, item, base):
         # mutex guards the fetch, so concurrent ticks never block each other (git serializes its
         # own short-lived ref locks).
         try:
-            dispatch_base_fetch(h, R, base)
+            dispatch_base_fetch(h, R, base, cfg=cfg)
         except RuntimeError as fetch_error:
             # A failing fetch aborts the dispatch right away: the base could not be validated, and
             # a later successful check (e.g. a concurrent tick that fetched the object in the

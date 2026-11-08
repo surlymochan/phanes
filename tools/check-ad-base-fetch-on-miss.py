@@ -94,6 +94,8 @@ class Sandbox:
         self.assign_log = root / "assign.log"
         self.commands = []  # every remote command the AD ran (the fetch-on-miss contract)
         self.gh_calls = []
+        self.seed_push = False
+        self.seed_commands = []
         self.fetch_mode = "ok"  # "ok" | "fail" | "fail_but_object_arrives"
         self.ls_remote_base = None  # pin the advertised base (a base the fetch cannot deliver)
         self.fetch_lock = threading.Lock()  # models git's own short-lived ref locks
@@ -168,6 +170,14 @@ class Sandbox:
         if argv[:2] == ["git", "ls-remote"]:
             if self.ls_remote_base:
                 return 0, f"{self.ls_remote_base}\trefs/heads/main\n", ""
+        if argv[:2] == ["git", "-c"] and "push" in argv:
+            self.seed_commands.append(argv)
+            if not self.seed_push:
+                return 1, "", "connection reset during seed push"
+            # Exercise real Git object transfer locally; only the SSH transport is replaced.
+            argv = ["git"] + argv[3:]
+            target = argv.index("push") + 2
+            argv[target] = argv[target].split(":", 1)[1]
         if argv[:1] == ["ssh"]:
             remote = argv[-1].replace("/tmp/", f"{self.root}/")  # keep every scratch file in the sandbox
             self.commands.append(remote)
@@ -204,9 +214,11 @@ def prepare(module, sandbox: Sandbox, state_dir="ad-state"):
     module.replenish = lambda k, state: []
     module.LOW = 0
     module.DISPATCH_BASE_FETCH_DELAY = 0.2
+    module.DISPATCH_FETCH_RETRY_DELAY = 0
     module.BASE_REPO_URL = str(sandbox.origin)
     module.BASE_BRANCH = "main"
     module.BACKOFF.clear()
+    module.DISPATCH_FETCH_FAILURES.clear()
 
 
 def tick(module, sandbox: Sandbox, lanes=None, state=None):
@@ -305,6 +317,21 @@ def check_tick_fetch_failure_not_masked(module, sandbox: Sandbox):
     print("  tick: fetch failed while the base arrived: dispatch aborted, host backed off: OK")
 
 
+def check_tick_seed_push_fallback(module, sandbox: Sandbox):
+    """A target with broken HTTPS receives the exact base via controller seed push."""
+    prepare(module, sandbox)
+    sandbox.fetch_mode = "fail"
+    sandbox.seed_push = True
+    state, log = tick(module, sandbox)
+    assert sandbox.seed_commands, "controller must push objects, not ask the target to fetch a mirror"
+    assert sandbox.assigned(), log
+    assert not module.BACKOFF, module.BACKOFF
+    assert git(sandbox.fleet, "cat-file", "-e", f"{sandbox.base}^{{commit}}").returncode == 0
+    assert "controller seed push" in log, log
+    assert saved_status(module)["_dispatch_fetch_failures"][HOST]["recent_failures"] == 3
+    print("  tick: HTTPS failure -> controller fetch -> seed push -> base check -> assigned: OK")
+
+
 def check_tick_base_present(module, sandbox: Sandbox):
     """the base is already in the target repo: the check passes without any fetch."""
     prepare(module, sandbox)
@@ -394,6 +421,7 @@ def main():
                            ("miss-after-fetch tick", check_tick_miss_after_fetch),
                            ("fetch-failure tick", check_tick_fetch_failure),
                            ("fetch-failure-not-masked tick", check_tick_fetch_failure_not_masked),
+                           ("seed-push tick", check_tick_seed_push_fallback),
                            ("base-present tick", check_tick_base_present),
                            ("configured-repo tick", check_tick_configured_repo),
                            ("concurrent dispatches", check_concurrent_dispatches),
