@@ -19,6 +19,19 @@ The tests below drive the real ``reconcile()`` and the real ``tick()`` of the
 autodispatcher against a fake fleet (no network, no ssh, no GitHub), and the real
 offline health contract of the pause store (``tools/check-health-pause.py``).
 
+The contract they cover:
+
+  * when a host comes back, the automatic pause that the outage itself caused is
+    re-checked and released - but only that one.  A pause of another cause (the hard
+    disk limit, a manual hold) survives the recovery: a reachable host does not prove
+    that the disk problem is gone;
+  * a run that the host does not know any more is re-queued - but only after the
+    dispatcher has verified that the runner of that run is really dead.  A runner whose
+    liveness is *unknown* (the run has no status file, the host cannot tell) may still
+    be running: re-queueing its card then dispatches the same work twice;
+  * a failed label update keeps the lane state, so the next tick retries the
+    re-queue instead of losing the card.
+
 On the baseline the tests of this file fail:
 
   * ``reconcile()`` re-queues a run whose runner liveness it does not know, and the
@@ -229,6 +242,18 @@ class RecoveryTickTests(unittest.TestCase):
         self.module.tick({LANE: LANE_CFG}, state, 0)
         return state
 
+    def outage(self):
+        """The host is unreachable: the ssh probe of the lane fails."""
+        self.status = {"error": "ssh: connect to host lane-host port 22: No route to host"}
+
+    def host_back(self):
+        """The host is reachable again (the backoff of the outage has passed)."""
+        self.module.BACKOFF.clear()
+
+    def host_pause(self):
+        """The path of the automatic pause of the host."""
+        return Path(self.module.host_pause_path(HOST))
+
     def test_the_tick_keeps_the_lane_of_a_run_with_an_unknown_liveness(self):
         """The tick must not drop the lane of a run whose runner liveness is unknown."""
         state = self.tick({LANE: lane_state()})
@@ -296,6 +321,194 @@ class HealthPauseContractTests(unittest.TestCase):
                         "the memory self-heal must not release the pause of the disk limit")
         self.assertIn("disk_hard", self.host_pause.read_text(),
                       "the pause must keep the cause that holds the host (the disk limit)")
+
+
+class HostPauseAttributionTests(unittest.TestCase):
+    """The attribution of an automatic pause to the unreachability of the host.
+
+    A pause is only released when its cause is the unreachability itself: a
+    reachable host does not prove that the disk limit, the memory limit, a machine
+    cooldown or an unknown failure of the host is gone."""
+
+    def setUp(self):
+        self.module = load_module("autodispatch_host_pause", AUTODISPATCH_PATH)
+        self.module.log = lambda *args, **kwargs: None
+
+    def test_the_marker_of_the_dispatcher_is_attributed(self):
+        self.assertTrue(self.module.pause_cause_is_unreachable(
+            f"{self.module.HOST_UNREACHABLE_MARKER} host={HOST} since=1700000000"))
+
+    def test_an_explicit_ssh_reason_is_attributed(self):
+        for body in ("auto: ssh streak 3\n", "auto: ssh unreachable\n",
+                     "auto: host_unreachable\n", "auto: ssh down\n"):
+            self.assertTrue(self.module.pause_cause_is_unreachable(body), body)
+
+    def test_another_cause_is_not_attributed(self):
+        for body in ("auto: disk_hard\n", "auto:host_hard mem_avail_mb=255\n",
+                     "auto:cooldown:until=2035-01-01T00:00:00Z\n", "auto: quota 429\n",
+                     "auto: api failure streak 3\n", "auto: lane hold\n", "operator hold\n"):
+            self.assertFalse(self.module.pause_cause_is_unreachable(body), body)
+
+
+class RunnerLivenessTests(unittest.TestCase):
+    """The liveness of the runner of a run: the proof that a run is really lost."""
+
+    def setUp(self):
+        self.module = load_module("autodispatch_runner_liveness", AUTODISPATCH_PATH)
+
+    def test_a_live_runner(self):
+        self.assertEqual(self.module.runner_liveness({"runner_alive": True}), "alive")
+
+    def test_a_dead_runner(self):
+        self.assertEqual(self.module.runner_liveness({"runner_alive": False}), "dead")
+
+    def test_a_finished_run_has_no_runner(self):
+        self.assertEqual(self.module.runner_liveness({"run_state": "finished"}), "dead")
+        self.assertEqual(self.module.runner_liveness({"run_state": "unroutable"}), "dead")
+
+    def test_an_unknown_liveness(self):
+        self.assertEqual(self.module.runner_liveness({"runner_alive": None}), "unknown")
+        self.assertEqual(self.module.runner_liveness({"run_state": "missing"}), "unknown")
+        self.assertEqual(self.module.runner_liveness({}), "unknown")
+
+
+class HostRecoveryPauseTests(unittest.TestCase):
+    """The re-check of the pauses of a host that came back."""
+
+    def setUp(self):
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(prefix="ad-host-pause-", dir=str(SCRATCH)))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.module = load_module("autodispatch_host_recovery_pause", AUTODISPATCH_PATH)
+        self.module.D = str(self.root)
+        self.module.log = lambda *args, **kwargs: None
+
+    def pause_paths(self):
+        return self.module.host_pause_paths(HOST, [LANE])
+
+    def test_the_pause_of_the_outage_is_released(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text(f"{self.module.HOST_UNREACHABLE_MARKER} host={HOST} since=1700000000\n")
+        released = self.module.release_unreachable_pauses(HOST, self.pause_paths())
+        self.assertEqual(released, [f"PAUSE-HOST-{HOST}"])
+        self.assertFalse(pause.exists(), "the pause of the outage must be released")
+
+    def test_the_lane_pause_of_the_outage_is_released(self):
+        lane_pause = Path(self.module.lane_pause_path(LANE))
+        lane_pause.write_text("auto: ssh streak 3\n")
+        released = self.module.release_unreachable_pauses(HOST, self.pause_paths())
+        self.assertEqual(released, [f"PAUSE-{LANE}"])
+        self.assertFalse(lane_pause.exists(), "the lane pause of the outage must be released")
+
+    def test_an_independent_pause_survives_the_recovery(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("auto: disk_hard\n")
+        released = self.module.release_unreachable_pauses(HOST, self.pause_paths())
+        self.assertEqual(released, [], "the pause of the disk limit must not be released")
+        self.assertTrue(pause.exists())
+        self.assertIn("disk_hard", pause.read_text())
+
+    def test_a_manual_pause_survives_the_recovery(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("operator hold\n")
+        released = self.module.release_unreachable_pauses(HOST, self.pause_paths())
+        self.assertEqual(released, [])
+        self.assertTrue(pause.exists(), "a manual hold must never be released")
+
+    def test_the_marker_never_overwrites_another_cause(self):
+        pause = Path(self.module.host_pause_path(HOST))
+        pause.write_text("auto: disk_hard\n")
+        self.assertFalse(self.module.write_unreachable_pause(HOST, 1700000000))
+        self.assertIn("disk_hard", pause.read_text(),
+                      "the pause of the disk limit must not be overwritten by the marker")
+
+
+class HostRecoveryTickTests(RecoveryTickTests):
+    """The recovery of a host inside the tick of the dispatcher.
+
+    The tick of the outage holds the host with the marker of its unreachability;
+    the tick of the recovery re-checks that pause and verifies the runs that were
+    in flight."""
+
+    def test_the_outage_holds_the_host(self):
+        self.outage()
+        state = self.tick({LANE: lane_state()})
+        self.assertTrue(self.host_pause().exists(),
+                        "the outage must hold the host with the marker of its unreachability")
+        self.assertIn(self.module.HOST_UNREACHABLE_MARKER, self.host_pause().read_text())
+
+    def test_the_recovery_releases_the_pause_and_requeues_the_lost_run(self):
+        self.outage()
+        state = self.tick({LANE: lane_state()})
+        self.host_back()
+        self.status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                                    run_state="running")
+        state = self.tick(state)
+        self.assertFalse(self.host_pause().exists(),
+                         "the pause of the outage must be released when the host is back")
+        self.assertNotIn(LANE, state, "the lane of the lost run must be released")
+        self.assertNotIn("in-progress", self.fleet.issues[ISSUE]["labels"])
+        self.assertIn("lane-ready", self.fleet.issues[ISSUE]["labels"],
+                      "the card of the lost run must be re-queued")
+
+    def test_the_recovery_keeps_a_run_with_an_unknown_liveness(self):
+        self.outage()
+        state = self.tick({LANE: lane_state()})
+        self.host_back()
+        self.status = remote_status(lane="busy", current_run=RUN)
+        state = self.tick(state)
+        self.assertFalse(self.host_pause().exists(),
+                         "the pause of the outage must be released when the host is back")
+        self.assertIn(LANE, state, "the lane of a run with an unknown liveness must be kept")
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"],
+                      "the card must keep its in-progress label while the liveness is unknown")
+        self.assertIn(LANE, state.get("_recovery", {}),
+                      "the verification of the run must be retried in the next tick")
+
+    def test_the_recovery_retries_the_requeue_after_a_failed_label_update(self):
+        self.outage()
+        state = self.tick({LANE: lane_state()})
+        self.host_back()
+        self.status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                                    run_state="running")
+        self.fleet.fail_edits = True
+        state = self.tick(state)
+        self.assertIn(LANE, state, "the lane must stay recorded while the label update fails")
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"])
+        self.assertIn(LANE, state.get("_recovery", {}),
+                      "the re-queue must be retried in the next tick")
+        # the label update works again: the next tick re-queues the card
+        self.fleet.fail_edits = False
+        state = self.tick(state)
+        self.assertNotIn(LANE, state, "the lane of the lost run must be released")
+        self.assertNotIn("in-progress", self.fleet.issues[ISSUE]["labels"])
+        self.assertIn("lane-ready", self.fleet.issues[ISSUE]["labels"])
+
+    def test_the_recovery_keeps_an_independent_pause(self):
+        self.outage()
+        pause = self.host_pause()
+        pause.write_text("auto: disk_hard\n")
+        state = self.tick({LANE: lane_state()})
+        self.host_back()
+        self.status = remote_status(lane="busy", current_run=RUN, runner_alive=False,
+                                    run_state="running")
+        state = self.tick(state)
+        self.assertTrue(pause.exists(),
+                        "the pause of the disk limit must survive the recovery of the host")
+        self.assertIn("disk_hard", pause.read_text())
+
+    def test_the_recovery_keeps_a_live_run(self):
+        self.outage()
+        state = self.tick({LANE: lane_state()})
+        self.host_back()
+        self.status = remote_status(lane="busy", current_run=RUN, runner_alive=True,
+                                    run_state="running")
+        state = self.tick(state)
+        self.assertIn(LANE, state, "the lane of a live run must be kept")
+        self.assertIn("in-progress", self.fleet.issues[ISSUE]["labels"],
+                      "the card of a live run must not be re-queued")
+        self.assertNotIn(LANE, state.get("_recovery", {}),
+                         "the verification of a live run is finished")
 
 
 if __name__ == "__main__":

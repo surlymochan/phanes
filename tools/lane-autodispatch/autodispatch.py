@@ -469,6 +469,207 @@ def host_fail(h, why):
 def host_good(h):
     if BACKOFF.pop(h, None): log(f"{h} ssh recovered", brain=False)
 
+# --- 主机回归检测（Refs #1673）------------------------------------------------------
+# The box loses its connection from time to time.  While a host is unreachable the
+# control plane holds it with a `PAUSE-HOST-<host>` file, and the runs that were in
+# flight are lost with the outage.  When the host comes back, both are re-checked
+# automatically.  Two rules hold everywhere below:
+#
+#   * only a pause whose cause is the unreachability of the host is released.  The
+#     host being reachable again does not prove that another cause (the hard disk
+#     limit, the memory limit, a machine cooldown, an operator hold) is gone;
+#   * a run is only re-queued when the runner of that run is *positively* dead.  An
+#     unknown liveness keeps the lane and its card: the runner may still be running
+#     and a second dispatch would run the same work twice.
+HOST_UNREACHABLE_MARKER = "auto: host_unreachable"
+# The closed list of the reasons that unambiguously mean "the host was unreachable".
+# The reason is compared as a whole phrase: a body that merely contains "ssh" or
+# "streak" ("auto: api failure streak 3") is an unknown cause and is kept.
+HOST_UNREACHABLE_REASONS = ("host_unreachable", "ssh_unreachable", "unreachable",
+                             "host unreachable", "ssh unreachable", "ssh down",
+                             "ssh failed", "ssh streak", "ssh failure streak")
+# The run states that prove that the runner of a run is not running any more.
+TERMINAL_RUN_STATES = ("finished", "failed", "unroutable", "budget_rejected",
+                       "dry-run", "cancelled", "stopped")
+
+def host_pause_path(host):
+    """The path of the automatic pause file of a host."""
+    return os.path.join(D, f"PAUSE-HOST-{host}")
+
+def lane_pause_path(lane):
+    """The path of the automatic pause file of a lane."""
+    return os.path.join(D, f"PAUSE-{lane}")
+
+def read_pause(path):
+    """The body of a pause file ("" when it does not exist or cannot be read)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream: return stream.read()
+    except OSError: return ""
+
+def pause_reason(body):
+    """The reason of an `auto:` pause body (None for a manual hold)."""
+    text = (body or "").strip()
+    if not text.startswith("auto:"): return None
+    return text[len("auto:"):].strip()
+
+def normalized_pause_reason(body):
+    """The reason of an automatic pause, normalized for the comparison.
+
+    The counters are dropped ("ssh streak 3" becomes "ssh streak"), the case and the
+    whitespace do not matter."""
+    reason = pause_reason(body)
+    if reason is None: return None
+    return re.sub(r"\s+", " ", re.sub(r"\s+\d+\b", "", reason)).strip().lower()
+
+def pause_cause_is_unreachable(body):
+    """Whether an automatic pause was caused by the unreachability of the host.
+
+    Only a body that names the unreachability proves it: the marker this dispatcher
+    writes itself, or one of the explicit reasons of the closed list.  Every other
+    cause (the disk limit, the memory limit, a machine cooldown, a quota) and every
+    unknown reason is kept: a reachable host does not prove that cause is gone
+    (Refs #1673)."""
+    reason = normalized_pause_reason(body)
+    if reason is None: return False
+    return reason.startswith("host_unreachable") or reason in HOST_UNREACHABLE_REASONS
+
+def lanes_of_host(lanes, host):
+    """The lanes that run on a host."""
+    return [lane for lane, cfg in lanes.items() if (cfg or {}).get("host") == host]
+
+def host_pause_paths(host, lane_names=()):
+    """The pause files of a host: its own pause and the pauses of its lanes."""
+    return [host_pause_path(host), *(lane_pause_path(lane) for lane in lane_names)]
+
+def write_unreachable_pause(host, since):
+    """Hold the host with the marker of its unreachability (Refs #1673).
+
+    An existing pause is never overwritten: it carries another cause (the disk
+    limit, a manual hold) that this dispatcher does not own."""
+    path = host_pause_path(host)
+    if os.path.exists(path): return False
+    try:
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(f"{HOST_UNREACHABLE_MARKER} host={host} since={int(since)}\n")
+    except OSError as e:
+        log(f"{host}: the automatic pause of the outage was not written ({e!r})", brain=False)
+        return False
+    return True
+
+def release_unreachable_pauses(host, paths, explain=True):
+    """Release the automatic pauses of a host whose cause is its unreachability.
+
+    The body of every pause is read again right before the removal, so a pause that
+    another writer replaced in the meantime is kept.  A pause of another cause is
+    kept as well: a reachable host does not prove that the disk, the memory or the
+    cooldown of the host is gone (Refs #1673)."""
+    released = []
+    for path in paths:
+        body = read_pause(path)
+        if not body: continue
+        name = os.path.basename(path)
+        if not pause_cause_is_unreachable(body):
+            if explain:
+                log(f"{name}: kept after the recovery of {host} (the cause is not the unreachability: "
+                    f"{normalized_pause_reason(body) or 'manual hold'})", brain=False)
+            continue
+        try: os.unlink(path)
+        except FileNotFoundError: continue
+        except OSError as e:
+            log(f"{name}: the automatic pause of the outage was not released ({e!r})", brain=False)
+            continue
+        released.append(name)
+        log(f"{name}: released after the recovery of {host} (the pause was caused by its unreachability)")
+    return released
+
+def host_records(state):
+    """The reachability records of the hosts (the host -> record table of the state)."""
+    records = state.get("_hosts")
+    if not isinstance(records, dict): records = {}
+    state["_hosts"] = records
+    return records
+
+def note_host_unreachable(state, host):
+    """Record that the host is unreachable and hold it with the own marker.
+
+    The record lives in the state of the dispatcher, so the recovery of the host is
+    detected even when the outage spans a restart of the dispatcher."""
+    records = host_records(state)
+    record = records.get(host)
+    if not isinstance(record, dict): record = {}
+    if not record.get("unreachable_since"):
+        record["unreachable_since"] = time.time()
+        write_unreachable_pause(host, record["unreachable_since"])
+        log(f"{host} is unreachable: it is held until it comes back", brain=False)
+    record["last_error_at"] = time.time()
+    records[host] = record
+
+def host_came_back(state, host):
+    """Whether the host just came back (the recovery edge); the edge is consumed.
+
+    The edge is the transition from unreachable to reachable.  It is reported once
+    per outage: the re-check of the pauses and the verification of the runs in
+    flight happen on that edge, and the verification itself is retried in the
+    following ticks until it succeeds."""
+    records = host_records(state)
+    record = records.get(host)
+    if not isinstance(record, dict): record = {}
+    if record.get("unreachable_since"):
+        record["unreachable_since"] = None
+        record["recovered_at"] = time.time()
+        records[host] = record
+        return True
+    # The dispatcher may have been restarted during the outage: its own pause marker
+    # still holds the host, and the host is reachable again.
+    if read_pause(host_pause_path(host)).startswith(HOST_UNREACHABLE_MARKER):
+        record["unreachable_since"] = None
+        record["recovered_at"] = time.time()
+        records[host] = record
+        return True
+    return False
+
+def recovery_runs(state):
+    """The runs whose liveness still has to be verified (the lane -> run table).
+
+    The table is bounded like the other bookkeeping of the state: a lane that
+    disappears from the configuration cannot keep its entry forever."""
+    pending = state.get("_recovery")
+    if not isinstance(pending, dict): pending = {}
+    while len(pending) > 200:
+        pending.pop(next(iter(pending)), None)
+    state["_recovery"] = pending
+    return pending
+
+def mark_recovery_runs(state, host, lanes):
+    """Mark the runs of a host that came back for the liveness verification.
+
+    A host that was unreachable may have lost the runs that were in flight: the run
+    directory of the host is gone, or its runner died with the outage.  The runs are
+    marked here and verified in the ticks that follow: the verification needs a
+    positive proof that the runner is dead, so it can take more than one tick
+    (Refs #1673)."""
+    pending = recovery_runs(state)
+    for lane in lanes_of_host(lanes, host):
+        st = state.get(lane)
+        if not st: continue
+        record = pending.get(lane)
+        if isinstance(record, dict) and record.get("run") == st.get("run"): continue
+        pending[lane] = {"host": host, "run": st.get("run"), "issue": st.get("issue"),
+                         "since": time.time()}
+        log(f"{lane}: the run {st.get('run')} of {host} is verified (a live runner continues the run, "
+            f"a dead runner re-queues the card)", brain=False)
+
+def runner_liveness(status):
+    """The liveness of the runner of a run: "alive", "dead" or "unknown".
+
+    "unknown" is the answer when the host cannot tell: the run has no status file,
+    or the file names no runner.  A run whose runner may still be alive is never
+    re-queued: its card would be dispatched a second time (Refs #1673)."""
+    if status.get("runner_alive") is True: return "alive"
+    if status.get("runner_alive") is False: return "dead"
+    if str(status.get("run_state") or "").strip().lower() in TERMINAL_RUN_STATES: return "dead"
+    return "unknown"
+
 def now(): return time.strftime("%H:%M")
 
 # --- lane PR 提交前校验（Refs #1704）---------------------------------------------
@@ -763,13 +964,12 @@ def age_s(st):
     try: return time.time() - time.mktime(time.strptime(st["at"], "%Y-%m-%d %H:%M:%S"))
     except Exception: return 1e9
 
-def reconcile(L, cfg, st, r, state):
-    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
-    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
-    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
-    # Missing status is not evidence that the runner exited. Keep the lane claimed
-    # until the remote probe positively reports a dead runner (Refs #1673).
-    if r.get("runner_alive") is not False or age_s(st) < 180: return False
+def requeue_lost_run(L, st, r, state, why="orphaned"):
+    """Re-queue the card of a run that was lost (the safe orphan path).
+
+    The labels of the issue and the lane state are updated together: when the label
+    update fails, the lane state is kept, so the next tick retries instead of losing
+    the card (Refs #1673)."""
     n = st["issue"]
     rc, out, _ = gh(["issue", "view", str(n), "--json", "state,labels"])
     if rc: return False
@@ -780,7 +980,41 @@ def reconcile(L, cfg, st, r, state):
         if rc: return False
         what = "requeued (lane-ready)"
     else: what = f"already {j['state'].lower()}/{'lane-pr' if 'lane-pr' in labels else '-'}; dropped"
-    log(f"{L} #{n} run {st['run']} orphaned (remote lane idle, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
+    log(f"{L} #{n} run {st['run']} {why} (remote lane {r.get('lane')}, current_run={r.get('current_run')}, run_state={r.get('run_state')}, runner dead) → {what}")
+    return True
+
+def reconcile(L, cfg, st, r, state):
+    """Local state says busy but the remote lane is idle on another/no run, the run has no result.json and its runner is dead:
+    the run was orphaned (lane restart / reassignment). Drop it; requeue the issue unless it already got a PR or closed."""
+    if r.get("run") != "running" or r.get("lane") != "idle" or r.get("current_run") == st["run"]: return False
+    # Missing status is not evidence that the runner exited. Keep the lane claimed
+    # until the remote probe positively reports a dead runner (Refs #1673).
+    if r.get("runner_alive") is not False or age_s(st) < 180: return False
+    return requeue_lost_run(L, st, r, state, "orphaned")
+
+def verify_recovered_run(L, cfg, st, r, state):
+    """Verify the run of a lane whose host came back; clean it up when it is lost.
+
+    The runner of the run decides: a live runner means the run continues (the
+    ordinary harvest picks it up when it ends), a dead runner means the run was lost
+    with the outage and its card is re-queued through the orphan path.  An unknown
+    liveness keeps the lane and its card: the runner may still be running, and a
+    second dispatch would run the same work twice (Refs #1673).
+
+    Returns True when the run was cleaned up (the lane slot is free again)."""
+    pending = recovery_runs(state)
+    if L not in pending: return False
+    liveness = runner_liveness(r)
+    if liveness == "alive":
+        pending.pop(L, None)
+        log(f"{L} run {st['run']} survived the outage of {cfg['host']}: the runner is alive, the run continues", brain=False)
+        return False
+    if liveness == "unknown":
+        log(f"{L} run {st['run']}: the liveness of the runner is unknown, the lane keeps its card until the host can tell", brain=False)
+        return False
+    if age_s(st) < 180: return False  # a young run: the host may still be starting it
+    if not requeue_lost_run(L, st, r, state, "lost with the outage of the host"): return False
+    pending.pop(L, None)
     return True
 
 def verify_of(body):
@@ -1463,12 +1697,24 @@ def tick(lanes, state, last_warn):
     for L in lanes:
         if L not in res: res[L] = {"error": "host in backoff", "skip": True}
     seen = set()
+    recovered_hosts = []
     for L in live:
         h = lanes[L]["host"]
         if h in seen: continue
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
-        if errs: host_fail(h, errs[0]["error"]); seen.add(h)
-        else: host_good(h); seen.add(h)
+        if errs:
+            host_fail(h, errs[0]["error"]); seen.add(h)
+            note_host_unreachable(state, h)  # the outage is recorded (Refs #1673)
+        else:
+            host_good(h); seen.add(h)
+            if host_came_back(state, h): recovered_hosts.append(h)
+    # the hosts that came back: re-check their pauses and verify the runs in flight
+    # (Refs #1673).  The edge is consumed here; the verification of a run is retried
+    # in the following ticks until it succeeds.
+    for h in recovered_hosts:
+        release_unreachable_pauses(h, host_pause_paths(h, lanes_of_host(lanes, h)))
+        mark_recovery_runs(state, h, lanes)
+        scopes = paused_scopes()  # the released pause opens the host again
     q = None
     queue_failed = False
     queue_error = ""
@@ -1572,15 +1818,21 @@ def tick(lanes, state, last_warn):
         st = state.get(L)
         if "error" in r: continue
         freed = False
-        if st and isinstance(r.get("run"), dict):
+        if not st:
+            recovery_runs(state).pop(L, None)  # the lane is free: nothing left to verify
+        elif isinstance(r.get("run"), dict):
             if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
             # the run ended: the lane is idle from its own end time on (Refs #1688)
             idle_open(state, L, r["run"].get("ended_at"), now, last_alive)
             result = finish(L, lanes[L], st, r["run"], state)
             if result.get("done"):
+                recovery_runs(state).pop(L, None)
                 state.pop(L); save_state(state); freed = True
             if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
-        elif st and reconcile(L, lanes[L], st, r, state):
+        elif reconcile(L, lanes[L], st, r, state):
+            recovery_runs(state).pop(L, None)
+            state.pop(L); save_state(state); freed = True
+        elif verify_recovered_run(L, lanes[L], st, r, state):
             state.pop(L); save_state(state); freed = True
         if freed:
             freed_lanes.add(L)
