@@ -557,6 +557,35 @@ class TestEvalidRolesControl(unittest.TestCase):
 
 
 class SpecRevisionTests(TestEvalidRolesControl):
+    def test_unversioned_initial_spec_cannot_bypass_revision_bindings(self):
+        self._spec(declare=False)
+        rejected = self._check(verdict="FAIL", bind=False)
+        with self.assertRaises(Rejected):
+            self._spec(version=2, declare=False, parent=None)
+        with self.assertRaises(Rejected):
+            self._spec(version=2, parent=None)
+        self._spec(version=2, parent=rejected["evidence_digest"])
+        with self.assertRaises(Rejected):
+            self._check(bind=False)
+
+    def test_concurrent_stale_check_cannot_advance_new_spec(self):
+        self._spec(version=1)
+        other = self._controller()
+        append = self.controller._append
+
+        def race(event):
+            self._check(other, verdict="FAIL")
+            self._spec(other, version=2)
+            return append(event)
+
+        with patch.object(self.controller, "_append", side_effect=race):
+            with self.assertRaises(Rejected):
+                self._check(verdict="PASS")
+        state = self._controller().state("offline-demo")
+        self.assertEqual(state["spec_version"], 2)
+        self.assertEqual(state["next"], "spec-check")
+        self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
+
     def _spec(self, controller=None, version=1, spec_digest=None, parent="auto", declare=True):
         """Submit a Spec receipt, binding the rejection it answers by default."""
         controller = controller or self.controller
@@ -566,7 +595,7 @@ class SpecRevisionTests(TestEvalidRolesControl):
             evidence["spec_version"] = version
         if parent == "auto":
             rejections = state.get("rejections") or []
-            if rejections and state["receipts"].get("spec", {}).get("versioned"):
+            if rejections:
                 evidence["parent_receipt"] = rejections[-1]["receipt_digest"]
         elif parent is not None:
             evidence["parent_receipt"] = parent
@@ -595,9 +624,11 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self.assertEqual(state["next"], "spec")
         self.assertEqual(state["receipts"]["spec-check"]["verdict"], "FAIL")
 
-        revised_spec = {"status": "PASS", "spec_digest": digest({"spec": 2})}
+        revised_spec = {"status": "PASS", "spec_digest": digest({"spec": 2}),
+                        "spec_version": 2, "parent_receipt": failed_receipt["evidence_digest"]}
         self.controller.accept("offline-demo", "spec", revised_spec)
-        self.controller.accept("offline-demo", "spec-check", {"verdict": "PASS", "blockers": []})
+        self.controller.accept("offline-demo", "spec-check", {"verdict": "PASS", "blockers": [],
+            "spec_digest": revised_spec["spec_digest"], "spec_version": 2})
         state = self.controller.state("offline-demo")
         self.assertEqual(state["receipts"]["spec"]["spec_digest"], revised_spec["spec_digest"])
         self.assertEqual(state["receipts"]["spec-check"]["verdict"], "PASS")
@@ -692,7 +723,7 @@ class SpecRevisionTests(TestEvalidRolesControl):
         self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
         current = self.controller.state("offline-demo")["receipts"]["spec"]["spec_digest"]
         with self.assertRaisesRegex(Rejected, "spec_not_revised"):
-            self._spec(version=2, spec_digest=current, declare=False)
+            self._spec(version=2, spec_digest=current)
         state = self.controller.state("offline-demo")
         self.assertEqual(state["receipts"]["spec"]["spec_digest"], current)
         self.assertEqual(state["next"], "spec")
@@ -725,7 +756,7 @@ class SpecRevisionTests(TestEvalidRolesControl):
     def test_replayed_rejection_from_an_earlier_round_is_rejected(self):
         self._spec(version=1, declare=False)
         self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
-        self._spec(version=2, declare=False)
+        self._spec(version=2)
         with self.assertRaisesRegex(Rejected, "stale_spec_check_receipt"):
             self._check(verdict="FAIL", blockers=["exit code missing"], bind=False)
         state = self.controller.state("offline-demo")

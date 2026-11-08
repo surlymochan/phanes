@@ -167,12 +167,24 @@ class RoleController:
             stream.seek(0)
             existing = [json.loads(raw) for raw in stream if raw.strip()]
             key = self._key(event)
+            attempts = [item for item in existing if (item["change_id"], item["attempt"]) ==
+                        (event["change_id"], event["attempt"])]
+            if event["stage"] == "spec-check":
+                specs = [item for item in attempts if item["stage"] == "spec"]
+                if (not specs or event["data"].get("parent_spec_digest") !=
+                        specs[-1]["data"].get("spec_digest") or
+                        event["data"].get("spec_version") != len(specs)):
+                    raise Rejected("spec_check_parent_mismatch")
+            elif event["stage"] == "spec" and event["data"].get("parent_receipt"):
+                checks = [item for item in attempts if item["stage"] == "spec-check" and
+                          item["data"].get("verdict") == "FAIL"]
+                if not checks or event["data"]["parent_receipt"] != self._rejection(
+                        checks[-1]["data"], 0)["receipt_digest"]:
+                    raise Rejected("parent_receipt_mismatch")
             duplicate = next((item for item in existing if self._key(item) == key), None)
             if duplicate:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                 return duplicate["data"]
-            attempts = [item for item in existing if (item["change_id"], item["attempt"]) ==
-                        (event["change_id"], event["attempt"])]
             if event["stage"] == "intake":
                 if attempts:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
@@ -487,8 +499,7 @@ class RoleController:
 
         The first Spec opens the version line at 1 and has no parent. A
         revision answers a rejected check: it advances the version, changes
-        the digest and, in the versioned protocol, binds the receipt of the
-        rejection it answers.
+        the digest and binds the receipt of the rejection it answers.
         """
         current = state["receipts"].get("spec", {})
         declared = evidence.get("spec_version")
@@ -505,17 +516,15 @@ class RoleController:
             if parent is not None:
                 raise Rejected("parent_receipt_mismatch")
             return expected
-        versioned = bool(current.get("versioned"))
         if declared is not None and declared != expected:
             raise Rejected("spec_version_mismatch")
-        if versioned and declared is None:
+        if declared is None:
             raise Rejected("spec_version_missing")
         rejections = state["rejections"]
         if not rejections:
             raise Rejected("missing_parent_receipt")
         if parent is None:
-            if versioned:
-                raise Rejected("missing_parent_receipt")
+            raise Rejected("missing_parent_receipt")
         elif parent != rejections[-1]["receipt_digest"]:
             raise Rejected("parent_receipt_mismatch")
         if evidence.get("spec_digest") == current.get("spec_digest"):
