@@ -441,6 +441,45 @@ class BudgetRequeueTest(unittest.TestCase):
         self.assertEqual(self.holds(state), [],
                          "a real failure must not leave a hold behind")
 
+    def test_exec_error_overrides_budget_words_in_the_summary(self):
+        """Task wording cannot turn an explicitly classified execution error into a hold."""
+        state = self.running()
+        self.fleet.end_run("run-1", status="failed", error_class="exec_error",
+                           summary="Could not implement budget window exhausted handling: tests failed")
+
+        self.tick(state)
+
+        self.assertIn("lane-failed", self.labels())
+        self.assertNotIn(LANE, state, "a real failure must release its lane")
+        self.assertEqual(self.holds(state), [], "a real failure must not retain budget history")
+        state = json.loads((self.state_dir / "state.json").read_text())
+        self.fleet.window_open()
+        self.advance(2 * 3600)
+        self.tick(state)
+
+        self.assertIn("lane-failed", self.labels())
+        self.assertEqual(self.fleet.dispatches, [], "window recovery must not retry a real failure")
+
+    def test_non_budget_class_overrides_conflicting_budget_status(self):
+        """An explicit quota classification takes precedence over other budget hints."""
+        state = self.running()
+        self.fleet.end_run("run-1", status="budget_exceeded", error_class="rate_limit",
+                           summary="budget_exceeded: budget window exhausted")
+
+        self.tick(state)
+
+        self.assertIn("lane-failed", self.labels())
+        self.assertNotIn(LANE, state)
+        self.assertEqual(self.holds(state), [])
+
+    def test_budget_hints_are_used_only_without_an_explicit_error_class(self):
+        for error_class in (None, ""):
+            for status, summary in (("budget_exceeded", ""),
+                                    ("failed", "budget window exhausted")):
+                with self.subTest(error_class=error_class, status=status):
+                    self.assertTrue(self.module.budget_failure(
+                        {"status": status, "error_class": error_class, "summary": summary}))
+
     # --- the window state -----------------------------------------------------------------
     def test_the_card_stays_held_while_the_window_is_exhausted(self):
         """The window is still closed: the card waits, it is not requeued on a timer.

@@ -1200,8 +1200,9 @@ def release_recovered_budget_holds(state, lanes):
 
 def budget_failure(info):
     """Recognize an executor budget death without classifying quota or real failures."""
+    error_class = (info.get("error_class") or "").lower()
+    if error_class: return error_class == "budget_exceeded"
     if (info.get("status") or "").lower() == "budget_exceeded": return True
-    if (info.get("error_class") or "").lower() == "budget_exceeded": return True
     return bool(re.search(r"\b(?:budget_exceeded|token plan.{0,40}(?:limit|quota)|budget window exhausted)\b",
                           info.get("summary") or "", re.I))
 

@@ -417,9 +417,12 @@ python3 tools/check-ad-harvest-backoff.py
 
 ### Budget-window failures (Refs #1668)
 
-An executor run that ends without a commit with `status` or `error_class` set to
+An executor run that ends without a commit with `error_class` set to
 `budget_exceeded` is held with `in-progress`, which frees its lane without treating
-the card as failed. The AD only removes that hold after it positively confirms that
+the card as failed. An explicit non-budget `error_class` keeps the ordinary failure
+flow even if the status or summary mentions budget exhaustion. Only when the error
+class is absent does AD fall back to budget status or summary hints.
+The AD only removes that hold after it positively confirms that
 the backend window is open. By default AD reads the health-loop's `health.json`
 in its state directory (at most 900 seconds old and strictly newer than the held
 card's `at` timestamp). A snapshot taken before or at the budget failure cannot
@@ -462,6 +465,10 @@ terminal writes, persisted holds/counts across ticks, and cleanup after recovery
 `test_a_budget_failure_is_not_a_card_failure` also checks that the harvest
 returns the result structure expected by `tick()` and releases the lane; the real
 failure guard is `test_a_real_failure_keeps_the_lane_failed_flow`.
+`test_exec_error_overrides_budget_words_in_the_summary` checks that an explicit
+execution error remains failed across state reload and window recovery;
+`test_non_budget_class_overrides_conflicting_budget_status` covers quota errors
+with conflicting budget hints.
 
 The offline end-to-end regression drives real `tick()` harvesting, hold, window
 recovery, re-dispatch, and terminal cleanup against a fake fleet:
