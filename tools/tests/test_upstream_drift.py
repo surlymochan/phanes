@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools.upstream_drift import (blob_id, classify, local_files, snapshot,
                                  unmarked_paths)
@@ -60,8 +61,29 @@ class UpstreamDriftTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
             remote = Path(scratch) / "remote.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-            with self.assertRaisesRegex(RuntimeError, "couldn't find remote ref|not our ref|fatal"):
+            with self.assertRaises(RuntimeError):
                 snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
+
+    def test_snapshot_rejects_missing_base_sha_with_localized_git_error(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
+            remote = Path(scratch) / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            real_run = subprocess.run
+            fetch_results = []
+
+            def run_with_localized_fetch_error(args, **kwargs):
+                if args[:2] == ["git", "--git-dir"] and "fetch" in args:
+                    result = subprocess.CompletedProcess(args, 128, "", "致命错误：找不到远程版本")
+                    fetch_results.append(result)
+                    return result
+                return real_run(args, **kwargs)
+
+            with patch("tools.upstream_drift.subprocess.run", side_effect=run_with_localized_fetch_error):
+                with self.assertRaises(RuntimeError):
+                    snapshot({"upstream_repo": str(remote)}, "deadbeef", Path(scratch))
+            self.assertEqual(len(fetch_results), 1)
+            self.assertNotEqual(fetch_results[0].returncode, 0)
+            self.assertEqual(fetch_results[0].args[-2:], [str(remote), "deadbeef"])
 
     def test_local_files_hash_symlink_targets(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as scratch:
