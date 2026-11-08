@@ -691,6 +691,34 @@ class VerifyMetricsTest(unittest.TestCase):
                                msg="one of the two dispatches of the window was a verify card, so the "
                                    "actual share of the verify class is 0.5")
 
+    def test_verify_dispatch_refreshes_deficit_when_no_other_lane_is_idle(self):
+        # Both lanes start busy with work. Only the review lane finishes, so no
+        # later admission attempt can hide a stale pre-dispatch deficit.
+        self.state[WORK_LANE] = {"issue": WORK_ISSUE, "run": "run-%d" % WORK_ISSUE,
+                                 "host": WORK_HOST, "base": self.base,
+                                 "at": self.clock.stamp(), "verify": None, "class": "work"}
+        self.fleet.issues[WORK_ISSUE]["labels"].append("in-progress")
+        self.set_lane(WORK_LANE, "busy", "run-%d" % WORK_ISSUE)
+        self.step_queue()
+        self.step_dispatch()
+        self.assertEqual(self.state[REVIEW_LANE]["issue"], VERIFY_ISSUE)
+        self.assertEqual(self.module.queue_class_limits(self.lanes, self.state, [])[0], 0)
+        self.assertEqual(self.deficit(), 0,
+                         "the successful verify dispatch filled the reserved slot")
+        self.assertEqual(json.loads((self.state_dir / "state.json").read_text())
+                         [self.module.VERIFY_METRICS_KEY]["deficit"], 0)
+        self.advance(60)
+        self.tick()
+        self.assertEqual(self.deficit(), 0,
+                         "the deficit must stay correct when both lanes remain busy")
+        module = load_module("autodispatch_verify_deficit_restart_%d" % id(self))
+        self.fleet.module = module
+        self.patch(module)
+        state = json.loads((self.state_dir / "state.json").read_text())
+        self.tick(state, module=module)
+        self.assertEqual(self.deficit(), 0,
+                         "a restart must restore the post-dispatch deficit")
+
     def test_an_ordinary_work_card_does_not_pollute_the_verify_metrics(self):
         self.scenario()
         records = verify_records(self.state)

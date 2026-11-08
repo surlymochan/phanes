@@ -2136,6 +2136,8 @@ def tick(lanes, state, last_warn):
             return "no-capacity"
         q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
         metrics = verify_metrics(state)
+        # The snapshot and saved state must reflect the slot just occupied.
+        if AD_VERIFY_SHARE_ENABLED: metrics["deficit"] = queue_class_limits(lanes, state, idle)[0]
         metrics["dispatches"]["all"] += 1
         if pick.get("verify"):
             metrics["dispatches"]["verify"] += 1
