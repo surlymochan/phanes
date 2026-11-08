@@ -783,7 +783,71 @@ class ExecutorProbeCommandLineTests(ProbeTestCase):
 
 
 class ExecutorReviewRegressionTests(ProbeTestCase):
-    """Regressions for the three blockers of the implementation review."""
+    """Regressions for the blockers of the implementation reviews."""
+
+    def test_nested_cgroup_zombies_alert_without_root_cgroup_pids(self):
+        host = self.soft_host()
+        host.services[SERVICE]["pids"] = []
+        child_group = "/system.slice/" + SERVICE + "/sandbox"
+        mapping_output = "\n".join(
+            "%d 0::%s" % (pid, child_group)
+            for pid in range(PARENT_PID, PARENT_PID + 52))
+
+        def runner(command):
+            if command == MODULE.CGROUP_MAP_COMMAND:
+                return mapping_output
+            return host.run(command)
+
+        alert = self.root / "health.alert"
+        payload = MODULE.update(HOST, self.root / "health.json", alert,
+                                self.root / "snapshots", run=runner)
+        service = payload["services"][0]
+        self.assertEqual(service["zombie_count"], 51)
+        self.assertEqual(service["zombie_parent_pids"], [PARENT_PID])
+        self.assertEqual(service["level"], "soft")
+        self.assertIn(SERVICE, alert.read_text())
+        self.assertIn("parents=%d" % PARENT_PID, alert.read_text())
+        self.assertEqual(self.snapshots()[0].read_text(), host.ps)
+
+    def test_similarly_prefixed_cgroup_is_not_part_of_the_service(self):
+        group = "/system.slice/" + SERVICE
+        mapping = {PARENT_PID + index: group + "-other/sandbox" for index in range(52)}
+        result = MODULE.inspect_service(
+            SERVICE, "TasksCurrent=120\nTasksMax=1000\nControlGroup=" + group,
+            set(), executor_ps(zombies=51), mapping)
+        self.assertEqual(result["zombie_count"], 0)
+        self.assertEqual(result["level"], "ok")
+
+    def test_different_sweep_commands_do_not_combine_into_an_alert(self):
+        host = self.ok_host()
+        host.ps = "\n".join([
+            PS_HEADER,
+            ps_row(627802, 1, "S", "bwrap " + RUN_ID),
+            *[ps_row(627900 + index, 627802, "S",
+                     "/usr/bin/fleet-capacity --sweep-loop " + target)
+              for index, target in enumerate(("gocc", "otherhost", "thirdhost"))],
+        ]) + "\n"
+        _, _, alert = self.update(host)
+        self.assertFalse(alert.exists())
+        self.assertFalse(self.snapshots())
+
+    def test_only_duplicate_sweep_commands_alert_with_their_own_parents(self):
+        host = self.sweep_host(count=3)
+        other_run = "20261103-214706-abcdef"
+        host.ps += "\n".join([
+            ps_row(700000, 1, "S", "bwrap " + other_run),
+            ps_row(700001, 700000, "S", "/usr/bin/fleet-capacity --sweep-loop otherhost"),
+            ps_row(700002, 700000, "S", "/usr/bin/fleet-capacity --sweep-loop otherhost"),
+        ]) + "\n"
+        _, _, alert = self.update(host)
+        lines = alert.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("count=3", lines[0])
+        self.assertIn("/usr/bin/fleet-capacity --sweep-loop gocc", lines[0])
+        self.assertIn("parents=627802", lines[0])
+        self.assertIn(RUN_ID, lines[0])
+        self.assertNotIn("700000", lines[0])
+        self.assertNotIn(other_run, lines[0])
 
     def test_ssh_preserves_shell_quotes_for_the_bulk_cgroup_map(self):
         # Model SSH's join of the arguments after the host, then run that command

@@ -26,8 +26,8 @@ as *not collected* and never alerts.  When an alert fires, the full
 appended, so the evidence of the leak survives.
 
 The follow-up part of the card counts the duplicate ``fleet-capacity --sweep-loop``
-processes: more than two of them alert with the parent processes and the run id of the
-parent.
+processes by their full command line: more than two identical commands alert with the
+parent processes and the run id of the parent.
 
 Usage (the control plane health check calls it as a command):
 
@@ -203,7 +203,8 @@ def zombie_rows(rows: Sequence[Dict[str, object]], pids: Set[int],
     * the cgroup lists it (``cgroup.procs``),
     * or its parent lives in that cgroup (the leaking lane serve process - the cgroup
       file of a not yet reaped child can miss it), or
-    * the cgroup of the process itself says so (the bulk ``/proc`` dump).
+    * the cgroup of the process itself is that cgroup or a descendant (the bulk
+      ``/proc`` dump).
     """
     zombies: List[Dict[str, object]] = []
     for row in rows:
@@ -214,7 +215,9 @@ def zombie_rows(rows: Sequence[Dict[str, object]], pids: Set[int],
         if pid in pids or ppid in pids:
             zombies.append(row)
             continue
-        if control_group and cgroup_map.get(pid) == control_group:
+        path = cgroup_map.get(pid, "")
+        if control_group and (path == control_group or
+                              path.startswith(control_group.rstrip("/") + "/")):
             zombies.append(row)
     return zombies
 
@@ -267,31 +270,43 @@ def detect_sweep(ps_output: str, limit: int = SWEEP_LIMIT) -> Dict[str, object]:
     """The ``fleet-capacity --sweep-loop`` processes of the host.
 
     The card asks for the number of resident processes with that command line, their
-    parent processes and the run id of the parent.  More than ``limit`` of them leak.
+    parent processes and the run id of the parent. More than ``limit`` instances of
+    the same full command line leak. Top-level fields summarize all sweep processes;
+    only the per-command groups determine alerts.
     """
     rows = parse_ps(ps_output)
     by_pid = {int(row["pid"]): row for row in rows}
     sweep = [row for row in rows if SWEEP_MARKER in str(row["args"])]
-    parents: Set[int] = set()
-    run_ids: Set[str] = set()
+
+    def summarize(processes: Sequence[Dict[str, object]]) -> Dict[str, object]:
+        parents: Set[int] = set()
+        run_ids: Set[str] = set()
+        for row in processes:
+            pid = int(row["ppid"])
+            seen: Set[int] = set()
+            while pid and pid not in seen:
+                seen.add(pid)
+                ancestor = by_pid.get(pid)
+                if ancestor is None:
+                    break
+                parents.add(int(ancestor["pid"]))
+                run_ids.update(RUN_ID_RE.findall(str(ancestor["args"])))
+                pid = int(ancestor["ppid"])
+        return {
+            "count": len(processes),
+            "limit": limit,
+            "pids": [int(row["pid"]) for row in processes],
+            "parent_pids": sorted(parents),
+            "run_ids": sorted(run_ids),
+        }
+
+    commands: Dict[str, List[Dict[str, object]]] = {}
     for row in sweep:
-        pid = int(row["ppid"])
-        seen: Set[int] = set()
-        while pid and pid not in seen:
-            seen.add(pid)
-            ancestor = by_pid.get(pid)
-            if ancestor is None:
-                break
-            parents.add(int(ancestor["pid"]))
-            run_ids.update(RUN_ID_RE.findall(str(ancestor["args"])))
-            pid = int(ancestor["ppid"])
-    return {
-        "count": len(sweep),
-        "limit": limit,
-        "pids": [int(row["pid"]) for row in sweep],
-        "parent_pids": sorted(parents),
-        "run_ids": sorted(run_ids),
-    }
+        commands.setdefault(str(row["args"]), []).append(row)
+    result = summarize(sweep)
+    result["groups"] = [dict(summarize(processes), command=command)
+                        for command, processes in sorted(commands.items())]
+    return result
 
 
 # --------------------------------------------------------------------------------
@@ -340,7 +355,7 @@ def empty_payload(host: str, status: str) -> Dict[str, object]:
         "at": time.strftime("%F %T"),
         "services": [],
         "sweep_loop": {"count": 0, "limit": SWEEP_LIMIT, "pids": [],
-                       "parent_pids": [], "run_ids": []},
+                       "parent_pids": [], "run_ids": [], "groups": []},
     }
 
 
@@ -465,15 +480,17 @@ def build_alerts(payload: Dict[str, object]) -> List[str]:
                 stamp, level, host, service.get("service"), service.get("zombie_count"),
                 service.get("tasks_current"), service.get("tasks_max"),
                 float(service.get("tasks_ratio") or 0.0), parents or "-"))
-    sweep = payload.get("sweep_loop") or {}
-    if int(sweep.get("count", 0)) > SWEEP_LIMIT:
+    for sweep in (payload.get("sweep_loop") or {}).get("groups", []):
+        if int(sweep.get("count", 0)) <= int(sweep.get("limit", SWEEP_LIMIT)):
+            continue
         lines.append(
             "%s level=hard source=executor-tasks host=%s kind=sweep-loop count=%s pids=%s "
-            "parents=%s run_ids=%s" % (
+            "parents=%s run_ids=%s command=%s" % (
                 stamp, host, sweep.get("count"),
                 ",".join(str(pid) for pid in sweep.get("pids", [])) or "-",
                 ",".join(str(pid) for pid in sweep.get("parent_pids", [])) or "-",
-                ",".join(str(run_id) for run_id in sweep.get("run_ids", [])) or "-"))
+                ",".join(str(run_id) for run_id in sweep.get("run_ids", [])) or "-",
+                shlex.quote(str(sweep.get("command", "")))))
     return lines
 
 
