@@ -73,18 +73,23 @@ class DispatchFetchResilienceTest(unittest.TestCase):
     def test_pr_head_timeout_uses_seed_fallback(self):
         self.run_seed_scenario(pr=1749, network_timeout=True)
 
+    def test_pr_head_seed_push_failure_cannot_start_run(self):
+        self.run_seed_scenario(pr=1749, push_fails=True)
+
     def run_seed_scenario(self, missing=False, push_fails=False, pr=None, network_timeout=False):
         with tempfile.TemporaryDirectory(dir=self.scratch) as scratch:
             commands = []
             checks = 0
             pushes = 0
             seeded = False
+            task = ""
 
             def fake_sh(command, timeout=None, inp=None):
-                nonlocal checks, pushes, seeded
+                nonlocal checks, pushes, seeded, task
                 text = " ".join(command)
                 commands.append(text if command[0] == "ssh" else "local: " + text)
                 if "cat > /tmp/task-" in text:
+                    task = inp
                     return 0, "", ""
                 if command[0] == "ssh" and "cat-file -e" in text:
                     checks += 1
@@ -134,7 +139,8 @@ class DispatchFetchResilienceTest(unittest.TestCase):
             self.assertTrue(any("abc123:refs/swrm-seed/" in text for text in commands))
             if pr:
                 self.assertTrue(any("refs/pull/1749/head:refs/seed/head" in text for text in commands))
-                self.assertTrue(any("refs/seed/head:refs/swrm-seed/" in text for text in commands))
+                self.assertTrue(any("+refs/seed/head:refs/heads/rebase-pr-1749" in text for text in commands))
+                self.assertIn("rebase-pr-1749", task)
             if not (missing or push_fails):
                 self.assertEqual(checks, 1 if pr else 2)
                 self.assertIn("lane assign", commands[-1])
@@ -193,8 +199,11 @@ class DispatchFetchResilienceTest(unittest.TestCase):
     def test_tick_base_lookup_retries_then_dispatches(self):
         self.run_base_lookup_scenario("retry")
 
-    def test_tick_base_lookup_falls_back_to_mirror(self):
+    def test_tick_base_lookup_rejects_unverified_mirror(self):
         self.run_base_lookup_scenario("mirror")
+
+    def test_tick_base_lookup_retries_upstream_with_mirror_configured(self):
+        self.run_base_lookup_scenario("mirror-retry")
 
     def test_tick_base_lookup_failure_backs_off_and_writes_health(self):
         self.run_base_lookup_scenario("failure")
@@ -219,8 +228,10 @@ class DispatchFetchResilienceTest(unittest.TestCase):
                 raise subprocess.TimeoutExpired(command, timeout)
             if mode == "empty":
                 return 0, "", ""
-            if (mode == "retry" and len(calls) > 1) or command[-2] == "https://mirror.invalid/repo.git":
+            if mode in {"retry", "mirror-retry"} and len(calls) > 1:
                 return 0, f"{base}\trefs/heads/main\n", ""
+            if command[-2] == "https://mirror.invalid/repo.git":
+                return 0, f"{'b' * 40}\trefs/heads/main\n", ""
             return 1, "", "gnutls_handshake failed"
 
         with tempfile.TemporaryDirectory(dir=self.scratch) as scratch, \
@@ -241,26 +252,26 @@ class DispatchFetchResilienceTest(unittest.TestCase):
              mock.patch.object(AUTODISPATCH, "dispatch", return_value=("run-base", None)) as dispatch, \
              mock.patch.object(AUTODISPATCH, "log") as log, \
              mock.patch.object(AUTODISPATCH.time, "sleep") as sleep, \
-             mock.patch.dict("os.environ", {"AD_BASE_FETCH_MIRROR": "https://mirror.invalid/repo.git" if mode == "mirror" else ""}):
+             mock.patch.dict("os.environ", {"AD_BASE_FETCH_MIRROR": "https://mirror.invalid/repo.git" if mode.startswith("mirror") else ""}):
             state = {}
             AUTODISPATCH.tick({"CX10": cfg}, state, 0)
             health = json.loads((Path(scratch) / "lanes-status.json").read_text())["_dispatch_fetch_failures"]["govpn"]
-            if mode in {"retry", "mirror"}:
+            self.assertTrue(all(command[-2] == AUTODISPATCH.BASE_REPO_URL for command in calls),
+                            "a mirror cannot establish the authoritative base")
+            if mode in {"retry", "mirror-retry"}:
                 dispatch.assert_called_once_with("CX10", cfg, item, base)
                 self.assertEqual(state["CX10"]["base"], base)
                 self.assertTrue(AUTODISPATCH.host_ok("govpn"))
-                self.assertEqual(health["recent_failures"], 1 if mode == "retry" else 2)
-                self.assertEqual(len(calls), 2 if mode == "retry" else 3)
+                self.assertEqual(health["recent_failures"], 1)
+                self.assertEqual(len(calls), 2)
                 self.assertEqual(sleep.call_args_list, [mock.call(0.25)])
-                if mode == "mirror":
-                    self.assertTrue(any("mirror" in call.args[0] for call in log.call_args_list))
             else:
                 dispatch.assert_not_called()
                 gh.assert_not_called()
                 self.assertNotIn("CX10", state)
                 self.assertFalse(AUTODISPATCH.host_ok("govpn"))
                 self.assertEqual(health["recent_failures"], 1 if mode == "empty" else 3)
-                self.assertEqual(health["primary_error"], {"failure": "tls", "timeout": "network", "empty": "other"}[mode])
+                self.assertEqual(health["primary_error"], {"failure": "tls", "mirror": "tls", "timeout": "network", "empty": "other"}[mode])
 
     def test_tls_harvest_failure_retries_and_uses_seed_fallback(self):
         state = {}

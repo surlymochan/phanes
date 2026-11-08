@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,7 +97,7 @@ class Sandbox:
         self.gh_calls = []
         self.seed_push = False
         self.seed_commands = []
-        self.fetch_mode = "ok"  # "ok" | "fail" | "fail_but_object_arrives"
+        self.fetch_mode = "ok"  # "ok" | "fail" | "tls" | "fail_but_object_arrives"
         self.ls_remote_base = None  # pin the advertised base (a base the fetch cannot deliver)
         self.fetch_lock = threading.Lock()  # models git's own short-lived ref locks
         root.mkdir(parents=True, exist_ok=True)
@@ -195,6 +196,8 @@ class Sandbox:
         reports the same failure although the object did arrive (a concurrent tick fetched it),
         which is exactly the case a later successful check must not be allowed to mask."""
         with self.fetch_lock:
+            if self.fetch_mode == "tls":
+                return 1, "", "gnutls_handshake() failed: Error in the pull function"
             if self.fetch_mode == "fail":
                 return 1, "", "fatal: unable to access 'https://github.com/surlymochan/phanes.git/': Could not resolve host"
             proc = subprocess.run(["bash", "-c", remote], capture_output=True, text=True, timeout=timeout)
@@ -332,6 +335,83 @@ def check_tick_seed_push_fallback(module, sandbox: Sandbox):
     print("  tick: HTTPS failure -> controller fetch -> seed push -> base check -> assigned: OK")
 
 
+def check_tick_unverified_mirror(module, sandbox: Sandbox):
+    """An old mirror base already present on the target cannot replace upstream."""
+    prepare(module, sandbox)
+    mirror = sandbox.root / "stale-mirror"
+    subprocess.run(["git", "clone", "-q", str(sandbox.fleet), str(mirror)], check=True)
+    old_base = git(mirror, "rev-parse", "main").stdout.strip()
+    assert old_base != sandbox.base
+    assert git(sandbox.fleet, "cat-file", "-e", f"{old_base}^{{commit}}").returncode == 0
+    lookups = []
+
+    def sh(cmd, timeout=120, inp=None):
+        if cmd[:2] == ["git", "ls-remote"]:
+            lookups.append(cmd)
+            if cmd[-2] == module.BASE_REPO_URL:
+                return 1, "", "gnutls_handshake failed"
+        return sandbox.sh(cmd, timeout, inp)
+
+    module.sh = sh
+    with mock.patch.dict(os.environ, {"AD_BASE_FETCH_MIRROR": str(mirror)}):
+        state, log = tick(module, sandbox)
+    assert not sandbox.assigned(), "an unverified mirror base must not start a run"
+    assert not state.get(LANE), state
+    assert not module.host_ok(HOST)
+    assert "in-progress" not in sandbox.labels(), sandbox.labels()
+    assert len(lookups) == module.DISPATCH_FETCH_RETRIES, lookups
+    assert all(cmd[-2] == module.BASE_REPO_URL for cmd in lookups), lookups
+    assert saved_status(module)["_dispatch_fetch_failures"][HOST]["primary_error"] == "tls"
+    print("  tick: upstream unavailable, stale mirror object present: no assign, host backed off: OK")
+
+
+def check_tick_pr_head(module, sandbox: Sandbox, seed=False):
+    """The task's PR branch survives a later base fetch and non-fast-forward updates."""
+    prepare(module, sandbox)
+    initial = git(sandbox.fleet, "rev-parse", "HEAD").stdout.strip()
+    git(sandbox.origin, "checkout", "-q", "-b", "pr-1749", initial)
+    head = commit_file(sandbox.origin, "pr.txt", "current PR head\n")
+    git(sandbox.origin, "update-ref", "refs/pull/1749/head", head)
+    git(sandbox.origin, "checkout", "-q", "main")
+    # A previous attempt left a divergent PR branch. Both fetch and seed push
+    # must replace it, since a rebased PR need not be a fast-forward.
+    stale = git(sandbox.fleet, "-c", "user.email=ad-check@example.invalid", "-c", "user.name=ad check",
+                "commit-tree", f"{initial}^{{tree}}", "-p", initial, "-m", "stale PR head").stdout.strip()
+    git(sandbox.fleet, "update-ref", "refs/heads/rebase-pr-1749", stale)
+    sandbox.issues[ISSUE]["body"] = "重基PR：#1749"
+    if seed:
+        sandbox.fetch_mode = "tls"
+        sandbox.seed_push = True
+    # The PR ref must still come from upstream when a base-object mirror is set.
+    with mock.patch.dict(os.environ, {"AD_BASE_FETCH_MIRROR": str(sandbox.fleet)}):
+        state, log = tick(module, sandbox)
+    assert sandbox.assigned(), log
+    assert not module.BACKOFF, module.BACKOFF
+    assert saved_state(module)[LANE]["base"] == sandbox.base
+    assert git(sandbox.fleet, "rev-parse", "rebase-pr-1749").stdout.strip() == head
+    assert git(sandbox.fleet, "rev-parse", "main").stdout.strip() == initial
+    assert "rebase-pr-1749" in (sandbox.root / f"task-{LANE}.md").read_text()
+    # Exercise the executor's isolated worktree: the named branch must resolve
+    # there even though a later main fetch overwrites FETCH_HEAD.
+    worktree = sandbox.root / "executor"
+    git(sandbox.fleet, "worktree", "add", "-q", "--detach", str(worktree), sandbox.base)
+    git(worktree, "checkout", "-q", "rebase-pr-1749")
+    assert git(worktree, "rev-parse", "HEAD").stdout.strip() == head
+    if seed:
+        assert sandbox.seed_commands
+        assert saved_status(module)["_dispatch_fetch_failures"][HOST]["recent_failures"] == 3
+        assert saved_status(module)["_dispatch_fetch_failures"][HOST]["primary_error"] == "tls"
+    else:
+        assert not sandbox.seed_commands
+        assert git(sandbox.fleet, "rev-parse", "FETCH_HEAD").stdout.strip() == sandbox.base
+        assert sum(is_fetch(cmd) for cmd in sandbox.commands) == 2
+    print(f"  tick: PR {'seed push' if seed else 'fetch'}: task branch available from executor worktree: OK")
+
+
+def check_tick_pr_head_seed(module, sandbox: Sandbox):
+    check_tick_pr_head(module, sandbox, seed=True)
+
+
 def check_tick_base_present(module, sandbox: Sandbox):
     """the base is already in the target repo: the check passes without any fetch."""
     prepare(module, sandbox)
@@ -422,6 +502,9 @@ def main():
                            ("fetch-failure tick", check_tick_fetch_failure),
                            ("fetch-failure-not-masked tick", check_tick_fetch_failure_not_masked),
                            ("seed-push tick", check_tick_seed_push_fallback),
+                           ("unverified-mirror tick", check_tick_unverified_mirror),
+                           ("pr-head tick", check_tick_pr_head),
+                           ("pr-head-seed tick", check_tick_pr_head_seed),
                            ("base-present tick", check_tick_base_present),
                            ("configured-repo tick", check_tick_configured_repo),
                            ("concurrent dispatches", check_concurrent_dispatches),

@@ -991,40 +991,39 @@ def dispatch_git_network(host, command, operation, policy, fallback=None, fallba
 
 
 def dispatch_base_revision(host, cfg):
-    """Resolve the base with retries and an optional mirror before assigning a lane.
+    """Resolve the authoritative upstream base with retries before assigning a lane.
 
-    No seed push is possible until the base is known. A configured mirror can
-    supply it; dispatch() still validates that exact commit on the target.
+    A mirror may lag upstream. It can supply objects for a known base, but its
+    branch tip cannot establish the base when the upstream lookup fails.
     """
     policy = dispatch_fetch_policy(host, cfg)
-    mirror = os.environ.get("AD_BASE_FETCH_MIRROR")
-
-    def lookup(source, fallback=None):
-        out = dispatch_git_network(
-            host, ["git", "ls-remote", "--exit-code", source, f"refs/heads/{BASE_BRANCH}"],
-            "base ls-remote", policy, fallback, fallback_name="base mirror")
-        fields = out.split()
-        if not fields or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", fields[0]):
-            error = "base ls-remote returned no valid commit"
-            record_dispatch_fetch_failure(host, error)
-            raise RuntimeError(error)
-        return fields[0]
-
-    return lookup(BASE_REPO_URL, (lambda: lookup(mirror)) if mirror and mirror != BASE_REPO_URL else None)
+    out = dispatch_git_network(
+        host, ["git", "ls-remote", "--exit-code", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"],
+        "base ls-remote", policy)
+    fields = out.split()
+    if not fields or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", fields[0]):
+        error = "base ls-remote returned no valid commit"
+        record_dispatch_fetch_failure(host, error)
+        raise RuntimeError(error)
+    return fields[0]
 
 
-def dispatch_seed_push(host, repo_path, base, branch, policy):
+def dispatch_seed_push(host, repo_path, base, branch, policy, target_ref=None):
     """Fetch on the reachable AD controller, then seed objects over SSH.
 
-    Use a private bare repository and a unique non-checked-out target ref. Never
-    update main or the target worktree. dispatch() still checks the exact base.
+    Use a private bare repository and non-checked-out target refs. PR heads use
+    the task's named branch; base seeds use unique refs. Never update main or
+    the target worktree. dispatch() still checks the exact base.
     """
     os.makedirs(D, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="seed-", dir=D) as directory:
         rc, _, err = sh(["git", "init", "--bare", "-q", directory])
         if rc:
             raise RuntimeError(f"seed init: {err.strip()[-160:]}")
-        source = os.environ.get("AD_BASE_FETCH_MIRROR") or BASE_REPO_URL
+        # A mirror's moving PR ref cannot establish the current PR head either.
+        source = BASE_REPO_URL
+        if not branch.startswith("refs/pull/"):
+            source = os.environ.get("AD_BASE_FETCH_MIRROR") or BASE_REPO_URL
         dispatch_git_network(host, ["git", "-C", directory, "fetch", "-q", source, f"{branch}:refs/seed/head"],
                              "seed fetch", policy)
         # Main may have advanced or been rewritten. Obtain the requested commit,
@@ -1034,21 +1033,23 @@ def dispatch_seed_push(host, repo_path, base, branch, policy):
             dispatch_git_network(host, ["git", "-C", directory, "fetch", "-q", source, base],
                                  "seed base fetch", policy)
         ref = f"refs/swrm-seed/{os.path.basename(directory)}"
+        head_refspec = f"+refs/seed/head:{target_ref}" if target_ref else f"refs/seed/head:{ref}/head"
         command = ["git", "-c", f"core.sshCommand={shlex.join(['ssh'] + ssh_opts(host))}",
-                   "-C", directory, "push", "-q", f"{host}:{repo_path}", f"{base}:{ref}/base", f"refs/seed/head:{ref}/head"]
+                   "-C", directory, "push", "-q", f"{host}:{repo_path}", f"{base}:{ref}/base", head_refspec]
         dispatch_git_network(host, command, "seed push", policy)
 
 
-def dispatch_base_fetch(host, repo_path, base, fetch_command=None, cfg=None, branch=None):
+def dispatch_base_fetch(host, repo_path, base, fetch_command=None, cfg=None, branch=None, target_ref=None):
     """Fetch main or a PR head, falling back to a controller seed push."""
     branch = branch or BASE_BRANCH
-    command = fetch_command or base_fetch_command(repo_path, BASE_REPO_URL, branch)
+    refspec = f"+{branch}:{target_ref}" if target_ref else branch
+    command = fetch_command or base_fetch_command(repo_path, BASE_REPO_URL, refspec)
     policy = dispatch_fetch_policy(host, cfg)
     operation = "base fetch" if branch == BASE_BRANCH else "PR head fetch"
     try:
         return dispatch_git_network(
             host, ssh_argv(ssh_opts(host), host, command), operation, policy,
-            fallback=lambda: dispatch_seed_push(host, repo_path, base, branch, policy))
+            fallback=lambda: dispatch_seed_push(host, repo_path, base, branch, policy, target_ref))
     except RuntimeError as error:
         raise RuntimeError(f"{operation} failed on {host}: {error}") from error
 
@@ -1059,6 +1060,13 @@ def dispatch_failed(lane, cfg, item, error):
 
 def dispatch(lane, cfg, item, base):
     n = item["n"]; task = f"# #{n} {item['title']}\n\n{item['body']}\n\n{RULES.format(n=n)}\n"
+    pr = item.get("pr")
+    if pr is None:
+        match = re.search(r"(?:重基\s*PR|目标\s*PR)\s*[:：]\s*#?(\d+)", item["body"], re.I)
+        pr = int(match.group(1)) if match else None
+    if pr is not None:
+        pr_branch = f"rebase-pr-{int(pr)}"
+        task += f"\nPR #{int(pr)} 当前头已获取到本地分支 `{pr_branch}`；从该分支开始并重基到 base `{base}`。\n"
     path = f"{D}/tasks/{lane}-{n}.md"; os.makedirs(f"{D}/tasks", exist_ok=True); open(path, "w").write(task)
     h = cfg["host"]; F = cfg.get("fleet", "~/.local/bin/swrm-fleet"); R = cfg.get("repo", "~/work/phanes-fleet")
     with open(path) as task_file:
@@ -1070,12 +1078,9 @@ def dispatch(lane, cfg, item, base):
     # Refs #1810: the base commit must exist in the target repo before the lane is assigned. The
     # target repo lags behind upstream, so a missing base is fetched and the check is repeated; the
     # check itself is not relaxed (a base that stays missing is still an error).
-    pr = item.get("pr")
-    if pr is None:
-        match = re.search(r"(?:重基\s*PR|目标\s*PR)\s*[:：]\s*#?(\d+)", item["body"], re.I)
-        pr = int(match.group(1)) if match else None
     if pr is not None:
-        dispatch_base_fetch(h, R, base, cfg=cfg, branch=f"refs/pull/{int(pr)}/head")
+        dispatch_base_fetch(h, R, base, cfg=cfg, branch=f"refs/pull/{int(pr)}/head",
+                            target_ref=f"refs/heads/{pr_branch}")
     cmd = f"{base_check_command(R, base)} && {assign}"
     for attempt in range(1, DISPATCH_BASE_FETCH_ATTEMPTS + 1):
         rc, out, err = sh(ssh_argv(ssh_opts(h), h, cmd), timeout=180)
