@@ -172,7 +172,7 @@ class TickHarness:
 
     LANES = {"CX2": {"host": "h2", "backend": "codex"}, "CX10": {"host": "h10", "backend": "codex"}}
 
-    def run_tick(self, issues, lanes=None, state=None):
+    def run_tick(self, issues, lanes=None, state=None, remote_info=None):
         """One tick with the GitHub/ssh/dispatch side effects faked; returns (dispatched, logs)."""
         dispatched, logs, edits = [], [], []
 
@@ -207,7 +207,7 @@ class TickHarness:
                 AUTODISPATCH.host_ok = lambda h: True
                 AUTODISPATCH.host_fail = lambda h, why: None
                 AUTODISPATCH.host_good = lambda h: None
-                AUTODISPATCH.remote = lambda lane, cfg, run="": {"lane": "idle"}
+                AUTODISPATCH.remote = lambda lane, cfg, run="": {"lane": "idle", **(remote_info or {})}
                 AUTODISPATCH.deps_met = lambda item: True
                 AUTODISPATCH.dispatch = fake_dispatch
                 AUTODISPATCH.replenish = lambda k, state: []
@@ -295,6 +295,22 @@ class TickVerifyDispatchTest(TickHarness, unittest.TestCase):
         # the pin class still comes first (autodispatch-backend-fallback.md rule 1), the verify card
         # goes to the review lane and the cross-pin p0 work card to the remaining codex lane
         self.assertEqual(dispatched, [("CX2", 1), ("CX10", 2)])
+
+
+class TickMemoryPrecheckTest(TickHarness, unittest.TestCase):
+    """Refs #1712: memory admission follows the selected executor, not just the card's pin."""
+
+    def test_codex_lane_skips_pi_pinned_fallback_at_135mb(self):
+        # The pi pin is non-strict, so codex can take it when no pi lane is available. The host's
+        # 135 MB available-memory sample must still block starting a codex session.
+        lanes = {"CX10": {"host": "gores2", "backend": "codex"}}
+        dispatched, logs = self.run_tick(
+            [issue(1712, "codex session task", ("lane-ready", "backend:pi"))],
+            lanes=lanes,
+            remote_info={"memory_available_mb": 135},
+        )
+        self.assertEqual(dispatched, [])
+        self.assertTrue(any("gores2" in line and "135" in line and "400" in line for line in logs))
 
 
 class TickWorkClassCapTest(TickHarness, unittest.TestCase):
