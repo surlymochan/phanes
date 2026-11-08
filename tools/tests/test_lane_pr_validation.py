@@ -327,6 +327,31 @@ class LaneRunInfoReadPathTests(unittest.TestCase):
 
 
 class ExecutorStartHarvestTests(unittest.TestCase):
+    def test_start_failure_with_commit_requeues_before_harvest(self):
+        for rc in (0, 1):
+            with self.subTest(relabel_rc=rc), tempfile.TemporaryDirectory() as directory, \
+                 mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
+                 mock.patch.object(MODULE, "gh", return_value=(rc, "", "labels unavailable")) as gh, \
+                 mock.patch.object(MODULE, "log"), \
+                 mock.patch.object(MODULE, "harvest_fetch", side_effect=AssertionError("startup failure must not be harvested")) as fetch, \
+                 mock.patch.object(MODULE, "label_lane_failed") as failed:
+                state = {"A1": {"issue": 1595, "run": RUN}, "_done": [12]}
+                before = {key: value.copy() for key, value in state.items()}
+                info = {"status": "failed", "error_class": "executor_start_failed",
+                        "branch": "work", "commit": "c0ffee", "repo": CFG["repo"]}
+                result = MODULE.finish("A1", CFG, state["A1"], info, state)
+                self.assertEqual(result["status"], "lane-ready" if rc == 0 else "requeue-failed")
+                self.assertEqual(result["done"], rc == 0)
+                self.assertEqual(state, before, "startup failures must not count as completed attempts")
+                gh.assert_called_once_with(["issue", "edit", "1595", "--remove-label", "in-progress",
+                                            "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+                records = MODULE.pause_records()
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["scope"], "lane:A1")
+                self.assertEqual(records[0]["expires_at"] - records[0]["created_at"], 600)
+                fetch.assert_not_called()
+                failed.assert_not_called()
+
     def test_start_failure_requeues_without_count_and_pauses_lane(self):
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(MODULE, "pause_store_dir", return_value=directory), \
@@ -369,7 +394,10 @@ class ExecutorStartHarvestTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(MODULE, "host_ok", return_value=True))
             stack.enter_context(mock.patch.object(MODULE, "gh", return_value=(0, "", "")))
             stack.enter_context(mock.patch.object(MODULE, "remote", return_value={
-                "lane": "idle", "run": {"error_class": "executor_start_failed"}}))
+                "lane": "idle", "run": {"error_class": "executor_start_failed",
+                                         "branch": "work", "commit": "c0ffee", "repo": CFG["repo"]}}))
+            fetch = stack.enter_context(mock.patch.object(
+                MODULE, "harvest_fetch", side_effect=AssertionError("startup failure must not be harvested")))
             stack.enter_context(mock.patch.object(MODULE, "queue", return_value=[{"n": 1595}]))
             stack.enter_context(mock.patch.object(MODULE, "deps_met", return_value=True))
             stack.enter_context(mock.patch.object(MODULE, "freshen_queue", side_effect=lambda q, s: q))
@@ -384,6 +412,7 @@ class ExecutorStartHarvestTests(unittest.TestCase):
             self.assertEqual(state["_done"], [])
             self.assertTrue(MODULE.lane_paused("A1"))
             dispatch.assert_not_called()
+            fetch.assert_not_called()
 
 
 if __name__ == "__main__":

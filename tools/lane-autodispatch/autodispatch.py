@@ -1201,6 +1201,16 @@ def finish(lane, cfg, st, info, state):
     "missing": [...]}. `done` means the lane slot is free again; `error` carries the
     explicit reason back to the caller (Refs #1704)."""
     n, run = st["issue"], st["run"]
+    # Finalization can preserve edits made before an early crash as a commit.
+    # Startup failures still require cooldown and requeue, regardless of that commit.
+    if info.get("error_class") == "executor_start_failed":
+        pause_executor_start_lane(lane)
+        rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
+                         "--remove-label", "lane-failed", "--add-label", "lane-ready"])
+        if rc:
+            return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
+        log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
+        return {"done": True, "status": "lane-ready", "error": None, "missing": []}
     if info.get("branch") and info["branch"] != "None" and info.get("commit"):
         b = f"fleet/{lane}-issue{n}-{run}"
         fetch = git_fetch_command(ssh_opts(cfg["host"]), LOCAL, f"{cfg['host']}:{info['repo']}", info["branch"], lane)
@@ -1241,14 +1251,6 @@ def finish(lane, cfg, st, info, state):
         log(f"{lane} finished #{n} (run {run}, {info.get('status')}) → {url}"); mark_done(state, n)
         return {"done": True, "status": "pr-created", "error": None, "missing": []}
     else:
-        if info.get("error_class") == "executor_start_failed":
-            pause_executor_start_lane(lane)
-            rc, _, err = gh(["issue", "edit", str(n), "--remove-label", "in-progress",
-                             "--remove-label", "lane-failed", "--add-label", "lane-ready"])
-            if rc:
-                return {"done": False, "status": "requeue-failed", "error": err, "missing": []}
-            log(f"{lane} executor failed to start #{n} (run {run}) → lane-ready, lane paused 600s")
-            return {"done": True, "status": "lane-ready", "error": None, "missing": []}
         label_lane_failed(n, f"Lane {lane} ({cfg['host']}, run `{run}`) ended `{info.get('status')}` without a commit "
             f"(error_class `{info.get('error_class')}`).\n\nExecutor summary: {info.get('summary')}\n\nLabel `lane-failed`; re-add `lane-ready` to retry.")
         mark_done(state, n); log(f"{lane} ended #{n} without a commit (run {run}, {info.get('status')}/{info.get('error_class')}) → labelled lane-failed")

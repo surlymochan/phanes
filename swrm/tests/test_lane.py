@@ -1126,6 +1126,13 @@ class AgyStartupRegressionTests(unittest.TestCase):
         child.proc.stderr.close.assert_called_once_with()
 
     def test_start_crash_releases_empty_fleet_reservation(self):
+        self.assert_start_crash_releases_empty_fleet_reservation(self.lane)
+
+    def test_cursor_headless_start_crash_releases_empty_fleet_reservation(self):
+        self.assert_start_crash_releases_empty_fleet_reservation(
+            {"name": "L1", "backend": "cursor", "mode": "headless", "model": "test"})
+
+    def assert_start_crash_releases_empty_fleet_reservation(self, lane):
         xs, mock = self.xs, self.mock
         spec = {"run_id": "startup", "task": "task", "started": 100, "budget_minutes": 1}
         rdir = os.path.join(self.tmp.name, "startup")
@@ -1134,6 +1141,7 @@ class AgyStartupRegressionTests(unittest.TestCase):
         child.alive.return_value = False
         ws = {"repo": self.tmp.name, "root": self.tmp.name, "path": self.tmp.name}
         with mock.patch.object(xs, "RUNS", self.tmp.name), \
+             mock.patch.object(xs, "lane_write_state"), \
              mock.patch.object(xs, "lane_prepare_workspace", return_value=ws), \
              mock.patch.object(xs, "run_workspace_prepare", return_value=None), \
              mock.patch.object(xs, "add_lessons_to_prompt", side_effect=lambda p, *a: (p, [])), \
@@ -1146,7 +1154,7 @@ class AgyStartupRegressionTests(unittest.TestCase):
              mock.patch.object(xs, "executor_boundary_empty", return_value=True), \
              mock.patch.object(xs, "release_fleet_slot") as release, \
              mock.patch.object(xs, "lane_finalize_run") as finalize:
-            xs.lane_do_run(self.lane, spec, child, None, None)
+            xs.lane_do_run(lane, spec, child, None, None)
         finalize.assert_called_once()
         self.assertEqual(finalize.call_args.args[5], "executor_start_failed")
         release.assert_called_once_with(rdir)
