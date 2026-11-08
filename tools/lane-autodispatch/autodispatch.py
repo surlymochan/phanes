@@ -11,8 +11,8 @@ PAUSE-HOST-<HOST>, PAUSE-BACKEND-<BACKEND> and PAUSE-MINT (no new issue minted).
 A legacy marker that carries its own deadline (`until=<epoch|ISO>`) stops holding the lane once that
 deadline passed; the marker file stays on disk as the evidence of the hold (Refs #1592).
 """
-<<<<<<< HEAD
-import base64, hashlib, json, os, re, shlex, stat, subprocess, sys, threading, time, tempfile, concurrent.futures as cf
+import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, threading, time, tempfile, concurrent.futures as cf
+from datetime import datetime, timezone
 HOME = os.path.expanduser("~")
 # The state dir holds the snapshot, the heartbeat and the log. It can be moved for a test or a
 # second deployment (Refs #1697): the reader (tools/check-lanes-status-stall.py) resolves the
@@ -29,11 +29,6 @@ try:  # a typo in the configuration must not kill the dispatcher at import time
     STATUS_REFRESH_SECONDS = float(next(os.environ[name] for name in STATUS_REFRESH_ENVS if os.environ.get(name)))
 except (StopIteration, TypeError, ValueError):
     STATUS_REFRESH_SECONDS = 30.0
-=======
-import base64, hashlib, json, math, os, re, shlex, stat, subprocess, sys, time, tempfile, concurrent.futures as cf
-from datetime import datetime, timezone
-HOME = os.path.expanduser("~"); D = f"{HOME}/phanes-ctl/autodispatch"
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
 REPO = "surlymochan/phanes"; LOCAL = "/workspace/phanes-repo"; BRAIN_LOG = "/workspace/phanes/brain/log.md"
 TICK = int(os.environ.get("AD_TICK", "60")); BUDGET = os.environ.get("AD_BUDGET", "45"); LOW = int(os.environ.get("AD_LOW", "10"))
 RULES = ("Rules: work only inside this repository worktree (the current directory). Never create, modify, move or delete "
@@ -1101,9 +1096,6 @@ def freshen_queue(q, state, cache=None):
             fresh.append(item)
     return fresh
 
-<<<<<<< HEAD
-def status_snapshot(lanes, state, res, ready, blocked, phase=None, tick_at=None):
-=======
 def update_busy_stale(lanes, state, res):
     """Retain review markers independently of run tracking, including offline hosts.
 
@@ -1133,8 +1125,7 @@ def update_busy_stale(lanes, state, res):
             log(f"{lane} #{st['issue']} run {st['run']} stale: no trusted activity; review required", brain=False)
     save_state(state)
 
-def status_snapshot(lanes, state, res, ready, blocked, records=None):
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
+def status_snapshot(lanes, state, res, ready, blocked, records=None, phase=None, tick_at=None):
     """Build the observable lane status row, including this process's stale skips."""
     status = {L: (("stale #%s (review required)" if "stale_since" in state[L] else "busy #%s") % state[L]["issue"]) if state.get(L) else (res[L].get("error") or res[L].get("lane") or "?") for L in lanes}
     status["_busy"] = sum(1 for L in lanes if state.get(L) and "stale_since" not in state[L])
@@ -1175,6 +1166,7 @@ class StatusPublisher:
         self.heartbeat = heartbeat or lanes_status_heartbeat_path()
         self.logger = logger or safe_log
         self.res = {}
+        self.records = None
         self.ready = self.previous("_ready")
         self.blocked = self.previous("_blocked")
         self.rows = self.previous_rows()
@@ -1213,7 +1205,7 @@ class StatusPublisher:
         if blocked is not None: self.blocked = blocked
         rows = {L: self.res.get(L) or {"lane": self.rows.get(L, "?")} for L in self.lanes}
         return status_snapshot(self.lanes, self.state, rows, self.ready or 0, self.blocked or 0,
-                               phase=self.phase, tick_at=self.tick_at)
+                               records=self.records, phase=self.phase, tick_at=self.tick_at)
 
     def publish(self, res=None, ready=None, blocked=None, phase=None, heartbeat=True):
         """Write the snapshot now; a failed write is logged, never swallowed.
@@ -1608,12 +1600,6 @@ def to_epoch(value, fmt=None):
 
 def heartbeat_path(): return f"{D}/heartbeat"
 
-def write_heartbeat():
-    """Mark the dispatcher as alive (the heartbeat is the stamp of its last life)."""
-    try:
-        with open(heartbeat_path(), "w") as stream: stream.write(time.strftime("%F %T") + "\n")
-    except OSError: pass
-
 def dispatcher_last_alive():
     """When the dispatcher was last alive (epoch seconds), or None when unknown.
 
@@ -1760,38 +1746,19 @@ def tick(lanes, state, last_warn):
 def run_tick(lanes, state, last_warn, publisher):
     """One tick; every step refreshes the snapshot (Refs #1697)."""
     audit_switches()  # the switch audit runs every tick, also when the loop itself is paused (Refs #1827)
-<<<<<<< HEAD
-    scopes = paused_scopes()  # the swrm pause store and the legacy PAUSE markers (Refs #1366)
-    if "all" in scopes:
-        publisher.publish(phase="paused")  # a paused loop still refreshes the watermark
-        return last_warn
-    label_cache_reset()  # authoritative label reads are cached for one tick only
-    state.setdefault("_done", [])
-    publisher.publish(phase="probe")
-=======
     records = pause_records()  # the swrm pause store and the legacy PAUSE markers (Refs #1366, #1592)
+    publisher.records = records
     scopes = paused_scopes(records=records)
     if "all" in scopes:
-        # Keep the pause visible even though this tick does no remote or queue work.
-        # Queue counts remain the last observed values while dispatch is stopped.
-        path = f"{D}/lanes-status.json"
-        try:
-            with open(path) as stream: previous = json.load(stream)
-        except (OSError, ValueError): previous = {}
-        if not isinstance(previous, dict): previous = {}
-        res = {L: {"lane": "paused"} for L in lanes}
-        st = status_snapshot(lanes, state, res, previous.get("_ready", 0), previous.get("_blocked", 0), records)
-        with open(path, "w") as stream: json.dump(st, stream, ensure_ascii=False, indent=1)
+        publisher.publish(res={L: {"lane": "paused"} for L in lanes}, phase="paused")
         return last_warn
     label_cache_reset()  # authoritative label reads are cached for one tick only
     state.setdefault("_done", [])
     idle_books(state)  # the idle bookkeeping of the state exists from the first tick on
     now = time.time()
-    # the heartbeat is the stamp of the dispatcher's last life: the gap to now is its
-    # downtime, and it is read before the dispatcher marks itself alive again (Refs #1688)
+    # Read the previous heartbeat before publishing marks this tick alive (Refs #1688).
     last_alive = dispatcher_last_alive()
-    write_heartbeat()
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
+    publisher.publish(phase="probe")
     live = [L for L in lanes if host_ok(lanes[L]["host"])]
     with cf.ThreadPoolExecutor(4) as ex:
         res = dict(zip(live, ex.map(lambda L: remote(L, lanes[L], (state.get(L) or {}).get("run", "")), live)))
@@ -1804,33 +1771,10 @@ def run_tick(lanes, state, last_warn, publisher):
         errs = [res[x] for x in live if lanes[x]["host"] == h and "error" in res[x]]
         if errs: host_fail(h, errs[0]["error"]); seen.add(h)
         else: host_good(h); seen.add(h)
-<<<<<<< HEAD
     publisher.publish(res=res, phase="harvest")  # the remote probe of every lane is done
-    for L, r in res.items():
-        st = state.get(L)
-        if "error" in r: continue
-        if st and isinstance(r.get("run"), dict):
-            if lane_in_fetch_backoff(st): continue  # harvest fetch is backing off after a transient failure (Refs #947)
-            result = finish(L, lanes[L], st, r["run"], state)
-            if result.get("done"): state.pop(L); save_state(state)
-            if result.get("error"): log(f"{L} #{st['issue']} run {st['run']}: {result['error']}", brain=False)
-        elif st and reconcile(L, lanes[L], st, r, state): state.pop(L); save_state(state)
-        # the harvest of one lane can take minutes: refresh `_at` after every lane
-        publisher.publish(res=res, phase="harvest")
-    try: q = queue()
-    except Exception as e:
-        log(f"queue error: {e}", brain=False); publisher.publish(res=res, phase="queue"); return last_warn
-    for i in q: i["deps_ok"] = deps_met(i)
-    # one authoritative read per issue per tick, shared by the dispatch candidates and the count
-    prefetch_labels([i["n"] for i in q])
-    q = freshen_queue(q, state)
-    blocked = sum(not i["deps_ok"] for i in q)
-    publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
-=======
     q = None
     queue_failed = False
     queue_error = ""
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
     base = None
     outcomes = {}
     freed_lanes = set()
@@ -1851,6 +1795,9 @@ def run_tick(lanes, state, last_warn, publisher):
         for i in q: i["deps_ok"] = deps_met(i)
         # one authoritative read per issue per tick, shared by all dispatches and the count
         prefetch_labels([i["n"] for i in q])
+        q = freshen_queue(q, state)
+        blocked = sum(not i["deps_ok"] for i in q)
+        publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="deps")
         return True
 
     def base_commit():
@@ -1906,27 +1853,17 @@ def run_tick(lanes, state, last_warn, publisher):
             # the authoritative read failed: keep the row (it may still be dispatchable),
             # never count it as a stale skip and never dispatch on unverified labels
             log_unverified(c["n"], status, detail, "kept in queue (not dispatched this tick)")
-<<<<<<< HEAD
-        if not pick: continue
+        if not pick: return "no-card"
         blocked = sum(not i["deps_ok"] for i in q)
         publisher.publish(res=res, ready=len(q) - blocked, blocked=blocked, phase="dispatch")
-        if base is None:
-            _, out, _ = sh(["git", "ls-remote", BASE_REPO_URL, f"refs/heads/{BASE_BRANCH}"]); base = out.split()[0]
-=======
-        if not pick: return "no-card"
         commit = base_commit()
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
         gh(["issue", "edit", str(pick["n"]), "--add-label", "in-progress"])
         try: run, ver = dispatch(L, cfg, pick, commit)
         except Exception as e:
-<<<<<<< HEAD
-            dispatch_failed(L, cfg, pick, e); publisher.publish(res=res, phase="dispatch"); continue
-        q.remove(pick)
-        publisher.record_dispatch(L, {"issue": pick["n"], "run": run, "host": cfg["host"], "base": base, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"})
-=======
             dispatch_failed(L, cfg, pick, e, busy=bool(LANE_BUSY_RE.search(str(e))))
             return "no-capacity"
-        q.remove(pick); state[L] = {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"}
+        q.remove(pick)
+        publisher.record_dispatch(L, {"issue": pick["n"], "run": run, "host": cfg["host"], "base": commit, "at": time.strftime("%F %T"), "verify": ver, "class": "verify" if pick.get("verify") else "work"})
         # Stop this lane's gap at its own successful dispatch. Later lanes may take
         # minutes to assign; their work cannot extend an already occupied lane's gap.
         closed = idle_close(state, L, time.time(), last_alive, tick_started_at=now)
@@ -1934,7 +1871,6 @@ def run_tick(lanes, state, last_warn, publisher):
             idle_s, reason = closed
             if idle_s > IDLE_LOG_MIN_S:
                 log(f"{L} idle {idle_s:.0f}s before dispatch (reason: {reason})", brain=True)
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
         if AD_VERIFY_SHARE_ENABLED: log(f"queue share: dispatched {state[L]['class']} #{pick['n']} on {L}", brain=False)
         save_state(state); log(f"dispatched #{pick['n']} → {L} ({cfg['host']}) run {run} base {commit[:8]}")
         return "dispatched"
@@ -1958,12 +1894,16 @@ def run_tick(lanes, state, last_warn, publisher):
         if freed:
             freed_lanes.add(L)
             outcomes[L] = give_card(L, lanes[L], remote_idle=False)
+        # The harvest of one lane can take minutes: refresh after every lane.
+        publisher.publish(res=res, phase="harvest")
+    queue_ok = tick_queue()
     update_busy_stale(lanes, state, res)
-    if not tick_queue():
-        st = status_snapshot(lanes, state, res, None, None)
-        st["_queue_error"] = queue_error or "queue unavailable"
-        with open(f"{D}/lanes-status.json", "w") as stream:
-            json.dump(st, stream, ensure_ascii=False, indent=1)
+    if not queue_ok:
+        with publisher._lock:
+            st = status_snapshot(lanes, state, res, None, None, records,
+                                 phase="queue", tick_at=publisher.tick_at)
+            st["_queue_error"] = queue_error or "queue unavailable"
+            write_status_snapshot(publisher.path, st, publisher.logger)
         return last_warn
     # 2) the lanes that were idle before this tick
     for L, cfg in lanes.items():
@@ -1998,16 +1938,10 @@ def run_tick(lanes, state, last_warn, publisher):
             if filed: log(f"{why}: filed {len(filed)} issue(s) from backlog: {' '.join(filed)}")
             elif time.time() - last_warn > 600:
                 log(f"WARNING queue low: {ready} dispatchable lane-ready issue(s) left (+{blocked} waiting on 依赖), backlog/ empty (threshold {LOW})"); last_warn = time.time()
-<<<<<<< HEAD
         publisher.publish(res=res, ready=ready, blocked=blocked, phase="refill")  # the (slow) refill is done
-    publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
-=======
     state["_tick_at"] = now
     save_state(state)
-    st = status_snapshot(lanes, state, res, ready, blocked, records)
-    with open(f"{D}/lanes-status.json", "w") as stream:
-        json.dump(st, stream, ensure_ascii=False, indent=1)
->>>>>>> e5c6352809ea95a3aedf8b280c62a3dec1201f53
+    publisher.publish(res=res, ready=ready, blocked=blocked, phase="idle")
     return last_warn
 
 def file_issue(text, extra=()):
