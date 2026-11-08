@@ -651,8 +651,8 @@ print(json.dumps(out))
 '''
 
 # Kill only after the executor has independently confirmed the ledger, event, queue and
-# process evidence. The two process snapshots rule out a transient RPC wait; all errors
-# are fail-closed. Runs are counted from the executor's own ledger, not AD health state.
+# process evidence. Stable snapshots also require a kernel-confirmed stopped sandbox;
+# all errors are fail-closed. Runs are counted from the executor's own ledger, not AD health state.
 REMOTE_STUCK_CLEANUP = REMOTE_STATE_HOME + r'''
 import glob,json,os,signal,sys,time
 L=sys.argv[1]; N=3
@@ -684,7 +684,7 @@ def proc(pid):
     wchan=open(f"{PROC_ROOT}/{pid}/wchan").read().strip()
     syscall=open(f"{PROC_ROOT}/{pid}/syscall").read().strip()
     cmd=open(f"{PROC_ROOT}/{pid}/cmdline","rb").read().replace(b"\0",b" ").decode(errors="replace")
-    return {"pid":pid,"state":rest[0],"ticks":(rest[11],rest[12]),"wchan":wchan,"syscall":syscall,"cmd":cmd}
+    return {"pid":pid,"state":rest[0],"start":rest[19],"ticks":(rest[11],rest[12]),"wchan":wchan,"syscall":syscall,"cmd":cmd}
   except Exception: return None
 def snapshot(pids):
   rows=[proc(pid) for pid in pids]
@@ -707,7 +707,7 @@ for run in ids:
   if event_count(run)!=0:
     print(json.dumps({"cleaned":False,"reason":"events-unknown-or-nonzero"})); sys.exit(0)
   status=read(os.path.join(O,"runs",run,"status.json"))
-  if not isinstance(status,dict) or status.get("queue_reason") or not status.get("attempt_started"):
+  if not isinstance(status,dict) or status.get("queue_reason") or not status.get("execution_started"):
     print(json.dumps({"cleaned":False,"reason":"queued-or-status-unknown"})); sys.exit(0)
 lane=read(os.path.join(O,"lanes",L,"state.json"))
 pid=(lane or {}).get("child_pid") if isinstance(lane,dict) else None
@@ -728,6 +728,17 @@ if second is None or [r["pid"] for r in first] != [r["pid"] for r in second]:
 if any(a["ticks"]!=b["ticks"] or a["wchan"]!=b["wchan"] or a["syscall"]!=b["syscall"]
        for a,b in zip(first[1:],second[1:])):
   print(json.dumps({"cleaned":False,"reason":"sandbox-active"})); sys.exit(0)
+# Stable CPU/syscall snapshots alone cannot distinguish a network wait from a
+# deadlock. Only a fully stopped sandbox is conclusive here: every leaf is
+# stopped by the kernel and every ancestor is stopped or waiting on its child.
+# Other stalls remain suspects for manual inspection, never automatic TERM.
+for row in second[1:]:
+  kids=children(row["pid"])
+  if kids is None or (row["state"] not in ("T","t") and
+                      not (kids and row["wchan"]=="do_wait")):
+    print(json.dumps({"cleaned":False,"reason":"sandbox-progress-unproven"})); sys.exit(0)
+if any(a["start"]!=b["start"] or a["cmd"]!=b["cmd"] for a,b in zip(first,second)):
+  print(json.dumps({"cleaned":False,"reason":"process-identity-changed"})); sys.exit(0)
 # Recheck the RPC wait channel and identity immediately before signaling.
 if second[0]["wchan"]!="do_wait" or second[0]["cmd"]!=first[0]["cmd"]:
   print(json.dumps({"cleaned":False,"reason":"rpc-state-changed"})); sys.exit(0)
